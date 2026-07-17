@@ -1,11 +1,25 @@
+import { clearToken, getToken } from "@/lib/auth";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+export class AuthError extends Error {}
+
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...(options.headers || {}) },
     cache: "no-store",
   });
+  if (res.status === 401) {
+    clearToken();
+    if (typeof window !== "undefined") window.location.href = "/login";
+    throw new AuthError("Sessionen har gått ut. Logga in igen.");
+  }
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`API-fel (${res.status}): ${body}`);
@@ -21,12 +35,37 @@ export type ChatSource = {
   score: number;
 };
 
+export type Confidence = "high" | "medium" | "low" | "none";
+
 export type ChatResponse = {
   conversation_id: string;
   reply: string;
   provider: string;
   model: string;
   sources: ChatSource[];
+  confidence: Confidence;
+  confidence_score: number;
+  providers_attempted: string[];
+};
+
+export type ConversationItem = {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ConversationMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  provider: string | null;
+  model: string | null;
+  created_at: string;
+};
+
+export type ConversationDetail = ConversationItem & {
+  messages: ConversationMessage[];
 };
 
 export type DocumentItem = {
@@ -65,12 +104,39 @@ export type ProviderStatus = {
   active_embedding: boolean;
 };
 
+export type UsageSummaryRow = {
+  provider: string;
+  model: string;
+  role: string;
+  request_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number | null;
+};
+
+export type CurrentUser = {
+  id: string;
+  email: string;
+  role: string;
+};
+
 export const api = {
+  login: (email: string, password: string) =>
+    request<{ access_token: string; token_type: string }>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+  me: () => request<CurrentUser>("/api/auth/me"),
+
   sendChat: (message: string, conversationId?: string) =>
     request<ChatResponse>("/api/chat", {
       method: "POST",
       body: JSON.stringify({ message, conversation_id: conversationId }),
     }),
+
+  listConversations: () => request<ConversationItem[]>("/api/conversations"),
+  getConversation: (id: string) => request<ConversationDetail>(`/api/conversations/${id}`),
+  deleteConversation: (id: string) => request(`/api/conversations/${id}`, { method: "DELETE" }),
 
   listDocuments: () => request<DocumentItem[]>("/api/documents"),
 
@@ -78,7 +144,16 @@ export const api = {
     const form = new FormData();
     form.append("file", file);
     const qs = category ? `?category=${encodeURIComponent(category)}` : "";
-    const res = await fetch(`${API_URL}/api/documents/upload${qs}`, { method: "POST", body: form });
+    const res = await fetch(`${API_URL}/api/documents/upload${qs}`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: form,
+    });
+    if (res.status === 401) {
+      clearToken();
+      if (typeof window !== "undefined") window.location.href = "/login";
+      throw new AuthError("Sessionen har gått ut. Logga in igen.");
+    }
     if (!res.ok) throw new Error(await res.text());
     return res.json() as Promise<DocumentItem>;
   },
@@ -107,4 +182,5 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ role, provider, model }),
     }),
+  usageSummary: () => request<UsageSummaryRow[]>("/api/admin/usage/summary"),
 };

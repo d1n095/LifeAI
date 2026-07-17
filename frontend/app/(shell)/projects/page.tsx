@@ -55,7 +55,11 @@ export default function ProjectsPage() {
             <div className="text-sm font-medium">Projekt</div>
           </div>
           <div className="flex gap-2 mb-4">
+            <label htmlFor="new-project" className="sr-only">
+              Nytt projektnamn
+            </label>
             <input
+              id="new-project"
               value={newProject}
               onChange={(e) => setNewProject(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addProject()}
@@ -80,7 +84,11 @@ export default function ProjectsPage() {
         <div className="rounded-xl border border-border bg-panel p-4">
           <div className="text-sm font-medium mb-3">Uppgifter</div>
           <div className="flex gap-2 mb-4">
+            <label htmlFor="new-task" className="sr-only">
+              Ny uppgiftstitel
+            </label>
             <input
+              id="new-task"
               value={newTask}
               onChange={(e) => setNewTask(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addTask()}

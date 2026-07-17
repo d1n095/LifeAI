@@ -58,10 +58,13 @@ services:
       - "8000:8000"
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      # Must be a build arg, not just a runtime `environment:` entry — NEXT_PUBLIC_API_URL
+      # is inlined into the client JS bundle at `next build` time (see frontend/Dockerfile).
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     restart: unless-stopped
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
     depends_on:
       - backend
     ports:

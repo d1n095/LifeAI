@@ -32,7 +32,11 @@ export default function KnowledgePage() {
       </p>
 
       <div className="flex gap-2">
+        <label htmlFor="knowledge-search" className="sr-only">
+          Sök i kunskapsbiblioteket
+        </label>
         <input
+          id="knowledge-search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && search()}
@@ -44,8 +48,16 @@ export default function KnowledgePage() {
         </button>
       </div>
 
-      {loading && <div className="text-white/40 text-sm">Söker…</div>}
-      {error && <div className="text-red-300 text-sm">{error}</div>}
+      {loading && (
+        <div className="text-white/40 text-sm" role="status">
+          Söker…
+        </div>
+      )}
+      {error && (
+        <div role="alert" className="text-red-300 text-sm">
+          {error}
+        </div>
+      )}
 
       <div className="space-y-3">
         {results.map((r, i) => (

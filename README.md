@@ -5,7 +5,9 @@ med ett leverantörsoberoende AI-lager (OpenAI, Anthropic, Google Gemini, DeepSe
 eller en lokal modell via Ollama).
 
 Se `docs/ARCHITECTURE.md` för systemarkitektur, `docs/ROADMAP.md` för den generella fasindelade
-planen, och `docs/MAINAI_0.1_PLAN.md`/`docs/STATUS.md` för den pågående MainAI 0.1-leveransen.
+planen, `docs/MAINAI_0.1_PLAN.md`/`docs/STATUS.md` för den pågående MainAI 0.1-leveransen, och
+**`docs/SECURITY_BLOCKERS.md` för kända säkerhetsuppgifter som måste lösas före
+produktionsdrift** (bl.a. en nödvändig Next.js-versionsuppgradering).
 
 ## Snabbstart (Docker — rekommenderat)
 
@@ -42,6 +44,11 @@ att få en JWT — skicka den som `Authorization: Bearer <token>` på alla övri
 API-routrar utom `/api/health`, `/api/auth/login` kräver inloggning; `/api/admin/*` kräver
 dessutom adminroll.
 
+Frontend har en egen inloggningssida (`/login`) som gör exakt detta och sparar token i
+`localStorage` (medvetet val, se `frontend/lib/auth.ts` och `docs/SECURITY_BLOCKERS.md`).
+Alla sidor utom `/login` är skyddade av `AuthGuard` — obehörig eller utgången token skickar
+tillbaka till `/login` automatiskt.
+
 ## Konfigurera AI-leverantörer
 
 Fyll i de nycklar du faktiskt har i `.env`:
@@ -71,6 +78,19 @@ faktiskt finns i kunskapsbiblioteket (Trust Engine, `app/rag/trust.py`) — vid 
 obefintligt underlag instrueras modellen uttryckligen att inte presentera gissningar som fakta.
 Kostnad och tokenanvändning loggas per anrop (`usage_log`) och kan summeras via
 `GET /api/admin/usage/summary`.
+
+### Chattgränssnittet — röst, orb, historik
+
+- **Animerad orb** (`components/Orb.tsx`) visar fyra tillstånd: vilar, lyssnar, tänker, talar
+  och fel — rent CSS-driven, ingen extern beroende.
+- **Röstinmatning/röstutmatning** (`lib/useVoice.ts`) via webbläsarens inbyggda Web Speech
+  API — ingen serverkostnad, inget API-nyckelbehov. Mikrofonknappen visas bara om
+  webbläsaren stödjer taligenkänning (svagt/inget stöd i t.ex. Firefox); "Läs upp
+  svar"-kryssrutan visas bara om talsyntes stöds.
+- **Konversationshistorik**: sidopanel i `/chat` mot `/api/conversations` — lista, öppna,
+  radera. Ny konversation-knapp startar om utan att tappa historiken.
+- **Confidence/källvisning**: varje AI-svar visar en färgkodad tillförlitlighetsbadge
+  (`components/ConfidenceBadge.tsx`) och de faktiska källorna svaret bygger på.
 
 ## Utveckling utan Docker
 
@@ -106,11 +126,18 @@ backend/
     models/         # SQLAlchemy-modeller (Postgres)
     main.py
 frontend/
-  app/              # Next.js App Router: Dashboard, Chat, Kunskapsdatabas, Projekt, Dokument, Admin
-  lib/api.ts        # enda kontaktpunkten mot backend-API:et
+  app/
+    login/          # publik inloggningssida (utanför AuthGuard)
+    (shell)/         # alla skyddade sidor: Dashboard, Chat, Kunskapsdatabas, Projekt, Dokument, Admin
+  components/        # Sidebar, AuthGuard, Orb, ConfidenceBadge
+  lib/
+    api.ts           # enda kontaktpunkten mot backend-API:et (bifogar JWT, hanterar 401)
+    auth.ts          # token-lagring
+    useVoice.ts       # Web Speech API-hook (röst in/ut)
 docs/
   ARCHITECTURE.md
   ROADMAP.md
+  SECURITY_BLOCKERS.md
 docker-compose.yml
 ```
 
@@ -129,6 +156,12 @@ docker-compose.yml
   backend-repliker körs samtidigt.
 - **Audit log**: inloggningar, dokumentborttagning och providerbyten loggas i `audit_log`
   (aldrig API-nycklar eller lösenord).
+- **Kända kvarstående säkerhetsuppgifter** (bl.a. en nödvändig Next.js-uppgradering på grund
+  av kända sårbarheter i den låsta versionen): se `docs/SECURITY_BLOCKERS.md`. Blockerar
+  produktionsdrift, blockerade inte denna leverans.
+- **Responsivt och tillgängligt**: sidomenyn kollapsar till en hamburgermeny på mobil,
+  formulärfält har kopplade `<label>`, statusändringar annonseras via `aria-live`/`role`,
+  och tabeller har `scope`/`caption` för skärmläsare.
 - Databaser är inte exponerade utanför Docker-nätverket i produktion (endast `backend` behöver nå dem).
 - Tabeller skapas i nuläget via `Base.metadata.create_all` vid uppstart — byt till Alembic-migrationer
   innan produktionsdrift (se `docs/ROADMAP.md`, Fas 1).

@@ -45,31 +45,47 @@ export default function DocumentsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <h1 className="text-xl font-semibold">Dokumenthantering</h1>
-        <label className="rounded-lg bg-accent px-4 py-2 text-sm font-medium cursor-pointer">
+        <label className="rounded-lg bg-accent px-4 py-2 text-sm font-medium cursor-pointer text-center">
           {uploading ? "Laddar upp…" : "Ladda upp dokument"}
           <input
             ref={fileInput}
             type="file"
             multiple
+            aria-label="Ladda upp dokument"
             className="hidden"
             onChange={(e) => handleUpload(e.target.files)}
           />
         </label>
       </div>
 
-      {error && <div className="text-sm text-red-300">{error}</div>}
+      {error && (
+        <div role="alert" className="text-sm text-red-300">
+          {error}
+        </div>
+      )}
 
-      <div className="rounded-xl border border-border overflow-hidden">
+      <div className="rounded-xl border border-border overflow-x-auto">
         <table className="w-full text-sm">
+          <caption className="sr-only">Uppladdade dokument och deras indexeringsstatus</caption>
           <thead className="bg-panel text-white/50 text-xs uppercase">
             <tr>
-              <th className="text-left px-4 py-3">Titel</th>
-              <th className="text-left px-4 py-3">Källa</th>
-              <th className="text-left px-4 py-3">Status</th>
-              <th className="text-left px-4 py-3">Chunkar</th>
-              <th className="px-4 py-3" />
+              <th scope="col" className="text-left px-4 py-3">
+                Titel
+              </th>
+              <th scope="col" className="text-left px-4 py-3">
+                Källa
+              </th>
+              <th scope="col" className="text-left px-4 py-3">
+                Status
+              </th>
+              <th scope="col" className="text-left px-4 py-3">
+                Chunkar
+              </th>
+              <th scope="col" className="px-4 py-3">
+                <span className="sr-only">Åtgärder</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -82,7 +98,11 @@ export default function DocumentsPage() {
                 </td>
                 <td className="px-4 py-3 text-white/50">{d.chunk_count}</td>
                 <td className="px-4 py-3 text-right">
-                  <button onClick={() => handleDelete(d.id)} className="text-white/40 hover:text-red-300 text-xs">
+                  <button
+                    onClick={() => handleDelete(d.id)}
+                    aria-label={`Ta bort dokumentet ${d.title}`}
+                    className="text-white/40 hover:text-red-300 text-xs"
+                  >
                     Ta bort
                   </button>
                 </td>
