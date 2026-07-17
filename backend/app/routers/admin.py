@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit
@@ -6,9 +7,10 @@ from app.config import get_settings
 from app.db import get_db
 from app.deps import require_admin
 from app.models.provider_config import ProviderConfig
+from app.models.usage import UsageLog
 from app.models.user import User
 from app.providers.registry import get_provider, provider_names
-from app.schemas import ProviderConfigIn, ProviderConfigOut, ProviderStatus
+from app.schemas import ProviderConfigIn, ProviderConfigOut, ProviderStatus, UsageSummaryRow
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -72,3 +74,37 @@ def set_provider_config(
         request=request,
     )
     return entry
+
+
+@router.get("/usage/summary", response_model=list[UsageSummaryRow])
+def usage_summary(db: Session = Depends(get_db)):
+    """Aggregated cost/usage per provider+model+role, across all users. Any group containing
+    at least one call with unknown pricing (see app/providers/pricing.py) reports cost as
+    None rather than an incomplete/misleading total."""
+    rows = (
+        db.query(
+            UsageLog.provider,
+            UsageLog.model,
+            UsageLog.role,
+            func.count(UsageLog.id),
+            func.sum(UsageLog.prompt_tokens),
+            func.sum(UsageLog.completion_tokens),
+            func.sum(UsageLog.cost_usd),
+            func.count(UsageLog.id).filter(UsageLog.cost_usd.is_(None)),
+        )
+        .group_by(UsageLog.provider, UsageLog.model, UsageLog.role)
+        .order_by(UsageLog.provider)
+        .all()
+    )
+    return [
+        UsageSummaryRow(
+            provider=provider,
+            model=model,
+            role=role,
+            request_count=count,
+            prompt_tokens=int(prompt_tokens or 0),
+            completion_tokens=int(completion_tokens or 0),
+            cost_usd=float(cost_sum) if unknown_count == 0 and cost_sum is not None else None,
+        )
+        for provider, model, role, count, prompt_tokens, completion_tokens, cost_sum, unknown_count in rows
+    ]

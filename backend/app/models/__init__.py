@@ -4,6 +4,7 @@ from app.models.conversation import Conversation, Message
 from app.models.document import Document
 from app.models.project import Project, Task
 from app.models.provider_config import ProviderConfig
+from app.models.usage import UsageLog
 from app.models.user import User
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "Project",
     "Task",
     "ProviderConfig",
+    "UsageLog",
     "User",
 ]

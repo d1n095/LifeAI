@@ -39,7 +39,14 @@ class AnthropicProvider(LLMProvider):
             resp.raise_for_status()
             data = resp.json()
         content = "".join(block.get("text", "") for block in data.get("content", []))
-        return ChatResult(content=content, provider=self.name, model=model, raw_usage=data.get("usage", {}))
+        usage = data.get("usage", {})
+        # Normalized to prompt_tokens/completion_tokens like every other provider (Anthropic
+        # calls them input_tokens/output_tokens) so usage logging doesn't need per-provider cases.
+        normalized_usage = {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+        }
+        return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
         raise ProviderError("Anthropic erbjuder inget embedding-API — använd OpenAI/Gemini/lokal modell för embeddings.")

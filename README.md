@@ -61,6 +61,17 @@ plattformen pratar alltid mot samma interna gränssnitt (`app/providers/base.py`
 **Obs:** Anthropic, DeepSeek och OpenRouter saknar publikt embedding-API i denna MVP. Använd
 OpenAI, Gemini eller en lokal Ollama-modell för embedding-rollen.
 
+### Fallback och tillförlitlighet
+
+`/api/chat` faller automatiskt tillbaka genom `CHAT_FALLBACK_ORDER` (standard:
+`openai,anthropic,gemini`) om den aktiva leverantören felar — svaret anger i
+`providers_attempted` exakt vilka leverantörer som försöktes. Varje svar innehåller också en
+`confidence`-nivå (`high`/`medium`/`low`/`none`) beräknad från hur väl frågan matchar det som
+faktiskt finns i kunskapsbiblioteket (Trust Engine, `app/rag/trust.py`) — vid svagt eller
+obefintligt underlag instrueras modellen uttryckligen att inte presentera gissningar som fakta.
+Kostnad och tokenanvändning loggas per anrop (`usage_log`) och kan summeras via
+`GET /api/admin/usage/summary`.
+
 ## Utveckling utan Docker
 
 ### Backend

@@ -33,7 +33,12 @@ class OllamaProvider(LLMProvider):
             content=data["message"]["content"],
             provider=self.name,
             model=model,
-            raw_usage={"eval_count": data.get("eval_count")},
+            # Normalized to prompt_tokens/completion_tokens (Ollama calls them
+            # prompt_eval_count/eval_count) — always free (local), but still logged for volume.
+            raw_usage={
+                "prompt_tokens": data.get("prompt_eval_count", 0),
+                "completion_tokens": data.get("eval_count", 0),
+            },
         )
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:

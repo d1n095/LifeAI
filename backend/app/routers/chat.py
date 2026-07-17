@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -8,18 +9,21 @@ from app.db import get_db
 from app.deps import get_current_user
 from app.limiter import limiter
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole
+from app.models.usage import UsageLog
 from app.models.user import User
-from app.providers.base import Message
-from app.providers.registry import resolve_active
+from app.providers.base import Message, ProviderError
+from app.providers.pricing import estimate_cost
+from app.providers.registry import chat_with_fallback
 from app.rag.retrieve import retrieve_context
+from app.rag.trust import assess_confidence, build_trust_instructions
 from app.schemas import ChatMessageIn, ChatMessageOut, SourceRef
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(get_current_user)])
 
 SYSTEM_PROMPT = (
     "Du är MainAI, den centrala AI-assistenten för företaget. Svara utifrån den kontext "
-    "som ges nedan från företagets kunskapsbibliotek. Om kontexten inte räcker, säg det "
-    "tydligt istället för att gissa. Svara på samma språk som användaren skriver på."
+    "som ges nedan från företagets kunskapsbibliotek. Svara på samma språk som användaren "
+    "skriver på."
 )
 
 settings = get_settings()
@@ -45,12 +49,12 @@ async def chat(
         conversation = Conversation(title=payload.message[:60], user_id=user.id)
         db.add(conversation)
         db.commit()
-        # No db.refresh() here: id/created_at/updated_at are populated client-side by
-        # SQLAlchemy at flush (see app/models/conversation.py defaults), so the object is
-        # already fully populated. A refresh would open a new transaction that (harmlessly,
-        # but needlessly) depends on the RLS session variable being re-applied — skip it.
+        # No db.refresh(): id/created_at/updated_at are populated client-side by SQLAlchemy
+        # at flush (see app/models/conversation.py defaults), so the object is already
+        # fully populated — a refresh would just be an unnecessary extra round-trip.
 
     hits = await retrieve_context(db, payload.message, top_k=5)
+    trust = assess_confidence(hits)
     context_block = "\n\n".join(f"[{h['title']}]\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
 
     history = (
@@ -61,12 +65,35 @@ async def chat(
         .all()
     )
 
-    messages = [Message(role="system", content=f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}")]
+    system_content = (
+        f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
+        f"TILLFÖRLITLIGHETSINSTRUKTION:\n{build_trust_instructions(trust.level)}"
+    )
+    messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=payload.message))
 
-    provider, model = resolve_active(db, role="chat")
-    result = await provider.chat(messages, model=model)
+    try:
+        result, attempted = await chat_with_fallback(db, messages)
+    except ProviderError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    usage = result.raw_usage or {}
+    prompt_tokens = usage.get("prompt_tokens", 0)
+    completion_tokens = usage.get("completion_tokens", 0)
+    cost = estimate_cost(result.provider, result.model, prompt_tokens, completion_tokens)
+    db.add(
+        UsageLog(
+            user_id=user.id,
+            conversation_id=conversation.id,
+            role="chat",
+            provider=result.provider,
+            model=result.model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost,
+        )
+    )
 
     db.add(MessageModel(conversation_id=conversation.id, role=MessageRole.user, content=payload.message))
     db.add(
@@ -79,6 +106,10 @@ async def chat(
             source_document_ids=",".join(h["document_id"] for h in hits),
         )
     )
+    # Touch updated_at explicitly — adding Message rows doesn't trigger the Conversation
+    # row's onupdate, and /api/conversations sorts by this to surface recent activity first.
+    conversation.updated_at = datetime.utcnow()
+    db.add(conversation)
     db.commit()
 
     sources = [
@@ -91,4 +122,7 @@ async def chat(
         provider=result.provider,
         model=result.model,
         sources=sources,
+        confidence=trust.level,
+        confidence_score=trust.score,
+        providers_attempted=attempted,
     )

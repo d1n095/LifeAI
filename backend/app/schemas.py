@@ -66,6 +66,31 @@ class ChatMessageOut(BaseModel):
     provider: str
     model: str
     sources: list[SourceRef] = []
+    confidence: str  # "high" | "medium" | "low" | "none"
+    confidence_score: float
+    providers_attempted: list[str] = []  # >1 entry means fallback engaged
+
+
+class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    role: str
+    content: str
+    provider: str | None
+    model: str | None
+    created_at: datetime
+
+
+class ConversationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationDetailOut(ConversationOut):
+    messages: list[MessageOut] = []
 
 
 class DocumentOut(BaseModel):
@@ -136,3 +161,13 @@ class ProviderStatus(BaseModel):
     configured: bool
     active_chat: bool
     active_embedding: bool
+
+
+class UsageSummaryRow(BaseModel):
+    provider: str
+    model: str
+    role: str
+    request_count: int
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float | None  # None means at least one row in this group has unknown pricing

@@ -33,7 +33,14 @@ class GeminiProvider(LLMProvider):
             resp.raise_for_status()
             data = resp.json()
         content = data["candidates"][0]["content"]["parts"][0]["text"]
-        return ChatResult(content=content, provider=self.name, model=model, raw_usage=data.get("usageMetadata", {}))
+        usage = data.get("usageMetadata", {})
+        # Normalized to prompt_tokens/completion_tokens (Gemini calls them
+        # promptTokenCount/candidatesTokenCount) so usage logging is provider-agnostic.
+        normalized_usage = {
+            "prompt_tokens": usage.get("promptTokenCount", 0),
+            "completion_tokens": usage.get("candidatesTokenCount", 0),
+        }
+        return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
         if not self.is_configured():

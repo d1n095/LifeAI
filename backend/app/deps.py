@@ -14,11 +14,17 @@ from app.security import decode_access_token
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def get_current_user(
+async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
+    # Deliberately `async def`, not `def`: FastAPI runs sync dependencies in a worker
+    # thread. contextvars.ContextVar.set() inside that thread would be local to that
+    # thread's copy of the context and never become visible to the rest of the request —
+    # current_user_id_var.set() below would silently do nothing. Running this as a
+    # coroutine on the request's own task makes the mutation actually stick (see
+    # app/request_context.py and the after_begin listener in app/db.py).
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Inloggning krävs.")
     try:
