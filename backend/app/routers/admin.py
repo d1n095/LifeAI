@@ -1,13 +1,16 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.config import get_settings
 from app.db import get_db
+from app.deps import require_admin
 from app.models.provider_config import ProviderConfig
+from app.models.user import User
 from app.providers.registry import get_provider, provider_names
 from app.schemas import ProviderConfigIn, ProviderConfigOut, ProviderStatus
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
 
 @router.get("/providers/status", response_model=list[ProviderStatus])
@@ -38,7 +41,12 @@ def get_provider_config(db: Session = Depends(get_db)):
 
 
 @router.put("/providers/config", response_model=ProviderConfigOut)
-def set_provider_config(payload: ProviderConfigIn, db: Session = Depends(get_db)):
+def set_provider_config(
+    payload: ProviderConfigIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+):
     """Switch the active provider/model for a role ("chat" or "embedding").
 
     This is the single write path that changes what LLM the whole platform uses —
@@ -54,4 +62,13 @@ def set_provider_config(payload: ProviderConfigIn, db: Session = Depends(get_db)
     db.add(entry)
     db.commit()
     db.refresh(entry)
+    record_audit(
+        db,
+        user_id=user.id,
+        action="provider_config_change",
+        entity_type="provider_config",
+        entity_id=payload.role,
+        detail=f"{payload.provider}/{payload.model}",
+        request=request,
+    )
     return entry

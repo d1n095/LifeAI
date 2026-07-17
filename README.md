@@ -4,7 +4,8 @@ Lokal AI-plattform som samlar företagets kunskap, dokument, projekt och källko
 med ett leverantörsoberoende AI-lager (OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter
 eller en lokal modell via Ollama).
 
-Se `docs/ARCHITECTURE.md` för systemarkitektur och `docs/ROADMAP.md` för fasindelad plan.
+Se `docs/ARCHITECTURE.md` för systemarkitektur, `docs/ROADMAP.md` för den generella fasindelade
+planen, och `docs/MAINAI_0.1_PLAN.md`/`docs/STATUS.md` för den pågående MainAI 0.1-leveransen.
 
 ## Snabbstart (Docker — rekommenderat)
 
@@ -32,6 +33,14 @@ docker exec -it lifeai-ollama-1 ollama pull llama3.1
 
 Sätt sedan i adminpanelen (`localhost:3000/admin`) leverantören `ollama` som aktiv för chat
 och/eller embedding.
+
+## Inloggning
+
+Vid första uppstart skapas automatiskt ett admin-konto från `ADMIN_EMAIL`/`ADMIN_PASSWORD` i
+`.env`. Logga in mot `POST /api/auth/login` (JSON: `{"email": "...", "password": "..."}`) för
+att få en JWT — skicka den som `Authorization: Bearer <token>` på alla övriga anrop. Alla
+API-routrar utom `/api/health`, `/api/auth/login` kräver inloggning; `/api/admin/*` kräver
+dessutom adminroll.
 
 ## Konfigurera AI-leverantörer
 
@@ -94,16 +103,28 @@ docs/
 docker-compose.yml
 ```
 
-## Drift och säkerhet — status i MVP
+## Drift och säkerhet — status
 
+- **Autentisering**: JWT-baserad inloggning, lösenord hashas med bcrypt, tokens signeras med
+  `SECRET_KEY` (byt från default i produktion).
+- **Row-Level Security**: konversationer är strikt isolerade per användare på databasnivå
+  (Postgres RLS, inte bara applikationslogik). Backend kör därför alla runtime-frågor via en
+  egen, icke-superuser databasroll (`mainai_app`, skapas automatiskt av
+  `backend/db-init/01-app-role.sh`) — den superuser-roll som skapar tabellerna
+  (`POSTGRES_USER`/`DATABASE_URL`) kringgår RLS per definition och används endast för
+  schemamigrering. Se `docs/MAINAI_0.1_PLAN.md` för vilka tabeller som är RLS-skyddade och varför.
+- **Rate limiting**: `/api/chat` är hastighetsbegränsad per användare (`RATE_LIMIT_CHAT_PER_MINUTE`),
+  övriga endpoints har en generösare gräns. In-memory — byt till Redis-backend innan flera
+  backend-repliker körs samtidigt.
+- **Audit log**: inloggningar, dokumentborttagning och providerbyten loggas i `audit_log`
+  (aldrig API-nycklar eller lösenord).
 - Databaser är inte exponerade utanför Docker-nätverket i produktion (endast `backend` behöver nå dem).
 - Tabeller skapas i nuläget via `Base.metadata.create_all` vid uppstart — byt till Alembic-migrationer
   innan produktionsdrift (se `docs/ROADMAP.md`, Fas 1).
-- Adminpanelen saknar ännu inloggning i denna MVP — lägg bakom autentisering innan den exponeras
-  utanför ett internt nätverk (Fas 1 i roadmapen).
 - Backup: kör regelbunden `pg_dump` av PostgreSQL och ta Qdrant-snapshots (`/collections/{name}/snapshots`).
 
 ## Nästa steg
 
-Se `docs/ROADMAP.md` för hela planen. Kortsiktigt (Fas 1): autentisering, Alembic-migrationer,
-bakgrundskö för indexering, och tester för provider- och RAG-lagret.
+Se `docs/MAINAI_0.1_PLAN.md` för den aktuella planen (provider-fallback, kostnadsloggning,
+Trust Engine, konversationshistorik, röst, animerad orb) och `docs/ROADMAP.md` för den
+generella, längre planen efter MainAI 0.1.

@@ -9,10 +9,27 @@ class Settings(BaseSettings):
     # Core
     environment: str = "development"
     secret_key: str = "change-me-in-production"
+
+    # Bootstrap admin account (created automatically on first startup if no users exist)
+    admin_email: str = "admin@lifeos.local"
     admin_password: str = "change-me-in-production"
 
-    # Database
+    # Auth
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60 * 12
+
+    # Rate limiting (requests per minute, per authenticated user)
+    rate_limit_chat_per_minute: int = 20
+    rate_limit_default_per_minute: int = 120
+
+    # Database — two roles by design:
+    # `database_url` is the superuser (POSTGRES_USER) and is used ONLY for schema migrations
+    # and enabling Row-Level Security, both of which require owner/superuser privileges.
+    # `app_database_url` is a restricted, non-superuser role (see backend/db-init/) used for
+    # all runtime request handling — Postgres superusers bypass RLS unconditionally, so if the
+    # app queried through the superuser, RLS would be silently ineffective.
     database_url: str = "postgresql://lifeos:lifeos@postgres:5432/lifeos"
+    app_database_url: str = "postgresql://mainai_app:mainai_app@postgres:5432/lifeos"
 
     # Vector DB
     qdrant_url: str = "http://qdrant:6333"
@@ -32,6 +49,10 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     openrouter_api_key: str | None = None
     ollama_base_url: str = "http://ollama:11434"
+
+    # Fallback order per role: comma-separated provider names, tried in order after the
+    # active provider fails. MainAI 0.1 focuses this on OpenAI/Anthropic/Gemini.
+    chat_fallback_order: str = "openai,anthropic,gemini"
 
     # CORS
     frontend_origin: str = "http://localhost:3000"

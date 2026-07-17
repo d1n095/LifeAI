@@ -1,18 +1,34 @@
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps import get_current_user
 from app.models.company import CompanyInfo
 from app.rag.retrieve import retrieve_context
 from app.schemas import CompanyInfoIn, CompanyInfoOut
 
-router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
+router = APIRouter(prefix="/api/knowledge", tags=["knowledge"], dependencies=[Depends(get_current_user)])
 
 
 class SearchQuery(BaseModel):
     query: str
     top_k: int = 8
+
+    @field_validator("query")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Sökfrågan får inte vara tom.")
+        if len(v) > 2000:
+            raise ValueError("Sökfrågan är för lång (max 2000 tecken).")
+        return v
+
+    @field_validator("top_k")
+    @classmethod
+    def bounded_top_k(cls, v: int) -> int:
+        return max(1, min(v, 25))
 
 
 @router.post("/search")

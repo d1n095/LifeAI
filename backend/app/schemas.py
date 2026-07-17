@@ -1,12 +1,56 @@
+import re
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v: str) -> str:
+        if not EMAIL_PATTERN.match(v):
+            raise ValueError("Ogiltig e-postadress.")
+        return v.lower()
+
+    @field_validator("password")
+    @classmethod
+    def valid_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Lösenordet måste vara minst 8 tecken.")
+        return v
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    email: str
+    role: str
 
 
 class ChatMessageIn(BaseModel):
     conversation_id: uuid.UUID | None = None
     message: str
+
+    @field_validator("message")
+    @classmethod
+    def non_empty_and_bounded(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Meddelandet får inte vara tomt.")
+        if len(v) > 8000:
+            raise ValueError("Meddelandet är för långt (max 8000 tecken).")
+        return v
 
 
 class SourceRef(BaseModel):

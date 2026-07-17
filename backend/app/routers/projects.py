@@ -4,10 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.deps import get_current_user
 from app.models.project import Project, Task
+from app.models.user import User
 from app.schemas import ProjectIn, ProjectOut, TaskIn, TaskOut
 
-router = APIRouter(prefix="/api/projects", tags=["projects"])
+router = APIRouter(prefix="/api/projects", tags=["projects"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("", response_model=list[ProjectOut])
@@ -16,8 +18,8 @@ def list_projects(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=ProjectOut)
-def create_project(payload: ProjectIn, db: Session = Depends(get_db)):
-    project = Project(**payload.model_dump())
+def create_project(payload: ProjectIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    project = Project(**payload.model_dump(), created_by=user.id)
     db.add(project)
     db.commit()
     db.refresh(project)
@@ -40,8 +42,8 @@ def list_tasks(db: Session = Depends(get_db)):
 
 
 @router.post("/tasks", response_model=TaskOut)
-def create_task(payload: TaskIn, db: Session = Depends(get_db)):
-    task = Task(**payload.model_dump())
+def create_task(payload: TaskIn, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    task = Task(**payload.model_dump(), created_by=user.id)
     db.add(task)
     db.commit()
     db.refresh(task)
