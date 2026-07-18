@@ -46,11 +46,24 @@ trap cleanup EXIT
 trap 'exit 143' TERM   # 128+15 — conventional exit code for SIGTERM (Docker/Render's stop signal)
 trap 'exit 130' INT    # 128+2  — conventional exit code for SIGINT (Ctrl-C, interactive use)
 
+# E2E_MOCK_MODE (unset/false in every real deployment — set only by
+# .github/workflows/ci.yml's combined-container-verify job) swaps the real uvicorn command for
+# backend/scripts/run_e2e_backend.py, which fakes only the outbound AI-provider and email
+# calls (see that file) so registration/verification/chat E2E runs are deterministic and need
+# neither real OpenAI network access nor a real SMTP server. Everything else — role
+# provisioning, Alembic migrations, auth, cookies, CSRF, RLS, rate limiting — is still the
+# genuine application code, unchanged by this flag.
+if [ "${E2E_MOCK_MODE:-false}" = "true" ]; then
+  BACKEND_CMD=(python scripts/run_e2e_backend.py)
+else
+  BACKEND_CMD=(uvicorn app.main:app --host 127.0.0.1 --port 8000 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1)
+fi
+
 # Reuses the existing role-provisioning + alembic-migration entrypoint unchanged — not
 # duplicated here. See backend/docker-entrypoint.sh.
-(cd /app/backend && ./docker-entrypoint.sh \
-  uvicorn app.main:app --host 127.0.0.1 --port 8000 \
-  --proxy-headers --forwarded-allow-ips=127.0.0.1) &
+(cd /app/backend && E2E_BACKEND_HOST=127.0.0.1 E2E_BACKEND_PORT=8000 \
+  ./docker-entrypoint.sh "${BACKEND_CMD[@]}") &
 BACKEND_PID=$!
 
 # Next's standalone server.js resolves .next/ relative to its OWN working directory, not
