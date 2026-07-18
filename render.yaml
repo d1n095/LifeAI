@@ -1,7 +1,8 @@
 # Render Blueprint for the full MainAI / Life OS web stack: PostgreSQL, Redis, Qdrant, the
-# FastAPI backend, and the Next.js frontend (`lifeai-1` — named to match the frontend web
-# service that's already live at https://lifeai-1.onrender.com, so applying this Blueprint
-# adopts/reconciles with it instead of creating a duplicate).
+# FastAPI backend, and the Next.js frontend — service name `LifeAI` (see below), matching the
+# frontend web service that's already live at https://lifeai-1.onrender.com (that hostname,
+# not "LifeAI", so applying this Blueprint adopts/reconciles with the existing service
+# instead of creating a duplicate).
 #
 # Same-origin architecture: the browser only ever talks to lifeai-1.onrender.com. It calls
 # /api/*, which lifeai-1's own Next.js server proxies to mainai-backend server-side (see
@@ -184,8 +185,15 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
 
+  # Service NAME is `LifeAI` — deliberately not `lifeai-1`. Blueprint adoption matches an
+  # existing service by this exact name field, and the real, already-live service (verified
+  # in the Render dashboard) is named `LifeAI`; its assigned public hostname
+  # (lifeai-1.onrender.com) is a separate, derived value Render picked because the plain
+  # `lifeai` slug was already taken — the hostname is not the service name. Naming this
+  # `lifeai-1` here would not match that service at all and would create a second, duplicate
+  # frontend on Apply.
   - type: web
-    name: lifeai-1
+    name: LifeAI
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend

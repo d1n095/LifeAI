@@ -5,9 +5,15 @@ Blueprint](https://render.com/docs/blueprint-spec) för hela webb-stacken: Postg
 Qdrant, FastAPI-backend och Next.js-frontend.
 
 **Den faktiska live-adressen är `https://lifeai-1.onrender.com`** — ett frontend-webbtjänst
-som redan finns i Render (inte skapat av detta Blueprint; se klick-steget längst ner för hur
-Blueprintet adopterar den befintliga tjänsten istället för att skapa en dubblett). Vercel är
-inte längre felsökningsmålet.
+som redan finns i Render (inte skapat av detta Blueprint). Vercel är inte längre
+felsökningsmålet.
+
+**Viktigt att inte blanda ihop:** tjänstens namn i Render-dashboarden är **`LifeAI`** — det är
+det namnet `render.yaml` måste matcha för att Blueprintet ska adoptera den befintliga tjänsten
+istället för att skapa en dubblett. `lifeai-1.onrender.com` är bara det *hostnamn* Render
+tilldelade (eftersom slugen `lifeai` redan var upptagen) — inte tjänstens namn. `render.yaml`s
+frontend-tjänst heter därför `LifeAI` (skiftlägeskänsligt, exakt som i dashboarden), inte
+`lifeai-1`.
 
 Grundorsaken till `Failed to fetch`/`Kunde inte nå servern` vid registrering var en kombination
 av att ingen backend (eller ofullständig backend) var kopplad till den existerande
@@ -176,21 +182,35 @@ utlösaren är jobbet `deploy-render` i `.github/workflows/ci.yml`, som körs ef
 `RENDER_BACKEND_DEPLOY_HOOK_URL` / `RENDER_FRONTEND_DEPLOY_HOOK_URL`, två GitHub Actions-secrets
 som **inte finns än** — så länge de saknas är jobbet ett ofarligt no-op.
 
-## Klick-steg i Render (första steget — invänta din bekräftelse innan nästa)
+## Klick-steg i Render (ett steg i taget — invänta bekräftelse innan nästa)
 
-**Steg 1 — endast detta:**
+**Redan verifierat i dashboarden** (av dig): tjänsten heter `LifeAI`, publik URL
+`https://lifeai-1.onrender.com`, kopplad till `d1n095/LifeAI`, branch
+`claude/det-kommer-mer-879lcm`, runtime Docker. Senaste deployen av `38c1d57` misslyckades med
+`failed to read dockerfile: open Dockerfile: no such file or directory` — Render letar efter
+`Dockerfile` i repo-roten, men den ligger i `frontend/Dockerfile`. Det bekräftar att tjänstens
+**Root Directory** inte är satt till `frontend`.
 
-1. Logga in i [Render Dashboard](https://dashboard.render.com).
-2. Öppna den befintliga tjänsten `lifeai-1` → **Settings** → leta upp kopplingen till
-   GitHub-repot (bekräftar att det verkligen är `d1n095/LifeAI` den redan är kopplad till).
-3. **New** → **Blueprint** → välj samma repo, branch `claude/det-kommer-mer-879lcm`. Render
-   läser `render.yaml` och bör känna igen `lifeai-1` som en redan existerande tjänst (samma
-   namn) och erbjuda att ta över den under Blueprint-hantering istället för att skapa en
-   dubblett — bekräfta att det är vad dashboarden visar innan du går vidare. **Klicka inte
-   Apply än.**
+Jag har fixat en separat, verklig bugg detta avslöjade: `render.yaml`s frontend-tjänst hette
+`lifeai-1`, men den riktiga tjänsten heter `LifeAI` — Blueprint-adoption matchar på exakt
+tjänstenamn, så det hade skapat en dubblett istället för att ta över `LifeAI`. Rättat och
+pushat (repo-ändring, rör ingen extern tjänst) — se `render.yaml`s `services[].name: LifeAI`.
 
-Jag väntar på din bekräftelse innan vi fyller i de manuella variablerna och applicerar
-Blueprintet.
+**Nästa steg — endast detta:**
+
+1. Öppna tjänsten **`LifeAI`** i Render Dashboard → **Settings** → **Build & Deploy**.
+2. Sätt **Root Directory** till `frontend`.
+
+Det ska (baserat på Renders vanliga beteende — jag kan inte verifiera dashboarden själv
+härifrån) göra att Render letar efter Dockerfilen relativt `frontend/` istället för repo-roten,
+vilket löser exakt det felmeddelande du fick. **Spara inte än om du vill att jag bekräftar
+Dockerfile Path-fältet först** — men om Render bara har ett Root Directory-fält och inget
+separat Dockerfile Path-fält kvar att sätta, är det här hela fixen.
+
+Efter att du sparat detta, säg till — nästa steg blir antingen att trigga om en deploy manuellt
+för att verifiera att byggfelet är löst, eller (om du hellre vill gå Blueprint-vägen direkt)
+**New → Blueprint** med samma repo/branch, som nu ska känna igen `LifeAI` som en existerande
+tjänst istället för att skapa en dubblett.
 
 ## Verifiering som redan gjorts (lokalt, utan Docker — se commit-historiken)
 
