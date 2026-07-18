@@ -119,11 +119,13 @@ ytorna:
    enheter direkt, utan att räkna upp eller blocklista enskilda `jti`.
 
 9. **Explicit, manuell cascade-städning vid kontoradering**, inte databasens
-   `ON DELETE CASCADE`. Projektet saknar ännu ett migrationsverktyg (`Base.metadata.create_all`
-   skapar bara saknade tabeller, ändrar aldrig befintliga — se `backend/app/main.py`), så ett
-   FK-constraint tillagt i en modell idag skulle inte retroaktivt gälla en redan körande
-   databas. Radering görs därför explicit i `backend/app/routers/account.py` och fungerar
-   korrekt oavsett vad som faktiskt är satt på databasnivå.
+   `ON DELETE CASCADE`. Ingen av de relevanta främmande nycklarna är deklarerade med
+   CASCADE/SET NULL på databasnivå (se `backend/alembic/versions/`) — bara
+   `usage_log.user_id`/`conversation_id` är det, av en annan, redan dokumenterad anledning
+   (`app/models/usage.py`). Radering görs därför explicit och transaktionellt i
+   `backend/app/routers/account.py` (med uttrycklig rollback vid fel — se
+   `docs/SECURITY_BLOCKERS.md`), vilket dessutom håller den exakta uppdelningen mellan
+   "raderas" (personuppgifter) och "frikopplas" (delat företagsinnehåll) på ett ställe.
 
 **Kvarstående, medvetet accepterad risk:**
 

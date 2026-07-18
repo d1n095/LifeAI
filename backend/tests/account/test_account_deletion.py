@@ -1,0 +1,144 @@
+from app.models.conversation import Conversation, Message
+from app.models.project import Project
+from app.models.refresh_token import RefreshToken
+from app.models.user import User
+
+
+def _login_and_get_csrf(client, email: str, password: str) -> str:
+    res = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert res.status_code == 200
+    return res.json()["csrf_token"]
+
+
+def test_export_includes_own_data_only(client, db_session, make_verified_user):
+    user, password = make_verified_user(email="exportme@example.com")
+    csrf = _login_and_get_csrf(client, "exportme@example.com", password)
+
+    client.post("/api/projects", json={"name": "shared project", "status": "active"}, headers={"X-CSRF-Token": csrf})
+
+    res = client.get("/api/account/export")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["account"]["email"] == "exportme@example.com"
+    assert "conversations" in body
+    assert "audit_log" in body
+    # Shared company data (projects/tasks/documents) is deliberately out of scope — see
+    # app/routers/account.py.
+    assert "projects" not in body
+
+
+def test_wrong_password_does_not_delete(client, db_session, make_verified_user):
+    user, password = make_verified_user(email="wrongpassdelete@example.com")
+    csrf = _login_and_get_csrf(client, "wrongpassdelete@example.com", password)
+
+    res = client.request("DELETE", "/api/account", json={"password": "not-the-real-password"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 403
+    assert db_session.query(User).filter_by(email="wrongpassdelete@example.com").count() == 1
+
+
+def test_correct_password_deletes_permanently_and_scrubs_shared_data(client, db_session, make_verified_user):
+    user, password = make_verified_user(email="deleteme@example.com")
+    user_id = user.id
+    csrf = _login_and_get_csrf(client, "deleteme@example.com", password)
+
+    project_res = client.post(
+        "/api/projects", json={"name": "orphaned project", "status": "active"}, headers={"X-CSRF-Token": csrf}
+    )
+    project_id = project_res.json()["id"]
+
+    res = client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+
+    assert db_session.query(User).filter_by(id=user_id).first() is None
+    assert db_session.query(RefreshToken).filter_by(user_id=user_id).count() == 0
+
+    # Shared company data survives, attribution scrubbed rather than deleted.
+    project = db_session.query(Project).filter_by(id=project_id).first()
+    assert project is not None
+    assert project.created_by is None
+
+    # The session is dead — no lingering access.
+    assert client.get("/api/auth/me").status_code == 401
+
+
+def test_deleted_account_conversations_are_gone(client, superuser_db, make_verified_user):
+    """Uses superuser_db (bypasses RLS) to check: db_session (the restricted runtime role)
+    would report zero rows for the OTHER user too, since it has no app.current_user_id set
+    for this ad-hoc test session — that would be a false pass, not proof of real deletion."""
+    user, password = make_verified_user(email="deleteconvos@example.com")
+    user_id = user.id
+    csrf = _login_and_get_csrf(client, "deleteconvos@example.com", password)
+
+    conversation = Conversation(user_id=user_id, title="to be deleted")
+    superuser_db.add(conversation)
+    superuser_db.commit()
+    conversation_id = conversation.id  # captured now — the row (and this object) won't survive the delete below
+    superuser_db.add(Message(conversation_id=conversation_id, role="user", content="hej"))
+    superuser_db.commit()
+
+    client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+
+    assert superuser_db.query(Conversation).filter_by(user_id=user_id).count() == 0
+    assert superuser_db.query(Message).filter_by(conversation_id=conversation_id).count() == 0
+
+
+def test_login_after_deletion_fails_with_generic_message(client, make_verified_user):
+    user, password = make_verified_user(email="goneuser@example.com")
+    csrf = _login_and_get_csrf(client, "goneuser@example.com", password)
+    client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+
+    res = client.post("/api/auth/login", json={"email": "goneuser@example.com", "password": password})
+    assert res.status_code == 401
+
+
+def test_deletion_is_rolled_back_atomically_on_mid_transaction_failure(
+    client, db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """Forces a failure partway through the deletion sequence (after some deletes/updates
+    have already been issued against the session, before the final commit) and verifies the
+    whole transaction rolls back cleanly — no half-deleted account, matching
+    docs/SECURITY_BLOCKERS.md's transactional-deletion guarantee."""
+    user, password = make_verified_user(email="rollbackme@example.com")
+    user_id = user.id
+    csrf = _login_and_get_csrf(client, "rollbackme@example.com", password)
+
+    conversation = Conversation(user_id=user_id, title="should survive the rollback")
+    superuser_db.add(conversation)
+    superuser_db.commit()
+
+    project_res = client.post(
+        "/api/projects", json={"name": "should stay attributed", "status": "active"}, headers={"X-CSRF-Token": csrf}
+    )
+    project_id = project_res.json()["id"]
+
+    from sqlalchemy.orm import Session as SASession
+
+    original_delete = SASession.delete
+
+    def _failing_delete(self, instance):
+        if isinstance(instance, User):
+            # Everything else (conversations, refresh tokens, ...) has already been queued
+            # for deletion on this Session by this point — this is where the real endpoint
+            # finally deletes the User row itself, right before commit.
+            raise RuntimeError("simulated database failure during account deletion")
+        return original_delete(self, instance)
+
+    monkeypatch.setattr(SASession, "delete", _failing_delete)
+
+    res = client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 500
+
+    monkeypatch.undo()
+
+    # Nothing was actually removed — the whole transaction rolled back.
+    assert db_session.query(User).filter_by(id=user_id).first() is not None
+    assert superuser_db.query(Conversation).filter_by(id=conversation.id).first() is not None
+    assert db_session.query(RefreshToken).filter_by(user_id=user_id).count() >= 1
+
+    project = db_session.query(Project).filter_by(id=project_id).first()
+    assert project is not None
+    assert project.created_by == user_id  # NOT scrubbed — the update was rolled back too
+
+    # The account is still fully usable afterward — the failure didn't corrupt state.
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200

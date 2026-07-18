@@ -127,27 +127,46 @@ npm run dev
 
 ```
 backend/
+  alembic/           # schemamigrationer — enda källan till schemat, se docs/OPERATIONS.md
   app/
-    providers/     # OpenAI, Anthropic, Gemini, DeepSeek, OpenRouter, Ollama — gemensamt interface
-    rag/            # chunkning, embedding, Qdrant-lagring, retrieval
-    routers/        # chat, documents, projects, knowledge, admin, health
-    models/         # SQLAlchemy-modeller (Postgres)
+    providers/       # OpenAI, Anthropic, Gemini, DeepSeek, OpenRouter, Ollama — gemensamt interface
+    rag/             # chunkning, embedding, Qdrant-lagring, retrieval
+    routers/         # auth, account, chat, documents, projects, knowledge, admin, health
+    models/          # SQLAlchemy-modeller (Postgres)
+    cleanup.py        # schemalagt städjobb för utgångna auth-tokens
     main.py
+  tests/             # pytest — backend/, security/, account/ (se docs/OPERATIONS.md)
 frontend/
   app/
-    login/          # publik inloggningssida (utanför AuthGuard)
-    (shell)/         # alla skyddade sidor: Dashboard, Chat, Kunskapsdatabas, Projekt, Dokument, Admin
+    login/, register/, verify-email/, forgot-password/, reset-password/   # publika sidor
+    (shell)/         # alla skyddade sidor: Dashboard, Chat, Kunskapsdatabas, Projekt, Dokument, Admin, Konto
   components/        # Sidebar, AuthGuard, Orb, ConfidenceBadge
   lib/
-    api.ts           # enda kontaktpunkten mot backend-API:et (bifogar JWT, hanterar 401)
-    auth.ts          # token-lagring
+    api.ts           # enda kontaktpunkten mot backend-API:et (cookies + CSRF, hanterar 401)
+    auth.ts          # CSRF-värdet i minnet — inga tokens lagras här, se docs/AUTH_THREAT_MODEL.md
     useVoice.ts       # Web Speech API-hook (röst in/ut)
+  e2e/               # Playwright end-to-end-tester mot hela stacken
 docs/
   ARCHITECTURE.md
   ROADMAP.md
   SECURITY_BLOCKERS.md
+  AUTH_THREAT_MODEL.md
+  OPERATIONS.md
+.github/workflows/ci.yml   # obligatoriska kontroller — se docs/OPERATIONS.md
 docker-compose.yml
 ```
+
+## Testning
+
+- **Backend** (`backend/tests/`, pytest): `pip install -r requirements-dev.txt && pytest tests/`
+  — kräver Postgres och Redis nåbara via `DATABASE_URL`/`APP_DATABASE_URL`/`REDIS_URL`
+  (testerna skapar och migrerar en egen engångsdatabas, se `tests/conftest.py`).
+- **E2E** (`frontend/e2e/`, Playwright): `npx playwright test` — kräver en riktig körande
+  backend (`python backend/scripts/run_e2e_backend.py`, som fejkar utgående AI- och
+  e-postanrop men kör allt annat på riktigt) samt att `npx playwright install --with-deps
+  chromium` körts en gång.
+- **CI** (`.github/workflows/ci.yml`) kör allt detta automatiskt på varje push/PR — se
+  `docs/OPERATIONS.md` för hur du kopplar det till obligatoriska branch-skydd.
 
 ## Drift och säkerhet — status
 
@@ -162,8 +181,11 @@ docker-compose.yml
   (`POSTGRES_USER`/`DATABASE_URL`) kringgår RLS per definition och används endast för
   schemamigrering. Se `docs/MAINAI_0.1_PLAN.md` för vilka tabeller som är RLS-skyddade och varför.
 - **Rate limiting**: `/api/chat` är hastighetsbegränsad per användare (`RATE_LIMIT_CHAT_PER_MINUTE`),
-  övriga endpoints har en generösare gräns. In-memory — byt till Redis-backend innan flera
-  backend-repliker körs samtidigt.
+  övriga endpoints har en generösare gräns, plus striktare gränser och ett separat
+  per-e-postadress brute-force-skydd på auth-endpoints (se `docs/AUTH_THREAT_MODEL.md`).
+  Redis-backad (`REDIS_URL`) för att fungera korrekt över flera backend-repliker — se
+  `docs/OPERATIONS.md`. Osatt `REDIS_URL` faller tillbaka till processlokal in-memory-räkning,
+  bara korrekt med exakt en instans.
 - **Audit log**: inloggningar, dokumentborttagning och providerbyten loggas i `audit_log`
   (aldrig API-nycklar eller lösenord).
 - **Next.js/React**: uppgraderat till `next@16.2.10` + `react@19.2.7` (från `14.2.15`/`18.3.1`)
@@ -174,8 +196,9 @@ docker-compose.yml
   formulärfält har kopplade `<label>`, statusändringar annonseras via `aria-live`/`role`,
   och tabeller har `scope`/`caption` för skärmläsare.
 - Databaser är inte exponerade utanför Docker-nätverket i produktion (endast `backend` behöver nå dem).
-- Tabeller skapas i nuläget via `Base.metadata.create_all` vid uppstart — byt till Alembic-migrationer
-  innan produktionsdrift (se `docs/ROADMAP.md`, Fas 1).
+- Schemat hanteras av Alembic-migrationer (`backend/alembic/versions/`), aldrig av
+  `Base.metadata.create_all` i produktion — se `docs/OPERATIONS.md` för install/uppgradering/
+  rollback.
 - Backup: kör regelbunden `pg_dump` av PostgreSQL och ta Qdrant-snapshots (`/collections/{name}/snapshots`).
 
 ## Nästa steg

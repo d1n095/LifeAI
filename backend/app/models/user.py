@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.security import utcnow_seconds_baseline
 
 
 class UserRole(str, enum.Enum):
@@ -28,5 +29,7 @@ class User(Base):
     # iat claim predates this is rejected in app/deps.py, and every refresh-token row for the
     # user is revoked at the same time (app/token_revocation.py). One column write invalidates
     # every session at once, without needing to enumerate or blocklist individual tokens.
-    sessions_valid_after: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # utcnow_seconds_baseline(), not utcnow(): must match JWT iat's whole-second precision
+    # and stay clear of it by construction — see app/security.py.
+    sessions_valid_after: Mapped[datetime] = mapped_column(DateTime, default=utcnow_seconds_baseline)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

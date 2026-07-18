@@ -1,11 +1,9 @@
-from datetime import datetime
-
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.email_utils import normalize_email
 from app.models.user import User, UserRole
-from app.security import hash_password
+from app.security import hash_password, utcnow_seconds_baseline
 
 
 def bootstrap_admin_user(db: Session) -> None:
@@ -22,7 +20,7 @@ def bootstrap_admin_user(db: Session) -> None:
         return
 
     settings = get_settings()
-    now = datetime.utcnow()
+    now = utcnow_seconds_baseline()  # must match JWT iat precision — see app/security.py
     admin = User(
         email=normalize_email(settings.admin_email),
         password_hash=hash_password(settings.admin_password),

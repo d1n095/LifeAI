@@ -15,8 +15,8 @@ Fasindelad plan. Varje fas ska vara körbar och testbar innan nästa påbörjas.
 - [x] README med installations-/driftinstruktioner.
 
 ## Fas 1 — Stabil MVP i drift
-- [ ] Alembic-migrationer istället för `create_all`.
-- [ ] Autentisering (adminlösenord/session) för portalen.
+- [x] Alembic-migrationer istället för `create_all` (se `backend/alembic/`, `docs/OPERATIONS.md`).
+- [x] Autentisering (cookie-session, registrering, e-postverifiering) för portalen.
 - [ ] Robust felhantering + loggning (strukturerad logg, request-ID).
 - [ ] Enhetstester för provider-lager och RAG-pipeline.
 - [ ] Kostnads-/tokenräkning per leverantör i adminpanelen.

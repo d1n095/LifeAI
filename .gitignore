@@ -7,6 +7,15 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/playwright/.cache/
+backend/e2e_test_emails.jsonl
+backend/*.log
+backend/dump.rdb
 
 # Node / Next.js
 node_modules/

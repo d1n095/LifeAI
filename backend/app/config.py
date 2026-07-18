@@ -52,8 +52,8 @@ class Settings(BaseSettings):
     # accidentally break email links by editing the CORS config, or vice versa.
     public_app_url: str = "http://localhost:3000"
 
-    # SMTP — if smtp_host is unset, app/email.py logs the email instead of sending it (dev
-    # mode), the same graceful-degradation pattern as an unconfigured AI provider.
+    # SMTP — if smtp_host is unset, app/email.py falls back to a local dev-only outbox
+    # (never the application log — see app/email.py for why) instead of sending it.
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_username: str | None = None
@@ -61,6 +61,26 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     smtp_from_email: str = "no-reply@lifeos.local"
     smtp_from_name: str = "MainAI / Life OS"
+    # Opt-in only, local dev convenience: if set (and environment != "production"), an
+    # unsent email (no SMTP configured) is written as a plain-text file here instead of
+    # being silently dropped. Never set in production — prefer pointing SMTP at a real
+    # local mail catcher (see the "dev-mail" docker-compose profile / docs/OPERATIONS.md).
+    dev_mail_outbox_dir: str | None = None
+
+    # Rate limiting storage: unset (default) uses slowapi's in-memory backend, which is
+    # correct for exactly one backend process and resets on restart — a real deployment with
+    # more than one replica needs a shared backend so the limit is enforced across all of
+    # them and survives individual restarts. Set to a redis:// URL to switch (see
+    # app/limiter.py). docker-compose.yml's `backend` service sets this by default.
+    redis_url: str | None = None
+
+    # Token cleanup (app/cleanup.py): how long expired/revoked/used auth tokens are kept
+    # before being purged, for security-incident forensics (e.g. investigating a
+    # refresh-token-reuse event after the fact) — not kept forever, since the metadata
+    # (IP, user-agent, timestamps) has no purpose past that window.
+    token_cleanup_retention_days: int = 30
+    enable_scheduled_cleanup: bool = True
+    cleanup_interval_hours: int = 24
 
     # Database — two roles by design:
     # `database_url` is the superuser (POSTGRES_USER) and is used ONLY for schema migrations

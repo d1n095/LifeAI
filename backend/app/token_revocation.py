@@ -7,6 +7,7 @@ from app.config import get_settings
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
 from app.models.user import User
+from app.security import utcnow_seconds
 
 settings = get_settings()
 
@@ -38,7 +39,7 @@ def revoke_all_sessions_for_user(db: Session, user_id: uuid.UUID) -> None:
     continue via refresh either). Used by both the explicit "log out everywhere" endpoint
     and password reset — a reset that left old sessions alive would defeat the point of
     resetting a possibly-compromised password."""
-    now = datetime.utcnow()
+    now = utcnow_seconds()  # must match JWT iat precision — see app/security.py
     user = db.get(User, user_id)
     if user is not None:
         user.sessions_valid_after = now

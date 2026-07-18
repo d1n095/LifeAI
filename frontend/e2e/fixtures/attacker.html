@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head><title>evil.example — CSRF attack simulation</title></head>
+<body>
+<script>
+  // Simulates a malicious third-party site trying to make the victim's browser send an
+  // authenticated, state-changing request to the real backend.
+  //
+  // Uses a "simple request" (no custom headers, form-urlencoded body) via mode:"no-cors" —
+  // this is the classic CSRF vector (equivalent to an auto-submitting <form> POST): it is
+  // NOT subject to a CORS preflight, so the browser sends it regardless of the backend's
+  // CORS allow-list, with the real SameSite=None session cookies attached automatically.
+  // The response is opaque (status 0, unreadable) because CORS blocks the attacker from
+  // READING it — but that's irrelevant to a CSRF attacker, who only cares whether the state
+  // change happened server-side. This page can never have obtained the CSRF token (it's
+  // delivered only in login/refresh/me JSON response bodies, over a channel CORS restricts
+  // to the real frontend origin), so it cannot attach a matching X-CSRF-Token header. Whether
+  // the attack actually succeeded must be verified out-of-band, by checking server-side state.
+  window.runAttack = async function (backendUrl) {
+    try {
+      await fetch(backendUrl + "/api/projects", {
+        method: "POST",
+        mode: "no-cors",
+        credentials: "include",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({ name: "CSRF-attack-project", status: "active" }),
+      });
+      return { attempted: true };
+    } catch (e) {
+      return { attempted: false, error: String(e) };
+    }
+  };
+</script>
+</body>
+</html>

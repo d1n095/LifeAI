@@ -131,10 +131,11 @@ kontrollerade efter bygge.
 måste sättas explicit i produktion om frontend och backend delar en överordnad domän
 (t.ex. `.exempel.se`) för att cookies ska nå rätt subdomäner; fel värde här kan antingen
 läcka cookien till fler subdomäner än avsett eller göra sessionen obrukbar, så det ska
-sättas medvetet per miljö, inte lämnas som standard i produktion. `refresh_token`-, `email_verification_token`- och `password_reset_token`-tabellerna
-växer obegränsat över tid (utgångna/återkallade/använda rader städas aldrig bort) — inte en
-säkerhetsrisk i sig, men bör få en periodisk städjobb innan volymen blir ett
-driftsproblem.
+sättas medvetet per miljö, inte lämnas som standard i produktion.
+
+(`refresh_token`-, `email_verification_token`- och `password_reset_token`-tabellernas
+tidigare obegränsade tillväxt är åtgärdad — se "Tillägg 2026-07-18: produktionshärdning"
+nedan.)
 
 ### Tillägg 2026-07-18: fullständigt, säkert kontoflöde
 
@@ -190,7 +191,91 @@ Produktionsbygge verifierat i båda lägena igen efter dessa ändringar.
 limiting mot automatiserad registrering) — tillräckligt för nuvarande skala, men svagare
 mot en målmedveten botoperatör; lägg till t.ex. hCaptcha/Turnstile om missbruk faktiskt
 observeras. SMTP måste konfigureras explicit i produktion (`SMTP_HOST` m.fl.) — annars
-loggas verifierings-/återställningsmejl bara till backend-loggen istället för att skickas.
+skickas inget verifierings-/återställningsmejl på riktigt (se "Tillägg 2026-07-18:
+produktionshärdning" nedan för hur detta numera hanteras säkert istället för att bara loggas).
+
+### Tillägg 2026-07-18: produktionshärdning
+
+**Status: åtgärdat.** Kontoflödet ovan var byggt och testat, men inte redo för produktion
+utan detta: permanent testkatalog, obligatorisk CI, riktig migrationshantering, städjobb,
+distribuerad rate limiting, och att inga rå tokens hamnar i loggar. Fullständig
+drift-/incidentdokumentation i `docs/OPERATIONS.md`.
+
+- **Permanent testkatalog**: `backend/tests/` (pytest — 74 tester i tre kataloger:
+  `backend/`, `security/`, `account/`, matchande CI-jobben nedan) och `frontend/e2e/`
+  (Playwright — samma täckning som de tidigare 75 ad-hoc-kontrollerna, nu strukturerade
+  som namngivna, körbara testfiler). Ingen kritisk testlogik finns kvar bara i en
+  scratchpad-katalog.
+- **GitHub Actions CI** (`.github/workflows/ci.yml`): `lint-and-typecheck`, `npm-audit`,
+  `frontend-build` (Docker- och Vercel-läge), `backend-tests`, `rls-security-tests`,
+  `account-rate-limit-tests`, `migration-check`, `e2e-tests`, samlat i en obligatorisk
+  `all-checks-passed`-check. Kräver att branch protection slås på i repo-inställningarna
+  för att faktiskt blockera merge — se `docs/OPERATIONS.md` (kodändringar kan inte göra
+  detta åt dig, det är en repo-administratörsåtgärd).
+- **Alembic-migrationer** (`backend/alembic/`) ersätter `Base.metadata.create_all` helt i
+  produktionsvägen — tre migrationer (baseline, cookie-session, kontoflöde) verifierade att
+  ge **exakt** samma schema som det gamla `create_all`-beteendet (diffat mot en
+  `pg_dump`-referens), plus en testad uppgraderingsväg med bevarad data och en testad
+  downgrade-till-base-och-upp-igen (körs som ett obligatoriskt CI-jobb på varje push).
+  Befintliga användare grandfathras korrekt in som verifierade vid uppgradering, utan att
+  bli utloggade av misstag (se migrationsfilens kommentarer om varför tidsstämpeln
+  bakdateras till `created_at`, inte `now()`).
+- **Idempotent städjobb** (`app/cleanup.py`): rensar utgångna/återkallade/använda
+  `refresh_tokens`, `revoked_access_tokens`, `email_verification_tokens` och
+  `password_reset_tokens` efter en dokumenterad retentionsperiod (`TOKEN_CLEANUP_RETENTION_DAYS`,
+  standard 30 dagar — behåller metadata så länge för säkerhetsrevision, exempelvis att
+  utreda ett token-återanvändningsincident i efterhand). Postgres advisory lock gör att
+  flera backend-repliker på samma schema aldrig dubbelkör eller kolliderar. Kör automatiskt
+  (`ENABLE_SCHEDULED_CLEANUP`) och manuellt (`POST /api/admin/cleanup`).
+- **Distribuerad rate limiting**: bekräftat processlokal (in-memory) tidigare, nu
+  Redis-backad (`REDIS_URL`) så skyddet gäller över flera backend-instanser och överlever
+  omstart. Backend vägrar starta om `REDIS_URL` är satt men Redis inte går att nå — fail
+  closed, inte en tyst nedgradering till svagare skydd.
+- **Inga rå tokens i loggar**: `app/email.py`:s tidigare dev-lägesfallback loggade hela
+  mejlkroppen (inklusive den rå engångstoken:en) till applikationsloggen om SMTP inte var
+  konfigurerat — åtgärdat. Loggar numera bara att ett mejl inte kunde skickas, utan
+  innehåll. Lokal utveckling kan istället peka SMTP mot en riktig mailfångare
+  (`docker compose --profile dev-mail up mailhog`) eller, enbart lokalt, aktivera en
+  explicit opt-in-fil-utkorg (`DEV_MAIL_OUTBOX_DIR`, aldrig i produktion).
+- **Transaktionell kontoradering**: `DELETE /api/account` omgärdas nu av explicit
+  try/except/rollback — ett fel mitt i raderingssekvensen (efter att vissa delar redan
+  köats mot databas-sessionen, innan den slutgiltiga commit:en) rullar hela transaktionen
+  tillbaka. Testat genom att tvinga fram ett fel mitt i sekvensen och verifiera att kontot,
+  konversationerna och sessionerna finns kvar helt orörda efteråt (inget halvraderat
+  tillstånd), samt att kontot fortfarande fungerar normalt direkt efteråt.
+
+**Hittade och fixade två skarpa buggar under testarbetet** (inte bara nya kontroller —
+faktiska produktionsbuggar som fanns redan i föregående milstolpe):
+1. **JWT `iat`-precision vs. `sessions_valid_after`**: JWT:s `iat`-klaim har
+  sekundprecision (RFC 7519), men `User.sessions_valid_after` sattes med
+  mikrosekundprecision. En session utfärdad inom samma väggklocksekund som en
+  massåterkallning (lösenordsåterställning, "logga ut från alla enheter", eller till och
+  med kontots eget skapande) kunde av misstag räknas som "innan" återkallningen och nekas,
+  eller i värsta fall — beroende på jämförelseoperator — tvärtom slippa igenom en
+  återkallning den egentligen skulle träffats av. Löst med `utcnow_seconds()`/
+  `utcnow_seconds_baseline()` (sekundtrunkerat, baslinjevärden bakdaterade en sekund) i
+  `app/security.py`, och `<=` istället för `<` i jämförelsen i `app/deps.py` (fail closed
+  vid en oavgjord sekund, inte fail open).
+2. **Advisory lock kunde läcka mellan pooled databasanslutningar**: städjobbet tog låset,
+  gjorde databasändringar, commit:ade (vilket kan lämna tillbaka SQLAlchemy-anslutningen
+  till poolen), och försökte sedan släppa låset — som då riskerade hamna på en **annan**
+  fysisk anslutning än den som tog det, vilket lämnade låset hängande tills just den
+  anslutningen råkade återanvändas. Löst genom att låsets hela livscykel (ta, arbeta,
+  släpp) nu körs på en enda, uttryckligen fasthållen anslutning, oberoende av
+  ORM-sessionens egna commit-cykler.
+
+**Verifierat**: 74 pytest-tester + Playwright E2E-svit (samma täckning som de tidigare 75
+kontrollerna, nu i namngivna testfiler) gröna, upprepade körningar utan flakiness.
+Migrationskedjan verifierad: ren installation matchar exakt det gamla schemat, uppgradering
+från tidigare schema med bevarad testdata, fullständig downgrade-till-base-och-upp-igen.
+`npm audit` 0 sårbarheter (`--audit-level=high`), `tsc`/`eslint` rena.
+
+**Kvarvarande risk:** ingen admin-driven "tvinga utloggning av en annan användare"-funktion
+finns än (bara användaren själv, via inloggning eller lösenordsåterställning, kan trigga en
+massåterkallning av sina egna sessioner) — se `docs/OPERATIONS.md`s incidentavsnitt. CAPTCHA
+mot riktade botattacker fortfarande inte implementerat (se ovan, oförändrat). Branch
+protection för CI måste aktiveras manuellt i GitHub-inställningarna — se
+`docs/OPERATIONS.md`.
 
 ## 3. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
 

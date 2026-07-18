@@ -38,6 +38,36 @@ services:
       - "11434:11434"
     profiles: ["local-llm"]
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Backs distributed rate limiting (app/limiter.py) — required as soon as more than one
+    # backend replica runs, since slowapi's in-memory fallback is process-local and
+    # wouldn't enforce a shared limit across instances. AOF persistence so limiter counters
+    # survive a Redis restart rather than silently resetting every client's window.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    restart: unless-stopped
+    # Local-dev SMTP catcher: set SMTP_HOST=mailhog in .env to actually receive
+    # verification/reset-password emails during development instead of relying on the
+    # (deliberately token-free) log line app/email.py prints when SMTP isn't configured at
+    # all. Web UI at http://localhost:8025.
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    profiles: ["dev-mail"]
+
   backend:
     build: ./backend
     restart: unless-stopped
@@ -49,11 +79,14 @@ services:
       QDRANT_URL: http://qdrant:6333
       OLLAMA_BASE_URL: http://ollama:11434
       FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:3000}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:
         condition: service_healthy
       qdrant:
         condition: service_started
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
 
@@ -74,3 +107,4 @@ volumes:
   postgres_data:
   qdrant_data:
   ollama_data:
+  redis_data:

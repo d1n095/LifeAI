@@ -1,5 +1,9 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger("mainai.account")
 
 from app.audit import record_audit
 from app.cookies import clear_session_cookies
@@ -90,11 +94,12 @@ def delete_account(
     session cookie alone (which is what every other authenticated endpoint relies on) isn't
     treated as sufficient proof of intent for a destructive, unrecoverable action.
 
-    Explicit manual cleanup rather than DB-level ON DELETE CASCADE/SET NULL: this project has
-    no migration tool yet (Base.metadata.create_all only creates missing tables — see
-    app/main.py — it never alters existing ones), so a constraint added to a model today
-    would not retroactively apply to an already-running database. Doing it here instead
-    works correctly regardless of what's actually enforced at the DB level.
+    Explicit manual cleanup rather than DB-level ON DELETE CASCADE/SET NULL: none of the
+    relevant foreign keys are declared with CASCADE/SET NULL at the database level (see
+    backend/alembic/versions/) — only usage_log.user_id/conversation_id are, for a different,
+    already-documented reason (see app/models/usage.py). Doing the cleanup explicitly here
+    works correctly regardless of what's enforced at the DB level, and keeps the exact
+    all-personal-data-deleted / all-shared-data-anonymized split in one auditable place.
     """
     if not verify_password(payload.password, user.password_hash):
         record_audit(db, user_id=user.id, action="account_deletion_failed_password", request=request)
@@ -102,28 +107,51 @@ def delete_account(
 
     user_id = user.id
 
-    # Personal data: deleted outright, not anonymized.
-    conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=user_id).all()]
-    if conversation_ids:
-        db.query(Message).filter(Message.conversation_id.in_(conversation_ids)).delete(synchronize_session=False)
-        db.query(Conversation).filter_by(user_id=user_id).delete(synchronize_session=False)
-    db.query(RefreshToken).filter_by(user_id=user_id).delete(synchronize_session=False)
-    db.query(EmailVerificationToken).filter_by(user_id=user_id).delete(synchronize_session=False)
-    db.query(PasswordResetToken).filter_by(user_id=user_id).delete(synchronize_session=False)
+    # Everything below runs as one transaction — either the whole account disappears
+    # cleanly, or none of it does. autocommit=False (app/db.py) already means nothing here
+    # is visible to any other connection until the single db.commit() at the end; the
+    # explicit try/except/rollback makes that guarantee active too, not just passive: if
+    # anything raises partway through, the transaction is rolled back explicitly before the
+    # exception propagates, rather than relying on Session.close() (app/db.py's get_db())
+    # to clean up an already-failed transaction implicitly.
+    try:
+        # Personal data: deleted outright, not anonymized.
+        conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=user_id).all()]
+        if conversation_ids:
+            db.query(Message).filter(Message.conversation_id.in_(conversation_ids)).delete(synchronize_session=False)
+            db.query(Conversation).filter_by(user_id=user_id).delete(synchronize_session=False)
+        db.query(RefreshToken).filter_by(user_id=user_id).delete(synchronize_session=False)
+        db.query(EmailVerificationToken).filter_by(user_id=user_id).delete(synchronize_session=False)
+        db.query(PasswordResetToken).filter_by(user_id=user_id).delete(synchronize_session=False)
 
-    # Shared company data the user merely created or used: kept, attribution scrubbed —
-    # deleting a person's account must not silently delete company knowledge other users
-    # still rely on (same reasoning as app/rls.py's access-control model for these tables).
-    db.query(Project).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
-    db.query(Task).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
-    db.query(Document).filter_by(uploaded_by=user_id).update({"uploaded_by": None}, synchronize_session=False)
-    db.query(UsageLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
-    # Audit trail: kept for security/compliance purposes independent of the erasure request,
-    # actor identity scrubbed rather than the events themselves being deleted.
-    db.query(AuditLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
+        # Shared company data the user merely created or used: kept, attribution scrubbed —
+        # deleting a person's account must not silently delete company knowledge other users
+        # still rely on (same reasoning as app/rls.py's access-control model for these tables).
+        db.query(Project).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
+        db.query(Task).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
+        db.query(Document).filter_by(uploaded_by=user_id).update({"uploaded_by": None}, synchronize_session=False)
+        db.query(UsageLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
+        # Audit trail: kept for security/compliance purposes independent of the erasure
+        # request, actor identity scrubbed rather than the events themselves being deleted.
+        db.query(AuditLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
 
-    db.delete(user)
-    db.commit()
+        db.delete(user)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Kontoradering misslyckades för user_id=%s, återställd (rollback).", user_id)
+        # Best-effort only, in a fresh transaction now that the failed one has been rolled
+        # back — if the DB itself is unreachable this write can fail too, which is fine:
+        # the HTTP 500 and the exception log above are the actual guarantee here, this is
+        # just supplementary visibility.
+        try:
+            record_audit(db, user_id=user_id, action="account_deletion_failed_error", request=request)
+        except Exception:
+            logger.exception("Kunde inte heller skriva audit-loggen för den misslyckade raderingen.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Kontot kunde inte raderas just nu. Inga ändringar gjordes — försök igen senare.",
+        )
 
     clear_session_cookies(response)
     record_audit(db, user_id=None, action="account_deleted", request=request)

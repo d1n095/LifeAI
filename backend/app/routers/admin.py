@@ -3,6 +3,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit
+from app.cleanup import run_token_cleanup
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_admin
@@ -108,3 +109,22 @@ def usage_summary(db: Session = Depends(get_db)):
         )
         for provider, model, role, count, prompt_tokens, completion_tokens, cost_sum, unknown_count in rows
     ]
+
+
+@router.post("/cleanup")
+def trigger_cleanup(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """Manual trigger for the token-retention cleanup (app/cleanup.py) — the same job also
+    runs on its own schedule (see app/scheduler.py) whenever ENABLE_SCHEDULED_CLEANUP is on.
+    Exposed here for ops visibility (run it on demand, see exactly what it purged) and so it
+    can be exercised in tests without waiting for the scheduler."""
+    counts = run_token_cleanup(db)
+    record_audit(
+        db,
+        user_id=user.id,
+        action="token_cleanup_triggered",
+        detail=str(counts) if counts is not None else "skipped (already running elsewhere)",
+        request=request,
+    )
+    if counts is None:
+        return {"status": "skipped", "reason": "another cleanup run holds the lock"}
+    return {"status": "completed", "purged": counts}

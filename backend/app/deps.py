@@ -56,12 +56,22 @@ async def get_current_user(
 
     # Bulk revocation check: password reset and "log out everywhere" both just bump
     # sessions_valid_after (app/token_revocation.py) instead of blocklisting every
-    # outstanding jti individually — any token issued before that timestamp is dead,
+    # outstanding jti individually — any token issued at or before that timestamp is dead,
     # access token included, even though it's otherwise a signature-valid, unexpired JWT.
+    #
+    # <=, not <: JWT's iat (RFC 7519 NumericDate) has whole-second precision, so two events
+    # that happen within the same wall-clock second are indistinguishable once compared —
+    # there is no sub-second information left to order them by. Given that ambiguity, fail
+    # closed (treat same-second as revoked) rather than fail open (treat it as still valid):
+    # the failure mode of <= is "an extremely rare same-second session needs one extra
+    # login", the failure mode of < would be "a same-second session survives a revocation
+    # that was supposed to be immediate". app/security.py's utcnow_seconds() backdates
+    # baseline (non-revocation) timestamps by a second precisely so a brand-new account's
+    # own first login never collides with its own creation-time baseline under this rule.
     if issued_at is not None:
         issued_at_dt = datetime.fromtimestamp(issued_at, tz=timezone.utc)
         sessions_valid_after = user.sessions_valid_after.replace(tzinfo=timezone.utc)
-        if issued_at_dt < sessions_valid_after:
+        if issued_at_dt <= sessions_valid_after:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessionen har återkallats. Logga in igen.")
 
     # CSRF check, folded in here rather than a standalone cookie-comparing middleware:
