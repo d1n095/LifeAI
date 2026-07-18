@@ -696,7 +696,10 @@ jobs:
         run: |
           BACKEND_PID=$(docker logs lifeai-a 2>&1 | grep -oP 'backend pid=\K[0-9]+')
           echo "Killing backend pid=$BACKEND_PID inside the container..."
-          docker exec lifeai-a kill -9 "$BACKEND_PID"
+          # kill is a shell builtin, not a standalone binary in this minimal image — `docker
+          # exec` without a shell tries to exec it directly and fails with "executable file
+          # not found in $PATH". Route it through sh (always present) instead.
+          docker exec lifeai-a sh -c "kill -9 $BACKEND_PID"
           timeout 15 docker wait lifeai-a
           docker logs lifeai-a 2>&1 | tail -30
           docker logs lifeai-a 2>&1 | grep -q "tearing down the other" || (echo "::error::entrypoint did not log the expected crash-linkage message" && exit 1)
