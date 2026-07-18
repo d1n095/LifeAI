@@ -23,7 +23,7 @@ valfritt härdning.
 | Hot | Beskrivning | Skydd i denna design |
 |---|---|---|
 | **XSS-attackerare** | Injicerad skript i frontend försöker läsa sessionstoken för att imitera användaren. | Access- och refresh-token ligger i `HttpOnly`-cookies — JavaScript kan aldrig läsa dem, oavsett XSS. Endast CSRF-värdet (i sig meningslöst utan de HttpOnly-cookies) är JS-läsbart. |
-| **CSRF-attackerare** | Extern sajt får offrets webbläsare att skicka en autentiserad state-changing request mot vårt API utan offrets vetskap. | Double-submit CSRF-token: ett separat, oförutsägbart värde i en icke-HttpOnly-cookie som måste upprepas i en `X-CSRF-Token`-header. En extern sajt kan inte läsa vår cookie (Same-Origin Policy) och kan därför inte konstruera en giltig header, även om webbläsaren automatiskt bifogar autentiseringscookien. |
+| **CSRF-attackerare** | Extern sajt får offrets webbläsare att skicka en autentiserad state-changing request mot vårt API utan offrets vetskap. | Ett separat, oförutsägbart CSRF-värde måste upprepas i en `X-CSRF-Token`-header på varje muterande anrop. Värdet levereras **en gång, i JSON-svarskroppen** från login/refresh/me — inte via en cookie (se Designval 3 nedan för varför). En extern sajt kan aldrig ha fått tag i det värdet och kan därför inte konstruera en giltig header, även om webbläsaren automatiskt bifogar sessionscookien. |
 | **Nätverksattackerare (MITM)** | Avlyssnar trafik för att stjäla token. | `Secure`-flaggan tvingar HTTPS i produktion (webbläsare skickar aldrig `Secure`-cookies över klartext HTTP, förutom det särskilda undantaget för `localhost`/`127.0.0.1` som webbläsare behandlar som en "secure context" — dokumenterad W3C/webbläsarstandard, inte en egen genväg vi hittat på). |
 | **Token-stöld + återuppspelning** | En refresh-token läcker (t.ex. loggfil, komprometterad enhet) och återanvänds efter att den legitima klienten redan roterat vidare. | Refresh-token-rotation: varje refresh-anrop ogiltigförklarar den använda token och utfärdar en ny. Om en redan återkallad token presenteras igen tolkas det som ett stöldsignal — **hela token-familjen** (alla token i samma rotationskedja) återkallas omedelbart, vilket tvingar total omlogin och loggas som säkerhetshändelse. |
 | **Session fixation** | Attackeraren tvingar offret att använda en token attackeraren redan känner till. | Vi accepterar aldrig ett klient-tillhandahållet sessions-ID som giltigt innan autentisering — alla token genereras server-side, uteslutande vid lyckad inloggning. Ingen "anonym session" existerar före login som senare skulle kunna "upphöjas". |
@@ -47,11 +47,19 @@ valfritt härdning.
    använd av attackeraren efter offret) återkallas **hela familjen** — inte bara den enskilda
    token — och händelsen auditloggas som `refresh_token_reuse_detected`.
 
-3. **CSRF: double-submit cookie**, inte enbart `SameSite` (som ändå måste vara `None` här).
-   Ett tredje, slumpmässigt värde i en **icke**-HttpOnly cookie (`csrf_token`) måste upprepas
-   i headern `X-CSRF-Token` på varje muterande (icke-GET/HEAD/OPTIONS) `/api/*`-anrop.
-   Verifieras med konstant-tidsjämförelse (`secrets.compare_digest`). Roteras vid varje
-   inloggning och varje refresh.
+3. **CSRF: inte klassisk double-submit cookie** (ursprunglig plan, ändrad under
+   implementation). Ett klassiskt double-submit-mönster förutsätter att frontendens JS kan
+   läsa CSRF-cookien via `document.cookie` och eka tillbaka den — verifierat i praktiken
+   (Playwright) att detta **inte fungerar cross-origin**: en cookie satt av backendens origin
+   är aldrig läsbar från frontendens origin via `document.cookie`, oavsett `HttpOnly`-flaggan
+   (Same-Origin Policy, inget vi kan konfigurera bort). Löst genom att CSRF-värdet i stället
+   skickas **en gång i JSON-svarskroppen** från `/login`, `/refresh` och `/me` (läsbart
+   cross-origin tack vare det explicita CORS-allowlistet), hålls i en ren in-memory
+   JS-variabel på frontend (`frontend/lib/auth.ts`, nollställs vid varje sidladdning) och
+   verifieras server-side mot ett databaslagrat värde. Måste upprepas i headern
+   `X-CSRF-Token` på varje muterande (icke-GET/HEAD/OPTIONS) `/api/*`-anrop, verifieras med
+   konstant-tidsjämförelse (`secrets.compare_digest`), och roteras vid varje inloggning och
+   varje refresh.
 
 4. **Strikt CORS:** `allow_origins` är en explicit lista (miljövariabel, kommaseparerad) —
    aldrig `*` (också inkompatibelt med `allow_credentials=True`, som krävs för att cookies
@@ -71,10 +79,67 @@ valfritt härdning.
 ## Vad som INTE ändras
 
 - RLS-policyn och isoleringen mellan användare (`docs/MAINAI_0.1_PLAN.md`) — oförändrad.
-- Lösenordshashning (bcrypt) — oförändrad.
-- Rate limiting-infrastrukturen (slowapi) — återanvänds, utökas med nya gränser för
-  `/api/auth/refresh` och `/api/auth/logout`.
+- Rate limiting-infrastrukturen (slowapi) — återanvänds, utökas med nya gränser per endpoint.
 - Audit-loggen — återanvänds, utökas med nya händelsetyper.
+
+(Lösenordshashning uppgraderades från bcrypt till Argon2id i samband med kontoflödet nedan —
+se den sektionen.)
+
+## Tillägg 2026-07-18: fullständigt kontoflöde (registrering, verifiering, återställning, radering)
+
+Byggt i samma säkerhetsmilstolpe, ovanpå cookie-sessionen ovan. Kort hotmodell för de nya
+ytorna:
+
+| Hot | Beskrivning | Skydd |
+|---|---|---|
+| **Kontoräkning (email enumeration)** | Attackeraren avgör om en e-postadress har ett konto genom att observera skillnader i svar. | `/register`, `/forgot-password` och `/resend-verification` svarar **identiskt** oavsett om adressen finns, redan är verifierad, eller inte — se `NEUTRAL_*_RESPONSE` i `backend/app/routers/auth.py`. Enda undantaget är efter lyckad lösenordsinloggning (attackeraren bevisar då redan att de känner till ett giltigt lösenord, vilket gör kvarvarande enumeration-risk försumbar) — se designval 7 nedan. |
+| **Automatiserad massregistrering** | Bot skapar konton i bulk för spam/missbruk. | Honeypot-fält (`website`) osynligt för riktiga användare och skärmläsare, striktare rate limit (5/min/IP) på `/register` än på `/login`. Inget CAPTCHA-beroende till tredje part i denna sandlåda — se kvarstående risk nedan. |
+| **Länkstöld ur mejlkorg/loggar** | Verifierings- eller återställningslänken läcker (delad inkorg, mejlserver-logg, skärmdump). | Kortlivad (24h resp. 1h), engångsanvändbar (`used_at`), 256-bitars slumpvärde — brute force är beräkningsmässigt omöjligt. Återställningslänken är kortare livslängd än verifieringslänken eftersom den ger direkt kontoövertagande, inte bara e-postbekräftelse. |
+| **Kontoövertagande via lösenordsåterställning** | Attackeraren som lyckas trigga/avlyssna en återställning måste inte kunna behålla åtkomst om den legitima ägaren agerar. | Lösenordsåterställning återkallar **alla** aktiva sessioner för kontot omedelbart (`revoke_all_sessions_for_user`) — en redan inloggad attackerares session dör i samma ögonblick som lösenordet byts, inte vid nästa naturliga utgång. |
+| **Brute force mot ett specifikt konto** | Många lösenordsgissningar mot samma konto, ev. spridda över flera IP-adresser för att kringgå IP-baserad rate limiting. | Separat räknare **per e-postadress** (inte bara per IP): 10 misslyckade `login_failed`-händelser inom 15 minuter blockerar vidare försök mot just det kontot, oavsett varifrån de kommer. `login_failed` loggas identiskt för "kontot finns inte" och "fel lösenord", så räknaren själv läcker ingen ny information. |
+| **Ofullständig radering (GDPR)** | Ett konto "raderas" men personuppgifter blir kvar och läckbara. | `DELETE /api/account` tar bort kontot, konversationer och meddelanden permanent (inte mjukradering) samt alla sessions-/tokenrader. Delat företagsinnehåll (dokument/projekt/uppgifter) behålls men frikopplas (`created_by`/`uploaded_by` → NULL) — se motivering i `backend/app/routers/account.py`. Kräver lösenordsbekräftelse: sessionscookien ensam räcker inte för en oåterkallelig åtgärd. |
+| **Otillräcklig lösenordsstyrka** | Svaga eller återanvända lösenord gör kontot lätt att gissa/knäcka offline vid en eventuell databasläcka. | Minst 12 tecken, lokal denylist för vanliga svaga lösenord, får inte innehålla e-postadressens lokal-del (`backend/app/password_policy.py`) — samt Argon2id (OWASP-rekommenderad, minneshård) istället för bcrypt för själva hashningen, vilket också höjer kostnaden för offline-attacker mot en läckt hash. |
+
+**Designval:**
+
+7. **Inloggning blockeras helt för overifierade konton**, inte bara kosmetiskt efter
+   inloggning. Ingen session utfärdas förrän `email_verified=true` — enklare och säkrare än
+   att låta en overifierad användare bli inloggad och sedan spärra enskilda routes, vilket
+   hade krävt en parallell auktoriseringsväg att hålla i synk. Ett korrekt lösenord men
+   overifierat konto svarar med ett distinkt `403` (inte `401`) så frontend kan visa "skicka
+   bekräftelsemail igen" istället för en återvändsgränd — detta läcker i praktiken inget nytt:
+   den som redan bevisat att de känner till rätt lösenord är per definition inte en
+   blind-gissande angripare.
+
+8. **Massrevocation via en tidsstämpel, inte en enumererad blocklista.** Både
+   lösenordsåterställning och "logga ut från alla enheter" sätter bara
+   `User.sessions_valid_after = now()` och markerar alla `refresh_tokens`-rader som
+   återkallade. `app/deps.py` avvisar varje access-token vars `iat`-claim föregår den
+   tidsstämpeln — en enda kolumnuppdatering ogiltigförklarar samtliga sessioner på alla
+   enheter direkt, utan att räkna upp eller blocklista enskilda `jti`.
+
+9. **Explicit, manuell cascade-städning vid kontoradering**, inte databasens
+   `ON DELETE CASCADE`. Projektet saknar ännu ett migrationsverktyg (`Base.metadata.create_all`
+   skapar bara saknade tabeller, ändrar aldrig befintliga — se `backend/app/main.py`), så ett
+   FK-constraint tillagt i en modell idag skulle inte retroaktivt gälla en redan körande
+   databas. Radering görs därför explicit i `backend/app/routers/account.py` och fungerar
+   korrekt oavsett vad som faktiskt är satt på databasnivå.
+
+**Kvarstående, medvetet accepterad risk:**
+
+- **Inget CAPTCHA-beroende till tredje part.** Skyddet mot automatiserad registrering är ett
+  honeypot-fält plus rate limiting — svagare än t.ex. hCaptcha/Turnstile mot en målmedveten
+  botoperatör, men undviker ett beroende till en extern tjänst (nätverksanrop, spårning,
+  driftberoende) som inte är motiverat i nuvarande skala. Lägg till ett riktigt CAPTCHA om
+  missbruk faktiskt observeras i produktion.
+- **SMTP måste konfigureras explicit i produktion** (`SMTP_HOST` m.fl., se `.env.example`) —
+  utan det loggas verifierings-/återställningsmejl bara till backend-loggen istället för att
+  skickas (samma gracefulla nedgradering som en okonfigurerad AI-leverantör). Ett
+  produktionsdeploy som glömmer detta skulle tyst sluta kunna verifiera nya konton eller
+  återställa lösenord — synligt i loggarna, men inte som ett fel som stoppar uppstart.
+- **`email_verification_tokens`/`password_reset_tokens` växer obegränsat** — samma
+  ackumulerande-tabell-risk som redan noterad för `refresh_tokens` i `docs/SECURITY_BLOCKERS.md`
+  post 2, inte en ny risk men värd att lösa med samma periodiska städjobb.
 
 ## Kvarstående, medvetet accepterad risk
 

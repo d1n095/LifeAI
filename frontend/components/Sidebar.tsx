@@ -12,6 +12,7 @@ const NAV = [
   { href: "/projects", label: "Projekt" },
   { href: "/documents", label: "Dokument" },
   { href: "/admin", label: "Admin" },
+  { href: "/account", label: "Konto" },
 ];
 
 export default function Sidebar({ userEmail }: { userEmail: string }) {

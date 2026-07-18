@@ -1,10 +1,9 @@
-import re
 import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+from app.email_utils import EMAIL_PATTERN, normalize_email
 
 
 class LoginIn(BaseModel):
@@ -14,9 +13,9 @@ class LoginIn(BaseModel):
     @field_validator("email")
     @classmethod
     def valid_email(cls, v: str) -> str:
-        if not EMAIL_PATTERN.match(v):
+        if not EMAIL_PATTERN.match(v.strip()):
             raise ValueError("Ogiltig e-postadress.")
-        return v.lower()
+        return normalize_email(v)
 
     @field_validator("password")
     @classmethod
@@ -26,15 +25,61 @@ class LoginIn(BaseModel):
         return v
 
 
+class RegisterIn(BaseModel):
+    email: str
+    password: str
+    # Honeypot: a hidden form field real users never see or fill (frontend keeps it visually
+    # and semantically hidden from assistive tech). Any value here marks the submission as
+    # automated — see app/routers/auth.py. Actual password strength is validated explicitly
+    # in the endpoint (app/password_policy.py), not here, since the Swedish error message
+    # needs to reach the client as a normal 400 response, not a generic Pydantic 422.
+    website: str = ""
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v: str) -> str:
+        if not EMAIL_PATTERN.match(v.strip()):
+            raise ValueError("Ogiltig e-postadress.")
+        return normalize_email(v)
+
+
+class EmailIn(BaseModel):
+    """Shared by /forgot-password and /resend-verification — both take just an email and
+    both must respond identically regardless of whether the address is registered."""
+
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v: str) -> str:
+        if not EMAIL_PATTERN.match(v.strip()):
+            raise ValueError("Ogiltig e-postadress.")
+        return normalize_email(v)
+
+
+class VerifyEmailIn(BaseModel):
+    token: str
+
+
+class ResetPasswordIn(BaseModel):
+    token: str
+    new_password: str
+
+
+class DeleteAccountIn(BaseModel):
+    password: str
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     email: str
     role: str
+    email_verified: bool
 
 
 class SessionOut(UserOut):
-    """Returned only by login/refresh — the one time the CSRF value is transmitted at all.
+    """Returned only by login/refresh/me — the one time the CSRF value is transmitted at all.
     The frontend holds it in memory (never localStorage) and echoes it back as
     X-CSRF-Token on mutating requests. See docs/AUTH_THREAT_MODEL.md."""
 

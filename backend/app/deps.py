@@ -1,5 +1,6 @@
 import secrets
 import uuid
+from datetime import datetime, timezone
 
 import jwt
 from fastapi import Depends, HTTPException, Request, status
@@ -39,6 +40,7 @@ async def get_current_user(
         payload = decode_access_token(access_token)
         user_id = uuid.UUID(payload["sub"])
         jti = payload.get("jti")
+        issued_at = payload.get("iat")
     except (jwt.PyJWTError, KeyError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Ogiltig eller utgången token.") from exc
 
@@ -51,6 +53,16 @@ async def get_current_user(
     user = db.get(User, user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Kontot finns inte eller är inaktiverat.")
+
+    # Bulk revocation check: password reset and "log out everywhere" both just bump
+    # sessions_valid_after (app/token_revocation.py) instead of blocklisting every
+    # outstanding jti individually — any token issued before that timestamp is dead,
+    # access token included, even though it's otherwise a signature-valid, unexpired JWT.
+    if issued_at is not None:
+        issued_at_dt = datetime.fromtimestamp(issued_at, tz=timezone.utc)
+        sessions_valid_after = user.sessions_valid_after.replace(tzinfo=timezone.utc)
+        if issued_at_dt < sessions_valid_after:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessionen har återkallats. Logga in igen.")
 
     # CSRF check, folded in here rather than a standalone cookie-comparing middleware:
     # frontend/backend are different origins, so the CSRF value can't live in a cookie the

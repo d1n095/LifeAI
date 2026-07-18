@@ -131,10 +131,66 @@ kontrollerade efter bygge.
 måste sättas explicit i produktion om frontend och backend delar en överordnad domän
 (t.ex. `.exempel.se`) för att cookies ska nå rätt subdomäner; fel värde här kan antingen
 läcka cookien till fler subdomäner än avsett eller göra sessionen obrukbar, så det ska
-sättas medvetet per miljö, inte lämnas som standard i produktion. `refresh_token`-tabellen
-växer obegränsat över tid (utgångna/återkallade rader städas aldrig bort) — inte en
+sättas medvetet per miljö, inte lämnas som standard i produktion. `refresh_token`-, `email_verification_token`- och `password_reset_token`-tabellerna
+växer obegränsat över tid (utgångna/återkallade/använda rader städas aldrig bort) — inte en
 säkerhetsrisk i sig, men bör få en periodisk städjobb innan volymen blir ett
 driftsproblem.
+
+### Tillägg 2026-07-18: fullständigt, säkert kontoflöde
+
+**Status: åtgärdat.** Konton kunde tidigare bara skapas manuellt (bootstrap-admin via
+miljövariabler). Byggt ovanpå cookie-sessionen ovan, i samma säkerhetsmilstolpe: självbetjänad
+registrering, e-postverifiering innan full åtkomst, lösenordsåterställning, utloggning från
+alla enheter, och kontoexport/-radering enligt dataskyddskrav. Fullständig hotmodell och
+designbeslut i `docs/AUTH_THREAT_MODEL.md` (avsnittet "Tillägg 2026-07-18").
+
+**Sammanfattning:**
+- **Argon2id** (OWASP-rekommenderad, minneshård) ersätter bcrypt för lösenordshashning.
+- **Lösenordspolicy**: minst 12 tecken, lokal denylist för vanliga svaga lösenord, får inte
+  innehålla e-postadressens lokal-del (`backend/app/password_policy.py`).
+- **E-post normaliseras** (NFKC + lowercase) innan uniktetskontroll och lagring
+  (`backend/app/email_utils.py`) — förhindrar dubbelregistrering via Unicode-varianter.
+- **Registrering** (`POST /api/auth/register`): honeypot-fält mot enkel botregistrering,
+  rate limit 5/min/IP, alltid neutralt svar oavsett om adressen redan finns.
+- **E-postverifiering**: kortlivad (24h), engångsanvändbar token (256-bitars slump, endast
+  SHA-256-hash lagras). Inloggning är helt blockerad — inget session utfärdas — förrän kontot
+  är verifierat.
+- **Lösenordsåterställning**: kortlivad (1h), engångsanvändbar token. Lyckad återställning
+  återkallar **alla** aktiva sessioner för kontot omedelbart (inte bara den som gjorde
+  återställningen) — se `revoke_all_sessions_for_user` i `backend/app/token_revocation.py`.
+- **Neutrala svar**: `/register`, `/forgot-password` och `/resend-verification` svarar
+  identiskt oavsett om e-postadressen finns, redan är verifierad, eller inte — ingen
+  kontoräkning (email enumeration) möjlig via dessa endpoints.
+- **Rate limiting + brute-force-skydd**: nya, striktare gränser per endpoint
+  (register/forgot-password/verify-email/reset-password), plus en separat räknare **per
+  e-postadress** (inte bara per IP) som blockerar inloggning efter 10 misslyckade försök
+  inom 15 minuter mot samma konto — skyddar mot distribuerad brute force över många IP:n.
+- **Logga ut från alla enheter** (`POST /api/auth/logout-all`) och **lösenordsbyte** delar
+  samma massåterkallningsmekanism: en tidsstämpel (`User.sessions_valid_after`) plus
+  återkallning av alla `refresh_tokens`-rader, istället för att räkna upp enskilda tokens.
+- **Kontoexport** (`GET /api/account/export`): JSON med profil, egna konversationer och
+  egen audit-logg. Delat företagsinnehåll (dokument/projekt/uppgifter) ingår medvetet inte —
+  det är inte personuppgifter tillhörande individen, se `docs/MAINAI_0.1_PLAN.md`.
+- **Kontoradering** (`DELETE /api/account`, kräver lösenordsbekräftelse): permanent radering
+  av konto, konversationer och sessionsdata; delat företagsinnehåll frikopplas
+  (`created_by`/`uploaded_by` → NULL) istället för att raderas; audit-loggen behålls men
+  aktörsidentiteten skrubbas.
+
+**Verifierat innan commit:** 34 nya Playwright-kontroller mot den riktiga stacken
+(registrering, dubblerad e-post, honeypot, utgången/återanvänd verifieringstoken,
+inloggning blockerad före verifiering, svagt lösenord avvisat, utgången/återanvänd
+återställningstoken, sessionsåterkallelse efter lösenordsbyte, utloggning från flera
+enheter samtidigt, användarisolering mellan två nyregistrerade konton, kontoradering med
+fel/rätt lösenord, ingen inloggning möjlig efter radering) plus 2 nya kontroller för
+rate limiting/brute-force. Alla tidigare 19 E2E- och 20 säkerhetskontroller fortsatt
+gröna (75 kontroller totalt). `tsc --noEmit` och `eslint .` rena, `py_compile` rent.
+Produktionsbygge verifierat i båda lägena igen efter dessa ändringar.
+
+**Kvarvarande risk:** inget CAPTCHA-beroende till tredje part (endast honeypot + rate
+limiting mot automatiserad registrering) — tillräckligt för nuvarande skala, men svagare
+mot en målmedveten botoperatör; lägg till t.ex. hCaptcha/Turnstile om missbruk faktiskt
+observeras. SMTP måste konfigureras explicit i produktion (`SMTP_HOST` m.fl.) — annars
+loggas verifierings-/återställningsmejl bara till backend-loggen istället för att skickas.
 
 ## 3. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
 

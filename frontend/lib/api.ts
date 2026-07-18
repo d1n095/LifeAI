@@ -76,7 +76,19 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`API-fel (${res.status}): ${body}`);
+    // FastAPI's HTTPException(detail=...) is always a clean, already-Swedish, user-facing
+    // string — surface it directly rather than wrapping it in a generic "API error" message,
+    // so forms (register, reset-password, ...) can show it as-is.
+    let detail: string | undefined;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.detail === "string") detail = parsed.detail;
+    } catch {
+      /* not JSON, fall through to the generic message */
+    }
+    const err = new Error(detail ?? `API-fel (${res.status}): ${body}`);
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
   }
   if (res.status === 204) return undefined as T;
   const text = await res.text();
@@ -183,7 +195,10 @@ export type CurrentUser = {
   id: string;
   email: string;
   role: string;
+  email_verified: boolean;
 };
+
+export type MessageResponse = { detail: string };
 
 export const api = {
   login: (email: string, password: string) =>
@@ -191,8 +206,38 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ email, password }),
     }),
+  register: (email: string, password: string, website: string = "") =>
+    request<MessageResponse>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ email, password, website }),
+    }),
+  verifyEmail: (token: string) =>
+    request<{ status: string }>("/api/auth/verify-email", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  resendVerification: (email: string) =>
+    request<MessageResponse>("/api/auth/resend-verification", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  forgotPassword: (email: string) =>
+    request<MessageResponse>("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  resetPassword: (token: string, newPassword: string) =>
+    request<{ status: string }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, new_password: newPassword }),
+    }),
   logout: () => request("/api/auth/logout", { method: "POST" }),
+  logoutAll: () => request("/api/auth/logout-all", { method: "POST" }),
   me: () => request<CurrentUser>("/api/auth/me"),
+
+  exportAccount: () => request<Record<string, unknown>>("/api/account/export"),
+  deleteAccount: (password: string) =>
+    request("/api/account", { method: "DELETE", body: JSON.stringify({ password }) }),
 
   sendChat: (message: string, conversationId?: string) =>
     request<ChatResponse>("/api/chat", {

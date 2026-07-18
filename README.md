@@ -36,18 +36,26 @@ docker exec -it lifeai-ollama-1 ollama pull llama3.1
 Sätt sedan i adminpanelen (`localhost:3000/admin`) leverantören `ollama` som aktiv för chat
 och/eller embedding.
 
-## Inloggning
+## Inloggning och konton
 
 Vid första uppstart skapas automatiskt ett admin-konto från `ADMIN_EMAIL`/`ADMIN_PASSWORD` i
-`.env`. Logga in mot `POST /api/auth/login` (JSON: `{"email": "...", "password": "..."}`) för
-att få en JWT — skicka den som `Authorization: Bearer <token>` på alla övriga anrop. Alla
-API-routrar utom `/api/health`, `/api/auth/login` kräver inloggning; `/api/admin/*` kräver
-dessutom adminroll.
+`.env` (förverifierat — inget e-postflöde behövs för det). Alla andra konton skapas via
+`POST /api/auth/register` eller sidan `/register`, och måste verifieras via en engångslänk
+skickad till e-postadressen innan inloggning är möjlig alls (se
+`docs/AUTH_THREAT_MODEL.md`).
 
-Frontend har en egen inloggningssida (`/login`) som gör exakt detta och sparar token i
-`localStorage` (medvetet val, se `frontend/lib/auth.ts` och `docs/SECURITY_BLOCKERS.md`).
-Alla sidor utom `/login` är skyddade av `AuthGuard` — obehörig eller utgången token skickar
-tillbaka till `/login` automatiskt.
+Sessionen levereras helt via `HttpOnly`/`Secure`-cookies (`POST /api/auth/login`) — det finns
+inget klientläsbart token att skicka som `Authorization`-header, och inget lagras i
+`localStorage`/`sessionStorage` (se `docs/AUTH_THREAT_MODEL.md` och
+`docs/SECURITY_BLOCKERS.md`). Alla API-routrar utom `/api/health` och `/api/auth/*` kräver
+inloggning; `/api/admin/*` kräver dessutom adminroll.
+
+Frontend har egna sidor för inloggning (`/login`), registrering (`/register`),
+e-postverifiering (`/verify-email`), glömt lösenord (`/forgot-password`),
+lösenordsåterställning (`/reset-password`) och kontohantering (`/account` — export, utloggning
+från alla enheter, permanent radering). Alla sidor utom dessa är skyddade av `AuthGuard` —
+obehörig eller utgången session skickar tillbaka till `/login` automatiskt (med en transparent
+förnyelse av access-token vid behov, inte en direkt utloggning).
 
 ## Konfigurera AI-leverantörer
 
@@ -143,8 +151,10 @@ docker-compose.yml
 
 ## Drift och säkerhet — status
 
-- **Autentisering**: JWT-baserad inloggning, lösenord hashas med bcrypt, tokens signeras med
-  `SECRET_KEY` (byt från default i produktion).
+- **Autentisering**: session i `HttpOnly`/`Secure`-cookies (kortlivad JWT-access-token +
+  roterande refresh-token), CSRF-skydd på alla muterande anrop, lösenord hashas med Argon2id,
+  tokens signeras med `SECRET_KEY` (byt från default i produktion). Full hotmodell i
+  `docs/AUTH_THREAT_MODEL.md`. Nya konton kräver e-postverifiering innan inloggning.
 - **Row-Level Security**: konversationer är strikt isolerade per användare på databasnivå
   (Postgres RLS, inte bara applikationslogik). Backend kör därför alla runtime-frågor via en
   egen, icke-superuser databasroll (`mainai_app`, skapas automatiskt av

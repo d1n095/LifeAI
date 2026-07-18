@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.db import Base, SessionLocal, migration_engine
 from app.limiter import limiter
 from app.rls import apply_rls
-from app.routers import admin, auth, chat, conversations, documents, health, knowledge, projects
+from app.routers import account, admin, auth, chat, conversations, documents, health, knowledge, projects
 
 settings = get_settings()
 
@@ -39,6 +39,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(account.router)
 app.include_router(chat.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { api } from "@/lib/api";
 
 export default function LoginPage() {
@@ -9,6 +10,8 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [unverified, setUnverified] = useState(false);
+  const [resendStatus, setResendStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -24,17 +27,39 @@ export default function LoginPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    setUnverified(false);
+    setResendStatus(null);
     setLoading(true);
     try {
-      // Login sets the session entirely via Set-Cookie (HttpOnly access/refresh tokens +
-      // a readable CSRF cookie) — the response body carries only non-sensitive user info,
-      // nothing this code needs to store.
+      // Login sets the session entirely via Set-Cookie (HttpOnly access/refresh tokens) —
+      // the response body carries only non-sensitive user info plus the CSRF value, nothing
+      // this code needs to store beyond what lib/api.ts already captures.
       await api.login(email, password);
       router.replace("/");
     } catch (err: any) {
-      setError("Fel e-post eller lösenord.");
+      const status = err?.status;
+      if (status === 403) {
+        // Correct password, just not verified yet — a distinct case from "wrong password"
+        // (see backend app/routers/auth.py), offered a way forward instead of a dead end.
+        setUnverified(true);
+        setError(err.message);
+      } else if (status === 429) {
+        setError(err.message);
+      } else {
+        setError("Fel e-post eller lösenord.");
+      }
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleResend() {
+    setResendStatus(null);
+    try {
+      const res = await api.resendVerification(email);
+      setResendStatus(res.detail);
+    } catch (err: any) {
+      setResendStatus(err?.message || "Något gick fel. Försök igen.");
     }
   }
 
@@ -79,6 +104,17 @@ export default function LoginPage() {
         {error && (
           <div role="alert" className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 p-2 text-sm text-red-300">
             {error}
+            {unverified && (
+              <button type="button" onClick={handleResend} className="mt-2 block text-accent2 underline">
+                Skicka bekräftelsemail igen
+              </button>
+            )}
+          </div>
+        )}
+
+        {resendStatus && (
+          <div role="status" className="mb-4 rounded-lg border border-border bg-base p-2 text-sm text-white/60">
+            {resendStatus}
           </div>
         )}
 
@@ -89,6 +125,15 @@ export default function LoginPage() {
         >
           {loading ? "Loggar in…" : "Logga in"}
         </button>
+
+        <div className="mt-4 flex justify-between text-sm text-white/40">
+          <Link href="/register" className="text-accent2 hover:underline">
+            Skapa konto
+          </Link>
+          <Link href="/forgot-password" className="text-accent2 hover:underline">
+            Glömt lösenord?
+          </Link>
+        </div>
       </form>
     </div>
   );

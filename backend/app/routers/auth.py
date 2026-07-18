@@ -10,22 +10,48 @@ from app.config import get_settings
 from app.cookies import REFRESH_COOKIE, clear_session_cookies, set_session_cookies
 from app.db import get_db
 from app.deps import CSRF_HEADER, get_current_user
+from app.email import send_email
 from app.limiter import limiter
+from app.models.audit import AuditLog
+from app.models.email_verification_token import EmailVerificationToken
+from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
-from app.schemas import LoginIn, SessionOut
+from app.password_policy import validate_password
+from app.schemas import EmailIn, LoginIn, RegisterIn, ResetPasswordIn, SessionOut, VerifyEmailIn
 from app.security import (
     create_access_token,
     generate_csrf_token,
+    generate_opaque_token,
     generate_refresh_token,
+    hash_opaque_token,
+    hash_password,
     hash_refresh_token,
     verify_password,
 )
-from app.token_revocation import revoke_access_token
+from app.token_revocation import revoke_access_token, revoke_all_sessions_for_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 settings = get_settings()
+
+# Generic, identical response bodies for anything that could otherwise leak whether an email
+# address has an account — see docs/AUTH_THREAT_MODEL.md. Same string used everywhere it
+# applies so there's no accidental tell in wording between call sites.
+NEUTRAL_REGISTER_RESPONSE = {"detail": "Om e-postadressen inte redan används har vi skickat ett bekräftelsemail."}
+NEUTRAL_FORGOT_PASSWORD_RESPONSE = {
+    "detail": "Om e-postadressen finns registrerad har vi skickat instruktioner för återställning."
+}
+NEUTRAL_RESEND_VERIFICATION_RESPONSE = {
+    "detail": "Om kontot finns och inte redan är verifierat har vi skickat ett nytt bekräftelsemail."
+}
+
+# Per-account brute-force guard, independent of (and in addition to) the per-IP rate limit
+# on /login: a distributed attack spread across many IPs would sail through IP-based limiting
+# alone. login_failed is recorded identically whether the account exists or not (see login()
+# below), so counting by email here reveals nothing an attacker didn't already control.
+FAILED_LOGIN_WINDOW_MINUTES = 15
+FAILED_LOGIN_THRESHOLD = 10
 
 
 def _issue_session(
@@ -60,7 +86,9 @@ def _issue_session(
 
 
 def _session_response(user: User, csrf_token: str) -> SessionOut:
-    return SessionOut(id=user.id, email=user.email, role=user.role.value, csrf_token=csrf_token)
+    return SessionOut(
+        id=user.id, email=user.email, role=user.role.value, email_verified=user.email_verified, csrf_token=csrf_token
+    )
 
 
 def _verify_csrf(request: Request, row: RefreshToken) -> None:
@@ -74,13 +102,133 @@ def _verify_csrf(request: Request, row: RefreshToken) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF-verifiering misslyckades.")
 
 
+def _recent_failed_logins(db: Session, email: str) -> int:
+    cutoff = datetime.utcnow() - timedelta(minutes=FAILED_LOGIN_WINDOW_MINUTES)
+    return (
+        db.query(AuditLog)
+        .filter(AuditLog.action == "login_failed", AuditLog.detail == email, AuditLog.created_at >= cutoff)
+        .count()
+    )
+
+
+def _issue_and_send_verification(db: Session, user: User, request: Request) -> None:
+    # Invalidate any previous outstanding link before issuing a new one — only one valid
+    # verification link should ever exist for an account at a time.
+    db.query(EmailVerificationToken).filter_by(user_id=user.id, used_at=None).update({"used_at": datetime.utcnow()})
+    token_plain = generate_opaque_token()
+    db.add(
+        EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_opaque_token(token_plain),
+            expires_at=datetime.utcnow() + timedelta(hours=settings.email_verification_token_expire_hours),
+        )
+    )
+    db.commit()
+    link = f"{settings.public_app_url}/verify-email?token={token_plain}"
+    send_email(
+        user.email,
+        "Bekräfta din e-postadress – MainAI",
+        "Klicka på länken nedan för att bekräfta ditt konto:\n\n"
+        f"{link}\n\n"
+        f"Länken är giltig i {settings.email_verification_token_expire_hours} timmar och kan bara användas en gång.\n\n"
+        "Om du inte skapade det här kontot kan du bortse från det här mejlet.",
+    )
+
+
+@router.post("/register", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit(f"{settings.rate_limit_register_per_minute}/minute")
+def register(request: Request, payload: RegisterIn, db: Session = Depends(get_db)):
+    # Honeypot: a real user's browser never populates this hidden field. Return the exact
+    # same response a genuine registration gets, so the bot can't distinguish "caught" from
+    # "processed" and adjust — but skip all DB writes and the email send entirely.
+    if payload.website:
+        record_audit(db, user_id=None, action="register_bot_suspected", request=request)
+        return NEUTRAL_REGISTER_RESPONSE
+
+    try:
+        validate_password(payload.password, email=payload.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    existing = db.query(User).filter_by(email=payload.email).first()
+    if existing is not None:
+        if not existing.email_verified:
+            # Legitimate case: someone lost or never received the first verification email.
+            # Safe to resend — the response is identical either way, so this doesn't leak
+            # anything beyond what a would-be attacker could already tell from the response.
+            _issue_and_send_verification(db, existing, request)
+            record_audit(db, user_id=existing.id, action="register_resent_verification", request=request)
+        else:
+            record_audit(db, user_id=existing.id, action="register_duplicate_attempt", request=request)
+        return NEUTRAL_REGISTER_RESPONSE
+
+    user = User(email=payload.email, password_hash=hash_password(payload.password))
+    db.add(user)
+    db.commit()
+    _issue_and_send_verification(db, user, request)
+    record_audit(db, user_id=user.id, action="register_success", request=request)
+    return NEUTRAL_REGISTER_RESPONSE
+
+
+@router.post("/verify-email")
+@limiter.limit(f"{settings.rate_limit_verify_email_per_minute}/minute")
+def verify_email(request: Request, payload: VerifyEmailIn, db: Session = Depends(get_db)):
+    row = db.query(EmailVerificationToken).filter_by(token_hash=hash_opaque_token(payload.token)).first()
+    if row is None or row.used_at is not None or row.expires_at < datetime.utcnow():
+        record_audit(db, user_id=row.user_id if row else None, action="email_verify_failed", request=request)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Länken är ogiltig eller har gått ut. Begär en ny."
+        )
+    user = db.get(User, row.user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Länken är ogiltig eller har gått ut. Begär en ny."
+        )
+
+    row.used_at = datetime.utcnow()
+    user.email_verified = True
+    user.email_verified_at = datetime.utcnow()
+    db.add_all([row, user])
+    db.commit()
+    record_audit(db, user_id=user.id, action="email_verified", request=request)
+    return {"status": "verified"}
+
+
+@router.post("/resend-verification", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit(f"{settings.rate_limit_register_per_minute}/minute")
+def resend_verification(request: Request, payload: EmailIn, db: Session = Depends(get_db)):
+    user = db.query(User).filter_by(email=payload.email).first()
+    if user is None or user.email_verified:
+        return NEUTRAL_RESEND_VERIFICATION_RESPONSE
+    _issue_and_send_verification(db, user, request)
+    record_audit(db, user_id=user.id, action="resend_verification", request=request)
+    return NEUTRAL_RESEND_VERIFICATION_RESPONSE
+
+
 @router.post("/login", response_model=SessionOut)
 @limiter.limit(f"{settings.rate_limit_login_per_minute}/minute")
 def login(request: Request, response: Response, payload: LoginIn, db: Session = Depends(get_db)):
+    if _recent_failed_logins(db, payload.email) >= FAILED_LOGIN_THRESHOLD:
+        record_audit(db, user_id=None, action="login_blocked_too_many_attempts", detail=payload.email, request=request)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="För många misslyckade inloggningsförsök för det här kontot. Försök igen om en stund.",
+        )
+
     user = db.query(User).filter_by(email=payload.email).first()
     if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):
         record_audit(db, user_id=None, action="login_failed", detail=payload.email, request=request)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Fel e-post eller lösenord.")
+
+    if not user.email_verified:
+        # Deliberately NOT counted as a login_failed attempt (it's not a credential-guessing
+        # signal — the password was correct) and no session is issued: full app access stays
+        # blocked until the account is verified, not just cosmetically restricted post-login.
+        record_audit(db, user_id=user.id, action="login_blocked_unverified", request=request)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Kontot är inte verifierat än. Kolla din e-post eller begär ett nytt bekräftelsemail.",
+        )
 
     # A brand new family_id every login — never extends or reuses a prior session's
     # rotation chain. Prevents session fixation by construction: nothing about a session
@@ -184,6 +332,86 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     clear_session_cookies(response)
     record_audit(db, user_id=user_id, action="logout", request=request)
     return {"status": "logged_out"}
+
+
+@router.post("/logout-all")
+@limiter.limit(f"{settings.rate_limit_logout_per_minute}/minute")
+def logout_all(
+    request: Request, response: Response, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+):
+    """Ends every session for this account, on every device — not just the one making the
+    request. get_current_user already enforces CSRF for this (POST is a mutating method)."""
+    revoke_all_sessions_for_user(db, user.id)
+    clear_session_cookies(response)
+    record_audit(db, user_id=user.id, action="logout_all_devices", request=request)
+    return {"status": "logged_out_all"}
+
+
+@router.post("/forgot-password", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit(f"{settings.rate_limit_forgot_password_per_minute}/minute")
+def forgot_password(request: Request, payload: EmailIn, db: Session = Depends(get_db)):
+    user = db.query(User).filter_by(email=payload.email).first()
+    if user is None or not user.is_active:
+        record_audit(db, user_id=None, action="forgot_password_unknown_email", request=request)
+        return NEUTRAL_FORGOT_PASSWORD_RESPONSE
+
+    db.query(PasswordResetToken).filter_by(user_id=user.id, used_at=None).update({"used_at": datetime.utcnow()})
+    token_plain = generate_opaque_token()
+    db.add(
+        PasswordResetToken(
+            user_id=user.id,
+            token_hash=hash_opaque_token(token_plain),
+            expires_at=datetime.utcnow() + timedelta(hours=settings.password_reset_token_expire_hours),
+        )
+    )
+    db.commit()
+    link = f"{settings.public_app_url}/reset-password?token={token_plain}"
+    send_email(
+        user.email,
+        "Återställ ditt lösenord – MainAI",
+        "Klicka på länken nedan för att välja ett nytt lösenord:\n\n"
+        f"{link}\n\n"
+        f"Länken är giltig i {settings.password_reset_token_expire_hours} timme(-ar) och kan bara användas en gång.\n\n"
+        "Om du inte begärde detta kan du bortse från mejlet — ditt lösenord ändras inte "
+        "förrän du klickar länken och väljer ett nytt.",
+    )
+    record_audit(db, user_id=user.id, action="forgot_password_requested", request=request)
+    return NEUTRAL_FORGOT_PASSWORD_RESPONSE
+
+
+@router.post("/reset-password")
+@limiter.limit(f"{settings.rate_limit_reset_password_per_minute}/minute")
+def reset_password(request: Request, response: Response, payload: ResetPasswordIn, db: Session = Depends(get_db)):
+    row = db.query(PasswordResetToken).filter_by(token_hash=hash_opaque_token(payload.token)).first()
+    if row is None or row.used_at is not None or row.expires_at < datetime.utcnow():
+        record_audit(db, user_id=row.user_id if row else None, action="reset_password_invalid_token", request=request)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Länken är ogiltig eller har gått ut. Begär en ny återställning.",
+        )
+    user = db.get(User, row.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Länken är ogiltig eller har gått ut. Begär en ny återställning.",
+        )
+
+    try:
+        validate_password(payload.new_password, email=user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    row.used_at = datetime.utcnow()
+    user.password_hash = hash_password(payload.new_password)
+    db.add_all([row, user])
+    db.commit()
+
+    # A password reset is exactly the situation where old sessions must not survive — if the
+    # password was compromised, whoever had it may also be holding a live session cookie.
+    revoke_all_sessions_for_user(db, user.id)
+    clear_session_cookies(response)
+    record_audit(db, user_id=user.id, action="password_reset_success", request=request)
+    return {"status": "password_reset"}
 
 
 @router.get("/me", response_model=SessionOut)

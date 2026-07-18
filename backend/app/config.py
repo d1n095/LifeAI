@@ -37,6 +37,30 @@ class Settings(BaseSettings):
     rate_limit_login_per_minute: int = 10
     rate_limit_refresh_per_minute: int = 30
     rate_limit_logout_per_minute: int = 30
+    # Deliberately stricter than login — registration and password-reset requests are the
+    # cheapest way to spam another person's inbox or mass-probe for valid accounts.
+    rate_limit_register_per_minute: int = 5
+    rate_limit_forgot_password_per_minute: int = 5
+    rate_limit_verify_email_per_minute: int = 20
+    rate_limit_reset_password_per_minute: int = 10
+
+    # Account/email flow
+    email_verification_token_expire_hours: int = 24
+    password_reset_token_expire_hours: int = 1
+    # Base URL used to build the links inside verification/reset emails — deliberately a
+    # separate setting from frontend_origins (a CORS allow-list) so an operator can't
+    # accidentally break email links by editing the CORS config, or vice versa.
+    public_app_url: str = "http://localhost:3000"
+
+    # SMTP — if smtp_host is unset, app/email.py logs the email instead of sending it (dev
+    # mode), the same graceful-degradation pattern as an unconfigured AI provider.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    smtp_from_email: str = "no-reply@lifeos.local"
+    smtp_from_name: str = "MainAI / Life OS"
 
     # Database — two roles by design:
     # `database_url` is the superuser (POSTGRES_USER) and is used ONLY for schema migrations
