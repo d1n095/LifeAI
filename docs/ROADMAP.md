@@ -28,6 +28,12 @@ Fasindelad plan. Varje fas ska vara körbar och testbar innan nästa påbörjas.
 - [ ] Automatiskt "minnesskrivning": AI:n föreslår vad som ska sparas permanent efter en konversation,
       användaren godkänner (ingen tyst datainsamling).
 - [ ] Deduplicering och konfliktdetektering i kunskapsbiblioteket (undviker motstridig info).
+- [ ] **Life Library / Life Knowledge Studio / LifeCast** — multimodal källimport (PDF, DOCX,
+      bild, ljud, video, YouTube), Trust Engine-utökning (källa/tolkning/osäkerhet/konflikt
+      per påstående) och genererade kunskapsprodukter + podcastproduktion. Planerad, ej
+      påbörjad — se `docs/LIFE_LIBRARY_PLAN.md` för fullständig arkitektur och fasindelning
+      (L0–L8). Byggspärr: kräver stabil Render-drift/kontoflöde och den bakgrundskö som redan
+      står som öppen punkt i Fas 1 ovan.
 
 ## Fas 3 — Proaktiv AI
 - [ ] Förslagsmotor: prioriteringar, nästa steg, riskflaggor baserat på roadmap + kunskapsbibliotek.

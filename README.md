@@ -7,9 +7,10 @@ eller en lokal modell via Ollama).
 Se `docs/ARCHITECTURE.md` för systemarkitektur, `docs/ROADMAP.md` för den generella fasindelade
 planen, `docs/MAINAI_0.1_PLAN.md`/`docs/STATUS.md` för den pågående MainAI 0.1-leveransen,
 **`docs/SECURITY_BLOCKERS.md` för kända säkerhetsuppgifter som måste lösas före
-produktionsdrift** (bl.a. en nödvändig Next.js-versionsuppgradering), och `docs/RENDER_DEPLOY.md`
+produktionsdrift** (bl.a. en nödvändig Next.js-versionsuppgradering), `docs/RENDER_DEPLOY.md`
 för Render-Blueprintet (`render.yaml`) som driftsätter hela stacken (Postgres, Redis, backend,
-frontend).
+frontend), och `docs/LIFE_LIBRARY_PLAN.md` för en planerad (ej påbörjad) framtida fas —
+multimodalt kunskapsbibliotek, genererade kunskapsprodukter och podcastproduktion.
 
 ## Snabbstart (Docker — rekommenderat)
 
