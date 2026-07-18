@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, AuthError, CurrentUser } from "@/lib/api";
-import { clearToken, getToken } from "@/lib/auth";
 
 type Props = {
   children: (user: CurrentUser) => React.ReactNode;
@@ -15,16 +14,16 @@ export default function AuthGuard({ children }: Props) {
   const [checked, setChecked] = useState(false);
 
   useEffect(() => {
-    if (!getToken()) {
-      router.replace("/login");
-      return;
-    }
+    // There's no client-readable token to check up front (see docs/AUTH_THREAT_MODEL.md) —
+    // the only way to know if a session exists is to ask the backend, which reads the
+    // HttpOnly cookie itself. api.me() also transparently attempts a refresh on a 401
+    // before giving up (see lib/api.ts), so a merely-expired access token doesn't force a
+    // login round-trip here.
     api
       .me()
       .then((me) => setUser(me))
       .catch((err) => {
         if (!(err instanceof AuthError)) {
-          clearToken();
           router.replace("/login");
         }
         // AuthError already redirected inside lib/api.ts

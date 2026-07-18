@@ -19,12 +19,22 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
+# CSRF verification is folded into app/deps.py's get_current_user (every mutating route
+# requires it) plus an explicit check in /refresh and /logout, which authenticate via the
+# refresh-token cookie instead — not a standalone middleware, because the CSRF value can no
+# longer live in a cookie the frontend can read (frontend/backend are different origins;
+# see docs/AUTH_THREAT_MODEL.md) and verifying it now requires the same DB lookup those
+# dependencies already do.
+
+# allow_credentials=True is required for cookie-based auth to work cross-origin at all —
+# combined with an explicit origin allow-list (never "*", which the Fetch spec forbids
+# alongside credentials anyway) and explicit methods/headers. See docs/AUTH_THREAT_MODEL.md.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=settings.frontend_origin_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-CSRF-Token"],
 )
 
 app.include_router(health.router)

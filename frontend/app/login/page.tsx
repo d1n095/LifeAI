@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { getToken, setToken } from "@/lib/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -13,7 +12,13 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (getToken()) router.replace("/");
+    // No client-readable token to check (see docs/AUTH_THREAT_MODEL.md) — ask the backend
+    // directly. A failure here just means "not logged in", which is the expected state for
+    // anyone actually looking at this page, so it's silently ignored.
+    api
+      .me()
+      .then(() => router.replace("/"))
+      .catch(() => {});
   }, [router]);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -21,8 +26,10 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      const { access_token } = await api.login(email, password);
-      setToken(access_token);
+      // Login sets the session entirely via Set-Cookie (HttpOnly access/refresh tokens +
+      // a readable CSRF cookie) — the response body carries only non-sensitive user info,
+      // nothing this code needs to store.
+      await api.login(email, password);
       router.replace("/");
     } catch (err: any) {
       setError("Fel e-post eller lösenord.");

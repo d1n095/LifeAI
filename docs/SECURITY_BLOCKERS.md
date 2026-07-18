@@ -45,12 +45,96 @@ att endast `NEXT_PUBLIC_API_URL` (aldrig en hemlighet) förekommer i klientbundl
 publicerad vid uppgraderingstillfället. Ingen känd öppen sårbarhet just nu — kör `npm audit`
 igen som rutin när den releasen landar, precis som för vilket beroende som helst.
 
-## 2. JWT lagras i `localStorage`, inte i en httpOnly-cookie
+## 2. [LÖST 2026-07-18] JWT lagrades i `localStorage`, inte i en httpOnly-cookie
 
-Se kommentaren i `frontend/lib/auth.ts`. Fungerar för 0.1 (ingen server-side
-sessionsinfrastruktur finns), men gör frontend beroende av att aldrig ha en XSS-lucka —
-en cookie-baserad lösning har inte samma svaghet. Uppgradera när backend får en riktig
-sessionsmodell (Fas 1 i `docs/ROADMAP.md`).
+**Status: åtgärdat.** Sessionen låg tidigare i en JWT i `localStorage`, läsbar av vilken
+JavaScript som helst på sidan — en enda XSS-lucka någonstans i appen (eller ett komprometterat
+npm-paket) hade räckt för att stjäla en giltig session permanent. Se `docs/AUTH_THREAT_MODEL.md`
+för fullständig hotmodell och designbeslut, skriven innan implementation påbörjades.
+
+**Ny arkitektur — två separata cookies, inget token i JS överhuvudtaget:**
+- `access_token`: kortlivad JWT (15 min), `HttpOnly`, `Secure`, `SameSite=None`, path `/`.
+  Bär en `jti`-claim för omedelbar återkallning (se nedan).
+- `refresh_token`: högentropi opak token (`secrets.token_urlsafe(48)`), samma
+  cookie-inställningar, men scoped till path `/api/auth` — kan aldrig läcka till
+  applikations-API:erna ens om de skulle vara XSS-sårbara. Endast SHA-256-hash lagras i
+  databasen, aldrig klartext.
+- `SameSite=None` + `Secure` krävs eftersom frontend och backend körs på olika origins
+  (även lokalt: `127.0.0.1:3020` vs `localhost:8010` är olika origins för webbläsaren);
+  `Secure` fungerar utan HTTPS på `localhost`/`127.0.0.1` eftersom webbläsare behandlar
+  dem som "secure contexts" per spec.
+
+**Refresh-token-rotation med replay-skydd:** varje `/api/auth/refresh` gör den gamla
+raden `revoked_at`-markerad och skapar en ny i samma `family_id`-kedja. Om en redan
+återkallad refresh-token presenteras igen (stulen och uppspelad, eller en förlorad
+race) tolkas det som ett kompromissignal: **hela familjen** återkallas — alla
+refresh-tokens i kedjan OCH deras respektive access-tokens (se `RevokedAccessToken`
+nedan) — vilket tvingar fullständig omdinloggning. Verifierat med ett dedikerat test som
+spelar upp en roterad-bort token och bekräftar att även den token som ersatte den
+(annars fortfarande giltig i isolation) därefter också är död.
+
+**CSRF-skydd — inte klassisk dubbel-cookie (fungerar inte cross-origin):** ett vanligt
+double-submit-cookie-mönster förutsätter att frontendens JS kan läsa CSRF-cookien via
+`document.cookie` och eka tillbaka den som header. Verifierat i praktiken (Playwright)
+att detta INTE fungerar cross-origin: en cookie satt av backendens origin är aldrig
+läsbar från frontendens origin via `document.cookie`, oavsett `HttpOnly`-flaggan — det är
+same-origin-policy, inget vi kan konfigurera bort. Lösning: CSRF-värdet skickas i stället
+en gång i JSON-svarskroppen från `/login`, `/refresh` och `/me` (läsbart cross-origin
+tack vare det explicita CORS-allowlistet), hålls i en ren in-memory JS-variabel på
+frontend (`lib/auth.ts`, nollställs vid varje sidladdning) och verifieras server-side mot
+ett databaslagrat värde (`app/deps.py` för vanliga state-changing anrop, `app/routers/auth.py`
+för `/refresh`/`/logout` som autentiserar via refresh-cookien innan access-token ens finns).
+Verifierat med en äkta cross-origin-attack-simulering (separat portad "attacker-origin",
+inte bara en annan path) som skickar en riktig `no-cors`-formulärliknande begäran med de
+riktiga sessionscookies bifogade av webbläsaren — begäran skickas (webbläsaren blockerar
+inte avsändandet, bara attackerarens möjlighet att läsa svaret), men servern avvisar den
+och det förfalskade objektet skapas aldrig, eftersom attacker-sidan aldrig kunnat få tag i
+CSRF-värdet.
+
+**Fullständig utloggning, inte bara refresh-token-återkallning:** en stateless JWT går
+normalt inte att ogiltigförklara innan den naturligt går ut. Löst med en liten
+återkallningslista (`RevokedAccessToken`, nyckel `jti`, självstädande via `expires_at`) —
+både explicit `/logout` och family-wide reuse-detection lägger till den aktuella
+access-token-`jti`:n där, och `get_current_user` kontrollerar listan på varje anrop.
+Verifierat: en access-token som var giltig strax före utloggning ger omedelbart 401
+("Sessionen har återkallats") direkt efter, i stället för att fortsätta fungera i upp
+till 15 minuter till.
+
+**Session fixation:** varje lyckad inloggning skapar en helt ny `family_id` — ingen
+existerande sessionskedja återanvänds eller förlängs, oavsett vad klienten skickade in.
+
+**Strikt CORS:** `allow_origins` är en explicit lista (`FRONTEND_ORIGINS`, kommaseparerad),
+`allow_credentials=True`, `allow_headers` begränsad till `Content-Type` och `X-CSRF-Token`.
+
+**Rate limiting och audit-logg:** `/login` 10/min, `/refresh` 30/min, `/logout` 30/min
+(per IP innan autentisering). `login_success`, `login_failed`, `refresh_success`,
+`refresh_failed`, `refresh_token_reuse_detected` och `logout` skrivs alla till
+`audit_log`.
+
+**Inga tokens i `localStorage`, `sessionStorage`, URL:er eller loggar:** `frontend/lib/auth.ts`
+lagrar numera bara CSRF-värdet, i minnet, aldrig i persistent webbläsarlagring.
+Session-identiteten finns enbart i `HttpOnly`-cookies som frontendens JS aldrig kan läsa.
+
+**Verifierat innan commit:** ett nytt 20-kontrollers säkerhetstestsvit (Playwright, mot
+den riktiga stacken, inga mockar) som bekräftar: `access_token`/`refresh_token` är
+`HttpOnly`+`Secure`, `document.cookie` exponerar dem varken på backendens eller
+frontendens egna origin, en äkta cross-origin CSRF-attack avvisas och skapar aldrig sitt
+mål-objekt, refresh-rotation ger en ny token och ogiltigförklarar den gamla, uppspelning
+av en redan roterad token återkallar hela familjen (båda generationerna av tokens), och
+utloggning dödar access-token omedelbart. Samtliga 19 befintliga Playwright E2E-kontroller
+gröna. `tsc --noEmit` och `eslint .` rena på frontend. `py_compile` rent på backend.
+Produktionsbygge kört och verifierat i båda lägena: Docker-läge (`.next/standalone`
+skapas) och Vercel-läge (skapas inte), `/`, `/login`, `/chat`, `/admin` manuellt
+kontrollerade efter bygge.
+
+**Kvarvarande risk:** `COOKIE_DOMAIN` är `None` som standard (host-only cookies) —
+måste sättas explicit i produktion om frontend och backend delar en överordnad domän
+(t.ex. `.exempel.se`) för att cookies ska nå rätt subdomäner; fel värde här kan antingen
+läcka cookien till fler subdomäner än avsett eller göra sessionen obrukbar, så det ska
+sättas medvetet per miljö, inte lämnas som standard i produktion. `refresh_token`-tabellen
+växer obegränsat över tid (utgångna/återkallade rader städas aldrig bort) — inte en
+säkerhetsrisk i sig, men bör få en periodisk städjobb innan volymen blir ett
+driftsproblem.
 
 ## 3. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
 

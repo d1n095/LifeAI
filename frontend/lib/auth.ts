@@ -1,20 +1,22 @@
-const TOKEN_KEY = "mainai_token";
+// No token storage here — deliberately. Session identity lives entirely in HttpOnly cookies
+// (access_token, refresh_token) that this frontend's JavaScript can never read, by design
+// (see docs/AUTH_THREAT_MODEL.md).
+//
+// The CSRF value below is held in a plain in-memory module variable, not a cookie: cookies
+// set by the backend belong to the BACKEND's origin, and frontend JavaScript can never read
+// another origin's cookies via document.cookie regardless of HttpOnly — that's a basic
+// same-origin-policy fact, not something we opted out of. So the backend instead sends the
+// current CSRF value once in the login/refresh/me JSON response body (readable cross-origin
+// because our CORS allow-list explicitly permits it), and this module just remembers it for
+// the lifetime of the page. It resets to null on every full page load/reload by construction
+// — lib/api.ts's AuthGuard-triggered /me call repopulates it immediately.
 
-// Stored in localStorage, not an httpOnly cookie — a deliberate MVP tradeoff, not an
-// oversight. The backend (see backend/app/security.py) issues stateless bearer JWTs with no
-// server-side session/cookie infrastructure; adding one is real work (a same-origin auth
-// proxy or a shared cookie domain) tracked as a Fas 1 hardening item, not something to fake
-// here. localStorage is readable by any script on the page, so it depends on this frontend
-// staying free of XSS — no unsanitized HTML injection anywhere (see chat message rendering).
-export function getToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(TOKEN_KEY);
+let csrfToken: string | null = null;
+
+export function getCsrfToken(): string | null {
+  return csrfToken;
 }
 
-export function setToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token);
-}
-
-export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY);
+export function setCsrfToken(token: string | null): void {
+  csrfToken = token;
 }

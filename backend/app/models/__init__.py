@@ -4,6 +4,8 @@ from app.models.conversation import Conversation, Message
 from app.models.document import Document
 from app.models.project import Project, Task
 from app.models.provider_config import ProviderConfig
+from app.models.refresh_token import RefreshToken
+from app.models.revoked_access_token import RevokedAccessToken
 from app.models.usage import UsageLog
 from app.models.user import User
 
@@ -16,6 +18,8 @@ __all__ = [
     "Project",
     "Task",
     "ProviderConfig",
+    "RefreshToken",
+    "RevokedAccessToken",
     "UsageLog",
     "User",
 ]

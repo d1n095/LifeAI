@@ -14,13 +14,29 @@ class Settings(BaseSettings):
     admin_email: str = "admin@lifeos.local"
     admin_password: str = "change-me-in-production"
 
-    # Auth
+    # Auth — short-lived access token + long-lived rotating refresh token, both delivered as
+    # HttpOnly cookies (never returned in a JSON body, never stored client-side). See
+    # docs/AUTH_THREAT_MODEL.md.
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60 * 12
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 14
 
-    # Rate limiting (requests per minute, per authenticated user)
+    # Cookie attributes. Secure=True works on localhost/127.0.0.1 without HTTPS — browsers
+    # treat those as a "secure context" by spec, so the same (safer) settings apply in dev
+    # and prod rather than a weaker dev-only fallback that could leak into production.
+    # SameSite=None is required because frontend and backend are different origins; that
+    # trade-off is exactly why CSRF protection (app/csrf.py) is mandatory, not optional.
+    cookie_secure: bool = True
+    cookie_samesite: str = "none"
+    cookie_domain: str | None = None  # unset = host-only cookie; set only for a shared parent domain
+
+    # Rate limiting (requests per minute, per authenticated user; login/refresh/logout are
+    # keyed by IP since there's no authenticated user yet at that point)
     rate_limit_chat_per_minute: int = 20
     rate_limit_default_per_minute: int = 120
+    rate_limit_login_per_minute: int = 10
+    rate_limit_refresh_per_minute: int = 30
+    rate_limit_logout_per_minute: int = 30
 
     # Database — two roles by design:
     # `database_url` is the superuser (POSTGRES_USER) and is used ONLY for schema migrations
@@ -54,8 +70,13 @@ class Settings(BaseSettings):
     # active provider fails. MainAI 0.1 focuses this on OpenAI/Anthropic/Gemini.
     chat_fallback_order: str = "openai,anthropic,gemini"
 
-    # CORS
-    frontend_origin: str = "http://localhost:3000"
+    # CORS — comma-separated explicit allow-list, never a wildcard (incompatible with
+    # allow_credentials=True anyway, which cookie-based auth requires).
+    frontend_origins: str = "http://localhost:3000"
+
+    @property
+    def frontend_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
 
 
 @lru_cache

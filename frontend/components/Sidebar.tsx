@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
-import { clearToken } from "@/lib/auth";
+import { api } from "@/lib/api";
 
 const NAV = [
   { href: "/", label: "Dashboard" },
@@ -19,9 +19,14 @@ export default function Sidebar({ userEmail }: { userEmail: string }) {
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  function logout() {
-    clearToken();
-    router.replace("/login");
+  async function logout() {
+    // Revokes the refresh token server-side and clears all three cookies via Set-Cookie —
+    // "logging out" client-side alone would leave a still-valid session on the server.
+    try {
+      await api.logout();
+    } finally {
+      router.replace("/login");
+    }
   }
 
   const navLinks = (

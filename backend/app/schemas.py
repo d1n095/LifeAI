@@ -26,16 +26,19 @@ class LoginIn(BaseModel):
         return v
 
 
-class TokenOut(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-
-
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     email: str
     role: str
+
+
+class SessionOut(UserOut):
+    """Returned only by login/refresh — the one time the CSRF value is transmitted at all.
+    The frontend holds it in memory (never localStorage) and echoes it back as
+    X-CSRF-Token on mutating requests. See docs/AUTH_THREAT_MODEL.md."""
+
+    csrf_token: str
 
 
 class ChatMessageIn(BaseModel):
