@@ -1,0 +1,174 @@
+# Render Blueprint for the MainAI / Life OS backend stack: PostgreSQL, Redis, and the
+# FastAPI backend. The Next.js frontend is included too (service `mainai-frontend`) so the
+# whole stack can be verified end-to-end on Render, but per docs/RENDER_DEPLOY.md, Vercel
+# stays the live/authoritative frontend until Render has been verified working — nothing
+# here changes Vercel.
+#
+# NOTHING in this file deploys anything by itself. Applying a Blueprint in the Render
+# dashboard is a deliberate, explicit action the operator takes — see docs/RENDER_DEPLOY.md
+# for the exact click-path and every environment variable that needs a real value before
+# first deploy.
+#
+# Deploys are intentionally NOT triggered by pushes to Render directly (autoDeploy: false
+# below) — see the `deploy-render` job in .github/workflows/ci.yml, which is the only thing
+# that ever calls Render's deploy hooks, and only after "All required checks passed" is
+# green on this branch. Until RENDER_BACKEND_DEPLOY_HOOK_URL / RENDER_FRONTEND_DEPLOY_HOOK_URL
+# are added as GitHub Actions secrets (a separate, explicit step — see docs/RENDER_DEPLOY.md),
+# that job is a safe no-op.
+
+databases:
+  - name: mainai-postgres
+    databaseName: lifeos
+    user: mainai_admin
+    plan: starter # paid tier — Render's free Postgres expires after 30 days, unsuitable for a real deploy. Confirm current pricing in the dashboard before applying.
+    region: oregon # keep every service in the same region — cross-region traffic is slower and (for the private network) not guaranteed to work
+    postgresMajorVersion: "16"
+    ipAllowList: [] # no direct external access; the backend reaches this over Render's private network via DATABASE_URL below. Add your own IP temporarily in the dashboard if you need direct psql access.
+
+services:
+  - type: redis
+    name: mainai-redis
+    plan: starter # paid tier, for persistence — see docs/RENDER_DEPLOY.md
+    region: oregon
+    ipAllowList: [] # no direct external access — only mainai-backend needs this, over the private network
+    maxmemoryPolicy: noeviction # rate-limit counters (app/limiter.py) should error loudly rather than be silently evicted mid-window
+
+  - type: web
+    name: mainai-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    region: oregon
+    branch: claude/det-kommer-mer-879lcm
+    autoDeploy: false # see .github/workflows/ci.yml's deploy-render job — deploys only after CI is green
+    healthCheckPath: /api/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true # signs JWTs — platform-generated, never committed (app/config.py)
+      - key: ADMIN_EMAIL
+        sync: false # bootstrap admin account, created on first startup only if no users exist yet (app/bootstrap.py)
+      - key: ADMIN_PASSWORD
+        sync: false
+
+      # Two-role Postgres model (see README.md "Row-Level Security" and
+      # backend/db-init/01-app-role.sh): DATABASE_URL is the admin/owner role Render creates
+      # for you, used only for migrations and enabling RLS. Managed Postgres gives you no way
+      # to provision a second, RLS-respecting role via this file — MAINAI_APP_PASSWORD is
+      # generated here and backend/scripts/ensure_app_role.py uses it, together with
+      # DATABASE_URL, to create that second role (`mainai_app`) itself at container start,
+      # before `alembic upgrade head` (see backend/docker-entrypoint.sh). APP_DATABASE_URL is
+      # deliberately NOT listed here — it's computed then, not set as a literal value.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mainai-postgres
+          property: connectionString
+      - key: MAINAI_APP_PASSWORD
+        generateValue: true
+
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: mainai-redis
+          property: connectionString
+
+      # CORS allow-list (app/main.py) — both origins are listed so the stack keeps working
+      # for both frontends during the Render/Vercel transition period. Verify the actual
+      # assigned mainai-frontend.onrender.com hostname in the dashboard once created (Render
+      # appends a suffix if the name is taken) and correct this value + redeploy if it differs.
+      - key: FRONTEND_ORIGINS
+        value: https://life-ai-seven.vercel.app,https://mainai-frontend.onrender.com
+      # Used only to build links inside verification/reset emails (app/config.py) — kept
+      # pointed at the still-authoritative Vercel frontend, not the CORS list above. Update
+      # this the day Render becomes the live frontend.
+      - key: PUBLIC_APP_URL
+        value: https://life-ai-seven.vercel.app
+
+      # Already the secure default in app/config.py — listed explicitly so the production
+      # value is visible here rather than implicit. Do not weaken these.
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: "none"
+      - key: REFRESH_TOKEN_EXPIRE_DAYS
+        value: "14"
+
+      # SMTP is mandatory in production as of this change (app/main.py's
+      # _check_smtp_configured) — the backend now refuses to start with ENVIRONMENT=production
+      # and no SMTP_HOST, rather than silently dropping verification/reset emails.
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_USE_TLS
+        value: "true"
+      - key: SMTP_FROM_EMAIL
+        sync: false
+      - key: SMTP_FROM_NAME
+        value: MainAI / Life OS
+      # DEV_MAIL_OUTBOX_DIR is deliberately absent — app/email.py refuses to use it outside
+      # ENVIRONMENT=production anyway, but it must never even be set here.
+
+      - key: TOKEN_CLEANUP_RETENTION_DAYS
+        value: "30"
+      - key: ENABLE_SCHEDULED_CLEANUP
+        value: "true"
+      - key: CLEANUP_INTERVAL_HOURS
+        value: "24"
+
+      - key: DEFAULT_LLM_PROVIDER
+        value: openai
+      - key: DEFAULT_LLM_MODEL
+        value: gpt-4o-mini
+      - key: DEFAULT_EMBEDDING_PROVIDER
+        value: openai
+      - key: DEFAULT_EMBEDDING_MODEL
+        value: text-embedding-3-small
+      - key: CHAT_FALLBACK_ORDER
+        value: openai,anthropic,gemini
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+
+      # No Qdrant service in this Blueprint — out of scope per the current request (only
+      # Postgres + Redis were asked for). QDRANT_URL is left unset (falls back to
+      # app/config.py's default, which won't resolve on Render) — this does NOT block
+      # startup or auth (get_qdrant_client() in app/rag/qdrant_store.py connects lazily, only
+      # when a knowledge/document endpoint is actually called), but /api/knowledge and
+      # /api/documents/upload will fail until a Qdrant instance is added. See
+      # docs/RENDER_DEPLOY.md.
+
+  - type: web
+    name: mainai-frontend
+    runtime: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: starter
+    region: oregon
+    branch: claude/det-kommer-mer-879lcm
+    autoDeploy: false # see .github/workflows/ci.yml's deploy-render job
+    healthCheckPath: /login # always public (unauthenticated), unlike / which client-side-redirects under AuthGuard
+    envVars:
+      # NEXT_PUBLIC_* values are inlined into the client bundle at `next build` time, not
+      # read at container start (see frontend/Dockerfile's ARG/ENV comment) — Render passes
+      # service envVars through as Docker build args automatically when the Dockerfile
+      # declares a matching ARG, which frontend/Dockerfile already does. Verify the actual
+      # assigned mainai-backend.onrender.com hostname in the dashboard once created (Render
+      # appends a suffix if the name is taken) and correct this value + redeploy if it differs
+      # — this is exactly the class of misconfiguration that caused the original
+      # "Failed to fetch" (NEXT_PUBLIC_API_URL baked in wrong, or not deployed at all).
+      - key: NEXT_PUBLIC_API_URL
+        value: https://mainai-backend.onrender.com

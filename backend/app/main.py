@@ -58,6 +58,9 @@ def on_startup():
     # here too as an idempotent safety net (cheap no-op if already applied) — see app/rls.py.
     apply_rls(migration_engine)
 
+    if settings.environment == "production":
+        _check_smtp_configured()
+
     if settings.redis_url:
         _check_redis_reachable()
 
@@ -73,6 +76,20 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     stop_scheduler()
+
+
+def _check_smtp_configured() -> None:
+    """SMTP is mandatory in production: without it, app/email.py's dev-only fallback just
+    logs a warning and drops the message (verification/reset links carry a one-time
+    credential that must never end up in the regular application log — see app/email.py and
+    docs/AUTH_THREAT_MODEL.md), so registration and password reset would silently never
+    reach anyone. Fail at startup, not on the first real user's request."""
+    if not settings.smtp_host:
+        raise RuntimeError(
+            "SMTP_HOST är inte satt i en produktionsmiljö (ENVIRONMENT=production). "
+            "E-postverifiering och lösenordsåterställning kräver en fungerande SMTP-server "
+            "— sätt SMTP_HOST/SMTP_PORT/SMTP_USERNAME/SMTP_PASSWORD (se .env.example)."
+        )
 
 
 def _check_redis_reachable() -> None:

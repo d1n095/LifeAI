@@ -6,6 +6,22 @@
 # is the one and only place `alembic upgrade head` runs in a container deploy.
 set -euo pipefail
 
+# On managed Postgres providers (e.g. Render) there's no docker-entrypoint-initdb.d hook to
+# create the restricted mainai_app role the way backend/db-init/01-app-role.sh does for local
+# Docker Compose — this does the equivalent, idempotently, via the admin connection
+# (DATABASE_URL). Only runs when MAINAI_APP_PASSWORD is set; local Docker Compose never sets
+# it on the backend container (APP_DATABASE_URL is already set there directly), so this is a
+# no-op locally. See scripts/ensure_app_role.py and docs/RENDER_DEPLOY.md.
+if [ -n "${MAINAI_APP_PASSWORD:-}" ]; then
+  echo "Skapar/uppdaterar mainai_app-rollen..."
+  export RENDER_ENV_FILE
+  RENDER_ENV_FILE="$(mktemp)"
+  python scripts/ensure_app_role.py
+  # shellcheck disable=SC1090
+  source "$RENDER_ENV_FILE"
+  rm -f "$RENDER_ENV_FILE"
+fi
+
 echo "Kör alembic upgrade head..."
 alembic upgrade head
 

@@ -463,3 +463,39 @@ jobs:
             exit 1
           fi
           echo "All required checks passed."
+
+  # ---------------------------------------------------------------------------------------
+  # Render deploy — the ONLY thing that ever triggers a Render deploy for this stack.
+  # render.yaml sets autoDeploy: false on both Render web services specifically so a push
+  # alone can never deploy; this job is gated on all-checks-passed and only runs for pushes
+  # to the production branch (not PRs, not other branches). It's a safe no-op until
+  # RENDER_BACKEND_DEPLOY_HOOK_URL / RENDER_FRONTEND_DEPLOY_HOOK_URL are added as GitHub
+  # Actions secrets — see docs/RENDER_DEPLOY.md. Each hook is independent: either, both, or
+  # neither can be configured without failing this job.
+  # ---------------------------------------------------------------------------------------
+  deploy-render:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: all-checks-passed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' && needs.all-checks-passed.result == 'success'
+    steps:
+      - name: Trigger backend deploy hook
+        env:
+          HOOK_URL: ${{ secrets.RENDER_BACKEND_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK_URL" ]; then
+            echo "RENDER_BACKEND_DEPLOY_HOOK_URL is not set — skipping backend deploy. See docs/RENDER_DEPLOY.md."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK_URL"
+          echo "Backend deploy triggered."
+      - name: Trigger frontend deploy hook
+        env:
+          HOOK_URL: ${{ secrets.RENDER_FRONTEND_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK_URL" ]; then
+            echo "RENDER_FRONTEND_DEPLOY_HOOK_URL is not set — skipping frontend deploy. See docs/RENDER_DEPLOY.md."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK_URL"
+          echo "Frontend deploy triggered."

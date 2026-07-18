@@ -177,6 +177,10 @@ repo-administratörsåtgärd):
    check — den är beroende av alla andra jobb, så ett enda kryss räcker.
 4. (Rekommenderat) Kryssa även i "Require branches to be up to date before merging".
 
+Efter `all-checks-passed` finns även `deploy-render`, som anropar Render-tjänsternas Deploy
+Hook-URL:er (om de är satta som repo-secrets) — den enda vägen en Render-deploy triggas på för
+den här stacken. Se `docs/RENDER_DEPLOY.md`.
+
 ## Incidenthantering
 
 ### Misstänkt stulen/återanvänd refresh-token
@@ -225,3 +229,7 @@ igen när SMTP är återställt.
 **Aldrig** aktivera `DEV_MAIL_OUTBOX_DIR` i produktion — det skriver hela mejlet (inklusive
 en giltig engångstoken) till en fil om SMTP inte är konfigurerat. Avsett endast för lokal
 utveckling (se `.env.example`).
+
+`SMTP_HOST` är obligatorisk så fort `ENVIRONMENT=production` — backend vägrar starta annars
+(`_check_smtp_configured` i `app/main.py`), samma fail-closed-princip som `REDIS_URL`-kontrollen
+ovan.
