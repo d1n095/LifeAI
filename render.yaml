@@ -67,6 +67,13 @@ services:
   # below). This is what makes trusting X-Forwarded-For unconditionally
   # (backend/Dockerfile's --forwarded-allow-ips=*) safe: the only thing that can ever connect
   # here is lifeai-1's proxy route.
+  #
+  # No healthCheckPath: Render's Blueprint validator rejects it on type: pserv ("pserv service
+  # type cannot have a health check path") — confirmed by the actual validator, not assumed.
+  # Health/liveness for this service is checked indirectly instead: the frontend's own
+  # healthCheckPath (/login) doesn't depend on it, but /api/health is still reachable through
+  # lifeai-1's proxy for manual verification (see docs/RENDER_DEPLOY.md), and Render still
+  # restarts a pserv container that crashes even without an HTTP health check configured.
   - type: pserv
     name: mainai-backend
     runtime: docker
@@ -76,7 +83,6 @@ services:
     region: oregon
     branch: claude/det-kommer-mer-879lcm
     autoDeploy: false # see .github/workflows/ci.yml's deploy-render job — deploys only after CI is green
-    healthCheckPath: /api/health
     envVars:
       - key: ENVIRONMENT
         value: production
