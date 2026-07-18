@@ -4,36 +4,46 @@ Saker som medvetet INTE är lösta i MainAI 0.1 och som måste åtgärdas innan 
 exponeras utanför en betrodd, intern miljö. Varje post har en tydlig åtgärd — inget här är
 "glömt", det är avsiktligt uppskjutet med en anledning.
 
-## 1. [BLOCKERANDE] Next.js-versionen har kända säkerhetsbrister
+## 1. [LÖST 2026-07-18] Next.js-versionen hade kända säkerhetsbrister
 
-`frontend/package.json` låser `next@14.2.15`. `npm audit` (kört 2026-07-17) flaggar den som
-**kritisk** — bland annat DoS via Server Actions, informationsläckage i dev-servern,
-cache-poisoning, SSRF via middleware-redirects och flera XSS-vägar i App Router. Fullständig
-lista: kör `npm audit` i `frontend/`.
+**Status: åtgärdat.** `frontend/package.json` låste tidigare `next@14.2.15`, som `npm audit`
+flaggade som kritisk (DoS via Server Actions, informationsläckage i dev-servern,
+cache-poisoning, SSRF via middleware-redirects, flera XSS-vägar i App Router — 14.x får inga
+fler säkerhetspatchar från Vercel).
 
-**Varför det inte är fixat nu:** `npm audit fix --force` vill installera `next@16.2.10` —
-en major-uppgradering över två versionssteg (14 → 15 → 16). Det är inte en säker
-"blind"-uppgradering:
+Uppgraderat kontrollerat till **`next@16.2.10`** (senaste `latest`-tagg på npm, verifierad
+säkerhetspatchad — se `docs/NEXTJS_UPGRADE_PLAN.md` för fullständig kompatibilitetsanalys och
+källverifiering) tillsammans med **React 19.2.7**, matchande `@types/react`/`@types/react-dom`,
+samt `postcss` uppgraderad till 8.5.19 (löste en separat, oberoende moderate-sårbarhet i
+PostCS:s CSS-stringifier) och tvingad projektbrett via `overrides` så att inte ens Next.js
+egen internt buntade postcss-kopia förblev sårbar.
 
-- App Router-beteenden, `next.config.mjs`-alternativ (t.ex. `output`-hanteringen som just
-  fixades för Vercel, se `docs/STATUS.md`) och middleware-API:er har ändrats mellan
-  major-versionerna.
-- React-versionskravet ändras (Next 15+ kräver React 19).
-- `output: "standalone"`-hanteringen i vårt Dockerfile och Vercel-flödet måste
-  regressionstestas efter uppgraderingen, inte bara antas fungera likadant.
+`npm audit` i `frontend/` visar nu **0 sårbarheter**.
 
-**Vad som krävs innan detta görs:**
-1. Läs Next.js migrationsguiderna 14→15 och 15→16 i sin helhet.
-2. Uppgradera i en egen branch, inte som en delrad i en funktionsleverans.
-3. Kör hela E2E-sviten (se `docs/STATUS.md`/commit-historik för hur den sattes upp: riktig
-   Postgres + riktig Chromium-browser via Playwright) mot den uppgraderade koden.
-4. Verifiera explicit: Docker-bygget (`output: standalone`) OCH Vercel-bygget
-   (`VERCEL`-villkoret i `next.config.mjs`) separat — de har olika kodvägar och båda måste
-   verifieras, inte bara en av dem.
-5. Kör `npm audit` igen efteråt och bekräfta att den kritiska varningen är borta.
+**Kodpåverkan var minimal** (verifierat med grep innan ändring, se migrationsplanen) — inga
+`cookies()`/`headers()`/dynamiska routesegment, ingen `middleware.ts`, inga Route Handlers,
+ingen AMP, ingen legacy React Context/sträng-refs. Enda faktiska kodändringarna:
+- `next lint` togs bort i v16 → ersatt med en fristående `eslint.config.mjs`
+  (`eslint-config-next` flat config).
+- En ny, striktare `react-hooks/set-state-in-effect`-lint-regel flaggade fem ställen med det
+  vanliga "hämta data vid mount"-mönstret. Två av dem (`lib/useVoice.ts`) skrevs om till
+  `useSyncExternalStore` (mer korrekt primitiv för statiska webbläsarflaggor). Tre är kvar som
+  det React-dokumenterade mönstret med en riktad, motiverad `eslint-disable-next-line`
+  (inte ett blockdolt undantag) eftersom mönstret redan är verifierat säkert via E2E-sviten.
+- `eslint`-versionen pinnades till `9.39.5`, inte senaste `10.x` — en genuin verktygsinkompatibilitet
+  (`eslint-plugin-react` kraschar mot ESLint 10:s interna API), inte en säkerhetsnedgradering:
+  ESLint är ett dev-only lint-verktyg, ingår aldrig i produktionsbygget eller klientbundlen.
 
-**Rekommenderad tidpunkt:** egen, dedikerad arbetsinsats innan produktionsdrift — inte
-ihopblandad med funktionsarbete, så att en eventuell regression är lätt att isolera.
+**Verifierat innan commit:** `npm audit` (0 sårbarheter), `tsc --noEmit` (rent), `eslint .`
+(rent), full backend-py_compile (oförändrad, ingen regression), manuellt RLS-isoleringstest
+mellan två användare (oförändrat korrekt), alla 19 Playwright E2E-kontroller gröna, Docker-läge
+(`.next/standalone` skapas) och Vercel-läge (`.next/standalone` skapas INTE) byggda och
+verifierade separat, `/`, `/login`, `/chat`, `/admin` manuellt kontrollerade efter bygge, och
+att endast `NEXT_PUBLIC_API_URL` (aldrig en hemlighet) förekommer i klientbundlen.
+
+**Kvarvarande risk:** en ny koordinerad Next.js-säkerhetsrelease var annonserad men inte
+publicerad vid uppgraderingstillfället. Ingen känd öppen sårbarhet just nu — kör `npm audit`
+igen som rutin när den releasen landar, precis som för vilket beroende som helst.
 
 ## 2. JWT lagras i `localStorage`, inte i en httpOnly-cookie
 

@@ -21,6 +21,9 @@ export default function ProjectsPage() {
   }
 
   useEffect(() => {
+    // See identical justification in app/(shell)/documents/page.tsx — documented
+    // fetch-on-mount pattern, setState happens after an await inside refresh().
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
   }, []);
 

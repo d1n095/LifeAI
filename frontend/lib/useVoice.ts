@@ -1,6 +1,26 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState, useSyncExternalStore } from "react";
+
+// Browser capability flags never change during a session, so there's nothing to subscribe
+// to — useSyncExternalStore with a no-op subscribe is the correct primitive for "read an
+// external, SSR-unsafe value once" (see https://react.dev/reference/react/useSyncExternalStore),
+// cleaner than a useEffect+setState pair for a value that's static after mount.
+function noopSubscribe() {
+  return () => {};
+}
+
+function getRecognitionSupported() {
+  return !!((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+}
+
+function getSynthesisSupported() {
+  return "speechSynthesis" in window;
+}
+
+function getServerSnapshotFalse() {
+  return false;
+}
 
 /**
  * Browser-native voice I/O (Web Speech API) — no server round-trip, no API key, no cost.
@@ -12,14 +32,8 @@ export function useVoice() {
   const recognitionRef = useRef<any>(null);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
-  const [recognitionSupported, setRecognitionSupported] = useState(false);
-  const [synthesisSupported, setSynthesisSupported] = useState(false);
-
-  useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    setRecognitionSupported(!!SpeechRecognition);
-    setSynthesisSupported(typeof window !== "undefined" && "speechSynthesis" in window);
-  }, []);
+  const recognitionSupported = useSyncExternalStore(noopSubscribe, getRecognitionSupported, getServerSnapshotFalse);
+  const synthesisSupported = useSyncExternalStore(noopSubscribe, getSynthesisSupported, getServerSnapshotFalse);
 
   const startListening = useCallback((onResult: (text: string) => void, onError?: () => void) => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;

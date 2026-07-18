@@ -156,9 +156,10 @@ docker-compose.yml
   backend-repliker körs samtidigt.
 - **Audit log**: inloggningar, dokumentborttagning och providerbyten loggas i `audit_log`
   (aldrig API-nycklar eller lösenord).
-- **Kända kvarstående säkerhetsuppgifter** (bl.a. en nödvändig Next.js-uppgradering på grund
-  av kända sårbarheter i den låsta versionen): se `docs/SECURITY_BLOCKERS.md`. Blockerar
-  produktionsdrift, blockerade inte denna leverans.
+- **Next.js/React**: uppgraderat till `next@16.2.10` + `react@19.2.7` (från `14.2.15`/`18.3.1`)
+  — `npm audit` visar 0 sårbarheter. Se `docs/NEXTJS_UPGRADE_PLAN.md` för
+  kompatibilitetsanalysen och `docs/SECURITY_BLOCKERS.md` för övriga kvarstående
+  säkerhetsuppgifter (ingen av dem blockerar denna leverans).
 - **Responsivt och tillgängligt**: sidomenyn kollapsar till en hamburgermeny på mobil,
   formulärfält har kopplade `<label>`, statusändringar annonseras via `aria-live`/`role`,
   och tabeller har `scope`/`caption` för skärmläsare.

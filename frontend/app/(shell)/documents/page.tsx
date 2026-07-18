@@ -18,6 +18,11 @@ export default function DocumentsPage() {
   }
 
   useEffect(() => {
+    // react-hooks/set-state-in-effect fires here because it can't statically see that
+    // refresh()'s setState calls happen after an await, not synchronously — this is React's
+    // own documented "fetch data on mount" pattern (https://react.dev/learn/synchronizing-with-effects),
+    // not the derived-state anti-pattern the rule targets. Covered by the Playwright E2E suite.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
   }, []);
 
