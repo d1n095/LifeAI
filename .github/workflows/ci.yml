@@ -640,19 +640,21 @@ jobs:
           chmod 777 e2e-data
 
       # ---- Container A: infra checks (health, loopback isolation, port exposure, crash) ----
+      # ENVIRONMENT is deliberately left unset (defaults to "development") in every docker run
+      # below, not "production" — app/main.py's _check_smtp_configured() fail-closed gate
+      # requires a real SMTP_HOST whenever ENVIRONMENT=production, which would defeat the point
+      # of E2E_MOCK_MODE's dev-email-log fake (see backend/scripts/run_e2e_backend.py).
+      # Everything else this job verifies (loopback isolation, proxy, signals, crash-linkage,
+      # CSRF/cookie/auth logic) is unaffected by this flag. A bash comment MUST NOT be placed
+      # inside a backslash-continued docker run flag list below (a `#` there prematurely
+      # terminates the continued command and drops the image argument) — this note stays here
+      # instead, once, for all three containers.
       - name: Start container A (infra checks)
         run: |
           docker run -d --name lifeai-a \
             --add-host=host.docker.internal:host-gateway \
             -p 3020:3000 \
             -v "${{ github.workspace }}/e2e-data:/app/e2e-data" \
-            # ENVIRONMENT deliberately left at its default ("development") for this
-            # E2E-mock run, not "production" — app/main.py's _check_smtp_configured()
-            # fail-closed gate requires a real SMTP_HOST whenever ENVIRONMENT=production,
-            # which would defeat the point of E2E_MOCK_MODE's dev-email-log fake (see
-            # backend/scripts/run_e2e_backend.py). Everything else this job verifies
-            # (loopback isolation, proxy, signals, crash-linkage, CSRF/cookie/auth logic)
-            # is unaffected by this flag.
             -e SECRET_KEY=ci-combined-secret-key \
             -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
             -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
@@ -709,13 +711,6 @@ jobs:
             --add-host=host.docker.internal:host-gateway \
             -p 3020:3000 \
             -v "${{ github.workspace }}/e2e-data:/app/e2e-data" \
-            # ENVIRONMENT deliberately left at its default ("development") for this
-            # E2E-mock run, not "production" — app/main.py's _check_smtp_configured()
-            # fail-closed gate requires a real SMTP_HOST whenever ENVIRONMENT=production,
-            # which would defeat the point of E2E_MOCK_MODE's dev-email-log fake (see
-            # backend/scripts/run_e2e_backend.py). Everything else this job verifies
-            # (loopback isolation, proxy, signals, crash-linkage, CSRF/cookie/auth logic)
-            # is unaffected by this flag.
             -e SECRET_KEY=ci-combined-secret-key \
             -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
             -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
@@ -774,13 +769,6 @@ jobs:
           docker run -d --name lifeai-c \
             --add-host=host.docker.internal:host-gateway \
             -p 3020:3000 \
-            # ENVIRONMENT deliberately left at its default ("development") for this
-            # E2E-mock run, not "production" — app/main.py's _check_smtp_configured()
-            # fail-closed gate requires a real SMTP_HOST whenever ENVIRONMENT=production,
-            # which would defeat the point of E2E_MOCK_MODE's dev-email-log fake (see
-            # backend/scripts/run_e2e_backend.py). Everything else this job verifies
-            # (loopback isolation, proxy, signals, crash-linkage, CSRF/cookie/auth logic)
-            # is unaffected by this flag.
             -e SECRET_KEY=ci-combined-secret-key \
             -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
             -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
