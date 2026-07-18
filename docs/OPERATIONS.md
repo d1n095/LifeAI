@@ -53,11 +53,13 @@ export APP_DATABASE_URL=postgresql://mainai_app:<lösenord>@localhost/lifeos
 alembic upgrade head
 uvicorn app.main:app
 
-# 3. Frontend
+# 3. Frontend — same-origin by default (see frontend/app/api/[...path]/route.ts and
+#    docs/RENDER_DEPLOY.md): the browser calls this server's own /api/*, which this server
+#    forwards to the backend server-side via INTERNAL_API_URL. No NEXT_PUBLIC_API_URL needed.
 cd frontend
 npm ci
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run build
-npm start
+INTERNAL_API_URL=http://localhost:8000 npm run build
+INTERNAL_API_URL=http://localhost:8000 npm start
 ```
 
 **`Base.metadata.create_all` används aldrig i produktion.** Schemat ägs uteslutande av

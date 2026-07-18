@@ -140,14 +140,15 @@ backend/
   tests/             # pytest — backend/, security/, account/ (se docs/OPERATIONS.md)
 frontend/
   app/
+    api/[...path]/route.ts   # same-origin proxy till backend (INTERNAL_API_URL) — se docs/RENDER_DEPLOY.md
     login/, register/, verify-email/, forgot-password/, reset-password/   # publika sidor
     (shell)/         # alla skyddade sidor: Dashboard, Chat, Kunskapsdatabas, Projekt, Dokument, Admin, Konto
   components/        # Sidebar, AuthGuard, Orb, ConfidenceBadge
   lib/
-    api.ts           # enda kontaktpunkten mot backend-API:et (cookies + CSRF, hanterar 401)
+    api.ts           # enda kontaktpunkten mot backend-API:et (cookies + CSRF, hanterar 401 och nätverksfel)
     auth.ts          # CSRF-värdet i minnet — inga tokens lagras här, se docs/AUTH_THREAT_MODEL.md
     useVoice.ts       # Web Speech API-hook (röst in/ut)
-  e2e/               # Playwright end-to-end-tester mot hela stacken
+  e2e/               # Playwright end-to-end-tester (cross-origin-läge + same-origin-proxy-läge)
 docs/
   ARCHITECTURE.md
   ROADMAP.md

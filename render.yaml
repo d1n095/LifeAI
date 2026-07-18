@@ -1,8 +1,16 @@
-# Render Blueprint for the MainAI / Life OS backend stack: PostgreSQL, Redis, and the
-# FastAPI backend. The Next.js frontend is included too (service `mainai-frontend`) so the
-# whole stack can be verified end-to-end on Render, but per docs/RENDER_DEPLOY.md, Vercel
-# stays the live/authoritative frontend until Render has been verified working — nothing
-# here changes Vercel.
+# Render Blueprint for the full MainAI / Life OS web stack: PostgreSQL, Redis, Qdrant, the
+# FastAPI backend, and the Next.js frontend (`lifeai-1` — named to match the frontend web
+# service that's already live at https://lifeai-1.onrender.com, so applying this Blueprint
+# adopts/reconciles with it instead of creating a duplicate).
+#
+# Same-origin architecture: the browser only ever talks to lifeai-1.onrender.com. It calls
+# /api/*, which lifeai-1's own Next.js server proxies to mainai-backend server-side (see
+# frontend/app/api/[...path]/route.ts) over Render's private network. mainai-backend is a
+# Private Service below — it has NO public URL at all, is unreachable from the public
+# internet by design, and its address is never present in the client bundle. This also
+# sidesteps cross-origin cookie handling entirely: the session cookie the backend sets
+# arrives at the browser as same-origin (see that route.ts file's comments and
+# docs/RENDER_DEPLOY.md).
 #
 # NOTHING in this file deploys anything by itself. Applying a Blueprint in the Render
 # dashboard is a deliberate, explicit action the operator takes — see docs/RENDER_DEPLOY.md
@@ -21,7 +29,7 @@ databases:
     databaseName: lifeos
     user: mainai_admin
     plan: starter # paid tier — Render's free Postgres expires after 30 days, unsuitable for a real deploy. Confirm current pricing in the dashboard before applying.
-    region: oregon # keep every service in the same region — cross-region traffic is slower and (for the private network) not guaranteed to work
+    region: oregon # keep every service in the same region — cross-region traffic is slower and private networking isn't guaranteed to work across regions
     postgresMajorVersion: "16"
     ipAllowList: [] # no direct external access; the backend reaches this over Render's private network via DATABASE_URL below. Add your own IP temporarily in the dashboard if you need direct psql access.
 
@@ -33,7 +41,32 @@ services:
     ipAllowList: [] # no direct external access — only mainai-backend needs this, over the private network
     maxmemoryPolicy: noeviction # rate-limit counters (app/limiter.py) should error loudly rather than be silently evicted mid-window
 
-  - type: web
+  # Vector DB for the knowledge/RAG features (app/rag/qdrant_store.py) — the storage the code
+  # actually requires beyond Postgres/Redis (see QDRANT_URL / QDRANT_COLLECTION in
+  # app/config.py). No native managed Qdrant offering on Render, so this runs the same
+  # official image docker-compose.yml uses locally, as a private, disk-backed service — never
+  # publicly reachable, only from mainai-backend over the private network. Verify Render's
+  # `runtime: image` Blueprint syntax and disk billing in the dashboard before applying — I
+  # could not reach render.com from this environment to confirm the exact current schema.
+  - type: pserv
+    name: mainai-qdrant
+    runtime: image
+    image:
+      url: docker.io/qdrant/qdrant:v1.11.5
+    plan: starter
+    region: oregon
+    disk:
+      name: qdrant-data
+      mountPath: /qdrant/storage
+      sizeGB: 10 # adjust to your actual document/knowledge-base volume
+
+  # Private Service — deliberately NOT type: web. No public URL, no public ingress at all;
+  # only reachable from other services in this Blueprint over Render's private network (by
+  # this service's name, e.g. http://mainai-backend:8000 — see INTERNAL_API_URL on lifeai-1
+  # below). This is what makes trusting X-Forwarded-For unconditionally
+  # (backend/Dockerfile's --forwarded-allow-ips=*) safe: the only thing that can ever connect
+  # here is lifeai-1's proxy route.
+  - type: pserv
     name: mainai-backend
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
@@ -74,20 +107,28 @@ services:
           name: mainai-redis
           property: connectionString
 
-      # CORS allow-list (app/main.py) — both origins are listed so the stack keeps working
-      # for both frontends during the Render/Vercel transition period. Verify the actual
-      # assigned mainai-frontend.onrender.com hostname in the dashboard once created (Render
-      # appends a suffix if the name is taken) and correct this value + redeploy if it differs.
+      # mainai-qdrant has no public URL (pserv) — reachable only by private-network service
+      # name. Verify the exact internal port Render exposes for an image-based pserv (should
+      # be Qdrant's default 6333) in the dashboard once created.
+      - key: QDRANT_URL
+        value: http://mainai-qdrant:6333
+
+      # CORS allow-list (app/main.py). Now mostly a defense-in-depth/documentation artifact:
+      # since mainai-backend has no public URL at all, nothing outside Render's private
+      # network — including a browser, including Vercel — can reach it directly regardless of
+      # this list; the only path in is lifeai-1's server-side proxy, which sends no Origin
+      # header (that's a browser-only concept), so CORS doesn't even apply to it. Kept
+      # accurate anyway in case the backend is ever also exposed publicly again.
       - key: FRONTEND_ORIGINS
-        value: https://life-ai-seven.vercel.app,https://mainai-frontend.onrender.com
-      # Used only to build links inside verification/reset emails (app/config.py) — kept
-      # pointed at the still-authoritative Vercel frontend, not the CORS list above. Update
-      # this the day Render becomes the live frontend.
+        value: https://lifeai-1.onrender.com
+      # Used only to build links inside verification/reset emails (app/config.py).
       - key: PUBLIC_APP_URL
-        value: https://life-ai-seven.vercel.app
+        value: https://lifeai-1.onrender.com
 
       # Already the secure default in app/config.py — listed explicitly so the production
-      # value is visible here rather than implicit. Do not weaken these.
+      # value is visible here rather than implicit. Do not weaken these; SameSite=None still
+      # works correctly even though cookies are same-origin in practice now (see lifeai-1's
+      # proxy route) — it's a superset, not a conflict.
       - key: COOKIE_SECURE
         value: "true"
       - key: COOKIE_SAMESITE
@@ -95,9 +136,9 @@ services:
       - key: REFRESH_TOKEN_EXPIRE_DAYS
         value: "14"
 
-      # SMTP is mandatory in production as of this change (app/main.py's
-      # _check_smtp_configured) — the backend now refuses to start with ENVIRONMENT=production
-      # and no SMTP_HOST, rather than silently dropping verification/reset emails.
+      # SMTP is mandatory in production (app/main.py's _check_smtp_configured) — the backend
+      # now refuses to start with ENVIRONMENT=production and no SMTP_HOST, rather than
+      # silently dropping verification/reset emails.
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
@@ -143,16 +184,8 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
 
-      # No Qdrant service in this Blueprint — out of scope per the current request (only
-      # Postgres + Redis were asked for). QDRANT_URL is left unset (falls back to
-      # app/config.py's default, which won't resolve on Render) — this does NOT block
-      # startup or auth (get_qdrant_client() in app/rag/qdrant_store.py connects lazily, only
-      # when a knowledge/document endpoint is actually called), but /api/knowledge and
-      # /api/documents/upload will fail until a Qdrant instance is added. See
-      # docs/RENDER_DEPLOY.md.
-
   - type: web
-    name: mainai-frontend
+    name: lifeai-1
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
@@ -160,15 +193,12 @@ services:
     region: oregon
     branch: claude/det-kommer-mer-879lcm
     autoDeploy: false # see .github/workflows/ci.yml's deploy-render job
-    healthCheckPath: /login # always public (unauthenticated), unlike / which client-side-redirects under AuthGuard
+    healthCheckPath: /login # always public (unauthenticated), unlike / which client-side-redirects under AuthGuard — and independent of backend health, unlike proxying through /api/health would be
     envVars:
-      # NEXT_PUBLIC_* values are inlined into the client bundle at `next build` time, not
-      # read at container start (see frontend/Dockerfile's ARG/ENV comment) — Render passes
-      # service envVars through as Docker build args automatically when the Dockerfile
-      # declares a matching ARG, which frontend/Dockerfile already does. Verify the actual
-      # assigned mainai-backend.onrender.com hostname in the dashboard once created (Render
-      # appends a suffix if the name is taken) and correct this value + redeploy if it differs
-      # — this is exactly the class of misconfiguration that caused the original
-      # "Failed to fetch" (NEXT_PUBLIC_API_URL baked in wrong, or not deployed at all).
-      - key: NEXT_PUBLIC_API_URL
-        value: https://mainai-backend.onrender.com
+      # NEXT_PUBLIC_API_URL is deliberately NOT set here — see frontend/lib/api.ts and
+      # frontend/Dockerfile. The browser calls this service's own /api/* (same origin);
+      # INTERNAL_API_URL below is what the Next.js *server* (not the browser) uses to reach
+      # mainai-backend, over Render's private network, by service name. It's a plain runtime
+      # env var — never baked into the client bundle, unlike NEXT_PUBLIC_* values.
+      - key: INTERNAL_API_URL
+        value: http://mainai-backend:8000

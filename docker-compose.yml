@@ -93,11 +93,15 @@ services:
   frontend:
     build:
       context: ./frontend
-      # Must be a build arg, not just a runtime `environment:` entry — NEXT_PUBLIC_API_URL
-      # is inlined into the client JS bundle at `next build` time (see frontend/Dockerfile).
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # NEXT_PUBLIC_API_URL deliberately left unset here — the browser calls this same
+      # server's own /api/* proxy route instead of the backend directly (see
+      # frontend/app/api/[...path]/route.ts and lib/api.ts). Only pass it as a build arg for
+      # a deployment that wants direct cross-origin calls instead.
     restart: unless-stopped
+    environment:
+      # Plain runtime env var, read server-side per request by the proxy route — never
+      # baked into the client bundle, unlike NEXT_PUBLIC_API_URL above.
+      INTERNAL_API_URL: http://backend:8000
     depends_on:
       - backend
     ports:

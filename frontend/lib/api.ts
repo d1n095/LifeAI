@@ -1,6 +1,14 @@
 import { getCsrfToken, setCsrfToken } from "@/lib/auth";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Empty by default: fetch(`${API_URL}${path}`) then becomes a relative same-origin request
+// (e.g. `/api/auth/register`), handled by this Next.js server's own proxy route
+// (app/api/[...path]/route.ts), which forwards it server-side to the real backend — the
+// browser never learns the backend's actual address, and the session cookie stays same-origin
+// (see that file's comments). NEXT_PUBLIC_API_URL remains a deliberate escape hatch for a
+// deployment that calls the backend directly cross-origin instead (e.g. a frontend hosted
+// somewhere that can't reach the backend server-side, like Vercel without the proxy's
+// INTERNAL_API_URL configured) — do not set it for a same-origin/proxied deployment.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export class AuthError extends Error {}

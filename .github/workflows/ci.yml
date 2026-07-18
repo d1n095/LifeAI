@@ -439,6 +439,141 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------------------
+  # Same-origin API proxy (frontend/app/api/[...path]/route.ts) — a real browser against the
+  # frontend's actual standalone production server (server.js, the same one Docker/Render
+  # run), built WITHOUT NEXT_PUBLIC_API_URL so the browser can only reach the backend through
+  # the proxy. A separate job (not an extra pass inside e2e-tests) because it needs its own,
+  # differently-configured frontend build — `next build` bakes NEXT_PUBLIC_API_URL in, so the
+  # cross-origin build e2e-tests uses can't be reused here. See docs/RENDER_DEPLOY.md.
+  # ---------------------------------------------------------------------------------------
+  same-origin-proxy-test:
+    name: E2E — same-origin proxy
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_proxy_e2e
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_e2e_pw@localhost:5432/lifeos_proxy_e2e
+      REDIS_URL: redis://localhost:6379/0
+      # The only frontend origin in this job is the proxy-mode server itself (port 3021 —
+      # see frontend/playwright.proxy.config.ts). Nothing calls the backend cross-origin here.
+      FRONTEND_ORIGINS: http://127.0.0.1:3021
+      PUBLIC_APP_URL: http://127.0.0.1:3021
+      ADMIN_EMAIL: admin@lifeos.local
+      ADMIN_PASSWORD: TestAdminPassword123!
+      SECRET_KEY: ci-e2e-secret-key
+      OPENAI_API_KEY: fake-key-for-e2e
+      ENABLE_SCHEDULED_CLEANUP: "false"
+      E2E_ADMIN_PASSWORD: TestAdminPassword123!
+      E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_proxy_e2e
+      E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/backend/e2e_test_emails.jsonl
+      # Read by frontend/app/api/[...path]/route.ts — the frontend server's own address for
+      # reaching the backend, distinct from what the browser calls (see that file).
+      INTERNAL_API_URL: http://127.0.0.1:8010
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: pip install -r requirements.txt
+        working-directory: backend
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      - name: Create restricted database role and E2E database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mainai_app') THEN
+                CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app_e2e_pw';
+              END IF;
+            END
+            \$\$;
+          "
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_proxy_e2e;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_proxy_e2e;"
+          psql -h localhost -U postgres -d lifeos_proxy_e2e -c "
+            GRANT USAGE ON SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;
+          "
+      - run: alembic upgrade head
+        working-directory: backend
+
+      # No NEXT_PUBLIC_API_URL — this is the whole point (see frontend/lib/api.ts).
+      - run: npx next build
+        working-directory: frontend
+      # Required for `node .next/standalone/server.js` to serve CSS/JS/images correctly —
+      # standalone output doesn't include them by default (see frontend/Dockerfile, which
+      # does the same two copies for the real image).
+      - name: Assemble standalone server output
+        working-directory: frontend
+        run: |
+          cp -r public .next/standalone/public
+          cp -r .next/static .next/standalone/.next/static
+
+      - name: Start backend
+        working-directory: backend
+        run: |
+          nohup python scripts/run_e2e_backend.py > backend.log 2>&1 &
+          echo $! > backend.pid
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
+            sleep 1
+          done
+      - run: npx playwright test --config=playwright.proxy.config.ts --project=chromium
+        working-directory: frontend
+      - name: Stop backend
+        if: always()
+        working-directory: backend
+        run: kill "$(cat backend.pid)" 2>/dev/null || true
+
+      - name: Upload Playwright report (proxy)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-proxy
+          path: frontend/playwright-report-proxy/
+          retention-days: 14
+      - name: Upload backend logs (proxy)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-logs-proxy
+          path: backend/*.log
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------
   # Single required status check for branch protection — see docs/OPERATIONS.md for how to
   # wire "Require status checks to pass before merging" to this job.
   # ---------------------------------------------------------------------------------------
@@ -454,6 +589,7 @@ jobs:
       - account-rate-limit-tests
       - migration-check
       - e2e-tests
+      - same-origin-proxy-test
     if: always()
     steps:
       - name: Fail if any required job failed

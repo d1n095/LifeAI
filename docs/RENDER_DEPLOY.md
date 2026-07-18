@@ -1,140 +1,220 @@
 # Render-driftsättning
 
 Detta dokument beskriver `render.yaml` (repo-roten) — ett [Render
-Blueprint](https://render.com/docs/blueprint-spec) för hela den nuvarande webb-stacken:
-PostgreSQL, Redis, FastAPI-backend och Next.js-frontend. Målet är att få den befintliga
-webbversionen fullt fungerande live och lösa det tidigare rapporterade `Failed to fetch`-felet
-vid registrering, vars mest sannolika grundorsak var att `NEXT_PUBLIC_API_URL` aldrig byggdes in
-korrekt och/eller att ingen backend var deployad alls (se felsökningen i tidigare commits).
+Blueprint](https://render.com/docs/blueprint-spec) för hela webb-stacken: PostgreSQL, Redis,
+Qdrant, FastAPI-backend och Next.js-frontend.
 
-**Vercel förblir den skarpa/live frontend-adressen tills Render är verifierat fungerande.**
-Ingenting i det här dokumentet eller i `render.yaml` ändrar Vercel-projektet. `mainai-frontend`
-på Render finns för att verifiera hela kedjan end-to-end innan en eventuell växling.
+**Den faktiska live-adressen är `https://lifeai-1.onrender.com`** — ett frontend-webbtjänst
+som redan finns i Render (inte skapat av detta Blueprint; se klick-steget längst ner för hur
+Blueprintet adopterar den befintliga tjänsten istället för att skapa en dubblett). Vercel är
+inte längre felsökningsmålet.
 
-**Qdrant ingår inte** i den här leveransen (endast Postgres + Redis begärdes). Det påverkar inte
-registrering/inloggning (`get_qdrant_client()` i `backend/app/rag/qdrant_store.py` kopplar upp
-lat, per anrop — inte vid uppstart), men `/api/knowledge` och `/api/documents/upload` kommer att
-fela tills en Qdrant-instans läggs till separat.
+Grundorsaken till `Failed to fetch`/`Kunde inte nå servern` vid registrering var en kombination
+av att ingen backend (eller ofullständig backend) var kopplad till den existerande
+frontend-tjänsten, och att en cross-origin-arkitektur (separat frontend-/backend-domän) för
+med sig en hel klass av CORS-/cookie-fallgropar. Det här Blueprintet löser båda: en komplett,
+verifierad backend-stack, och en **same-origin-proxy** som gör att webbläsaren aldrig anropar
+backend direkt.
 
-## Arkitektur: hur de fyra tjänsterna hänger ihop
+## Arkitektur: same-origin-proxyn
 
 ```
-┌─────────────────┐        ┌──────────────────┐        ┌──────────────────┐
-│ mainai-frontend  │──HTTPS→│  mainai-backend   │──TCP──→│  mainai-postgres  │
-│ (Next.js, Docker)│        │ (FastAPI, Docker) │  (internt nätverk)│
-└─────────────────┘        └─────────┬─────────┘        └──────────────────┘
-                                      │
-                                      ↓ TCP (internt nätverk)
-                               ┌──────────────┐
-                               │ mainai-redis  │
-                               └──────────────┘
+Webbläsare                    lifeai-1 (Next.js, web)         mainai-backend (FastAPI, PRIVATE)
+    │  https://lifeai-1.onrender.com/api/auth/register             (ingen publik URL alls)
+    ├────────────────────────────►│                                        │
+    │  (samma origin — inget CORS,│  app/api/[...path]/route.ts           │
+    │   inget SameSite-problem)   │  forwarding via INTERNAL_API_URL      │
+    │                             ├───────────────────────────────────────►│
+    │                             │  Render internt privat nätverk        │
+    │  ◄────────────────────────── (Set-Cookie, statuskod, body)          │
 ```
+
+Webbläsaren pratar **bara** med `lifeai-1.onrender.com`. Den vet aldrig att `mainai-backend`
+existerar, och kan det inte heller — `mainai-backend` är en Render **Private Service** (typ
+`pserv` i `render.yaml`), utan publik URL över huvud taget, bara nåbar från andra tjänster i
+samma Render-projekt över det interna nätverket.
+
+**Varför:** det här är den konkreta lösningen på uppdraget "undvik cross-origin-cookieproblem".
+Sessionscookien (`HttpOnly`, se `backend/app/cookies.py`) sätts av backend men skickas till
+webbläsaren *via* `lifeai-1`s egen server — webbläsaren ser den som en förstapartscookie
+(samma origin den redan pratar med), oavsett var backend faktiskt kör. `SameSite=None` (redan
+default i `app/config.py`) fungerar fortfarande, det är bara inte längre den enda linjen som
+håller det ihop.
+
+### Proxyn i detalj — `frontend/app/api/[...path]/route.ts`
+
+Varje anrop under `/api/*` från webbläsaren landar i den här Route Handlern, som vidarebefordrar
+det byte-för-byte till backend via `INTERNAL_API_URL` (en ren server-side miljövariabel, aldrig
+i klientbundeln — se `frontend/lib/api.ts`s kommentar om detta):
+
+- **Metod, query-sträng, body**: strömmas rakt igenom (fungerar oförändrat för både JSON och
+  multipart-filuppladdning, och för framtida strömmande svar) — inget parsas/serialiseras om.
+- **Headers**: kopieras rakt av, minus de hop-by-hop-headers (RFC 7230 §6.1) som bara gäller ett
+  enskilt transportsteg.
+- **Set-Cookie**: Node/undicis `getSetCookie()` används explicit — annars slår `Headers`-API:et
+  ihop flera `Set-Cookie`-instanser till en kommaseparerad sträng som webbläsaren inte kan tolka
+  tillbaka till separata cookies. Verifierat manuellt (se "Verifiering som redan gjorts" nedan)
+  att `access_token`- och `refresh_token`-cookien båda kommer fram som separata cookies.
+- **Statuskod**: vidarebefordras exakt (verifierat: en 400/401/403/404 från backend syns
+  identiskt genom proxyn, inte som ett generiskt Next.js-fel).
+- **Caching**: `export const dynamic = "force-dynamic"` — den här routen får **aldrig** cachas
+  eller statiskt optimeras av Next.js, eftersom svaret kan vara specifikt för en inloggad
+  användare (sessionscookien). Verifierat i produktionsbygget: `/api/[...path]` listas som
+  `ƒ Dynamic`, inte `○ Static`.
+
+### Den verkliga klient-IP:n — `X-Forwarded-For`
+
+Med proxyn framför backend skulle `request.client.host` (det `app/limiter.py`s rate limiting,
+`app/audit.py` och `app/routers/auth.py`s inloggningslogg alla nycklar på) annars alltid visa
+**`lifeai-1`s egen adress** för varje enda användare — rate limiting hade i praktiken blivit
+delad mellan alla användare istället för per person. Löst med två delar:
+
+1. Proxyn vidarebefordrar `X-Forwarded-For` precis som alla andra headers (ingen särskild kod
+   behövs — Render sätter den redan på anropet som når `lifeai-1`, från den riktiga klienten).
+2. `backend/Dockerfile`s uvicorn-kommando kör med `--proxy-headers --forwarded-allow-ips=*` —
+   uvicorn litar då på `X-Forwarded-For` och skriver om `request.client.host` därefter.
+   `--forwarded-allow-ips=*` (lita på *vem som helst* som ansluter) är bara säkert **eftersom**
+   `mainai-backend` är en Private Service utan publik ingång alls — det enda som någonsin kan
+   ansluta är `lifeai-1`s proxy. Exponera aldrig den här containerns port publikt med den
+   flaggan kvar.
+
+Verifierat manuellt: ett anrop till proxyn med `X-Forwarded-For: 203.0.113.55` gav
+`203.0.113.55` i backendens access-logg, inte loopback-adressen curl faktiskt anslöt från.
 
 ### Databasrollerna — varför det inte är en enda `DATABASE_URL`
 
-Precis som i `docker-compose.yml` kör backend alla runtime-frågor genom en **egen, icke-superuser
-databasroll** (`mainai_app`) — inte den administratörsroll som Render skapar åt dig
-(`mainai_admin` i det här Blueprintet). Det är detta som gör Row-Level Security verkningsfull:
-en superuser/ägarroll kringgår RLS per definition (se README.md).
+Backend kör alla runtime-frågor genom en **egen, icke-superuser databasroll** (`mainai_app`) —
+inte administratörsrollen Render skapar åt dig (`mainai_admin`). Det är detta som gör
+Row-Level Security verkningsfull: en superuser/ägarroll kringgår RLS per definition.
 
-Lokalt (Docker Compose) skapas `mainai_app` av `backend/db-init/01-app-role.sh`, monterad som ett
-Postgres-init-skript. **Render (och praktiskt taget alla hanterade Postgres-tjänster) stödjer inte
-att montera init-skript** i sin Postgres-container — du får bara den ena admin-anslutningen.
-`render.yaml` löser det genom att:
+Render stödjer inte att montera ett Postgres-init-skript (det `backend/db-init/01-app-role.sh`
+gör lokalt via Docker Compose), så `render.yaml` löser det istället genom att:
 
-1. Generera `MAINAI_APP_PASSWORD` som en plattforms-hemlighet (`generateValue: true` —
-   Render slumpar värdet, det hamnar aldrig i repot eller i någon logg).
+1. Generera `MAINAI_APP_PASSWORD` som en plattforms-hemlighet (`generateValue: true`).
 2. Vid varje containerstart (`backend/docker-entrypoint.sh`, innan `alembic upgrade head`) köra
    `backend/scripts/ensure_app_role.py`, som ansluter med `DATABASE_URL` (admin-rollen) och
-   idempotent skapar/uppdaterar `mainai_app`-rollen med samma GRANT:ar som
-   `01-app-role.sh` ger lokalt.
-3. Skriptet skriver den fullständiga `APP_DATABASE_URL` (härledd från `DATABASE_URL`:s
-   host/port/databasnamn + `mainai_app` + det genererade lösenordet) till en tillfällig fil som
-   entrypoint-skriptet `source`:ar innan `uvicorn` startar — så `app_database_url` i
-   `backend/app/config.py` får rätt värde utan att någon behöver skriva in det manuellt.
+   idempotent skapar/uppdaterar `mainai_app`-rollen med samma GRANT:ar som `01-app-role.sh`.
+3. Skriptet skriver den fullständiga `APP_DATABASE_URL` till en tillfällig fil som
+   entrypoint-skriptet `source`:ar innan `uvicorn` startar.
 
-Det här steget körs bara om `MAINAI_APP_PASSWORD` är satt. Lokal Docker Compose sätter den
-variabeln på `postgres`-tjänsten men inte på `backend`-containern, så det befintliga lokala
-flödet (init-skriptet) är oförändrat.
+Verifierat manuellt mot en riktig lokal Postgres, inklusive med specialtecken
+(`$ / + = !`) i det genererade lösenordet — rollen skapas/uppdateras korrekt och
+`mainai_app` kan ansluta med den URL-kodade `APP_DATABASE_URL`:n.
+
+Lokal Docker Compose är oförändrad (skriptet är ett no-op där — `MAINAI_APP_PASSWORD` sätts
+bara på Render, inte på `backend`-containern i `docker-compose.yml`).
+
+### Qdrant
+
+Ingen managed Qdrant-tjänst finns på Render, så `mainai-qdrant` körs som en privat,
+disk-uppbackad tjänst av samma officiella image `docker-compose.yml` använder lokalt
+(`qdrant/qdrant:v1.11.5`), via `runtime: image` istället för att bygga från en Dockerfile.
+Jag kunde inte nå render.com från den här miljön för att bekräfta exakt Blueprint-syntax för
+`runtime: image` eller disk-prissättning — verifiera i dashboarden innan Apply.
 
 ## Miljövariabler — fullständig lista
 
-### Automatiska (Render kopplar ihop tjänsterna åt dig — inget du fyller i)
+### Automatiska (Render kopplar ihop tjänsterna åt dig)
 
 | Variabel | Tjänst | Källa |
 |---|---|---|
-| `DATABASE_URL` | backend | `fromDatabase: mainai-postgres` (admin-anslutningen) |
-| `REDIS_URL` | backend | `fromService: mainai-redis` |
+| `DATABASE_URL` | mainai-backend | `fromDatabase: mainai-postgres` (admin-anslutningen) |
+| `REDIS_URL` | mainai-backend | `fromService: mainai-redis` |
 
 ### Genererade hemligheter (Render slumpar värdet — hamnar aldrig i repot)
 
 | Variabel | Tjänst | Vad den styr |
 |---|---|---|
-| `SECRET_KEY` | backend | Signerar JWT-access-/refresh-tokens |
-| `MAINAI_APP_PASSWORD` | backend | Lösenord för den begränsade RLS-databasrollen (se ovan) |
+| `SECRET_KEY` | mainai-backend | Signerar JWT-access-/refresh-tokens |
+| `MAINAI_APP_PASSWORD` | mainai-backend | Lösenord för den begränsade RLS-databasrollen (se ovan) |
 
-### Måste fyllas i manuellt i Render-dashboarden (`sync: false` i render.yaml — Render frågar
-efter dessa när Blueprintet appliceras, eller de kan sättas efteråt under tjänstens
-**Environment**-flik)
+### Måste fyllas i manuellt i Render-dashboarden (`sync: false` i render.yaml)
 
 | Variabel | Tjänst | Vad du sätter |
 |---|---|---|
-| `ADMIN_EMAIL` | backend | E-post för det automatiskt skapade admin-kontot (skapas bara om inga användare finns) |
-| `ADMIN_PASSWORD` | backend | Lösenord för samma konto — välj ett starkt värde, inte `.env.example`s placeholder |
-| `SMTP_HOST` | backend | **Obligatorisk i produktion** — backend vägrar nu starta (`ENVIRONMENT=production` utan `SMTP_HOST`, se `app/main.py`s `_check_smtp_configured`) om den saknas. Utan SMTP når verifierings-/återställningsmail aldrig fram, och det ska inte ske tyst. |
-| `SMTP_USERNAME` | backend | Enligt din SMTP-leverantör |
-| `SMTP_PASSWORD` | backend | Enligt din SMTP-leverantör |
-| `SMTP_FROM_EMAIL` | backend | Avsändaradress för konto-mail |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | backend | Fyll i minst en — lämna resten tomma. Ingen ändras här; bara de leverantörer med ifylld nyckel går att aktivera i `/admin`. |
+| `ADMIN_EMAIL` | mainai-backend | E-post för det automatiskt skapade admin-kontot (skapas bara om inga användare finns) |
+| `ADMIN_PASSWORD` | mainai-backend | Starkt lösenord, inte `.env.example`s placeholder |
+| `SMTP_HOST` | mainai-backend | **Obligatorisk i produktion** — backend vägrar nu starta (`ENVIRONMENT=production` utan `SMTP_HOST`, se `_check_smtp_configured` i `app/main.py`) om den saknas |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | mainai-backend | Enligt din SMTP-leverantör |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | mainai-backend | Fyll i minst en |
 
-Ingen av ovanstående finns i `render.yaml` som klartext — filen innehåller bara *nycklarna*, inte
-värdena, precis som `sync: false` är avsett för.
+### Redan satta, synliga värden i `render.yaml`
 
-### Redan satta, synliga värden i `render.yaml` (inte hemliga, men dokumenterade här för överblick)
+| Variabel | Tjänst | Värde | Kommentar |
+|---|---|---|---|
+| `ENVIRONMENT` | mainai-backend | `production` | Utlöser SMTP-tvånget ovan |
+| `QDRANT_URL` | mainai-backend | `http://mainai-qdrant:6333` | Privat nätverksadress |
+| `FRONTEND_ORIGINS` | mainai-backend | `https://lifeai-1.onrender.com` | Mest defense-in-depth nu — se "CORS är nästan irrelevant nu" nedan |
+| `PUBLIC_APP_URL` | mainai-backend | `https://lifeai-1.onrender.com` | Länkar i verifierings-/återställningsmail |
+| `COOKIE_SECURE` / `COOKIE_SAMESITE` | mainai-backend | `true` / `none` | Oförändrat säkra defaults — se ovan för varför `none` fortfarande är rätt trots att cookien i praktiken är same-origin nu |
+| `INTERNAL_API_URL` | lifeai-1 | `http://mainai-backend:8000` | Servern (inte webbläsaren) når backend härigenom — se proxy-avsnittet ovan |
 
-| Variabel | Värde | Kommentar |
-|---|---|---|
-| `ENVIRONMENT` | `production` | Utlöser SMTP-tvånget ovan och andra produktionsbeteenden |
-| `FRONTEND_ORIGINS` | `https://life-ai-seven.vercel.app,https://mainai-frontend.onrender.com` | CORS-allowlist — båda origins under övergångsperioden. **Verifiera det faktiska tilldelade `mainai-frontend`-hostnamnet i dashboarden** (Render lägger till en suffix om namnet är upptaget) och rätta annars + omdeploya. |
-| `PUBLIC_APP_URL` | `https://life-ai-seven.vercel.app` | Länkar i verifierings-/återställningsmail — pekar på den fortfarande skarpa Vercel-adressen, inte CORS-listan |
-| `COOKIE_SECURE` | `true` | Oförändrat säkert default |
-| `COOKIE_SAMESITE` | `none` | Krävs eftersom frontend/backend är olika origins |
-| `NEXT_PUBLIC_API_URL` (frontend) | `https://mainai-backend.onrender.com` | **Samma sak att verifiera** — om Render tilldelat backend ett annat hostnamn, rätta detta värde och trigga en ny frontend-build (bakas in vid `next build`, se `frontend/Dockerfile`) |
+**Ingen `NEXT_PUBLIC_API_URL`** sätts längre någonstans i `render.yaml` — det är en avsiktlig
+utelämning, inte ett förbiseende (se `frontend/lib/api.ts`).
+
+### CORS är nästan irrelevant nu
+
+Eftersom `mainai-backend` inte har någon publik URL alls kan ingenting utanför Render — inte en
+webbläsare, inte Vercel, ingenting — nå den direkt oavsett `FRONTEND_ORIGINS`. Proxyanropet från
+`lifeai-1`s server är server-till-server (Node `fetch`) och skickar ingen `Origin`-header (det
+är ett webbläsarkoncept), så CORS-mellanvaran i `app/main.py` triggas inte ens av den vägen.
+Listan är kvar av dokumentations-/försvar-i-djupet-skäl, inte för att den faktiskt portvaktar
+något just nu.
+
+**Konsekvens att vara medveten om:** om den gamla Vercel-driftsättningen fortfarande är live och
+skulle försöka anropa backend direkt (cross-origin, det gamla mönstret), fungerar det inte
+längre — det finns ingen publik backend-URL att anropa. Säg till om Vercel ändå ska kunna nå
+backend direkt (t.ex. under en övergångsperiod) — då behöver `mainai-backend` vara `type: web`
+igen (publik) istället för `pserv`, vilket är en enkel ändring men en medveten avvägning värd
+ett eget beslut, inte något jag ändrar underhand.
 
 ## Deploy sker bara via CI, aldrig av ett push i sig
 
-`render.yaml` sätter `autoDeploy: false` på både `mainai-backend` och `mainai-frontend` — ett
-push till `claude/det-kommer-mer-879lcm` deployar alltså **ingenting** på Render av sig självt.
-Den enda utlösaren är jobbet `deploy-render` i `.github/workflows/ci.yml`, som körs efter — och
-bara om — `all-checks-passed` blir grönt, och bara för push (inte pull request) till exakt den
-branchen. Det jobbet anropar Render-tjänsternas **Deploy Hook**-URL:er via
-`RENDER_BACKEND_DEPLOY_HOOK_URL` / `RENDER_FRONTEND_DEPLOY_HOOK_URL` — två GitHub Actions-secrets
-som **inte finns än**. Så länge de saknas är jobbet ett ofarligt no-op (loggar att det hoppar
-över, avslutar med kod 0) — dvs det här Blueprintet i sig kan inte trigga en deploy.
+`render.yaml` sätter `autoDeploy: false` på både `mainai-backend` och `lifeai-1`. Enda
+utlösaren är jobbet `deploy-render` i `.github/workflows/ci.yml`, som körs efter — och bara om —
+`all-checks-passed` blir grönt. Det anropar Render-tjänsternas **Deploy Hook**-URL:er via
+`RENDER_BACKEND_DEPLOY_HOOK_URL` / `RENDER_FRONTEND_DEPLOY_HOOK_URL`, två GitHub Actions-secrets
+som **inte finns än** — så länge de saknas är jobbet ett ofarligt no-op.
 
-Att lägga till dessa secrets (Repo → Settings → Secrets and variables → Actions → New repository
-secret) är alltså det steg som faktiskt kopplar på automatisk deploy, och det görs efter att
-tjänsterna finns i Render (Deploy Hook-URL:en visas under respektive tjänsts **Settings** →
-**Deploy Hook** i Render-dashboarden, efter att Blueprintet applicerats).
+## Klick-steg i Render (första steget — invänta din bekräftelse innan nästa)
 
-## Klick-steg i Render (första steget — invänta bekräftelse innan nästa)
-
-**Steg 1 — endast detta, invänta din bekräftelse innan något mer görs:**
+**Steg 1 — endast detta:**
 
 1. Logga in i [Render Dashboard](https://dashboard.render.com).
-2. **New** → **Blueprint**.
-3. Koppla (eller välj, om redan kopplat) GitHub-repot `d1n095/LifeAI`.
-4. Välj branch `claude/det-kommer-mer-879lcm` — Render läser `render.yaml` från roten och listar
-   de fyra tjänsterna (`mainai-postgres`, `mainai-redis`, `mainai-backend`, `mainai-frontend`)
-   för granskning. **Klicka inte Apply än** — det är ett separat, senare steg.
+2. Öppna den befintliga tjänsten `lifeai-1` → **Settings** → leta upp kopplingen till
+   GitHub-repot (bekräftar att det verkligen är `d1n095/LifeAI` den redan är kopplad till).
+3. **New** → **Blueprint** → välj samma repo, branch `claude/det-kommer-mer-879lcm`. Render
+   läser `render.yaml` och bör känna igen `lifeai-1` som en redan existerande tjänst (samma
+   namn) och erbjuda att ta över den under Blueprint-hantering istället för att skapa en
+   dubblett — bekräfta att det är vad dashboarden visar innan du går vidare. **Klicka inte
+   Apply än.**
 
-Jag väntar på din bekräftelse innan vi går vidare till att fylla i de manuella variablerna och
-faktiskt applicera Blueprintet, i linje med att inga externa tjänster ska ändras utan uttrycklig
-bekräftelse.
+Jag väntar på din bekräftelse innan vi fyller i de manuella variablerna och applicerar
+Blueprintet.
+
+## Verifiering som redan gjorts (lokalt, utan Docker — se commit-historiken)
+
+Byggd mot en riktig lokal Postgres och Redis (inte mockad), med hela proxykedjan uppe: riktig
+backend (`alembic upgrade head` + `ensure_app_role.py` körda på riktigt), riktigt
+`next build`/`node .next/standalone/server.js`, och en riktig webbläsare (Playwright):
+
+- Registrering och inloggning genom proxyn ger korrekta statuskoder och JSON-svar.
+- `Set-Cookie` kommer fram som två separata cookies (`access_token`, `refresh_token`), inte
+  hopslagna — och cookien är scopead till frontend-origin, inte backend-adressen.
+- CSRF-skyddad mutation (utloggning) fungerar med token, avvisas korrekt (`403`) utan.
+- `X-Forwarded-For` från klienten når fram till backendens access-logg oförändrad genom proxyn.
+- En 404 på en obefintlig `/api/`-sökväg är backendens riktiga JSON-404, inte Next.js egen
+  404-sida — bekräftar att proxyn fångar alla `/api/*`-anrop, inte bara de kända routrarna.
+- Den nya `frontend/e2e/same-origin-proxy.spec.ts` (körs av CI-jobbet
+  `same-origin-proxy-test`) kodifierar samma kontroller automatiskt, mot en riktig webbläsare.
 
 ## Verifiering efter en fullständig deploy (för senare, när vi är där)
 
-1. `curl -i https://mainai-backend.onrender.com/api/health` → förväntat `200 {"status":"ok"}`.
-2. `curl -i -X OPTIONS https://mainai-backend.onrender.com/api/auth/register -H "Origin: https://mainai-frontend.onrender.com" -H "Access-Control-Request-Method: POST"` → `Access-Control-Allow-Origin` ska matcha exakt.
-3. Öppna `https://mainai-frontend.onrender.com/register`, försök skapa ett konto, kontrollera i DevTools → Network att `POST /api/auth/register` ger `200`/`201`.
-4. Kontrollera att ett verifieringsmail faktiskt kommer fram (bekräftar att `SMTP_HOST` m.fl. är korrekt ifyllda).
+1. `https://lifeai-1.onrender.com/api/health` i webbläsaren → `{"status":"ok"}` (går genom
+   proxyn — det finns ingen annan väg att nå backend från utanför Render).
+2. Öppna `https://lifeai-1.onrender.com/register`, försök skapa ett konto, kontrollera i
+   DevTools → Network att `POST /api/auth/register` (samma origin som sidan, inget
+   preflight-OPTIONS) ger `202`.
+3. Kontrollera att ett verifieringsmail faktiskt kommer fram (bekräftar `SMTP_HOST` m.fl.).
+4. DevTools → Application → Cookies: `access_token`/`refresh_token` ska stå under
+   `lifeai-1.onrender.com`, inte något annat värdnamn.
