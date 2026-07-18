@@ -57,17 +57,32 @@ async function proxy(request: NextRequest, path: string[]): Promise<Response> {
 
   const hasBody = !["GET", "HEAD"].includes(request.method);
 
-  const backendResponse = await fetch(targetUrl, {
-    method: request.method,
-    headers: copyHeaders(request.headers),
-    body: hasBody ? request.body : undefined,
-    // Required by undici whenever the body is a ReadableStream rather than a buffered value.
-    // @ts-expect-error -- `duplex` is a real, required fetch option for streamed bodies but
-    // missing from the DOM lib's RequestInit type as of this Next.js/TS version.
-    duplex: hasBody ? "half" : undefined,
-    redirect: "manual",
-    cache: "no-store",
-  });
+  let backendResponse: Response;
+  try {
+    backendResponse = await fetch(targetUrl, {
+      method: request.method,
+      headers: copyHeaders(request.headers),
+      body: hasBody ? request.body : undefined,
+      // Required by undici whenever the body is a ReadableStream rather than a buffered value.
+      // @ts-expect-error -- `duplex` is a real, required fetch option for streamed bodies but
+      // missing from the DOM lib's RequestInit type as of this Next.js/TS version.
+      duplex: hasBody ? "half" : undefined,
+      redirect: "manual",
+      cache: "no-store",
+    });
+  } catch (err) {
+    // The backend is unreachable — wrong INTERNAL_API_URL, the backend service doesn't exist
+    // yet, it hasn't finished deploying, or it crashed. Left uncaught, this throws out of the
+    // Route Handler and Next.js returns a bare 500 with no body — indistinguishable from a
+    // real backend error and useless for diagnosing which of those it actually is. Logged
+    // server-side (visible in this service's own Render logs, not the backend's) and
+    // returned as a distinct, structured response instead.
+    console.error(`[api-proxy] could not reach backend at ${targetUrl}:`, err);
+    return Response.json(
+      { detail: "Kunde inte nå backend-tjänsten.", proxy_error: true },
+      { status: 502 }
+    );
+  }
 
   const responseHeaders = copyHeaders(backendResponse.headers);
   // Headers.forEach/get collapse multiple Set-Cookie instances into one comma-joined string
