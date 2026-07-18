@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, NetworkError } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -38,7 +38,9 @@ export default function LoginPage() {
       router.replace("/");
     } catch (err: any) {
       const status = err?.status;
-      if (status === 403) {
+      if (err instanceof NetworkError) {
+        setError(err.message);
+      } else if (status === 403) {
         // Correct password, just not verified yet — a distinct case from "wrong password"
         // (see backend app/routers/auth.py), offered a way forward instead of a dead end.
         setUnverified(true);

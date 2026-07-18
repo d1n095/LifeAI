@@ -5,6 +5,18 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export class AuthError extends Error {}
 
+// Thrown when fetch() itself rejects — DNS failure, connection refused, TLS failure, CORS
+// preflight rejection, mixed-content block, offline, etc. The browser's own message for this
+// (e.g. "Failed to fetch", "NetworkError when attempting to fetch resource", "Load failed")
+// is not something a user can act on and may hint at internal infra, so it's never shown —
+// callers only ever see this generic, safe Swedish message.
+export class NetworkError extends Error {
+  constructor() {
+    super("Kunde inte nå servern. Kontrollera din internetanslutning och försök igen.");
+    this.name = "NetworkError";
+  }
+}
+
 // Deduplicates concurrent refresh attempts — if several requests 401 at once (e.g. several
 // widgets fetching in parallel right as the access token expires), only one refresh call
 // goes out; the rest wait on the same in-flight promise instead of racing each other.
@@ -49,14 +61,19 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
     Object.assign(headers, csrfHeader());
   }
 
-  const res = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers,
-    // Sends and receives the HttpOnly session cookies cross-origin. Nothing about the
-    // session ever needs to be read or stored by this JS — the browser handles it.
-    credentials: "include",
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      ...options,
+      headers,
+      // Sends and receives the HttpOnly session cookies cross-origin. Nothing about the
+      // session ever needs to be read or stored by this JS — the browser handles it.
+      credentials: "include",
+      cache: "no-store",
+    });
+  } catch {
+    throw new NetworkError();
+  }
 
   const isAuthEndpoint = path === "/api/auth/login" || path === "/api/auth/refresh";
   if (res.status === 401 && !isRetry && !isAuthEndpoint) {

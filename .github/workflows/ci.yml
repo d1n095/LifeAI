@@ -409,7 +409,7 @@ jobs:
       - name: Start backend (default rate limits)
         working-directory: backend
         run: |
-          redis-cli -h localhost flushdb
+          python -c "import redis; redis.from_url('redis://localhost:6379/0').flushdb()"
           nohup python scripts/run_e2e_backend.py > backend-ratelimit.log 2>&1 &
           echo $! > backend.pid
           for i in $(seq 1 30); do
