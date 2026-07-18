@@ -29,7 +29,7 @@ databases:
   - name: mainai-postgres
     databaseName: lifeos
     user: mainai_admin
-    plan: starter # paid tier — Render's free Postgres expires after 30 days, unsuitable for a real deploy. Confirm current pricing in the dashboard before applying.
+    plan: basic-256mb # smallest current paid Postgres tier — "starter" is a legacy plan name Render's Blueprint validator now rejects for new databases (confirmed by the actual validator, not guessed). Free Postgres expires after 30 days, unsuitable for a real deploy — confirm current pricing in the dashboard.
     region: oregon # keep every service in the same region — cross-region traffic is slower and private networking isn't guaranteed to work across regions
     postgresMajorVersion: "16"
     ipAllowList: [] # no direct external access; the backend reaches this over Render's private network via DATABASE_URL below. Add your own IP temporarily in the dashboard if you need direct psql access.
