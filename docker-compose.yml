@@ -1,6 +1,9 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector-enabled Postgres, not the plain official image — matches CI
+    # (.github/workflows/ci.yml) and production (Supabase, which has pgvector enabled) so
+    # local dev/CI/prod never diverge on this. See backend/app/models/document_chunk.py.
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: lifeos
@@ -20,14 +23,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-  qdrant:
-    image: qdrant/qdrant:v1.11.5
-    restart: unless-stopped
-    volumes:
-      - qdrant_data:/qdrant/storage
-    ports:
-      - "6333:6333"
 
   ollama:
     image: ollama/ollama:latest
@@ -76,15 +71,12 @@ services:
     environment:
       DATABASE_URL: postgresql://lifeos:lifeos@postgres:5432/lifeos
       APP_DATABASE_URL: postgresql://mainai_app:${MAINAI_APP_PASSWORD:-mainai_app}@postgres:5432/lifeos
-      QDRANT_URL: http://qdrant:6333
       OLLAMA_BASE_URL: http://ollama:11434
       FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:3000}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
     depends_on:
       postgres:
         condition: service_healthy
-      qdrant:
-        condition: service_started
       redis:
         condition: service_healthy
     ports:
@@ -109,6 +101,5 @@ services:
 
 volumes:
   postgres_data:
-  qdrant_data:
   ollama_data:
   redis_data:

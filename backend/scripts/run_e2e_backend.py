@@ -22,11 +22,14 @@ PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
 # Truncate any previous run's captured emails.
 open(EMAIL_LOG_PATH, "w").close()
 
+from app.config import get_settings
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
-import app.rag.qdrant_store as qdrant_store
+import app.rag.vector_store as vector_store
 import app.rag.retrieve as retrieve_mod
 import app.routers.auth as auth_router
+
+_EMBEDDING_DIM = get_settings().embedding_dim
 
 
 async def fake_chat(self, messages, model, **kwargs):
@@ -40,10 +43,14 @@ async def fake_chat(self, messages, model, **kwargs):
 
 
 async def fake_embed(self, texts, model):
-    return [[0.05] * 8 for _ in texts]
+    # Must match app/config.py's embedding_dim exactly — pgvector's document_chunks.embedding
+    # column is a fixed vector(1536) (see the 0004 migration), unlike Qdrant's old
+    # dynamically-sized collection. A shorter fake vector here would raise a dimension
+    # mismatch the moment anything actually tried to insert it.
+    return [[0.05] * _EMBEDDING_DIM for _ in texts]
 
 
-def fake_search(vector, top_k=5):
+def fake_search(db, owner_id, vector, top_k=5):
     return [
         {
             "document_id": "22222222-2222-2222-2222-222222222222",
@@ -63,7 +70,7 @@ def fake_send_email(to: str, subject: str, body_text: str) -> None:
 
 OpenAIProvider.chat = fake_chat
 OpenAIProvider.embed = fake_embed
-qdrant_store.search = fake_search
+vector_store.search = fake_search
 retrieve_mod.search = fake_search
 auth_router.send_email = fake_send_email
 

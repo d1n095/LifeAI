@@ -6,6 +6,8 @@ RLS_STATEMENTS = [
     # FORCE is required because the app connects as the table owner (created the tables via
     # SQLAlchemy) — Postgres exempts owners from RLS by default unless FORCE is set.
     "ALTER TABLE conversations FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE document_chunks FORCE ROW LEVEL SECURITY",
 ]
 
 # One policy per table: rows are only visible/writable when they belong to the user bound
@@ -22,15 +24,28 @@ POLICY_DEFINITIONS = [
         "name": "conversations_isolation",
         "expr": "user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
+    {
+        "table": "document_chunks",
+        "name": "document_chunks_isolation",
+        # Deliberately narrower than Document itself (shared company knowledge, see the
+        # docstring below) — this is a pgvector-migration-specific requirement: chunk/
+        # embedding rows are strictly per-owner, so two users' uploaded material is never
+        # readable or searchable by each other even though the Document row describing it
+        # is still shared metadata. See app/rag/vector_store.py and app/rag/ingest.py.
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
 ]
 
 
 def apply_rls(engine: Engine) -> None:
     """Idempotently enable Postgres Row-Level Security on user-owned tables.
 
-    Conversations are the only table with strict per-user isolation in MainAI 0.1 —
-    documents/projects/tasks are intentionally shared company knowledge (see
-    docs/MAINAI_0.1_PLAN.md) and only track `created_by` for attribution, not access control.
+    Conversations and document_chunks have strict per-user isolation. Documents/projects/
+    tasks themselves are still intentionally shared company knowledge (see
+    docs/MAINAI_0.1_PLAN.md) and only track `created_by` for attribution, not access control
+    — document_chunks (the pgvector-backed embedded text actually used for search) is a
+    deliberate exception to that, not a contradiction of it: see
+    app/models/document_chunk.py's docstring.
     """
     with engine.begin() as conn:
         for statement in RLS_STATEMENTS:

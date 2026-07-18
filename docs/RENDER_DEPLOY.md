@@ -1,240 +1,215 @@
 # Render-driftsättning
 
 Detta dokument beskriver `render.yaml` (repo-roten) — ett [Render
-Blueprint](https://render.com/docs/blueprint-spec) för hela webb-stacken: PostgreSQL, Redis,
-Qdrant, FastAPI-backend och Next.js-frontend.
+Blueprint](https://render.com/docs/blueprint-spec) för en enda Render Free-webbtjänst som kör
+hela stacken: Next.js-frontend och FastAPI-backend som syskonprocesser i **samma container**,
+mot en extern Postgres (Supabase Free, med pgvector) och extern Redis (Upstash Free). Mål:
+0 kr/månad.
 
-**Den faktiska live-adressen är `https://lifeai-1.onrender.com`** — ett frontend-webbtjänst
-som redan finns i Render (inte skapat av detta Blueprint). Vercel är inte längre
-felsökningsmålet.
+**Den faktiska live-adressen är `https://lifeai-1.onrender.com`** — en webbtjänst som redan
+finns i Render (namnet i dashboarden är `LifeAI`; `lifeai-1` är bara hostnamnet Render
+tilldelade eftersom slugen `lifeai` redan var upptagen). `render.yaml`s enda tjänst heter
+därför `LifeAI` (skiftlägeskänsligt), inte `lifeai-1` — annars adopterar Blueprintet inte den
+befintliga tjänsten utan skapar en dubblett.
 
-**Viktigt att inte blanda ihop:** tjänstens namn i Render-dashboarden är **`LifeAI`** — det är
-det namnet `render.yaml` måste matcha för att Blueprintet ska adoptera den befintliga tjänsten
-istället för att skapa en dubblett. `lifeai-1.onrender.com` är bara det *hostnamn* Render
-tilldelade (eftersom slugen `lifeai` redan var upptagen) — inte tjänstens namn. `render.yaml`s
-frontend-tjänst heter därför `LifeAI` (skiftlägeskänsligt, exakt som i dashboarden), inte
-`lifeai-1`.
+## Varför en enda container, inte separat frontend/backend
 
-Grundorsaken till `Failed to fetch`/`Kunde inte nå servern` vid registrering var en kombination
-av att ingen backend (eller ofullständig backend) var kopplad till den existerande
-frontend-tjänsten, och att en cross-origin-arkitektur (separat frontend-/backend-domän) för
-med sig en hel klass av CORS-/cookie-fallgropar. Det här Blueprintet löser båda: en komplett,
-verifierad backend-stack, och en **same-origin-proxy** som gör att webbläsaren aldrig anropar
-backend direkt.
+Render Free erbjuder ingen **Private Service**-plan (den tidigare arkitekturen i det här
+dokumentet förutsatte det). Utan en privat tjänsttyp skulle en fristående FastAPI-tjänst på
+Free-planen få en publik URL vare den vill eller ej. Lösningen: kör Next.js och FastAPI som två
+processer i **samma** container (`Dockerfile.combined`,
+`scripts/entrypoint-combined.sh`) istället för två Render-tjänster:
 
-## Arkitektur: same-origin-proxyn
+- **Next.js** binder publikt till `$PORT` — det här är den enda process som Render faktiskt
+  exponerar.
+- **FastAPI** binder till `127.0.0.1:8000` — loopback-only. Ingenting utanför containern kan
+  nå den, oavsett vad Render gör på plattformsnivå med tjänstens publika URL, eftersom
+  operativsystemets socket helt enkelt inte lyssnar på något annat än loopback-gränssnittet.
+  Det här ersätter Private Service-isoleringen utan att kosta något extra.
+- `frontend/app/api/[...path]/route.ts` proxar `/api/*`-anrop till FastAPI via
+  `INTERNAL_API_URL=http://127.0.0.1:8000` — samma same-origin-proxy-mönster som tidigare,
+  bara att båda ändarna nu råkar dela process-namespace istället för att prata över Renders
+  interna nätverk mellan två tjänster.
 
-```
-Webbläsare                    lifeai-1 (Next.js, web)         mainai-backend (FastAPI, PRIVATE)
-    │  https://lifeai-1.onrender.com/api/auth/register             (ingen publik URL alls)
-    ├────────────────────────────►│                                        │
-    │  (samma origin — inget CORS,│  app/api/[...path]/route.ts           │
-    │   inget SameSite-problem)   │  forwarding via INTERNAL_API_URL      │
-    │                             ├───────────────────────────────────────►│
-    │                             │  Render internt privat nätverk        │
-    │  ◄────────────────────────── (Set-Cookie, statuskod, body)          │
-```
+Det finns bara **en** tjänst i `render.yaml`: `LifeAI`, `plan: free`. Ingen
+`mainai-backend`-tjänst ska någonsin skapas separat — det vore både en extra kostnad och
+onödigt, eftersom loopback-bindningen redan ger samma isolering.
 
-Webbläsaren pratar **bara** med `lifeai-1.onrender.com`. Den vet aldrig att `mainai-backend`
-existerar, och kan det inte heller — `mainai-backend` är en Render **Private Service** (typ
-`pserv` i `render.yaml`), utan publik URL över huvud taget, bara nåbar från andra tjänster i
-samma Render-projekt över det interna nätverket.
+### Verifierat lokalt (utan Docker — se `docker`-anmärkningen nedan)
 
-**Varför:** det här är den konkreta lösningen på uppdraget "undvik cross-origin-cookieproblem".
-Sessionscookien (`HttpOnly`, se `backend/app/cookies.py`) sätts av backend men skickas till
-webbläsaren *via* `lifeai-1`s egen server — webbläsaren ser den som en förstapartscookie
-(samma origin den redan pratar med), oavsett var backend faktiskt kör. `SameSite=None` (redan
-default i `app/config.py`) fungerar fortfarande, det är bara inte längre den enda linjen som
-håller det ihop.
+Docker-daemonen är inte tillgänglig i den sandlåda det här arbetet gjordes i, så
+`Dockerfile.combined` kunde inte byggas och köras som en riktig container. Istället kördes
+exakt samma kommandon (`docker-entrypoint.sh` + `uvicorn --host 127.0.0.1` och
+`node server.js`) direkt på sandlåde-hosten, med symlänkar som efterliknar containerns
+filstruktur (`/app/backend`, `/app/frontend-standalone`) — logiken i
+`scripts/entrypoint-combined.sh` (bindning, proxy, signalhantering, processlivscykel) är
+alltså verifierad på riktigt, även om själva Docker-bygget inte kunde köras. Detaljer:
 
-### Proxyn i detalj — `frontend/app/api/[...path]/route.ts`
+- **Loopback-isolering**: bekräftad på socket-nivå via `/proc/net/tcp` (inte bara tolkning av
+  `--host`-flaggan) — backend lyssnar bara på `0100007F:1F40` (127.0.0.1:8000), frontend på
+  `00000000:...` (0.0.0.0:$PORT).
+- **Proxykedjan**: `curl` genom hela kedjan (webbläsarens ingångspunkt → Next.js → loopback →
+  FastAPI → riktig Postgres/Redis) — `/api/health` och en riktig `POST /api/auth/register` gav
+  korrekta svar.
+- **Signalhantering**: `SIGTERM` till entrypoint-processen gav en ren, korrekt ordnad
+  nedstängning av båda barnprocesserna och lämnade inga föräldralösa processer kvar.
+- **Krasch-länkning**: `kill -KILL` mot enbart backend-processen utlöste `wait -n`-fångsten,
+  loggade att den andra processen stängs ner, och hela entrypoint-skriptet avslutades
+  fullständigt — bekräftar att en krasch i endera processen tar ner hela containern (vilket är
+  avsiktligt: en halvdöd container utan fungerande backend ska inte fortsätta serva trafik).
+- **Minnesförbrukning**: RSS-sampling (`/proc/<pid>/status`, var 0.5:e sekund) under en riktig
+  Playwright-driven E2E-körning mot den kombinerade containern gav ≈198 MB kombinerat i vila
+  och ≈298 MB kombinerat under belastning (backend ≈180 MB, frontend ≈121 MB vid toppen). Detta
+  är uppmätt, inte skattat — men jämförelsen mot Render Free-planens exakta minnesgräns är
+  **inte** verifierad från den här miljön (ingen nätverksåtkomst till render.com), så
+  jämförelsen bör bekräftas i dashboarden innan produktionsdeploy.
 
-Varje anrop under `/api/*` från webbläsaren landar i den här Route Handlern, som vidarebefordrar
-det byte-för-byte till backend via `INTERNAL_API_URL` (en ren server-side miljövariabel, aldrig
-i klientbundeln — se `frontend/lib/api.ts`s kommentar om detta):
+## pgvector istället för Qdrant
 
-- **Metod, query-sträng, body**: strömmas rakt igenom (fungerar oförändrat för både JSON och
-  multipart-filuppladdning, och för framtida strömmande svar) — inget parsas/serialiseras om.
-- **Headers**: kopieras rakt av, minus de hop-by-hop-headers (RFC 7230 §6.1) som bara gäller ett
-  enskilt transportsteg.
-- **Set-Cookie**: Node/undicis `getSetCookie()` används explicit — annars slår `Headers`-API:et
-  ihop flera `Set-Cookie`-instanser till en kommaseparerad sträng som webbläsaren inte kan tolka
-  tillbaka till separata cookies. Verifierat manuellt (se "Verifiering som redan gjorts" nedan)
-  att `access_token`- och `refresh_token`-cookien båda kommer fram som separata cookies.
-- **Statuskod**: vidarebefordras exakt (verifierat: en 400/401/403/404 från backend syns
-  identiskt genom proxyn, inte som ett generiskt Next.js-fel).
-- **Caching**: `export const dynamic = "force-dynamic"` — den här routen får **aldrig** cachas
-  eller statiskt optimeras av Next.js, eftersom svaret kan vara specifikt för en inloggad
-  användare (sessionscookien). Verifierat i produktionsbygget: `/api/[...path]` listas som
-  `ƒ Dynamic`, inte `○ Static`.
+Ingen separat Qdrant-tjänst finns längre. Embeddings lagras i en `document_chunks`-tabell i
+samma Postgres, med `pgvector`-kolumnen (`vector(1536)`) och ett HNSW-index
+(`backend/alembic/versions/0004_pgvector_document_chunks.py`). Se
+`backend/app/rag/vector_store.py` för sökning/skrivning och
+`backend/app/models/document_chunk.py` för schemat.
 
-### Den verkliga klient-IP:n — `X-Forwarded-For`
+`document_chunks` har **full Row-Level Security** (`ENABLE` + `FORCE ROW LEVEL SECURITY`,
+policy i `backend/app/rls.py`), scopead per `owner_id` — till skillnad från `Document` självt
+(som förblir delad "företagskunskap" enligt befintlig design) är chunks/embeddings strikt
+per-uppladdare. Både sökning (`search()`) och skrivning (`upsert_chunks()`) filtrerar explicit
+på `owner_id` **och** förlitar sig på RLS som försvar i djupet — se
+`backend/tests/security/test_rls_isolation.py` för tester som bevisar att två användare aldrig
+kan läsa eller söka varandras chunks, varken via en direkt query eller via den faktiska
+`search()`-kodvägen chatt/kunskapssökning använder, inklusive ett scenario där applikationskod
+av misstag skickar fel `owner_id` till `search()` — RLS-sessionen (satt via
+`SET LOCAL app.current_user_id`) begränsar ändå frågan till en omöjlig skärning, inte till
+"ofiltrerat".
 
-Med proxyn framför backend skulle `request.client.host` (det `app/limiter.py`s rate limiting,
-`app/audit.py` och `app/routers/auth.py`s inloggningslogg alla nycklar på) annars alltid visa
-**`lifeai-1`s egen adress** för varje enda användare — rate limiting hade i praktiken blivit
-delad mellan alla användare istället för per person. Löst med två delar:
+Bakgrundsindexering (`backend/app/routers/documents.py`s `_index_in_background`) körs i en
+egen `SessionLocal()`/event loop som aldrig passerar `app/deps.py`s `get_current_user` — den
+sätter därför `app.current_user_id` explicit från dokumentets `uploaded_by`-kolumn (ett
+beständigt DB-värde), inte från någon contextvar som bara existerar under en HTTP-request.
 
-1. Proxyn vidarebefordrar `X-Forwarded-For` precis som alla andra headers (ingen särskild kod
-   behövs — Render sätter den redan på anropet som når `lifeai-1`, från den riktiga klienten).
-2. `backend/Dockerfile`s uvicorn-kommando kör med `--proxy-headers --forwarded-allow-ips=*` —
-   uvicorn litar då på `X-Forwarded-For` och skriver om `request.client.host` därefter.
-   `--forwarded-allow-ips=*` (lita på *vem som helst* som ansluter) är bara säkert **eftersom**
-   `mainai-backend` är en Private Service utan publik ingång alls — det enda som någonsin kan
-   ansluta är `lifeai-1`s proxy. Exponera aldrig den här containerns port publikt med den
-   flaggan kvar.
+pgvectors `<=>`-operator returnerar **avstånd** (0 = identiskt, 2 = motsatt) — motsatt riktning
+mot Qdrants likhetspoäng (högre = bättre). `vector_store.search()` konverterar
+`likhet = 1 - avstånd` innan resultatet används, så Trust Engine-logiken som litar på "högre
+poäng = bättre träff" är oförändrad.
 
-Verifierat manuellt: ett anrop till proxyn med `X-Forwarded-For: 203.0.113.55` gav
-`203.0.113.55` i backendens access-logg, inte loopback-adressen curl faktiskt anslöt från.
+Lokal utveckling och CI använder samma pgvector-aktiverade Postgres-image
+(`pgvector/pgvector:pg16`, se `docker-compose.yml` och `.github/workflows/ci.yml`) som
+produktion (Supabase Free, som har pgvector aktiverat) — ingen risk att en migration eller
+frågeplan beter sig annorlunda i produktion än lokalt.
 
-### Databasrollerna — varför det inte är en enda `DATABASE_URL`
+## `/api/health` — generiskt svar, inga interna detaljer
+
+`backend/app/routers/health.py` kontrollerar både databasen (`SELECT 1`) och Redis (`PING`, om
+`REDIS_URL` är satt). Om något beroende misslyckas: HTTP **503** och `{"status":
+"unavailable"}` — inga adresser, inga stacktraces, inga interna felmeddelanden i svaret. Den
+faktiska exceptionen loggas fullständigt server-side (`logger.exception`) för felsökning, men
+skickas aldrig till klienten. Verifierat manuellt genom att stänga av databasanslutningen
+(`ALTER DATABASE ... CONNECTION LIMIT 0`) och bekräfta både klientsvaret och serverloggen, samt
+återhämtning till `{"status": "ok"}`/200 efter att gränsen återställdes.
+
+## Databasrollerna — varför det inte är en enda `DATABASE_URL`
 
 Backend kör alla runtime-frågor genom en **egen, icke-superuser databasroll** (`mainai_app`) —
-inte administratörsrollen Render skapar åt dig (`mainai_admin`). Det är detta som gör
-Row-Level Security verkningsfull: en superuser/ägarroll kringgår RLS per definition.
+inte den admin-roll `DATABASE_URL` pekar på. Det är detta som gör Row-Level Security
+verkningsfull: en superuser/ägarroll kringgår RLS per definition.
 
-Render stödjer inte att montera ett Postgres-init-skript (det `backend/db-init/01-app-role.sh`
-gör lokalt via Docker Compose), så `render.yaml` löser det istället genom att:
+Supabase stödjer inte att montera ett Postgres-init-skript (det
+`backend/db-init/01-app-role.sh` gör lokalt via Docker Compose), så samma mekanism som i den
+tidigare arkitekturen används: vid varje containerstart (`backend/docker-entrypoint.sh`, innan
+`alembic upgrade head`) körs `backend/scripts/ensure_app_role.py`, som ansluter med
+`DATABASE_URL` (admin-rollen) och idempotent skapar/uppdaterar `mainai_app`-rollen. Skriptet
+skriver den fullständiga `APP_DATABASE_URL` till en tillfällig fil som entrypoint-skriptet
+`source`:ar innan `uvicorn` startar.
 
-1. Generera `MAINAI_APP_PASSWORD` som en plattforms-hemlighet (`generateValue: true`).
-2. Vid varje containerstart (`backend/docker-entrypoint.sh`, innan `alembic upgrade head`) köra
-   `backend/scripts/ensure_app_role.py`, som ansluter med `DATABASE_URL` (admin-rollen) och
-   idempotent skapar/uppdaterar `mainai_app`-rollen med samma GRANT:ar som `01-app-role.sh`.
-3. Skriptet skriver den fullständiga `APP_DATABASE_URL` till en tillfällig fil som
-   entrypoint-skriptet `source`:ar innan `uvicorn` startar.
-
-Verifierat manuellt mot en riktig lokal Postgres, inklusive med specialtecken
-(`$ / + = !`) i det genererade lösenordet — rollen skapas/uppdateras korrekt och
-`mainai_app` kan ansluta med den URL-kodade `APP_DATABASE_URL`:n.
+**Viktigt:** `DATABASE_URL` måste vara Supabases **DIRECT**-anslutning (port 5432), inte den
+poolade pgbouncer-anslutningen (port 6543, transaction-pooling-läge) — rollskapandet och
+Alembics DDL behöver sessionsnivå-operationer som transaction pooling inte pålitligt stödjer.
 
 Lokal Docker Compose är oförändrad (skriptet är ett no-op där — `MAINAI_APP_PASSWORD` sätts
 bara på Render, inte på `backend`-containern i `docker-compose.yml`).
 
-### Qdrant
-
-Ingen managed Qdrant-tjänst finns på Render, så `mainai-qdrant` körs som en privat,
-disk-uppbackad tjänst av samma officiella image `docker-compose.yml` använder lokalt
-(`qdrant/qdrant:v1.11.5`), via `runtime: image` istället för att bygga från en Dockerfile.
-Jag kunde inte nå render.com från den här miljön för att bekräfta exakt Blueprint-syntax för
-`runtime: image` eller disk-prissättning — verifiera i dashboarden innan Apply.
-
 ## Miljövariabler — fullständig lista
-
-### Automatiska (Render kopplar ihop tjänsterna åt dig)
-
-| Variabel | Tjänst | Källa |
-|---|---|---|
-| `DATABASE_URL` | mainai-backend | `fromDatabase: mainai-postgres` (admin-anslutningen) |
-| `REDIS_URL` | mainai-backend | `fromService: mainai-redis` |
 
 ### Genererade hemligheter (Render slumpar värdet — hamnar aldrig i repot)
 
-| Variabel | Tjänst | Vad den styr |
-|---|---|---|
-| `SECRET_KEY` | mainai-backend | Signerar JWT-access-/refresh-tokens |
-| `MAINAI_APP_PASSWORD` | mainai-backend | Lösenord för den begränsade RLS-databasrollen (se ovan) |
+| Variabel | Vad den styr |
+|---|---|
+| `SECRET_KEY` | Signerar JWT-access-/refresh-tokens |
+| `MAINAI_APP_PASSWORD` | Lösenord för den begränsade RLS-databasrollen (se ovan) |
 
 ### Måste fyllas i manuellt i Render-dashboarden (`sync: false` i render.yaml)
 
-| Variabel | Tjänst | Vad du sätter |
-|---|---|---|
-| `ADMIN_EMAIL` | mainai-backend | E-post för det automatiskt skapade admin-kontot (skapas bara om inga användare finns) |
-| `ADMIN_PASSWORD` | mainai-backend | Starkt lösenord, inte `.env.example`s placeholder |
-| `SMTP_HOST` | mainai-backend | **Obligatorisk i produktion** — backend vägrar nu starta (`ENVIRONMENT=production` utan `SMTP_HOST`, se `_check_smtp_configured` i `app/main.py`) om den saknas |
-| `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | mainai-backend | Enligt din SMTP-leverantör |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | mainai-backend | Fyll i minst en |
+| Variabel | Vad du sätter |
+|---|---|
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Det automatiskt skapade admin-kontot (skapas bara om inga användare finns) |
+| `DATABASE_URL` | Supabase Free — **DIRECT**-anslutningen, port 5432, inte den poolade 6543:an |
+| `REDIS_URL` | Upstash Free |
+| `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | **Obligatoriskt i produktion** (`ENVIRONMENT=production` utan `SMTP_HOST` gör att backend vägrar starta, se `_check_smtp_configured` i `app/main.py`) — en gratis transaktionell e-postleverantör (t.ex. Resend eller Brevos gratisnivå) räcker |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | Fyll i minst en |
 
 ### Redan satta, synliga värden i `render.yaml`
 
-| Variabel | Tjänst | Värde | Kommentar |
-|---|---|---|---|
-| `ENVIRONMENT` | mainai-backend | `production` | Utlöser SMTP-tvånget ovan |
-| `QDRANT_URL` | mainai-backend | `http://mainai-qdrant:6333` | Privat nätverksadress |
-| `FRONTEND_ORIGINS` | mainai-backend | `https://lifeai-1.onrender.com` | Mest defense-in-depth nu — se "CORS är nästan irrelevant nu" nedan |
-| `PUBLIC_APP_URL` | mainai-backend | `https://lifeai-1.onrender.com` | Länkar i verifierings-/återställningsmail |
-| `COOKIE_SECURE` / `COOKIE_SAMESITE` | mainai-backend | `true` / `none` | Oförändrat säkra defaults — se ovan för varför `none` fortfarande är rätt trots att cookien i praktiken är same-origin nu |
-| `INTERNAL_API_URL` | lifeai-1 | `http://mainai-backend:8000` | Servern (inte webbläsaren) når backend härigenom — se proxy-avsnittet ovan |
+| Variabel | Värde | Kommentar |
+|---|---|---|
+| `ENVIRONMENT` | `production` | Utlöser SMTP-tvånget ovan |
+| `INTERNAL_API_URL` | `http://127.0.0.1:8000` | Loopback — proxyn når backend härigenom, se arkitekturavsnittet ovan |
+| `FRONTEND_ORIGINS` | `https://lifeai-1.onrender.com` | Defense-in-depth — se "CORS" nedan |
+| `PUBLIC_APP_URL` | `https://lifeai-1.onrender.com` | Länkar i verifierings-/återställningsmail |
+| `COOKIE_SECURE` / `COOKIE_SAMESITE` | `true` / `none` | Oförändrat säkra defaults |
 
 **Ingen `NEXT_PUBLIC_API_URL`** sätts längre någonstans i `render.yaml` — det är en avsiktlig
 utelämning, inte ett förbiseende (se `frontend/lib/api.ts`).
 
 ### CORS är nästan irrelevant nu
 
-Eftersom `mainai-backend` inte har någon publik URL alls kan ingenting utanför Render — inte en
-webbläsare, inte Vercel, ingenting — nå den direkt oavsett `FRONTEND_ORIGINS`. Proxyanropet från
-`lifeai-1`s server är server-till-server (Node `fetch`) och skickar ingen `Origin`-header (det
-är ett webbläsarkoncept), så CORS-mellanvaran i `app/main.py` triggas inte ens av den vägen.
-Listan är kvar av dokumentations-/försvar-i-djupet-skäl, inte för att den faktiskt portvaktar
-något just nu.
-
-**Konsekvens att vara medveten om:** om den gamla Vercel-driftsättningen fortfarande är live och
-skulle försöka anropa backend direkt (cross-origin, det gamla mönstret), fungerar det inte
-längre — det finns ingen publik backend-URL att anropa. Säg till om Vercel ändå ska kunna nå
-backend direkt (t.ex. under en övergångsperiod) — då behöver `mainai-backend` vara `type: web`
-igen (publik) istället för `pserv`, vilket är en enkel ändring men en medveten avvägning värd
-ett eget beslut, inte något jag ändrar underhand.
+Webbläsaren pratar bara med `lifeai-1.onrender.com` (samma tjänst som proxyn). Proxyanropet
+till FastAPI sker server-till-server över loopback (Node `fetch` till `127.0.0.1:8000`) och
+skickar ingen `Origin`-header (det är ett webbläsarkoncept), så CORS-mellanvaran i
+`app/main.py` triggas inte av den vägen. `FRONTEND_ORIGINS` är kvar av
+dokumentations-/försvar-i-djupet-skäl.
 
 ## Deploy sker bara via CI, aldrig av ett push i sig
 
-`render.yaml` sätter `autoDeploy: false` på både `mainai-backend` och `lifeai-1`. Enda
-utlösaren är jobbet `deploy-render` i `.github/workflows/ci.yml`, som körs efter — och bara om —
-`all-checks-passed` blir grönt. Det anropar Render-tjänsternas **Deploy Hook**-URL:er via
-`RENDER_BACKEND_DEPLOY_HOOK_URL` / `RENDER_FRONTEND_DEPLOY_HOOK_URL`, två GitHub Actions-secrets
-som **inte finns än** — så länge de saknas är jobbet ett ofarligt no-op.
+`render.yaml` sätter `autoDeploy: false`. Enda utlösaren är jobbet `deploy-render` i
+`.github/workflows/ci.yml`, som körs efter — och bara om — `all-checks-passed` blir grönt. Det
+anropar tjänstens **Deploy Hook**-URL via `RENDER_DEPLOY_HOOK_URL`, en GitHub Actions-secret som
+**inte finns än** — så länge den saknas är jobbet ett ofarligt no-op.
 
-## Klick-steg i Render (ett steg i taget — invänta bekräftelse innan nästa)
+## Klick-steg i Render
 
-**Redan verifierat i dashboarden** (av dig): tjänsten heter `LifeAI`, publik URL
-`https://lifeai-1.onrender.com`, kopplad till `d1n095/LifeAI`, branch
-`claude/det-kommer-mer-879lcm`, runtime Docker. Senaste deployen av `38c1d57` misslyckades med
-`failed to read dockerfile: open Dockerfile: no such file or directory` — Render letar efter
-`Dockerfile` i repo-roten, men den ligger i `frontend/Dockerfile`. Det bekräftar att tjänstens
-**Root Directory** inte är satt till `frontend`.
+**Inget har ännu ändrats i Render-dashboarden för den här arkitekturen.** Föregående fas av
+det här arbetet (dokumenterad i git-historiken) löste ett annat problem — `Root Directory` för
+den då separata frontend-tjänsten. Den lösningen är inte längre relevant: det finns nu bara en
+tjänst, och `Dockerfile.combined` ligger i repo-roten (`dockerfilePath: ./Dockerfile.combined`,
+`dockerContext: .`), så inget särskilt Root Directory-steg ska behövas för den här arkitekturen.
 
-Jag har fixat en separat, verklig bugg detta avslöjade: `render.yaml`s frontend-tjänst hette
-`lifeai-1`, men den riktiga tjänsten heter `LifeAI` — Blueprint-adoption matchar på exakt
-tjänstenamn, så det hade skapat en dubblett istället för att ta över `LifeAI`. Rättat och
-pushat (repo-ändring, rör ingen extern tjänst) — se `render.yaml`s `services[].name: LifeAI`.
+**Följande krävs innan Blueprintet kan appliceras, och görs ett steg i taget — invänta
+bekräftelse innan nästa:**
 
-**Nästa steg — endast detta:**
+1. Skapa ett Supabase-projekt (gratisnivå), aktivera `vector`-tillägget om det inte redan är
+   på, och hämta **DIRECT**-anslutningssträngen (port 5432).
+2. Skapa en Upstash Redis-databas (gratisnivå) och hämta dess anslutnings-URL.
+3. Bekräfta i Render-dashboarden att `plan: free` faktiskt är den aktuella plan-slugen för
+   webbtjänster (Postgres-planen `starter` visade sig vara ett föråldrat namn under det här
+   arbetet — samma typ av namnbyte kan gälla här, verifierat först).
+4. Fyll i `sync: false`-variablerna i tabellen ovan i dashboarden.
 
-1. Öppna tjänsten **`LifeAI`** i Render Dashboard → **Settings** → **Build & Deploy**.
-2. Sätt **Root Directory** till `frontend`.
-
-Det ska (baserat på Renders vanliga beteende — jag kan inte verifiera dashboarden själv
-härifrån) göra att Render letar efter Dockerfilen relativt `frontend/` istället för repo-roten,
-vilket löser exakt det felmeddelande du fick. **Spara inte än om du vill att jag bekräftar
-Dockerfile Path-fältet först** — men om Render bara har ett Root Directory-fält och inget
-separat Dockerfile Path-fält kvar att sätta, är det här hela fixen.
-
-Efter att du sparat detta, säg till — nästa steg blir antingen att trigga om en deploy manuellt
-för att verifiera att byggfelet är löst, eller (om du hellre vill gå Blueprint-vägen direkt)
-**New → Blueprint** med samma repo/branch, som nu ska känna igen `LifeAI` som en existerande
-tjänst istället för att skapa en dubblett.
-
-## Verifiering som redan gjorts (lokalt, utan Docker — se commit-historiken)
-
-Byggd mot en riktig lokal Postgres och Redis (inte mockad), med hela proxykedjan uppe: riktig
-backend (`alembic upgrade head` + `ensure_app_role.py` körda på riktigt), riktigt
-`next build`/`node .next/standalone/server.js`, och en riktig webbläsare (Playwright):
-
-- Registrering och inloggning genom proxyn ger korrekta statuskoder och JSON-svar.
-- `Set-Cookie` kommer fram som två separata cookies (`access_token`, `refresh_token`), inte
-  hopslagna — och cookien är scopead till frontend-origin, inte backend-adressen.
-- CSRF-skyddad mutation (utloggning) fungerar med token, avvisas korrekt (`403`) utan.
-- `X-Forwarded-For` från klienten når fram till backendens access-logg oförändrad genom proxyn.
-- En 404 på en obefintlig `/api/`-sökväg är backendens riktiga JSON-404, inte Next.js egen
-  404-sida — bekräftar att proxyn fångar alla `/api/*`-anrop, inte bara de kända routrarna.
-- Den nya `frontend/e2e/same-origin-proxy.spec.ts` (körs av CI-jobbet
-  `same-origin-proxy-test`) kodifierar samma kontroller automatiskt, mot en riktig webbläsare.
+Inget av detta har körts än — det här dokumentet beskriver vad som **kommer** krävas, inte vad
+som redan är gjort mot den riktiga Render-tjänsten.
 
 ## Verifiering efter en fullständig deploy (för senare, när vi är där)
 
 1. `https://lifeai-1.onrender.com/api/health` i webbläsaren → `{"status":"ok"}` (går genom
-   proxyn — det finns ingen annan väg att nå backend från utanför Render).
+   hela kedjan: Next.js → loopback → FastAPI → Supabase/Upstash).
 2. Öppna `https://lifeai-1.onrender.com/register`, försök skapa ett konto, kontrollera i
    DevTools → Network att `POST /api/auth/register` (samma origin som sidan, inget
    preflight-OPTIONS) ger `202`.
 3. Kontrollera att ett verifieringsmail faktiskt kommer fram (bekräftar `SMTP_HOST` m.fl.).
 4. DevTools → Application → Cookies: `access_token`/`refresh_token` ska stå under
    `lifeai-1.onrender.com`, inte något annat värdnamn.
+5. Kontrollera minnesanvändning i Render-dashboardens metrics-flik under riktig belastning —
+   jämför mot de lokalt uppmätta ≈198 MB (vila) / ≈298 MB (belastning) som riktmärke, men lita
+   på Renders egen siffra, inte den lokala uppskattningen, för det faktiska
+   platsbeslutet om minnesgränsen räcker.

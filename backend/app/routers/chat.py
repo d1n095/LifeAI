@@ -53,7 +53,7 @@ async def chat(
         # at flush (see app/models/conversation.py defaults), so the object is already
         # fully populated — a refresh would just be an unnecessary extra round-trip.
 
-    hits = await retrieve_context(db, payload.message, top_k=5)
+    hits = await retrieve_context(db, user.id, payload.message, top_k=5)
     trust = assess_confidence(hits)
     context_block = "\n\n".join(f"[{h['title']}]\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
 

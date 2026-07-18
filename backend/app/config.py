@@ -91,9 +91,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://lifeos:lifeos@postgres:5432/lifeos"
     app_database_url: str = "postgresql://mainai_app:mainai_app@postgres:5432/lifeos"
 
-    # Vector DB
-    qdrant_url: str = "http://qdrant:6333"
-    qdrant_collection: str = "lifeos_knowledge"
+    # Embedding vectors are stored in Postgres via pgvector (app/models/document_chunk.py),
+    # not a separate vector database — embedding_dim is a real, fixed constraint (the
+    # column's declared dimension, set at migration time), not just a default: switching to
+    # an embedding model with a different vector size needs a new migration, not just this
+    # value changed. See app/rag/vector_store.py.
     embedding_dim: int = 1536
 
     # Active provider (can be overridden at runtime via admin API -> DB config)
