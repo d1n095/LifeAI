@@ -30,10 +30,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Postgres has no ALTER TYPE ... DROP VALUE — the standard workaround is to recreate the
-    # enum type without the value and repoint the column at it. Only safe if no row is
-    # actually using role='founder' at downgrade time (the founder account always exists in
-    # any deployed environment, so this downgrade is expected to be run against an empty/
-    # test database, not a live one — same caveat as any narrowing enum downgrade).
+    # enum type without the value and repoint the column at it. That USING cast fails outright
+    # (aborting the whole transaction, not corrupting data) if any row still has role='founder'
+    # — which it always will in any environment where this migration actually ran, since
+    # app/bootstrap.py provisions exactly one such row on every startup. Reassign it to
+    # 'admin' first (the closest predecessor role) so the downgrade completes instead of just
+    # failing loudly — a real rollback path, not one that only works on an empty database.
+    op.execute("UPDATE users SET role = 'admin' WHERE role = 'founder';")
     op.execute("""
         ALTER TYPE userrole RENAME TO userrole_old;
         CREATE TYPE userrole AS ENUM ('admin', 'member');

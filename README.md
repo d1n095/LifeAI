@@ -41,23 +41,29 @@ och/eller embedding.
 
 ## Inloggning och konton
 
-Vid första uppstart skapas automatiskt ett admin-konto från `ADMIN_EMAIL`/`ADMIN_PASSWORD` i
-`.env` (förverifierat — inget e-postflöde behövs för det). Alla andra konton skapas via
-`POST /api/auth/register` eller sidan `/register`, och måste verifieras via en engångslänk
-skickad till e-postadressen innan inloggning är möjlig alls (se
-`docs/AUTH_THREAT_MODEL.md`).
+MainAI är Founder AI, inte en delad eller per-användare-assistent — se
+`docs/FOUNDER_KNOWLEDGE_BOOTSTRAP.md`. Vid första uppstart skapas automatiskt det enda
+grundarkontot från `FOUNDER_EMAIL`/`FOUNDER_PASSWORD` i `.env` (förverifierat — inget
+e-postflöde behövs för det, se `backend/app/bootstrap.py`). Publik självregistrering är
+avstängd (`POST /api/auth/register` ger 404 när `ENVIRONMENT=production`, och det finns
+ingen `/register`-sida) — se `backend/app/deps.py`s `require_founder()`, som varje skyddad
+rutt (chat, konversationer, dokument, kunskap, projekt, admin) kräver server-side, inte bara
+en UI-spärr.
 
 Sessionen levereras helt via `HttpOnly`/`Secure`-cookies (`POST /api/auth/login`) — det finns
 inget klientläsbart token att skicka som `Authorization`-header, och inget lagras i
 `localStorage`/`sessionStorage` (se `docs/AUTH_THREAT_MODEL.md` och
 `docs/SECURITY_BLOCKERS.md`). Alla API-routrar utom `/api/health` och `/api/auth/*` kräver
-inloggning; `/api/admin/*` kräver dessutom adminroll.
+inloggning; MainAI-ytan (`/api/chat`, `/api/conversations`, `/api/documents`,
+`/api/knowledge/*`, `/api/projects`, `/api/admin/*`) kräver dessutom grundarkontot specifikt
+(`require_founder()` i `backend/app/deps.py`) — se "Inloggning och konton" ovan.
 
-Frontend har egna sidor för inloggning (`/login`), registrering (`/register`),
-e-postverifiering (`/verify-email`), glömt lösenord (`/forgot-password`),
-lösenordsåterställning (`/reset-password`) och kontohantering (`/account` — export, utloggning
-från alla enheter, permanent radering). Alla sidor utom dessa är skyddade av `AuthGuard` —
-obehörig eller utgången session skickar tillbaka till `/login` automatiskt (med en transparent
+Frontend har egna sidor för inloggning (`/login`), e-postverifiering (`/verify-email`), glömt
+lösenord (`/forgot-password`), lösenordsåterställning (`/reset-password`) och kontohantering
+(`/account` — export, utloggning från alla enheter, permanent radering). `/register` finns
+kvar som en tom väg som omdirigerar till `/login` — ingen registreringssida renderas. Alla
+sidor utom login-/verifierings-/återställningsflödet är skyddade av `AuthGuard` — obehörig
+eller utgången session skickar tillbaka till `/login` automatiskt (med en transparent
 förnyelse av access-token vid behov, inte en direkt utloggning).
 
 ## Konfigurera AI-leverantörer
