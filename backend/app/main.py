@@ -58,6 +58,8 @@ def on_startup():
     # here too as an idempotent safety net (cheap no-op if already applied) — see app/rls.py.
     apply_rls(migration_engine)
 
+    _check_smtp_mode()
+
     if settings.environment == "production":
         _check_smtp_configured()
 
@@ -76,6 +78,23 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     stop_scheduler()
+
+
+def _check_smtp_mode() -> None:
+    """STARTTLS (smtp_use_tls, plaintext-then-upgrade — typically port 587) and implicit
+    TLS/SSL (smtp_use_ssl, TLS from the first byte — typically port 465, e.g. Strato's
+    smtp.strato.com:465) are two different wire protocols selected by app/email.py's
+    _send_via_smtp(); a server only speaks one of them on a given port, so both flags true is
+    a real misconfiguration, not a harmless redundancy. Fail at startup, not on the first
+    delivery attempt."""
+    if settings.smtp_host and settings.smtp_use_tls and settings.smtp_use_ssl:
+        raise RuntimeError(
+            "SMTP_USE_TLS och SMTP_USE_SSL är båda satta till true. De är ömsesidigt "
+            "uteslutande anslutningslägen (STARTTLS respektive implicit TLS/SSL) — välj "
+            "exakt ett beroende på vad SMTP-servern på SMTP_PORT faktiskt talar. "
+            "T.ex. Strato: port 465 => SMTP_USE_SSL=true, SMTP_USE_TLS=false. "
+            "Port 587 (de flesta andra) => SMTP_USE_TLS=true, SMTP_USE_SSL=false."
+        )
 
 
 def _check_smtp_configured() -> None:
