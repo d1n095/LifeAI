@@ -182,8 +182,12 @@ repo-administratörsåtgärd):
 4. (Rekommenderat) Kryssa även i "Require branches to be up to date before merging".
 
 Efter `all-checks-passed` finns även `deploy-render`, som anropar Render-tjänsternas Deploy
-Hook-URL:er (om de är satta som repo-secrets) — den enda vägen en Render-deploy triggas på för
-den här stacken. Se `docs/RENDER_DEPLOY.md`.
+Hook-URL:er (om de är satta som repo-secrets) — det är vägen en Render-deploy triggas på via
+GitHub Actions. **Detta är inte nödvändigtvis den enda vägen**: om ett Render Blueprint är
+länkat mot repot med Auto Sync påslaget kan Render själv applicera `render.yaml`-ändringar
+(inklusive ett runtime-byte) direkt vid push till den länkade branchen, oberoende av
+GitHub Actions och oberoende av om deploy-hook-secreten är satt. Se avsnittet om Auto Sync i
+`docs/RENDER_DEPLOY.md` innan du pushar ändringar till `render.yaml`.
 
 ## Incidenthantering
 

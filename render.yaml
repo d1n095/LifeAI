@@ -1,9 +1,18 @@
 # Render Blueprint — single-container, 0 kr/mån MVP deployment.
 #
-# ONE Render Free web service (`LifeAI`, matching the already-live
-# https://lifeai-1.onrender.com — Blueprint adoption matches by this exact name field, see
-# docs/RENDER_DEPLOY.md). No separate backend service — Render Free doesn't offer a Private
-# Service plan, and paying for a second service defeats the point of this architecture.
+# ONE Render Free web service (`LifeAI-1` — this is the service's REAL name as it exists in the
+# Render dashboard today, confirmed by direct inspection 2026-07-19, serving
+# https://lifeai-1.onrender.com). An earlier version of this file used `LifeAI` (without the
+# `-1`), on the assumption that Render's hostname-uniqueness suffix ("lifeai" was taken, so the
+# platform gave it the `lifeai-1` hostname) left the dashboard *name* unsuffixed. That assumption
+# was wrong — the dashboard name itself is `LifeAI-1`. Render Blueprint sync matches an existing
+# service by this exact `name` field; if it doesn't match, Render creates a NEW service instead
+# of adopting the existing one (Render's own documented behavior appends a numeric suffix to the
+# new resource specifically to avoid a collision with an existing same-named one — plausibly
+# exactly how the live service ended up suffixed `-1` in the first place, from an earlier sync
+# attempt against a mismatched Blueprint). See docs/RENDER_DEPLOY.md for the full account and
+# citations. No separate backend service — Render Free doesn't offer a Private Service plan, and
+# paying for a second service defeats the point of this architecture.
 #
 # Next.js and FastAPI run as sibling processes INSIDE this one container
 # (Dockerfile.combined, scripts/entrypoint-combined.sh): Next.js binds publicly to $PORT,
@@ -23,14 +32,14 @@
 
 services:
   - type: web
-    name: LifeAI
+    name: LifeAI-1
     runtime: docker
     dockerfilePath: ./Dockerfile.combined
     dockerContext: .
     plan: free # verify this exact plan slug in the Render dashboard before applying — Postgres's "starter" plan name turned out to be legacy/rejected, confirm "free" is still current for web services too
     region: oregon
     branch: claude/det-kommer-mer-879lcm
-    autoDeploy: false # see .github/workflows/ci.yml's deploy-render job — deploys only after CI is green
+    autoDeploy: false # see .github/workflows/ci.yml's deploy-render job — deploys only after CI is green. This field does NOT cover a Render Blueprint's own "Auto Sync" setting, which is a separate mechanism that can apply config (including a runtime change) and deploy on a push to this same branch independent of GitHub Actions — confirm Auto Sync is Off (manual sync) before ever pushing a change to this file. See docs/RENDER_DEPLOY.md.
     healthCheckPath: /api/health # deliberately checks the whole chain (Next.js -> loopback -> FastAPI -> Supabase/Upstash) — see backend/app/routers/health.py. Safe here specifically because scripts/entrypoint-combined.sh links both processes' lifecycle: if FastAPI is the reason this fails, the entrypoint already tears the whole container down on its own, so Render restarting on a failed health check isn't fighting that design, it's the same signal twice.
     envVars:
       - key: ENVIRONMENT
