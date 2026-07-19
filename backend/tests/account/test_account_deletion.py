@@ -1,4 +1,8 @@
 from app.models.conversation import Conversation, Message
+from app.models.document import Document, DocumentSource
+from app.models.document_chunk import DocumentChunk
+from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.knowledge_version import KnowledgeVersion
 from app.models.project import Project
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
@@ -150,3 +154,45 @@ def test_deletion_is_rolled_back_atomically_on_mid_transaction_failure(
     # The account is still fully usable afterward — the failure didn't corrupt state.
     me = client.get("/api/auth/me")
     assert me.status_code == 200
+
+
+def test_deletion_removes_documents_and_knowledge_data_outright(client, superuser_db, make_verified_user):
+    """Regression test: migration 0006 (Founder Knowledge Studio v1) made `documents`
+    RLS-protected and owner-scoped, which means the old anonymize-uploaded_by-to-NULL
+    behavior this endpoint used to have would now be rejected outright by the
+    documents_isolation policy's WITH CHECK (NULL never matches any current_user_id) —
+    see app/routers/account.py's delete_account(). Confirms both that account deletion still
+    succeeds (doesn't crash under the new RLS policy) AND that documents/chunks/versions/
+    import jobs are genuinely gone afterward, not silently left as orphaned, permanently
+    RLS-hidden rows."""
+    user, password = make_verified_user(email="deleteme-with-docs@example.com")
+    user_id = user.id
+    csrf = _login_and_get_csrf(client, "deleteme-with-docs@example.com", password)
+
+    from app.config import get_settings
+
+    embedding_dim = get_settings().embedding_dim
+
+    document = Document(title="Mitt dokument", source=DocumentSource.upload, uploaded_by=user_id)
+    superuser_db.add(document)
+    superuser_db.commit()
+    document_id = document.id
+
+    superuser_db.add(
+        DocumentChunk(
+            document_id=document_id, owner_id=user_id, chunk_index=0, text="chunk", embedding=[0.1] * embedding_dim
+        )
+    )
+    superuser_db.add(
+        KnowledgeVersion(source_id=document_id, owner_id=user_id, version_number=1, checksum="c" * 64, extraction_version="v1")
+    )
+    superuser_db.add(ImportJob(owner_id=user_id, status=ImportJobStatus.completed, source_filename="test.zip"))
+    superuser_db.commit()
+
+    res = client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+
+    assert superuser_db.query(Document).filter_by(id=document_id).first() is None
+    assert superuser_db.query(DocumentChunk).filter_by(document_id=document_id).count() == 0
+    assert superuser_db.query(KnowledgeVersion).filter_by(source_id=document_id).count() == 0
+    assert superuser_db.query(ImportJob).filter_by(owner_id=user_id).count() == 0

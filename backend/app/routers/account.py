@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("mainai.account")
@@ -13,10 +14,14 @@ from app.limiter import limiter
 from app.models.audit import AuditLog
 from app.models.conversation import Conversation, Message
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
+from app.models.import_job import ImportJob
+from app.models.knowledge_version import KnowledgeVersion
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.refresh_token import RefreshToken
+from app.models.source_relationship import SourceRelationship
 from app.models.usage import UsageLog
 from app.models.user import User
 from app.schemas import DeleteAccountIn
@@ -129,7 +134,32 @@ def delete_account(
         # still rely on (same reasoning as app/rls.py's access-control model for these tables).
         db.query(Project).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
         db.query(Task).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
-        db.query(Document).filter_by(uploaded_by=user_id).update({"uploaded_by": None}, synchronize_session=False)
+
+        # Documents (Founder Knowledge Studio): unlike Project/Task, these are now
+        # owner-scoped, RLS-protected personal/founder data (migration 0006 — see
+        # app/models/document.py's docstring), not shared company knowledge — anonymizing
+        # uploaded_by to NULL would both violate the new documents_isolation RLS policy's
+        # WITH CHECK (NULL never matches any current_user_id) and, even if it didn't, would
+        # just leave permanently unreadable orphan rows instead of a clean deletion. Deleted
+        # outright instead, same as conversations above. document_chunks/knowledge_versions/
+        # source_relationships all have ON DELETE CASCADE or ondelete="CASCADE" back to
+        # documents.id (see those models) so this single delete is enough for the bulk of
+        # them, but knowledge_import_jobs has no FK to documents (a job outlives the
+        # documents it created, e.g. to show "3 succeeded, 1 failed" after a partial import)
+        # so it's deleted explicitly by owner_id here too.
+        document_ids = [row.id for row in db.query(Document.id).filter_by(uploaded_by=user_id).all()]
+        if document_ids:
+            db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(document_ids)).delete(synchronize_session=False)
+            db.query(KnowledgeVersion).filter(KnowledgeVersion.source_id.in_(document_ids)).delete(synchronize_session=False)
+            db.query(SourceRelationship).filter(
+                or_(
+                    SourceRelationship.from_source_id.in_(document_ids),
+                    SourceRelationship.to_source_id.in_(document_ids),
+                )
+            ).delete(synchronize_session=False)
+            db.query(Document).filter_by(uploaded_by=user_id).delete(synchronize_session=False)
+        db.query(ImportJob).filter_by(owner_id=user_id).delete(synchronize_session=False)
+
         db.query(UsageLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.

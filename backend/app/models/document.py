@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,6 +14,7 @@ class DocumentSource(str, enum.Enum):
     website = "website"
     code = "code"
     manual = "manual"
+    zip_import = "zip_import"
 
 
 class IndexStatus(str, enum.Enum):
@@ -21,6 +22,31 @@ class IndexStatus(str, enum.Enum):
     indexing = "indexing"
     indexed = "indexed"
     failed = "failed"
+
+
+class ActiveTruthStatus(str, enum.Enum):
+    """Founder Knowledge Studio's epistemic status — deliberately separate from IndexStatus
+    (which is purely technical: has this been chunked/embedded yet). A document can be fully
+    `indexed` and still be `historical` or `disputed`: whether MainAI is allowed to treat its
+    content as current fact is a content-classification decision, not a pipeline-progress
+    one. See docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md and app/rag/trust.py, which is the actual
+    enforcement point — chat.py must never let a `historical`/`superseded`/`disputed` source
+    be presented as settled fact just because it scored well on similarity."""
+
+    active = "active"
+    historical = "historical"
+    proposed = "proposed"
+    superseded = "superseded"
+    disputed = "disputed"
+
+
+class KnowledgeClassification(str, enum.Enum):
+    vision = "vision"
+    architecture = "architecture"
+    decisions = "decisions"
+    history = "history"
+    security = "security"
+    general = "general"
 
 
 class Document(Base):
@@ -39,3 +65,25 @@ class Document(Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # --- Founder Knowledge Studio v1 fields (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) ---
+    checksum: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # sha256 hex
+    media_type: Mapped[str | None] = mapped_column(String(96), nullable=True)  # MIME-ish, e.g. "application/pdf"
+    original_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    classification: Mapped[KnowledgeClassification] = mapped_column(
+        Enum(KnowledgeClassification), default=KnowledgeClassification.general
+    )
+    active_truth_status: Mapped[ActiveTruthStatus] = mapped_column(
+        Enum(ActiveTruthStatus), default=ActiveTruthStatus.active
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
+    import_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_import_jobs.id"), nullable=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer, default=1)
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Soft delete: see app/routers/library.py's delete_source. A hard DELETE would also work
+    # RLS-wise, but soft delete lets a deletion be audited/undone before the next scheduled
+    # cleanup, matching the founder's explicit "radering med tydlig bekräftelse" requirement
+    # without making it irreversible at the database layer the instant it's clicked.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
