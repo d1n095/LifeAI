@@ -1,16 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
+import { ATTACKER_URL, FRONTEND_URL } from "./e2e/urls";
 
-// Frontend and backend deliberately use DIFFERENT hostnames here (127.0.0.1 vs localhost),
-// not just different ports — that's what makes this a genuine cross-origin setup, matching
-// production (frontend and backend as separate services) and exercising the parts of the
-// cookie/CSRF design that only matter cross-origin. See docs/AUTH_THREAT_MODEL.md.
+// FRONTEND_URL/ATTACKER_URL live in ./e2e/urls.ts (env-overridable — see that file's comment
+// for why there's no BACKEND_URL here at all: every spec now talks to the backend exclusively
+// through the frontend's own same-origin proxy). Re-exported here so existing
+// `from "../playwright.config"` imports in the spec files keep working unchanged.
+export { ATTACKER_URL, FRONTEND_URL };
+
 const FRONTEND_PORT = 3020;
-const BACKEND_PORT = 8010;
 const ATTACKER_PORT = 9099;
-
-export const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
-export const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
-export const ATTACKER_URL = `http://127.0.0.1:${ATTACKER_PORT}`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -40,6 +38,13 @@ export default defineConfig({
       url: FRONTEND_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
+      // Same-origin proxy mode (see frontend/app/api/[...path]/route.ts) — the browser only
+      // ever calls this server's own /api/*, never the backend directly. Matches how every
+      // real deployment (Docker Compose, the combined Render container) actually works, so
+      // this build must NOT set NEXT_PUBLIC_API_URL (see frontend/lib/api.ts's comment on
+      // that var). E2E_INTERNAL_API_URL overrides where the proxy forwards to; defaults to
+      // where backend/scripts/run_e2e_backend.py listens.
+      env: { INTERNAL_API_URL: process.env.E2E_INTERNAL_API_URL || "http://127.0.0.1:8010" },
     },
     {
       command: `node e2e/attacker-server.js`,

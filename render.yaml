@@ -1,141 +1,73 @@
-# Render Blueprint for the full MainAI / Life OS web stack: PostgreSQL, Redis, Qdrant, the
-# FastAPI backend, and the Next.js frontend — service name `LifeAI` (see below), matching the
-# frontend web service that's already live at https://lifeai-1.onrender.com (that hostname,
-# not "LifeAI", so applying this Blueprint adopts/reconciles with the existing service
-# instead of creating a duplicate).
+# Render Blueprint — single-container, 0 kr/mån MVP deployment.
 #
-# Same-origin architecture: the browser only ever talks to lifeai-1.onrender.com. It calls
-# /api/*, which lifeai-1's own Next.js server proxies to mainai-backend server-side (see
-# frontend/app/api/[...path]/route.ts) over Render's private network. mainai-backend is a
-# Private Service below — it has NO public URL at all, is unreachable from the public
-# internet by design, and its address is never present in the client bundle. This also
-# sidesteps cross-origin cookie handling entirely: the session cookie the backend sets
-# arrives at the browser as same-origin (see that route.ts file's comments and
-# docs/RENDER_DEPLOY.md).
+# ONE Render Free web service (`LifeAI`, matching the already-live
+# https://lifeai-1.onrender.com — Blueprint adoption matches by this exact name field, see
+# docs/RENDER_DEPLOY.md). No separate backend service — Render Free doesn't offer a Private
+# Service plan, and paying for a second service defeats the point of this architecture.
 #
-# NOTHING in this file deploys anything by itself. Applying a Blueprint in the Render
-# dashboard is a deliberate, explicit action the operator takes — see docs/RENDER_DEPLOY.md
-# for the exact click-path and every environment variable that needs a real value before
-# first deploy.
+# Next.js and FastAPI run as sibling processes INSIDE this one container
+# (Dockerfile.combined, scripts/entrypoint-combined.sh): Next.js binds publicly to $PORT,
+# FastAPI binds only to 127.0.0.1:8000 — unreachable from outside the container by
+# construction, without needing Render's Private Service type at all. The browser only ever
+# talks to this one service; frontend/app/api/[...path]/route.ts proxies to FastAPI over
+# loopback (INTERNAL_API_URL=http://127.0.0.1:8000).
 #
-# Deploys are intentionally NOT triggered by pushes to Render directly (autoDeploy: false
-# below) — see the `deploy-render` job in .github/workflows/ci.yml, which is the only thing
-# that ever calls Render's deploy hooks, and only after "All required checks passed" is
-# green on this branch. Until RENDER_BACKEND_DEPLOY_HOOK_URL / RENDER_FRONTEND_DEPLOY_HOOK_URL
-# are added as GitHub Actions secrets (a separate, explicit step — see docs/RENDER_DEPLOY.md),
-# that job is a safe no-op.
-
-databases:
-  - name: mainai-postgres
-    databaseName: lifeos
-    user: mainai_admin
-    plan: basic-256mb # smallest current paid Postgres tier — "starter" is a legacy plan name Render's Blueprint validator now rejects for new databases (confirmed by the actual validator, not guessed). Free Postgres expires after 30 days, unsuitable for a real deploy — confirm current pricing in the dashboard.
-    region: oregon # keep every service in the same region — cross-region traffic is slower and private networking isn't guaranteed to work across regions
-    postgresMajorVersion: "16"
-    ipAllowList: [] # no direct external access; the backend reaches this over Render's private network via DATABASE_URL below. Add your own IP temporarily in the dashboard if you need direct psql access.
+# PostgreSQL (with pgvector) and Redis are NOT Render-managed here — Supabase Free and
+# Upstash Free respectively, both external, both sync:false (real values entered manually,
+# never committed). Qdrant is gone entirely — replaced by pgvector
+# (backend/app/models/document_chunk.py, backend/app/rag/vector_store.py).
+#
+# NOTHING in this file deploys anything by itself — see docs/RENDER_DEPLOY.md for the
+# click-path and every variable that needs a real value before first deploy. Deploys are
+# still gated on CI (.github/workflows/ci.yml's deploy-render job), not a bare push.
 
 services:
-  - type: redis
-    name: mainai-redis
-    plan: starter # paid tier, for persistence — see docs/RENDER_DEPLOY.md
-    region: oregon
-    ipAllowList: [] # no direct external access — only mainai-backend needs this, over the private network
-    maxmemoryPolicy: noeviction # rate-limit counters (app/limiter.py) should error loudly rather than be silently evicted mid-window
-
-  # Vector DB for the knowledge/RAG features (app/rag/qdrant_store.py) — the storage the code
-  # actually requires beyond Postgres/Redis (see QDRANT_URL / QDRANT_COLLECTION in
-  # app/config.py). No native managed Qdrant offering on Render, so this runs the same
-  # official image docker-compose.yml uses locally, as a private, disk-backed service — never
-  # publicly reachable, only from mainai-backend over the private network. Verify Render's
-  # `runtime: image` Blueprint syntax and disk billing in the dashboard before applying — I
-  # could not reach render.com from this environment to confirm the exact current schema.
-  - type: pserv
-    name: mainai-qdrant
-    runtime: image
-    image:
-      url: docker.io/qdrant/qdrant:v1.11.5
-    plan: starter
-    region: oregon
-    disk:
-      name: qdrant-data
-      mountPath: /qdrant/storage
-      sizeGB: 10 # adjust to your actual document/knowledge-base volume
-
-  # Private Service — deliberately NOT type: web. No public URL, no public ingress at all;
-  # only reachable from other services in this Blueprint over Render's private network (by
-  # this service's name, e.g. http://mainai-backend:8000 — see INTERNAL_API_URL on lifeai-1
-  # below). This is what makes trusting X-Forwarded-For unconditionally
-  # (backend/Dockerfile's --forwarded-allow-ips=*) safe: the only thing that can ever connect
-  # here is lifeai-1's proxy route.
-  #
-  # No healthCheckPath: Render's Blueprint validator rejects it on type: pserv ("pserv service
-  # type cannot have a health check path") — confirmed by the actual validator, not assumed.
-  # Health/liveness for this service is checked indirectly instead: the frontend's own
-  # healthCheckPath (/login) doesn't depend on it, but /api/health is still reachable through
-  # lifeai-1's proxy for manual verification (see docs/RENDER_DEPLOY.md), and Render still
-  # restarts a pserv container that crashes even without an HTTP health check configured.
-  - type: pserv
-    name: mainai-backend
+  - type: web
+    name: LifeAI
     runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    plan: starter
+    dockerfilePath: ./Dockerfile.combined
+    dockerContext: .
+    plan: free # verify this exact plan slug in the Render dashboard before applying — Postgres's "starter" plan name turned out to be legacy/rejected, confirm "free" is still current for web services too
     region: oregon
     branch: claude/det-kommer-mer-879lcm
     autoDeploy: false # see .github/workflows/ci.yml's deploy-render job — deploys only after CI is green
+    healthCheckPath: /api/health # deliberately checks the whole chain (Next.js -> loopback -> FastAPI -> Supabase/Upstash) — see backend/app/routers/health.py. Safe here specifically because scripts/entrypoint-combined.sh links both processes' lifecycle: if FastAPI is the reason this fails, the entrypoint already tears the whole container down on its own, so Render restarting on a failed health check isn't fighting that design, it's the same signal twice.
     envVars:
       - key: ENVIRONMENT
         value: production
       - key: SECRET_KEY
         generateValue: true # signs JWTs — platform-generated, never committed (app/config.py)
+
       - key: ADMIN_EMAIL
-        sync: false # bootstrap admin account, created on first startup only if no users exist yet (app/bootstrap.py)
+        sync: false
       - key: ADMIN_PASSWORD
         sync: false
 
-      # Two-role Postgres model (see README.md "Row-Level Security" and
-      # backend/db-init/01-app-role.sh): DATABASE_URL is the admin/owner role Render creates
-      # for you, used only for migrations and enabling RLS. Managed Postgres gives you no way
-      # to provision a second, RLS-respecting role via this file — MAINAI_APP_PASSWORD is
-      # generated here and backend/scripts/ensure_app_role.py uses it, together with
-      # DATABASE_URL, to create that second role (`mainai_app`) itself at container start,
-      # before `alembic upgrade head` (see backend/docker-entrypoint.sh). APP_DATABASE_URL is
-      # deliberately NOT listed here — it's computed then, not set as a literal value.
+      # Supabase Free Postgres (with pgvector) — external, not Render-managed, so Render
+      # can't auto-wire these via fromDatabase the way it could for its own managed
+      # Postgres. Enter Supabase's DIRECT connection string (port 5432), not their pooled
+      # pgbouncer one (port 6543) — backend/scripts/ensure_app_role.py's role-creation SQL
+      # and Alembic's DDL need session-level operations pgbouncer's transaction pooling
+      # mode doesn't reliably support. See docs/RENDER_DEPLOY.md.
       - key: DATABASE_URL
-        fromDatabase:
-          name: mainai-postgres
-          property: connectionString
+        sync: false
       - key: MAINAI_APP_PASSWORD
-        generateValue: true
+        generateValue: true # backend/scripts/ensure_app_role.py still runs the same way against Supabase's direct connection — only WHERE it points changed, not the mechanism
 
+      # Upstash Free Redis — external, sync:false for the same reason as DATABASE_URL above.
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: mainai-redis
-          property: connectionString
+        sync: false
 
-      # mainai-qdrant has no public URL (pserv) — reachable only by private-network service
-      # name. Verify the exact internal port Render exposes for an image-based pserv (should
-      # be Qdrant's default 6333) in the dashboard once created.
-      - key: QDRANT_URL
-        value: http://mainai-qdrant:6333
+      # Loopback only — the whole point of this architecture (see top-of-file comment).
+      # Not a secret, so a literal value, not sync:false.
+      - key: INTERNAL_API_URL
+        value: http://127.0.0.1:8000
 
-      # CORS allow-list (app/main.py). Now mostly a defense-in-depth/documentation artifact:
-      # since mainai-backend has no public URL at all, nothing outside Render's private
-      # network — including a browser, including Vercel — can reach it directly regardless of
-      # this list; the only path in is lifeai-1's server-side proxy, which sends no Origin
-      # header (that's a browser-only concept), so CORS doesn't even apply to it. Kept
-      # accurate anyway in case the backend is ever also exposed publicly again.
       - key: FRONTEND_ORIGINS
         value: https://lifeai-1.onrender.com
-      # Used only to build links inside verification/reset emails (app/config.py).
       - key: PUBLIC_APP_URL
         value: https://lifeai-1.onrender.com
 
-      # Already the secure default in app/config.py — listed explicitly so the production
-      # value is visible here rather than implicit. Do not weaken these; SameSite=None still
-      # works correctly even though cookies are same-origin in practice now (see lifeai-1's
-      # proxy route) — it's a superset, not a conflict.
       - key: COOKIE_SECURE
         value: "true"
       - key: COOKIE_SAMESITE
@@ -143,9 +75,9 @@ services:
       - key: REFRESH_TOKEN_EXPIRE_DAYS
         value: "14"
 
-      # SMTP is mandatory in production (app/main.py's _check_smtp_configured) — the backend
-      # now refuses to start with ENVIRONMENT=production and no SMTP_HOST, rather than
-      # silently dropping verification/reset emails.
+      # SMTP is mandatory in production (app/main.py's _check_smtp_configured). Use a free
+      # transactional email provider (e.g. Resend or Brevo's free tier) — see
+      # docs/RENDER_DEPLOY.md for the exact free-tier constraints to check before picking one.
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
@@ -160,8 +92,6 @@ services:
         sync: false
       - key: SMTP_FROM_NAME
         value: MainAI / Life OS
-      # DEV_MAIL_OUTBOX_DIR is deliberately absent — app/email.py refuses to use it outside
-      # ENVIRONMENT=production anyway, but it must never even be set here.
 
       - key: TOKEN_CLEANUP_RETENTION_DAYS
         value: "30"
@@ -190,29 +120,3 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
-
-  # Service NAME is `LifeAI` — deliberately not `lifeai-1`. Blueprint adoption matches an
-  # existing service by this exact name field, and the real, already-live service (verified
-  # in the Render dashboard) is named `LifeAI`; its assigned public hostname
-  # (lifeai-1.onrender.com) is a separate, derived value Render picked because the plain
-  # `lifeai` slug was already taken — the hostname is not the service name. Naming this
-  # `lifeai-1` here would not match that service at all and would create a second, duplicate
-  # frontend on Apply.
-  - type: web
-    name: LifeAI
-    runtime: docker
-    dockerfilePath: ./frontend/Dockerfile
-    dockerContext: ./frontend
-    plan: starter
-    region: oregon
-    branch: claude/det-kommer-mer-879lcm
-    autoDeploy: false # see .github/workflows/ci.yml's deploy-render job
-    healthCheckPath: /login # always public (unauthenticated), unlike / which client-side-redirects under AuthGuard — and independent of backend health, unlike proxying through /api/health would be
-    envVars:
-      # NEXT_PUBLIC_API_URL is deliberately NOT set here — see frontend/lib/api.ts and
-      # frontend/Dockerfile. The browser calls this service's own /api/* (same origin);
-      # INTERNAL_API_URL below is what the Next.js *server* (not the browser) uses to reach
-      # mainai-backend, over Render's private network, by service name. It's a plain runtime
-      # env var — never baked into the client bundle, unlike NEXT_PUBLIC_* values.
-      - key: INTERNAL_API_URL
-        value: http://mainai-backend:8000
