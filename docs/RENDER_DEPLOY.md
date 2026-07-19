@@ -6,11 +6,30 @@ hela stacken: Next.js-frontend och FastAPI-backend som syskonprocesser i **samma
 mot en extern Postgres (Supabase Free, med pgvector) och extern Redis (Upstash Free). Mål:
 0 kr/månad.
 
-**Den faktiska live-adressen är `https://lifeai-1.onrender.com`** — en webbtjänst som redan
-finns i Render (namnet i dashboarden är `LifeAI`; `lifeai-1` är bara hostnamnet Render
-tilldelade eftersom slugen `lifeai` redan var upptagen). `render.yaml`s enda tjänst heter
-därför `LifeAI` (skiftlägeskänsligt), inte `lifeai-1` — annars adopterar Blueprintet inte den
-befintliga tjänsten utan skapar en dubblett.
+**Den faktiska live-adressen är `https://lifeai-1.onrender.com`.** Tidigare versioner av det
+här dokumentet och `render.yaml` antog att dashboard-*namnet* var `LifeAI` (utan `-1`) och att
+`-1` bara var ett hostnamnstillägg Render la på eftersom slugen `lifeai` redan var upptagen. Det
+antagandet var **fel** — grundaren har verifierat direkt i Render-dashboarden (2026-07-19) att
+tjänstens faktiska namn är `LifeAI-1`. `render.yaml`s enda tjänst heter därför `LifeAI-1`
+(skiftlägeskänsligt) för att matcha exakt.
+
+Varför namnet troligen blev `LifeAI-1` i första hand: enligt Renders egen dokumentation lägger
+Render till ett suffix på en *ny* resurs specifikt för att undvika en namnkrock med en redan
+existerande resurs, när ett Blueprint syncas mot ett namn som redan är upptaget
+(https://render.com/docs/infrastructure-as-code). Det är en trolig förklaring till att den
+levande tjänsten fick suffixet `-1` — ett tidigare syncförsök mot ett Blueprint som (liksom
+detta dokument tidigare gjorde) angav `name: LifeAI` utan `-1`. Detta är en rimlig förklaring
+grundad i Renders dokumenterade beteende, inte en bekräftad logg av vad som faktiskt hände i det
+här kontot.
+
+**Viktigt att verifiera innan Blueprintet syncas mot den här filen:** grundaren har även
+observerat att den befintliga tjänsten just nu kör som en **Node-tjänst, inte Docker** — Root
+Directory `frontend`, Build Command `npm ci && npm run build`, Start Command `npm start`. Det är
+den äldre, separata frontend-arkitekturen (se historiken i denna fil), inte den kombinerade
+containern. `render.yaml` anger `runtime: docker`, `dockerfilePath: ./Dockerfile.combined`,
+`dockerContext: .` (repo-roten, inget Root Directory-fält behövs i själva filen) — men det krävs
+en verklig runtime-övergång i Render för att den befintliga tjänsten faktiskt ska byta från
+Node till Docker. Se "Klick-steg i Render" nedan för hur den övergången görs säkert.
 
 ## Varför en enda container, inte separat frontend/backend
 
@@ -31,7 +50,7 @@ processer i **samma** container (`Dockerfile.combined`,
   bara att båda ändarna nu råkar dela process-namespace istället för att prata över Renders
   interna nätverk mellan två tjänster.
 
-Det finns bara **en** tjänst i `render.yaml`: `LifeAI`, `plan: free`. Ingen
+Det finns bara **en** tjänst i `render.yaml`: `LifeAI-1`, `plan: free`. Ingen
 `mainai-backend`-tjänst ska någonsin skapas separat — det vore både en extra kostnad och
 onödigt, eftersom loopback-bindningen redan ger samma isolering.
 
@@ -179,11 +198,47 @@ anropar tjänstens **Deploy Hook**-URL via `RENDER_DEPLOY_HOOK_URL`, en GitHub A
 
 ## Klick-steg i Render
 
-**Inget har ännu ändrats i Render-dashboarden för den här arkitekturen.** Föregående fas av
-det här arbetet (dokumenterad i git-historiken) löste ett annat problem — `Root Directory` för
-den då separata frontend-tjänsten. Den lösningen är inte längre relevant: det finns nu bara en
-tjänst, och `Dockerfile.combined` ligger i repo-roten (`dockerfilePath: ./Dockerfile.combined`,
-`dockerContext: .`), så inget särskilt Root Directory-steg ska behövas för den här arkitekturen.
+**Status 2026-07-19, verifierat direkt av grundaren i dashboarden:** den befintliga tjänsten
+`LifeAI-1` kör i dagsläget som en Node-tjänst (Root Directory `frontend`, Build Command
+`npm ci && npm run build`, Start Command `npm start`) — **inte** den kombinerade
+Docker-containern som `render.yaml` beskriver. Alla nödvändiga secrets är redan manuellt
+sparade på tjänsten. Det som återstår är att faktiskt byta tjänstens runtime till Docker och
+peka den på `Dockerfile.combined`.
+
+### Två olika mekanismer i Render — vet vilken du använder
+
+1. **Tjänstens egen "Update Source"-dialog** (Settings → Build & Deploy på den befintliga
+   tjänsten). Grundaren har observerat att den här dialogen erbjuder `Runtime: Docker` men
+   **inget fält för Dockerfile Path**, och knappen heter direkt "Deploy" — dvs. den kan byta
+   runtime men verkar inte kunna peka ut `./Dockerfile.combined`, och trycker du på knappen
+   startar den sannolikt en deploy omedelbart.
+2. **Render Blueprint-sync** (via `render.yaml` i det här repot). Blueprint-synken läser
+   `dockerfilePath`/`dockerContext` direkt ur filen och kan enligt Renders egen changelog byta
+   en befintlig tjänsts runtime (Node → Docker) genom att bara ändra `runtime`-fältet och
+   synca — se https://render.com/changelog/change-an-existing-services-runtime-via-api-or-blueprint.
+   Det är alltså **Blueprint-synken, inte "Update Source"-dialogen**, som är rätt väg för att
+   få med `dockerfilePath` korrekt.
+
+### Innan Blueprintet syncas — verifiera detta i dashboarden (kritiskt, kan annars trigga en
+### oavsiktlig deploy)
+
+Render Blueprints har en egen **Auto Sync**-inställning (Blueprint → Settings) som, om den är
+påslagen, applicerar `render.yaml`-ändringar (inklusive en runtime-övergång) **automatiskt vid
+varje push till den länkade branchen** — oberoende av GitHub Actions och oberoende av att
+`RENDER_DEPLOY_HOOK_URL` saknas som secret. `render.yaml`s eget `autoDeploy: false`-fält
+täcker *inte* detta — det gäller bara "ny commit på branchen" via tjänstens vanliga
+deploy-mekanism, inte ett Blueprint-syncat konfigurationsbyte.
+
+**Innan nästa push av den här filen till `claude/det-kommer-mer-879lcm`:**
+
+1. Kontrollera i Render-dashboarden om ett Blueprint redan är länkat mot det här repot/den här
+   branchen. Om ja: kontrollera Blueprintets **Auto Sync**-inställning.
+2. Om Auto Sync är påslagen: stäng av den (sätt till manuell sync) innan koden pushas, så att
+   push av den rättade `render.yaml` inte i sig triggar runtime-bytet och en deploy.
+3. Om inget Blueprint är länkat än: runtime-bytet sker inte förrän du själv initierar en
+   Blueprint-sync i dashboarden — då finns ingen push-triggad risk, men bekräfta ändå att
+   "New → Blueprint" i Render pekar mot rätt repo/branch och **adopterar** `LifeAI-1` (matchar
+   på namnet) istället för att föreslå en ny tjänst, innan du bekräftar synken.
 
 **Följande krävs innan Blueprintet kan appliceras, och görs ett steg i taget — invänta
 bekräftelse innan nästa:**
@@ -194,10 +249,16 @@ bekräftelse innan nästa:**
 3. Bekräfta i Render-dashboarden att `plan: free` faktiskt är den aktuella plan-slugen för
    webbtjänster (Postgres-planen `starter` visade sig vara ett föråldrat namn under det här
    arbetet — samma typ av namnbyte kan gälla här, verifierat först).
-4. Fyll i `sync: false`-variablerna i tabellen ovan i dashboarden.
+4. Fyll i `sync: false`-variablerna i tabellen ovan i dashboarden (grundaren har rapporterat
+   att detta redan är gjort för den befintliga tjänsten — bekräfta att alla nycklar i tabellen
+   ovan faktiskt finns satta, inte bara några).
+5. Verifiera Auto Sync-läget enligt föregående avsnitt.
+6. Först därefter: initiera Blueprint-synken/runtime-bytet manuellt i dashboarden.
 
-Inget av detta har körts än — det här dokumentet beskriver vad som **kommer** krävas, inte vad
-som redan är gjort mot den riktiga Render-tjänsten.
+Inget av detta har körts än via den här sessionen — det här dokumentet beskriver vad som
+**kommer** krävas, inte vad som redan är gjort mot den riktiga Render-tjänsten. De observerade
+faktan (tjänstenamn, Root Directory, Build/Start Command) kommer direkt från grundarens egen
+inspektion av dashboarden, inte från kod i det här repot.
 
 ## Verifiering efter en fullständig deploy (för senare, när vi är där)
 

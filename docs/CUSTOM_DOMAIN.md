@@ -27,11 +27,11 @@ rätt.
 
 | Typ | Namn | Värde | TTL |
 |---|---|---|---|
-| CNAME | `app` | `lifeai-1.onrender.com` (den nuvarande Render-hostnamnet — verifiera exakt värde i Render Dashboard → tjänsten `LifeAI` → Settings → Custom Domains innan du lägger till posten, Render visar där den exakta CNAME-target den vill ha) | 3600 (eller Stratos standard) |
+| CNAME | `app` | `lifeai-1.onrender.com` (den nuvarande Render-hostnamnet — verifiera exakt värde i Render Dashboard → tjänsten `LifeAI-1` → Settings → Custom Domains innan du lägger till posten, Render visar där den exakta CNAME-target den vill ha) | 3600 (eller Stratos standard) |
 
 **Klick-steg (görs senare, inte nu):**
 
-1. Render Dashboard → tjänsten `LifeAI` → Settings → Custom Domains → Add Custom Domain →
+1. Render Dashboard → tjänsten `LifeAI-1` → Settings → Custom Domains → Add Custom Domain →
    ange `app.<din-domän>`.
 2. Render visar en CNAME-post att lägga till — lägg till exakt den i Strato's DNS-panel.
 3. Vänta på DNS-propagering (kan ta allt från minuter till någon timme) och att Render visar
