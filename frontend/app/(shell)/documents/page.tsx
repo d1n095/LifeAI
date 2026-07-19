@@ -44,8 +44,16 @@ export default function DocumentsPage() {
   }
 
   async function handleDelete(id: string) {
-    await api.deleteDocument(id);
-    await refresh();
+    // Was previously un-caught: a failed delete (network error, session expired, ...) left
+    // the row exactly where it was with zero feedback — indistinguishable from the click not
+    // registering at all. Same error state and role="alert" surface already used above for
+    // refresh()/handleUpload() failures.
+    try {
+      await api.deleteDocument(id);
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    }
   }
 
   return (
