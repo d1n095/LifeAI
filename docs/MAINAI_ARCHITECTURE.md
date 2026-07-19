@@ -12,7 +12,10 @@ Relaterade dokument som detta bygger vidare på snarare än duplicerar:
 `docs/AUTH_THREAT_MODEL.md` (hotmodell för sessionshanteringen), `docs/RENDER_DEPLOY.md`
 (driftarkitektur för den kombinerade Render-containern), `docs/LIFE_LIBRARY_PLAN.md`
 (nästa fas: Universal Object Model, utökad Trust Engine, multimodal inhämtning — refereras
-under respektive avsnitt nedan, inte återgiven i sin helhet här).
+under respektive avsnitt nedan, inte återgiven i sin helhet här), `docs/AI_PROVIDER_ARCHITECTURE.md`
+(djupdykning i §7 nedan: kapabilitetsbaserade interface, universellt request/response-schema,
+felmängd, orkestrering och multi-tenant-leverantörspolicy — den auktoritativa källan för
+providerlagrets målarkitektur, §7 nedan är sammanfattningen).
 
 **Notation:** varje avsnitt separerar tydligt **Idag** (finns i koden, verifierat) från
 **Målarkitektur** (designat här, inte byggt). Att inte skilja på de två är exakt den sortens
@@ -415,6 +418,15 @@ inte byggt, inte motiverat av nuvarande belastning.
 ---
 
 ## 7. AI orchestration
+
+**Se `docs/AI_PROVIDER_ARCHITECTURE.md` för fullständig design** — kapabilitetsbaserade
+interface (inte ett per-provider-interface), universellt request/response-schema, en
+universell felmängd (`ProviderErrorKind`) som är den konkreta mekanismen bakom "ingen
+leverantörsspecifik logik läcker uppåt", plugin-baserad providerregistrering, en
+orkestreringsmotor med flera routingstrategier (kostnad/latens/complianceberoende/lokal-
+modell-föredragen), ett conformance-testsvit som gör "plug-and-play" till en testad
+egenskap, och en additiv migrationsplan från dagens kod. Det här avsnittet är
+sammanfattningen; det andra dokumentet är sanningskällan för detaljerna.
 
 ### Idag
 
