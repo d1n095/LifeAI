@@ -54,14 +54,17 @@ services:
 
       # Supabase Free Postgres (with pgvector) — external, not Render-managed, so Render
       # can't auto-wire these via fromDatabase the way it could for its own managed
-      # Postgres. Enter Supabase's DIRECT connection string (port 5432), not their pooled
-      # pgbouncer one (port 6543) — backend/scripts/ensure_app_role.py's role-creation SQL
-      # and Alembic's DDL need session-level operations pgbouncer's transaction pooling
-      # mode doesn't reliably support. See docs/RENDER_DEPLOY.md.
+      # Postgres. Use Supabase's SESSION POOLER connection string (Supavisor, session mode,
+      # port 5432) — Direct connection is IPv6-only and unreachable from Render Free, which
+      # has no outbound IPv6. Do NOT use the Transaction pooler (port 6543) — that mode
+      # doesn't reliably support the session-level operations backend/scripts/ensure_app_role.py's
+      # role-creation SQL and Alembic's DDL need. Session pooler's username is of the form
+      # postgres.<project-ref>, a pooler login identity, not a real Postgres role — see
+      # ensure_app_role.py's use of SELECT current_user and docs/RENDER_DEPLOY.md.
       - key: DATABASE_URL
         sync: false
       - key: MAINAI_APP_PASSWORD
-        generateValue: true # backend/scripts/ensure_app_role.py still runs the same way against Supabase's direct connection — only WHERE it points changed, not the mechanism
+        generateValue: true # backend/scripts/ensure_app_role.py runs the same way regardless of Direct vs. Session pooler — only which real role it ends up connected as changes, which is exactly why it asks Postgres (SELECT current_user) instead of assuming
 
       # Upstash Free Redis — external, sync:false for the same reason as DATABASE_URL above.
       - key: REDIS_URL

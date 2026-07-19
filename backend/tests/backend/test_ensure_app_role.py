@@ -8,6 +8,9 @@ normally.
 import importlib.util
 from pathlib import Path
 from unittest.mock import MagicMock
+from urllib.parse import urlparse
+
+import psycopg2
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "ensure_app_role.py"
 
@@ -71,3 +74,31 @@ def test_default_privileges_use_current_user_not_pooler_login_identity(monkeypat
     # ...and use that role, never the raw pooler login identity, as a SQL identifier.
     assert (real_role,) in identifier_args
     assert (pooler_username,) not in identifier_args
+
+
+def test_full_script_run_against_real_local_postgres_is_idempotent(monkeypatch):
+    """Runs the real, unmocked script against the actual local Postgres test database this
+    suite already uses (see conftest.py's `_test_database` fixture) — the ordinary
+    local/Docker-Compose-style case where DATABASE_URL's username already IS a real role
+    (e.g. `lifeos`), not a pooler login identity. Confirms the current_user fix doesn't
+    regress that setup: `current_user` there must simply equal the connection's own
+    username, and running the script twice (as every container restart does) must stay
+    safely idempotent."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    app_password = urlparse(settings.app_database_url).password or "mainai_app_pw"
+
+    module = _load_module()
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    # Same password conftest.py's _test_database fixture already provisioned mainai_app
+    # with — running this script must not change it out from under the rest of the suite.
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", app_password)
+    monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+
+    module.main()
+    module.main()  # a second, idempotent run — what every container restart actually does
+
+    # mainai_app must still be reachable with the same password afterwards.
+    conn = psycopg2.connect(settings.app_database_url)
+    conn.close()

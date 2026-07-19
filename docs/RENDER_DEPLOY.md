@@ -142,12 +142,37 @@ tidigare arkitekturen används: vid varje containerstart (`backend/docker-entryp
 skriver den fullständiga `APP_DATABASE_URL` till en tillfällig fil som entrypoint-skriptet
 `source`:ar innan `uvicorn` startar.
 
-**Viktigt:** `DATABASE_URL` måste vara Supabases **DIRECT**-anslutning (port 5432), inte den
-poolade pgbouncer-anslutningen (port 6543, transaction-pooling-läge) — rollskapandet och
-Alembics DDL behöver sessionsnivå-operationer som transaction pooling inte pålitligt stödjer.
+**Viktigt — uppdaterat 2026-07-19, ersätter tidigare felaktig rekommendation:** Denna sektion
+sa tidigare att `DATABASE_URL` måste peka på Supabases **DIRECT**-anslutning (port 5432), och
+varnade för "den poolade pgbouncer-anslutningen (port 6543)". Det är fortfarande sant att
+**Transaction pooler** (port 6543, transaction-pooling-läge) inte pålitligt stödjer
+rollskapandet och Alembics DDL, som behöver sessionsnivå-operationer.
+
+Men Direct connection visade sig i praktiken **inte vara nåbar från Render** — Supabases Direct
+connection är IPv6-only, och Render Free saknar utgående IPv6. Den faktiska, verifierade lösningen
+är Supabases **Session pooler** (Supavisor i sessionsläge, körs också över port 5432, men med ett
+annat värdnamn/portmönster än Direct — kopiera den exakta anslutningssträngen Supabase visar för
+"Session pooler" specifikt, inte "Transaction pooler"). Session pooler stödjer sessionsnivå-
+operationer (det är hela poängen med sessionsläge, till skillnad från transaction-läge) och löser
+IPv4-problemet, eftersom Supavisor själv är IPv4-nåbart även när den bakomliggande Postgres-
+instansen bara har en IPv6-adress.
+
+**Känt fel att inte upprepa:** Session poolerns anslutningssträng har ett användarnamn av formen
+`postgres.<project-ref>` (t.ex. `postgres.ruwihvifpgftcwakdmvo`) — det är Supavisors
+pooler-inloggningsidentitet, inte ett riktigt Postgres-rollnamn. Kod som antar att
+`DATABASE_URL`s användarnamn direkt är ett rollnamn (t.ex. för `ALTER DEFAULT PRIVILEGES FOR
+ROLE <användarnamn>`) kraschar med `psycopg2.errors.UndefinedObject: role
+"postgres.<project-ref>" does not exist`, eftersom poolern mappar den identiteten till den
+faktiska rollen (`postgres`) internt — ingen roll med det pooler-namnet finns i `pg_roles`.
+`backend/scripts/ensure_app_role.py` frågar numera `SELECT current_user` för att få den
+faktiska anslutna rollen istället för att anta att URL-användarnamnet är rollnamnet — se
+skriptets kommentarer och `backend/tests/backend/test_ensure_app_role.py` för regressionstestet.
 
 Lokal Docker Compose är oförändrad (skriptet är ett no-op där — `MAINAI_APP_PASSWORD` sätts
-bara på Render, inte på `backend`-containern i `docker-compose.yml`).
+bara på Render, inte på `backend`-containern i `docker-compose.yml`). Lokal Postgres har heller
+aldrig någon pooler i vägen, så `current_user` där är alltid helt enkelt anslutningens eget
+användarnamn (t.ex. `lifeos`) — samma beteende som innan denna fix, verifierat av
+`test_full_script_run_against_real_local_postgres_is_idempotent` i samma testfil.
 
 ## Miljövariabler — fullständig lista
 

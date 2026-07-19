@@ -17,6 +17,15 @@ docker-entrypoint.sh skips this there and nothing changes for local dev.
 On success, appends `export APP_DATABASE_URL=...` to the file named by $RENDER_ENV_FILE so
 the calling shell can source it before starting the app — this script's own process exiting
 can't otherwise change its parent shell's environment.
+
+Default-privilege grants below are scoped `FOR ROLE {current_user}` (the role THIS connection
+actually authenticated as — see the comment at that call site), not the role named in
+DATABASE_URL's URL, which under a connection pooler (e.g. Supabase's Session pooler) can be a
+login identity rather than a real role. This relies on one assumption: that
+backend/docker-entrypoint.sh runs this script and `alembic upgrade head` with the exact same
+DATABASE_URL, in the same boot — so the role Alembic's later DDL runs as is the same role this
+script just granted default privileges for. If a future change ever pointed those two steps at
+different connection strings, this guarantee would silently stop holding.
 """
 
 import os
