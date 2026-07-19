@@ -10,11 +10,15 @@ def _login_and_get_csrf(client, email: str, password: str) -> str:
     return res.json()["csrf_token"]
 
 
-def test_export_includes_own_data_only(client, db_session, make_verified_user):
+def test_export_includes_own_data_only(client, db_session, superuser_db, make_verified_user):
     user, password = make_verified_user(email="exportme@example.com")
-    csrf = _login_and_get_csrf(client, "exportme@example.com", password)
+    _login_and_get_csrf(client, "exportme@example.com", password)
 
-    client.post("/api/projects", json={"name": "shared project", "status": "active"}, headers={"X-CSRF-Token": csrf})
+    # Created directly against the DB, not via POST /api/projects: that route is
+    # founder-only now (see app/deps.py's require_founder) — this test is about what
+    # /api/account/export includes for a logged-in user, not about who may create projects.
+    superuser_db.add(Project(name="shared project", status="active", created_by=user.id))
+    superuser_db.commit()
 
     res = client.get("/api/account/export")
     assert res.status_code == 200
@@ -36,15 +40,17 @@ def test_wrong_password_does_not_delete(client, db_session, make_verified_user):
     assert db_session.query(User).filter_by(email="wrongpassdelete@example.com").count() == 1
 
 
-def test_correct_password_deletes_permanently_and_scrubs_shared_data(client, db_session, make_verified_user):
+def test_correct_password_deletes_permanently_and_scrubs_shared_data(client, db_session, superuser_db, make_verified_user):
     user, password = make_verified_user(email="deleteme@example.com")
     user_id = user.id
     csrf = _login_and_get_csrf(client, "deleteme@example.com", password)
 
-    project_res = client.post(
-        "/api/projects", json={"name": "orphaned project", "status": "active"}, headers={"X-CSRF-Token": csrf}
-    )
-    project_id = project_res.json()["id"]
+    # Created directly against the DB, not via POST /api/projects (founder-only now) — this
+    # test is about account-deletion's data-scrubbing behavior, not project creation.
+    project = Project(name="orphaned project", status="active", created_by=user_id)
+    superuser_db.add(project)
+    superuser_db.commit()
+    project_id = project.id
 
     res = client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
     assert res.status_code == 200
@@ -106,10 +112,12 @@ def test_deletion_is_rolled_back_atomically_on_mid_transaction_failure(
     superuser_db.add(conversation)
     superuser_db.commit()
 
-    project_res = client.post(
-        "/api/projects", json={"name": "should stay attributed", "status": "active"}, headers={"X-CSRF-Token": csrf}
-    )
-    project_id = project_res.json()["id"]
+    # Created directly against the DB, not via POST /api/projects (founder-only now) — see
+    # the comment in test_correct_password_deletes_permanently_and_scrubs_shared_data above.
+    project = Project(name="should stay attributed", status="active", created_by=user_id)
+    superuser_db.add(project)
+    superuser_db.commit()
+    project_id = project.id
 
     from sqlalchemy.orm import Session as SASession
 

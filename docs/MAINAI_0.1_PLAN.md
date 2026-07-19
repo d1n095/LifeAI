@@ -3,6 +3,12 @@
 Avgränsning: endast MainAI-kärnan (chatt, minne, förtroende, säkerhet). Inga andra Life OS-
 moduler (Source Hub, UserAI, GlowUp) tas upp i denna version.
 
+> **Historisk plan, delvis omsprungen.** Milstolpe 1:s bootstrap-mekanism beskrivs nedan som
+> den skrevs vid den tiden (`ADMIN_EMAIL`/`ADMIN_PASSWORD`, ett "admin-konto"). Sedan Founder-
+> only-launch är detta ett fast, ensamt grundarkonto (`FOUNDER_EMAIL`/`FOUNDER_PASSWORD`, se
+> `app/founder.py` och `docs/FOUNDER_KNOWLEDGE_BOOTSTRAP.md`) och publik självregistrering är
+> avstängd i produktion. Texten nedan är lämnad orörd som historik, inte som aktuell sanning.
+
 ## Byggordning och varför
 
 Säkerhet och dataisolering byggs **före** nya AI-funktioner, eftersom allt som läggs till

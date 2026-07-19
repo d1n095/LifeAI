@@ -38,9 +38,9 @@ services:
       - key: SECRET_KEY
         generateValue: true # signs JWTs — platform-generated, never committed (app/config.py)
 
-      - key: ADMIN_EMAIL
+      - key: FOUNDER_EMAIL
         sync: false
-      - key: ADMIN_PASSWORD
+      - key: FOUNDER_PASSWORD
         sync: false
 
       # Supabase Free Postgres (with pgvector) — external, not Render-managed, so Render

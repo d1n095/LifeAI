@@ -6,14 +6,14 @@ from app.audit import record_audit
 from app.cleanup import run_token_cleanup
 from app.config import get_settings
 from app.db import get_db
-from app.deps import require_admin
+from app.deps import require_founder
 from app.models.provider_config import ProviderConfig
 from app.models.usage import UsageLog
 from app.models.user import User
 from app.providers.registry import get_provider, provider_names
 from app.schemas import ProviderConfigIn, ProviderConfigOut, ProviderStatus, UsageSummaryRow
 
-router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_founder)])
 
 
 @router.get("/providers/status", response_model=list[ProviderStatus])
@@ -48,7 +48,7 @@ def set_provider_config(
     payload: ProviderConfigIn,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_founder),
 ):
     """Switch the active provider/model for a role ("chat" or "embedding").
 
@@ -112,7 +112,7 @@ def usage_summary(db: Session = Depends(get_db)):
 
 
 @router.post("/cleanup")
-def trigger_cleanup(request: Request, db: Session = Depends(get_db), user: User = Depends(require_admin)):
+def trigger_cleanup(request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     """Manual trigger for the token-retention cleanup (app/cleanup.py) — the same job also
     runs on its own schedule (see app/scheduler.py) whenever ENABLE_SCHEDULED_CLEANUP is on.
     Exposed here for ops visibility (run it on demand, see exactly what it purged) and so it

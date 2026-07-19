@@ -143,7 +143,7 @@ bara på Render, inte på `backend`-containern i `docker-compose.yml`).
 
 | Variabel | Vad du sätter |
 |---|---|
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Det automatiskt skapade admin-kontot (skapas bara om inga användare finns) |
+| `FOUNDER_EMAIL` / `FOUNDER_PASSWORD` | Det enda grundarkontot MainAI någonsin tillåter (fast primärnyckel, se `backend/app/founder.py`) — skapas automatiskt vid första uppstart om det inte redan finns |
 | `DATABASE_URL` | Supabase Free — **DIRECT**-anslutningen, port 5432, inte den poolade 6543:an |
 | `REDIS_URL` | Upstash Free |
 | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | **Obligatoriskt i produktion** (`ENVIRONMENT=production` utan `SMTP_HOST` gör att backend vägrar starta, se `_check_smtp_configured` i `app/main.py`) — en gratis transaktionell e-postleverantör (t.ex. Resend eller Brevos gratisnivå) räcker |
@@ -203,10 +203,14 @@ som redan är gjort mot den riktiga Render-tjänsten.
 
 1. `https://lifeai-1.onrender.com/api/health` i webbläsaren → `{"status":"ok"}` (går genom
    hela kedjan: Next.js → loopback → FastAPI → Supabase/Upstash).
-2. Öppna `https://lifeai-1.onrender.com/register`, försök skapa ett konto, kontrollera i
-   DevTools → Network att `POST /api/auth/register` (samma origin som sidan, inget
-   preflight-OPTIONS) ger `202`.
-3. Kontrollera att ett verifieringsmail faktiskt kommer fram (bekräftar `SMTP_HOST` m.fl.).
+2. MainAI är Founder-only — det finns ingen `/register`-sida att testa mot (den omdirigerar
+   till `/login`) och `POST /api/auth/register` ska ge `404` i produktion (se
+   `backend/app/routers/auth.py`). Verifiera istället att `/login` med `FOUNDER_EMAIL`/
+   `FOUNDER_PASSWORD` loggar in, och att `POST /api/auth/register` faktiskt svarar `404` (inte
+   `202`) mot den riktiga produktionstjänsten.
+3. Kontrollera att ett lösenordsåterställningsmail faktiskt kommer fram till grundarens
+   e-postadress (bekräftar `SMTP_HOST` m.fl.) — `/forgot-password` fungerar oavsett
+   Founder-only-läget.
 4. DevTools → Application → Cookies: `access_token`/`refresh_token` ska stå under
    `lifeai-1.onrender.com`, inte något annat värdnamn.
 5. Kontrollera minnesanvändning i Render-dashboardens metrics-flik under riktig belastning —

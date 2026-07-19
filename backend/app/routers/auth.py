@@ -138,6 +138,19 @@ def _issue_and_send_verification(db: Session, user: User, request: Request) -> N
 @router.post("/register", status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit(f"{settings.rate_limit_register_per_minute}/minute")
 def register(request: Request, payload: RegisterIn, db: Session = Depends(get_db)):
+    # MainAI is Founder-only — public self-registration is permanently disabled in
+    # production, not just hidden from the UI (frontend/app/register/page.tsx redirects
+    # rather than rendering a form, but that's a UI convenience, not the actual gate: this
+    # check is what a direct API call against a production deployment actually hits). 404,
+    # not 403: a production deployment should look like this route doesn't exist at all,
+    # the same posture as any other route that was never wired up, rather than confirming
+    # there's a registration feature that's merely locked. Non-production environments keep
+    # this endpoint reachable — CI's E2E/pytest suites exercise the full account-lifecycle
+    # flow (duplicate handling, honeypot, password policy, RLS isolation between accounts)
+    # against it, and ENVIRONMENT is never "production" there (see .github/workflows/ci.yml).
+    if settings.environment == "production":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
+
     # Honeypot: a real user's browser never populates this hidden field. Return the exact
     # same response a genuine registration gets, so the bot can't distinguish "caught" from
     # "processed" and adjust — but skip all DB writes and the email send entirely.
@@ -197,6 +210,12 @@ def verify_email(request: Request, payload: VerifyEmailIn, db: Session = Depends
 @router.post("/resend-verification", status_code=status.HTTP_202_ACCEPTED)
 @limiter.limit(f"{settings.rate_limit_register_per_minute}/minute")
 def resend_verification(request: Request, payload: EmailIn, db: Session = Depends(get_db)):
+    # Not a bypass of register()'s production block: this endpoint only ever resends a link
+    # for a row that already exists, it never creates one. In production the only row that
+    # can exist at all is the founder account, which bootstrap_founder_user() creates already
+    # verified (email_verified=True) — so `user.email_verified` below is always true for it,
+    # and this falls through to the neutral no-op response unconditionally. No separate
+    # environment check needed; there is no unverified row for it to act on.
     user = db.query(User).filter_by(email=payload.email).first()
     if user is None or user.email_verified:
         return NEUTRAL_RESEND_VERIFICATION_RESPONSE

@@ -21,7 +21,7 @@ motsäger koden: koden vinner, och den här filen bör uppdateras.
 
 ```bash
 cp .env.example .env
-# Fyll i SECRET_KEY, ADMIN_EMAIL/ADMIN_PASSWORD, MAINAI_APP_PASSWORD, ev. API-nycklar.
+# Fyll i SECRET_KEY, FOUNDER_EMAIL/FOUNDER_PASSWORD, MAINAI_APP_PASSWORD, ev. API-nycklar.
 docker compose up -d postgres redis qdrant
 docker compose run --rm backend alembic upgrade head
 docker compose up -d backend frontend
@@ -31,8 +31,10 @@ docker compose up -d backend frontend
 containerstart också — det extra `alembic upgrade head`-steget ovan är för att se
 migrationsloggen tydligt vid en helt ny installation, inte strikt nödvändigt.
 
-Vid första uppstart skapas automatiskt ett admin-konto från `ADMIN_EMAIL`/`ADMIN_PASSWORD`
-(förverifierat, inget e-postflöde krävs — se `app/bootstrap.py`).
+Vid första uppstart skapas automatiskt det enda grundarkontot MainAI tillåter, från
+`FOUNDER_EMAIL`/`FOUNDER_PASSWORD` (förverifierat, inget e-postflöde krävs — se
+`app/bootstrap.py`, `app/founder.py`). Publik självregistrering är avstängd i produktion —
+se `docs/FOUNDER_KNOWLEDGE_BOOTSTRAP.md`.
 
 ### Manuell installation (utan Docker)
 

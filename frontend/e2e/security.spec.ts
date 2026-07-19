@@ -12,8 +12,8 @@ import { loginViaUi, trackCsrf } from "./helpers";
 // origin at all" test below, which is a strictly stronger property than "cookies aren't
 // visible on the backend's origin" (the old version's version of this check, meaningless now
 // that there IS no separate backend origin to visit).
-const ADMIN_EMAIL = "admin@lifeos.local";
-const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || "TestAdminPassword123!";
+const FOUNDER_EMAIL = "founder@lifeos.local";
+const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!";
 
 async function getCookie(context: import("@playwright/test").BrowserContext, name: string) {
   const cookies = await context.cookies();
@@ -23,7 +23,7 @@ async function getCookie(context: import("@playwright/test").BrowserContext, nam
 test.describe("cookie/CSRF/rotation security", () => {
   test("session tokens are unreadable by JavaScript", async ({ page, context }) => {
     const csrf = trackCsrf(page);
-    await loginViaUi(page, FRONTEND_URL, ADMIN_EMAIL, ADMIN_PASSWORD);
+    await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
     expect(csrf.get()).toBeTruthy();
 
@@ -58,7 +58,7 @@ test.describe("cookie/CSRF/rotation security", () => {
   });
 
   test("a genuine cross-origin CSRF attack against the proxy is rejected server-side", async ({ page, context }) => {
-    await loginViaUi(page, FRONTEND_URL, ADMIN_EMAIL, ADMIN_PASSWORD);
+    await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
 
     // The attacker page fetches the FRONTEND's own /api/projects (the proxy) — that's the
@@ -80,7 +80,7 @@ test.describe("cookie/CSRF/rotation security", () => {
   });
 
   test("mutating request without a CSRF header is rejected (403)", async ({ page, context }) => {
-    await loginViaUi(page, FRONTEND_URL, ADMIN_EMAIL, ADMIN_PASSWORD);
+    await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
     const res = await context.request.post(`${FRONTEND_URL}/api/projects`, {
       data: { name: "no csrf header", status: "active" },
@@ -93,7 +93,7 @@ test.describe("cookie/CSRF/rotation security", () => {
     context,
   }) => {
     const csrf = trackCsrf(page);
-    await loginViaUi(page, FRONTEND_URL, ADMIN_EMAIL, ADMIN_PASSWORD);
+    await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
 
     const csrf1 = csrf.get()!;
@@ -126,7 +126,7 @@ test.describe("cookie/CSRF/rotation security", () => {
 
   test("logout revokes the access token immediately, not just the refresh token", async ({ page, context }) => {
     const csrf = trackCsrf(page);
-    await loginViaUi(page, FRONTEND_URL, ADMIN_EMAIL, ADMIN_PASSWORD);
+    await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
 
     const before = await context.request.get(`${FRONTEND_URL}/api/auth/me`);

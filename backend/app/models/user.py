@@ -11,6 +11,12 @@ from app.security import utcnow_seconds_baseline
 
 
 class UserRole(str, enum.Enum):
+    # founder: the single, permanent MainAI operator account (see app/founder.py) — the only
+    # role that can ever pass app/deps.py's require_founder(). admin/member predate the
+    # Founder-only launch restriction and are currently unreachable (public registration is
+    # disabled — see app/routers/auth.py's register()) but are kept for the future UserAI
+    # phase (see docs/FOUNDER_KNOWLEDGE_BOOTSTRAP.md), not removed.
+    founder = "founder"
     admin = "admin"
     member = "member"
 

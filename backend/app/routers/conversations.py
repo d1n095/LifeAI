@@ -4,12 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import require_founder
 from app.models.conversation import Conversation, Message
 from app.models.user import User
 from app.schemas import ConversationDetailOut, ConversationOut
 
-router = APIRouter(prefix="/api/conversations", tags=["conversations"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/api/conversations", tags=["conversations"], dependencies=[Depends(require_founder)])
 
 
 @router.get("", response_model=list[ConversationOut])
@@ -39,7 +39,7 @@ def get_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.delete("/{conversation_id}")
-def delete_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def delete_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     conversation = db.get(Conversation, conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Konversationen hittades inte.")

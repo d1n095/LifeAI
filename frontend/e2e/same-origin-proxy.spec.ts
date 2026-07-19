@@ -9,13 +9,13 @@ import { PROXY_FRONTEND_URL } from "../playwright.proxy.config";
 // CSRF-protected mutating call (logout) round-trips correctly. This is exactly the flow that
 // broke in production before this change (see the "Failed to fetch" / "Kunde inte nå servern"
 // investigation) — run with playwright.proxy.config.ts, not the default config.
-const ADMIN_EMAIL = "admin@lifeos.local";
-const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || "TestAdminPassword123!";
+const FOUNDER_EMAIL = "founder@lifeos.local";
+const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!";
 
 test.describe("same-origin proxy", () => {
   test("wrong password error surfaces correctly through the proxy", async ({ page }) => {
     await page.goto(`${PROXY_FRONTEND_URL}/login`, { waitUntil: "networkidle" });
-    await page.getByLabel("E-post").fill(ADMIN_EMAIL);
+    await page.getByLabel("E-post").fill(FOUNDER_EMAIL);
     await page.getByLabel("Lösenord").fill("wrongpassword");
     await page.getByRole("button", { name: "Logga in" }).click();
     await page.waitForTimeout(800);
@@ -28,8 +28,8 @@ test.describe("same-origin proxy", () => {
     context,
   }) => {
     await page.goto(`${PROXY_FRONTEND_URL}/login`, { waitUntil: "networkidle" });
-    await page.getByLabel("E-post").fill(ADMIN_EMAIL);
-    await page.getByLabel("Lösenord").fill(ADMIN_PASSWORD);
+    await page.getByLabel("E-post").fill(FOUNDER_EMAIL);
+    await page.getByLabel("Lösenord").fill(FOUNDER_PASSWORD);
     await page.getByRole("button", { name: "Logga in" }).click();
     await page.waitForURL(PROXY_FRONTEND_URL + "/", { timeout: 5000 });
 

@@ -6,8 +6,8 @@ import { FRONTEND_URL } from "../playwright.config";
 // see backend/scripts/run_e2e_backend.py), conversation history, admin usage view,
 // responsive layout, and logout. Uses the bootstrap admin account (pre-verified — see
 // app/bootstrap.py), not a self-registered one.
-const ADMIN_EMAIL = "admin@lifeos.local";
-const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || "TestAdminPassword123!";
+const FOUNDER_EMAIL = "founder@lifeos.local";
+const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!";
 
 test.describe("baseline app flow", () => {
   test("unauthenticated '/' redirects to /login", async ({ page }) => {
@@ -33,7 +33,7 @@ test.describe("baseline app flow", () => {
 
     // Wrong password shows an error, stays on /login.
     await page.goto(`${FRONTEND_URL}/login`, { waitUntil: "networkidle" });
-    await page.getByLabel("E-post").fill(ADMIN_EMAIL);
+    await page.getByLabel("E-post").fill(FOUNDER_EMAIL);
     await page.getByLabel("Lösenord").fill("wrongpassword");
     await page.getByRole("button", { name: "Logga in" }).click();
     await page.waitForTimeout(800);
@@ -43,14 +43,14 @@ test.describe("baseline app flow", () => {
     await expect(page.getByRole("alert").filter({ hasText: "Fel e-post" })).toHaveCount(1);
 
     // Correct login redirects to the dashboard.
-    await page.getByLabel("E-post").fill(ADMIN_EMAIL);
-    await page.getByLabel("Lösenord").fill(ADMIN_PASSWORD);
+    await page.getByLabel("E-post").fill(FOUNDER_EMAIL);
+    await page.getByLabel("Lösenord").fill(FOUNDER_PASSWORD);
     await page.getByRole("button", { name: "Logga in" }).click();
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
     expect(page.url()).toBe(FRONTEND_URL + "/");
     await expect(page.locator("text=God kväll").first()).toBeVisible({ timeout: 5000 }).catch(() => {});
 
-    await expect(page.locator(`text=${ADMIN_EMAIL}`).first()).toBeVisible();
+    await expect(page.locator(`text=${FOUNDER_EMAIL}`).first()).toBeVisible();
 
     // Chat round-trip through the real backend (AI provider call faked, everything else real).
     await page.getByRole("link", { name: "Chat", exact: true }).click();

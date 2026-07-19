@@ -231,11 +231,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ email, password }),
     }),
-  register: (email: string, password: string, website: string = "") =>
-    request<MessageResponse>("/api/auth/register", {
-      method: "POST",
-      body: JSON.stringify({ email, password, website }),
-    }),
   verifyEmail: (token: string) =>
     request<{ status: string }>("/api/auth/verify-email", {
       method: "POST",
