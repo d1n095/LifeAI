@@ -58,7 +58,14 @@ class Settings(BaseSettings):
     smtp_port: int = 587
     smtp_username: str | None = None
     smtp_password: str | None = None
+    # Two mutually exclusive connection modes (see app/email.py): STARTTLS (plaintext
+    # connect, then upgrade — typically port 587) vs. implicit TLS/SSL (TLS from the first
+    # byte — typically port 465, e.g. Strato's smtp.strato.com:465). Both default False/True
+    # to match the pre-existing STARTTLS-only behavior for anyone with an existing .env;
+    # app/main.py's _check_smtp_configured() rejects the contradictory combination
+    # (both true) at startup rather than silently picking one.
     smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
     smtp_from_email: str = "no-reply@lifeos.local"
     smtp_from_name: str = "MainAI / Life OS"
     # Opt-in only, local dev convenience: if set (and environment != "production"), an

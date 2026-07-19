@@ -53,12 +53,24 @@ def _send_via_smtp(to: str, subject: str, body_text: str) -> None:
     msg.set_content(body_text)
 
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
-            if settings.smtp_use_tls:
-                server.starttls()
-            if settings.smtp_username and settings.smtp_password:
-                server.login(settings.smtp_username, settings.smtp_password)
-            server.send_message(msg)
+        # Implicit TLS (smtp_use_ssl, e.g. Strato's smtp.strato.com:465) establishes the TLS
+        # handshake as part of the connection itself — smtplib.SMTP_SSL, not smtplib.SMTP —
+        # there is no separate .starttls() call because the connection is never plaintext.
+        # STARTTLS (the smtp_use_tls default, e.g. port 587) connects in plaintext and
+        # upgrades in-place instead. These are genuinely different wire protocols, not a
+        # single client with two flags — see docs/RENDER_DEPLOY.md.
+        if settings.smtp_use_ssl:
+            with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as server:
+                if settings.smtp_username and settings.smtp_password:
+                    server.login(settings.smtp_username, settings.smtp_password)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as server:
+                if settings.smtp_use_tls:
+                    server.starttls()
+                if settings.smtp_username and settings.smtp_password:
+                    server.login(settings.smtp_username, settings.smtp_password)
+                server.send_message(msg)
     except Exception:
         # Deliberately no email body/token in this log line either — only what's needed to
         # notice and investigate a delivery outage.

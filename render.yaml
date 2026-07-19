@@ -75,18 +75,21 @@ services:
       - key: REFRESH_TOKEN_EXPIRE_DAYS
         value: "14"
 
-      # SMTP is mandatory in production (app/main.py's _check_smtp_configured). Use a free
-      # transactional email provider (e.g. Resend or Brevo's free tier) — see
-      # docs/RENDER_DEPLOY.md for the exact free-tier constraints to check before picking one.
+      # SMTP is mandatory in production (app/main.py's _check_smtp_configured). Strato's
+      # smtp.strato.com uses implicit TLS/SSL on port 465, not STARTTLS — hence
+      # SMTP_USE_SSL=true/SMTP_USE_TLS=false/port 465 below (see app/email.py and
+      # app/main.py's _check_smtp_mode, which fails startup if both TLS modes are true).
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
-        value: "587"
+        value: "465"
       - key: SMTP_USERNAME
         sync: false
       - key: SMTP_PASSWORD
         sync: false
       - key: SMTP_USE_TLS
+        value: "false"
+      - key: SMTP_USE_SSL
         value: "true"
       - key: SMTP_FROM_EMAIL
         sync: false
