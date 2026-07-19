@@ -2,6 +2,7 @@ from app.models.audit import AuditLog
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
@@ -17,6 +18,7 @@ __all__ = [
     "Conversation",
     "Message",
     "Document",
+    "DocumentChunk",
     "EmailVerificationToken",
     "PasswordResetToken",
     "Project",

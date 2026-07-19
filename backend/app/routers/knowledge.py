@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.deps import get_current_user
 from app.models.company import CompanyInfo
+from app.models.user import User
 from app.rag.retrieve import retrieve_context
 from app.schemas import CompanyInfoIn, CompanyInfoOut
 
@@ -32,8 +33,8 @@ class SearchQuery(BaseModel):
 
 
 @router.post("/search")
-async def search_knowledge(payload: SearchQuery, db: Session = Depends(get_db)):
-    return await retrieve_context(db, payload.query, top_k=payload.top_k)
+async def search_knowledge(payload: SearchQuery, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return await retrieve_context(db, user.id, payload.query, top_k=payload.top_k)
 
 
 @router.get("/company", response_model=list[CompanyInfoOut])

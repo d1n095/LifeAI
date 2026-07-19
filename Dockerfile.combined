@@ -1,0 +1,66 @@
+# Single-container image for Render Free: FastAPI + Next.js as sibling processes,
+# supervised by scripts/entrypoint-combined.sh. See docs/RENDER_DEPLOY.md.
+#
+# Separate from backend/Dockerfile and frontend/Dockerfile, which remain the images for
+# local Docker Compose (multi-container — no artificial single-instance memory constraint
+# there, easier iteration). This file exists only for the Render Free deployment path.
+#
+# dockerContext must be the repo root (not backend/ or frontend/) — it needs both
+# directories to build both halves of the app in one image.
+
+# ---- Frontend: build stage (mirrors frontend/Dockerfile's deps+builder stages) ----
+FROM node:20-slim AS frontend-deps
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+FROM node:20-slim AS frontend-builder
+WORKDIR /app/frontend
+# Empty by default — see frontend/lib/api.ts and frontend/Dockerfile's identical comment.
+# The browser must call this same server's own /api/* (INTERNAL_API_URL, set at runtime
+# below, handles reaching the backend server-side) — never NEXT_PUBLIC_API_URL here.
+ARG NEXT_PUBLIC_API_URL=
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+COPY --from=frontend-deps /app/frontend/node_modules ./node_modules
+COPY frontend/ .
+RUN npm run build
+
+# ---- Final runtime stage: both Python and Node runtimes in one image ----
+FROM python:3.12-slim AS runtime
+WORKDIR /app
+
+# tini: proper PID-1 signal forwarding + zombie reaping, ahead of our own supervisor
+# script (scripts/entrypoint-combined.sh) — see that file for why the script itself
+# doesn't try to be PID 1's full signal-handling story alone.
+# curl: used by backend/docker-entrypoint.sh style health-polling and manual debugging.
+# Node 20, to match frontend/Dockerfile's node:20-slim exactly (Debian's own default apt
+# nodejs package version drifts independently of this project's target Node version).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential libpq-dev curl tini gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- Backend ----
+COPY backend/requirements.txt ./backend/requirements.txt
+RUN pip install --no-cache-dir -r backend/requirements.txt
+COPY backend/ ./backend/
+RUN chmod +x backend/docker-entrypoint.sh
+
+# ---- Frontend (standalone output only — same three copies frontend/Dockerfile's runner
+# stage does, required for `node server.js` to actually serve CSS/JS/images) ----
+COPY --from=frontend-builder /app/frontend/.next/standalone ./frontend-standalone
+COPY --from=frontend-builder /app/frontend/.next/static ./frontend-standalone/.next/static
+COPY --from=frontend-builder /app/frontend/public ./frontend-standalone/public
+
+# ---- Supervisor ----
+COPY scripts/entrypoint-combined.sh ./scripts/entrypoint-combined.sh
+RUN chmod +x scripts/entrypoint-combined.sh
+
+ENV NODE_ENV=production
+# Render sets $PORT; Next.js (server.js) reads it directly. FastAPI never gets a $PORT —
+# it's hardcoded to 127.0.0.1:8000 inside the entrypoint script, deliberately not
+# configurable via env, so it can never accidentally end up bound to 0.0.0.0.
+EXPOSE 3000
+
+ENTRYPOINT ["tini", "--", "./scripts/entrypoint-combined.sh"]
