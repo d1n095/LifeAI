@@ -1,0 +1,185 @@
+{
+  "package_name": "Founder Knowledge Pack",
+  "version": "1.1",
+  "supersedes_version": "1.0",
+  "created": "2026-07-19",
+  "note": "Generated last, after all v1.1 content files were finalized, listing only files actually present in this package. Fixes FKP v1.0 finding K-04 (self-inconsistent manifest). See 00_MASTER_INDEX/CHANGELOG_FROM_V1.md.",
+  "file_count": 35,
+  "curated_files": [
+    {
+      "path": "00_MASTER_INDEX/CHANGELOG_FROM_V1.md",
+      "sha256": "2b9c1f336e2f87c7dc0642ae4790b95cbe0b6ae8c1b0fbb6f8dcb303ef3080d1",
+      "size_bytes": 5362
+    },
+    {
+      "path": "00_MASTER_INDEX/FKP_V1_AUDIT.md",
+      "sha256": "f1bea0a8146d773127890935f0be43c3e14553ef525b5ad14ec113b712fdc02c",
+      "size_bytes": 9261
+    },
+    {
+      "path": "00_MASTER_INDEX/MASTER_INDEX.md",
+      "sha256": "a7f50b44f85af11a76e7956953e6a659eb8f608ff7900d2d798299be4cfacf6f",
+      "size_bytes": 5089
+    },
+    {
+      "path": "00_MASTER_INDEX/READING_ORDER.md",
+      "sha256": "04214cae1f0f7d92cbf39f816fb2ccc65456aec4001885617863c13d0def53f6",
+      "size_bytes": 2778
+    },
+    {
+      "path": "01_FOUNDER_VISION/DOMAIN_AND_REQUIREMENT_MAP.md",
+      "sha256": "f1ccd45e3d904adc515aee720c8bf65e7c35f7096b661e18c02c610d4bbe1430",
+      "size_bytes": 7791
+    },
+    {
+      "path": "01_FOUNDER_VISION/FOUNDER_CONSTITUTION.md",
+      "sha256": "5909a9dff229f05a4092f9999f2e7c0103aa407787da1b359e3de5e3de9ed1f2",
+      "size_bytes": 3570
+    },
+    {
+      "path": "01_FOUNDER_VISION/MASTER_PRODUCT_VISION.md",
+      "sha256": "7bb24238b24b2e28fd4fc6d59ceb74bf5e8216b1ea986266373a2c260d238e3b",
+      "size_bytes": 4312
+    },
+    {
+      "path": "01_FOUNDER_VISION/NON_NEGOTIABLE_PRINCIPLES.md",
+      "sha256": "6e180d4b11a84d6ad25a3db31b95a30db03177120267567d9d5abe2f2d0dc428",
+      "size_bytes": 3754
+    },
+    {
+      "path": "02_DECISIONS/CANDIDATE_REQUIREMENTS.md",
+      "sha256": "f992215c222cdd30d1de29f69e06753ac3c4b75de1fd319a8a445d49e7e1f1e7",
+      "size_bytes": 7367
+    },
+    {
+      "path": "02_DECISIONS/DECISION_REGISTER.md",
+      "sha256": "61b29b845be6c5a1a972f6104d03b661701fbee43e69a29865d1fab1546f227a",
+      "size_bytes": 7629
+    },
+    {
+      "path": "02_DECISIONS/OD_02_03_04_17_ANALYSIS.md",
+      "sha256": "d5c161ee366b8949c84cc543908f1de249582f8a939639abe06cbb32d164675f",
+      "size_bytes": 12077
+    },
+    {
+      "path": "02_DECISIONS/OPEN_DECISIONS.md",
+      "sha256": "18d482956dc68d24d2d713b3b23b5ea5c0489fec7b05e102ca4cc6002ea860a5",
+      "size_bytes": 6596
+    },
+    {
+      "path": "02_DECISIONS/REJECTED_ALTERNATIVES.md",
+      "sha256": "da152b785b6fc2c7662db9c7104f3083918ebbcce9145c0d2c1e8f7b333ff840",
+      "size_bytes": 2664
+    },
+    {
+      "path": "03_ARCHITECTURE/ADAPTIVE_WORK_ORCHESTRATION.md",
+      "sha256": "b55e417d4704bed4daf4645079bfe536a45abb791741c26fd4b811d312cf484b",
+      "size_bytes": 10511
+    },
+    {
+      "path": "03_ARCHITECTURE/AI_RESOURCE_ORCHESTRATION.md",
+      "sha256": "ccb7ae143d3299d5c4b0d86200ffa61aa55692e8d1f08f7417efe3a1c9293a5a",
+      "size_bytes": 7374
+    },
+    {
+      "path": "03_ARCHITECTURE/BUILT_VS_DESIGNED.md",
+      "sha256": "c9b5446db274540775f8a69830ecd4a1935c4b5f419beb99356f27566aedcc60",
+      "size_bytes": 6060
+    },
+    {
+      "path": "03_ARCHITECTURE/CURRENT_ARCHITECTURE.md",
+      "sha256": "c71484523b33d09e09bc4bfa7e6f5b1776dd4eee9af45d80149b1d5a0d93b52e",
+      "size_bytes": 7950
+    },
+    {
+      "path": "03_ARCHITECTURE/TARGET_ARCHITECTURE.md",
+      "sha256": "59e1a8cd24c24668cf451fa667bdc438e90881657b649b1de95b4f0d9e3a840c",
+      "size_bytes": 4362
+    },
+    {
+      "path": "04_PRODUCT_AND_MODULES/MODULE_REGISTER.md",
+      "sha256": "b1e8b7e6790f81473635be5223b10787d3e7c8936dd2b31beaf973d72d9b3dc4",
+      "size_bytes": 6330
+    },
+    {
+      "path": "05_SECURITY_AND_TRUST/SECURITY_REQUIREMENTS.md",
+      "sha256": "a61e8a3daf933b95f7175d0d94bb16c867bd0cb9fdff7d5397ccf8a1e2994685",
+      "size_bytes": 5192
+    },
+    {
+      "path": "06_PROJECT_STATUS/CURRENT_STATUS.md",
+      "sha256": "84f5175d52a20e8c5012158b2bd9fcb3ddec662b5ab3cf0ac49c79b747a28196",
+      "size_bytes": 4505
+    },
+    {
+      "path": "06_PROJECT_STATUS/IMPLEMENTED_AND_VERIFIED.md",
+      "sha256": "3ed6aa8cd3d4c5da563b4327276920c1a5df9ca560d3ff578fc7c11e5a97e80f",
+      "size_bytes": 3884
+    },
+    {
+      "path": "06_PROJECT_STATUS/NEXT_RECOMMENDED_STEPS.md",
+      "sha256": "ccfef59d40214ece1f9da44692e2dae492a99f5aa60ac9180f512e91d5216946",
+      "size_bytes": 2757
+    },
+    {
+      "path": "07_CONFLICTS_AND_GAPS/CONFLICT_REGISTER.md",
+      "sha256": "14b97b80b72dc78bae79ff05f280781d4c0dea5e39351fa3ed9d6e76002000bf",
+      "size_bytes": 6382
+    },
+    {
+      "path": "07_CONFLICTS_AND_GAPS/MISSING_INFORMATION.md",
+      "sha256": "9b4da27eab99ad8ad2dac2a09d99a103acc4c5b643855f54ffff35c80e75231e",
+      "size_bytes": 4002
+    },
+    {
+      "path": "07_CONFLICTS_AND_GAPS/STALE_INFORMATION.md",
+      "sha256": "9c94ee85ba415dcb7df3e0201e319d57f98da176fa9919a36b8cbb05d698c23f",
+      "size_bytes": 4440
+    },
+    {
+      "path": "08_HANDOVER/AGENT_CONTEXT_RULES.md",
+      "sha256": "51dd9aa34bfb482ff09144e679f4578c46b9cac2813132e55cfb3507301a4345",
+      "size_bytes": 6438
+    },
+    {
+      "path": "08_HANDOVER/CLAUDE_CODE_HANDOVER.md",
+      "sha256": "912141849b0dfda500406ebf5c6512eca60e8068185923f99dc30ec547aae3d2",
+      "size_bytes": 4486
+    },
+    {
+      "path": "08_HANDOVER/SESSION_BOOTSTRAP.md",
+      "sha256": "b0169850d17137c09ff7e8f9b5ea6310e200a72cd1e46ec22fe8e276a0e85b00",
+      "size_bytes": 5220
+    },
+    {
+      "path": "09_DEPENDENCY_STAIRCASE/DEPENDENCY_STAIRCASE.md",
+      "sha256": "23df94fdd22fa46eeee6586bb5815b23ded400be059f14e0a2bde42826c344ca",
+      "size_bytes": 10189
+    },
+    {
+      "path": "09_DEPENDENCY_STAIRCASE/SOURCE_PHASE_GATES.md",
+      "sha256": "36826324462f63d76b19d6afc5abda0cf3fc954eb49f09964b487d83e498b3ec",
+      "size_bytes": 6133
+    },
+    {
+      "path": "10_HISTORICAL_DOMAIN_MATERIAL/BUILT_VS_DESIGNED_SAVINGS_STORY_SCANNER.md",
+      "sha256": "c5f5c0dea0ae4fb85ba8c78884596fb8b812177119b6c88b8e9aaf506ee8af60",
+      "size_bytes": 3742
+    },
+    {
+      "path": "10_HISTORICAL_DOMAIN_MATERIAL/CURRENT_ARCHITECTURE_SAVINGS_STORY_SCANNER.md",
+      "sha256": "26cb1639331d2314f3bcfd2a798333dbc8f9ef731205bc2838a4274a9f1dc88a",
+      "size_bytes": 3698
+    },
+    {
+      "path": "10_HISTORICAL_DOMAIN_MATERIAL/MODULE_REGISTER_SAVINGS_STORY_SCANNER.md",
+      "sha256": "e806584b3e7327f0ebd94c1c63e6e4739c0c162c6ea91c60b0db206de59a027c",
+      "size_bytes": 2626
+    },
+    {
+      "path": "10_HISTORICAL_DOMAIN_MATERIAL/README.md",
+      "sha256": "da6683a152c030a76cc9a067ee7833e78cef3aeb85731db448a6ccfadf84097f",
+      "size_bytes": 1908
+    }
+  ]
+}
