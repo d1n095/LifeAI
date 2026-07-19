@@ -15,7 +15,11 @@ Relaterade dokument som detta bygger vidare på snarare än duplicerar:
 under respektive avsnitt nedan, inte återgiven i sin helhet här), `docs/AI_PROVIDER_ARCHITECTURE.md`
 (djupdykning i §7 nedan: kapabilitetsbaserade interface, universellt request/response-schema,
 felmängd, orkestrering och multi-tenant-leverantörspolicy — den auktoritativa källan för
-providerlagrets målarkitektur, §7 nedan är sammanfattningen).
+providerlagrets målarkitektur, §7 nedan är sammanfattningen), `docs/MEMORY_ARCHITECTURE.md`
+(djupdykning i §6 nedan: det fullständiga minnessystemet — kort-/lång-/episodiskt/semantiskt/
+strukturerat minne korsat med scope, trust scoring, källspårning, versionshistorik,
+konfliktlösning, åldrande, godkännande, revisionsspår, och skalningsarkitekturen för
+miljontals användare).
 
 **Notation:** varje avsnitt separerar tydligt **Idag** (finns i koden, verifierat) från
 **Målarkitektur** (designat här, inte byggt). Att inte skilja på de två är exakt den sortens
@@ -354,6 +358,15 @@ säkerhets-/isoleringsdesign från start, inte all möjlig skalningsinfrastruktu
 ---
 
 ## 6. Memory architecture
+
+**Se `docs/MEMORY_ARCHITECTURE.md` för det fullständiga minnessystemet** — designat för
+miljontals användare: kort-/långtidsminne, episodiskt/semantiskt/strukturerat minne korsat med
+scope (användare/projekt/organisation/delat), trust scoring, källspårning, versionshistorik,
+konfliktlösning, minnesåldrande, mänskligt godkännande och en revisionsspår som är en del av
+minnessystemet snarare än en separat logg. Det avsnittet definierar också den konkreta
+skalningsarkitekturen (partitionerad pgvector-indexering per tenant, cachelager, skrivväg) som
+gör att en enda global HNSW-index inte blir en flaskhals vid skala. Det här avsnittet är
+sammanfattningen; det andra dokumentet är sanningskällan.
 
 MainAI har fyra distinkta minnesnivåer idag, med olika livslängd, isolering och åtkomstmönster
 — att blanda ihop dem (t.ex. behandla RAG-kontext som om den vore konversationshistorik) är en
