@@ -278,6 +278,17 @@ class ProviderRegistry:
 
 ## 6. Orchestration engine
 
+**Se `docs/AI_ORCHESTRATION_ENGINE.md` för den fullständiga designen** — modellpoängsättning,
+kostnads-/latensoptimering, en exakt beslutstabell för retry kontra fallback per
+`ProviderErrorKind`, konsensusläge, multi-modell-samarbete (pipelines), eskalering till
+människa (återanvänder `docs/MEMORY_ARCHITECTURE.md` §11:s godkännandekö), observability
+(spårning/loggning/mätvärden) och proaktiv hälsoövervakning skild från circuit breakern. Det
+dokumentet skiljer också explicit "routing confidence" (den här motorns egen bedömning av
+vilken kandidat som ska hantera en förfrågan) från "response confidence" (Trust Engine,
+`docs/MAINAI_ARCHITECTURE.md` §10, som bedömer om ett redan producerat svar går att lita på)
+— två olika saker som annars lätt blandas ihop. Det här avsnittet är sammanfattningen; det
+andra dokumentet är sanningskällan.
+
 Where routing decisions actually get made — and the only place provider **selection** logic
 lives (never inside a router, never inside RAG code).
 
