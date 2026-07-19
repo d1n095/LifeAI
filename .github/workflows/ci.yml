@@ -373,10 +373,11 @@ jobs:
       - run: alembic upgrade head
         working-directory: backend
 
+      # No NEXT_PUBLIC_API_URL — same-origin proxy mode, matching every real deployment (see
+      # frontend/lib/api.ts's comment on that var and playwright.config.ts's webServer entry,
+      # which passes INTERNAL_API_URL to the started `next start` process at runtime).
       - run: npx next build
         working-directory: frontend
-        env:
-          NEXT_PUBLIC_API_URL: http://localhost:8010
 
       # First pass: functional suites (auth, session-security, account lifecycle) run with
       # a generous login/register rate limit — they are not what's exercising that control
@@ -571,6 +572,238 @@ jobs:
         with:
           name: backend-logs-proxy
           path: backend/*.log
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------
+  # Combined-container verification — builds and runs the REAL Dockerfile.combined image
+  # (the one Render Free would actually run), not a stand-in. Deliberately NOT part of
+  # all-checks-passed's `needs:` (so it can't gate deploy-render or become a required check on
+  # every push to claude/**) and gated to only run on the dedicated validation branch — see
+  # docs/RENDER_DEPLOY.md. Nothing here can trigger a Render deploy: deploy-render's own `if`
+  # only matches the exact ref claude/det-kommer-mer-879lcm, which this branch is not.
+  # ---------------------------------------------------------------------------------------
+  combined-container-verify:
+    name: Combined container — build, run, verify
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/verify-combined-container'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      E2E_ADMIN_PASSWORD: TestAdminPassword123!
+      E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_combined_ci
+      E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/e2e-data/e2e_test_emails.jsonl
+      # Container-internal DB/Redis addresses use host.docker.internal (see --add-host below)
+      # — the postgres/redis *services* above publish to the RUNNER's own network stack, not
+      # to any Docker bridge network our own `docker run` container is on.
+      CONTAINER_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_combined_ci
+      CONTAINER_REDIS_URL: redis://host.docker.internal:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      - name: Create database for the combined-container run
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_combined_ci;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_combined_ci;"
+
+      - name: Build the real Dockerfile.combined image
+        run: docker build -f Dockerfile.combined -t lifeai-combined:ci .
+
+      - name: Prepare shared email-log directory
+        run: |
+          mkdir -p e2e-data
+          chmod 777 e2e-data
+
+      # ---- Container A: infra checks (health, loopback isolation, port exposure, crash) ----
+      # ENVIRONMENT is deliberately left unset (defaults to "development") in every docker run
+      # below, not "production" — app/main.py's _check_smtp_configured() fail-closed gate
+      # requires a real SMTP_HOST whenever ENVIRONMENT=production, which would defeat the point
+      # of E2E_MOCK_MODE's dev-email-log fake (see backend/scripts/run_e2e_backend.py).
+      # Everything else this job verifies (loopback isolation, proxy, signals, crash-linkage,
+      # CSRF/cookie/auth logic) is unaffected by this flag. A bash comment MUST NOT be placed
+      # inside a backslash-continued docker run flag list below (a `#` there prematurely
+      # terminates the continued command and drops the image argument) — this note stays here
+      # instead, once, for all three containers.
+      - name: Start container A (infra checks)
+        run: |
+          docker run -d --name lifeai-a \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3020:3000 \
+            -v "${{ github.workspace }}/e2e-data:/app/e2e-data" \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e ADMIN_EMAIL=admin@lifeos.local \
+            -e ADMIN_PASSWORD=TestAdminPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3020 \
+            -e PUBLIC_APP_URL=http://localhost:3020 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e E2E_EMAIL_LOG_PATH=/app/e2e-data/e2e_test_emails.jsonl \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3020/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3020/api/health
+
+      - name: Verify loopback isolation (backend bound to 127.0.0.1 only, inside its own netns)
+        run: |
+          docker exec lifeai-a sh -c "cat /proc/net/tcp" | tee /tmp/lifeai-a-tcp.txt
+          # 1F40 = 8000 in hex. A listener line's local-address field is HEXIP:HEXPORT.
+          grep -q "0100007F:1F40" /tmp/lifeai-a-tcp.txt || (echo "::error::backend is not listening on 127.0.0.1:8000 inside the container" && exit 1)
+          ! grep -q "00000000:1F40" /tmp/lifeai-a-tcp.txt || (echo "::error::backend is ALSO listening on 0.0.0.0:8000 — not loopback-only" && exit 1)
+
+      - name: Verify port 8000 is not reachable from outside the container
+        run: |
+          docker port lifeai-a
+          if docker port lifeai-a | grep -q 8000; then
+            echo "::error::port 8000 is published — it must never be" && exit 1
+          fi
+          CONTAINER_IP=$(docker inspect -f '{{.NetworkSettings.IPAddress}}' lifeai-a)
+          if curl -sf --max-time 3 "http://$CONTAINER_IP:8000/api/health" > /dev/null; then
+            echo "::error::backend answered on its bridge-network IP:8000 — loopback-only isolation is broken" && exit 1
+          fi
+          echo "Confirmed: $CONTAINER_IP:8000 is unreachable (connection refused/timeout), as expected."
+
+      - name: Verify crash of one process tears down the whole container
+        run: |
+          BACKEND_PID=$(docker logs lifeai-a 2>&1 | grep -oP 'backend pid=\K[0-9]+')
+          echo "Killing backend pid=$BACKEND_PID inside the container..."
+          # kill is a shell builtin, not a standalone binary in this minimal image — `docker
+          # exec` without a shell tries to exec it directly and fails with "executable file
+          # not found in $PATH". Route it through sh (always present) instead.
+          docker exec lifeai-a sh -c "kill -9 $BACKEND_PID"
+          timeout 15 docker wait lifeai-a
+          docker logs lifeai-a 2>&1 | tail -30
+          docker logs lifeai-a 2>&1 | grep -q "tearing down the other" || (echo "::error::entrypoint did not log the expected crash-linkage message" && exit 1)
+          docker ps -a --filter name=lifeai-a --format '{{.Status}}'
+          docker rm -f lifeai-a || true
+
+      # ---- Container B: functional E2E (auth/registration/chat + adapted security tests),
+      #      generous rate limits so the suite itself isn't what triggers a 429 ----
+      - name: Start container B (functional E2E — generous rate limits)
+        run: |
+          docker run -d --name lifeai-b \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3020:3000 \
+            -v "${{ github.workspace }}/e2e-data:/app/e2e-data" \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e ADMIN_EMAIL=admin@lifeos.local \
+            -e ADMIN_PASSWORD=TestAdminPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3020 \
+            -e PUBLIC_APP_URL=http://localhost:3020 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e E2E_EMAIL_LOG_PATH=/app/e2e-data/e2e_test_emails.jsonl \
+            -e RATE_LIMIT_LOGIN_PER_MINUTE=1000 \
+            -e RATE_LIMIT_REGISTER_PER_MINUTE=1000 \
+            -e RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE=1000 \
+            -e RATE_LIMIT_RESET_PASSWORD_PER_MINUTE=1000 \
+            -e RATE_LIMIT_VERIFY_EMAIL_PER_MINUTE=1000 \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3020/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3020/api/health
+
+      - name: Registration through the proxy actually works (curl, before the browser suite)
+        run: |
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:3020/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"curl-smoke-test@example.com","password":"Test1234Password!","website":""}')
+          [ "$RES" = "202" ] || (echo "::error::expected 202 from /api/auth/register through the proxy, got $RES" && exit 1)
+
+      - name: Run adapted security + auth + account E2E against the real container
+        working-directory: frontend
+        env:
+          E2E_FRONTEND_URL: http://localhost:3020
+          E2E_BACKEND_DIRECT_PORT: "8000"
+        run: npx playwright test --config=playwright.combined.config.ts e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+
+      - name: Stop container B (verifies graceful SIGTERM shutdown)
+        run: |
+          docker stop --time 10 lifeai-b
+          docker logs lifeai-b 2>&1 | tail -30
+          docker logs lifeai-b 2>&1 | grep -q "shutdown complete" || (echo "::error::entrypoint did not log a clean shutdown — did it actually get SIGKILLed instead of shutting down on SIGTERM?" && exit 1)
+          EXIT_CODE=$(docker inspect lifeai-b --format '{{.State.ExitCode}}')
+          # 143 = 128+15 (SIGTERM), see scripts/entrypoint-combined.sh's trap. 137 (128+9,
+          # SIGKILL) would mean Docker's grace period expired before the entrypoint's own
+          # cleanup finished — a real regression, not a pass.
+          [ "$EXIT_CODE" = "143" ] || (echo "::error::expected exit code 143 (graceful SIGTERM), got $EXIT_CODE" && exit 1)
+          docker rm -f lifeai-b || true
+
+      # ---- Container C: rate-limit.spec.ts against the REAL default limits ----
+      - name: Flush Redis before the rate-limit pass
+        run: docker run --rm --add-host=host.docker.internal:host-gateway redis:7-alpine redis-cli -h host.docker.internal flushall
+
+      - name: Start container C (default rate limits)
+        run: |
+          docker run -d --name lifeai-c \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3020:3000 \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e ADMIN_EMAIL=admin@lifeos.local \
+            -e ADMIN_PASSWORD=TestAdminPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3020 \
+            -e PUBLIC_APP_URL=http://localhost:3020 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3020/api/health && break
+            sleep 2
+          done
+
+      - name: Run rate-limit.spec.ts against the real container
+        working-directory: frontend
+        env:
+          E2E_FRONTEND_URL: http://localhost:3020
+        run: npx playwright test --config=playwright.combined.config.ts e2e/rate-limit.spec.ts --project=chromium
+
+      - name: Stop container C
+        if: always()
+        run: docker rm -f lifeai-c || true
+
+      - name: Upload Playwright report (combined container)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-combined
+          path: frontend/playwright-report-combined/
           retention-days: 14
 
   # ---------------------------------------------------------------------------------------
