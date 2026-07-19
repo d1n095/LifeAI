@@ -10,9 +10,13 @@ class Settings(BaseSettings):
     environment: str = "development"
     secret_key: str = "change-me-in-production"
 
-    # Bootstrap admin account (created automatically on first startup if no users exist)
-    admin_email: str = "admin@lifeos.local"
-    admin_password: str = "change-me-in-production"
+    # Founder account — the single, permanent MainAI operator account, provisioned
+    # automatically on first startup (see app/bootstrap.py, app/founder.py). Never a
+    # self-registered account: public registration is disabled entirely (see
+    # app/routers/auth.py's register()). Real values are entered directly in the Render
+    # dashboard (sync: false in render.yaml) — never committed, never pasted in chat.
+    founder_email: str = "founder@lifeos.local"
+    founder_password: str = "change-me-in-production"
 
     # Auth — short-lived access token + long-lived rotating refresh token, both delivered as
     # HttpOnly cookies (never returned in a JSON body, never stored client-side). See

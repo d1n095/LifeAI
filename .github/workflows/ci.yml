@@ -118,8 +118,8 @@ jobs:
       APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
       REDIS_URL: redis://localhost:6379/1
       SECRET_KEY: ci-test-secret-key
-      ADMIN_EMAIL: admin@lifeos.local
-      ADMIN_PASSWORD: TestAdminPassword123!
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
       FRONTEND_ORIGINS: http://127.0.0.1:3020
       PUBLIC_APP_URL: http://127.0.0.1:3020
       ENABLE_SCHEDULED_CLEANUP: "false"
@@ -163,8 +163,8 @@ jobs:
       APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
       REDIS_URL: redis://localhost:6379/1
       SECRET_KEY: ci-test-secret-key
-      ADMIN_EMAIL: admin@lifeos.local
-      ADMIN_PASSWORD: TestAdminPassword123!
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
       FRONTEND_ORIGINS: http://127.0.0.1:3020
       PUBLIC_APP_URL: http://127.0.0.1:3020
       ENABLE_SCHEDULED_CLEANUP: "false"
@@ -205,8 +205,8 @@ jobs:
       APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
       REDIS_URL: redis://localhost:6379/1
       SECRET_KEY: ci-test-secret-key
-      ADMIN_EMAIL: admin@lifeos.local
-      ADMIN_PASSWORD: TestAdminPassword123!
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
       FRONTEND_ORIGINS: http://127.0.0.1:3020
       PUBLIC_APP_URL: http://127.0.0.1:3020
       ENABLE_SCHEDULED_CLEANUP: "false"
@@ -320,12 +320,12 @@ jobs:
       REDIS_URL: redis://localhost:6379/0
       FRONTEND_ORIGINS: http://127.0.0.1:3020
       PUBLIC_APP_URL: http://127.0.0.1:3020
-      ADMIN_EMAIL: admin@lifeos.local
-      ADMIN_PASSWORD: TestAdminPassword123!
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
       SECRET_KEY: ci-e2e-secret-key
       OPENAI_API_KEY: fake-key-for-e2e
       ENABLE_SCHEDULED_CLEANUP: "false"
-      E2E_ADMIN_PASSWORD: TestAdminPassword123!
+      E2E_FOUNDER_PASSWORD: TestFounderPassword123!
       E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_e2e
       E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/backend/e2e_test_emails.jsonl
     steps:
@@ -475,12 +475,12 @@ jobs:
       # see frontend/playwright.proxy.config.ts). Nothing calls the backend cross-origin here.
       FRONTEND_ORIGINS: http://127.0.0.1:3021
       PUBLIC_APP_URL: http://127.0.0.1:3021
-      ADMIN_EMAIL: admin@lifeos.local
-      ADMIN_PASSWORD: TestAdminPassword123!
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
       SECRET_KEY: ci-e2e-secret-key
       OPENAI_API_KEY: fake-key-for-e2e
       ENABLE_SCHEDULED_CLEANUP: "false"
-      E2E_ADMIN_PASSWORD: TestAdminPassword123!
+      E2E_FOUNDER_PASSWORD: TestFounderPassword123!
       E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_proxy_e2e
       E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/backend/e2e_test_emails.jsonl
       # Read by frontend/app/api/[...path]/route.ts — the frontend server's own address for
@@ -604,7 +604,7 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      E2E_ADMIN_PASSWORD: TestAdminPassword123!
+      E2E_FOUNDER_PASSWORD: TestFounderPassword123!
       E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_combined_ci
       E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/e2e-data/e2e_test_emails.jsonl
       # Container-internal DB/Redis addresses use host.docker.internal (see --add-host below)
@@ -659,8 +659,8 @@ jobs:
             -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
             -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
             -e REDIS_URL="$CONTAINER_REDIS_URL" \
-            -e ADMIN_EMAIL=admin@lifeos.local \
-            -e ADMIN_PASSWORD=TestAdminPassword123! \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
             -e FRONTEND_ORIGINS=http://localhost:3020 \
             -e PUBLIC_APP_URL=http://localhost:3020 \
             -e PORT=3000 \
@@ -718,8 +718,8 @@ jobs:
             -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
             -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
             -e REDIS_URL="$CONTAINER_REDIS_URL" \
-            -e ADMIN_EMAIL=admin@lifeos.local \
-            -e ADMIN_PASSWORD=TestAdminPassword123! \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
             -e FRONTEND_ORIGINS=http://localhost:3020 \
             -e PUBLIC_APP_URL=http://localhost:3020 \
             -e PORT=3000 \
@@ -776,8 +776,8 @@ jobs:
             -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
             -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
             -e REDIS_URL="$CONTAINER_REDIS_URL" \
-            -e ADMIN_EMAIL=admin@lifeos.local \
-            -e ADMIN_PASSWORD=TestAdminPassword123! \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
             -e FRONTEND_ORIGINS=http://localhost:3020 \
             -e PUBLIC_APP_URL=http://localhost:3020 \
             -e PORT=3000 \

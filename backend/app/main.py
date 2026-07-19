@@ -4,7 +4,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.bootstrap import bootstrap_admin_user
+from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.limiter import limiter
@@ -68,7 +68,7 @@ def on_startup():
 
     db = SessionLocal()
     try:
-        bootstrap_admin_user(db)
+        bootstrap_founder_user(db)
     finally:
         db.close()
 

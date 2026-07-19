@@ -10,7 +10,7 @@ def _raw_set_cookie_headers(response) -> list[str]:
 
 
 def test_login_sets_httponly_secure_samesite_none_cookies(client):
-    res = client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "TestAdminPassword123!"})
+    res = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
     assert res.status_code == 200
     headers = _raw_set_cookie_headers(res)
     access_header = next(h for h in headers if h.startswith("access_token="))
@@ -24,7 +24,7 @@ def test_login_sets_httponly_secure_samesite_none_cookies(client):
 
 
 def test_wrong_password_rejected(client):
-    res = client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "wrong-password"})
+    res = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "wrong-password"})
     assert res.status_code == 401
 
 
@@ -34,14 +34,14 @@ def test_me_requires_session(client):
 
 
 def test_mutating_request_without_csrf_header_rejected(client):
-    login = client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "TestAdminPassword123!"})
+    login = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
     assert login.status_code == 200
     res = client.post("/api/projects", json={"name": "no csrf header", "status": "active"})
     assert res.status_code == 403
 
 
 def test_mutating_request_with_correct_csrf_header_succeeds(client):
-    login = client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "TestAdminPassword123!"})
+    login = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
     csrf = login.json()["csrf_token"]
     res = client.post(
         "/api/projects", json={"name": "with csrf header", "status": "active"}, headers={"X-CSRF-Token": csrf}
@@ -50,7 +50,7 @@ def test_mutating_request_with_correct_csrf_header_succeeds(client):
 
 
 def test_mutating_request_with_wrong_csrf_header_rejected(client):
-    client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "TestAdminPassword123!"})
+    client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
     res = client.post(
         "/api/projects", json={"name": "wrong csrf", "status": "active"}, headers={"X-CSRF-Token": "not-the-real-value"}
     )
@@ -58,7 +58,7 @@ def test_mutating_request_with_wrong_csrf_header_rejected(client):
 
 
 def test_refresh_rotates_token_and_csrf(client):
-    login = client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "TestAdminPassword123!"})
+    login = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
     csrf1 = login.json()["csrf_token"]
     refresh_cookie_1 = client.cookies.get("refresh_token")
 
@@ -72,7 +72,7 @@ def test_refresh_rotates_token_and_csrf(client):
 
 
 def test_replaying_a_rotated_refresh_token_is_rejected_and_revokes_the_family(client):
-    login = client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "TestAdminPassword123!"})
+    login = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
     csrf1 = login.json()["csrf_token"]
     old_refresh_value = client.cookies.get("refresh_token")
 
@@ -95,7 +95,7 @@ def test_replaying_a_rotated_refresh_token_is_rejected_and_revokes_the_family(cl
 
 
 def test_logout_revokes_access_token_immediately(client):
-    login = client.post("/api/auth/login", json={"email": "admin@lifeos.local", "password": "TestAdminPassword123!"})
+    login = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
     csrf = login.json()["csrf_token"]
 
     before = client.get("/api/auth/me")

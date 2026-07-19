@@ -11,8 +11,8 @@ import os
 os.environ.setdefault("DATABASE_URL", "postgresql://lifeos@localhost:5433/lifeos_test")
 os.environ.setdefault("APP_DATABASE_URL", "postgresql://mainai_app:mainai_app_pw@localhost:5433/lifeos_test")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-pytest")
-os.environ.setdefault("ADMIN_EMAIL", "admin@lifeos.local")
-os.environ.setdefault("ADMIN_PASSWORD", "TestAdminPassword123!")
+os.environ.setdefault("FOUNDER_EMAIL", "founder@lifeos.local")
+os.environ.setdefault("FOUNDER_PASSWORD", "TestFounderPassword123!")
 os.environ.setdefault("FRONTEND_ORIGINS", "http://127.0.0.1:3020")
 os.environ.setdefault("PUBLIC_APP_URL", "http://127.0.0.1:3020")
 os.environ.setdefault("ENABLE_SCHEDULED_CLEANUP", "false")  # tests trigger cleanup explicitly

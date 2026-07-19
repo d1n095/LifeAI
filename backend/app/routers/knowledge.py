@@ -3,13 +3,13 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import require_founder
 from app.models.company import CompanyInfo
 from app.models.user import User
 from app.rag.retrieve import retrieve_context
 from app.schemas import CompanyInfoIn, CompanyInfoOut
 
-router = APIRouter(prefix="/api/knowledge", tags=["knowledge"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/api/knowledge", tags=["knowledge"], dependencies=[Depends(require_founder)])
 
 
 class SearchQuery(BaseModel):
@@ -33,7 +33,7 @@ class SearchQuery(BaseModel):
 
 
 @router.post("/search")
-async def search_knowledge(payload: SearchQuery, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+async def search_knowledge(payload: SearchQuery, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     return await retrieve_context(db, user.id, payload.query, top_k=payload.top_k)
 
 

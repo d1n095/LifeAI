@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.cookies import ACCESS_COOKIE
 from app.db import get_db
+from app.founder import FOUNDER_USER_ID
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
 from app.request_context import current_user_id as current_user_id_var
@@ -109,7 +110,14 @@ async def get_current_user(
     return user
 
 
-def require_admin(user: User = Depends(get_current_user)) -> User:
-    if user.role != UserRole.admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Kräver adminbehörighet.")
+def require_founder(user: User = Depends(get_current_user)) -> User:
+    """MainAI is a Founder AI, not a shared or per-user assistant — this is the server-side
+    gate every protected route in the system depends on, not just a UI-level restriction.
+
+    Checks both role AND id against the fixed FOUNDER_USER_ID (see app/founder.py):
+    a role check alone would trust any row someone managed to mark role=founder, whereas
+    pinning to the exact primary key means only the one specific row app/bootstrap.py
+    provisions can ever pass this check, regardless of what role any other row claims."""
+    if user.role != UserRole.founder or user.id != FOUNDER_USER_ID:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MainAI är endast tillgänglig för grundarkontot.")
     return user

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.audit import record_audit
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import require_founder
 from app.models.document import Document, DocumentSource
 from app.models.user import User
 from app.rag.extract import extract_text
@@ -16,7 +16,7 @@ from app.schemas import DocumentOut
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 
-router = APIRouter(prefix="/api/documents", tags=["documents"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/api/documents", tags=["documents"], dependencies=[Depends(require_founder)])
 
 
 @router.get("", response_model=list[DocumentOut])
@@ -31,7 +31,7 @@ async def upload_document(
     file: UploadFile,
     category: str | None = None,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_founder),
 ):
     raw = await file.read()
     if len(raw) > MAX_UPLOAD_BYTES:
@@ -80,7 +80,7 @@ def _index_in_background(document_id: uuid.UUID, text_content: str) -> None:
 
 
 @router.delete("/{document_id}")
-def delete_document(document_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def delete_document(document_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     document = db.get(Document, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="Dokumentet hittades inte.")

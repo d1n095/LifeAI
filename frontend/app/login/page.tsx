@@ -128,10 +128,7 @@ export default function LoginPage() {
           {loading ? "Loggar in…" : "Logga in"}
         </button>
 
-        <div className="mt-4 flex justify-between text-sm text-white/40">
-          <Link href="/register" className="text-accent2 hover:underline">
-            Skapa konto
-          </Link>
+        <div className="mt-4 flex justify-end text-sm text-white/40">
           <Link href="/forgot-password" className="text-accent2 hover:underline">
             Glömt lösenord?
           </Link>

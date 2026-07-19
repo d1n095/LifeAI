@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import type { BrowserContext, Page } from "@playwright/test";
+import type { APIResponse, BrowserContext, Page } from "@playwright/test";
 
 // Must match backend/scripts/run_e2e_backend.py's default E2E_EMAIL_LOG_PATH.
 const EMAIL_LOG_PATH =
@@ -66,31 +66,23 @@ export async function loginViaUi(
   await page.getByRole("button", { name: "Logga in" }).click();
 }
 
-export async function registerViaUi(
-  page: Page,
-  frontendUrl: string,
-  email: string,
-  password: string
-): Promise<void> {
-  await page.goto(`${frontendUrl}/register`, { waitUntil: "networkidle" });
-  await page.getByLabel("E-post").fill(email);
-  await page.getByLabel("Lösenord", { exact: true }).fill(password);
-  await page.getByLabel("Bekräfta lösenord").fill(password);
-  await page.getByRole("button", { name: "Skapa konto" }).click();
-  await page.waitForSelector("text=Kolla din e-post", { timeout: 5000 });
-}
-
-export async function registerVerifyLogin(
-  page: Page,
+/** MainAI is Founder-only — frontend/app/register/page.tsx no longer renders a form (it
+ * redirects to /login), so there is no UI path left to drive. register() itself is still
+ * reachable directly in non-production environments (see backend/app/routers/auth.py — the
+ * 404 block is scoped to ENVIRONMENT=production, which CI never sets) precisely so tests
+ * like this can still exercise account-lifecycle mechanics (duplicate handling, honeypot,
+ * password policy, token issuance) at the API layer. What a freshly-registered account can
+ * no longer do is log in — see require_founder and login()'s explicit non-founder block —
+ * so callers of this helper should expect subsequent login attempts to fail with 401, not
+ * succeed the way they used to. */
+export async function registerViaApi(
   context: BrowserContext,
-  frontendUrl: string,
   backendUrl: string,
   email: string,
-  password: string
-): Promise<void> {
-  await registerViaUi(page, frontendUrl, email, password);
-  const token = extractToken(latestEmailTo(email)!.body);
-  await context.request.post(`${backendUrl}/api/auth/verify-email`, { data: { token } });
-  await loginViaUi(page, frontendUrl, email, password);
-  await page.waitForURL(frontendUrl + "/", { timeout: 5000 });
+  password: string,
+  website: string = ""
+): Promise<APIResponse> {
+  return context.request.post(`${backendUrl}/api/auth/register`, {
+    data: { email, password, website },
+  });
 }

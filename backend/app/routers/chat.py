@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import require_founder
 from app.limiter import limiter
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole
 from app.models.usage import UsageLog
@@ -18,12 +18,12 @@ from app.rag.retrieve import retrieve_context
 from app.rag.trust import assess_confidence, build_trust_instructions
 from app.schemas import ChatMessageIn, ChatMessageOut, SourceRef
 
-router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(require_founder)])
 
 SYSTEM_PROMPT = (
-    "Du är MainAI, den centrala AI-assistenten för företaget. Svara utifrån den kontext "
-    "som ges nedan från företagets kunskapsbibliotek. Svara på samma språk som användaren "
-    "skriver på."
+    "Du är MainAI, grundarens Founder AI — inte en delad eller allmän assistent. Svara "
+    "utifrån den kontext som ges nedan från kunskapsbiblioteket. Svara på samma språk som "
+    "grundaren skriver på."
 )
 
 settings = get_settings()
@@ -35,7 +35,7 @@ async def chat(
     request: Request,
     payload: ChatMessageIn,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_founder),
 ):
     conversation = None
     if payload.conversation_id:
