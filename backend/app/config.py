@@ -1,5 +1,7 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -134,6 +136,47 @@ class Settings(BaseSettings):
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
+
+    # Fail fast on a malformed connection string at process startup (when Settings() is
+    # first constructed) rather than surfacing as a confusing low-level driver error deep
+    # inside SQLAlchemy/redis-py the first time something actually tries to connect.
+    # Deliberately checks *shape* only (scheme + host present, expected scheme family) — not
+    # reachability, which is what app/main.py's _check_redis_reachable() and the DB
+    # connection itself already verify separately.
+    @field_validator("database_url", "app_database_url")
+    @classmethod
+    def _validate_postgres_url(cls, value: str, info) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("postgresql", "postgres") or not parts.hostname:
+            raise ValueError(
+                f"{info.field_name.upper()} ser inte ut som en giltig Postgres-anslutningssträng "
+                f"(förväntar postgresql://användare:lösenord@host:port/databas)."
+            )
+        return value
+
+    @field_validator("redis_url")
+    @classmethod
+    def _validate_redis_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme not in ("redis", "rediss") or not parts.hostname:
+            raise ValueError(
+                "REDIS_URL ser inte ut som en giltig Redis-anslutningssträng (förväntar "
+                "redis://... eller rediss://... med ett host)."
+            )
+        return value
+
+    @field_validator("public_app_url")
+    @classmethod
+    def _validate_public_app_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(
+                "PUBLIC_APP_URL ser inte ut som en giltig URL (förväntar http(s)://host, "
+                "används i verifierings-/återställningsmail-länkar)."
+            )
+        return value
 
 
 @lru_cache
