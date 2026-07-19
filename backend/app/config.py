@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     # keyed by IP since there's no authenticated user yet at that point)
     rate_limit_chat_per_minute: int = 20
     rate_limit_default_per_minute: int = 120
+    # Import is heavier than ordinary CRUD (a ZIP can contain up to 500 files, each chunked
+    # and embedded — see app/rag/zip_import.py/app/rag/library_import.py) and, unlike chat,
+    # has no per-request AI-provider cost ceiling of its own to lean on, so it gets its own,
+    # stricter limit rather than sharing rate_limit_default_per_minute.
+    rate_limit_library_import_per_minute: int = 10
     rate_limit_login_per_minute: int = 10
     rate_limit_refresh_per_minute: int = 30
     rate_limit_logout_per_minute: int = 30

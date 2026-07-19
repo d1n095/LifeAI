@@ -59,6 +59,7 @@ CONFIG_MATRIX: dict[str, dict] = {
     "cookie_samesite": {"required_in_production": False, "secret": False, "default": "none", "validates": "none"},
     "cookie_domain": {"required_in_production": False, "secret": False, "default": None, "validates": "none"},
     "rate_limit_chat_per_minute": {"required_in_production": False, "secret": False, "default": 20, "validates": "none"},
+    "rate_limit_library_import_per_minute": {"required_in_production": False, "secret": False, "default": 10, "validates": "none"},
     "rate_limit_default_per_minute": {"required_in_production": False, "secret": False, "default": 120, "validates": "none"},
     "rate_limit_login_per_minute": {"required_in_production": False, "secret": False, "default": 10, "validates": "none"},
     "rate_limit_refresh_per_minute": {"required_in_production": False, "secret": False, "default": 30, "validates": "none"},

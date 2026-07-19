@@ -219,3 +219,101 @@ class UsageSummaryRow(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float | None  # None means at least one row in this group has unknown pricing
+
+
+# --- Founder Knowledge Studio v1 (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) ---
+
+
+class KnowledgeVersionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    version_number: int
+    checksum: str
+    extraction_version: str
+    raw_metadata: dict | None
+    created_at: datetime
+
+
+class SourceRelationshipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    from_source_id: uuid.UUID
+    to_source_id: uuid.UUID
+    relationship_type: str
+    note: str | None
+    created_at: datetime
+
+
+class SourceRelationshipIn(BaseModel):
+    to_source_id: uuid.UUID
+    relationship_type: str
+    note: str | None = None
+
+    @field_validator("relationship_type")
+    @classmethod
+    def valid_relationship_type(cls, v: str) -> str:
+        allowed = {"derived_from", "supersedes", "contradicts", "supports", "duplicates", "belongs_to"}
+        if v not in allowed:
+            raise ValueError(f"Ogiltig relationstyp. Måste vara en av: {', '.join(sorted(allowed))}.")
+        return v
+
+
+class KnowledgeSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    source: str
+    media_type: str | None
+    original_filename: str | None
+    category: str | None
+    classification: str
+    active_truth_status: str
+    status: str
+    chunk_count: int
+    checksum: str | None
+    project_id: uuid.UUID | None
+    version_number: int
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    imported_at: datetime | None
+
+
+class KnowledgeSourceDetailOut(KnowledgeSourceOut):
+    versions: list[KnowledgeVersionOut] = []
+    relationships: list[SourceRelationshipOut] = []
+    chunk_preview: list[str] = []
+
+
+class ImportJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    status: str
+    source_filename: str | None
+    source_checksum: str | None
+    progress_current: int
+    progress_total: int
+    succeeded_count: int
+    failed_count: int
+    skipped_count: int
+    failure_reason: str | None
+    manifest: dict | None
+    file_results: list | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+
+
+class LibrarySearchHit(BaseModel):
+    document_id: uuid.UUID
+    title: str
+    text: str
+    score: float
+    classification: str
+    active_truth_status: str
+    media_type: str | None
+    text_match: bool = False
+
+
+class DeleteConfirmIn(BaseModel):
+    confirm: bool = False
