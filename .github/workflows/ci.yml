@@ -1028,16 +1028,78 @@ jobs:
           echo "Static asset (edge-probe.html — no SSR, no React) via the public \$PORT:"
           curl -sS -o /dev/null -w "edge-probe.html -> %{http_code}\n" http://localhost:3025/edge-probe.html
           curl -sS http://localhost:3025/edge-probe.html | grep -q "edge-probe-ok" || (echo "::error::edge-probe.html did not serve its expected static content via the public \$PORT" && exit 1)
-          echo "Diagnostic route /api/edge-probe (Next-native, no backend/DB/Redis) via the public \$PORT:"
-          EDGE_PROBE_HEADERS=$(curl -sS -D - -o /tmp/edge-probe-body.txt http://localhost:3025/api/edge-probe)
-          echo "$EDGE_PROBE_HEADERS" | grep -qi "^x-edge-probe: 1" || (echo "::error::x-edge-probe header missing from /api/edge-probe response" && exit 1)
-          grep -q "edge-probe-ok" /tmp/edge-probe-body.txt || (echo "::error::/api/edge-probe body did not contain the expected marker" && exit 1)
-          echo "Diagnostic route /api/edge-health (separate from /api/health and from the internal ?probe= marker) via the public \$PORT:"
-          EDGE_HEALTH_HEADERS=$(curl -sS -D - -o /tmp/edge-health-body.txt http://localhost:3025/api/edge-health)
-          echo "$EDGE_HEALTH_HEADERS" | grep -qi "^x-edge-health: 1" || (echo "::error::x-edge-health header missing from /api/edge-health response" && exit 1)
-          grep -q "edge-health-ok" /tmp/edge-health-body.txt || (echo "::error::/api/edge-health body did not contain the expected marker" && exit 1)
-          echo "Confirming the catch-all /api/* proxy (frontend/app/api/[...path]/route.ts) still handles an unrelated backend path unaffected by the two new literal routes:"
+          echo "Diagnostic route /api/edge-probe (Next-native, no backend/DB/Redis) via the public \$PORT — quick reachability check:"
+          curl -sS -o /dev/null -w "/api/edge-probe?probe_id=ci-boot-check -> %{http_code}\n" "http://localhost:3025/api/edge-probe?probe_id=ci-boot-check"
+          echo "Confirming the catch-all /api/* proxy (frontend/app/api/[...path]/route.ts) still handles an unrelated backend path unaffected by the new literal route:"
           curl -sS -o /dev/null -w "/api/auth/me -> %{http_code}\n" http://localhost:3025/api/auth/me
+
+      - name: Validate /api/edge-probe — probe_id enforcement, boot-id stability, log-injection and secret-leak safety
+        run: |
+          BASE=http://localhost:3025
+
+          echo "--- Missing probe_id -> 400 ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE/api/edge-probe")
+          [ "$CODE" = "400" ] || (echo "::error::missing probe_id did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- Empty probe_id -> 400 ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE/api/edge-probe?probe_id=")
+          [ "$CODE" = "400" ] || (echo "::error::empty probe_id did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- 65-character probe_id (one over the limit) -> 400 ---"
+          LONG_ID=$(printf 'a%.0s' $(seq 1 65))
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" -G --data-urlencode "probe_id=$LONG_ID" "$BASE/api/edge-probe")
+          [ "$CODE" = "400" ] || (echo "::error::65-char probe_id did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- Disallowed characters in probe_id -> 400 ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" -G --data-urlencode 'probe_id=bad id!' "$BASE/api/edge-probe")
+          [ "$CODE" = "400" ] || (echo "::error::probe_id with disallowed characters did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- CR/LF log-injection attempt in probe_id -> 400, never leaks into the container log ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE/api/edge-probe?probe_id=inject%0d%0a%5Bfake%5D-line")
+          [ "$CODE" = "400" ] || (echo "::error::CR/LF-bearing probe_id did not return 400 (got $CODE)" && exit 1)
+          if docker logs lifeai-f 2>&1 | grep -q "fake.-line\|inject.fake"; then
+            echo "::error::a rejected probe_id leaked into the container log" && exit 1
+          fi
+
+          echo "--- Valid probe_id -> 200, correct plain-text body, all required headers ---"
+          FIRST_ID="ci-probe-first-${RANDOM}"
+          HEADERS_1=$(curl -sS -D - -o /tmp/edge-probe-body-1.txt "$BASE/api/edge-probe?probe_id=$FIRST_ID")
+          grep -q "^LifeAI edge probe OK" /tmp/edge-probe-body-1.txt || (echo "::error::unexpected /api/edge-probe response body" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^content-type: text/plain; charset=utf-8" || (echo "::error::wrong Content-Type on /api/edge-probe" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^cache-control: no-store" || (echo "::error::missing Cache-Control: no-store on /api/edge-probe" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^x-lifeai-probe: edge-v1" || (echo "::error::missing X-LifeAI-Probe: edge-v1 header" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^x-lifeai-process-id: " || (echo "::error::missing X-LifeAI-Process-ID header" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^x-lifeai-probe-id: $FIRST_ID" || (echo "::error::X-LifeAI-Probe-ID header does not echo the validated probe_id" && exit 1)
+          BOOT_ID_1=$(echo "$HEADERS_1" | grep -i "^x-lifeai-boot-id:" | tr -d '\r' | awk '{print $2}')
+          [ -n "$BOOT_ID_1" ] || (echo "::error::missing X-LifeAI-Boot-ID header" && exit 1)
+
+          echo "--- Second valid call, same running process -> identical boot_id ---"
+          SECOND_ID="ci-probe-second-${RANDOM}"
+          HEADERS_2=$(curl -sS -D - -o /dev/null "$BASE/api/edge-probe?probe_id=$SECOND_ID")
+          BOOT_ID_2=$(echo "$HEADERS_2" | grep -i "^x-lifeai-boot-id:" | tr -d '\r' | awk '{print $2}')
+          [ "$BOOT_ID_1" = "$BOOT_ID_2" ] || (echo "::error::boot_id changed between two calls in the same process ($BOOT_ID_1 vs $BOOT_ID_2)" && exit 1)
+
+          echo "--- A call carrying Cookie/Authorization/X-Forwarded-For must never leak their values into the log, only a boolean presence indicator ---"
+          SECRET_ID="ci-probe-secret-${RANDOM}"
+          curl -sS -o /dev/null \
+            -H "Cookie: session=super-secret-cookie-value" \
+            -H "Authorization: Bearer super-secret-token" \
+            -H "X-Forwarded-For: 203.0.113.99" \
+            "$BASE/api/edge-probe?probe_id=$SECRET_ID"
+          if docker logs lifeai-f 2>&1 | grep -q "super-secret-cookie-value"; then
+            echo "::error::a Cookie value leaked into the container log" && exit 1
+          fi
+          if docker logs lifeai-f 2>&1 | grep -q "super-secret-token"; then
+            echo "::error::an Authorization value leaked into the container log" && exit 1
+          fi
+          if docker logs lifeai-f 2>&1 | grep -q "203.0.113.99"; then
+            echo "::error::a full X-Forwarded-For address leaked into the container log" && exit 1
+          fi
+          docker logs lifeai-f 2>&1 | grep -q "\[edge-probe\].*probe_id=$SECRET_ID.*forwarded_for_present=true" \
+            || (echo "::error::expected structured log line for the secret-header test call was not found" && exit 1)
+          docker logs lifeai-f 2>&1 | grep -q "\[edge-probe\].*boot_id=$BOOT_ID_1.*pid=.*probe_id=$FIRST_ID" \
+            || (echo "::error::expected structured log line for the first valid call was not found" && exit 1)
+          echo "All /api/edge-probe validation checks passed."
 
       - name: Confirm the public frontend $PORT is the sole externally-reachable port (unambiguous for Render)
         run: |
@@ -1062,18 +1124,19 @@ jobs:
             echo "::error::port 8000 (FastAPI) is published — it must never be reachable from outside the container" && exit 1
           fi
 
-      - name: Simulate a real browser page load of /, /login, /edge-probe.html, /api/edge-probe and /api/edge-health under the memory ceiling, repeatedly
+      - name: Simulate a real browser page load of /, /login, /edge-probe.html and /api/edge-probe under the memory ceiling, repeatedly
         run: |
           # Unlike Container A-E's health-check-only traffic, this fetches the actual HTML documents
           # for / and /login, then every /_next/static/* asset those documents reference — the same
           # request pattern a real browser makes on first paint (HTML + JS chunks + CSS), repeated
           # several times to simulate more than one visitor without waiting for a real 15-minute
-          # Render Free idle window. /edge-probe.html rides along on every round too — a static
-          # asset with no SSR/React involved, to separate "Next's process/port/routing as a whole
-          # is broken" from "page rendering specifically is broken".
+          # Render Free idle window. /edge-probe.html and /api/edge-probe ride along on every round
+          # too — a static asset with no SSR/React involved and a Next-native route handler with no
+          # backend/DB/Redis involved, to separate "Next's process/port/routing as a whole is
+          # broken" from "page rendering specifically is broken".
           for round in $(seq 1 5); do
             echo "--- round $round ---"
-            for page in / /login /edge-probe.html /api/edge-probe /api/edge-health; do
+            for page in / /login /edge-probe.html "/api/edge-probe?probe_id=ci-load-round-$round"; do
               html=$(curl -sS --max-time 10 "http://localhost:3025$page")
               code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:3025$page")
               echo "$page -> $code"
