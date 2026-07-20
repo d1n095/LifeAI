@@ -119,6 +119,8 @@ class ChatMessageOut(BaseModel):
     confidence_score: float
     providers_attempted: list[str] = []  # >1 entry means fallback engaged
     conflicts_detected: bool = False
+    context_intent: str | None = None  # see app/context/resolver.py — observational only tonight
+    context_confidence: str | None = None
 
 
 class MessageOut(BaseModel):

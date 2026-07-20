@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.context.resolver import ConversationMessage, resolve_context
 from app.db import get_db
 from app.deps import require_founder
 from app.limiter import limiter
@@ -71,6 +72,16 @@ async def chat(
         .order_by(MessageModel.created_at.asc())
         .limit(20)
         .all()
+    )
+
+    # Conversation Context Resolver v1 (see app/context/resolver.py, docs/CONTEXT_RESOLVER_V1.md)
+    # — a rule-based classification of what kind of turn this message is (continuation, new
+    # topic, correction, ...). Purely observational tonight: it doesn't yet change retrieval
+    # or the system prompt (see that doc's "not built tonight" section for the deliberately
+    # deferred deeper integration) — surfaced on the response so the founder and a future UI
+    # can see it and build on it without this endpoint's core behavior depending on it.
+    context_resolution = resolve_context(
+        payload.message, [ConversationMessage(role=m.role.value, content=m.content, created_at=m.created_at) for m in history]
     )
 
     system_content = (
@@ -141,4 +152,6 @@ async def chat(
         confidence_score=trust.score,
         providers_attempted=attempted,
         conflicts_detected=trust.conflicts_detected,
+        context_intent=context_resolution.intent,
+        context_confidence=context_resolution.confidence,
     )

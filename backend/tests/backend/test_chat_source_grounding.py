@@ -167,3 +167,18 @@ def test_chat_never_surfaces_another_users_source(client, superuser_db, make_ver
     body = res.json()
     assert body["sources"] == []
     assert not any("hemlighet" in m.content.lower() for m in _captured_chat_messages[0] if m.role == "system")
+
+
+def test_chat_response_includes_context_resolver_classification(client, superuser_db, _captured_chat_messages):
+    """Confirms app/context/resolver.py (DEL 7) is actually wired into the live /api/chat
+    endpoint, not just unit-tested in isolation — a brand-new conversation's first message
+    has no history, so it must resolve as a new topic."""
+    founder_id = _founder_id(superuser_db)
+    _make_source(superuser_db, founder_id, "Aktuellt dokument")
+    csrf = _login(client)
+
+    res = client.post("/api/chat", json={"message": "Berätta om kvantdatorer."}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["context_intent"] == "new_topic"
+    assert body["context_confidence"] in ("high", "medium", "low")
