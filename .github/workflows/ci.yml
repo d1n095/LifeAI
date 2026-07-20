@@ -1336,6 +1336,8 @@ jobs:
             if [ -n "$cid" ]; then
               echo "--- $name health ---"
               docker inspect -f '{{json .State.Health}}' "$cid" || true
+              echo "--- $name listening sockets (/proc/net/tcp, port 3000 = 0BB8, port 8000 = 1F40) ---"
+              docker exec "$cid" cat /proc/net/tcp || true
             fi
           done
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci logs
