@@ -975,22 +975,46 @@ jobs:
       # simulated ceiling may drift from the real one — treat 512m as the best available
       # proxy, not a guaranteed match. --memory-swap equal to --memory disables swap
       # entirely, matching a container platform that has none.
-      - name: Start container F (Render Free memory-pressure simulation, 512m/no-swap)
+      #
+      # Uses its OWN dedicated database (lifeos_combined_ci_memtest) and forces
+      # MAINAI_APP_ROTATE_PASSWORD=true, deliberately not reusing lifeos_combined_ci or
+      # ci_combined_app_pw the way containers A-D do. mainai_app is a cluster-global Postgres
+      # role (same shared Postgres service container across this whole job — see the
+      # incident this job's Container E steps already document), and Container E's own
+      # retry-test step just above rotated that global role's password to
+      # ci_combined_app_pw_fresh. Reusing ci_combined_app_pw here would silently point at a
+      # password Postgres no longer accepts — a real, permanent auth failure that has nothing
+      # to do with what this container actually tests (memory pressure), and would show up
+      # misleadingly as this step failing before the memory test even ran.
+      - name: Create a dedicated database for the memory-pressure test
+        env:
+          PGPASSWORD: postgres
         run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_combined_ci_memtest;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_combined_ci_memtest;"
+
+      - name: Start container F (Render Free memory-pressure simulation, 512m/no-swap, real PORT=10000)
+        run: |
+          # PORT=10000, and the container-side half of the -p mapping, are literally 10000 here —
+          # not the 3000 every other container (A-E) in this job uses. The actual production
+          # incident happened with Render's real $PORT (10000, confirmed in the Render deploy log
+          # this branch is investigating); every prior CI container only ever exercised 3000,
+          # leaving a real, unexamined gap between what CI covers and what Render actually runs.
           docker run -d --name lifeai-f \
             --add-host=host.docker.internal:host-gateway \
             --memory=512m --memory-swap=512m \
-            -p 3025:3000 \
+            -p 3025:10000 \
             -v "${{ github.workspace }}/e2e-data:/app/e2e-data" \
             -e SECRET_KEY=ci-combined-secret-key \
-            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
-            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e DATABASE_URL="postgresql://postgres:postgres@host.docker.internal:5432/lifeos_combined_ci_memtest" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw_memtest \
+            -e MAINAI_APP_ROTATE_PASSWORD=true \
             -e REDIS_URL="$CONTAINER_REDIS_URL" \
             -e FOUNDER_EMAIL=founder@lifeos.local \
             -e FOUNDER_PASSWORD=TestFounderPassword123! \
             -e FRONTEND_ORIGINS=http://localhost:3025 \
             -e PUBLIC_APP_URL=http://localhost:3025 \
-            -e PORT=3000 \
+            -e PORT=10000 \
             -e E2E_MOCK_MODE=true \
             -e E2E_EMAIL_LOG_PATH=/app/e2e-data/e2e_test_emails.jsonl \
             lifeai-combined:ci
@@ -1001,39 +1025,45 @@ jobs:
           curl -sS http://localhost:3025/api/health
           echo "Memory limit actually applied inside the container:"
           docker exec lifeai-f sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes'
+          echo "Static asset (edge-probe.html — no SSR, no React) via the public \$PORT:"
+          curl -sS -o /dev/null -w "edge-probe.html -> %{http_code}\n" http://localhost:3025/edge-probe.html
+          curl -sS http://localhost:3025/edge-probe.html | grep -q "edge-probe-ok" || (echo "::error::edge-probe.html did not serve its expected static content via the public \$PORT" && exit 1)
 
       - name: Confirm the public frontend $PORT is the sole externally-reachable port (unambiguous for Render)
         run: |
           docker port lifeai-f
           # Exactly one published mapping, and it must be the frontend's $PORT (container-side
-          # 3000, mapped to host 3025 above) — never 8000 (FastAPI, loopback-only by design; see
-          # Container A's identical check earlier in this job) and never anything else. If a future
-          # change to Dockerfile.combined or entrypoint-combined.sh ever published a second port,
-          # Render would have two candidate ports to route to instead of one — the exact class of
+          # 10000, mapped to host 3025 above, matching Render's actual assigned port exactly) —
+          # never 8000 (FastAPI, loopback-only by design; see Container A's identical check
+          # earlier in this job) and never anything else. If a future change to
+          # Dockerfile.combined or entrypoint-combined.sh ever published a second port, Render
+          # would have two candidate ports to route to instead of one — the exact class of
           # ambiguity this step exists to rule out.
           # `docker port` prints one line per (container-port, host-family) pair — a single
-          # `-p 3025:3000` mapping normally shows up as two lines (0.0.0.0 and [::]), not one.
+          # `-p 3025:10000` mapping normally shows up as two lines (0.0.0.0 and [::]), not one.
           # Count DISTINCT container-side "port/proto" prefixes instead of raw lines, so this
           # doesn't false-positive on the ordinary IPv4+IPv6 duplication.
           DISTINCT_CONTAINER_PORTS=$(docker port lifeai-f | awk '{print $1}' | sort -u | wc -l)
           if [ "$DISTINCT_CONTAINER_PORTS" -ne 1 ]; then
             echo "::error::expected exactly one distinct published container-side port, found $DISTINCT_CONTAINER_PORTS: $(docker port lifeai-f)" && exit 1
           fi
-          docker port lifeai-f | grep -q "^3000/tcp -> " || (echo "::error::the published container-side port is not 3000 (the frontend's \$PORT)" && exit 1)
+          docker port lifeai-f | grep -q "^10000/tcp -> " || (echo "::error::the published container-side port is not 10000 (Render's actual \$PORT)" && exit 1)
           if docker port lifeai-f | grep -q "^8000/tcp"; then
             echo "::error::port 8000 (FastAPI) is published — it must never be reachable from outside the container" && exit 1
           fi
 
-      - name: Simulate a real browser page load of / and /login under the memory ceiling, repeatedly
+      - name: Simulate a real browser page load of /, /login and /edge-probe.html under the memory ceiling, repeatedly
         run: |
           # Unlike Container A-E's health-check-only traffic, this fetches the actual HTML documents
           # for / and /login, then every /_next/static/* asset those documents reference — the same
           # request pattern a real browser makes on first paint (HTML + JS chunks + CSS), repeated
           # several times to simulate more than one visitor without waiting for a real 15-minute
-          # Render Free idle window.
+          # Render Free idle window. /edge-probe.html rides along on every round too — a static
+          # asset with no SSR/React involved, to separate "Next's process/port/routing as a whole
+          # is broken" from "page rendering specifically is broken".
           for round in $(seq 1 5); do
             echo "--- round $round ---"
-            for page in / /login; do
+            for page in / /login /edge-probe.html; do
               html=$(curl -sS --max-time 10 "http://localhost:3025$page")
               code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:3025$page")
               echo "$page -> $code"
