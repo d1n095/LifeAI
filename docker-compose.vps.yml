@@ -77,6 +77,17 @@ services:
       # Docker DNS on lifeai_internal — same mechanism docker-compose.yml already uses
       # locally, just now crossing a real container boundary instead of a loopback one.
       INTERNAL_API_URL: http://backend:8000
+      # Docker auto-injects HOSTNAME=<container id> into every container's environment.
+      # Next.js's standalone server.js (frontend/Dockerfile's CMD) reads process.env.HOSTNAME
+      # as its bind address when set, falling back to 0.0.0.0 only if it's unset — so without
+      # this override it silently binds to whatever that hostname resolves to (this
+      # container's own address on lifeai_internal) instead of all interfaces. Caddy's own
+      # reverse_proxy still reaches it fine either way (Docker DNS resolves `frontend` to
+      # that same address), but the healthcheck below — and anything else connecting via
+      # loopback inside this container's own network namespace — would get ECONNREFUSED on
+      # 127.0.0.1:3000 without this. Verified against the real image: see
+      # .github/workflows/ci.yml's vps-compose-verify job history.
+      HOSTNAME: "0.0.0.0"
     depends_on:
       backend:
         condition: service_healthy
