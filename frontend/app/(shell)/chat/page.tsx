@@ -15,6 +15,7 @@ type ChatEntry = {
   confidence?: Confidence;
   confidenceScore?: number;
   providersAttempted?: string[];
+  conflictsDetected?: boolean;
 };
 
 export default function ChatPage() {
@@ -102,6 +103,7 @@ export default function ChatPage() {
           confidence: res.confidence,
           confidenceScore: res.confidence_score,
           providersAttempted: res.providers_attempted,
+          conflictsDetected: res.conflicts_detected,
         },
       ]);
       if (readAloud) voice.speak(res.reply);
@@ -231,8 +233,24 @@ export default function ChatPage() {
                 {entry.content}
               </div>
               {entry.confidence && (
-                <div className="mt-2">
+                <div className="mt-2 flex flex-wrap items-center gap-2">
                   <ConfidenceBadge confidence={entry.confidence} score={entry.confidenceScore ?? 0} />
+                  {/* Trust Engine's conflicts_detected (app/rag/trust.py) was computed and
+                      returned by every /api/chat response but never shown anywhere in this
+                      UI — a founder had no visible warning that a source-level or
+                      claim-level contradiction (app/rag/trust.py's detect_conflicts /
+                      detect_claim_conflicts) was flagged internally, even next to a "hög
+                      tillförlitlighet" badge. Found during STEG 14's full vertical review. */}
+                  {entry.conflictsDetected && (
+                    <span
+                      role="alert"
+                      className="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/15 px-2.5 py-1 text-xs text-red-300"
+                      title="Källorna bakom svaret motsäger varandra — se källorna nedan innan du litar på svaret."
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+                      Motstridiga källor
+                    </span>
+                  )}
                 </div>
               )}
               {entry.sources && entry.sources.length > 0 && (

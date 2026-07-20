@@ -130,7 +130,20 @@ async def import_package(
         .first()
     )
     if existing is not None:
-        return existing
+        # ...but only if that job's result is still actually there. A founder who deletes a
+        # source and then re-imports the identical file must get a real re-import, not a
+        # phantom "completed" response pointing at documents that no longer exist — found via
+        # STEG 14's full vertical review, reproduced by a fresh import immediately following a
+        # delete of the same content. Without this check the UI confidently shows "completed,
+        # 1 importerade" while the library silently stays empty.
+        still_has_result = (
+            db.query(Document.id)
+            .filter(Document.import_job_id == existing.id, Document.deleted_at.is_(None))
+            .first()
+            is not None
+        )
+        if still_has_result:
+            return existing
 
     job = ImportJob(
         owner_id=user.id,

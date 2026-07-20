@@ -130,6 +130,35 @@ def test_reimporting_identical_zip_returns_the_same_completed_job_not_a_new_one(
     assert job2["status"] == "completed"
 
 
+def test_reimporting_identical_content_after_deleting_the_source_is_a_real_new_import(client):
+    """Found during STEG 14's full vertical review, and the exact cause of a reproducible
+    (not flaky) E2E failure: the whole-upload idempotency check above
+    (test_reimporting_identical_zip_returns_the_same_completed_job_not_a_new_one) matched
+    purely on checksum + status=="completed", with no regard for whether that job's document
+    still exists. A founder who deletes a source and later re-imports the exact same file got
+    back the OLD job object — status "completed", succeeded_count populated — while the
+    library stayed permanently empty for that content, since no new Document was ever
+    created and the old one was gone. This proves the fix in app/routers/library.py's
+    import_package: a job is only treated as a duplicate if it still has a live (non-deleted)
+    result."""
+    csrf = _login(client)
+    job1 = _import_and_wait(client, csrf, "reimport-after-delete.txt", b"innehall som raderas och importeras igen")
+    source_id_1 = job1["file_results"][0]["source_id"]
+
+    client.request("DELETE", f"/api/library/{source_id_1}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+    assert client.get(f"/api/library/{source_id_1}").status_code == 404
+
+    job2 = _import_and_wait(client, csrf, "reimport-after-delete.txt", b"innehall som raderas och importeras igen")
+    assert job2["id"] != job1["id"], "re-import after delete must be a real new job, not the stale deleted one"
+    assert job2["status"] == "completed"
+    assert job2["succeeded_count"] == 1
+    source_id_2 = job2["file_results"][0]["source_id"]
+    assert source_id_2 != source_id_1
+
+    listed = client.get("/api/library").json()
+    assert any(d["id"] == source_id_2 for d in listed)
+
+
 def test_get_job_status(client):
     csrf = _login(client)
     res = client.post("/api/library/import", files={"file": ("j.txt", b"jobbstatus-test", "text/plain")}, headers={"X-CSRF-Token": csrf})

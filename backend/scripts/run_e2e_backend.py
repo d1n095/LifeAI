@@ -25,6 +25,7 @@ open(EMAIL_LOG_PATH, "w").close()
 from app.config import get_settings
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
+from app.rag.claims import CLAIM_EXTRACTION_SYSTEM_PROMPT
 import app.rag.vector_store as vector_store
 import app.rag.retrieve as retrieve_mod
 import app.routers.auth as auth_router
@@ -33,6 +34,21 @@ _EMBEDDING_DIM = get_settings().embedding_dim
 
 
 async def fake_chat(self, messages, model, **kwargs):
+    # STEG 14: without this branch, EVERY claim extraction call during E2E (app/rag/claims.py's
+    # extract_claims_for_document, which runs automatically after every successful import)
+    # silently produced zero claims — the generic conversational reply below has no `[...]`
+    # JSON array in it, so app/rag/claims.py's _parse_claims() always returned []. That made
+    # STEG 10's claim-level trust layer untestable end-to-end through a real browser, only
+    # provable at the pytest layer. Detected by the exact system prompt claims.py sends (not
+    # a heuristic guess), so the branch can never accidentally misfire against a real chat
+    # turn. Echoes the chunk text back as a single claim — deterministic and directly
+    # traceable to what was actually indexed, not an invented fact.
+    if messages and messages[0].role == "system" and messages[0].content == CLAIM_EXTRACTION_SYSTEM_PROMPT:
+        chunk_text = messages[-1].content.strip()
+        claim = chunk_text[:200] if chunk_text else ""
+        content = json.dumps([claim]) if claim else "[]"
+        return ChatResult(content=content, provider="openai", model=model, raw_usage={"prompt_tokens": 40, "completion_tokens": 10})
+
     return ChatResult(
         content="Hej! Detta ar ett riktigt svar fran den simulerade AI-motorn under E2E-testet. "
         "Kostnadsloggning, Trust Engine och konversationshistorik gar via de riktiga API-vagarna.",
