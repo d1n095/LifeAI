@@ -1327,6 +1327,104 @@ jobs:
           # correctly end to end, same as same-origin-proxy-test's reasoning.
           [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected a real backend response (403/404, registration disabled) through the full VPS chain, got $RES" && exit 1)
 
+      - name: Verify each container runs as its intended non-root user
+        # See docs/VPS_DOCKER_HARDENING.md — backend/frontend/Dockerfile both create a
+        # dedicated UID 10001 user and USER-switch to it; caddy:2-alpine's own official image
+        # already runs as its baked-in non-root "caddy" user by default.
+        run: |
+          for name in backend frontend; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            uid=$(docker exec "$cid" id -u)
+            [ "$uid" = "10001" ] || (echo "::error::$name is running as UID $uid, expected the dedicated non-root UID 10001" && exit 1)
+          done
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q caddy)
+          uid=$(docker exec "$cid" id -u)
+          [ "$uid" != "0" ] || (echo "::error::caddy is running as root (UID 0)" && exit 1)
+          echo "Confirmed: backend/frontend run as UID 10001, caddy runs as its own non-root default user (UID $uid)."
+
+      - name: Verify container-level security controls are actually applied, not just declared
+        run: |
+          for name in caddy backend frontend; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+
+            privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' "$cid")
+            [ "$privileged" = "false" ] || (echo "::error::$name is running privileged" && exit 1)
+
+            readonly_fs=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$cid")
+            [ "$readonly_fs" = "true" ] || (echo "::error::$name does not have a read-only root filesystem" && exit 1)
+
+            nnp=$(docker inspect -f '{{.HostConfig.SecurityOpt}}' "$cid")
+            case "$nnp" in
+              *no-new-privileges:true*) ;;
+              *) echo "::error::$name is missing security_opt no-new-privileges:true (got: $nnp)" && exit 1 ;;
+            esac
+
+            capdrop=$(docker inspect -f '{{.HostConfig.CapDrop}}' "$cid")
+            case "$capdrop" in
+              *ALL*) ;;
+              *) echo "::error::$name does not drop ALL capabilities (got: $capdrop)" && exit 1 ;;
+            esac
+
+            pidslimit=$(docker inspect -f '{{.HostConfig.PidsLimit}}' "$cid")
+            if [ -z "$pidslimit" ] || [ "$pidslimit" = "0" ]; then
+              echo "::error::$name has no pids_limit applied" && exit 1
+            fi
+
+            # No Docker socket and no sensitive host directory ever mounted into any of the
+            # three containers — the only bind mount in the whole topology is the read-only
+            # Caddyfile.
+            mounts=$(docker inspect -f '{{range .Mounts}}{{.Type}}:{{.Source}}:{{.Destination}} {{end}}' "$cid")
+            case "$mounts" in
+              *docker.sock*) echo "::error::$name has the Docker socket mounted — this must never happen" && exit 1 ;;
+            esac
+            case "$name" in
+              caddy)
+                case "$mounts" in
+                  *"bind:"*Caddyfile*":/etc/caddy/Caddyfile"*) ;;
+                  *) echo "::error::caddy's bind mounts changed unexpectedly: $mounts" && exit 1 ;;
+                esac
+                ;;
+              *)
+                case "$mounts" in
+                  *"bind:"*) echo "::error::$name has an unexpected bind mount: $mounts" && exit 1 ;;
+                esac
+                ;;
+            esac
+          done
+          echo "Confirmed: no privileged containers, read-only root filesystems, no-new-privileges, all capabilities dropped, pids_limit set, no Docker socket or unexpected host mounts anywhere in the topology."
+
+      - name: Verify Caddy's own config validates inside the running container
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q caddy)
+          docker exec "$cid" caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Verify Caddy enforces the request-body size limit before it ever reaches the app
+        run: |
+          # 31 MB of zero bytes — 1 MB over the Caddyfile's request_body max_size 30MB.
+          # /dev/zero is unavailable to `curl --data-binary @-` sanely at this size without
+          # writing it out first — use `head -c` against /dev/zero into a real temp file.
+          head -c 32000000 /dev/zero > /tmp/oversized-body.bin
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @/tmp/oversized-body.bin)
+          rm -f /tmp/oversized-body.bin
+          # Caddy's request_body directive responds 413 Payload Too Large. Explicitly NOT
+          # 403/404 (the app-level response for this route) or 502 (backend unreachable) —
+          # this proves Caddy itself is the one rejecting it, before frontend/backend ever
+          # see the oversized body.
+          [ "$RES" = "413" ] || (echo "::error::expected 413 Payload Too Large from Caddy's request_body limit, got $RES" && exit 1)
+          echo "Confirmed: a body over the configured limit is rejected by Caddy itself (413), never reaching frontend/backend."
+
+      - name: Verify security response headers are present
+        run: |
+          HEADERS=$(curl -sS -D - -o /dev/null http://localhost:80/api/health)
+          echo "$HEADERS"
+          echo "$HEADERS" | grep -qi "^x-content-type-options: nosniff" || (echo "::error::missing X-Content-Type-Options: nosniff" && exit 1)
+          echo "$HEADERS" | grep -qi "^x-frame-options: DENY" || (echo "::error::missing X-Frame-Options: DENY" && exit 1)
+          echo "$HEADERS" | grep -qi "^referrer-policy: strict-origin-when-cross-origin" || (echo "::error::missing Referrer-Policy" && exit 1)
+          echo "$HEADERS" | grep -qi "^server:" && (echo "::error::Server header leaked despite -Server" && exit 1)
+          echo "Confirmed: hardening response headers present, Server header suppressed."
+
       - name: Dump logs on failure
         if: failure()
         run: |
@@ -1345,6 +1443,17 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci down -v || true
+
+      - name: Verify teardown left no orphan containers, networks, or volumes
+        if: always()
+        run: |
+          leftover_containers=$(docker ps -a --filter "label=com.docker.compose.project=lifeai_vps_ci" --format '{{.Names}}')
+          [ -z "$leftover_containers" ] || (echo "::error::orphan containers survived teardown: $leftover_containers" && exit 1)
+          leftover_networks=$(docker network ls --filter "label=com.docker.compose.project=lifeai_vps_ci" --format '{{.Name}}')
+          [ -z "$leftover_networks" ] || (echo "::error::orphan networks survived teardown: $leftover_networks" && exit 1)
+          leftover_volumes=$(docker volume ls --filter "label=com.docker.compose.project=lifeai_vps_ci" --format '{{.Name}}')
+          [ -z "$leftover_volumes" ] || (echo "::error::orphan volumes survived teardown (expected -v to remove them): $leftover_volumes" && exit 1)
+          echo "Confirmed: clean shutdown, no orphan containers/networks/volumes left behind."
 
   # ---------------------------------------------------------------------------------------
   # Single required status check for branch protection — see docs/OPERATIONS.md for how to
