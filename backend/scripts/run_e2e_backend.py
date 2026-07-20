@@ -50,13 +50,31 @@ async def fake_embed(self, texts, model):
     return [[0.05] * _EMBEDDING_DIM for _ in texts]
 
 
-def fake_search(db, owner_id, vector, top_k=5):
+_real_search = vector_store.search
+
+
+def fake_search(db, owner_id, vector, top_k=5, **kwargs):
+    """Prefers the REAL search (real DB query, real RLS, real deleted-source exclusion —
+    only the embedding vector itself is fake, from fake_embed above) whenever the founder
+    actually has real indexed material; only falls back to the fixed fixture below when the
+    library is empty. This is what lets a Founder Knowledge Studio E2E test (import a real
+    document, then ask MainAI about it) prove a genuine cited answer, not just a UI
+    round-trip against a canned response — while auth.spec.ts's baseline flow (which never
+    imports anything) keeps getting the same deterministic fixture it always has, since real
+    search legitimately returns nothing for an empty library."""
+    real_hits = _real_search(db, owner_id, vector, top_k=top_k, **kwargs)
+    if real_hits:
+        return real_hits
     return [
         {
             "document_id": "22222222-2222-2222-2222-222222222222",
             "title": "Personalhandbok.pdf",
             "text": "Semantiskt relevant testinnehall for E2E-testet.",
             "score": 0.88,
+            "classification": "general",
+            "active_truth_status": "active",
+            "media_type": None,
+            "project_id": None,
         }
     ]
 

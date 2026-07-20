@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { api, ChatSource, Confidence, ConversationItem } from "@/lib/api";
 import { useVoice } from "@/lib/useVoice";
 import Orb, { OrbState } from "@/components/Orb";
@@ -238,9 +239,17 @@ export default function ChatPage() {
                 <div className="mt-2 text-xs text-white/40 space-y-1">
                   <div>Källor:</div>
                   {entry.sources.map((s, j) => (
-                    <div key={j} className="pl-2 border-l border-border">
+                    <Link
+                      key={j}
+                      href={`/library/${s.document_id}`}
+                      className="block pl-2 border-l border-border hover:border-accent hover:text-white/70"
+                      title="Öppna källan i Founder Knowledge Studio"
+                    >
                       {s.title} ({s.score.toFixed(2)})
-                    </div>
+                      {s.active_truth_status && s.active_truth_status !== "active" && (
+                        <span className="ml-1 text-amber-300/70">[{s.active_truth_status}]</span>
+                      )}
+                    </Link>
                   ))}
                 </div>
               )}

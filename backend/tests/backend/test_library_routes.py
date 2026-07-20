@@ -242,3 +242,22 @@ def test_list_filters_by_classification_and_project(client):
     security_only = client.get("/api/library", params={"classification": "security"}).json()
     assert all(d["classification"] == "security" for d in security_only)
     assert any(d["original_filename"] == "sec.txt" for d in security_only)
+
+
+def test_a_source_deleted_via_library_disappears_from_the_older_documents_router_too(client):
+    """Regression test: Document is the same underlying table both /api/documents (the
+    original, simpler upload flow) and /api/library (Founder Knowledge Studio) operate on.
+    Found as a real bug during E2E testing, not assumed: deleting a source through the
+    library's soft-delete (deleted_at) left it still visible via GET /api/documents, which
+    had no deleted_at filter at all. Both surfaces must agree on what's still there."""
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "shared-table.txt", b"innehall som finns i bada vyerna")
+    source_id = job["file_results"][0]["source_id"]
+
+    assert any(d["id"] == source_id for d in client.get("/api/documents").json())
+    assert any(d["id"] == source_id for d in client.get("/api/library").json())
+
+    client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+
+    assert not any(d["id"] == source_id for d in client.get("/api/documents").json())
+    assert not any(d["id"] == source_id for d in client.get("/api/library").json())

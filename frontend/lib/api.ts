@@ -135,6 +135,7 @@ export type ChatSource = {
   title: string;
   snippet: string;
   score: number;
+  active_truth_status?: string | null;
 };
 
 export type Confidence = "high" | "medium" | "low" | "none";
@@ -148,6 +149,9 @@ export type ChatResponse = {
   confidence: Confidence;
   confidence_score: number;
   providers_attempted: string[];
+  conflicts_detected?: boolean;
+  context_intent?: string | null;
+  context_confidence?: string | null;
 };
 
 export type ConversationItem = {
@@ -186,6 +190,98 @@ export type ProjectItem = {
   description: string | null;
   status: string;
   created_at: string;
+};
+
+// --- Founder Knowledge Studio v1 (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) ---
+
+export type Classification = "vision" | "architecture" | "decisions" | "history" | "security" | "general";
+export type ActiveTruthStatus = "active" | "historical" | "proposed" | "superseded" | "disputed";
+
+export type KnowledgeSourceItem = {
+  id: string;
+  title: string;
+  source: string;
+  media_type: string | null;
+  original_filename: string | null;
+  category: string | null;
+  classification: Classification;
+  active_truth_status: ActiveTruthStatus;
+  status: string;
+  chunk_count: number;
+  checksum: string | null;
+  project_id: string | null;
+  version_number: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  imported_at: string | null;
+};
+
+export type KnowledgeVersionItem = {
+  id: string;
+  version_number: number;
+  checksum: string;
+  extraction_version: string;
+  raw_metadata: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type SourceRelationshipItem = {
+  id: string;
+  from_source_id: string;
+  to_source_id: string;
+  relationship_type: string;
+  note: string | null;
+  created_at: string;
+};
+
+export type KnowledgeSourceDetail = KnowledgeSourceItem & {
+  versions: KnowledgeVersionItem[];
+  relationships: SourceRelationshipItem[];
+  chunk_preview: string[];
+};
+
+export type FileOutcome = {
+  filename: string;
+  status: "indexed" | "duplicate" | "failed" | "skipped";
+  reason: string | null;
+  source_id: string | null;
+};
+
+export type ImportJobItem = {
+  id: string;
+  status: "pending" | "running" | "completed" | "failed" | "partial";
+  source_filename: string | null;
+  source_checksum: string | null;
+  progress_current: number;
+  progress_total: number;
+  succeeded_count: number;
+  failed_count: number;
+  skipped_count: number;
+  failure_reason: string | null;
+  manifest: Record<string, unknown> | null;
+  file_results: FileOutcome[] | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+};
+
+export type LibrarySearchHit = {
+  document_id: string;
+  title: string;
+  text: string;
+  score: number;
+  classification: Classification;
+  active_truth_status: ActiveTruthStatus;
+  media_type: string | null;
+  text_match: boolean;
+};
+
+export type LibraryListFilters = {
+  project_id?: string;
+  classification?: string;
+  active_truth_status?: string;
+  q?: string;
 };
 
 export type TaskItem = {
@@ -303,4 +399,31 @@ export const api = {
       body: JSON.stringify({ role, provider, model }),
     }),
   usageSummary: () => request<UsageSummaryRow[]>("/api/admin/usage/summary"),
+
+  importToLibrary: (file: File, projectId?: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return request<ImportJobItem>(`/api/library/import${qs}`, { method: "POST", body: form });
+  },
+  getImportJob: (id: string) => request<ImportJobItem>(`/api/library/jobs/${id}`),
+  listLibrary: (filters: LibraryListFilters = {}) => {
+    const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => !!v) as [string, string][]).toString();
+    return request<KnowledgeSourceItem[]>(`/api/library${qs ? `?${qs}` : ""}`);
+  },
+  getLibrarySource: (id: string) => request<KnowledgeSourceDetail>(`/api/library/${id}`),
+  deleteLibrarySource: (id: string) =>
+    request(`/api/library/${id}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }),
+  createSourceRelationship: (sourceId: string, toSourceId: string, relationshipType: string, note?: string) =>
+    request<SourceRelationshipItem>(`/api/library/${sourceId}/relationships`, {
+      method: "POST",
+      body: JSON.stringify({ to_source_id: toSourceId, relationship_type: relationshipType, note }),
+    }),
+  searchLibrary: (query: string, filters: LibraryListFilters = {}) => {
+    const qs = new URLSearchParams({
+      q: query,
+      ...Object.fromEntries(Object.entries(filters).filter(([, v]) => !!v)),
+    } as Record<string, string>).toString();
+    return request<LibrarySearchHit[]>(`/api/library/search/hybrid?${qs}`);
+  },
 };
