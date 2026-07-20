@@ -94,9 +94,8 @@ export LIFEAI_ENV_FILE="$ENV_FILE"
 log_info "OK."
 
 log_info "== Step 2/11: validating required secret NAMES are present (values never printed) =="
-REQUIRED_VARS="SECRET_KEY MAINAI_APP_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD DATABASE_URL REDIS_URL FRONTEND_ORIGINS PUBLIC_APP_URL SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL DOMAIN BACKEND_IMAGE FRONTEND_IMAGE"
 MISSING_VARS=""
-for var in $REQUIRED_VARS; do
+for var in $LIFEAI_REQUIRED_ENV_VARS; do
     if ! grep -qE "^${var}=" "$ENV_FILE"; then
         MISSING_VARS="$MISSING_VARS $var"
     fi
@@ -116,6 +115,7 @@ fi
 
 BACKEND_IMAGE=$(grep -E "^BACKEND_IMAGE=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
 FRONTEND_IMAGE=$(grep -E "^FRONTEND_IMAGE=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
+DOMAIN_VALUE=$(grep -E "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
 [ -n "$BACKEND_IMAGE" ] || die "BACKEND_IMAGE is empty in $ENV_FILE."
 [ -n "$FRONTEND_IMAGE" ] || die "FRONTEND_IMAGE is empty in $ENV_FILE."
 case "$BACKEND_IMAGE" in
@@ -163,7 +163,13 @@ log_info "Image architecture matches host ($EXPECTED_DOCKER_ARCH)."
 log_info "== Step 6/11: validating Compose config and Caddyfile =="
 compose config -q
 CADDY_IMAGE=$(compose config | awk '/^  caddy:/{f=1} f && /image:/{print $2; exit}')
-docker run --rm -v "$CADDYFILE:/etc/caddy/Caddyfile:ro" "${CADDY_IMAGE:-caddy:2-alpine}" caddy validate --config /etc/caddy/Caddyfile
+# The Caddyfile uses Caddy's OWN {$DOMAIN} placeholder syntax (substituted by caddy itself at
+# load time, not by Compose) — a bare `docker run` here has no environment of its own, so
+# without -e DOMAIN, {$DOMAIN} resolves to an empty string and caddy misparses the now-
+# address-less `{ ... }` site block as the Caddyfile's global options block instead ("Error:
+# adapting config using caddyfile: ...: unrecognized global option: encode"), a real failure
+# this exact validate step reproduced before this was found and fixed.
+docker run --rm -e DOMAIN="$DOMAIN_VALUE" -v "$CADDYFILE:/etc/caddy/Caddyfile:ro" "${CADDY_IMAGE:-caddy:2-alpine}" caddy validate --config /etc/caddy/Caddyfile
 log_info "Compose config and Caddyfile are valid."
 
 log_info "== Step 7/11: recording deployment metadata =="
@@ -232,7 +238,6 @@ if [ "$ALL_HEALTHY" != "1" ]; then
     DEPLOY_OK=0
 else
     log_info "== Step 10/11: verifying a real request through Caddy =="
-    DOMAIN_VALUE=$(grep -E "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
     if [ "$DOMAIN_VALUE" = ":80" ] || [ -z "$DOMAIN_VALUE" ]; then
         HEALTH_URL="http://localhost/api/health"
     else
