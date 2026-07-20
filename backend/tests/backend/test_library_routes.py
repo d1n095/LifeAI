@@ -294,3 +294,60 @@ def test_a_source_deleted_via_library_disappears_from_the_older_documents_router
 
     assert not any(d["id"] == source_id for d in client.get("/api/documents").json())
     assert not any(d["id"] == source_id for d in client.get("/api/library").json())
+
+
+# --- STEG 12: secure URL-import model (POST /api/library/import-url) — records intent
+# only, never fetches. See app/models/media_url_import.py's docstring. ---
+
+
+def test_create_media_url_import_records_intent_and_never_advances_past_pending_review(client):
+    csrf = _login(client)
+    res = client.post(
+        "/api/library/import-url",
+        json={
+            "url": "https://www.youtube.com/watch?v=abc123",
+            "platform": "youtube",
+            "consent_confirmed": True,
+            "rights_note": "Mitt eget inspelade grundarsamtal.",
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "pending_review"
+    assert body["url"] == "https://www.youtube.com/watch?v=abc123"
+    assert body["consent_confirmed"] is True
+
+    listed = client.get("/api/library/url-imports").json()
+    assert any(r["id"] == body["id"] and r["status"] == "pending_review" for r in listed)
+
+
+def test_media_url_import_rejects_non_http_scheme(client):
+    csrf = _login(client)
+    res = client.post(
+        "/api/library/import-url",
+        json={"url": "file:///etc/passwd", "platform": "generic"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 422
+
+
+def test_media_url_import_rejects_unknown_platform(client):
+    csrf = _login(client)
+    res = client.post(
+        "/api/library/import-url",
+        json={"url": "https://example.com/video", "platform": "some-random-site"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 422
+
+
+def test_media_url_import_defaults_consent_to_false_when_not_provided(client):
+    csrf = _login(client)
+    res = client.post(
+        "/api/library/import-url",
+        json={"url": "https://vimeo.com/12345", "platform": "vimeo"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["consent_confirmed"] is False

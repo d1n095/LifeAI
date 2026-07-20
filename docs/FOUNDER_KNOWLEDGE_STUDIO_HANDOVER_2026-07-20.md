@@ -108,10 +108,13 @@ från den faktiska retrieval-listan (kan aldrig hallucineras av modellen).
 ## Vad som INTE är byggt (dokumenterat, inte glömt)
 
 Se det fullständiga avsnittet i `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`. Kort — uppdaterat efter
-STEG 10 (påstående-nivå trust) och STEG 11 (Redis-jobblås), båda nu byggda, se avsnittet
-"STEG 10–11-tillägg" nedan:
-- Ljud/video/transkript-import (STEG 12–13) — ingen extraktion för dessa format ännu, näst i
-  trappan.
+STEG 10 (påstående-nivå trust), STEG 11 (Redis-jobblås) och STEG 12 (ljud/video-import v1),
+alla nu byggda, se avsnitten "STEG 10–11-tillägg" och "STEG 12-tillägg" nedan:
+- Multimedia i UI (STEG 13) — uppladdning/spelare/tidsstämplade citat i frontend. Backend-
+  pipelinen (STEG 12) är klar; ingen UI ännu.
+- Riktig transkription (Whisper/Gemini/etc) — leverantörsgränssnittet finns
+  (`app/providers/transcription.py`), men bara en icke-betald platshållarleverantör är
+  inkopplad, per uppdragets "inga riktiga API-nycklar"-krav.
 - Automatisk AI-system-handover mellan MainAI-instanser.
 - Riktig extern malware-/antivirusskanning av importerat innehåll (kräver en tjänst som inte
   är aktiverad, i linje med uppdragets förbud).
@@ -159,10 +162,75 @@ RLS/ContextVar-buggmönstret (en testhjälpfunktion satte bara den råa `SET LOC
 återapplicera RLS-scoping på en session's ANDRA transaktion) — fångat proaktivt av ett nytt
 test, inte i produktion.
 
-## Slutgranskning (STEG 9-checklista, uppdaterad efter STEG 10–11)
+## STEG 12-tillägg (denna session): ljud/video-import v1
 
-- [x] Hela backend-testsviten — 285 tester gröna (upp från 238 vid STEG 9, se STEG 10–11-
-      tillägget ovan)
+Migration 0009 lägger till `start_seconds`/`end_seconds` på `document_chunks` (NULL för
+vanliga textchunkar, satta för en chunk byggd från ett tidsstämplat transkriptsegment),
+`media_duration_seconds`/`transcript_provider` på `documents`, och en helt ny tabell
+`media_url_imports` (samma RLS-mönster som `knowledge_claims`).
+
+**Transkriptionsleverantör-gränssnitt** (`app/providers/transcription.py`): mirrorar
+`LLMProvider`-mönstret — `TranscriptionProvider`-ABC med `transcribe(raw, filename,
+media_kind) -> TranscriptResult`, så en riktig leverantör (Whisper, Gemini, …) kan kopplas in
+senare utan att skriva om resten av pipelinen. Den enda inkopplade implementationen,
+`MockTranscriptionProvider`, gör INGEN riktig taligenkänning (ingen ML/ASR-bibliotek
+tillgängligt, inga riktiga API-nycklar per uppdragets krav) och gör inget nätverksanrop —
+den producerar ETT segment som täcker filens (uppskattade) längd, med text som ÄRLIGT säger
+att ingen riktig transkription skett, snarare än att hitta på trovärdigt låtande tal för en
+riktig fil (samma "lura aldrig grundaren att ogrundat innehåll är verkligt"-princip som redan
+gäller i `app/rag/trust.py`). Tester får meningsfulla, deterministiska flersegmentstranskript
+genom att monkeypatcha `.transcribe()` direkt — exakt samma mönster som redan används för
+`OpenAIProvider.chat`/`.embed` i hela kodbasen.
+
+**Importpipeline** (`app/rag/media_import.py`): MIME/storlekskontroll via riktiga magic bytes
+(`ID3`/MPEG-frame-sync för mp3, `ftyp` vid byte-offset 4 för mp4 — INTE bara filändelsen) →
+transkription → `chunk_segments()` (grupperar på ordantal som `chunking.py`s textchunkning,
+men utan sliding-window-overlap eftersom transkriptsegment redan har naturliga
+brytpunkter, och chunkens `[start, end)` är exakt spannet av de grupperade segmenten) →
+embedding (samma leverantör/pipeline som text) → `DocumentChunk`-rader med tidsstämplar.
+`app/rag/library_import.py`s `_import_one_file` avgör dispatch via filändelse (`.mp3`→audio,
+`.mp4`→video) innan textextraktion ens försöks. Ett ogiltigt medieinnehåll (fel magic bytes)
+blir ett per-fil-fel (`FileOutcome(status="failed")`), aldrig ett jobbnivåfel — samma mönster
+som `ZipSecurityError`s per-entry-motsvarighet.
+
+**Medvetet avgränsat i v1:** endast enfil-uppladdning genom samma `/api/library/import`-
+endpoint; ljud/video paketerat i en ZIP stöds INTE ännu (`zip_import.py`s
+`ALLOWED_EXTENSIONS`/`MAGIC_BYTES` är byggda för enkla `startswith()`-signaturer vid offset 0,
+och mp4:s signatur ligger vid offset 4 — att bygga om det modulens säkerhetsmodell ansågs inte
+vara värt risken för STEG 12 ensamt, dokumenterat, inte glömt). Två format: `.mp3` (ljud),
+`.mp4` (video) — de två vanligaste containerformaten, båda med en riktig kontrollerbar binär
+signatur.
+
+**Sökning och citat:** `app/rag/vector_store.py`s `_hit_dict()` och `app/schemas.py`s
+`SourceRef`/`LibrarySearchHit` bär nu `start_seconds`/`end_seconds` genom hela vägen —
+hybrid-sök hittar rätt del av en transkription (bevisat i test via textmatchning på ett
+specifikt ord i ett av två segment), och `/api/chat`s källhänvisningar bär tidsstämpeln så en
+framtida spelare (STEG 13) kan öppna exakt rätt ögonblick, inte bara källan.
+
+**Säker URL-import-modell** (`app/models/media_url_import.py`, `POST
+/api/library/import-url`, `GET /api/library/url-imports`): registrerar ENDAST avsikt — ingen
+kod någonstans i denna kodbas läser `url`-fältet och hämtar det. Raden börjar och förblir
+`pending_review` i v1; det finns medvetet ingen endpoint som avancerar den. `consent_confirmed`
+(boolean) och `rights_note` (fritext) är där grundaren dokumenterar SAMTYCKE och RÄTTIGHETER
+innan någon framtida, granskad hämtare någonsin skulle få agera på raden — se
+`docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`s STEG 12-avsnitt. `platform` är begränsad till en
+vitlista (`youtube`/`vimeo`/`generic`) och `url` måste vara http(s), validerat vid skapande —
+inte för att skydda mot en hämtning som inte finns, utan för att hålla datan meningsfull för
+den dag en granskad hämtare faktiskt byggs.
+
+24 nya tester (`tests/backend/test_media_import.py` — 19, plus ett citat-tidsstämpeltest i
+`test_chat_source_grounding.py` och fyra URL-import-tester i `test_library_routes.py`),
+inklusive: magic-byte-validering (giltig/ogiltig mp3/mp4, tom fil, för stor fil),
+`chunk_segments`s gruppering och tidsstämpelbevarande, `MockTranscriptionProvider`s ärliga
+platshållarbeteende, fulla vertikala integrationstester (mp3/mp4 → transkript → tidsstämplade
+chunkar → sökbart via hybrid-sök med korrekta start/end, en trasig medie-signatur som ett
+per-fil- inte jobbnivåfel), citat-tidsstämplar i `/api/chat`s svar, och RLS-isolation för
+`media_url_imports`.
+
+## Slutgranskning (STEG 9-checklista, uppdaterad efter STEG 10–12)
+
+- [x] Hela backend-testsviten — 309 tester gröna (upp från 238 vid STEG 9, se STEG 10–11- och
+      STEG 12-tilläggen ovan)
 - [x] Migration upgrade → downgrade → upgrade — automatiserat test, schema jämfört rad för rad
 - [x] Frontend typecheck, ESLint, produktionsbygge — alla gröna
 - [x] Playwright desktop (fullt vertikalt flöde) — grönt

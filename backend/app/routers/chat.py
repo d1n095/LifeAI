@@ -144,6 +144,8 @@ async def chat(
             snippet=h["text"][:240],
             score=h["score"],
             active_truth_status=h.get("active_truth_status"),
+            start_seconds=h.get("start_seconds"),
+            end_seconds=h.get("end_seconds"),
         )
         for h in hits
     ]

@@ -30,6 +30,7 @@ from app.models.knowledge_version import KnowledgeVersion
 from app.rag.claims import extract_claims_for_document
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
+from app.rag import media_import
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
 
 logger = logging.getLogger("mainai.rag.library_import")
@@ -45,6 +46,10 @@ MEDIA_TYPES: dict[str, str] = {
     ".json": "application/json",
     ".html": "text/html",
     ".htm": "text/html",
+    # STEG 12: audio/video (see app/rag/media_import.py) — dispatched to a different
+    # pipeline in _import_one_file below, but the MIME type it gets labeled with in the
+    # Document row comes from this same lookup table as everything else.
+    **media_import.MEDIA_TYPES,
 }
 
 VALID_CLASSIFICATIONS = {c.value for c in KnowledgeClassification}
@@ -112,10 +117,22 @@ async def _import_one_file(
         return FileOutcome(filename=filename, status="duplicate", reason="Identiskt innehåll finns redan.", source_id=str(existing.id))
 
     suffix = PurePosixPath(filename).suffix.lower()
-    try:
-        text_content = extract_text(filename, content)
-    except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
-        return FileOutcome(filename=filename, status="failed", reason=f"Kunde inte extrahera text: {exc}")
+    media_kind = media_import.media_kind_for(filename)
+    text_content: str | None = None
+    if media_kind is None:
+        try:
+            text_content = extract_text(filename, content)
+        except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
+            return FileOutcome(filename=filename, status="failed", reason=f"Kunde inte extrahera text: {exc}")
+    else:
+        # STEG 12: MIME/size check happens before anything is written to the database — a
+        # rejected media file becomes a per-file FileOutcome, exactly like a text-extraction
+        # failure above, never a job-level failure (see app/rag/media_import.py's
+        # MediaImportError docstring).
+        try:
+            media_import.validate_media_bytes(filename, content, media_kind)
+        except media_import.MediaImportError as exc:
+            return FileOutcome(filename=filename, status="failed", reason=str(exc))
 
     classification_raw = manifest_entry.get("classification")
     classification = classification_raw if classification_raw in VALID_CLASSIFICATIONS else KnowledgeClassification.general.value
@@ -158,7 +175,10 @@ async def _import_one_file(
     db.add(version)
     db.commit()
 
-    await index_document(db, document, text_content)
+    if media_kind is None:
+        await index_document(db, document, text_content)
+    else:
+        await media_import.index_media_document(db, document, content, filename, media_kind)
 
     if document.status == IndexStatus.failed:
         return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))

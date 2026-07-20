@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -87,3 +87,12 @@ class Document(Base):
     # cleanup, matching the founder's explicit "radering med tydlig bekräftelse" requirement
     # without making it irreversible at the database layer the instant it's clicked.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # --- STEG 12: audio/video import v1 (see app/rag/media_import.py) ---
+    # Both nullable and both None for every non-media Document — only set once
+    # index_media_document() has actually produced a transcript. media_duration_seconds
+    # drives the player UI's scrubber (STEG 13); transcript_provider records which
+    # TranscriptionProvider produced it (today only "mock", see
+    # app/providers/transcription.py) purely for UI/debug transparency.
+    media_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    transcript_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)

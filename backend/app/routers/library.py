@@ -15,6 +15,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.media_url_import import MediaUrlImport
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
@@ -29,6 +30,8 @@ from app.schemas import (
     KnowledgeSourceDetailOut,
     KnowledgeSourceOut,
     LibrarySearchHit,
+    MediaUrlImportIn,
+    MediaUrlImportOut,
     SourceRelationshipIn,
     SourceRelationshipOut,
 )
@@ -164,6 +167,45 @@ def get_import_job(job_id: uuid.UUID, db: Session = Depends(get_db), user: User 
     if job is None:
         raise HTTPException(status_code=404, detail="Importjobbet hittades inte.")
     return job
+
+
+@router.post("/import-url", response_model=MediaUrlImportOut)
+@limiter.limit(f"{settings.rate_limit_library_import_per_minute}/minute")
+async def create_media_url_import(
+    request: Request,
+    payload: MediaUrlImportIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """STEG 12's secure URL-import MODEL — records the founder's intent to import a URL
+    (e.g. a future YouTube/web video) without ever fetching it. See
+    app/models/media_url_import.py's docstring: nothing reads this row's `url` and makes a
+    network request anywhere in this codebase. The row starts and stays `pending_review` —
+    there is deliberately no endpoint that advances it, since actually fetching would require
+    a reviewed, rights-aware fetcher this work order explicitly does not build."""
+    if payload.project_id is not None:
+        from app.models.project import Project
+
+        if db.query(Project).filter_by(id=payload.project_id).first() is None:
+            raise HTTPException(status_code=404, detail="Projektet hittades inte.")
+
+    record = MediaUrlImport(
+        owner_id=user.id,
+        project_id=payload.project_id,
+        url=payload.url,
+        platform=payload.platform,
+        consent_confirmed=payload.consent_confirmed,
+        rights_note=payload.rights_note,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+@router.get("/url-imports", response_model=list[MediaUrlImportOut])
+def list_media_url_imports(db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    return db.query(MediaUrlImport).filter_by(owner_id=user.id).order_by(MediaUrlImport.created_at.desc()).all()
 
 
 @router.get("", response_model=list[KnowledgeSourceOut])

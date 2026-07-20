@@ -136,10 +136,10 @@ källhänvisning.
 
 ## Byggt, testat — och medvetet INTE byggt ikväll
 
-**Byggt och testat:** DEL 1–9, 11, 12 (se ovan), plus STEG 10 (påstående-nivå trust) och
-STEG 11 (Redis-baserade jobblås/återförsök) från en senare session — se
-`docs/FOUNDER_KNOWLEDGE_STUDIO_HANDOVER_2026-07-20.md`s "STEG 10–11-tillägg" för den fulla
-tekniska beskrivningen. Hela sviten grön (285 tester). Full Playwright-regression grön
+**Byggt och testat:** DEL 1–9, 11, 12 (se ovan), plus STEG 10 (påstående-nivå trust), STEG 11
+(Redis-baserade jobblås/återförsök) och STEG 12 (ljud/video-import v1) från senare sessioner
+— se `docs/FOUNDER_KNOWLEDGE_STUDIO_HANDOVER_2026-07-20.md`s "STEG 10–12-tillägg" för den
+fulla tekniska beskrivningen. Hela sviten grön (309 tester). Full Playwright-regression grön
 (auth/security/account/shell-pages/founder-knowledge-studio).
 
 **Design-only / dokumenterat men inte byggt:**
@@ -154,8 +154,11 @@ tekniska beskrivningen. Hela sviten grön (285 tester). Full Playwright-regressi
   förhindrar obegränsad kostnad är redan på plats och testade oberoende av detta
   (`MAX_FILES=500`, `MAX_TOTAL_UNCOMPRESSED_BYTES=200MB`, `top_k=5` i retrieval — se
   `docs/KNOWLEDGE_IMPORT_SECURITY.md`).
-- Ljud/video/transkript-stöd (nämnt i LIFE_LIBRARY_PLAN.md) — ingen extraktion för dessa
-  format finns; `zip_import.py`s `ALLOWED_EXTENSIONS` inkluderar dem inte.
+- Multimedia i UI (STEG 13) — uppladdning/spelare/tidsstämplade citat i Library/Workbench-
+  frontend. Backend-pipelinen (STEG 12) är klar och testad; ingen UI byggd för den ännu.
+- Riktig transkription (Whisper/Gemini/etc) — STEG 12 bygger hela pipelinen och ett
+  leverantörsgränssnitt, men ingen riktig, betald leverantör är inkopplad (se STEG 12-
+  tillägget nedan).
 - Automatisk AI-system-handover mellan MainAI-instanser — inte påbörjat.
 
 ## Migrationsordning och rollback

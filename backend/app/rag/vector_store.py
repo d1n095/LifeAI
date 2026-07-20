@@ -51,6 +51,13 @@ def _hit_dict(chunk: DocumentChunk, score: float) -> dict:
         "active_truth_status": doc.active_truth_status.value if doc else None,
         "media_type": doc.media_type if doc else None,
         "project_id": str(doc.project_id) if doc and doc.project_id else None,
+        # STEG 12: set only for a chunk built from a timed transcript segment
+        # (app/rag/media_import.py) — None for ordinary text chunks, exactly mirroring
+        # DocumentChunk.start_seconds/end_seconds themselves. Lets a citation (chat.py's
+        # SourceRef, library search hits) open the source at the exact moment instead of
+        # just the source itself.
+        "start_seconds": chunk.start_seconds,
+        "end_seconds": chunk.end_seconds,
     }
 
 

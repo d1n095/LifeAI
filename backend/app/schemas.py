@@ -107,6 +107,11 @@ class SourceRef(BaseModel):
     snippet: str
     score: float
     active_truth_status: str | None = None
+    # STEG 12: set only when this citation comes from a timed transcript chunk
+    # (app/rag/media_import.py) — lets the frontend player open the source at the exact
+    # moment instead of just the source itself.
+    start_seconds: float | None = None
+    end_seconds: float | None = None
 
 
 class ChatMessageOut(BaseModel):
@@ -281,6 +286,8 @@ class KnowledgeSourceOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     imported_at: datetime | None
+    media_duration_seconds: float | None = None
+    transcript_provider: str | None = None
 
 
 class KnowledgeClaimOut(BaseModel):
@@ -332,6 +339,60 @@ class LibrarySearchHit(BaseModel):
     active_truth_status: str
     media_type: str | None
     text_match: bool = False
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+
+
+# --- STEG 12: secure URL-import model (intent only, never fetched — see
+# app/models/media_url_import.py) ---
+
+MEDIA_URL_PLATFORMS = {"youtube", "vimeo", "generic"}
+
+
+class MediaUrlImportIn(BaseModel):
+    url: str
+    platform: str
+    consent_confirmed: bool = False
+    rights_note: str | None = None
+    project_id: uuid.UUID | None = None
+
+    @field_validator("url")
+    @classmethod
+    def http_url_only(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("URL får inte vara tom.")
+        if len(v) > 2000:
+            raise ValueError("URL:en är för lång (max 2000 tecken).")
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("Endast http(s)-URL:er stöds.")
+        return v
+
+    @field_validator("platform")
+    @classmethod
+    def known_platform(cls, v: str) -> str:
+        if v not in MEDIA_URL_PLATFORMS:
+            raise ValueError(f"Okänd plattform. Tillåtna: {', '.join(sorted(MEDIA_URL_PLATFORMS))}.")
+        return v
+
+    @field_validator("rights_note")
+    @classmethod
+    def bounded_rights_note(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 4000:
+            raise ValueError("Rättighetsnoteringen är för lång (max 4000 tecken).")
+        return v
+
+
+class MediaUrlImportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    url: str
+    platform: str
+    consent_confirmed: bool
+    rights_note: str | None
+    status: str
+    project_id: uuid.UUID | None
+    created_at: datetime
 
 
 class DeleteConfirmIn(BaseModel):

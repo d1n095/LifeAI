@@ -95,6 +95,8 @@ def export_account(request: Request, db: Session = Depends(get_db), user: User =
             "version_number": d.version_number,
             "status": d.status.value,
             "chunk_count": d.chunk_count,
+            "media_duration_seconds": d.media_duration_seconds,
+            "transcript_provider": d.transcript_provider,
             "imported_at": d.imported_at.isoformat() if d.imported_at else None,
             "created_at": d.created_at.isoformat(),
             "deleted_at": d.deleted_at.isoformat() if d.deleted_at else None,

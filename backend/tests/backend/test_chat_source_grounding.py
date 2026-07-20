@@ -210,3 +210,49 @@ def test_chat_response_includes_context_resolver_classification(client, superuse
     body = res.json()
     assert body["context_intent"] == "new_topic"
     assert body["context_confidence"] in ("high", "medium", "low")
+
+
+def test_citation_carries_timestamp_range_for_a_media_chunk(client, superuser_db, _captured_chat_messages):
+    """STEG 12: a citation built from a chunk with start_seconds/end_seconds set (i.e. one
+    produced by app/rag/media_import.py from a timed transcript segment) must surface those
+    timestamps in the chat response's SourceRef — that's what lets a future player (STEG 13)
+    open the exact moment instead of just the source. An ordinary text chunk's citation must
+    NOT have them (both None), proving this isn't accidentally set for everything."""
+    founder_id = _founder_id(superuser_db)
+    text_doc = _make_source(superuser_db, founder_id, "Textkälla")
+
+    media_doc = Document(
+        title="Ljudinspelning",
+        source=DocumentSource.upload,
+        uploaded_by=founder_id,
+        active_truth_status=ActiveTruthStatus.active,
+        checksum=uuid.uuid4().hex,
+        media_type="audio/mpeg",
+    )
+    superuser_db.add(media_doc)
+    superuser_db.commit()
+    superuser_db.add(
+        DocumentChunk(
+            document_id=media_doc.id,
+            owner_id=founder_id,
+            chunk_index=0,
+            text="Talaren namner ett specifikt tidsstampat pastaende.",
+            embedding=MATCHING_VECTOR,
+            start_seconds=12.5,
+            end_seconds=27.0,
+        )
+    )
+    superuser_db.commit()
+
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Vad sager inspelningen?"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    sources = res.json()["sources"]
+
+    media_source = next(s for s in sources if s["document_id"] == str(media_doc.id))
+    assert media_source["start_seconds"] == 12.5
+    assert media_source["end_seconds"] == 27.0
+
+    text_source = next(s for s in sources if s["document_id"] == str(text_doc.id))
+    assert text_source["start_seconds"] is None
+    assert text_source["end_seconds"] is None
