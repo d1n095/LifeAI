@@ -278,6 +278,9 @@ export type ImportJobItem = {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  attempt_count: number;
+  max_attempts: number;
+  last_failure_transient: boolean | null;
 };
 
 export type LibrarySearchHit = {

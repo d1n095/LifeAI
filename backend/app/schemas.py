@@ -318,6 +318,9 @@ class ImportJobOut(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     created_at: datetime
+    attempt_count: int
+    max_attempts: int
+    last_failure_transient: bool | None
 
 
 class LibrarySearchHit(BaseModel):

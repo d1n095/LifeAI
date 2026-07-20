@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,3 +52,11 @@ class ImportJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # --- STEG 11: retry/coordination (app/jobs/retry.py, app/jobs/lock.py) ---
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    # None until a failure has actually happened; then True/False per app/jobs/retry.py's
+    # is_transient_error() — lets the Library UI show "kommer försökas igen automatiskt" vs.
+    # "kräver en ny manuell import" instead of a single generic "misslyckades".
+    last_failure_transient: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

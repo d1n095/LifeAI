@@ -209,11 +209,29 @@ export default function LibraryPage() {
                 }}
               />
             </div>
-            {activeJob.status !== "pending" && activeJob.status !== "running" && (
-              <p className="text-xs text-white/40 mt-1">
-                {activeJob.succeeded_count} importerade, {activeJob.skipped_count} hoppade över/dubbletter,{" "}
-                {activeJob.failed_count} misslyckade
+            {/* STEG 11: a job that's back in "pending" with attempt_count > 0 is between
+                automatic retries (app/jobs/retry.py's backoff), not a fresh import — make
+                that distinction visible instead of looking like the upload silently reset. */}
+            {activeJob.status === "pending" && activeJob.attempt_count > 0 && (
+              <p className="text-xs text-amber-300 mt-1">
+                Tillfälligt fel — försöker igen automatiskt (försök {activeJob.attempt_count + 1} av{" "}
+                {activeJob.max_attempts})…
               </p>
+            )}
+            {activeJob.status !== "pending" && activeJob.status !== "running" && (
+              <>
+                <p className="text-xs text-white/40 mt-1">
+                  {activeJob.succeeded_count} importerade, {activeJob.skipped_count} hoppade över/dubbletter,{" "}
+                  {activeJob.failed_count} misslyckade
+                </p>
+                {activeJob.status === "failed" && activeJob.attempt_count > 0 && (
+                  <p className="text-xs text-white/40 mt-1">
+                    {activeJob.last_failure_transient
+                      ? `Gav upp efter ${activeJob.attempt_count} automatiska återförsök — pröva att importera igen manuellt.`
+                      : "Permanent fel — importen försöktes inte igen automatiskt."}
+                  </p>
+                )}
+              </>
             )}
           </div>
         )}

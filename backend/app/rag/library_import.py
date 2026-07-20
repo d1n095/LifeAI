@@ -11,6 +11,8 @@ pick up a `pending` row and call run_import_job() exactly the way the background
 today, with no schema change.
 """
 
+import asyncio
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +21,8 @@ from pathlib import PurePosixPath
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.jobs.lock import JobLock, JobLockUnavailable
+from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus, KnowledgeClassification
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
@@ -27,6 +31,8 @@ from app.rag.claims import extract_claims_for_document
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
+
+logger = logging.getLogger("mainai.rag.library_import")
 
 EXTRACTION_VERSION = "extract-v1"  # bump when chunking/extraction logic changes meaningfully
 
@@ -180,16 +186,97 @@ async def run_import_job(
     *,
     project_id: uuid.UUID | None = None,
 ) -> None:
-    """Runs synchronously to completion, writing progress to the ImportJob row as it goes.
-    Never raises — every failure mode (a bad ZIP, an extraction error, a DB error on one
-    file) is captured on the job row itself so a caller polling GET /api/library/jobs/{id}
-    always sees a terminal, informative status rather than the request just hanging or the
-    job row being stuck at "running" forever."""
+    """STEG 11 entry point: coordinates a distributed lock (app/jobs/lock.py) around the
+    actual work (_run_once below) and retries transient failures with exponential backoff
+    (app/jobs/retry.py) before giving up. Never raises — every terminal outcome (success,
+    permanent failure, or transient failure with attempts exhausted) is captured on the job
+    row itself, so a caller polling GET /api/library/jobs/{id} always sees a definitive
+    status rather than the request hanging or the job stuck at "running" forever.
+
+    Resumability is an emergent property, not new logic: retrying calls _run_once again from
+    the top of the same file list, and _import_one_file's existing per-file checksum
+    idempotency check means any file already successfully imported on a prior attempt is
+    detected as a "duplicate" and skipped, not redone — a retry naturally only does the
+    remaining work.
+    """
     _set_rls_owner(db, owner_id)
     job = db.get(ImportJob, job_id)
     if job is None:
         return
 
+    lock_key = f"import:{owner_id}:{job.source_checksum or job_id}"
+    lock = JobLock(lock_key, lease_seconds=60)
+    # None = "couldn't even check" (Redis unreachable) — proceed without coordination rather
+    # than blocking every import whenever Redis happens to be down (see app/limiter.py's
+    # identical in-memory-fallback philosophy for rate limiting). False = another worker
+    # genuinely holds this exact (owner, content) lock right now — a real, expected outcome
+    # of concurrency, not a degraded-Redis situation.
+    lock_held: bool | None
+    try:
+        lock_held = lock.acquire()
+    except JobLockUnavailable as exc:
+        logger.warning("Jobblås otillgängligt (%s) — fortsätter utan distribuerad koordinering.", exc)
+        lock_held = None
+
+    if lock_held is False:
+        job.status = ImportJobStatus.failed
+        job.failure_reason = "En identisk import pågår redan i en annan process (jobblås upptaget)."
+        job.completed_at = datetime.utcnow()
+        db.add(job)
+        db.commit()
+        return
+
+    try:
+        while True:
+            try:
+                await _run_once(db, job, owner_id, raw, filename, project_id, lock if lock_held else None)
+                return
+            except Exception as exc:  # noqa: BLE001 - the job row is the only place this failure can safely surface
+                db.rollback()
+                _set_rls_owner(db, owner_id)
+                job = db.get(ImportJob, job_id)
+                if job is None:
+                    return
+                transient = is_transient_error(exc)
+                job.last_failure_transient = transient
+                if transient and job.attempt_count + 1 < job.max_attempts:
+                    job.attempt_count += 1
+                    job.status = ImportJobStatus.pending
+                    db.add(job)
+                    db.commit()
+                    delay = compute_backoff_seconds(job.attempt_count)
+                    logger.warning(
+                        "Import %s: tillfälligt fel (%s), försök %d/%d om %.1fs.", job_id, exc, job.attempt_count, job.max_attempts, delay
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                job.status = ImportJobStatus.failed
+                # ZipSecurityError's own message is already a clear, specific rejection
+                # reason (see app/rag/zip_import.py) — wrapping it in a generic "unexpected
+                # error" prefix would bury the actual, actionable explanation.
+                job.failure_reason = str(exc) if isinstance(exc, ZipSecurityError) else f"Oväntat fel under import: {exc}"
+                job.completed_at = datetime.utcnow()
+                db.add(job)
+                db.commit()
+                return
+    finally:
+        if lock_held:
+            lock.release()
+
+
+async def _run_once(
+    db: Session,
+    job: ImportJob,
+    owner_id: uuid.UUID,
+    raw: bytes,
+    filename: str,
+    project_id: uuid.UUID | None,
+    lock: JobLock | None,
+) -> None:
+    """One attempt at the actual import work — everything run_import_job used to do inline
+    before STEG 11 added the retry/lock wrapper around it. Raises on failure (unlike the
+    outer function) so run_import_job's retry loop can classify and act on the exception;
+    never itself decides retry vs. permanent failure."""
     job.status = ImportJobStatus.running
     job.started_at = datetime.utcnow()
     db.add(job)
@@ -198,92 +285,88 @@ async def run_import_job(
     suffix = PurePosixPath(filename).suffix.lower()
     outcomes: list[FileOutcome] = []
 
-    try:
-        if suffix == ".zip":
-            try:
-                zip_result = validate_and_extract_zip(raw)
-            except ZipSecurityError as exc:
-                job.status = ImportJobStatus.failed
-                job.failure_reason = str(exc)
-                job.completed_at = datetime.utcnow()
-                db.add(job)
-                db.commit()
-                return
+    if suffix == ".zip":
+        try:
+            zip_result = validate_and_extract_zip(raw)
+        except ZipSecurityError as exc:
+            # Permanent, not transient (see app/jobs/retry.py's is_transient_error) — a
+            # malicious/malformed ZIP will never succeed no matter how many times it's
+            # retried, so this is raised, not written directly as a terminal failure here;
+            # run_import_job's retry loop classifies it and skips straight to "failed".
+            raise
 
-            job.manifest = zip_result.manifest
-            entries = zip_result.entries
-            job.progress_total = len(entries)
-            db.add(job)
-            db.commit()
+        job.manifest = zip_result.manifest
+        entries = zip_result.entries
+        job.progress_total = len(entries)
+        db.add(job)
+        db.commit()
 
-            for entry in entries:
-                # manifest.json describes the package (see zip_import.py's own parsing of
-                # it into zip_result.manifest, already applied above) — it is package
-                # metadata, not a knowledge source in its own right, so it's never imported
-                # as a Document even though it passes the same .json allow-list check every
-                # other JSON file in the package does.
-                if entry.status == "ok" and PurePosixPath(entry.filename).name.lower() == "manifest.json":
-                    outcomes.append(
-                        FileOutcome(filename=entry.filename, status="skipped", reason="Manifestfil, importeras inte som ett eget dokument.")
-                    )
-                elif entry.status != "ok":
-                    outcomes.append(FileOutcome(filename=entry.filename, status="skipped", reason=entry.reason))
-                else:
-                    manifest_entry = _manifest_entry_for(zip_result.manifest, entry.filename)
-                    outcome = await _import_one_file(
-                        db,
-                        owner_id,
-                        entry.filename,
-                        entry.content,
-                        entry.checksum,
-                        project_id=project_id,
-                        import_job_id=job_id,
-                        manifest_entry=manifest_entry,
-                    )
-                    outcomes.append(outcome)
-                job.progress_current = len(outcomes)
-                job.file_results = [o.__dict__ for o in outcomes]
-                db.add(job)
-                db.commit()
-        else:
-            job.progress_total = 1
-            db.add(job)
-            db.commit()
-            checksum = sha256_bytes(raw)
-            outcome = await _import_one_file(
-                db, owner_id, filename, raw, checksum, project_id=project_id, import_job_id=job_id, manifest_entry={}
-            )
-            outcomes.append(outcome)
-            job.progress_current = 1
+        for entry in entries:
+            # manifest.json describes the package (see zip_import.py's own parsing of
+            # it into zip_result.manifest, already applied above) — it is package
+            # metadata, not a knowledge source in its own right, so it's never imported
+            # as a Document even though it passes the same .json allow-list check every
+            # other JSON file in the package does.
+            if entry.status == "ok" and PurePosixPath(entry.filename).name.lower() == "manifest.json":
+                outcomes.append(
+                    FileOutcome(filename=entry.filename, status="skipped", reason="Manifestfil, importeras inte som ett eget dokument.")
+                )
+            elif entry.status != "ok":
+                outcomes.append(FileOutcome(filename=entry.filename, status="skipped", reason=entry.reason))
+            else:
+                manifest_entry = _manifest_entry_for(zip_result.manifest, entry.filename)
+                outcome = await _import_one_file(
+                    db,
+                    owner_id,
+                    entry.filename,
+                    entry.content,
+                    entry.checksum,
+                    project_id=project_id,
+                    import_job_id=job.id,
+                    manifest_entry=manifest_entry,
+                )
+                outcomes.append(outcome)
+            job.progress_current = len(outcomes)
             job.file_results = [o.__dict__ for o in outcomes]
             db.add(job)
             db.commit()
-
-        succeeded = sum(1 for o in outcomes if o.status == "indexed")
-        duplicates = sum(1 for o in outcomes if o.status == "duplicate")
-        failed = sum(1 for o in outcomes if o.status == "failed")
-        skipped = sum(1 for o in outcomes if o.status == "skipped")
-
-        job.succeeded_count = succeeded
-        job.failed_count = failed
-        job.skipped_count = skipped + duplicates
-        if failed and (succeeded or duplicates or skipped):
-            job.status = ImportJobStatus.partial
-        elif failed and not (succeeded or duplicates or skipped):
-            job.status = ImportJobStatus.failed
-            job.failure_reason = "Alla filer i paketet misslyckades."
-        else:
-            job.status = ImportJobStatus.completed
-        job.completed_at = datetime.utcnow()
+            # Heartbeat: renews the lease so a large package doesn't outlive its lock while
+            # still genuinely being worked on. A failed renewal (lease already expired,
+            # possibly reacquired by another worker under an abandoned-job assumption) is
+            # logged, not fatal — the import keeps going rather than aborting mid-batch over
+            # a coordination signal, since the actual data-safety guarantee here is
+            # per-file/per-document idempotency (checksums), not the lock itself.
+            if lock is not None and not lock.renew():
+                logger.warning("Import %s: kunde inte förnya jobblåset — kan ha övertagits som övergivet.", job.id)
+    else:
+        job.progress_total = 1
         db.add(job)
         db.commit()
-    except Exception as exc:  # noqa: BLE001 - the job row is the only place this failure can safely surface
-        db.rollback()
-        _set_rls_owner(db, owner_id)
-        job = db.get(ImportJob, job_id)
-        if job is not None:
-            job.status = ImportJobStatus.failed
-            job.failure_reason = f"Oväntat fel under import: {exc}"
-            job.completed_at = datetime.utcnow()
-            db.add(job)
-            db.commit()
+        checksum = sha256_bytes(raw)
+        outcome = await _import_one_file(
+            db, owner_id, filename, raw, checksum, project_id=project_id, import_job_id=job.id, manifest_entry={}
+        )
+        outcomes.append(outcome)
+        job.progress_current = 1
+        job.file_results = [o.__dict__ for o in outcomes]
+        db.add(job)
+        db.commit()
+
+    succeeded = sum(1 for o in outcomes if o.status == "indexed")
+    duplicates = sum(1 for o in outcomes if o.status == "duplicate")
+    failed = sum(1 for o in outcomes if o.status == "failed")
+    skipped = sum(1 for o in outcomes if o.status == "skipped")
+
+    job.succeeded_count = succeeded
+    job.failed_count = failed
+    job.skipped_count = skipped + duplicates
+    if failed and (succeeded or duplicates or skipped):
+        job.status = ImportJobStatus.partial
+    elif failed and not (succeeded or duplicates or skipped):
+        job.status = ImportJobStatus.failed
+        job.failure_reason = "Alla filer i paketet misslyckades."
+    else:
+        job.status = ImportJobStatus.completed
+    job.completed_at = datetime.utcnow()
+    db.add(job)
+    db.commit()
