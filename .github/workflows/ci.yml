@@ -1253,10 +1253,21 @@ jobs:
           REDIS_URL=$CI_REDIS_URL
           FRONTEND_ORIGINS=http://localhost:80
           PUBLIC_APP_URL=http://localhost:80
+          SMTP_HOST=ci-smtp-placeholder.invalid
+          SMTP_PORT=587
+          SMTP_USERNAME=ci
+          SMTP_PASSWORD=ci
+          SMTP_FROM_EMAIL=no-reply@lifeos.local
           EOF
-          # ENVIRONMENT is deliberately left unset (defaults to "development" — see
-          # app/config.py) so app/main.py's SMTP fail-closed startup gate doesn't require a
-          # real SMTP_HOST here. Same reasoning as combined-container-verify's identical note.
+          # Unlike combined-container-verify (which sets ENVIRONMENT=development to skip the
+          # SMTP fail-closed startup gate), docker-compose.vps.yml hardcodes
+          # ENVIRONMENT=production directly in the service definition — the REAL VPS always
+          # runs with that gate active, so watering it down here would mean this job no
+          # longer tests the actual production startup path. A placeholder SMTP_HOST that
+          # satisfies app/main.py's _check_smtp_configured() (a presence check, not a real
+          # connection attempt) is enough: nothing in this job's test steps ever triggers an
+          # actual send (registration is disabled — founder-only launch — and the request
+          # this job makes against it is expected to be rejected before reaching app/email.py).
 
       - name: Start the real VPS compose topology
         run: |
