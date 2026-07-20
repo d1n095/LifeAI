@@ -17,6 +17,15 @@ docker-entrypoint.sh skips this there and nothing changes for local dev.
 On success, appends `export APP_DATABASE_URL=...` to the file named by $RENDER_ENV_FILE so
 the calling shell can source it before starting the app — this script's own process exiting
 can't otherwise change its parent shell's environment.
+
+Default-privilege grants below are scoped `FOR ROLE {current_user}` (the role THIS connection
+actually authenticated as — see the comment at that call site), not the role named in
+DATABASE_URL's URL, which under a connection pooler (e.g. Supabase's Session pooler) can be a
+login identity rather than a real role. This relies on one assumption: that
+backend/docker-entrypoint.sh runs this script and `alembic upgrade head` with the exact same
+DATABASE_URL, in the same boot — so the role Alembic's later DDL runs as is the same role this
+script just granted default privileges for. If a future change ever pointed those two steps at
+different connection strings, this guarantee would silently stop holding.
 """
 
 import os
@@ -46,6 +55,16 @@ def main() -> None:
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
+            # The connected role, not DATABASE_URL's username. Under Supabase's Session
+            # Pooler (required on Render for IPv4 reachability — see docs/RENDER_DEPLOY.md),
+            # the URL's username is a pooler login identity of the form
+            # `postgres.<project-ref>`, not a real Postgres role; the pooler maps it to the
+            # actual role (typically `postgres`) for the session. `ALTER DEFAULT PRIVILEGES
+            # FOR ROLE postgres.<project-ref>` then fails with "role ... does not exist"
+            # because no such role exists in pg_roles. Ask Postgres what it actually
+            # authenticated the session as instead of assuming the URL username is a role.
+            cur.execute("SELECT current_user")
+            (admin_role,) = cur.fetchone()
             cur.execute(
                 sql.SQL(
                     """
@@ -85,13 +104,13 @@ def main() -> None:
                 sql.SQL(
                     "ALTER DEFAULT PRIVILEGES FOR ROLE {admin} IN SCHEMA public "
                     "GRANT ALL PRIVILEGES ON TABLES TO {app}"
-                ).format(admin=sql.Identifier(parts.username), app=sql.Identifier(APP_ROLE))
+                ).format(admin=sql.Identifier(admin_role), app=sql.Identifier(APP_ROLE))
             )
             cur.execute(
                 sql.SQL(
                     "ALTER DEFAULT PRIVILEGES FOR ROLE {admin} IN SCHEMA public "
                     "GRANT ALL PRIVILEGES ON SEQUENCES TO {app}"
-                ).format(admin=sql.Identifier(parts.username), app=sql.Identifier(APP_ROLE))
+                ).format(admin=sql.Identifier(admin_role), app=sql.Identifier(APP_ROLE))
             )
     finally:
         conn.close()

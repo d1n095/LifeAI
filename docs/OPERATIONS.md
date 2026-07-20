@@ -241,3 +241,17 @@ utveckling (se `.env.example`).
 `SMTP_HOST` är obligatorisk så fort `ENVIRONMENT=production` — backend vägrar starta annars
 (`_check_smtp_configured` i `app/main.py`), samma fail-closed-princip som `REDIS_URL`-kontrollen
 ovan.
+
+### Backend startar inte: `role "postgres.<project-ref>" does not exist`
+
+Verifierat fel 2026-07-19, fixat i `backend/scripts/ensure_app_role.py`. Uppstår vid
+`ALTER DEFAULT PRIVILEGES` när `DATABASE_URL` pekar på Supabases **Session pooler** — dess
+anslutningssträng har ett användarnamn av formen `postgres.<project-ref>`, en
+pooler-inloggningsidentitet, inte ett riktigt Postgres-rollnamn (den faktiska rollen, oftast
+`postgres`, finns bara i `pg_roles`). Skriptet frågar numera `SELECT current_user` för den
+riktiga anslutna rollen istället för att anta att URL-användarnamnet är rollen. Se
+`docs/RENDER_DEPLOY.md`s avsnitt "Databasrollerna" för hela bakgrunden (inklusive varför Session
+pooler används istället för Direct connection) och `backend/tests/backend/test_ensure_app_role.py`
+för regressionstestet. Om detta fel dyker upp igen efter framtida ändringar i skriptet: det är
+nästan alltid ett tecken på att någon kod börjat lita på `DATABASE_URL`s användarnamn som ett
+rollnamn igen istället för att fråga databasen.
