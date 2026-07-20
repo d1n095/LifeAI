@@ -1,0 +1,18 @@
+<!doctype html>
+<!--
+  Minimal static asset, served by Next's standalone server.js directly from public/ with no
+  React rendering, no SSR, no client bundle. Exists to isolate one specific question during the
+  2026-07-20 "Render shows Live + /api/health 200 but the public root URL 502s" investigation:
+  is Next's static-file serving path reachable via the public $PORT at all, independent of
+  whether SSR/RSC page rendering (/ and /login) is. If /edge-probe.html and /api/health both
+  succeed while / and /login don't, the fault is in page rendering specifically, not in Next's
+  process/port/routing as a whole. See .github/workflows/ci.yml's Container F step and
+  docs/RENDER_DEPLOY.md.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>edge-probe</title>
+  </head>
+  <body>edge-probe-ok</body>
+</html>

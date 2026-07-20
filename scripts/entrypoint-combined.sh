@@ -85,7 +85,14 @@ echo "[entrypoint] backend pid=$BACKEND_PID (127.0.0.1:8000, loopback-only) — 
 # uvicorn boot — every request in that window gets ECONNREFUSED, surfaced to the browser as
 # a 502. Gating frontend startup on a real /api/health 200 (not just "the process exists")
 # closes that window entirely instead of relying on timing that happens to work locally.
-BACKEND_HEALTH_URL="http://127.0.0.1:8000/api/health"
+#
+# The ?probe=internal-startup-gate query string changes nothing about how app/routers/health.py
+# answers (FastAPI ignores unrecognized query params) — it exists purely so this loopback-only
+# call is textually distinguishable from Render's own public-edge health probe in
+# backend/uvicorn's access log, when reading logs after the fact (see docs/RENDER_DEPLOY.md's
+# 2026-07-20 502-despite-Live entry). Render's probe never carries this param — it can't, since
+# it never sees this script's source.
+BACKEND_HEALTH_URL="http://127.0.0.1:8000/api/health?probe=internal-startup-gate"
 BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS="${BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS:-90}"
 backend_ready=0
 elapsed=0
