@@ -168,18 +168,33 @@ sudo nano /etc/lifeai/lifeai.env
 #   BACKEND_IMAGE=ghcr.io/d1n095/lifeai-backend@sha256:<den faktiska digesten>
 #   FRONTEND_IMAGE=ghcr.io/d1n095/lifeai-frontend@sha256:<den faktiska digesten>
 
-# 2. Pulla exakt de images'.
+# 2. Kör deploy-skriptet — vägrar köra utan --confirm, se scripts/vps/deploy.sh.
 cd /opt/lifeai
-sudo docker compose -f docker-compose.vps.yml pull
-
-# 3. Starta.
-sudo docker compose -f docker-compose.vps.yml up -d
-
-# 4. Verifiera (se "Verifiering efter deploy" nedan) INNAN du lämnar terminalen.
+sudo ./scripts/vps/deploy.sh --confirm
 ```
 
-En framtida omdeploy (ny digest efter en kodändring) upprepar bara steg 1-4 ovan — aldrig
+`scripts/vps/deploy.sh` gör, i ordning, det som tidigare stod som separata manuella steg här
+(se skriptets egen huvudkommentar för hela listan): validerar att alla obligatoriska filer och
+hemlighetsnamn finns (utan att någonsin skriva ut värden), kontrollerar GHCR-inloggning,
+pullar exakt de digest-pinnade images:erna, verifierar att de matchar serverns
+CPU-arkitektur, validerar `docker-compose.vps.yml` och `Caddyfile`, skriver en tidsstämplad
+deploy-post till `/opt/lifeai/deployments/` INNAN något startas (så en rollback alltid har
+något att gå tillbaka till även om detta försöket misslyckas), startar tjänsterna, väntar
+begränsat på att alla blir friska, och kör ett riktigt end-to-end-anrop genom Caddy. **Om
+verifieringen misslyckas rullar det automatiskt tillbaka till senaste kända goda deploy** (se
+`scripts/vps/rollback.sh`) och rapporterar tydligt vad som hände.
+
+En framtida omdeploy (ny digest efter en kodändring) upprepar bara steg 1-2 ovan — aldrig
 `git pull` av källkod på servern, aldrig en lokal `docker build` här.
+
+Rå `docker compose`-kommandon (om `deploy.sh` av någon anledning inte kan användas) finns kvar
+som en nödfallback:
+
+```bash
+cd /opt/lifeai
+sudo docker compose --env-file /etc/lifeai/lifeai.env -f docker-compose.vps.yml pull
+sudo docker compose --env-file /etc/lifeai/lifeai.env -f docker-compose.vps.yml up -d
+```
 
 ### Steg 6 — Health checks och restart-policies
 
@@ -231,22 +246,23 @@ sudo tar czf /root/lifeai-backup-$(date +%F).tar.gz \
 
 **Rollback vid en trasig deploy:**
 
+`scripts/vps/deploy.sh` rullar redan tillbaka AUTOMATISKT om en färsk deploys egen
+hälsoverifiering misslyckas — se Steg 5. Manuell rollback (t.ex. om ett problem upptäcks
+timmar senare, inte direkt vid deploy) görs med samma skript deploy.sh anropar internt:
+
 ```bash
-# 1. Sätt tillbaka föregående kända goda digest i /etc/lifeai/lifeai.env (håll en logg över
-#    vilken digest som kördes senast, t.ex. i en enkel textfil bredvid — inte i Git).
-sudo nano /etc/lifeai/lifeai.env
-
-# 2. Pulla och starta om exakt som i Steg 5.
 cd /opt/lifeai
-sudo docker compose -f docker-compose.vps.yml pull
-sudo docker compose -f docker-compose.vps.yml up -d
-
-# 3. Verifiera enligt nästa avsnitt.
+sudo ./scripts/vps/rollback.sh --confirm
 ```
 
-Eftersom varje deploy pinnas till en specifik, oföränderlig digest (aldrig `:latest`) är
-"föregående digest" alltid känd och exakt — ingen gissning om vilken kodversion som faktiskt
-körde innan.
+`rollback.sh` letar upp den senaste deploy-posten i `/opt/lifeai/deployments/` vars EGET
+resultat var `success`, sätter tillbaka precis dess `BACKEND_IMAGE`/`FRONTEND_IMAGE`-digests i
+`/etc/lifeai/lifeai.env` (rör ingen annan rad i filen), pullar, startar om, och verifierar
+hälsan igen efteråt. Eftersom varje deploy pinnas till en specifik, oföränderlig digest
+(aldrig `:latest`) och varje deploy-försök spelas in innan det startas (se `deploy.sh`), är
+"föregående kända goda digest" alltid känd exakt — ingen gissning om vilken kodversion som
+faktiskt körde innan. Se `docs/VPS_OPERATIONS_RUNBOOK.md`s "failed rollback"-avsnitt för
+fullständig felsökning om även rollback misslyckas.
 
 ## Verifiering efter deploy
 
