@@ -1539,6 +1539,173 @@ jobs:
           echo "Confirmed: clean shutdown, no orphan containers/networks/volumes left behind."
 
   # ---------------------------------------------------------------------------------------
+  # scripts/vps/deploy.sh and rollback.sh, exercised for real end to end: deploy a known-good
+  # topology, record it, deploy an intentionally-broken image, watch deploy.sh detect the
+  # failure and auto-rollback, then confirm the real request path works again on the restored
+  # images. Uses a throwaway local Docker registry (not GHCR, not the real VPS) so
+  # BACKEND_IMAGE/FRONTEND_IMAGE can be genuine, digest-pinned references — the exact
+  # mechanism deploy.sh's own safety check requires — without needing real registry
+  # credentials or contacting GHCR at all.
+  # ---------------------------------------------------------------------------------------
+  vps-deploy-rollback-test:
+    name: VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      registry:
+        image: registry:2
+        ports: ["5000:5000"]
+    env:
+      CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_deploy_ci
+      CI_REDIS_URL: redis://host.docker.internal:6379/0
+      TEST_COMPOSE_DIR: ${{ github.workspace }}/deploy-test/opt-lifeai
+      TEST_ENV_FILE: ${{ github.workspace }}/deploy-test/etc-lifeai.env
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create database for this test
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_deploy_ci;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_deploy_ci;"
+
+      - name: Build the real backend/frontend images and an intentionally-broken backend image
+        run: |
+          docker build -t localhost:5000/lifeai-backend:good ./backend
+          docker build -t localhost:5000/lifeai-frontend:good ./frontend
+          printf 'FROM alpine:latest\nCMD ["sleep", "infinity"]\n' > /tmp/Dockerfile.broken
+          docker build -t localhost:5000/lifeai-backend:bad -f /tmp/Dockerfile.broken /tmp
+
+      - name: Push to the local registry and capture real digests
+        id: digests
+        run: |
+          for ref in localhost:5000/lifeai-backend:good localhost:5000/lifeai-frontend:good localhost:5000/lifeai-backend:bad; do
+            docker push "$ref"
+          done
+          good_backend=$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5000/lifeai-backend:good)
+          good_frontend=$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5000/lifeai-frontend:good)
+          bad_backend=$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5000/lifeai-backend:bad)
+          echo "good_backend=$good_backend" >> "$GITHUB_OUTPUT"
+          echo "good_frontend=$good_frontend" >> "$GITHUB_OUTPUT"
+          echo "bad_backend=$bad_backend" >> "$GITHUB_OUTPUT"
+          echo "Good backend digest: $good_backend"
+          echo "Good frontend digest: $good_frontend"
+          echo "Bad backend digest: $bad_backend"
+
+      - name: Set up an isolated fake /opt/lifeai and /etc/lifeai for this test
+        run: |
+          mkdir -p "$TEST_COMPOSE_DIR/deployments"
+          cp docker-compose.vps.yml docker-compose.vps.ci.yml Caddyfile "$TEST_COMPOSE_DIR/"
+          cat > "$TEST_ENV_FILE" <<EOF
+          SECRET_KEY=ci-deploy-test-secret
+          MAINAI_APP_PASSWORD=ci_deploy_test_pw
+          FOUNDER_EMAIL=founder@lifeos.local
+          FOUNDER_PASSWORD=TestFounderPassword123!
+          DATABASE_URL=$CI_DATABASE_URL
+          REDIS_URL=$CI_REDIS_URL
+          FRONTEND_ORIGINS=http://localhost:80
+          PUBLIC_APP_URL=http://localhost:80
+          SMTP_HOST=ci-smtp-placeholder.invalid
+          SMTP_PORT=587
+          SMTP_USERNAME=ci
+          SMTP_PASSWORD=ci
+          SMTP_FROM_EMAIL=no-reply@lifeos.local
+          DOMAIN=:80
+          BACKEND_IMAGE=${{ steps.digests.outputs.good_backend }}
+          FRONTEND_IMAGE=${{ steps.digests.outputs.good_frontend }}
+          EOF
+          chmod 600 "$TEST_ENV_FILE"
+          # docker-compose.vps.ci.yml adds host.docker.internal for the backend service only —
+          # needed here too, for the exact same reason as vps-compose-verify.
+
+      - name: Inject a throwaway ghcr.io credential entry so deploy.sh's presence check passes
+        # This test deliberately never talks to GHCR (it uses a local registry instead — see
+        # above) — deploy.sh's own GHCR-credential-presence check is a real safety feature for
+        # the actual VPS, not something this test should bypass by weakening the script. A
+        # fake-but-present entry satisfies the presence check exactly the way a real
+        # `docker login ghcr.io` would, without this job ever needing real GHCR access.
+        run: |
+          mkdir -p ~/.docker
+          [ -f ~/.docker/config.json ] || echo '{}' > ~/.docker/config.json
+          jq '.auths["ghcr.io"] = {"auth": "Y2ktdGVzdDpjaS10ZXN0"}' ~/.docker/config.json > /tmp/docker-config.json
+          mv /tmp/docker-config.json ~/.docker/config.json
+
+      - name: Deploy the known-good topology for real
+        run: |
+          cd "$TEST_COMPOSE_DIR"
+          sudo -E "$GITHUB_WORKSPACE/scripts/vps/deploy.sh" --confirm --compose-dir "$TEST_COMPOSE_DIR" --env-file "$TEST_ENV_FILE" --extra-compose-file "$TEST_COMPOSE_DIR/docker-compose.vps.ci.yml" --timeout 90
+
+      - name: Verify the deployment record was written with result=success
+        run: |
+          record=$(find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -exec jq -r '.result' {} \; | tail -n1)
+          [ "$record" = "success" ] || (echo "::error::expected the deployment record's result to be 'success', got '$record'" && exit 1)
+          echo "Confirmed: good deployment recorded as success."
+
+      - name: Verify the full request path works on the good deployment
+        run: |
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"deploy-ci-smoke-test@example.com","password":"Test1234Password!","website":""}')
+          [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected 403/404 through the deployed stack, got $RES" && exit 1)
+
+      - name: Attempt to deploy an intentionally broken backend image
+        run: |
+          sed -i "s|^BACKEND_IMAGE=.*|BACKEND_IMAGE=${{ steps.digests.outputs.bad_backend }}|" "$TEST_ENV_FILE"
+          cd "$TEST_COMPOSE_DIR"
+          # This MUST exit non-zero (deploy.sh reports failure even after a successful
+          # auto-rollback, since the DEPLOY itself failed) — `|| true` only prevents this
+          # expected failure from aborting the job before the checks below run.
+          sudo -E "$GITHUB_WORKSPACE/scripts/vps/deploy.sh" --confirm --compose-dir "$TEST_COMPOSE_DIR" --env-file "$TEST_ENV_FILE" --extra-compose-file "$TEST_COMPOSE_DIR/docker-compose.vps.ci.yml" --timeout 45 || true
+
+      - name: Verify the broken deployment was detected and recorded as failed
+        run: |
+          record=$(find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -exec jq -r 'select(.backend_image | contains("bad")) | .result' {} \;)
+          [ "$record" = "failed_verification" ] || (echo "::error::expected the broken deployment's record to be 'failed_verification', got '$record'" && exit 1)
+          echo "Confirmed: broken deployment correctly detected and recorded as failed."
+
+      - name: Verify automatic rollback actually restored the good images and real traffic works again
+        run: |
+          current_backend=$(grep -E "^BACKEND_IMAGE=" "$TEST_ENV_FILE" | cut -d= -f2-)
+          [ "$current_backend" = "${{ steps.digests.outputs.good_backend }}" ] || (echo "::error::expected BACKEND_IMAGE to be restored to the good digest after rollback, got $current_backend" && exit 1)
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"deploy-ci-smoke-test-2@example.com","password":"Test1234Password!","website":""}')
+          [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected 403/404 through the ROLLED-BACK stack, got $RES" && exit 1)
+          echo "Confirmed: rollback restored the known-good digests and the real request path works again."
+
+      - name: Dump deployment records and logs on failure
+        if: failure()
+        run: |
+          echo "--- deployment records ---"
+          find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -exec sh -c 'echo "$1:"; cat "$1"; echo' _ {} \;
+          cd "$TEST_COMPOSE_DIR"
+          docker compose --env-file "$TEST_ENV_FILE" -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai logs || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          cd "$TEST_COMPOSE_DIR" || exit 0
+          sudo docker compose --env-file "$TEST_ENV_FILE" -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai down -v || true
+          docker rm -f "$(docker ps -aq --filter ancestor=localhost:5000/lifeai-backend:bad)" 2> /dev/null || true
+
+  # ---------------------------------------------------------------------------------------
   # Single required status check for branch protection — see docs/OPERATIONS.md for how to
   # wire "Require status checks to pass before merging" to this job.
   # ---------------------------------------------------------------------------------------
