@@ -1,10 +1,11 @@
 from app.models.conversation import Conversation, Message
-from app.models.document import Document, DocumentSource
+from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.project import Project
 from app.models.refresh_token import RefreshToken
+from app.models.source_relationship import RelationshipType, SourceRelationship
 from app.models.user import User
 
 
@@ -33,6 +34,59 @@ def test_export_includes_own_data_only(client, db_session, superuser_db, make_ve
     # Shared company data (projects/tasks/documents) is deliberately out of scope — see
     # app/routers/account.py.
     assert "projects" not in body
+
+
+def test_export_includes_own_knowledge_sources_versions_and_relationships(client, superuser_db, make_verified_user):
+    """DEL 11 of the Founder Knowledge Studio work order: export must include source
+    metadata, document versions, and relationships — not just conversations/audit_log.
+    Also confirms a second user's material never leaks into this export (isolation)."""
+    user, password = make_verified_user(email="exportknowledge@example.com")
+    other, _ = make_verified_user(email="exportknowledge-other@example.com")
+    _login_and_get_csrf(client, "exportknowledge@example.com", password)
+
+    doc_a = Document(
+        title="Källa A",
+        source=DocumentSource.upload,
+        uploaded_by=user.id,
+        classification="architecture",
+        active_truth_status=ActiveTruthStatus.historical,
+        checksum="a" * 64,
+    )
+    doc_b = Document(title="Källa B", source=DocumentSource.upload, uploaded_by=user.id, checksum="b" * 64)
+    other_doc = Document(title="Någon annans källa", source=DocumentSource.upload, uploaded_by=other.id, checksum="c" * 64)
+    superuser_db.add_all([doc_a, doc_b, other_doc])
+    superuser_db.commit()
+
+    superuser_db.add(
+        KnowledgeVersion(source_id=doc_a.id, owner_id=user.id, version_number=1, checksum="a" * 64, extraction_version="extract-v1")
+    )
+    superuser_db.add(
+        SourceRelationship(
+            owner_id=user.id, from_source_id=doc_b.id, to_source_id=doc_a.id, relationship_type=RelationshipType.supersedes
+        )
+    )
+    superuser_db.add(ImportJob(owner_id=user.id, status=ImportJobStatus.completed, source_filename="paket.zip", succeeded_count=2))
+    superuser_db.commit()
+
+    res = client.get("/api/account/export")
+    assert res.status_code == 200
+    body = res.json()
+
+    source_ids = {s["id"] for s in body["knowledge_sources"]}
+    assert str(doc_a.id) in source_ids
+    assert str(doc_b.id) in source_ids
+    assert str(other_doc.id) not in source_ids  # isolation: never another founder's material
+
+    source_a = next(s for s in body["knowledge_sources"] if s["id"] == str(doc_a.id))
+    assert source_a["active_truth_status"] == "historical"
+    assert len(source_a["versions"]) == 1
+    assert source_a["versions"][0]["extraction_version"] == "extract-v1"
+
+    assert len(body["knowledge_source_relationships"]) == 1
+    assert body["knowledge_source_relationships"][0]["relationship_type"] == "supersedes"
+
+    assert len(body["knowledge_import_jobs"]) == 1
+    assert body["knowledge_import_jobs"][0]["succeeded_count"] == 2
 
 
 def test_wrong_password_does_not_delete(client, db_session, make_verified_user):
