@@ -22,14 +22,12 @@ detta dokument tidigare gjorde) angav `name: LifeAI` utan `-1`. Detta är en rim
 grundad i Renders dokumenterade beteende, inte en bekräftad logg av vad som faktiskt hände i det
 här kontot.
 
-**Viktigt att verifiera innan Blueprintet syncas mot den här filen:** grundaren har även
-observerat att den befintliga tjänsten just nu kör som en **Node-tjänst, inte Docker** — Root
-Directory `frontend`, Build Command `npm ci && npm run build`, Start Command `npm start`. Det är
-den äldre, separata frontend-arkitekturen (se historiken i denna fil), inte den kombinerade
-containern. `render.yaml` anger `runtime: docker`, `dockerfilePath: ./Dockerfile.combined`,
-`dockerContext: .` (repo-roten, inget Root Directory-fält behövs i själva filen) — men det krävs
-en verklig runtime-övergång i Render för att den befintliga tjänsten faktiskt ska byta från
-Node till Docker. Se "Klick-steg i Render" nedan för hur den övergången görs säkert.
+**Status 2026-07-20, verifierat direkt i dashboarden:** Blueprintet är redan syncat och har
+redan adopterat den befintliga tjänsten. Den kör redan `runtime: docker` mot
+`dockerfilePath: ./Dockerfile.combined` med tom Root Directory, exakt som `render.yaml`
+beskriver — den äldre, separata Node-frontend-arkitekturen är inte längre i drift. Se
+"Klick-steg i Render" nedan för vad som faktiskt återstår (en enda manuell redeploy, inte en
+runtime-övergång).
 
 ## Varför en enda container, inte separat frontend/backend
 
@@ -188,7 +186,7 @@ användarnamn (t.ex. `lifeos`) — samma beteende som innan denna fix, verifiera
 | Variabel | Vad du sätter |
 |---|---|
 | `FOUNDER_EMAIL` / `FOUNDER_PASSWORD` | Det enda grundarkontot MainAI någonsin tillåter (fast primärnyckel, se `backend/app/founder.py`) — skapas automatiskt vid första uppstart om det inte redan finns |
-| `DATABASE_URL` | Supabase Free — **DIRECT**-anslutningen, port 5432, inte den poolade 6543:an |
+| `DATABASE_URL` | Supabase Free — **Session pooler**-anslutningen (Supavisor, port 5432) — INTE Direct (IPv6-only, onåbar från Render Free) och INTE Transaction pooler (port 6543, stödjer inte sessionsnivå-DDL). Se "Databasrollerna" ovan. |
 | `REDIS_URL` | Upstash Free |
 | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | **Obligatoriskt i produktion** (`ENVIRONMENT=production` utan `SMTP_HOST` gör att backend vägrar starta, se `_check_smtp_configured` i `app/main.py`) — en gratis transaktionell e-postleverantör (t.ex. Resend eller Brevos gratisnivå) räcker |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | Fyll i minst en |
@@ -217,73 +215,52 @@ dokumentations-/försvar-i-djupet-skäl.
 ## Deploy sker bara via CI, aldrig av ett push i sig
 
 `render.yaml` sätter `autoDeploy: false`. Enda utlösaren är jobbet `deploy-render` i
-`.github/workflows/ci.yml`, som körs efter — och bara om — `all-checks-passed` blir grönt. Det
-anropar tjänstens **Deploy Hook**-URL via `RENDER_DEPLOY_HOOK_URL`, en GitHub Actions-secret som
-**inte finns än** — så länge den saknas är jobbet ett ofarligt no-op.
+`.github/workflows/ci.yml`, som körs efter — och bara om — `all-checks-passed` blir grönt, och
+bara på push till exakt `claude/det-kommer-mer-879lcm`. Det anropar tjänstens **Deploy Hook**-
+URL:er via två separata GitHub Actions-secrets, `RENDER_BACKEND_DEPLOY_HOOK_URL` och
+`RENDER_FRONTEND_DEPLOY_HOOK_URL` — **ingen av dem finns än** (verifierat i jobbloggen för
+commit `f9f3899`: båda skriver "is not set — skipping" och avslutar med kod 0) — så länge de
+saknas är jobbet ett ofarligt no-op, oberoende av varandra.
 
 ## Klick-steg i Render
 
-**Status 2026-07-19, verifierat direkt av grundaren i dashboarden:** den befintliga tjänsten
-`LifeAI-1` kör i dagsläget som en Node-tjänst (Root Directory `frontend`, Build Command
-`npm ci && npm run build`, Start Command `npm start`) — **inte** den kombinerade
-Docker-containern som `render.yaml` beskriver. Alla nödvändiga secrets är redan manuellt
-sparade på tjänsten. Det som återstår är att faktiskt byta tjänstens runtime till Docker och
-peka den på `Dockerfile.combined`.
+**Status 2026-07-20, verifierat direkt av grundaren i dashboarden — ersätter allt tidigare
+"återstår att byta till Docker"-innehåll i det här avsnittet, som är inaktuellt:** tjänsten
+`LifeAI-1` är redan adopterad av Render Blueprintet, kör redan `Runtime: Docker`, har redan en
+tom Root Directory, och bygger redan mot `Dockerfile.combined` — runtime-övergången
+Node → Docker som föregående version av det här avsnittet beskrev som återstående är alltså
+redan genomförd. `DATABASE_URL` pekar redan på Supabases **Session pooler** (port 5432), inte
+Direct connection (som är IPv6-only och onåbar från Render Free) — se "Databasrollerna" ovan.
 
-### Två olika mekanismer i Render — vet vilken du använder
+**Senaste kända produktionsstart nådde `ensure_app_role.py` och kraschade med:**
+```
+role "postgres.<project-ref>" does not exist
+```
+Rotorsaken var att skriptet antog att `DATABASE_URL`s användarnamn (Session poolerns
+pooler-inloggningsidentitet, formen `postgres.<project-ref>`) var ett riktigt Postgres-
+rollnamn. **Fixat och mergat till `claude/det-kommer-mer-879lcm`** (commit `f9f3899`, mergar in
+`claude/fix-supabase-pooler-role`s två commits `e428ab9`/`e3e4633`) — skriptet frågar nu
+`SELECT current_user` för den faktiska anslutna rollen istället. CI grön på merge-commiten:
+https://github.com/d1n095/LifeAI/actions/runs/29733943975. Ingen ny miljövariabel, hemlighet
+eller dashboard-inställning krävs för fixen — den ligger helt i applikationskoden.
 
-1. **Tjänstens egen "Update Source"-dialog** (Settings → Build & Deploy på den befintliga
-   tjänsten). Grundaren har observerat att den här dialogen erbjuder `Runtime: Docker` men
-   **inget fält för Dockerfile Path**, och knappen heter direkt "Deploy" — dvs. den kan byta
-   runtime men verkar inte kunna peka ut `./Dockerfile.combined`, och trycker du på knappen
-   startar den sannolikt en deploy omedelbart.
-2. **Render Blueprint-sync** (via `render.yaml` i det här repot). Blueprint-synken läser
-   `dockerfilePath`/`dockerContext` direkt ur filen och kan enligt Renders egen changelog byta
-   en befintlig tjänsts runtime (Node → Docker) genom att bara ändra `runtime`-fältet och
-   synca — se https://render.com/changelog/change-an-existing-services-runtime-via-api-or-blueprint.
-   Det är alltså **Blueprint-synken, inte "Update Source"-dialogen**, som är rätt väg för att
-   få med `dockerfilePath` korrekt.
+### Vad som konkret återstår: ett enda manuellt klick
 
-### Innan Blueprintet syncas — verifiera detta i dashboarden (kritiskt, kan annars trigga en
-### oavsiktlig deploy)
+Eftersom `render.yaml` har `autoDeploy: false` och CI:s `deploy-render`-jobb är ett medvetet
+no-op tills `RENDER_BACKEND_DEPLOY_HOOK_URL`/`RENDER_FRONTEND_DEPLOY_HOOK_URL` sätts som
+GitHub Actions-secrets (verifierat i klartext i jobbloggen för merge-commiten ovan — ingen
+deploy triggades av den här sessionens push), har den senaste fixen INTE nått produktionen
+automatiskt. Nästa steg är:
 
-Render Blueprints har en egen **Auto Sync**-inställning (Blueprint → Settings) som, om den är
-påslagen, applicerar `render.yaml`-ändringar (inklusive en runtime-övergång) **automatiskt vid
-varje push till den länkade branchen** — oberoende av GitHub Actions och oberoende av att
-`RENDER_DEPLOY_HOOK_URL` saknas som secret. `render.yaml`s eget `autoDeploy: false`-fält
-täcker *inte* detta — det gäller bara "ny commit på branchen" via tjänstens vanliga
-deploy-mekanism, inte ett Blueprint-syncat konfigurationsbyte.
+**I Render-dashboarden, på den befintliga `LifeAI-1`-tjänsten: Manual Deploy → "Deploy latest
+commit".**
 
-**Innan nästa push av den här filen till `claude/det-kommer-mer-879lcm`:**
-
-1. Kontrollera i Render-dashboarden om ett Blueprint redan är länkat mot det här repot/den här
-   branchen. Om ja: kontrollera Blueprintets **Auto Sync**-inställning.
-2. Om Auto Sync är påslagen: stäng av den (sätt till manuell sync) innan koden pushas, så att
-   push av den rättade `render.yaml` inte i sig triggar runtime-bytet och en deploy.
-3. Om inget Blueprint är länkat än: runtime-bytet sker inte förrän du själv initierar en
-   Blueprint-sync i dashboarden — då finns ingen push-triggad risk, men bekräfta ändå att
-   "New → Blueprint" i Render pekar mot rätt repo/branch och **adopterar** `LifeAI-1` (matchar
-   på namnet) istället för att föreslå en ny tjänst, innan du bekräftar synken.
-
-**Följande krävs innan Blueprintet kan appliceras, och görs ett steg i taget — invänta
-bekräftelse innan nästa:**
-
-1. Skapa ett Supabase-projekt (gratisnivå), aktivera `vector`-tillägget om det inte redan är
-   på, och hämta **DIRECT**-anslutningssträngen (port 5432).
-2. Skapa en Upstash Redis-databas (gratisnivå) och hämta dess anslutnings-URL.
-3. Bekräfta i Render-dashboarden att `plan: free` faktiskt är den aktuella plan-slugen för
-   webbtjänster (Postgres-planen `starter` visade sig vara ett föråldrat namn under det här
-   arbetet — samma typ av namnbyte kan gälla här, verifierat först).
-4. Fyll i `sync: false`-variablerna i tabellen ovan i dashboarden (grundaren har rapporterat
-   att detta redan är gjort för den befintliga tjänsten — bekräfta att alla nycklar i tabellen
-   ovan faktiskt finns satta, inte bara några).
-5. Verifiera Auto Sync-läget enligt föregående avsnitt.
-6. Först därefter: initiera Blueprint-synken/runtime-bytet manuellt i dashboarden.
-
-Inget av detta har körts än via den här sessionen — det här dokumentet beskriver vad som
-**kommer** krävas, inte vad som redan är gjort mot den riktiga Render-tjänsten. De observerade
-faktan (tjänstenamn, Root Directory, Build/Start Command) kommer direkt från grundarens egen
-inspektion av dashboarden, inte från kod i det här repot.
+Det hämtar och bygger om `claude/det-kommer-mer-879lcm`s senaste commit (`f9f3899`, som
+innehåller pooler-fixen) mot samma redan korrekta Docker-runtime/`Dockerfile.combined`/
+`DATABASE_URL`-konfiguration tjänsten redan har — ingen Blueprint-sync, ingen
+runtime-övergång, ingen ny secret eller dashboard-ändring behövs. Om starten fortfarande
+kraschar efter det klicket är felet något annat än den nu fixade rollbuggen och bör
+undersökas separat innan fler ändringar görs.
 
 ## Verifiering efter en fullständig deploy (för senare, när vi är där)
 
