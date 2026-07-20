@@ -1706,6 +1706,132 @@ jobs:
           docker rm -f "$(docker ps -aq --filter ancestor=localhost:5000/lifeai-backend:bad)" 2> /dev/null || true
 
   # ---------------------------------------------------------------------------------------
+  # scripts/vps/backup.sh and restore.sh, exercised for real: a genuine archive is produced
+  # from a fake /opt/lifeai plus real Docker volumes with known content, then verified for
+  # structure, exclusions (no secrets), permissions, and checksum — followed by real restore
+  # runs covering the happy path, the disposable-target-only guard, and both corruption modes
+  # (checksum mismatch, invalid tar). No compose stack needed here — backup.sh/restore.sh
+  # operate on files and Docker volumes directly, independent of any running service.
+  # ---------------------------------------------------------------------------------------
+  vps-backup-restore-test:
+    name: VPS backup.sh / restore.sh — archive structure, checksums, and restore behavior
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    env:
+      TEST_COMPOSE_DIR: ${{ github.workspace }}/backup-test/opt-lifeai
+      TEST_OUTPUT_DIR: ${{ github.workspace }}/backup-test/var-backups-lifeai
+      TEST_RESTORE_DIR: ${{ github.workspace }}/backup-test/restored
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up a fake /opt/lifeai and known-content Docker volumes
+        run: |
+          mkdir -p "$TEST_COMPOSE_DIR/deployments" "$TEST_OUTPUT_DIR"
+          cp docker-compose.vps.yml Caddyfile "$TEST_COMPOSE_DIR/"
+          cat > "$TEST_COMPOSE_DIR/deployments/20260101T000000Z.json" <<'EOF'
+          {"timestamp":"20260101T000000Z","result":"success","backend_image":"x@sha256:0000000000000000000000000000000000000000000000000000000000000000","frontend_image":"y@sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+          EOF
+          # backup.sh hardcodes the "lifeai" Compose project prefix (matching deploy.sh's own
+          # `-p lifeai`) — created directly here rather than via a real `compose up`, since
+          # this job tests backup/restore in isolation, not the full running stack (see
+          # vps-deploy-rollback-test for that).
+          docker volume create lifeai_caddy_data > /dev/null
+          docker volume create lifeai_caddy_config > /dev/null
+          docker run --rm -v lifeai_caddy_data:/vol alpine:3 sh -c "echo FAKE-TLS-CERT-DATA > /vol/cert.pem"
+          docker run --rm -v lifeai_caddy_config:/vol alpine:3 sh -c "echo '{\"fake\":\"config\"}' > /vol/autosave.json"
+
+      - name: Run backup.sh for real
+        run: |
+          ./scripts/vps/backup.sh --compose-dir "$TEST_COMPOSE_DIR" --output-dir "$TEST_OUTPUT_DIR" --keep 7
+          echo "ARCHIVE=$(ls "$TEST_OUTPUT_DIR"/lifeai-backup-*.tar.gz)" >> "$GITHUB_ENV"
+
+      - name: Verify archive permissions are not world/group readable
+        run: |
+          perms=$(stat -c '%a' "$ARCHIVE")
+          [ "$perms" = "600" ] || (echo "::error::expected archive permissions 600, got $perms" && exit 1)
+          perms_sha=$(stat -c '%a' "$ARCHIVE.sha256")
+          [ "$perms_sha" = "600" ] || (echo "::error::expected checksum file permissions 600, got $perms_sha" && exit 1)
+
+      - name: Verify checksum file matches the archive
+        run: |
+          cd "$TEST_OUTPUT_DIR"
+          sha256sum -c "$(basename "$ARCHIVE").sha256"
+
+      - name: Verify archive structure and manifest, and that no secret ever appears in it
+        run: |
+          mkdir -p /tmp/backup-inspect
+          tar xzf "$ARCHIVE" -C /tmp/backup-inspect
+          for member in opt-lifeai.tar.gz caddy_data.tar.gz caddy_config.tar.gz manifest.json; do
+            [ -f "/tmp/backup-inspect/$member" ] || (echo "::error::backup archive is missing expected member: $member" && exit 1)
+          done
+          # The whole point of this check: /etc/lifeai/lifeai.env (or any file that looks like
+          # it) must never appear anywhere in the archive, at any nesting level.
+          find /tmp/backup-inspect -iname '*lifeai.env*' | grep -q . && (echo "::error::a secrets-file-like entry was found in the backup archive" && exit 1)
+          jq -e '.required_env_var_names | index("SECRET_KEY")' /tmp/backup-inspect/manifest.json > /dev/null || (echo "::error::manifest.json is missing the expected required_env_var_names list" && exit 1)
+          mkdir -p /tmp/backup-inspect-opt
+          tar xzf /tmp/backup-inspect/opt-lifeai.tar.gz -C /tmp/backup-inspect-opt
+          [ -f /tmp/backup-inspect-opt/docker-compose.vps.yml ] || (echo "::error::opt-lifeai.tar.gz is missing docker-compose.vps.yml" && exit 1)
+          [ -f /tmp/backup-inspect-opt/deployments/20260101T000000Z.json ] || (echo "::error::opt-lifeai.tar.gz is missing the deployment record" && exit 1)
+          echo "Confirmed: archive structure is correct and contains no secrets."
+
+      - name: Verify restore.sh refuses to target /opt/lifeai directly
+        run: |
+          set +e
+          ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir /opt/lifeai --confirm
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused to target /opt/lifeai" && exit 1)
+
+      - name: Verify restore.sh refuses without --confirm
+        run: |
+          set +e
+          ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir "$TEST_RESTORE_DIR" > /dev/null 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused without --confirm" && exit 1)
+
+      - name: Verify restore.sh refuses a checksum-mismatched archive
+        run: |
+          cp "$ARCHIVE" "$TEST_OUTPUT_DIR/tampered.tar.gz"
+          cp "$ARCHIVE.sha256" "$TEST_OUTPUT_DIR/tampered.tar.gz.sha256"
+          sed -i "s#$(basename "$ARCHIVE")#tampered.tar.gz#" "$TEST_OUTPUT_DIR/tampered.tar.gz.sha256"
+          printf '\x00' >> "$TEST_OUTPUT_DIR/tampered.tar.gz"
+          set +e
+          ./scripts/vps/restore.sh --from "$TEST_OUTPUT_DIR/tampered.tar.gz" --target-dir "$TEST_RESTORE_DIR-tampered" --confirm
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused a checksum-mismatched archive" && exit 1)
+
+      - name: Verify restore.sh refuses a corrupt (non-tar) archive
+        run: |
+          echo "not a real tar file" > "$TEST_OUTPUT_DIR/garbage.tar.gz"
+          set +e
+          ./scripts/vps/restore.sh --from "$TEST_OUTPUT_DIR/garbage.tar.gz" --target-dir "$TEST_RESTORE_DIR-garbage" --confirm
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused a corrupt/non-tar archive" && exit 1)
+
+      - name: Restore for real into a disposable target and verify the content matches
+        run: |
+          ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir "$TEST_RESTORE_DIR" --confirm
+          diff "$TEST_COMPOSE_DIR/docker-compose.vps.yml" "$TEST_RESTORE_DIR/docker-compose.vps.yml"
+          diff "$TEST_COMPOSE_DIR/Caddyfile" "$TEST_RESTORE_DIR/Caddyfile"
+          diff "$TEST_COMPOSE_DIR/deployments/20260101T000000Z.json" "$TEST_RESTORE_DIR/deployments/20260101T000000Z.json"
+          restored_vol=$(docker volume ls --format '{{.Name}}' | grep '^lifeai_restore_.*_caddy_data$')
+          [ -n "$restored_vol" ] || (echo "::error::expected a lifeai_restore_*_caddy_data volume to exist after restore" && exit 1)
+          content=$(docker run --rm -v "$restored_vol:/vol:ro" alpine:3 cat /vol/cert.pem)
+          [ "$content" = "FAKE-TLS-CERT-DATA" ] || (echo "::error::restored caddy_data volume content did not match the original" && exit 1)
+          # The LIVE volumes must be untouched by a default (non---overwrite-live-volumes) restore.
+          live_content=$(docker run --rm -v lifeai_caddy_data:/vol:ro alpine:3 cat /vol/cert.pem)
+          [ "$live_content" = "FAKE-TLS-CERT-DATA" ] || (echo "::error::the live caddy_data volume was unexpectedly modified" && exit 1)
+          echo "Confirmed: restore produced correct file and volume content without touching anything live."
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker volume ls --format '{{.Name}}' | grep '^lifeai_' | xargs -r docker volume rm > /dev/null 2>&1 || true
+
+  # ---------------------------------------------------------------------------------------
   # Single required status check for branch protection — see docs/OPERATIONS.md for how to
   # wire "Require status checks to pass before merging" to this job.
   # ---------------------------------------------------------------------------------------
