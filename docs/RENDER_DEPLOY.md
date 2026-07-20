@@ -357,6 +357,63 @@ Fyra möjliga utfall, och vad vart och ett bevisar:
   vidare — om den behöver undersökas igen finns nu ett konkret, återanvändbart verktyg för
   det.
 
+## ROTORSAK BEKRÄFTAD AV RENDER SUPPORT — 2026-07-20, ersätter alla ovanstående hypoteser
+
+**Detta avsnitt är den slutgiltiga förklaringen.** Allt ovanför denna rubrik (de tre
+motbevisade hypoteserna — appkodsbugg, portambiguitet, OOM — och den efterföljande
+`/api/edge-probe`-diagnostiken) var seriös, bevisdriven felsökning som metodiskt uteslöt
+varje förklaring som gick att testa från kod och CI. Den satte oss i rätt läge för att ställa
+Render support en precis fråga, men ingen av de hypoteserna var den faktiska rotorsaken.
+Render support har nu bekräftat den riktiga förklaringen direkt, och den är arkitekturell,
+inte en bugg i det här repots kod:
+
+**`Dockerfile.combined` kör två separata webbservrar i EN Render Web Service** — FastAPI
+(uvicorn) bundet till `127.0.0.1:8000` och Next.js bundet till `0.0.0.0:$PORT` (10000 i
+produktion), övervakade som syskonprocesser av `scripts/entrypoint-combined.sh`. Render
+Web Services förutsätter EN process som lyssnar på `$PORT` och kan enligt Render supports
+egen bekräftelse **icke-deterministiskt välja mellan flera upptäckta webbservrar** i samma
+tjänst, snarare än att garanterat och konsekvent routa publik trafik till Next.js-processen.
+Detta förklarar exakt det uppmätta mönstret som annars var svårförklarat: Renders EGEN
+interna hälsokontroll (som i denna arkitektur alltid till slut når fram till Next.js →
+loopback → FastAPI, oavsett vilken av de två processerna Render "råkar" upptäcka för sitt eget
+bruk) kunde visa `200 OK` kontinuerligt, medan den PUBLIKA edgen route:ade en del eller all
+trafik till fel destination internt i sin egen infrastruktur — konsekvent med att både en
+helt statisk fil (`/edge-probe.html`, noll serverkod) och en enkel dynamisk route
+(`/api/edge-probe`) gav `502` samtidigt.
+
+Render dokumenterar detta explicit som en känd begränsning och rekommenderar uttryckligen
+SEPARATA tjänster för frontend och backend istället för att köra flera webbservrar i en och
+samma Web Service:
+<https://render.com/docs/faq#can-i-deploy-multiple-apps-to-a-single-render-service>
+
+**Varför `Dockerfile.combined` ändå byggdes så här från början, och varför det INTE var en
+uppenbar designbrist i förväg:** Render Free-planen erbjuder ingen "Private Service"-typ (se
+toppen av den här filens ursprungliga kommentarer och `render.yaml`s egen motivering) — utan
+en andra betald tjänst fanns ingen Render-inbyggd väg att köra FastAPI overksamt-men-privat
+bredvid Next.js. Den kombinerade enda-container-lösningen med loopback-isolering
+(`127.0.0.1:8000`, aldrig publicerad) var den enda kostnadsfria vägen att uppnå både "en
+tjänst, 0 kr/mån" och "backend aldrig direkt nåbar utifrån" SAMTIDIGT på Render specifikt.
+Vad som saknades i den ursprungliga designen var inte loopback-isoleringen i sig (den fungerar
+korrekt och är fortfarande bevisligen säker — se `Verify port 8000 is not reachable from
+outside the container` i `combined-container-verify`), utan antagandet att Render skulle
+route:a konsekvent till "processen som faktiskt lyssnar på \$PORT" i alla lägen. Den
+bekräftade sanningen är att Render inte garanterar det när fler än en webbserver är
+upptäckbar i samma tjänst, oavsett vilken port de facto är rätt.
+
+**Konsekvens för det här repot:** `claude/fix-render-public-port`s diagnostikrutter
+(`/api/edge-probe`, `/edge-probe.html`) har fyllt sitt syfte — de bevisade att felet inte
+satt i applikationskoden, portkonfigurationen eller minnesgränsen, vilket i sin tur gjorde det
+möjligt att ställa Render support en tillräckligt precis fråga för att få den riktiga
+rotorsaken bekräftad. **Ingen ytterligare Render-diagnostikfunktion byggs eller planeras.**
+Ingen ny Render-deploy görs för att testa detta vidare — arkitekturen i sig (en enda tjänst,
+två webbservrar) är den bekräftade begränsningen, inte något ett till försök skulle kunna
+runda. Se `docs/STRATO_VPS_DEPLOY.md` för den nya produktionsvägen: en riktig Strato-VPS med
+Docker Compose, separata backend-/frontend-containrar på ett privat Docker-nätverk, och Caddy
+som den enda publikt exponerade processen — samma säkerhetsegenskap (backend aldrig direkt
+nåbar utifrån) som `Dockerfile.combined` försökte uppnå, men med en arkitektur Render supports
+egen rekommendation bekräftar är korrekt: separata tjänster/processer bakom en riktig
+reverse proxy, inte flera webbservrar i en och samma tjänst.
+
 ## Miljövariabler — fullständig lista
 
 ### Genererade hemligheter (Render slumpar värdet — hamnar aldrig i repot)
