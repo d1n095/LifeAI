@@ -137,7 +137,7 @@ källhänvisning.
 ## Byggt, testat — och medvetet INTE byggt ikväll
 
 **Byggt och testat:** DEL 1–9, 11, 12 (se ovan). ~40 nya backend-tester denna session,
-hela sviten grön (227 tester). Full Playwright-regression grön (auth/security/account/
+hela sviten grön (238 tester). Full Playwright-regression grön (auth/security/account/
 shell-pages/founder-knowledge-studio).
 
 **Design-only / dokumenterat men inte byggt:**

@@ -21,8 +21,14 @@ under testkörning.
 | `ae518ea` | DEL 9 — Founder Workbench | [29718835246](https://github.com/d1n095/LifeAI/actions/runs/29718835246) |
 | `5929b19` | DEL 15 — obligatorisk dokumentation | [29719031419](https://github.com/d1n095/LifeAI/actions/runs/29719031419) |
 | `4d400af` | DEL 14 — lokal prestandamätning | [29719246143](https://github.com/d1n095/LifeAI/actions/runs/29719246143) |
+| `a4f38b5` | Handover uppdaterad med commit-lista + PR-länk | (dokumentation, ingen kodändring) |
+| `c930811` | STEG 9 — automatiserat migrationsrundturstest | [29719643222](https://github.com/d1n095/LifeAI/actions/runs/29719643222) |
+| `8766b78` | STEG 7 — fixa obegränsad chunk-storlek (verklig bugg) | [29719836847](https://github.com/d1n095/LifeAI/actions/runs/29719836847) |
+| `41b64a1` | STEG 7 — verifiera att råa DB-fel aldrig läcker | [29720028211](https://github.com/d1n095/LifeAI/actions/runs/29720028211) |
+| `28db7f8` | STEG 9 — OpenAPI-kontroll för /api/library och /api/workbench | [29720247185](https://github.com/d1n095/LifeAI/actions/runs/29720247185) |
+| `9794e45` | STEG 3/9 — Playwright mobil-täckning för /library och /workbench | [29720420425](https://github.com/d1n095/LifeAI/actions/runs/29720420425) |
 
-Total diff mot `claude/night-shift-mainai-web`: 11 commits, se `git log
+Total diff mot `claude/night-shift-mainai-web`: 17 commits, se `git log
 claude/night-shift-mainai-web..HEAD` för fullständig lista.
 
 **Draft PR:** [d1n095/LifeAI#4](https://github.com/d1n095/LifeAI/pull/4) mot
@@ -35,23 +41,29 @@ fråga MainAI -> få källhänvisat svar -> öppna källan -> fortsätta samtale
 
 Bevisat av `frontend/e2e/founder-knowledge-studio.spec.ts` mot den riktiga backenden (endast
 AI-providerns chat/embed-anrop och e-post fejkade). Senaste fulla E2E-regressionskörning,
-lokalt: **17 passed, 1 skipped** (det överhoppade testet kräver container-isolering och hoppas
+lokalt: **19 passed, 1 skipped** (det överhoppade testet kräver container-isolering och hoppas
 alltid över lokalt, samma som i tidigare nattpass) — `auth.spec.ts`, `security.spec.ts`,
-`account.spec.ts`, `shell-pages.spec.ts`, `founder-knowledge-studio.spec.ts` alla gröna
-tillsammans.
+`account.spec.ts`, `shell-pages.spec.ts`, `founder-knowledge-studio.spec.ts` och den nya
+`library-workbench-mobile.spec.ts` alla gröna tillsammans.
 
 ## Testresultat
 
-- **Backend-pytest:** 228 tester gröna (växte från startpunkten 124 genom sessionen via
-  commit:en ovan — se respektive commits diffstat för exakta siffror per steg).
+- **Backend-pytest:** 238 tester gröna (växte från startpunkten 124 genom sessionen — se
+  respektive commits diffstat för exakta siffror per steg).
 - **Frontend:** TypeScript-typecheck grön, ESLint grön (0 fel), produktionsbygge
   (`npx next build`) grönt med `/library`, `/library/[id]` och `/workbench` registrerade som
-  rutter.
-- **Migration:** `alembic upgrade head` OCH `alembic downgrade -1` verifierade lokalt mot
-  riktig Postgres 16 med pgvector.
+  rutter. `npm audit` — 0 sårbarheter.
+- **Migration:** `alembic upgrade head` → `downgrade -1` → `upgrade head` verifierat både
+  manuellt och som ett automatiserat, återkörbart backend-test
+  (`tests/backend/test_migration_roundtrip.py`) som jämför hela schemat (tabeller +
+  documents-kolumner) före och efter rundturen, inte bara att kommandona lyckas utan fel.
 - **Säkerhetstester:** 22 dedikerade ZIP-importtester (en per attackklass), 6 nya
   RLS-isolationstester, isolationstester i export/workbench/library som aktivt försöker läcka
-  en annan användares data.
+  en annan användares data, ett verifierat test att råa DB-fel aldrig läcker i ett HTTP-svar,
+  en OpenAPI-schemakontroll för alla åtta nya rutter.
+- **Mobil:** `frontend/e2e/library-workbench-mobile.spec.ts` — /library och /workbench vid en
+  telefon-bredd (390px): mobilmenyn fungerar, ingen horisontell overflow, kärnkontroller
+  synliga och användbara.
 
 ## Verkliga buggar hittade och fixade under sessionen (inte hypotetiska)
 
@@ -73,6 +85,15 @@ tillsammans.
 5. **`LibrarySearchHit`-schemat saknade `text_match`** — FastAPI:s `response_model` tystade
    bort fältet trots att `hybrid_search()` satte det korrekt. Fixad genom att lägga till fältet
    i schemat.
+6. **Obegränsad chunk-storlek.** `app/rag/chunking.py`s `chunk_text()` delar text på
+   whitespace och styr chunkstorlek via ordantal — ett dokument helt utan whitespace (t.ex.
+   en minifierad fil eller en base64-blob) blev ett enda "ord" och därmed EN enda,
+   obegränsad chunk. Bekräftat lokalt: en 2 MB whitespace-fri sträng gav en 2 000 000-tecken
+   lång chunk, som sedan skulle gå hel till både embedding-providern och (om den citerades)
+   rakt in i en chatt-/workbench-prompt — en obegränsad kostnads-/promptstorlekssårbarhet.
+   Fixad med `MAX_CHUNK_CHARS`, en hård teckenbaserad fallback-gräns. Verifierad via
+   revert/reapply (regressionstestet failar mot okorrigerad kod med ett tydligt
+   `ImportError`, passerar med fixen).
 
 ## Säkerhetsgranskning
 
@@ -97,6 +118,21 @@ Se det fullständiga avsnittet i `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`. Kort:
 - Automatisk AI-system-handover mellan MainAI-instanser.
 - Riktig extern malware-/antivirusskanning av importerat innehåll (kräver en tjänst som inte
   är aktiverad, i linje med uppdragets förbud).
+
+## Slutgranskning (STEG 9-checklista)
+
+- [x] Hela backend-testsviten — 238 tester gröna
+- [x] Migration upgrade → downgrade → upgrade — automatiserat test, schema jämfört rad för rad
+- [x] Frontend typecheck, ESLint, produktionsbygge — alla gröna
+- [x] Playwright desktop (fullt vertikalt flöde) — grönt
+- [x] Playwright mobil (/library, /workbench) — grönt, nytt denna omgång
+- [x] `npm audit` — 0 sårbarheter
+- [x] OpenAPI-kontroll för alla åtta nya rutter — schemat byggs, alla rutter dokumenterade med
+      riktiga JSON-scheman
+- [x] Hemlighetsgenomsökning av hela grendiffen — mönsterbaserad, inga träffar utöver kända
+      testplaceholders (GitHub:s strukturerade scanner kunde inte ta hela ~300 KB-diffen i ett
+      anrop; se not i commit `28db7f8`)
+- [x] CI grön på samtliga 17 commits
 
 ## Migrationsordning och rollback
 
