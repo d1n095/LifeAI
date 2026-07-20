@@ -1,0 +1,21 @@
+# CI-only override for .github/workflows/ci.yml's vps-compose-verify job — never used on the
+# real VPS (docs/STRATO_VPS_DEPLOY.md never references this file). Applied on top of
+# docker-compose.vps.yml with `-f docker-compose.vps.yml -f docker-compose.vps.ci.yml` so the
+# job tests the REAL production compose file, not a rewritten copy of it.
+#
+# What this changes, and why it's CI-only:
+#   - backend: adds host.docker.internal so it can reach the runner-level postgres/redis
+#     GitHub Actions services (see combined-container-verify job for the same pattern) —
+#     production instead reaches Supabase/Upstash over the public internet, no extra_hosts
+#     entry needed there at all.
+#
+# caddy's own "80:80"/"443:443" publish from docker-compose.vps.yml is left untouched and
+# reused as-is (the job curls host port 80 directly) — ports are merged/concatenated across
+# compose files, not replaced, so redeclaring them here would just create redundant, confusing
+# duplicate mappings for no benefit. DOMAIN is set to ":80" via the job's own environment
+# (see Caddyfile) so no real domain or ACME is needed; port 443 stays published but unused
+# since a ":80"-only site block never triggers Caddy's automatic HTTPS.
+services:
+  backend:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

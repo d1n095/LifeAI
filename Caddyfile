@@ -1,0 +1,27 @@
+# Strato VPS — the ONLY publicly reachable process in the whole stack (see
+# docker-compose.vps.yml). Caddy handles automatic HTTPS (Let's Encrypt) for a real DOMAIN;
+# for CI verification (docs/STRATO_VPS_DEPLOY.md, .github/workflows/ci.yml's
+# vps-compose-verify job) DOMAIN is set to the special address ":80", which Caddy treats as
+# "serve plain HTTP on port 80 for any Host header" — no ACME involved, since CI has no real
+# domain or public port 443 to prove ownership of.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Everything — /api/* and the app UI — goes to the frontend's own Next.js server, which
+	# proxies /api/* to the backend server-side over the private lifeai_internal network
+	# (see frontend/app/api/[...path]/route.ts, INTERNAL_API_URL=http://backend:8000). Caddy
+	# never talks to the backend directly, matching docker-compose.vps.yml's isolation.
+	reverse_proxy frontend:3000
+
+	# Don't leak the reverse proxy's own identity to the internet.
+	header {
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}

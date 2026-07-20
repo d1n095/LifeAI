@@ -1,0 +1,76 @@
+name: Build & push VPS images
+
+# Builds backend/frontend images and pushes them to GHCR, tagged by commit SHA — nothing
+# more. This workflow NEVER deploys, NEVER contacts the VPS, and NEVER runs `docker compose`
+# against any real server — see docs/STRATO_VPS_DEPLOY.md's "Första manuella deploy": Dennis
+# copies the printed digest into /etc/lifeai/lifeai.env by hand and runs `docker compose pull
+# && docker compose up -d` on the VPS himself. That manual step is the ONLY thing that ever
+# changes what the VPS actually runs — this workflow only ever populates the registry.
+#
+# Triggers on push to `main` (building/pushing an image to a registry is a safe, reversible,
+# non-deploying action) and manually via workflow_dispatch. It intentionally does NOT trigger
+# on push to claude/** branches like ci.yml does — there is no reason to publish an image for
+# every WIP branch push, only for what's actually on main.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-backend:
+    name: Build & push backend image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: ./backend
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/lifeai-backend:${{ github.sha }}
+      - name: Print the digest-pinned reference for docker-compose.vps.yml
+        run: |
+          {
+            echo "### Digest-pinned backend image"
+            echo
+            echo "Paste this exact value as \`BACKEND_IMAGE\` in \`/etc/lifeai/lifeai.env\` on the VPS:"
+            echo '```'
+            echo "ghcr.io/${{ github.repository_owner }}/lifeai-backend@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-frontend:
+    name: Build & push frontend image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: ./frontend
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/lifeai-frontend:${{ github.sha }}
+      - name: Print the digest-pinned reference for docker-compose.vps.yml
+        run: |
+          {
+            echo "### Digest-pinned frontend image"
+            echo
+            echo "Paste this exact value as \`FRONTEND_IMAGE\` in \`/etc/lifeai/lifeai.env\` on the VPS:"
+            echo '```'
+            echo "ghcr.io/${{ github.repository_owner }}/lifeai-frontend@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

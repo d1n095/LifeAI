@@ -1,0 +1,112 @@
+# Strato VPS production topology — see docs/STRATO_VPS_DEPLOY.md for the full installation
+# order. This is deliberately NOT docker-compose.yml (local dev): no local postgres/redis
+# (Supabase Session Pooler / Upstash remain external, see the secrets file), no `build:`
+# (images are built and pushed by GitHub Actions — see .github/workflows/build-images.yml —
+# and only ever pulled here by digest), and only `caddy` publishes anything to the host.
+#
+# Security property this mirrors from Dockerfile.combined's loopback isolation (see the
+# "ROTORSAK BEKRÄFTAD AV RENDER SUPPORT" section of docs/RENDER_DEPLOY.md for why that
+# approach was abandoned): the backend is never directly reachable from outside the
+# `lifeai_internal` Docker network. Here that's real network isolation instead of
+# loopback-inside-one-container isolation — the pattern Render's own docs recommend
+# (https://render.com/docs/faq#can-i-deploy-multiple-apps-to-a-single-render-service).
+#
+# LIFEAI_ENV_FILE lets docs/STRATO_VPS_DEPLOY.md's CI verification job point env_file at a
+# throwaway file instead of the real root-owned /etc/lifeai/lifeai.env (which only exists on
+# the actual VPS) — in production, leave it unset and the default applies.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?sätt DOMAIN i /etc/lifeai/lifeai.env, t.ex. lifeai.exempel.se}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+    networks:
+      - lifeai_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  backend:
+    # Digest-pinned, e.g. ghcr.io/d1n095/lifeai-backend@sha256:... — never a mutable tag like
+    # :latest. See docs/STRATO_VPS_DEPLOY.md's "Första manuella deploy" section for why the
+    # pin is chosen by Dennis explicitly, not auto-followed.
+    image: ${BACKEND_IMAGE:?sätt BACKEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-backend@sha256:...}
+    restart: unless-stopped
+    env_file:
+      - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
+    environment:
+      ENVIRONMENT: production
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - lifeai_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Deliberately no `ports:` — same warning as backend/Dockerfile's own comment: this
+    # container must never receive public ingress directly. Only reachable from other
+    # containers on lifeai_internal (and even then, only the frontend's proxy route ever
+    # calls it — see frontend/app/api/[...path]/route.ts).
+
+  frontend:
+    # Digest-pinned, e.g. ghcr.io/d1n095/lifeai-frontend@sha256:...
+    image: ${FRONTEND_IMAGE:?sätt FRONTEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-frontend@sha256:...}
+    restart: unless-stopped
+    env_file:
+      - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
+    environment:
+      # Docker DNS on lifeai_internal — same mechanism docker-compose.yml already uses
+      # locally, just now crossing a real container boundary instead of a loopback one.
+      INTERNAL_API_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # No curl/wget in node:20-slim (see frontend/Dockerfile) — Node itself is always
+      # present, so use it directly instead of adding a package just for this.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - lifeai_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Deliberately no `ports:` — only Caddy ever reaches this, via lifeai_internal.
+
+networks:
+  lifeai_internal:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

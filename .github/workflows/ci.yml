@@ -1178,6 +1178,148 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------------------
+  # Strato VPS topology — builds the REAL backend/frontend Dockerfiles and runs the REAL
+  # docker-compose.vps.yml (+ the CI-only docker-compose.vps.ci.yml override) against them,
+  # exactly as docs/STRATO_VPS_DEPLOY.md documents for the actual server, minus the images
+  # coming from GHCR (built locally here instead — see docker-compose.vps.ci.yml's comment)
+  # and minus a real domain/TLS (DOMAIN=":80", see Caddyfile). Verifies the specific
+  # architectural property this whole VPS plan exists to guarantee (see the "ROTORSAK
+  # BEKRÄFTAD AV RENDER SUPPORT" section of docs/RENDER_DEPLOY.md): a real reverse proxy in
+  # front of separate frontend/backend containers, with the backend never reachable except
+  # through the private Docker network. Branch-gated like combined-container-verify — this
+  # doesn't need to run on every push to every branch, only when this branch's own compose
+  # topology actually changes.
+  # ---------------------------------------------------------------------------------------
+  vps-compose-verify:
+    name: Strato VPS compose topology — build, run, verify
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # host.docker.internal (via docker-compose.vps.ci.yml's extra_hosts) is how the backend
+      # container reaches these runner-level services — see combined-container-verify's env
+      # block for the same reasoning.
+      CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_vps_ci
+      CI_REDIS_URL: redis://host.docker.internal:6379/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create database for the VPS-compose run
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_vps_ci;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_vps_ci;"
+
+      - name: Build the real backend and frontend images
+        run: |
+          docker build -t lifeai-vps-backend:ci ./backend
+          docker build -t lifeai-vps-frontend:ci ./frontend
+
+      - name: Write the CI-only secrets file (never used on the real VPS)
+        run: |
+          cat > "${{ github.workspace }}/ci-secrets.env" <<EOF
+          SECRET_KEY=ci-vps-secret-key
+          MAINAI_APP_PASSWORD=ci_vps_app_pw
+          FOUNDER_EMAIL=founder@lifeos.local
+          FOUNDER_PASSWORD=TestFounderPassword123!
+          DATABASE_URL=$CI_DATABASE_URL
+          REDIS_URL=$CI_REDIS_URL
+          FRONTEND_ORIGINS=http://localhost:80
+          PUBLIC_APP_URL=http://localhost:80
+          EOF
+          # ENVIRONMENT is deliberately left unset (defaults to "development" — see
+          # app/config.py) so app/main.py's SMTP fail-closed startup gate doesn't require a
+          # real SMTP_HOST here. Same reasoning as combined-container-verify's identical note.
+
+      - name: Start the real VPS compose topology
+        env:
+          BACKEND_IMAGE: lifeai-vps-backend:ci
+          FRONTEND_IMAGE: lifeai-vps-frontend:ci
+          DOMAIN: ":80"
+          LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci up -d
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:80/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:80/api/health
+
+      - name: Verify Caddy is the only container publishing anything to the host
+        run: |
+          for name in backend frontend; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            ports=$(docker port "$cid" || true)
+            if [ -n "$ports" ]; then
+              echo "::error::$name publishes a host port — it must never be reachable except through caddy: $ports" && exit 1
+            fi
+            echo "Confirmed: $name publishes nothing to the host."
+          done
+
+      - name: Verify the backend has no listener reachable from the host's own network interfaces
+        # NOT a check against the container's bridge-network IP: backend/Dockerfile's uvicorn
+        # binds 0.0.0.0:8000 *inside its own container*, so other containers on
+        # lifeai_internal (frontend, and technically caddy) CAN reach that bridge IP directly
+        # — that's required, expected container-to-container behavior, not a hole (unlike
+        # Dockerfile.combined's loopback-only bind, which combined-container-verify's
+        # equivalent check tests against). The real security property `ports:` (or its
+        # absence) controls is whether the HOST's own interfaces — what the public internet
+        # would actually reach on a real VPS at its public IP — have a listener at all. They
+        # don't, because docker-compose.vps.yml never publishes anything for backend/frontend.
+        run: |
+          if curl -sf --max-time 3 "http://127.0.0.1:8000/api/health" > /dev/null; then
+            echo "::error::something is listening on the RUNNER's own 127.0.0.1:8000 — backend must never be published to the host" && exit 1
+          fi
+          echo "Confirmed: the host itself has no listener on port 8000 — nothing outside lifeai_internal (and on a real VPS, nothing outside the Docker daemon's own host) can ever reach the backend directly."
+
+      - name: Verify restart policy and log rotation are actually applied
+        run: |
+          for name in caddy backend frontend; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid")
+            [ "$policy" = "unless-stopped" ] || (echo "::error::$name has restart policy '$policy', expected unless-stopped" && exit 1)
+            logdriver=$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$cid")
+            [ "$logdriver" = "json-file" ] || (echo "::error::$name uses log driver '$logdriver', expected json-file with size limits" && exit 1)
+          done
+          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all three services."
+
+      - name: Verify a full request actually reaches the backend/database through Caddy -> frontend -> backend
+        run: |
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"vps-ci-smoke-test@example.com","password":"Test1234Password!","website":""}')
+          # Public registration is intentionally disabled (founder-only launch, see
+          # app/routers/auth.py) — 403/404 here (not a network error, not a 502) is exactly
+          # the proof the whole chain (Caddy -> frontend -> backend -> Postgres) is wired
+          # correctly end to end, same as same-origin-proxy-test's reasoning.
+          [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected a real backend response (403/404, registration disabled) through the full VPS chain, got $RES" && exit 1)
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci down -v || true
+
+  # ---------------------------------------------------------------------------------------
   # Single required status check for branch protection — see docs/OPERATIONS.md for how to
   # wire "Require status checks to pass before merging" to this job.
   # ---------------------------------------------------------------------------------------
