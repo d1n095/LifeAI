@@ -235,10 +235,24 @@ export type SourceRelationshipItem = {
   created_at: string;
 };
 
+export type ClaimConfidence = "certain" | "likely" | "uncertain" | "conflict" | "no_basis";
+export type ClaimStatus = "active" | "historical" | "proposed" | "disputed";
+
+export type KnowledgeClaimItem = {
+  id: string;
+  claim_text: string;
+  status: ClaimStatus;
+  confidence: ClaimConfidence;
+  grounding_score: number;
+  chunk_id: string | null;
+  created_at: string;
+};
+
 export type KnowledgeSourceDetail = KnowledgeSourceItem & {
   versions: KnowledgeVersionItem[];
   relationships: SourceRelationshipItem[];
   chunk_preview: string[];
+  claims: KnowledgeClaimItem[];
 };
 
 export type FileOutcome = {

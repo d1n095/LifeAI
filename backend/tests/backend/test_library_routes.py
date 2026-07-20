@@ -148,6 +148,28 @@ def test_source_detail_includes_versions_and_chunk_preview(client):
     assert len(body["chunk_preview"]) >= 1
 
 
+def test_source_detail_includes_extracted_claims_with_computed_confidence(client, monkeypatch):
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _claim_chat(self, messages, model, **kwargs):
+        return ChatResult(content='["Bolaget grundades 2019 i Stockholm."]', provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _claim_chat)
+
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "claims.txt", b"Bolaget grundades 2019 i Stockholm.")
+    source_id = job["file_results"][0]["source_id"]
+
+    detail = client.get(f"/api/library/{source_id}")
+    assert detail.status_code == 200
+    claims = detail.json()["claims"]
+    assert len(claims) == 1
+    assert claims[0]["claim_text"] == "Bolaget grundades 2019 i Stockholm."
+    assert claims[0]["confidence"] == "likely"  # well-grounded, but not "certain" without independent corroboration
+    assert claims[0]["status"] == "active"
+
+
 def test_delete_requires_explicit_confirmation(client):
     csrf = _login(client)
     job = _import_and_wait(client, csrf, "delete-me.txt", b"raderas snart")

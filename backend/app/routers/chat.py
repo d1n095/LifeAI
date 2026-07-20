@@ -16,7 +16,7 @@ from app.providers.base import Message, ProviderError
 from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback
 from app.rag.retrieve import retrieve_context
-from app.rag.trust import assess_confidence, build_trust_instructions, detect_conflicts
+from app.rag.trust import assess_confidence, build_trust_instructions, detect_claim_conflicts, detect_conflicts
 from app.schemas import ChatMessageIn, ChatMessageOut, SourceRef
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(require_founder)])
@@ -59,6 +59,11 @@ async def chat(
     # excludes Document.deleted_at IS NOT NULL at the query level, not just in the UI.
     conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
     trust = assess_confidence(hits, conflicting_pairs)
+    # Claim-level conflicts (STEG 10) can surface a disagreement source-level detection
+    # alone would miss — see app/rag/trust.py's detect_claim_conflicts() docstring. ORed in,
+    # never replaces the source-level check.
+    if not trust.conflicts_detected and detect_claim_conflicts(db, user.id, [h["chunk_id"] for h in hits if h.get("chunk_id")]):
+        trust.conflicts_detected = True
 
     def _label(h: dict) -> str:
         status = h.get("active_truth_status")

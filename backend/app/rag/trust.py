@@ -150,6 +150,21 @@ CONFLICT_INSTRUCTION = (
 )
 
 
+def detect_claim_conflicts(db: Session, owner_id: uuid.UUID, chunk_ids: list[str]) -> bool:
+    """Claim-level analogue of detect_conflicts() above: True if ANY claim bound to one of
+    the actually-retrieved chunks currently resolves to `conflict` (assess_claim_confidence
+    below). This can flag a conflict detect_conflicts() alone would miss — two claims can
+    contradict each other even when their SOURCE documents have no `contradicts`
+    SourceRelationship recorded between them (e.g. two otherwise-agreeing documents that
+    happen to state one fact differently). Used by app/routers/chat.py to OR into
+    ChatMessageOut's conflicts_detected, not to replace the source-level check."""
+    if not chunk_ids:
+        return False
+    ids = [uuid.UUID(c) for c in set(chunk_ids)]
+    claims = db.query(KnowledgeClaim).filter(KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.chunk_id.in_(ids)).all()
+    return any(assess_claim_confidence(db, claim) == ClaimConfidence.conflict for claim in claims)
+
+
 def assess_claim_confidence(db: Session, claim: KnowledgeClaim) -> ClaimConfidence:
     """STEG 10's claim-level analogue of assess_confidence() above: the stored,
     extraction-time confidence (app/rag/claims.py's grounding-score heuristic) is only the

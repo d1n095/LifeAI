@@ -13,16 +13,19 @@ from app.limiter import limiter
 from app.models.document import ActiveTruthStatus, Document, KnowledgeClassification
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
 from app.rag.library_import import run_import_job
+from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.rag.zip_import import sha256_bytes
 from app.schemas import (
     DeleteConfirmIn,
     ImportJobOut,
+    KnowledgeClaimOut,
     KnowledgeSourceDetailOut,
     KnowledgeSourceOut,
     LibrarySearchHit,
@@ -205,11 +208,27 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
         .limit(CHUNK_PREVIEW_COUNT)
         .all()
     )
+    claims = db.query(KnowledgeClaim).filter_by(source_id=source_id).order_by(KnowledgeClaim.created_at.asc()).all()
 
     detail = KnowledgeSourceDetailOut.model_validate(document)
     detail.versions = versions
     detail.relationships = relationships
     detail.chunk_preview = [c.text[:CHUNK_PREVIEW_LENGTH] for c in chunks]
+    # confidence is recomputed live (assess_claim_confidence), not read from the stored
+    # extraction-time value — see app/rag/trust.py's docstring for why (a relationship added
+    # after extraction must be reflected immediately).
+    detail.claims = [
+        KnowledgeClaimOut(
+            id=c.id,
+            claim_text=c.claim_text,
+            status=c.status.value,
+            confidence=assess_claim_confidence(db, c).value,
+            grounding_score=c.grounding_score,
+            chunk_id=c.chunk_id,
+            created_at=c.created_at,
+        )
+        for c in claims
+    ]
     return detail
 
 

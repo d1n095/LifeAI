@@ -169,6 +169,34 @@ def test_chat_never_surfaces_another_users_source(client, superuser_db, make_ver
     assert not any("hemlighet" in m.content.lower() for m in _captured_chat_messages[0] if m.role == "system")
 
 
+def test_chat_flags_claim_level_conflict_even_without_a_source_relationship(client, superuser_db, _captured_chat_messages):
+    """STEG 10: two claims can contradict each other even when their SOURCE documents have
+    no `contradicts` SourceRelationship recorded — app/rag/trust.py's
+    detect_claim_conflicts() must still surface this in the chat response's
+    conflicts_detected, not just detect_conflicts()'s source-level check."""
+    from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipType
+    from app.models.document_chunk import DocumentChunk as DC
+    from app.models.knowledge_claim import ClaimConfidence, KnowledgeClaim
+
+    founder_id = _founder_id(superuser_db)
+    doc = _make_source(superuser_db, founder_id, "Kalla med paastaenden")
+    chunk = superuser_db.query(DC).filter_by(document_id=doc.id).first()
+
+    claim_a = KnowledgeClaim(owner_id=founder_id, source_id=doc.id, chunk_id=chunk.id, claim_text="Pastaende A", confidence=ClaimConfidence.likely, extraction_version="test")
+    claim_b = KnowledgeClaim(owner_id=founder_id, source_id=doc.id, claim_text="Pastaende B (motsager A)", confidence=ClaimConfidence.likely, extraction_version="test")
+    superuser_db.add_all([claim_a, claim_b])
+    superuser_db.commit()
+    superuser_db.add(
+        ClaimRelationship(owner_id=founder_id, from_claim_id=claim_b.id, to_claim_id=claim_a.id, relationship_type=ClaimRelationshipType.contradicts)
+    )
+    superuser_db.commit()
+
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Fraga om kallan"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    assert res.json()["conflicts_detected"] is True
+
+
 def test_chat_response_includes_context_resolver_classification(client, superuser_db, _captured_chat_messages):
     """Confirms app/context/resolver.py (DEL 7) is actually wired into the live /api/chat
     endpoint, not just unit-tested in isolation — a brand-new conversation's first message

@@ -43,6 +43,7 @@ def _hit_dict(chunk: DocumentChunk, score: float) -> dict:
     doc = chunk.document
     return {
         "document_id": str(chunk.document_id),
+        "chunk_id": str(chunk.id),
         "title": doc.title if doc else None,
         "text": chunk.text,
         "score": score,

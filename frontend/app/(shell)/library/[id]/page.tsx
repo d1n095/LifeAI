@@ -24,6 +24,22 @@ const RELATIONSHIP_LABELS: Record<string, string> = {
 
 const RELATIONSHIP_TYPES = Object.keys(RELATIONSHIP_LABELS);
 
+const CLAIM_CONFIDENCE_LABELS: Record<string, string> = {
+  certain: "Säkerställt",
+  likely: "Troligt",
+  uncertain: "Osäkert",
+  conflict: "Konflikt",
+  no_basis: "Inget underlag",
+};
+
+const CLAIM_CONFIDENCE_COLORS: Record<string, string> = {
+  certain: "bg-emerald-500/20 text-emerald-300",
+  likely: "bg-sky-500/20 text-sky-300",
+  uncertain: "bg-amber-500/20 text-amber-300",
+  conflict: "bg-red-500/20 text-red-300",
+  no_basis: "bg-white/10 text-white/50",
+};
+
 export default function LibrarySourceDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -158,6 +174,30 @@ export default function LibrarySourceDetailPage() {
             </p>
           ))}
         </div>
+      </section>
+
+      <section aria-labelledby="claims-heading" className="rounded-xl border border-border p-4">
+        <h2 id="claims-heading" className="text-sm font-medium text-white/70 mb-3">
+          Sakpåståenden (claims)
+        </h2>
+        {source.claims.length === 0 && (
+          <p className="text-white/30 text-sm">Inga sakpåståenden extraherade ännu.</p>
+        )}
+        <ul className="space-y-2">
+          {source.claims.map((c) => (
+            <li key={c.id} className="text-sm border-b border-border/60 pb-2 last:border-0">
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-white/80">{c.claim_text}</span>
+                <span className={`shrink-0 rounded px-2 py-0.5 text-[10px] ${CLAIM_CONFIDENCE_COLORS[c.confidence]}`}>
+                  {CLAIM_CONFIDENCE_LABELS[c.confidence] || c.confidence}
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] text-white/30">
+                {STATUS_LABELS[c.status] || c.status} · underlag {(c.grounding_score * 100).toFixed(0)}%
+              </div>
+            </li>
+          ))}
+        </ul>
       </section>
 
       <section aria-labelledby="versions-heading" className="rounded-xl border border-border p-4">

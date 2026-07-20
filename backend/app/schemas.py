@@ -283,10 +283,22 @@ class KnowledgeSourceOut(BaseModel):
     imported_at: datetime | None
 
 
+class KnowledgeClaimOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    claim_text: str
+    status: str
+    confidence: str  # computed via app/rag/trust.py's assess_claim_confidence(), not the stored extraction-time value
+    grounding_score: float
+    chunk_id: uuid.UUID | None
+    created_at: datetime
+
+
 class KnowledgeSourceDetailOut(KnowledgeSourceOut):
     versions: list[KnowledgeVersionOut] = []
     relationships: list[SourceRelationshipOut] = []
     chunk_preview: list[str] = []
+    claims: list[KnowledgeClaimOut] = []
 
 
 class ImportJobOut(BaseModel):
