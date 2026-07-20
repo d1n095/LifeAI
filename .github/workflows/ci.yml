@@ -1028,6 +1028,16 @@ jobs:
           echo "Static asset (edge-probe.html — no SSR, no React) via the public \$PORT:"
           curl -sS -o /dev/null -w "edge-probe.html -> %{http_code}\n" http://localhost:3025/edge-probe.html
           curl -sS http://localhost:3025/edge-probe.html | grep -q "edge-probe-ok" || (echo "::error::edge-probe.html did not serve its expected static content via the public \$PORT" && exit 1)
+          echo "Diagnostic route /api/edge-probe (Next-native, no backend/DB/Redis) via the public \$PORT:"
+          EDGE_PROBE_HEADERS=$(curl -sS -D - -o /tmp/edge-probe-body.txt http://localhost:3025/api/edge-probe)
+          echo "$EDGE_PROBE_HEADERS" | grep -qi "^x-edge-probe: 1" || (echo "::error::x-edge-probe header missing from /api/edge-probe response" && exit 1)
+          grep -q "edge-probe-ok" /tmp/edge-probe-body.txt || (echo "::error::/api/edge-probe body did not contain the expected marker" && exit 1)
+          echo "Diagnostic route /api/edge-health (separate from /api/health and from the internal ?probe= marker) via the public \$PORT:"
+          EDGE_HEALTH_HEADERS=$(curl -sS -D - -o /tmp/edge-health-body.txt http://localhost:3025/api/edge-health)
+          echo "$EDGE_HEALTH_HEADERS" | grep -qi "^x-edge-health: 1" || (echo "::error::x-edge-health header missing from /api/edge-health response" && exit 1)
+          grep -q "edge-health-ok" /tmp/edge-health-body.txt || (echo "::error::/api/edge-health body did not contain the expected marker" && exit 1)
+          echo "Confirming the catch-all /api/* proxy (frontend/app/api/[...path]/route.ts) still handles an unrelated backend path unaffected by the two new literal routes:"
+          curl -sS -o /dev/null -w "/api/auth/me -> %{http_code}\n" http://localhost:3025/api/auth/me
 
       - name: Confirm the public frontend $PORT is the sole externally-reachable port (unambiguous for Render)
         run: |
@@ -1052,7 +1062,7 @@ jobs:
             echo "::error::port 8000 (FastAPI) is published — it must never be reachable from outside the container" && exit 1
           fi
 
-      - name: Simulate a real browser page load of /, /login and /edge-probe.html under the memory ceiling, repeatedly
+      - name: Simulate a real browser page load of /, /login, /edge-probe.html, /api/edge-probe and /api/edge-health under the memory ceiling, repeatedly
         run: |
           # Unlike Container A-E's health-check-only traffic, this fetches the actual HTML documents
           # for / and /login, then every /_next/static/* asset those documents reference — the same
@@ -1063,7 +1073,7 @@ jobs:
           # is broken" from "page rendering specifically is broken".
           for round in $(seq 1 5); do
             echo "--- round $round ---"
-            for page in / /login /edge-probe.html; do
+            for page in / /login /edge-probe.html /api/edge-probe /api/edge-health; do
               html=$(curl -sS --max-time 10 "http://localhost:3025$page")
               code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:3025$page")
               echo "$page -> $code"

@@ -249,6 +249,98 @@ redan provisionerad roll roterar inte lösenordet, och simulerade transienta
 anslutningsfel — via test-kroken `TEST_FORCE_APP_DB_CONNECT_FAILURES`, som aldrig sätts i en
 riktig deploy — visas faktiskt återförsökta och containern blir ändå frisk).
 
+**Ett fjärde, ännu olöst fall — 2026-07-20, efter merge av `888b41a` (som redan innehåller
+alla tre fixarna ovan):** en manuell deploy gick grön/Live, Render-loggen visade en
+oavbruten ström av `GET /api/health 200 OK` (Renders egen interna prob, `10.238.x.x`) i
+minst en och en halv minut efter "Your service is live 🎉" — men `https://lifeai-1.onrender.com/`
+gav 502 och förblev så i flera minuter, inte den korta självläkande blipp som fall tre visade
+sig vara. Alltså INTE samma mönster: det första kraschade försöket i fall tre visade sig vara
+en sekundäreffekt av en instans som Render redan låst som misslyckad; här finns inget
+kraschat försök i loggen alls — bara en frisk container och en 502 på den publika adressen
+samtidigt.
+
+Tre hypoteser är sedan dess uttömt testade mot den riktiga avbildningen, alla motbevisade
+med mätdata, inte antaganden:
+
+1. **En vanlig appkodsbugg** — uteslutet genom en full processreproduktion (riktigt
+   Next.js-standalone-bygge + riktig backend + riktig Postgres/Redis, samma
+   `entrypoint-combined.sh`, produktionslika miljövariabler): `/`, `/login` och `/api/health`
+   gav alla 200 konsekvent i över 70 sekunder, matchande exakt det friska fönstret i den
+   riktiga Render-loggen.
+2. **Fel/otydlig port trots `PORT=10000`** — Container F i `combined-container-verify`
+   kör nu uttryckligen med `PORT=10000` (Renders faktiska tilldelade värde, bekräftat i
+   deploy-loggen — alla tidigare CI-containrar A-E körde bara `PORT=3000`, en verklig,
+   otestad lucka). `docker port` visar exakt en distinkt publicerad containersida-port,
+   `10000/tcp` (aldrig `8000`, FastAPI förblir loopback-only). Ingen ambiguitet hittad.
+3. **OOM under Render Frees minnesgräns** — Container F körs med `--memory=512m
+   --memory-swap=512m` (Render Frees vanligen dokumenterade gräns, inte independent
+   omkontrollerad mot Renders aktuella dokumentation eftersom den här sandlådan saknar
+   utgående nätåtkomst dit). Fem omgångar av riktiga sidladdningar av `/`, `/login`,
+   `/edge-probe.html`, `/api/edge-probe` och `/api/edge-health` (HTML + varje
+   `/_next/static/*`-tillgång sidan refererar, samma mönster en riktig webbläsare gör) höll
+   minnesanvändningen platt runt 124–127 MiB av 512 MiB (~25 %) — `docker inspect
+   .State.OOMKilled` var `false` genomgående. Ingen OOM reproducerad.
+
+**Ny diagnostik tillagd på `claude/fix-render-public-port` (inte mergad, inte deployad) för
+att avgöra var i kedjan felet faktiskt sitter, nästa gång ett kontrollerat deployförsök görs:**
+
+- `frontend/public/edge-probe.html` — en helt statisk fil, ingen React/SSR/serverkod alls.
+  Om den är nåbar publikt men `/` inte är det, är felet specifikt i sidrendering, inte i
+  Next.js-processen/porten/routingen som helhet.
+- `frontend/app/api/edge-probe/route.ts` och `frontend/app/api/edge-health/route.ts` — två
+  separata, Next-native diagnosrutter. Ingen av dem proxas till backend (till skillnad från
+  allt annat under `/api/*`, se `frontend/app/api/[...path]/route.ts`) och ingen av dem rör
+  databas, Redis eller AI. Varje anrop loggas server-side med `process.pid`, request-path,
+  och en säkerhetsvitlista av headers — `Host`, `X-Forwarded-Proto`, `X-Forwarded-For` —
+  **aldrig** `Cookie`, `Authorization`, eller andra hemlighetsbärande headers. Svaren har
+  unika headers (`X-Edge-Probe: 1` respektive `X-Edge-Health: 1`) som gör dem lätta att
+  känna igen i `curl -v`-utdata.
+- `/api/edge-health` är medvetet en ANNAN URL än både Renders faktiska `healthCheckPath`
+  (`/api/health`, proxas till FastAPI) och `entrypoint-combined.sh`s egna interna
+  hälsokontroll-loop (som nu märker sina egna loopback-anrop med
+  `?probe=internal-startup-gate` — se den skriptets kommentar). Tre olika, aldrig
+  förväxlingsbara signaler i containerloggen: Renders riktiga externa probe, vår egen
+  interna uppstartsgrind, och ett framtida manuellt externt test mot `/api/edge-health`.
+
+**Renders shell/CLI-baserade localhost-testning i en levande instans** — dokumenterat efter
+bästa nuvarande kännedom, INTE omkontrollerat mot Renders live-dokumentation (den här
+sandlådan har ingen utgående nätåtkomst till render.com, bekräftat via `$HTTPS_PROXY/
+__agentproxy/status`, som visar ett explicit policy-avslag för `lifeai-1.onrender.com`).
+Render har historiskt erbjudit en webbläsarbaserad "Shell"-flik per tjänst i dashboarden som
+öppnar en terminal INUTI den körande containern — därifrån skulle `curl -sS
+localhost:$PORT/api/edge-probe` (eller `/api/edge-health`, `/api/health`) bevisa om appen
+själv svarar korrekt helt oberoende av Renders publika edge, eftersom anropet aldrig lämnar
+containern. Shell-fliken har traditionellt varit en funktion på Renders betalda planer, inte
+på Free — det är oklart om det fortfarande stämmer eller om LifeAI-1:s Free-tjänst har
+tillgång till den; kontrollera själv i dashboarden (Shell-fliken, om den finns, under
+tjänstens sidomeny) snarare än att lita på det här stycket som ett aktuellt faktum.
+
+**Vad som ska kontrolleras vid nästa enda kontrollerade deployförsök, för att slutgiltigt
+avgöra var felet sitter:**
+
+1. Efter att Render visar tjänsten Live: besök `https://lifeai-1.onrender.com/api/edge-probe`
+   (eller `/api/edge-health`) direkt i webbläsaren eller med `curl -v`.
+2. Kontrollera **samtidigt** containerloggen i Render-dashboarden för en rad som börjar
+   `[edge-probe]` respektive `[edge-health]`.
+3. Kontrollera **samtidigt** om `/api/health`-strömmen (Renders egen probe) fortfarande visar
+   `200 OK`-rader.
+
+Tre möjliga utfall, och vad vart och ett bevisar:
+
+- **Publik `/api/edge-probe` ger 502, OCH ingen `[edge-probe]`-rad syns alls i
+  containerloggen** → anropet når aldrig containern. Felet sitter i Renders egen
+  edge/routing före containern — utanför vad en kodändring i det här repot kan påverka.
+- **Publik `/api/edge-probe` ger 502, MEN en `[edge-probe]`-rad SYNS i containerloggen**
+  (dvs. Next.js-processen faktiskt tog emot och besvarade anropet internt) → anropet når
+  containern men svaret som lämnar den är trasigt eller blockeras på vägen ut — ett
+  container-/HTTP-svarsproblem, värt att undersöka vidare i kod (t.ex. `Connection`/
+  `Transfer-Encoding`-hantering, eller något Render-specifikt om proxy-headers).
+- **`/api/edge-probe` och `/api/edge-health` svarar 200 (statisk `/edge-probe.html` också),
+  MEN `/` fortfarande ger 502** → Next.js-processen och porten fungerar i sig — felet är
+  specifikt i sidrenderingen av `/` (eller `/login`), inte i processen/porten/routingen som
+  helhet. Nästa steg då: jämföra `/` mot en annan sida som `/edge-probe.html` för vad som
+  faktiskt skiljer dem åt i renderingsvägen (klientkomponent, `AuthGuard`, etc.).
+
 ## Miljövariabler — fullständig lista
 
 ### Genererade hemligheter (Render slumpar värdet — hamnar aldrig i repot)
