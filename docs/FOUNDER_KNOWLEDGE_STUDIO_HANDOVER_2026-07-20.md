@@ -107,21 +107,62 @@ från den faktiska retrieval-listan (kan aldrig hallucineras av modellen).
 
 ## Vad som INTE är byggt (dokumenterat, inte glömt)
 
-Se det fullständiga avsnittet i `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`. Kort:
-- Påstående-nivå (`KnowledgeClaim`) trust-bedömning (DEL 8-fördjupning) — kräver en ny tabell,
-  medvetet avgränsad.
-- Redis-baserade jobblås för flerprocess-/replikskydd (DEL 10) — dagens `ImportJob` +
-  `BackgroundTasks` är enprocess-säkert men saknar den explicita lås-abstraktionen.
-- Formell prestanda-/kostnadsmätning (DEL 14) — gränser finns (60 MB, 500 filer, top_k=5) men
-  är inte instrumenterade.
-- Ljud/video/transkript-import — ingen extraktion för dessa format.
+Se det fullständiga avsnittet i `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`. Kort — uppdaterat efter
+STEG 10 (påstående-nivå trust) och STEG 11 (Redis-jobblås), båda nu byggda, se avsnittet
+"STEG 10–11-tillägg" nedan:
+- Ljud/video/transkript-import (STEG 12–13) — ingen extraktion för dessa format ännu, näst i
+  trappan.
 - Automatisk AI-system-handover mellan MainAI-instanser.
 - Riktig extern malware-/antivirusskanning av importerat innehåll (kräver en tjänst som inte
   är aktiverad, i linje med uppdragets förbud).
 
-## Slutgranskning (STEG 9-checklista)
+## STEG 10–11-tillägg (denna session)
 
-- [x] Hela backend-testsviten — 238 tester gröna
+**STEG 10 — påstående-nivå trust:** migration 0007 lägger till `knowledge_claims` och
+`claim_relationships` (samma RLS-mönster som migration 0006). `app/rag/claims.py` extraherar
+testbara påståenden per chunk via providern (kapat vid `MAX_CHUNKS_PER_DOCUMENT=20`), binder
+varje påstående till exakt källa/version/chunk, och beräknar ett objektivt `grounding_score`
+(ordöverlapp mot chunk-texten — INTE modellens egen självrapporterade konfidens, samma princip
+som redan gäller på källnivå i `app/rag/trust.py`). Konfidensen (`assess_claim_confidence`)
+beräknas LIVE vid varje läsning, aldrig cachad: en `contradicts`-relation tak:ar den
+ovillkorligt till `conflict`, `no_basis` kan aldrig höjas, och `likely`→`certain` kräver en
+OBEROENDE `supports`-relation från en annan källa. `detect_claim_conflicts` i `chat.py` fångar
+motsägelser på påstående-nivå som saknar en explicit källrelation. Exponerat i
+`GET /api/library/{id}` och `/library/[id]`-sidan. 21 nya tester
+(`tests/backend/test_claims.py`), inklusive en cross-owner-isolationstest som skapar data som
+ägare A och verifierar att en session scopead till ägare B fortfarande ser rätt (icke-höjd)
+konfidens även när den ges ägare A:s objekt direkt.
+
+**STEG 11 — robusta importjobb för flera instanser:** `app/jobs/lock.py` är ett
+Redis-baserat distribuerat lås (samma enda Redis-instans som redan används för rate limiting
+— ingen ny betaltjänst, ingen ny produktionsworker): atomärt förvärv via `SET NX EX`, Lua-CAS
+för förnyelse/frisläppning så bara rätt innehavare (token-matchning) kan agera, och en
+leasing-TTL på varje lås så det aldrig kan bli permanent. `app/jobs/retry.py` klassificerar
+fel som tillfälliga (nätverk, `JobLockUnavailable`) eller permanenta (`ZipSecurityError`,
+`ValueError`, okänd typ default:ar till permanent — vitlista, inte svartlista) och beräknar
+exponentiell backoff med full jitter. `run_import_job` (`app/rag/library_import.py`) förvärvar
+ett lås nyckla på `(ägare, innehålls-checksumma)`, hjärtslår det per fil under stora paket, och
+degraderar till okoordinerad körning (inte blockering) om Redis själv är nere. Migration 0008
+lägger till `attempt_count`/`max_attempts`/`last_failure_transient` på `knowledge_import_jobs`,
+exponerat i `ImportJobOut` och synligt i Library-UI:t ("försöker igen automatiskt" vs.
+permanent fel). Återupptagbarhet är en emergent egenskap av den redan existerande per-fil-
+checksummaidempotensen — ingen ny logik krävdes. 29 nya tester
+(`test_job_lock.py` — 18, `test_job_retry.py` — 11, plus retry/lås-integrationstester i
+`test_library_import.py`), inklusive ett test av två genuint samtidiga importförsök av samma
+innehåll där exakt ett blockeras av låset (verifierat med en riktig asyncio-interleaving via en
+monkeypatchad fördröjning i embed-anropet, inte bara sekventiell körning som råkar se
+samtidig ut).
+
+Under STEG 11-arbetet hittades och fixades ytterligare en instans av det redan kända
+RLS/ContextVar-buggmönstret (en testhjälpfunktion satte bara den råa `SET LOCAL`-SQL:en, inte
+`current_user_id`-kontextvariabeln som `app/db.py`s `after_begin`-lyssnare behöver för att
+återapplicera RLS-scoping på en session's ANDRA transaktion) — fångat proaktivt av ett nytt
+test, inte i produktion.
+
+## Slutgranskning (STEG 9-checklista, uppdaterad efter STEG 10–11)
+
+- [x] Hela backend-testsviten — 285 tester gröna (upp från 238 vid STEG 9, se STEG 10–11-
+      tillägget ovan)
 - [x] Migration upgrade → downgrade → upgrade — automatiserat test, schema jämfört rad för rad
 - [x] Frontend typecheck, ESLint, produktionsbygge — alla gröna
 - [x] Playwright desktop (fullt vertikalt flöde) — grönt
@@ -157,9 +198,10 @@ kan inte tas bort vid nedgradering, bara tabellerna som använder det).
 2. Om godkänd: merga `claude/founder-knowledge-studio-v1` in i `claude/night-shift-mainai-web`
    (INTE till `main`/produktion utan en separat, explicit produktionsbeslutsprocess — se
    `docs/RENDER_DEPLOY.md`).
-3. Nästa naturliga djup, i ordning efter vad som redan är mest byggt: DEL 8-fördjupning
-   (`KnowledgeClaim`-tabell), DEL 10 (Redis-jobblås inför flerinstansdrift), DEL 14
-   (prestanda-/kostnadsmätning), ljud/video-import.
+3. Nästa naturliga djup: ljud/video-import v1 (STEG 12 — transkriptionsprovider-gränssnitt,
+   deterministisk mock i tester, tidsstämplade segment/chunks, sökbart, citerbart med
+   tidsstämpel), sedan multimedia i UI (STEG 13), sedan en full vertikal 12-stegsverifiering
+   som även täcker ljud/video (STEG 14).
 4. Inga öppna produktbeslut väntar på svar just nu — allt som saknades dokumenterades och
    avgränsades löpande (se "inte byggt"-avsnitten) istället för att blockera arbetet.
 

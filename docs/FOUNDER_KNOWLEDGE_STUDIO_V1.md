@@ -136,21 +136,13 @@ källhänvisning.
 
 ## Byggt, testat — och medvetet INTE byggt ikväll
 
-**Byggt och testat:** DEL 1–9, 11, 12 (se ovan). ~40 nya backend-tester denna session,
-hela sviten grön (238 tester). Full Playwright-regression grön (auth/security/account/
-shell-pages/founder-knowledge-studio).
+**Byggt och testat:** DEL 1–9, 11, 12 (se ovan), plus STEG 10 (påstående-nivå trust) och
+STEG 11 (Redis-baserade jobblås/återförsök) från en senare session — se
+`docs/FOUNDER_KNOWLEDGE_STUDIO_HANDOVER_2026-07-20.md`s "STEG 10–11-tillägg" för den fulla
+tekniska beskrivningen. Hela sviten grön (285 tester). Full Playwright-regression grön
+(auth/security/account/shell-pages/founder-knowledge-studio).
 
 **Design-only / dokumenterat men inte byggt:**
-- **DEL 8 fördjupning** — påstående-nivå (`KnowledgeClaim`) trust-bedömning, inte bara
-  käll-nivå. Kräver en ny tabell och en egen extraktionspipeline (identifiera enskilda
-  påståenden i en källa) — deliberat avgränsat för att inte bygga en otestad tabell på
-  natten. Nästa steg: en `KnowledgeClaim`-modell kopplad till `DocumentChunk` med samma
-  RLS-mönster som `SourceRelationship`.
-- **DEL 10** — Redis-baserade jobblås/dubbelbearbetningsskydd för `ImportJob`. Dagens
-  `ImportJob` + `BackgroundTasks`-mönster är i praktiken enprocess-säkert (samma mönster som
-  `documents.py`s befintliga bakgrundsindexering) men saknar en explicit lås-abstraktion för
-  flera processer/repliker. Production-behovet: ett Redis-baserat lås nyckel:at på
-  `source_checksum` innan Render skalas till fler instanser.
 - **DEL 14** — lätt lokal mätning genomförd (`backend/tests/backend/test_performance_measurement.py`,
   kör med `-s` för att se siffrorna), inte en fullständig instrumenterad produktionsmätning.
   Ett syntetiskt paket (10 filer × 20 stycken) lokalt mot riktig Postgres/pgvector med en
