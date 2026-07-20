@@ -151,10 +151,17 @@ shell-pages/founder-knowledge-studio).
   `documents.py`s befintliga bakgrundsindexering) men saknar en explicit lås-abstraktion för
   flera processer/repliker. Production-behovet: ett Redis-baserat lås nyckel:at på
   `source_checksum` innan Render skalas till fler instanser.
-- **DEL 14** — formell prestanda-/kostnadsmätning (importtid, chunk-antal,
-  embedding-batchstorlek, söklatens, prompt-storlek). Storleksgränser finns redan
-  (60 MB uppladdning, 500 filer, 200 MB uppackat, `top_k=5` i retrieval) men är inte
-  instrumenterade eller uppmätta lokalt ikväll.
+- **DEL 14** — lätt lokal mätning genomförd (`backend/tests/backend/test_performance_measurement.py`,
+  kör med `-s` för att se siffrorna), inte en fullständig instrumenterad produktionsmätning.
+  Ett syntetiskt paket (10 filer × 20 stycken) lokalt mot riktig Postgres/pgvector med en
+  deterministisk fejk-embedding gav: import 0,244s totalt (~0,024s/fil), 10 chunkar (1
+  chunk/fil vid den textstorleken — chunkningsgränsen är större än en enskild fil här),
+  hybrid-sök (top_k=10) 37 ms, chatt-hämtning (top_k=5) 10 ms med 10 145 tecken kontext till
+  prompten. Siffrorna är inte absoluta produktionsvärden (lokal maskin, syntetisk data) utan
+  en baslinje och ett lätt regressionsskydd — de hårda säkerhetsgränserna som faktiskt
+  förhindrar obegränsad kostnad är redan på plats och testade oberoende av detta
+  (`MAX_FILES=500`, `MAX_TOTAL_UNCOMPRESSED_BYTES=200MB`, `top_k=5` i retrieval — se
+  `docs/KNOWLEDGE_IMPORT_SECURITY.md`).
 - Ljud/video/transkript-stöd (nämnt i LIFE_LIBRARY_PLAN.md) — ingen extraktion för dessa
   format finns; `zip_import.py`s `ALLOWED_EXTENSIONS` inkluderar dem inte.
 - Automatisk AI-system-handover mellan MainAI-instanser — inte påbörjat.
