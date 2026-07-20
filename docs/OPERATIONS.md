@@ -268,3 +268,28 @@ vet den inte vilket projekts Postgres anslutningen hör till. `ensure_app_role.p
 `_app_username()` — suffixet kopieras nu från `DATABASE_URL`s användarnamn när ett finns. Se
 `docs/RENDER_DEPLOY.md`s avsnitt "Databasrollerna" och
 `backend/tests/backend/test_ensure_app_role.py`.
+
+### Backend startar (nästan) men kraschar sedan: `password authentication failed for user "mainai_app"` — och rot-URL:en ger 502 trots att `/api/health` gav 200 i loggen
+
+Verifierat fel 2026-07-20 på en riktig produktionsdeploy — ett TREDJE, separat pooler-fel, inte
+samma som de två ovan. Uppstod EFTER att både `ensure_app_role.py` och backend-hälsokontrollen
+redan lyckats. Rotorsak: `ensure_app_role.py` roterade `mainai_app`s lösenord **på varje
+enda uppstart**, även när det redan var korrekt — under Supabases Session Pooler (Supavisor)
+kan det göra poolerns egen auth-cache kortvarigt inaktuell, så nästa anslutning med SAMMA
+lösenord kan avvisas i några sekunder innan cachen hinner uppdateras. `app/main.py`s
+`on_startup()` gjorde sin första `APP_DATABASE_URL`-anslutning utan något återförsök alls, så
+den transienta avvisningen tog ner hela processen. Den efterföljande 502:an på rot-URL:en
+(trots att loggen visade en senare lyckad uppstart och flera `/api/health 200`) var en
+sekundäreffekt: Render hade redan låst deployen som misslyckad utifrån det första kraschade
+försöket och rev troligen ner den instans som faktiskt blev frisk — inte en separat bugg i
+frontend eller entrypointen (`node server.js` lyssnade bevisligen korrekt fram till en extern,
+signalstyrd avstängning, inte en krasch).
+
+Fixat: `ensure_app_role.py` ändrar nu bara lösenordet vid första rollskapandet eller ett
+uttryckligt `MAINAI_APP_ROTATE_PASSWORD=true` (se `docs/RENDER_DEPLOY.md`), och gör en
+självtest-anslutning med återförsök/backoff varje gång lösenordet faktiskt ändras.
+`app/main.py`/`app/db.py`s nya `call_with_db_retry` ger samma skydd som ett andra lager kring
+appens egen uppstart. Se `docs/RENDER_DEPLOY.md`s avsnitt "Databasrollerna" ("Ett tredje,
+separat pooler-fel"), `backend/tests/backend/test_ensure_app_role.py`,
+`backend/tests/backend/test_db_retry.py`, och Container E i
+`.github/workflows/ci.yml`s `combined-container-verify`.
