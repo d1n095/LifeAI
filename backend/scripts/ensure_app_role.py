@@ -38,6 +38,22 @@ from psycopg2 import sql
 APP_ROLE = "mainai_app"
 
 
+def _app_username(admin_username: str) -> str:
+    """Under Supabase's Session Pooler (Supavisor), the admin URL's username is a pooler
+    login identity of the form `<role>.<tenant-id>` (see the current_user comment below) —
+    the `.<tenant-id>` suffix is how Supavisor knows which project's Postgres to route the
+    connection to, and every connection through the pooler needs it, not just the admin one.
+    Building the app role's connection string as bare "mainai_app" (no suffix) makes Supavisor
+    reject it outright with "no tenant identifier provided (external_id or sni_hostname
+    required)" — a production crash, confirmed against a real Render deploy, not a
+    hypothetical. A plain, non-pooled admin username (local dev, direct Postgres) has no dot
+    and is left alone."""
+    if "." in admin_username:
+        _, _, tenant = admin_username.partition(".")
+        return f"{APP_ROLE}.{tenant}"
+    return APP_ROLE
+
+
 def main() -> None:
     database_url = os.environ["DATABASE_URL"]
     app_password = os.environ["MAINAI_APP_PASSWORD"]
@@ -48,7 +64,8 @@ def main() -> None:
         print(f"DATABASE_URL saknar host eller användarnamn: {database_url!r}", file=sys.stderr)
         sys.exit(1)
 
-    app_netloc = f"{APP_ROLE}:{quote(app_password, safe='')}@{parts.hostname}:{parts.port or 5432}"
+    app_username = _app_username(parts.username)
+    app_netloc = f"{quote(app_username, safe='.')}:{quote(app_password, safe='')}@{parts.hostname}:{parts.port or 5432}"
     app_database_url = urlunsplit((parts.scheme, app_netloc, parts.path, "", ""))
 
     conn = psycopg2.connect(database_url)

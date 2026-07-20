@@ -76,6 +76,70 @@ def test_default_privileges_use_current_user_not_pooler_login_identity(monkeypat
     assert (pooler_username,) not in identifier_args
 
 
+def test_app_database_url_carries_the_pooler_tenant_suffix(monkeypatch, tmp_path):
+    """Reproduces a second, distinct Supabase Session Pooler production crash — this one
+    AFTER ensure_app_role.py succeeds: Supavisor rejects any connection whose username lacks
+    the `.<tenant-id>` suffix with "no tenant identifier provided (external_id or
+    sni_hostname required)", not just the admin connection. The pre-fix code built
+    APP_DATABASE_URL's username as the bare role name ("mainai_app"), dropping the tenant
+    suffix DATABASE_URL's own username carries (`postgres.<project-ref>`) — so every runtime
+    request-serving connection the app made after boot was rejected by the pooler, even
+    though ensure_app_role.py itself (using the admin DATABASE_URL, which does have the
+    suffix) had just succeeded moments earlier. The fix copies the tenant suffix onto the
+    app role's username too."""
+    module = _load_module()
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://postgres.ruwihvifpgftcwakdmvo:adminpw@aws-1-us-west-2.pooler.supabase.com:5432/postgres",
+    )
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "app-pw")
+    env_file = tmp_path / "render_env.sh"
+    monkeypatch.setenv("RENDER_ENV_FILE", str(env_file))
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    fake_cursor.fetchone.return_value = ("postgres",)
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+    monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
+
+    module.main()
+
+    written = env_file.read_text()
+    assert "APP_DATABASE_URL=" in written
+    app_url = written.split('APP_DATABASE_URL="', 1)[1].split('"', 1)[0]
+    app_username = urlparse(app_url).username
+    assert app_username == "mainai_app.ruwihvifpgftcwakdmvo"
+
+
+def test_app_database_url_stays_unsuffixed_for_a_plain_non_pooled_admin_username(monkeypatch, tmp_path):
+    """Local Docker Compose / any direct (non-pooled) Postgres has a plain admin username
+    (e.g. `lifeos`) with no tenant suffix to copy — must not gain a spurious ".something"
+    appended, which would just be a made-up role name that doesn't exist."""
+    module = _load_module()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://lifeos:adminpw@localhost:5432/lifeos")
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "app-pw")
+    env_file = tmp_path / "render_env.sh"
+    monkeypatch.setenv("RENDER_ENV_FILE", str(env_file))
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    fake_cursor.fetchone.return_value = ("lifeos",)
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+    monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
+
+    module.main()
+
+    written = env_file.read_text()
+    app_url = written.split('APP_DATABASE_URL="', 1)[1].split('"', 1)[0]
+    assert urlparse(app_url).username == "mainai_app"
+
+
 def test_full_script_run_against_real_local_postgres_is_idempotent(monkeypatch):
     """Runs the real, unmocked script against the actual local Postgres test database this
     suite already uses (see conftest.py's `_test_database` fixture) — the ordinary

@@ -255,3 +255,16 @@ pooler används istället för Direct connection) och `backend/tests/backend/tes
 för regressionstestet. Om detta fel dyker upp igen efter framtida ändringar i skriptet: det är
 nästan alltid ett tecken på att någon kod börjat lita på `DATABASE_URL`s användarnamn som ett
 rollnamn igen istället för att fråga databasen.
+
+### Backend startar (nästan) men kraschar sedan: `FATAL: (NODENOTIFIER) no tenant identifier provided (external_id or sni_hostname required)`
+
+Verifierat fel 2026-07-20 på en riktig produktionsdeploy, EFTER att `ensure_app_role.py` redan
+lyckats — det här är alltså inte samma fel som ovan. Uppstår när appens egna runtime-anslutningar
+(via `APP_DATABASE_URL`, den begränsade `mainai_app`-rollen) går genom Supabases Session pooler:
+Supavisor kräver ett `.{project-ref}`-suffix på **varje** användarnamn den routar (samma suffix
+som `DATABASE_URL`s eget användarnamn redan har, t.ex. `postgres.ruwihvifpgftcwakdmvo`), annars
+vet den inte vilket projekts Postgres anslutningen hör till. `ensure_app_role.py` byggde tidigare
+`APP_DATABASE_URL`s användarnamn som bara `mainai_app`, utan det suffixet. Fixat i skriptets
+`_app_username()` — suffixet kopieras nu från `DATABASE_URL`s användarnamn när ett finns. Se
+`docs/RENDER_DEPLOY.md`s avsnitt "Databasrollerna" och
+`backend/tests/backend/test_ensure_app_role.py`.

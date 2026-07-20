@@ -172,6 +172,24 @@ aldrig någon pooler i vägen, så `current_user` där är alltid helt enkelt an
 användarnamn (t.ex. `lifeos`) — samma beteende som innan denna fix, verifierat av
 `test_full_script_run_against_real_local_postgres_is_idempotent` i samma testfil.
 
+**Ett andra, separat pooler-fel — uppdaterat 2026-07-20:** ovanstående fix löste rollkraschen i
+`ensure_app_role.py` självt, men en verifierad produktionsdeploy på `ed85ff3` kraschade ändå,
+den här gången EFTER att `ensure_app_role.py` lyckats — appens egna runtime-anslutningar (via
+`APP_DATABASE_URL`, den begränsade `mainai_app`-rollen) avvisades av Supavisor med:
+```
+FATAL: (NODENOTIFIER) no tenant identifier provided (external_id or sni_hostname required)
+```
+Orsaken: `ensure_app_role.py` byggde `APP_DATABASE_URL`s användarnamn som bara `mainai_app`,
+utan poolerns `.{project-ref}`-suffix (som `DATABASE_URL`s eget användarnamn,
+`postgres.ruwihvifpgftcwakdmvo`, redan har). Supavisor kräver suffixet på **varje** anslutning
+den routar, inte bara admin-anslutningen — utan det vet den inte vilket projekts Postgres
+anslutningen ska gå till. Fixat i `_app_username()` i samma skript: suffixet kopieras från
+`DATABASE_URL`s användarnamn till `mainai_app`s användarnamn när ett finns (poolat läge); en
+vanlig lokal, icke-poolad admin-användare (inget suffix) lämnas orörd. Se
+`test_app_database_url_carries_the_pooler_tenant_suffix` och
+`test_app_database_url_stays_unsuffixed_for_a_plain_non_pooled_admin_username` i
+`backend/tests/backend/test_ensure_app_role.py`.
+
 ## Miljövariabler — fullständig lista
 
 ### Genererade hemligheter (Render slumpar värdet — hamnar aldrig i repot)
