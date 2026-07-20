@@ -25,8 +25,11 @@ def test_every_founder_knowledge_studio_route_is_present():
     expected = {
         "/api/library",
         "/api/library/import",
+        "/api/library/import-url",
         "/api/library/jobs/{job_id}",
+        "/api/library/url-imports",
         "/api/library/{source_id}",
+        "/api/library/{source_id}/media",
         "/api/library/{source_id}/relationships",
         "/api/library/search/hybrid",
         "/api/workbench/analyze",
@@ -35,13 +38,19 @@ def test_every_founder_knowledge_studio_route_is_present():
     assert expected <= fks_paths
 
 
+# GET .../media deliberately returns raw audio/video bytes, never JSON (see
+# test_media_route_is_not_falsely_documented_as_json below) — the one intentional
+# exception to "every FKS route returns a documented JSON schema".
+_NON_JSON_ROUTES = {"/api/library/{source_id}/media"}
+
+
 def test_every_founder_knowledge_studio_route_declares_a_response_schema():
     """A route with no response_model still "works" but produces an OpenAPI operation with
     no usable response schema — this is exactly the gap DEL 12 asks to be checked for, not a
     hypothetical."""
     schema = _schema()
     for path, operations in schema["paths"].items():
-        if not path.startswith(FKS_PREFIXES):
+        if not path.startswith(FKS_PREFIXES) or path in _NON_JSON_ROUTES:
             continue
         for method, operation in operations.items():
             if method not in ("get", "post", "delete", "patch", "put"):
@@ -56,3 +65,19 @@ def test_every_founder_knowledge_studio_route_declares_a_response_schema():
                 if content is None:
                     continue
                 assert "application/json" in content, f"{method.upper()} {path} {code} has no JSON schema"
+
+
+def test_media_route_is_not_falsely_documented_as_json():
+    """A real, found-not-hypothetical documentation gap: FastAPI's default OpenAPI
+    generation assumes every route returns application/json (an empty {} schema) unless
+    told otherwise — actively misleading for GET /api/library/{source_id}/media, whose
+    entire point is to return raw audio/mpeg or video/mp4 bytes for an <audio>/<video>
+    element, never JSON. A client generating code from the undeclared schema would expect
+    a JSON body and get binary data instead. app/routers/library.py's get_source_media now
+    declares explicit `responses=` content types; this pins that down."""
+    schema = _schema()
+    response_200 = schema["paths"]["/api/library/{source_id}/media"]["get"]["responses"]["200"]
+    content = response_200.get("content", {})
+    assert "application/json" not in content
+    assert "audio/mpeg" in content
+    assert "video/mp4" in content

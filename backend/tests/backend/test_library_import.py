@@ -128,6 +128,33 @@ async def test_partial_failure_does_not_abort_the_whole_package(db_session, make
 
 
 @pytest.mark.asyncio
+async def test_media_files_bundled_in_a_zip_are_skipped_not_silently_mishandled(db_session, make_verified_user):
+    """STEG 12's own docstring (app/rag/media_import.py) claims audio/video bundled inside a
+    ZIP package is unsupported in v1 — zip_import.py's ALLOWED_EXTENSIONS was never extended
+    for .mp3/.mp4, so those entries should be rejected at the zip-validation stage, before
+    _import_one_file's media_kind dispatch ever sees them. Proven here end-to-end through the
+    real import pipeline rather than just asserted in a comment: the package still completes
+    successfully for its supported file, and the media entry is skipped cleanly (not
+    misinterpreted as some other file type, not silently dropped without a reason)."""
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id)
+    valid_mp3 = b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 64
+    raw = _make_zip({"notes.txt": b"vanligt textinnehall", "recording.mp3": valid_mp3})
+
+    await run_import_job(db_session, job.id, user.id, raw, "mixed-media.zip")
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.completed
+    assert job.succeeded_count == 1
+    assert job.skipped_count == 1
+    skipped_entry = next(f for f in job.file_results if f["filename"] == "recording.mp3")
+    assert skipped_entry["status"] == "skipped"
+    assert "stöds inte" in skipped_entry["reason"]
+    docs = db_session.query(Document).filter_by(uploaded_by=user.id).all()
+    assert {d.original_filename for d in docs} == {"notes.txt"}
+
+
+@pytest.mark.asyncio
 async def test_zip_security_violation_fails_the_job_cleanly_not_a_crash(db_session, make_verified_user):
     user, _ = make_verified_user()
     job = _make_job(db_session, user.id)

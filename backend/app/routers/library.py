@@ -285,7 +285,23 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     return detail
 
 
-@router.get("/{source_id}/media")
+@router.get(
+    "/{source_id}/media",
+    # response_class=Response (not the default JSONResponse) is what stops FastAPI from
+    # ALSO adding its own empty application/json entry alongside the real content types
+    # below — without it, responses= merges with rather than replaces FastAPI's default
+    # JSON assumption, per FastAPI's own documented behavior.
+    response_class=Response,
+    responses={
+        # Without this, FastAPI's default OpenAPI generation assumes every route returns
+        # application/json (an empty {} schema, since it has no way to infer the real type
+        # from a runtime-determined media_type= on a plain Response) — actively misleading
+        # for a route whose entire point is to return raw audio/video bytes. Declaring the
+        # real content types here is what tests/backend/test_openapi_schema.py's
+        # test_media_route_is_not_falsely_documented_as_json checks for.
+        200: {"content": {"audio/mpeg": {}, "video/mp4": {}}, "description": "Rå ljud-/videobytes för uppspelning."},
+    },
+)
 def get_source_media(source_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     """STEG 13: streams the raw bytes an audio/video import kept (Document.media_blob, see
     app/rag/media_import.py) back to an <audio>/<video> element. Same RLS-scoped,
