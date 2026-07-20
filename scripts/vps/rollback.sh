@@ -59,6 +59,11 @@ DEPLOYMENTS_DIR="$COMPOSE_DIR/deployments"
 [ -f "$COMPOSE_FILE" ] || die "Missing $COMPOSE_FILE."
 [ -f "$ENV_FILE" ] || die "Missing $ENV_FILE."
 [ -d "$DEPLOYMENTS_DIR" ] || die "Missing $DEPLOYMENTS_DIR — nothing to roll back to."
+# See deploy.sh's identical line: docker-compose.vps.yml's services resolve their OWN
+# env_file: directive from ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}, a separate mechanism
+# from --env-file/$ENV_FILE above — without exporting this, it silently falls back to the
+# hardcoded default path whenever $ENV_FILE points anywhere else.
+export LIFEAI_ENV_FILE="$ENV_FILE"
 
 compose() {
     if [ -n "$EXTRA_COMPOSE_FILE" ]; then

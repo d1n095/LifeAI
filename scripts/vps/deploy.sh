@@ -83,6 +83,14 @@ log_info "== Step 1/11: validating required local files =="
 [ -f "$CADDYFILE" ] || die "Missing $CADDYFILE."
 [ -f "$ENV_FILE" ] || die "Missing $ENV_FILE — see docs/STRATO_VPS_DEPLOY.md Steg 2."
 [ -d "$DEPLOYMENTS_DIR" ] || die "Missing $DEPLOYMENTS_DIR — run 30_setup_directories.sh first."
+# docker-compose.vps.yml's backend/frontend services each have their OWN
+# `env_file: - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}` directive — a separate
+# interpolation variable from --env-file/$ENV_FILE above (see the compose file's own comment
+# on that line). --env-file only controls what Compose substitutes ${...} with while parsing
+# the YAML; without also exporting LIFEAI_ENV_FILE here, that directive would silently fall
+# back to the hardcoded default path whenever $ENV_FILE points anywhere else, breaking
+# `compose config`/`compose up` even though every check above already passed.
+export LIFEAI_ENV_FILE="$ENV_FILE"
 log_info "OK."
 
 log_info "== Step 2/11: validating required secret NAMES are present (values never printed) =="
