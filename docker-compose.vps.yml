@@ -14,11 +14,29 @@
 # LIFEAI_ENV_FILE lets docs/STRATO_VPS_DEPLOY.md's CI verification job point env_file at a
 # throwaway file instead of the real root-owned /etc/lifeai/lifeai.env (which only exists on
 # the actual VPS) — in production, leave it unset and the default applies.
+#
+# Container hardening (init/security_opt/cap_drop/read_only/tmpfs/pids_limit/mem_limit/cpus)
+# is applied uniformly to all three services and verified against the REAL images in
+# .github/workflows/ci.yml's vps-compose-verify job — see docs/VPS_DOCKER_HARDENING.md for
+# what was evaluated, what was applied, and why. mem_limit/cpus below are conservative
+# starting points sized for a small VPS, not a hard architectural ceiling — tune them to the
+# real server's specs during the first deployment (docs/STRATO_VPS_DEPLOY.md).
 
 services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    init: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 100
+    mem_limit: 128m
+    cpus: "0.50"
     ports:
       - "80:80"
       - "443:443"
@@ -45,6 +63,22 @@ services:
     # pin is chosen by Dennis explicitly, not auto-followed.
     image: ${BACKEND_IMAGE:?sätt BACKEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-backend@sha256:...}
     restart: unless-stopped
+    init: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # /tmp is the ONLY thing this app writes to at runtime — scripts/ensure_app_role.py hands
+    # its freshly-derived APP_DATABASE_URL back to docker-entrypoint.sh via a mktemp() file
+    # (see that script's module docstring). Everything else (schema, RLS, session state) is
+    # already in Postgres, not the container filesystem — verified by grepping the app for
+    # any other open(..., "w"/"a") / mkdir / tempfile use outside test-only tooling.
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: "1.00"
     env_file:
       - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
     environment:
@@ -71,6 +105,21 @@ services:
     # Digest-pinned, e.g. ghcr.io/d1n095/lifeai-frontend@sha256:...
     image: ${FRONTEND_IMAGE:?sätt FRONTEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-frontend@sha256:...}
     restart: unless-stopped
+    init: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # The standalone Next.js server serves pre-built static/server output and proxies
+    # /api/* — it has no on-disk cache or upload target of its own in this app (uploads go
+    # straight through to the backend, see frontend/app/api/[...path]/route.ts). A tmpfs
+    # /tmp is kept as a safety net rather than a known requirement.
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: "1.00"
     env_file:
       - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
     environment:
