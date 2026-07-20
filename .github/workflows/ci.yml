@@ -1217,6 +1217,16 @@ jobs:
       # block for the same reasoning.
       CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_vps_ci
       CI_REDIS_URL: redis://host.docker.internal:6379/0
+      # Job-level, not just on the "up" step: docker-compose.vps.yml's `${VAR:?...}`
+      # interpolation guards run on EVERY invocation of `docker compose -f
+      # docker-compose.vps.yml ...` — including `logs` and `down` — not just `up`. Scoping
+      # these to a single step (an earlier version of this job did that) makes every later
+      # step in the SAME job fail to even parse the compose file, masking the real failure
+      # behind an unrelated interpolation error instead of showing it.
+      BACKEND_IMAGE: lifeai-vps-backend:ci
+      FRONTEND_IMAGE: lifeai-vps-frontend:ci
+      DOMAIN: ":80"
+      LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
     steps:
       - uses: actions/checkout@v4
 
@@ -1249,11 +1259,6 @@ jobs:
           # real SMTP_HOST here. Same reasoning as combined-container-verify's identical note.
 
       - name: Start the real VPS compose topology
-        env:
-          BACKEND_IMAGE: lifeai-vps-backend:ci
-          FRONTEND_IMAGE: lifeai-vps-frontend:ci
-          DOMAIN: ":80"
-          LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
         run: |
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci up -d
           for i in $(seq 1 60); do
@@ -1313,7 +1318,16 @@ jobs:
 
       - name: Dump logs on failure
         if: failure()
-        run: docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci logs
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
+          for name in backend frontend caddy; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
+            if [ -n "$cid" ]; then
+              echo "--- $name health ---"
+              docker inspect -f '{{json .State.Health}}' "$cid" || true
+            fi
+          done
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci logs
 
       - name: Tear down
         if: always()
