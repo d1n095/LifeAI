@@ -63,75 +63,40 @@ skriver in — se "Första manuella deploy" nedan.
 - Samma Supabase- och Upstash-uppgifter som redan finns för Render (inga nya konton behövs).
 - En GitHub Personal Access Token med enbart `read:packages`-scope, för att VPS:en ska kunna
   `docker login ghcr.io` och pulla privata images (skapas separat från alla andra hemligheter,
-  se steg 6 nedan).
+  se Steg 3 nedan).
 
 ## Exakt installationsordning
 
-### Steg 1 — Initial serverhärdning
+### Steg 1 — Kör bootstrap-skripten (`scripts/vps/`)
 
-Körs som `root` första gången, sedan aldrig igen över root.
+Alla manuella `apt`/`useradd`/`ufw`-kommandon som tidigare stod utskrivna här har ersatts av
+idempotenta, `--dry-run`-stödda skript i `scripts/vps/` — se `scripts/vps/README.md` för hela
+listan och `docs/VPS_BOOTSTRAP.md` för säkerhetsresonemanget bakom varje skript (särskilt
+`41_harden_ssh.sh`, som VÄGRAR stänga av lösenordsinloggning om den inte kan verifiera att en
+riktig publik nyckel redan finns installerad). Att ha EN källa till sanning (skripten) istället
+för både utskrivna kommandon här OCH separata skript förhindrar att de två divergerar över tid.
 
-```bash
-# 1a. Skapa en icke-root-användare med sudo, logga in med den härifrån och framåt.
-adduser dennis
-usermod -aG sudo dennis
-
-# 1b. Kopiera din publika SSH-nyckel till den nya användaren (från din EGEN maskin, inte VPS:en):
-#     ssh-copy-id dennis@<vps-ip>
-# Verifiera att `ssh dennis@<vps-ip>` fungerar UTAN lösenord innan du fortsätter till 1c.
-
-# 1c. Stäng av lösenordsinloggning och root-inloggning över SSH.
-sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-sudo sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
-sudo systemctl restart ssh
-
-# 1d. Brandvägg: SSH + Caddys 80/443, allt annat blockerat (inklusive alla interna
-#     container-portar — de är redan bara nåbara via Docker-nätverket, ufw är ett andra lager).
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw enable
-
-# 1e. Automatiska säkerhetsuppdateringar.
-sudo apt-get update
-sudo apt-get install -y unattended-upgrades
-sudo dpkg-reconfigure -plow unattended-upgrades
-# Verifiera att /etc/apt/apt.conf.d/20auto-upgrades innehåller:
-#   APT::Periodic::Update-Package-Lists "1";
-#   APT::Periodic::Unattended-Upgrade "1";
-```
-
-### Steg 2 — Installera Docker Engine + Compose-plugin
-
-Officiellt Docker-repo, inte Ubuntus egen (ofta äldre) `docker.io`-paket:
+Körs som `root` (via `sudo`), i denna ordning, från en klon av repot på servern (eller kopiera
+bara `scripts/vps/`-katalogen dit om du inte vill klona hela repot ännu):
 
 ```bash
-sudo apt-get install -y ca-certificates curl gnupg
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-# Låt `dennis` köra docker utan sudo (logga ut/in igen efter detta för att det ska ta effekt).
-sudo usermod -aG docker dennis
+sudo ./scripts/vps/00_preflight.sh --domain <din-domän>   # skrivskyddad, säker att köra om när som helst
+sudo ./scripts/vps/10_install_docker.sh
+sudo ./scripts/vps/20_create_deploy_user.sh --user dennis
+# --- nu, från DIN EGEN maskin: ---
+ssh-copy-id dennis@<vps-ip>
+# Verifiera att `ssh dennis@<vps-ip>` loggar in UTAN lösenord innan du fortsätter.
+sudo ./scripts/vps/30_setup_directories.sh --user dennis
+sudo ./scripts/vps/40_configure_firewall.sh
+sudo ./scripts/vps/50_enable_auto_updates.sh
+# --- valfritt, ENDAST efter att lösenordsfri inloggning är verifierad ovan: ---
+sudo ./scripts/vps/41_harden_ssh.sh --user dennis
+sudo ./scripts/vps/90_verify_installation.sh --user dennis
 ```
 
-### Steg 3 — Katalogstruktur
-
-```bash
-sudo mkdir -p /opt/lifeai /etc/lifeai
-sudo chown dennis:dennis /opt/lifeai
-# /etc/lifeai stannar root-ägd — se steg 5, hemlighetsfilen där får ALDRIG vara läsbar för
-# den vanliga användaren, bara för root (docker compose körs med sudo, se steg 7).
-```
+Kör varje steg först med `--dry-run` om du vill se exakt vad det skulle göra innan det
+faktiskt gör det. `90_verify_installation.sh` avslutar med en tydlig "redo för Steg 2"-signal
+eller en lista över vad som fortfarande saknas.
 
 `/opt/lifeai` får en gles git-checkout av repot (bara det som faktiskt behövs på servern —
 `docker-compose.vps.yml`, `docker-compose.vps.ci.yml` behövs INTE här, `Caddyfile`):
@@ -145,7 +110,7 @@ git sparse-checkout set docker-compose.vps.yml Caddyfile
 Ingen `backend/` eller `frontend/` källkod hämtas hit — VPS:en bygger aldrig produktion
 lokalt, den pullar bara färdiga images (se "Varför" i inledningen).
 
-### Steg 4 — Hemligheter (`/etc/lifeai/lifeai.env`)
+### Steg 2 — Hemligheter (`/etc/lifeai/lifeai.env`)
 
 **Aldrig i Git.** `.env.vps.example` i repot är mallen — kopiera den till servern (inte via
 `git clone`, som redan är sparse och saknar den avsiktligt) och fyll i på servern direkt:
@@ -165,10 +130,10 @@ Generera `SECRET_KEY` och `MAINAI_APP_PASSWORD` med `openssl rand -hex 32` var �
 oberoende värden, återanvänd aldrig Renders**, så en eventuell kompromettering av det ena
 systemet aldrig automatiskt ger tillgång till det andra.
 
-`BACKEND_IMAGE`/`FRONTEND_IMAGE` lämnas tomma här — de fylls i i steg 7, det manuella
+`BACKEND_IMAGE`/`FRONTEND_IMAGE` lämnas tomma här — de fylls i i Steg 5, det manuella
 deploy-steget, aldrig innan.
 
-### Steg 5 — Logga in mot GHCR på VPS:en
+### Steg 3 — Logga in mot GHCR på VPS:en
 
 ```bash
 # PAT med ENBART read:packages, skapad separat från alla andra hemligheter.
@@ -176,10 +141,10 @@ echo "<GHCR_READ_PACKAGES_PAT>" | sudo docker login ghcr.io -u <github-användar
 ```
 
 `docker login` sparar autentiseringen i root's `~/.docker/config.json` — konsekvent med att
-`docker compose` för produktion alltid körs som root/sudo (steg 7), aldrig som `dennis`
+`docker compose` för produktion alltid körs som root/sudo (Steg 5), aldrig som `dennis`
 direkt, exakt som `/etc/lifeai/lifeai.env` bara är läsbar för root.
 
-### Steg 6 — GitHub Actions bygger och pushar images
+### Steg 4 — GitHub Actions bygger och pushar images
 
 Redan klart som kod (`.github/workflows/build-images.yml`) — körs automatiskt vid push till
 `main`, eller manuellt via `workflow_dispatch`. Bygger `backend/Dockerfile` och
@@ -191,13 +156,13 @@ tagg som `:latest`.
 
 **Detta jobb deployar ingenting och rör aldrig VPS:en.** Det fyller bara registret.
 
-### Steg 7 — Första manuella deploy (kräver Dennis uttryckliga godkännande)
+### Steg 5 — Första manuella deploy (kräver Dennis uttryckliga godkännande)
 
 **Görs bara efter att Dennis själv, uttryckligen, pekat ut vilken digest som ska köras.** Inget
 i det här repot eller i CI SSH:ar in på servern eller kör detta åt honom.
 
 ```bash
-# 1. Hämta digesten från GitHub Actions-jobbets Summary (steg 6) och skriv in den i
+# 1. Hämta digesten från GitHub Actions-jobbets Summary (Steg 4) och skriv in den i
 #    /etc/lifeai/lifeai.env:
 sudo nano /etc/lifeai/lifeai.env
 #   BACKEND_IMAGE=ghcr.io/d1n095/lifeai-backend@sha256:<den faktiska digesten>
@@ -216,7 +181,7 @@ sudo docker compose -f docker-compose.vps.yml up -d
 En framtida omdeploy (ny digest efter en kodändring) upprepar bara steg 1-4 ovan — aldrig
 `git pull` av källkod på servern, aldrig en lokal `docker build` här.
 
-### Steg 8 — Health checks och restart-policies
+### Steg 6 — Health checks och restart-policies
 
 Redan inbyggda i `docker-compose.vps.yml`: `restart: unless-stopped` på alla tre tjänster,
 `healthcheck:` på backend (`curl /api/health`) och frontend (`node -e ...` mot samma
@@ -225,7 +190,7 @@ frisk backend och Caddy väntar in en frisk frontend innan den börjar route:a t
 samma typ av startup-ordningsgaranti som `scripts/entrypoint-combined.sh` gav inuti EN
 container, nu uttryckt som riktiga Compose-beroenden mellan containrar istället.
 
-### Steg 9 — Loggrotation
+### Steg 7 — Loggrotation
 
 `docker-compose.vps.yml` sätter `logging: driver: json-file, max-size: 10m, max-file: 5` på
 alla tre tjänster — Dockers egen inbyggda rotation, ingen extra host-level `logrotate`-config
@@ -233,18 +198,19 @@ behövs för containerloggarna. Caddys egen accessloggfil (`/data/access.log` in
 se `Caddyfile`) roterar separat via Caddys `roll_size`/`roll_keep`-direktiv (10 MB × 5 filer) —
 den ligger i volymen `caddy_data`, se backup-avsnittet.
 
-### Steg 10 — Brandvägg (upprepat härifrån för fullständighetens skull)
+### Steg 8 — Brandvägg (upprepat härifrån för fullständighetens skull)
 
-Redan satt i steg 1d: `ufw` tillåter bara 22/80/443 inkommande, allt annat nekas. Docker
+Redan satt i Steg 1 (`scripts/vps/40_configure_firewall.sh`): `ufw` tillåter bara SSH/80/443 inkommande, allt annat nekas. Docker
 manipulerar normalt sina egna `iptables`-regler direkt och kan i vissa konfigurationer
 kringgå `ufw` för publicerade portar — eftersom bara Caddy publicerar något alls (`ports:` i
 `docker-compose.vps.yml`), och det redan är 80/443 som `ufw` explicit tillåter, finns ingen
 öppning det här faktiskt skulle exponera. Backend/frontend har ingen `ports:`-rad att
 exponeras via över huvud taget.
 
-### Steg 11 — SSH-härdning (upprepat härifrån)
+### Steg 9 — SSH-härdning (upprepat härifrån)
 
-Redan satt i steg 1c: enbart nyckelbaserad auth, `PermitRootLogin no`. Rotera VPS:ens SSH-värdnycklar
+Redan satt i Steg 1 (`scripts/vps/41_harden_ssh.sh`, om du valde att köra det): enbart
+nyckelbaserad auth, `PermitRootLogin no`. Rotera VPS:ens SSH-värdnycklar
 om du någonsin misstänker att den privata nyckeln på din egen maskin exponerats.
 
 ## Backup- och rollback-plan
@@ -270,7 +236,7 @@ sudo tar czf /root/lifeai-backup-$(date +%F).tar.gz \
 #    vilken digest som kördes senast, t.ex. i en enkel textfil bredvid — inte i Git).
 sudo nano /etc/lifeai/lifeai.env
 
-# 2. Pulla och starta om exakt som i steg 7.
+# 2. Pulla och starta om exakt som i Steg 5.
 cd /opt/lifeai
 sudo docker compose -f docker-compose.vps.yml pull
 sudo docker compose -f docker-compose.vps.yml up -d
