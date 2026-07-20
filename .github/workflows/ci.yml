@@ -963,6 +963,109 @@ jobs:
           docker logs lifeai-e-retry 2>&1 | grep -q "backend is healthy" || (echo "::error::backend never became healthy despite the retry loop absorbing the simulated failures" && exit 1)
           docker rm -f lifeai-e-retry || true
 
+      # ---- Container F: Render Free memory-pressure check — proves or disproves the
+      # hypothesis that a real page load (not just the lightweight /api/health probe) pushes
+      # the combined container's memory past Render Free's documented 512 MB limit, causing
+      # the kernel OOM killer to SIGKILL the whole cgroup silently (no app-level log line,
+      # no graceful error — exactly what would explain a public 502 on "/" while Render's
+      # own /api/health probe, cheap enough to survive, keeps reporting 200). 512m is the
+      # commonly documented Render Free web-service RAM ceiling; not independently
+      # reconfirmed against Render's current docs from inside this sandbox (no outbound
+      # access to render.com here), so if Render has since changed that number this
+      # simulated ceiling may drift from the real one — treat 512m as the best available
+      # proxy, not a guaranteed match. --memory-swap equal to --memory disables swap
+      # entirely, matching a container platform that has none.
+      - name: Start container F (Render Free memory-pressure simulation, 512m/no-swap)
+        run: |
+          docker run -d --name lifeai-f \
+            --add-host=host.docker.internal:host-gateway \
+            --memory=512m --memory-swap=512m \
+            -p 3025:3000 \
+            -v "${{ github.workspace }}/e2e-data:/app/e2e-data" \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3025 \
+            -e PUBLIC_APP_URL=http://localhost:3025 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e E2E_EMAIL_LOG_PATH=/app/e2e-data/e2e_test_emails.jsonl \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3025/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3025/api/health
+          echo "Memory limit actually applied inside the container:"
+          docker exec lifeai-f sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes'
+
+      - name: Confirm the public frontend $PORT is the sole externally-reachable port (unambiguous for Render)
+        run: |
+          docker port lifeai-f
+          # Exactly one published mapping, and it must be the frontend's $PORT (container-side
+          # 3000, mapped to host 3025 above) — never 8000 (FastAPI, loopback-only by design; see
+          # Container A's identical check earlier in this job) and never anything else. If a future
+          # change to Dockerfile.combined or entrypoint-combined.sh ever published a second port,
+          # Render would have two candidate ports to route to instead of one — the exact class of
+          # ambiguity this step exists to rule out.
+          # `docker port` prints one line per (container-port, host-family) pair — a single
+          # `-p 3025:3000` mapping normally shows up as two lines (0.0.0.0 and [::]), not one.
+          # Count DISTINCT container-side "port/proto" prefixes instead of raw lines, so this
+          # doesn't false-positive on the ordinary IPv4+IPv6 duplication.
+          DISTINCT_CONTAINER_PORTS=$(docker port lifeai-f | awk '{print $1}' | sort -u | wc -l)
+          if [ "$DISTINCT_CONTAINER_PORTS" -ne 1 ]; then
+            echo "::error::expected exactly one distinct published container-side port, found $DISTINCT_CONTAINER_PORTS: $(docker port lifeai-f)" && exit 1
+          fi
+          docker port lifeai-f | grep -q "^3000/tcp -> " || (echo "::error::the published container-side port is not 3000 (the frontend's \$PORT)" && exit 1)
+          if docker port lifeai-f | grep -q "^8000/tcp"; then
+            echo "::error::port 8000 (FastAPI) is published — it must never be reachable from outside the container" && exit 1
+          fi
+
+      - name: Simulate a real browser page load of / and /login under the memory ceiling, repeatedly
+        run: |
+          # Unlike Container A-E's health-check-only traffic, this fetches the actual HTML documents
+          # for / and /login, then every /_next/static/* asset those documents reference — the same
+          # request pattern a real browser makes on first paint (HTML + JS chunks + CSS), repeated
+          # several times to simulate more than one visitor without waiting for a real 15-minute
+          # Render Free idle window.
+          for round in $(seq 1 5); do
+            echo "--- round $round ---"
+            for page in / /login; do
+              html=$(curl -sS --max-time 10 "http://localhost:3025$page")
+              code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:3025$page")
+              echo "$page -> $code"
+              if [ "$code" != "200" ]; then
+                echo "::error::$page returned $code on round $round under the memory ceiling" && exit 1
+              fi
+              assets=$(echo "$html" | grep -oE '/_next/static/[A-Za-z0-9._/-]+' | sort -u)
+              for asset in $assets; do
+                acode=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:3025$asset")
+                if [ "$acode" != "200" ]; then
+                  echo "::error::asset $asset returned $acode on round $round under the memory ceiling" && exit 1
+                fi
+              done
+            done
+            echo "Memory usage after round $round:"
+            docker stats --no-stream --format '{{.Name}}: {{.MemUsage}} ({{.MemPerc}})' lifeai-f
+            if [ "$(docker inspect -f '{{.State.Running}}' lifeai-f)" != "true" ]; then
+              echo "::error::container is no longer running after round $round" && exit 1
+            fi
+          done
+          curl -sS http://localhost:3025/api/health
+          echo "Final OOMKilled status: $(docker inspect -f '{{.State.OOMKilled}}' lifeai-f)"
+          if [ "$(docker inspect -f '{{.State.OOMKilled}}' lifeai-f)" = "true" ]; then
+            echo "::error::container WAS OOM-killed under the 512m Render-Free-equivalent memory ceiling — this reproduces the hypothesis" && exit 1
+          fi
+
+      - name: Stop container F
+        if: always()
+        run: |
+          docker logs lifeai-f 2>&1 | tail -60
+          docker rm -f lifeai-f || true
+
       - name: Upload Playwright report (combined container)
         if: always()
         uses: actions/upload-artifact@v4
