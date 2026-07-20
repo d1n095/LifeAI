@@ -137,12 +137,17 @@ källhänvisning.
 ## Byggt, testat — och medvetet INTE byggt ikväll
 
 **Byggt och testat:** DEL 1–9, 11, 12 (se ovan), plus STEG 10 (påstående-nivå trust), STEG 11
-(Redis-baserade jobblås/återförsök) och STEG 12 (ljud/video-import v1) från senare sessioner
-— se `docs/FOUNDER_KNOWLEDGE_STUDIO_HANDOVER_2026-07-20.md`s "STEG 10–12-tillägg" för den
-fulla tekniska beskrivningen. Hela sviten grön (309 tester). Full Playwright-regression grön
-(auth/security/account/shell-pages/founder-knowledge-studio).
+(Redis-baserade jobblås/återförsök), STEG 12 (ljud/video-import v1) och STEG 13 (multimedia i
+UI — spelare, tidsstämplad transkriptvy/sök, felåterförsök, citat som öppnar rätt ögonblick)
+från senare sessioner — se `docs/FOUNDER_KNOWLEDGE_STUDIO_HANDOVER_2026-07-20.md`s
+"STEG 10–11-" och "STEG 12–13-tillägg" för den fulla tekniska beskrivningen. Hela sviten grön
+(314 tester). Full Playwright-regression grön (auth/security/account/shell-pages/founder-
+knowledge-studio/founder-knowledge-studio-media/library-workbench-mobile).
 
 **Design-only / dokumenterat men inte byggt:**
+- **STEG 14** — full vertikal 12-stegsverifiering som även täcker ljud/video. Inte påbörjad;
+  medvetet nedprioriterad tills produktionsstarten på Render är löst (se handover-dokumentets
+  "Exakt nästa steg").
 - **DEL 14** — lätt lokal mätning genomförd (`backend/tests/backend/test_performance_measurement.py`,
   kör med `-s` för att se siffrorna), inte en fullständig instrumenterad produktionsmätning.
   Ett syntetiskt paket (10 filer × 20 stycken) lokalt mot riktig Postgres/pgvector med en

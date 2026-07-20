@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, field_validator
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
@@ -30,6 +30,7 @@ from app.schemas import (
     KnowledgeSourceDetailOut,
     KnowledgeSourceOut,
     LibrarySearchHit,
+    MediaSegmentOut,
     MediaUrlImportIn,
     MediaUrlImportOut,
     SourceRelationshipIn,
@@ -271,7 +272,30 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
         )
         for c in claims
     ]
+    # STEG 13: the FULL timestamped chunk list, not just the CHUNK_PREVIEW_COUNT preview
+    # above — only meaningful for a media source (media_duration_seconds is None for every
+    # text/document import), so this stays [] for those, exactly like before this field
+    # existed.
+    if document.media_duration_seconds is not None:
+        all_chunks = db.query(DocumentChunk).filter_by(document_id=source_id).order_by(DocumentChunk.chunk_index.asc()).all()
+        detail.segments = [
+            MediaSegmentOut(chunk_index=c.chunk_index, text=c.text, start_seconds=c.start_seconds, end_seconds=c.end_seconds)
+            for c in all_chunks
+        ]
     return detail
+
+
+@router.get("/{source_id}/media")
+def get_source_media(source_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """STEG 13: streams the raw bytes an audio/video import kept (Document.media_blob, see
+    app/rag/media_import.py) back to an <audio>/<video> element. Same RLS-scoped,
+    deleted_at-excluding query every other source-detail route uses — a deleted or
+    someone-else's source 404s here exactly like it does everywhere else in this router, not
+    just a "hidden from listings" soft block."""
+    document = _visible_document_query(db, user.id).filter(Document.id == source_id).first()
+    if document is None or document.media_blob is None:
+        raise HTTPException(status_code=404, detail="Ingen mediefil hittades för den här källan.")
+    return Response(content=document.media_blob, media_type=document.media_type or "application/octet-stream")
 
 
 @router.delete("/{source_id}")

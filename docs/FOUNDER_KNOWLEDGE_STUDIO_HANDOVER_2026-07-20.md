@@ -108,10 +108,12 @@ från den faktiska retrieval-listan (kan aldrig hallucineras av modellen).
 ## Vad som INTE är byggt (dokumenterat, inte glömt)
 
 Se det fullständiga avsnittet i `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`. Kort — uppdaterat efter
-STEG 10 (påstående-nivå trust), STEG 11 (Redis-jobblås) och STEG 12 (ljud/video-import v1),
-alla nu byggda, se avsnitten "STEG 10–11-tillägg" och "STEG 12-tillägg" nedan:
-- Multimedia i UI (STEG 13) — uppladdning/spelare/tidsstämplade citat i frontend. Backend-
-  pipelinen (STEG 12) är klar; ingen UI ännu.
+STEG 10 (påstående-nivå trust), STEG 11 (Redis-jobblås), STEG 12 (ljud/video-import v1) och
+STEG 13 (multimedia i UI), alla nu byggda, se avsnitten "STEG 10–11-tillägg" och
+"STEG 12–13-tillägg" nedan:
+- STEG 14 — full vertikal 12-stegsverifiering (inloggning → video → transkript → sökning →
+  citat → konfliktdetektion → dubblettskydd → återupptagning → radering → obehörig nekas).
+  Inte påbörjad.
 - Riktig transkription (Whisper/Gemini/etc) — leverantörsgränssnittet finns
   (`app/providers/transcription.py`), men bara en icke-betald platshållarleverantör är
   inkopplad, per uppdragets "inga riktiga API-nycklar"-krav.
@@ -227,21 +229,73 @@ chunkar → sökbart via hybrid-sök med korrekta start/end, en trasig medie-sig
 per-fil- inte jobbnivåfel), citat-tidsstämplar i `/api/chat`s svar, och RLS-isolation för
 `media_url_imports`.
 
-## Slutgranskning (STEG 9-checklista, uppdaterad efter STEG 10–12)
+## STEG 12–13-tillägg (denna session): multimedia i UI + spelbar uppspelning
 
-- [x] Hela backend-testsviten — 309 tester gröna (upp från 238 vid STEG 9, se STEG 10–11- och
-      STEG 12-tilläggen ovan)
+STEG 12 byggde bara pipelinen; STEG 13 gör den faktiskt användbar. Migration 0010 lägger till
+`documents.media_blob` (bytea) — de RÅA uppladdade bytena, sparade ENDAST för en ljud-/
+videoimport (`app/rag/library_import.py`s media_kind-gren; NULL för varje text-/dokumentimport,
+precis lika litet som innan kolumnen fanns). Ingen ny blob-tjänst eller S3-hink — appen har
+ingen objektlagring idag och uppdraget förbjuder att aktivera en ny betaltjänst, så en bytea-
+kolumn (samma 60 MB-tak som redan gäller för hela uppladdningen) var den säkra, infrastruktur-
+fria vägen. En ny `GET /api/library/{id}/media` (samma RLS-scopade, deleted_at-exkluderande
+källfråga som varje annan källrutt) strömmar dem tillbaka med rätt `Content-Type`.
+
+**Frontend** (`app/(shell)/library/[id]/page.tsx`): ett `<audio>`- eller `<video>`-element
+(valt via `media_type`) med `src` satt direkt till mediarutten — ingen fetch/blob-URL-omväg
+behövs, webbläsaren bifogar sessionskakan själv för en same-origin-begäran (samma princip som
+`frontend/lib/api.ts`s befintliga `credentials: "include"`-mönster). Transkriptet visas som en
+klickbar, tidsstämplad lista (`GET /api/library/{id}`s nya `segments`-fält — HELA chunk-listan
+med riktiga tidsstämplar, avsiktligt separat från `chunk_preview` som stannar avkortad för
+textkällor) med ett fritextsökfält som filtrerar klientsidan. Ett klick på ett segment sätter
+spelarens `currentTime` och startar uppspelning. Fel/återförsök: ett `onerror`-läge byter ut
+spelaren mot ett tydligt felmeddelande med en "Försök igen"-knapp. `/api/chat`s källcitat
+länkar nu till `/library/{id}?t=<sekunder>` för en tidsstämplad källa; sidan läser `?t=` vid
+mount (kräver en `Suspense`-gräns runt `useSearchParams()`, samma mönster som
+`app/reset-password/page.tsx` redan etablerat) och söker/spelar upp automatiskt — ett klick
+på ett citat öppnar exakt rätt ögonblick, inte bara källan.
+
+**En verklig upptäckt under E2E-verifiering, inte hypotetisk:** det syntetiska mp3-fixturet
+(en giltig ID3-header + nollbytes, samma form pytest-sviten redan använder) klarar backendens
+magic-byte-kontroll men är INTE en riktig avkodningsbar ljudström — en riktig webbläsares
+`<audio>`-element vägrar korrekt spela upp den och avfyrar `onerror`. Det är inte en bugg;
+det bevisar att fel/återförsök-UI:t (ett uttryckligt STEG 13-krav) reagerar på ett genuint
+avkodningsfel, inte ett simulerat, så E2E-specen verifierar just det istället för att låtsas om
+riktig uppspelning ett fejkat fixture inte ärligt kan bevisa.
+
+**En andra verklig bugg hittad och fixad under samma verifiering:** `founder-knowledge-
+studio-media.spec.ts`s första version laddade upp mediefiler men raderade dem aldrig — i den
+grundar-endast-arkitekturen delar VARJE specfil samma enda grundarkonto, så kvarlämnat
+biblioteksinnehåll bröt `founder-knowledge-studio.spec.ts`s och `shell-pages.spec.ts`s
+"biblioteket/dokumenten är tomma"-antaganden för vilken spec som än körs efter. Fixat genom
+att lägga till samma explicita raderingssteg i slutet av båda nya testerna, som
+`founder-knowledge-studio.spec.ts` redan gör. Två andra E2E-observationer under samma
+verifieringspass var miljöspecifika för den här sandlådan, inte regressioner: `account.spec.ts`
+har ett hårdkodat `psql`-sidokanalsanrop mot port 5433 (env-override:bart via
+`E2E_DATABASE_URL`; verifierat grönt 5/5 med rätt port) och `same-origin-proxy.spec.ts` kräver
+sin egen `playwright.proxy.config.ts` (dokumenterat i filens egen kommentar, aldrig del av den
+etablerade lokala regressionslistan i Draft PR #4:s testplan).
+
+5 nya backend-tester (`test_library_routes.py`: spelbara bytes via mediarutten, 404 för en
+textkälla, 404 för en okänd källa, full segmentlista i källdetaljen, tom segmentlista för en
+textkälla) och en ny E2E-spec (`founder-knowledge-studio-media.spec.ts`, 2 tester: desktop-
+flödet upload→transkript→spelare/fel-återförsök→chattcitat med `?t=`, samt mobilt 390px-läge).
+
+## Slutgranskning (STEG 9-checklista, uppdaterad efter STEG 10–13)
+
+- [x] Hela backend-testsviten — 314 tester gröna (upp från 238 vid STEG 9, se STEG 10–11-,
+      STEG 12- och STEG 12–13-tilläggen ovan)
 - [x] Migration upgrade → downgrade → upgrade — automatiserat test, schema jämfört rad för rad
 - [x] Frontend typecheck, ESLint, produktionsbygge — alla gröna
-- [x] Playwright desktop (fullt vertikalt flöde) — grönt
-- [x] Playwright mobil (/library, /workbench) — grönt, nytt denna omgång
+- [x] Playwright desktop (fullt vertikalt flöde, inkl. ljudimport/spelare/citat-tidsstämplar) —
+      grönt
+- [x] Playwright mobil (/library, /workbench, mediaspelare) — grönt
 - [x] `npm audit` — 0 sårbarheter
-- [x] OpenAPI-kontroll för alla åtta nya rutter — schemat byggs, alla rutter dokumenterade med
-      riktiga JSON-scheman
+- [x] OpenAPI-kontroll för alla rutter — schemat byggs, alla rutter dokumenterade med riktiga
+      JSON-scheman
 - [x] Hemlighetsgenomsökning av hela grendiffen — mönsterbaserad, inga träffar utöver kända
       testplaceholders (GitHub:s strukturerade scanner kunde inte ta hela ~300 KB-diffen i ett
       anrop; se not i commit `28db7f8`)
-- [x] CI grön på samtliga 17 commits
+- [x] CI grön på samtliga commits
 
 ## Migrationsordning och rollback
 
@@ -266,11 +320,17 @@ kan inte tas bort vid nedgradering, bara tabellerna som använder det).
 2. Om godkänd: merga `claude/founder-knowledge-studio-v1` in i `claude/night-shift-mainai-web`
    (INTE till `main`/produktion utan en separat, explicit produktionsbeslutsprocess — se
    `docs/RENDER_DEPLOY.md`).
-3. Nästa naturliga djup: ljud/video-import v1 (STEG 12 — transkriptionsprovider-gränssnitt,
-   deterministisk mock i tester, tidsstämplade segment/chunks, sökbart, citerbart med
-   tidsstämpel), sedan multimedia i UI (STEG 13), sedan en full vertikal 12-stegsverifiering
-   som även täcker ljud/video (STEG 14).
-4. Inga öppna produktbeslut väntar på svar just nu — allt som saknades dokumenterades och
+3. STEG 12 (ljud/video-import v1) och STEG 13 (multimedia i UI) är nu båda klara och
+   verifierade — se STEG 12–13-tillägget ovan. STEG 14 (full vertikal 12-stegsverifiering) är
+   INTE påbörjad och är, per explicit instruktion, medvetet nedprioriterad tills
+   produktionsstarten är löst (se nästa punkt) — ingen fortsatt funktionsutveckling före dess.
+4. Uttryckligt nästa fokus: lösa produktionsstarten på Render för den befintliga founder-only-
+   versionen och verifiera inloggning live, INTE fortsatt funktionsbyggande. Se
+   `docs/RENDER_DEPLOY.md` för den redan dokumenterade deploy-processen (Blueprint,
+   `ensure_app_role.py`, Session Pooler-hänsyn) — den här grenen (`claude/founder-knowledge-
+   studio-v1`) är fortfarande inte mergad någonstans, så produktionsstarten avser den redan
+   deployade `claude/det-kommer-mer-879lcm`-linjen, inte det som byggts i den här PR:en.
+5. Inga öppna produktbeslut väntar på svar just nu — allt som saknades dokumenterades och
    avgränsades löpande (se "inte byggt"-avsnitten) istället för att blockera arbetet.
 
 ## Bekräftelse

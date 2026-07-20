@@ -136,6 +136,8 @@ export type ChatSource = {
   snippet: string;
   score: number;
   active_truth_status?: string | null;
+  start_seconds?: number | null;
+  end_seconds?: number | null;
 };
 
 export type Confidence = "high" | "medium" | "low" | "none";
@@ -215,6 +217,8 @@ export type KnowledgeSourceItem = {
   created_at: string;
   updated_at: string;
   imported_at: string | null;
+  media_duration_seconds: number | null;
+  transcript_provider: string | null;
 };
 
 export type KnowledgeVersionItem = {
@@ -248,11 +252,19 @@ export type KnowledgeClaimItem = {
   created_at: string;
 };
 
+export type MediaSegmentItem = {
+  chunk_index: number;
+  text: string;
+  start_seconds: number | null;
+  end_seconds: number | null;
+};
+
 export type KnowledgeSourceDetail = KnowledgeSourceItem & {
   versions: KnowledgeVersionItem[];
   relationships: SourceRelationshipItem[];
   chunk_preview: string[];
   claims: KnowledgeClaimItem[];
+  segments: MediaSegmentItem[];
 };
 
 export type FileOutcome = {
@@ -445,6 +457,11 @@ export const api = {
     return request<KnowledgeSourceItem[]>(`/api/library${qs ? `?${qs}` : ""}`);
   },
   getLibrarySource: (id: string) => request<KnowledgeSourceDetail>(`/api/library/${id}`),
+  // Not a request() call: this is a direct <audio>/<video> src URL. The browser attaches
+  // the session cookie itself for a same-origin request (API_URL is empty in the normal
+  // same-origin-proxied deployment — see this file's top comment), so no fetch/blob-URL
+  // indirection is needed here.
+  getLibraryMediaUrl: (id: string) => `${API_URL}/api/library/${id}/media`,
   deleteLibrarySource: (id: string) =>
     request(`/api/library/${id}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }),
   createSourceRelationship: (sourceId: string, toSourceId: string, relationshipType: string, note?: string) =>

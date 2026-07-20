@@ -182,7 +182,7 @@ export default function LibraryPage() {
           <input
             ref={fileInput}
             type="file"
-            accept=".zip,.pdf,.docx,.txt,.md,.markdown,.json,.html,.htm"
+            accept=".zip,.pdf,.docx,.txt,.md,.markdown,.json,.html,.htm,.mp3,.mp4"
             aria-label="Importera till kunskapsbiblioteket"
             className="hidden"
             disabled={uploading}

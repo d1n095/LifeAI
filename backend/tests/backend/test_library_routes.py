@@ -5,6 +5,7 @@ exercised together, the same way a real client would hit them."""
 
 import io
 import time
+import uuid
 import zipfile
 
 import pytest
@@ -351,3 +352,58 @@ def test_media_url_import_defaults_consent_to_false_when_not_provided(client):
     )
     assert res.status_code == 200, res.text
     assert res.json()["consent_confirmed"] is False
+
+
+# --- STEG 13: multimedia in UI — GET /api/library/{id}/media, and the source detail
+# route's full timestamped segment list ---
+
+VALID_MP3 = b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 64
+
+
+def test_media_source_serves_playable_bytes_via_media_endpoint(client):
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "clip.mp3", VALID_MP3, "audio/mpeg")
+    assert job["status"] == "completed"
+    source_id = job["file_results"][0]["source_id"]
+
+    res = client.get(f"/api/library/{source_id}/media")
+    assert res.status_code == 200
+    assert res.content == VALID_MP3
+    assert res.headers["content-type"] == "audio/mpeg"
+
+
+def test_media_endpoint_404s_for_a_text_source(client):
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "notes.txt", b"vanlig text, inget ljud har")
+    source_id = job["file_results"][0]["source_id"]
+
+    res = client.get(f"/api/library/{source_id}/media")
+    assert res.status_code == 404
+
+
+def test_media_endpoint_404s_for_an_unknown_source(client):
+    _login(client)
+    res = client.get(f"/api/library/{uuid.uuid4()}/media")
+    assert res.status_code == 404
+
+
+def test_source_detail_includes_full_timestamped_segment_list_for_a_media_source(client):
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "talk.mp3", VALID_MP3, "audio/mpeg")
+    source_id = job["file_results"][0]["source_id"]
+
+    detail = client.get(f"/api/library/{source_id}").json()
+    assert len(detail["segments"]) >= 1
+    assert detail["segments"][0]["start_seconds"] == 0.0
+    assert detail["media_duration_seconds"] is not None
+    assert detail["transcript_provider"] == "mock"
+
+
+def test_source_detail_segments_stay_empty_for_a_text_source(client):
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "plain.txt", b"vanligt textinnehall utan ljud")
+    source_id = job["file_results"][0]["source_id"]
+
+    detail = client.get(f"/api/library/{source_id}").json()
+    assert detail["segments"] == []
+    assert detail["media_duration_seconds"] is None

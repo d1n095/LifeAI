@@ -160,6 +160,10 @@ async def _import_one_file(
         project_id=project_id,
         import_job_id=import_job_id,
         imported_at=datetime.utcnow(),
+        # STEG 13: only media imports keep the raw bytes around (for GET
+        # /api/library/{id}/media's player, app/routers/library.py) — every text/document
+        # import leaves this NULL, unchanged from before this field existed.
+        media_blob=content if media_kind is not None else None,
     )
     db.add(document)
     db.commit()

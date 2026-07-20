@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api, KnowledgeSourceDetail, KnowledgeSourceItem } from "@/lib/api";
+
+function formatTimestamp(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
 
 const STATUS_LABELS: Record<string, string> = {
   active: "Aktiv",
@@ -40,12 +47,30 @@ const CLAIM_CONFIDENCE_COLORS: Record<string, string> = {
   no_basis: "bg-white/10 text-white/50",
 };
 
+// useSearchParams() requires a Suspense boundary above it (Next.js App Router) so the page
+// can still be statically prerendered — same pattern as app/reset-password/page.tsx.
 export default function LibrarySourceDetailPage() {
+  return (
+    <Suspense fallback={null}>
+      <LibrarySourceDetailInner />
+    </Suspense>
+  );
+}
+
+function LibrarySourceDetailInner() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [source, setSource] = useState<KnowledgeSourceDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // STEG 13: audio/video playback + timestamped transcript. mediaRef covers both <audio>
+  // and <video> (only one of the two ever renders, chosen by media_type) since both expose
+  // the same currentTime/play() surface via HTMLMediaElement.
+  const mediaRef = useRef<HTMLMediaElement | null>(null);
+  const [mediaError, setMediaError] = useState(false);
+  const [transcriptQuery, setTranscriptQuery] = useState("");
 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -107,6 +132,35 @@ export default function LibrarySourceDetailPage() {
     }
   }
 
+  function seekTo(seconds: number) {
+    const el = mediaRef.current;
+    if (!el) return;
+    el.currentTime = seconds;
+    el.play().catch(() => {
+      // Autoplay can be blocked by the browser (e.g. no prior user gesture) — the seek
+      // itself still succeeded, so the transcript position and the player agree even if
+      // playback doesn't start automatically. Not an error worth surfacing to the founder.
+    });
+  }
+
+  // Citation deep-link from /api/chat's SourceRef (app/(shell)/chat/page.tsx links here with
+  // ?t=<start_seconds>) — seeks and plays as soon as the player element exists, so opening a
+  // citation lands exactly at the cited moment instead of just the source.
+  useEffect(() => {
+    const t = searchParams.get("t");
+    if (t === null || !mediaRef.current) return;
+    const seconds = Number(t);
+    if (!Number.isFinite(seconds)) return;
+    seekTo(seconds);
+  }, [searchParams, source?.segments.length]);
+
+  const filteredSegments = useMemo(() => {
+    if (!source) return [];
+    const q = transcriptQuery.trim().toLowerCase();
+    if (!q) return source.segments;
+    return source.segments.filter((seg) => seg.text.toLowerCase().includes(q));
+  }, [source, transcriptQuery]);
+
   if (loading) {
     return (
       <div className="text-white/40 text-sm" role="status">
@@ -160,6 +214,80 @@ export default function LibrarySourceDetailPage() {
         <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
           Indexeringsfel: {source.error_message}
         </div>
+      )}
+
+      {source.segments.length > 0 && (
+        <section aria-labelledby="media-heading" className="rounded-xl border border-border p-4">
+          <h2 id="media-heading" className="text-sm font-medium text-white/70 mb-3">
+            Uppspelning och transkript
+            {source.transcript_provider && (
+              <span className="ml-2 text-[10px] font-normal text-white/30">({source.transcript_provider})</span>
+            )}
+          </h2>
+
+          {mediaError ? (
+            <p role="alert" className="text-sm text-red-300 mb-3">
+              Mediefilen kunde inte laddas.{" "}
+              <button type="button" onClick={() => setMediaError(false)} className="underline underline-offset-2">
+                Försök igen
+              </button>
+            </p>
+          ) : source.media_type?.startsWith("video/") ? (
+            <video
+              ref={(el) => {
+                mediaRef.current = el;
+              }}
+              controls
+              className="w-full rounded-lg mb-3"
+              src={api.getLibraryMediaUrl(source.id)}
+              onError={() => setMediaError(true)}
+            />
+          ) : (
+            <audio
+              ref={(el) => {
+                mediaRef.current = el;
+              }}
+              controls
+              className="w-full mb-3"
+              src={api.getLibraryMediaUrl(source.id)}
+              onError={() => setMediaError(true)}
+            />
+          )}
+
+          <label htmlFor="transcript-search" className="sr-only">
+            Sök i transkriptet
+          </label>
+          <input
+            id="transcript-search"
+            type="search"
+            value={transcriptQuery}
+            onChange={(e) => setTranscriptQuery(e.target.value)}
+            placeholder="Sök i transkriptet…"
+            className="w-full rounded-lg border border-border bg-base px-3 py-2 text-sm mb-3"
+          />
+
+          {filteredSegments.length === 0 && (
+            <p className="text-white/30 text-sm">
+              {transcriptQuery ? "Inga träffar i transkriptet." : "Inga tidsstämplade avsnitt ännu."}
+            </p>
+          )}
+          <ul className="space-y-2 max-h-96 overflow-y-auto">
+            {filteredSegments.map((seg) => (
+              <li key={seg.chunk_index} className="text-sm border-b border-border/60 pb-2 last:border-0">
+                <button
+                  type="button"
+                  onClick={() => seg.start_seconds !== null && seekTo(seg.start_seconds)}
+                  disabled={seg.start_seconds === null}
+                  className="text-accent2 hover:underline underline-offset-2 mr-2 shrink-0 disabled:opacity-40 disabled:no-underline"
+                  aria-label={`Spela från ${seg.start_seconds !== null ? formatTimestamp(seg.start_seconds) : "okänd tid"}`}
+                >
+                  ▶ {seg.start_seconds !== null ? formatTimestamp(seg.start_seconds) : "–"}
+                </button>
+                <span className="text-white/60">{seg.text}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
 
       <section aria-labelledby="preview-heading" className="rounded-xl border border-border p-4">

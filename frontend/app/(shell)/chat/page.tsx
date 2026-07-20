@@ -241,13 +241,28 @@ export default function ChatPage() {
                   {entry.sources.map((s, j) => (
                     <Link
                       key={j}
-                      href={`/library/${s.document_id}`}
+                      // STEG 12/13: a citation from a timed transcript chunk carries
+                      // start_seconds — the ?t= param is read by the library detail page
+                      // (app/(shell)/library/[id]/page.tsx) to seek+play the media element
+                      // to that exact moment, not just open the source.
+                      href={
+                        s.start_seconds != null
+                          ? `/library/${s.document_id}?t=${s.start_seconds}`
+                          : `/library/${s.document_id}`
+                      }
                       className="block pl-2 border-l border-border hover:border-accent hover:text-white/70"
-                      title="Öppna källan i Founder Knowledge Studio"
+                      title={
+                        s.start_seconds != null
+                          ? "Öppna källan i Founder Knowledge Studio och spela upp från citatet"
+                          : "Öppna källan i Founder Knowledge Studio"
+                      }
                     >
                       {s.title} ({s.score.toFixed(2)})
                       {s.active_truth_status && s.active_truth_status !== "active" && (
                         <span className="ml-1 text-amber-300/70">[{s.active_truth_status}]</span>
+                      )}
+                      {s.start_seconds != null && (
+                        <span className="ml-1 text-white/30">▶ {Math.floor(s.start_seconds / 60)}:{(Math.floor(s.start_seconds) % 60).toString().padStart(2, "0")}</span>
                       )}
                     </Link>
                   ))}

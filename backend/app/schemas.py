@@ -301,11 +301,24 @@ class KnowledgeClaimOut(BaseModel):
     created_at: datetime
 
 
+class MediaSegmentOut(BaseModel):
+    """STEG 13: the FULL timestamped chunk list for a media source — deliberately separate
+    from chunk_preview (which stays truncated to CHUNK_PREVIEW_COUNT/CHUNK_PREVIEW_LENGTH
+    for text sources) since the Library UI's transcript view/search needs every chunk, not a
+    preview, to be useful."""
+
+    chunk_index: int
+    text: str
+    start_seconds: float | None
+    end_seconds: float | None
+
+
 class KnowledgeSourceDetailOut(KnowledgeSourceOut):
     versions: list[KnowledgeVersionOut] = []
     relationships: list[SourceRelationshipOut] = []
     chunk_preview: list[str] = []
     claims: list[KnowledgeClaimOut] = []
+    segments: list[MediaSegmentOut] = []
 
 
 class ImportJobOut(BaseModel):

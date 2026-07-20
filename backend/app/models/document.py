@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -96,3 +96,8 @@ class Document(Base):
     # app/providers/transcription.py) purely for UI/debug transparency.
     media_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     transcript_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # STEG 13: the raw uploaded bytes, so GET /api/library/{id}/media (app/routers/library.py)
+    # can actually serve them back to an <audio>/<video> element. ONLY ever set for a media
+    # import (app/rag/library_import.py's media_kind branch) — every text/document import
+    # leaves this NULL, exactly as small as before this column existed.
+    media_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
