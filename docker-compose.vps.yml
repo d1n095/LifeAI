@@ -31,6 +31,16 @@ services:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    # The official Caddy image binds ports 80/443 (< 1024, "privileged" ports) via a file
+    # capability on the caddy binary itself, not by running as a privileged user — dropping
+    # ALL capabilities strips that too, and combined with no-new-privileges (which blocks
+    # exactly this kind of exec-time privilege grant) the container failed outright at
+    # startup: "[FATAL tini] exec caddy failed: Operation not permitted" — a real failure
+    # caught by vps-compose-verify, not a hypothetical. CAP_NET_BIND_SERVICE is the one
+    # capability actually needed here; backend/frontend never bind anything below 1024, so
+    # they don't get it.
+    cap_add:
+      - NET_BIND_SERVICE
     read_only: true
     tmpfs:
       - /tmp
