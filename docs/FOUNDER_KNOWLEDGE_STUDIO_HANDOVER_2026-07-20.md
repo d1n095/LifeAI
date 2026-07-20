@@ -19,9 +19,14 @@ under testkörning.
 | `b37c0bc` | DEL 4 — Library-UI + vertikalt E2E-flöde + tvärroutar-buggfix | [29718372402](https://github.com/d1n095/LifeAI/actions/runs/29718372402) |
 | `75b1dd6` | DEL 11 — GDPR-export utökad med kunskapsdata | [29718482476](https://github.com/d1n095/LifeAI/actions/runs/29718482476) |
 | `ae518ea` | DEL 9 — Founder Workbench | [29718835246](https://github.com/d1n095/LifeAI/actions/runs/29718835246) |
+| `5929b19` | DEL 15 — obligatorisk dokumentation | [29719031419](https://github.com/d1n095/LifeAI/actions/runs/29719031419) |
+| `4d400af` | DEL 14 — lokal prestandamätning | [29719246143](https://github.com/d1n095/LifeAI/actions/runs/29719246143) |
 
-Total diff mot `claude/night-shift-mainai-web`: 9 commits, se `git log
+Total diff mot `claude/night-shift-mainai-web`: 11 commits, se `git log
 claude/night-shift-mainai-web..HEAD` för fullständig lista.
+
+**Draft PR:** [d1n095/LifeAI#4](https://github.com/d1n095/LifeAI/pull/4) mot
+`claude/night-shift-mainai-web`. Öppen som draft, INTE mergad.
 
 ## Det verifierade minimikravet: fungerande vertikalt flöde
 
@@ -37,7 +42,7 @@ tillsammans.
 
 ## Testresultat
 
-- **Backend-pytest:** 227 tester gröna (växte från startpunkten 124 genom sessionen via de nio
+- **Backend-pytest:** 228 tester gröna (växte från startpunkten 124 genom sessionen via
   commit:en ovan — se respektive commits diffstat för exakta siffror per steg).
 - **Frontend:** TypeScript-typecheck grön, ESLint grön (0 fel), produktionsbygge
   (`npx next build`) grönt med `/library`, `/library/[id]` och `/workbench` registrerade som
