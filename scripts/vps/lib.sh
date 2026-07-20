@@ -96,3 +96,11 @@ parse_common_flags() {
         esac
     done
 }
+
+# The full set of secret/config variable NAMES /etc/lifeai/lifeai.env must define — never
+# their values. Shared by deploy.sh (which refuses to deploy if any is missing) and
+# backup.sh (which writes this list, names only, into its manifest so a from-scratch restore
+# has a checklist of what to re-provision from your own secret store — see
+# docs/VPS_SECRETS_INVENTORY.md). Defined once here so the two can never drift apart.
+# shellcheck disable=SC2034 # used by every script that sources this file, not by lib.sh itself
+LIFEAI_REQUIRED_ENV_VARS="SECRET_KEY MAINAI_APP_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD DATABASE_URL REDIS_URL FRONTEND_ORIGINS PUBLIC_APP_URL SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL DOMAIN BACKEND_IMAGE FRONTEND_IMAGE"

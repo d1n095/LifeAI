@@ -20,6 +20,18 @@ sudo ./41_harden_ssh.sh --user lifeai
 sudo ./90_verify_installation.sh --user lifeai
 ```
 
+## Ongoing operations (after bootstrap)
+
+Not part of the one-time order above — run repeatedly, as needed, once the server is
+bootstrapped:
+
+```
+sudo ./deploy.sh --confirm            # manual-gated deploy — see docs/STRATO_VPS_DEPLOY.md Steg 5
+sudo ./rollback.sh --confirm          # manual rollback (deploy.sh also calls this automatically on failure)
+sudo ./backup.sh                      # backup /opt/lifeai + Caddy's TLS/config volumes — see docs/VPS_BACKUP_RESTORE.md
+sudo ./restore.sh --from <archive> --target-dir <disposable-dir> --confirm
+```
+
 ## Every script supports
 
 - `--dry-run` — prints every command it would run instead of running it. Every mutating
@@ -47,5 +59,10 @@ sudo ./90_verify_installation.sh --user lifeai
 `.github/workflows/ci.yml`'s `vps-scripts-check` job runs `shellcheck` against every script
 here and executes each script's `--dry-run` path (which is side-effect-free by construction)
 to catch syntax/logic errors — see that job for exactly what's checked. The real,
-non-dry-run paths are not (and cannot safely be) exercised in CI, since there is no real
-server to run them against yet.
+non-dry-run paths of the bootstrap scripts above are not (and cannot safely be) exercised in
+CI, since there is no real server to run them against yet.
+
+`deploy.sh`/`rollback.sh` and `backup.sh`/`restore.sh` are the exception: since they act only
+on files/volumes already on the machine they're run on (never SSH, never a real domain), their
+REAL (non-dry-run) paths ARE exercised for real in CI — see `vps-deploy-rollback-test` and
+`vps-backup-restore-test`.

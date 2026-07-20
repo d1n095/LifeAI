@@ -230,19 +230,19 @@ om du någonsin misstänker att den privata nyckeln på din egen maskin exponera
 
 ## Backup- och rollback-plan
 
-**Vad som faktiskt behöver säkerhetskopieras — bara `/etc/lifeai/lifeai.env` och Caddys
-`caddy_data`-volym (TLS-certifikat, av/på-läge går att återskapa gratis från Let's Encrypt om
-den förloras, så det är bekvämlighet, inte kritiskt).** Postgres och Redis är externa
-(Supabase/Upstash) och har sina egna backup-rutiner utanför den här VPS:en helt.
-
 ```bash
-# Backup (kör t.ex. som ett dagligt cron-jobb som root):
-sudo tar czf /root/lifeai-backup-$(date +%F).tar.gz \
-  /etc/lifeai/lifeai.env \
-  -C /var/lib/docker/volumes/lifeai_caddy_data/_data .
-# Flytta backupfilen off-box (t.ex. till en separat lagringstjänst) — en backup som bara
-# ligger kvar på samma VPS överlever inte om VPS:en själv går förlorad.
+cd /opt/lifeai
+sudo ./scripts/vps/backup.sh
 ```
+
+Skriver ett tidsstämplat, checksummerat arkiv till `/var/backups/lifeai/` med
+`docker-compose.vps.yml`/`Caddyfile`/deploy-poster samt Caddys `caddy_data`/`caddy_config`-
+volymer (TLS-certifikat, autosparad config). Innehåller **aldrig** `/etc/lifeai/lifeai.env` —
+se `docs/VPS_BACKUP_RESTORE.md` för den fullständiga policyn (vad som täcks, varför
+hemligheter medvetet är exkluderade, och en återställningsövning att köra periodiskt, inte
+bara vid en verklig incident). Flytta arkivfilen off-box efter varje körning (t.ex. till en
+separat lagringstjänst) — en backup som bara ligger kvar på samma VPS överlever inte om VPS:en
+själv går förlorad.
 
 **Rollback vid en trasig deploy:**
 
