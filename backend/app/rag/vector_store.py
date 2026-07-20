@@ -60,6 +60,7 @@ def search(
     top_k: int = 5,
     *,
     project_id: uuid.UUID | None = None,
+    document_id: uuid.UUID | None = None,
 ) -> list[dict]:
     """Explicit owner_id filter in addition to RLS — see upsert_chunks's docstring on why
     this isn't relying on a single layer.
@@ -88,6 +89,8 @@ def search(
     )
     if project_id is not None:
         stmt = stmt.where(Document.project_id == project_id)
+    if document_id is not None:
+        stmt = stmt.where(Document.id == document_id)
     stmt = stmt.order_by(distance).limit(top_k)
     rows = db.execute(stmt).all()
     return [_hit_dict(chunk, 1 - dist) for chunk, dist in rows]

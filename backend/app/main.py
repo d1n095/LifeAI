@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.limiter import limiter
 from app.rls import apply_rls
-from app.routers import account, admin, auth, chat, conversations, documents, health, knowledge, library, projects
+from app.routers import account, admin, auth, chat, conversations, documents, health, knowledge, library, projects, workbench
 from app.scheduler import start_scheduler, stop_scheduler
 
 settings = get_settings()
@@ -47,6 +47,7 @@ app.include_router(documents.router)
 app.include_router(projects.router)
 app.include_router(knowledge.router)
 app.include_router(library.router)
+app.include_router(workbench.router)
 app.include_router(admin.router)
 
 

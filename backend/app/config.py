@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # has no per-request AI-provider cost ceiling of its own to lean on, so it gets its own,
     # stricter limit rather than sharing rate_limit_default_per_minute.
     rate_limit_library_import_per_minute: int = 10
+    # Founder Workbench analysis calls a real AI provider (same per-request cost profile as
+    # chat) but is a heavier prompt (question + retrieved context + a critique pass) — kept
+    # equal to chat's default rather than looser, since there's no cheaper fallback path.
+    rate_limit_workbench_per_minute: int = 20
     rate_limit_login_per_minute: int = 10
     rate_limit_refresh_per_minute: int = 30
     rate_limit_logout_per_minute: int = 30

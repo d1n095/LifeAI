@@ -321,3 +321,41 @@ class LibrarySearchHit(BaseModel):
 
 class DeleteConfirmIn(BaseModel):
     confirm: bool = False
+
+
+# --- Founder Workbench (DEL 9) ---
+
+
+class WorkbenchAnalyzeIn(BaseModel):
+    question: str
+    project_id: uuid.UUID | None = None
+    document_id: uuid.UUID | None = None
+
+
+class WorkbenchAnalyzeOut(BaseModel):
+    question: str
+    conclusion: str
+    critique: str | None
+    sources: list[SourceRef]
+    confidence: str
+    confidence_score: float
+    conflicts_detected: bool
+    provider: str
+    model: str
+
+
+class WorkbenchSaveIn(BaseModel):
+    question: str
+    conclusion: str
+    critique: str | None = None
+    label: str
+    project_id: uuid.UUID | None = None
+    source_document_ids: list[uuid.UUID] = []
+
+    @field_validator("label")
+    @classmethod
+    def valid_label(cls, v: str) -> str:
+        allowed = {"idea", "proposal", "decision", "history"}
+        if v not in allowed:
+            raise ValueError(f"Ogiltig etikett. Måste vara en av: {', '.join(sorted(allowed))}.")
+        return v

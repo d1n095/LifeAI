@@ -284,6 +284,22 @@ export type LibraryListFilters = {
   q?: string;
 };
 
+// --- Founder Workbench (DEL 9) ---
+
+export type WorkbenchLabel = "idea" | "proposal" | "decision" | "history";
+
+export type WorkbenchAnalysis = {
+  question: string;
+  conclusion: string;
+  critique: string | null;
+  sources: ChatSource[];
+  confidence: Confidence;
+  confidence_score: number;
+  conflicts_detected: boolean;
+  provider: string;
+  model: string;
+};
+
 export type TaskItem = {
   id: string;
   project_id: string | null;
@@ -426,4 +442,18 @@ export const api = {
     } as Record<string, string>).toString();
     return request<LibrarySearchHit[]>(`/api/library/search/hybrid?${qs}`);
   },
+
+  analyzeWorkbench: (question: string, projectId?: string, documentId?: string) =>
+    request<WorkbenchAnalysis>("/api/workbench/analyze", {
+      method: "POST",
+      body: JSON.stringify({ question, project_id: projectId || null, document_id: documentId || null }),
+    }),
+  saveWorkbenchResult: (payload: {
+    question: string;
+    conclusion: string;
+    critique?: string | null;
+    label: WorkbenchLabel;
+    project_id?: string | null;
+    source_document_ids?: string[];
+  }) => request<KnowledgeSourceItem>("/api/workbench/save", { method: "POST", body: JSON.stringify(payload) }),
 };
