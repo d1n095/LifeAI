@@ -1,10 +1,12 @@
 from app.models.audit import AuditLog
+from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.import_job import ImportJob
+from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
@@ -17,6 +19,7 @@ from app.models.user import User
 
 __all__ = [
     "AuditLog",
+    "ClaimRelationship",
     "CompanyInfo",
     "Conversation",
     "Message",
@@ -24,6 +27,7 @@ __all__ = [
     "DocumentChunk",
     "EmailVerificationToken",
     "ImportJob",
+    "KnowledgeClaim",
     "KnowledgeVersion",
     "PasswordResetToken",
     "Project",

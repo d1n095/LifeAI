@@ -1,8 +1,11 @@
 import uuid
 from dataclasses import dataclass, field
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipType
+from app.models.knowledge_claim import ClaimConfidence, KnowledgeClaim
 from app.models.source_relationship import RelationshipType, SourceRelationship
 
 HIGH_THRESHOLD = 0.75
@@ -145,6 +148,62 @@ CONFLICT_INSTRUCTION = (
     "(en 'contradicts'-relation). Dölj aldrig detta — säg uttryckligen att källorna motsäger "
     "varandra, beskriv båda ståndpunkterna separat, och gissa inte vilken som är korrekt."
 )
+
+
+def assess_claim_confidence(db: Session, claim: KnowledgeClaim) -> ClaimConfidence:
+    """STEG 10's claim-level analogue of assess_confidence() above: the stored,
+    extraction-time confidence (app/rag/claims.py's grounding-score heuristic) is only the
+    starting point — this recomputes the CURRENT confidence from the claim's
+    claim_relationships every time it's asked, so a relationship added after extraction
+    (e.g. the founder or a later import creates a `contradicts`/`supports` edge) is reflected
+    immediately without needing to re-run extraction.
+
+    Any `contradicts` edge caps the result at `conflict`, unconditionally — a claim is never
+    "certain" no matter how much independent corroboration it has if it's also known to be
+    disputed by another claim. This mirrors build_trust_instructions()'s source-level rule
+    that a detected conflict is always surfaced, never silently outvoted.
+
+    A claim starting at `no_basis` (extraction-time grounding score too low — see
+    app/rag/claims.py's _confidence_for_score) can never be rescued into a higher bucket by
+    corroboration: weak textual grounding in its OWN source chunk is a property of the claim
+    itself, not something another claim agreeing with it can fix — two ungrounded claims
+    agreeing with each other is not evidence.
+
+    `likely` is promoted to `certain` only by INDEPENDENT corroboration — a `supports` edge
+    from a claim whose source_id differs from this claim's own. A source repeating itself
+    (e.g. two chunks of the same document both stating the same fact) is not independent
+    corroboration and must never count toward "certain".
+    """
+    contradicting = (
+        db.query(ClaimRelationship)
+        .filter(
+            ClaimRelationship.owner_id == claim.owner_id,
+            ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
+            or_(ClaimRelationship.from_claim_id == claim.id, ClaimRelationship.to_claim_id == claim.id),
+        )
+        .first()
+    )
+    if contradicting is not None:
+        return ClaimConfidence.conflict
+
+    if claim.confidence == ClaimConfidence.no_basis:
+        return ClaimConfidence.no_basis
+
+    if claim.confidence != ClaimConfidence.likely:
+        return claim.confidence
+
+    supporting_rows = (
+        db.query(ClaimRelationship, KnowledgeClaim.source_id)
+        .join(KnowledgeClaim, KnowledgeClaim.id == ClaimRelationship.from_claim_id)
+        .filter(
+            ClaimRelationship.owner_id == claim.owner_id,
+            ClaimRelationship.relationship_type == ClaimRelationshipType.supports,
+            ClaimRelationship.to_claim_id == claim.id,
+        )
+        .all()
+    )
+    independent_sources = {source_id for _, source_id in supporting_rows if source_id != claim.source_id}
+    return ClaimConfidence.certain if independent_sources else claim.confidence
 
 
 def build_trust_instructions(

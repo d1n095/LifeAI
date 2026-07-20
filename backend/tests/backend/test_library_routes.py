@@ -40,6 +40,7 @@ def _import_and_wait(client, csrf: str, filename: str, content: bytes, content_t
 @pytest.fixture(autouse=True)
 def _fake_embedding_provider(monkeypatch):
     from app.config import get_settings
+    from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
     dim = get_settings().embedding_dim
@@ -47,7 +48,17 @@ def _fake_embedding_provider(monkeypatch):
     async def _fake_embed(self, texts, model):
         return [[0.02] * dim for _ in texts]
 
+    # A real import now also runs claim extraction (app/rag/claims.py, STEG 10) after
+    # indexing succeeds, which calls the chat provider too — without this, OpenAIProvider's
+    # is_configured() sees the truthy "fake-key-for-tests" value and would attempt a REAL
+    # outbound HTTPS call to OpenAI on every import test in this file. Empty-list response
+    # is deliberate: these tests don't care about claim content, just that import itself
+    # still behaves correctly with claim extraction wired in.
+    async def _fake_chat(self, messages, model, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
+
     monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
 
 def _login(client) -> str:

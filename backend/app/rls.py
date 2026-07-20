@@ -19,6 +19,11 @@ RLS_STATEMENTS = [
     "ALTER TABLE knowledge_import_jobs FORCE ROW LEVEL SECURITY",
     "ALTER TABLE source_relationships ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE source_relationships FORCE ROW LEVEL SECURITY",
+    # Claim-level trust (migration 0007, STEG 10) — see app/models/knowledge_claim.py.
+    "ALTER TABLE knowledge_claims ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE knowledge_claims FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE claim_relationships ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE claim_relationships FORCE ROW LEVEL SECURITY",
 ]
 
 # One policy per table: rows are only visible/writable when they belong to the user bound
@@ -65,18 +70,28 @@ POLICY_DEFINITIONS = [
         "name": "source_relationships_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
+    {
+        "table": "knowledge_claims",
+        "name": "knowledge_claims_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "claim_relationships",
+        "name": "claim_relationships_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
 ]
 
 
 def apply_rls(engine: Engine) -> None:
     """Idempotently enable Postgres Row-Level Security on user-owned tables.
 
-    Conversations, document_chunks, documents, knowledge_versions, knowledge_import_jobs and
-    source_relationships all have strict per-user isolation (see migration 0006 —
-    docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md). Projects/tasks remain intentionally shared company
-    knowledge (see docs/MAINAI_0.1_PLAN.md) and only track `created_by` for attribution, not
-    access control — that distinction predates Founder Knowledge Studio and wasn't part of
-    tonight's change.
+    Conversations, document_chunks, documents, knowledge_versions, knowledge_import_jobs,
+    source_relationships, knowledge_claims and claim_relationships all have strict per-user
+    isolation (see migrations 0006/0007 — docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md). Projects/tasks
+    remain intentionally shared company knowledge (see docs/MAINAI_0.1_PLAN.md) and only track
+    `created_by` for attribution, not access control — that distinction predates Founder
+    Knowledge Studio and wasn't part of tonight's change.
     """
     with engine.begin() as conn:
         for statement in RLS_STATEMENTS:

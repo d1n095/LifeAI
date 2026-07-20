@@ -24,12 +24,20 @@ def _fake_embedding_provider(monkeypatch):
     """Deterministic, offline embedding — no real provider call, no API key, matches the
     dimension pgvector's column requires (see conftest/other RAG tests for the same
     pattern)."""
+    from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
     async def _fake_embed(self, texts, model):
         return [[0.01 * (i + 1)] * EMBEDDING_DIM for i, _ in enumerate(texts)]
 
+    # Import now also runs claim extraction (app/rag/claims.py, STEG 10) right after
+    # indexing, which calls the chat provider too — see the identical comment in
+    # test_library_routes.py's fixture for why this mock is required here as well.
+    async def _fake_chat(self, messages, model, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
+
     monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
 
 def _make_zip(files: dict[str, bytes]) -> bytes:

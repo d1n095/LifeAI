@@ -23,6 +23,7 @@ from app.models.document import ActiveTruthStatus, Document, DocumentSource, Ind
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
+from app.rag.claims import extract_claims_for_document
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
@@ -140,22 +141,33 @@ async def _import_one_file(
     db.add(document)
     db.commit()
 
-    db.add(
-        KnowledgeVersion(
-            source_id=document.id,
-            owner_id=owner_id,
-            version_number=1,
-            checksum=checksum,
-            extraction_version=EXTRACTION_VERSION,
-            raw_metadata={"original_filename": filename, "size_bytes": len(content), "media_type": document.media_type},
-        )
+    version = KnowledgeVersion(
+        source_id=document.id,
+        owner_id=owner_id,
+        version_number=1,
+        checksum=checksum,
+        extraction_version=EXTRACTION_VERSION,
+        raw_metadata={"original_filename": filename, "size_bytes": len(content), "media_type": document.media_type},
     )
+    db.add(version)
     db.commit()
 
     await index_document(db, document, text_content)
 
     if document.status == IndexStatus.failed:
         return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+
+    # Claim extraction (STEG 10, app/rag/claims.py) runs after indexing succeeds, on the
+    # chunks index_document just created. A failure here must never turn a successfully
+    # indexed, searchable document into a "failed" import outcome — claims are an
+    # enrichment layer on top of the already-complete indexing result, not a precondition
+    # for it, so any exception is swallowed the same way a single chunk's extraction
+    # failure already is inside extract_claims_for_document itself.
+    try:
+        await extract_claims_for_document(db, document, owner_id, version.id)
+    except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
+        pass
+
     return FileOutcome(filename=filename, status="indexed", source_id=str(document.id))
 
 

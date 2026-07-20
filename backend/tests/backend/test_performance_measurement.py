@@ -29,12 +29,20 @@ PARAGRAPHS_PER_FILE = 20
 
 @pytest.fixture(autouse=True)
 def _fake_embedding_provider(monkeypatch):
+    from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
     async def _fake_embed(self, texts, model):
         return [[0.01 * ((i % 97) + 1)] * EMBEDDING_DIM for i, _ in enumerate(texts)]
 
+    # Import now also runs claim extraction (app/rag/claims.py, STEG 10), which calls the
+    # chat provider — without this mock, OpenAIProvider.is_configured() would see the truthy
+    # "fake-key-for-tests" value and attempt a REAL outbound call during this measurement.
+    async def _fake_chat(self, messages, model, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
+
     monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
 
 def _make_zip() -> bytes:
