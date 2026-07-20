@@ -878,6 +878,91 @@ jobs:
         if: always()
         run: docker rm -f lifeai-d lifeai-d-timeout || true
 
+      # ---- Container E: Supabase Session Pooler auth hardening — proves
+      # backend/scripts/ensure_app_role.py's two fixes against the REAL image. Verified
+      # production incident: the pre-fix script ran ALTER ROLE ... PASSWORD unconditionally
+      # on every boot, which risked a transient "password authentication failed" the next
+      # time mainai_app connected while Supabase's Session Pooler (Supavisor) auth cache
+      # caught up — with no retry anywhere in the app, that killed the whole container even
+      # though the credential was correct. ----
+      - name: Verify a repeated start against an already-provisioned role does not rotate the password
+        run: |
+          docker run -d --name lifeai-e-repeat \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3023:3000 \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3023 \
+            -e PUBLIC_APP_URL=http://localhost:3023 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3023/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3023/api/health
+          # This is a REPEATED start: container A already provisioned mainai_app against the
+          # same lifeos_combined_ci database earlier in this job, so the role already exists
+          # here with the correct password — exactly the "ordinary restart" case the incident
+          # was about.
+          docker logs lifeai-e-repeat 2>&1 | grep -q "lösenordet ändras INTE" || (echo "::error::a restart against an already-provisioned role must skip the password ALTER — it didn't" && exit 1)
+          if docker logs lifeai-e-repeat 2>&1 | grep -qE "CREATE ROLE|roterat"; then
+            echo "::error::a normal restart rotated/recreated the password — this is exactly the incident this fix prevents" && exit 1
+          fi
+          docker rm -f lifeai-e-repeat || true
+
+      - name: Create a second database for the fresh-role retry test
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_combined_ci_fresh_role;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_combined_ci_fresh_role;"
+
+      - name: Verify simulated transient DB auth failures are retried, not fatal
+        run: |
+          docker run -d --name lifeai-e-retry \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3024:3000 \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="postgresql://postgres:postgres@host.docker.internal:5432/lifeos_combined_ci_fresh_role" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw_fresh \
+            -e MAINAI_APP_ROTATE_PASSWORD=true \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3024 \
+            -e PUBLIC_APP_URL=http://localhost:3024 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e TEST_FORCE_APP_DB_CONNECT_FAILURES=3 \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3024/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3024/api/health
+          docker logs lifeai-e-retry 2>&1 | tail -30
+          # Postgres roles are cluster-global, not database-scoped: mainai_app already
+          # exists (containers A-D provisioned it earlier in this same job's shared Postgres
+          # service), even though lifeos_combined_ci_fresh_role is a brand-new database. So
+          # this step must force MAINAI_APP_ROTATE_PASSWORD=true — otherwise
+          # ensure_app_role.py correctly (by design) leaves the existing password alone,
+          # APP_DATABASE_URL is then built from a password Postgres was never told to
+          # accept, and the container fails to boot for a real (not simulated) reason. With
+          # rotation forced, the ALTER ROLE path runs and self-tests the new credential,
+          # which is what exercises the simulated-failure retry loop below.
+          docker logs lifeai-e-retry 2>&1 | grep -q "TEST HOOK: TEST_FORCE_APP_DB_CONNECT_FAILURES simulated failure" || (echo "::error::the simulated-failure test hook never engaged" && exit 1)
+          docker logs lifeai-e-retry 2>&1 | grep -qE "mainai_app-anslutningen (misslyckades|fungerar)" || (echo "::error::no retry/backoff log lines from the self-test-connect loop" && exit 1)
+          # And, despite those simulated failures, the container must have booted normally —
+          # this is the actual point: a transient auth failure must not be fatal.
+          docker logs lifeai-e-retry 2>&1 | grep -q "backend is healthy" || (echo "::error::backend never became healthy despite the retry loop absorbing the simulated failures" && exit 1)
+          docker rm -f lifeai-e-retry || true
+
       - name: Upload Playwright report (combined container)
         if: always()
         uses: actions/upload-artifact@v4

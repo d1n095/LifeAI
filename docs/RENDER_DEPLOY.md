@@ -190,6 +190,65 @@ vanlig lokal, icke-poolad admin-användare (inget suffix) lämnas orörd. Se
 `test_app_database_url_stays_unsuffixed_for_a_plain_non_pooled_admin_username` i
 `backend/tests/backend/test_ensure_app_role.py`.
 
+**Ett tredje, separat pooler-fel — uppdaterat 2026-07-20:** en verifierad produktionsdeploy på
+`acac6d1` (som redan har både fixarna ovan) kraschade en tredje gång, EFTER att både
+`ensure_app_role.py` OCH backend-hälsokontrollen (se "startup-race"-avsnittet nedan) lyckats:
+```
+sqlalchemy.exc.OperationalError: (psycopg2.OperationalError) connection to server at
+"aws-1-us-west-2.pooler.supabase.com" ... FATAL: password authentication failed for user "mainai_app"
+ERROR:    Application startup failed. Exiting.
+```
+**Rotorsak:** `ensure_app_role.py` körde `ALTER ROLE mainai_app LOGIN PASSWORD ...`
+**ovillkorligt vid varje enda uppstart**, även när lösenordet redan var korrekt. Under
+Supabases Session Pooler (Supavisor) kan den ALTER ROLE:en göra att poolerns egen
+auth-cache blir kortvarigt inaktuell — en anslutning som `mainai_app` strax därefter, med
+exakt samma (korrekta, precis satta) lösenord, observerades misslyckas med "password
+authentication failed", för att sedan lyckas rakt av på nästa uppstartsförsök, utan någon
+kod- eller lösenordsändring alls. Appens egen uppstart (`app/main.py`s `on_startup()`, den
+FÖRSTA anslutningen någonsin till `APP_DATABASE_URL` i hela uppstartskedjan) hade ingen
+återförsöksmekanism alls — en enda transient avvisning där tog ner hela processen
+("Application startup failed. Exiting."), trots att appen i övrigt var frisk.
+
+En sekundäreffekt av just DENNA krasch observerades också: Render-dashboarden visade "Exited
+with status 1" som deployens sluttatus (från detta FÖRSTA, kraschade uppstartsförsöket), men
+loggen fortsatte sedan med ett NYTT uppstartsförsök som lyckades helt — backend blev frisk,
+frontend startade, flera `/api/health`-kontroller gav 200 — innan en ren, signalstyrd
+avstängning (`[entrypoint] shutting down... shutdown complete`, INTE en krasch — den
+loggraden syns bara vid en riktig SIGTERM, inte vid ett dött delprocess). Samtidigt gav
+`https://lifeai-1.onrender.com` (rot-URL:en) 502 trots att `/api/health` gav 200 i loggen.
+Den mest sannolika förklaringen: Render hade redan låst deployens status som misslyckad
+utifrån det FÖRSTA kraschade försöket och rev senare ner den instans som faktiskt blivit
+frisk (interna hälsokontroller i loggen kommer från Renders egna interna probe-adresser,
+`10.238.x.x`, inte från publik trafik via edgen) — inte en separat bugg i frontend eller
+entrypointen. Frontendens `node server.js` lyssnade bevisligen korrekt (flera lyckade
+hälsokontroller, `✓ Ready in 0ms` från Next.js) fram till den externa SIGTERM:en. Detta är
+alltså en förväntad, sekundär konsekvens av det första kraschade försöket, inte ett eget fel
+att fixa i containern — att förhindra den första kraschen (nedan) förhindrar hela kedjan.
+
+**Fix, i `backend/scripts/ensure_app_role.py`:**
+1. Lösenordet ändras nu bara när rollen skapas för första gången, eller när
+   `MAINAI_APP_ROTATE_PASSWORD=true` är explicit satt för just den deployen — aldrig som en
+   bieffekt av en vanlig omstart. Se miljövariabeltabellen nedan.
+2. Varje gång lösenordet faktiskt ändras (skapande eller uttrycklig rotation) gör skriptet nu
+   en självtest-anslutning mot det nya `APP_DATABASE_URL` med exponentiell backoff (1s/2s/4s/8s)
+   innan det rapporterar att det är klart — absorberar precis den propageringsfördröjning som
+   orsakade kraschen, redan under provisioneringssteget, innan appen själv någonsin försöker.
+3. `app/main.py`s `on_startup()` (och `app/db.py`s nya `call_with_db_retry`) har nu samma
+   återförsök/backoff runt sina DB-beröringar, som ett andra skyddslager — en transient
+   pooler-avvisning där tar inte längre ner en i övrigt frisk container.
+4. Det schemalagda städjobbet (`app/scheduler.py`) var redan resilient (fångar och loggar,
+   kraschar aldrig processen) — verifierat oförändrat, inte en ny regression.
+
+Se `backend/tests/backend/test_ensure_app_role.py` (`test_password_is_not_rotated_on_a_normal_restart_when_the_role_already_exists`,
+`test_explicit_rotate_password_env_var_rotates_and_self_tests_the_new_credential`,
+`test_self_test_connection_retries_transient_failures_then_succeeds`,
+`test_self_test_connection_gives_up_and_raises_after_exhausting_every_attempt`),
+`backend/tests/backend/test_db_retry.py`, och Container E i `.github/workflows/ci.yml`s
+`combined-container-verify`-jobb (kör mot den riktiga avbildningen: en upprepad start mot en
+redan provisionerad roll roterar inte lösenordet, och simulerade transienta
+anslutningsfel — via test-kroken `TEST_FORCE_APP_DB_CONNECT_FAILURES`, som aldrig sätts i en
+riktig deploy — visas faktiskt återförsökta och containern blir ändå frisk).
+
 ## Miljövariabler — fullständig lista
 
 ### Genererade hemligheter (Render slumpar värdet — hamnar aldrig i repot)
@@ -208,6 +267,12 @@ vanlig lokal, icke-poolad admin-användare (inget suffix) lämnas orörd. Se
 | `REDIS_URL` | Upstash Free |
 | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | **Obligatoriskt i produktion** (`ENVIRONMENT=production` utan `SMTP_HOST` gör att backend vägrar starta, se `_check_smtp_configured` i `app/main.py`) — en gratis transaktionell e-postleverantör (t.ex. Resend eller Brevos gratisnivå) räcker |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | Fyll i minst en |
+
+### Valfri, manuell drift-åtgärd (aldrig satt av render.yaml)
+
+| Variabel | Vad du sätter |
+|---|---|
+| `MAINAI_APP_ROTATE_PASSWORD` | `true` för att uttryckligen rotera `mainai_app`s lösenord på just NÄSTA deploy — sätt den, deploya en gång, ta sedan bort den igen. En vanlig omstart/redeploy rör aldrig lösenordet (se "Ett tredje, separat pooler-fel" ovan) — detta är den enda avsiktliga vägen att ändra det. |
 
 ### Redan satta, synliga värden i `render.yaml`
 

@@ -6,7 +6,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
-from app.db import SessionLocal, migration_engine
+from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
 from app.rls import apply_rls
 from app.routers import account, admin, auth, chat, conversations, documents, health, knowledge, projects
@@ -56,7 +56,15 @@ def on_startup():
     # docs/OPERATIONS.md), never by the app itself at request-serving startup. RLS
     # enable/policy statements are also defined in the migrations, but apply_rls() is kept
     # here too as an idempotent safety net (cheap no-op if already applied) — see app/rls.py.
-    apply_rls(migration_engine)
+    #
+    # Both DB touches below go through call_with_db_retry (app/db.py): verified production
+    # incident, 2026-07-20 — this was the ONE unprotected first-ever connection to
+    # APP_DATABASE_URL in the whole boot sequence, and a brief Supabase Session Pooler
+    # auth-cache propagation lag right after backend/scripts/ensure_app_role.py provisioned
+    # the role killed the entire process here ("Application startup failed. Exiting."), even
+    # though the exact same credential worked moments later. ensure_app_role.py now also
+    # retries its own self-test connection, so this is defense in depth, not the only guard.
+    call_with_db_retry(lambda: apply_rls(migration_engine))
 
     _check_smtp_mode()
 
@@ -66,11 +74,14 @@ def on_startup():
     if settings.redis_url:
         _check_redis_reachable()
 
-    db = SessionLocal()
-    try:
-        bootstrap_founder_user(db)
-    finally:
-        db.close()
+    def _bootstrap():
+        db = SessionLocal()
+        try:
+            bootstrap_founder_user(db)
+        finally:
+            db.close()
+
+    call_with_db_retry(_bootstrap)
 
     start_scheduler()
 
