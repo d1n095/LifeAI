@@ -1190,6 +1190,64 @@ jobs:
   # doesn't need to run on every push to every branch, only when this branch's own compose
   # topology actually changes.
   # ---------------------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------------------
+  # scripts/vps/*.sh — shellcheck every script, then exercise each mutating script's
+  # --dry-run path (side-effect-free by construction, see lib.sh's run() helper) so a syntax
+  # or logic error is caught before it's ever run for real against an actual server. The
+  # read-only scripts (00_preflight.sh, 90_verify_installation.sh) are run for real here —
+  # there's nothing unsafe about that, they never mutate anything regardless of --dry-run.
+  # ---------------------------------------------------------------------------------------
+  vps-scripts-check:
+    name: VPS bootstrap scripts — shellcheck + dry-run
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Shellcheck every script
+        run: |
+          for f in scripts/vps/*.sh; do
+            echo "--- $f ---"
+            shellcheck -x "$f"
+          done
+
+      - name: Bash syntax check every script
+        run: |
+          for f in scripts/vps/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: Run 00_preflight.sh for real (read-only, safe)
+        working-directory: scripts/vps
+        run: sudo ./00_preflight.sh --min-disk-gb 1 --min-mem-mb 100
+
+      - name: Exercise every mutating script's --dry-run path
+        working-directory: scripts/vps
+        run: |
+          sudo ./10_install_docker.sh --dry-run
+          sudo ./20_create_deploy_user.sh --dry-run --user lifeai-ci-test
+          # 30_setup_directories.sh correctly refuses when the user doesn't exist yet (a real
+          # safety check, not a limitation of this test) — create a throwaway local user
+          # first so the dry-run actually exercises the directory-creation logic too.
+          sudo useradd -m lifeai-ci-test
+          sudo ./30_setup_directories.sh --dry-run --user lifeai-ci-test
+          sudo ./40_configure_firewall.sh --dry-run
+          sudo ./50_enable_auto_updates.sh --dry-run
+          # This MUST fail closed (no authorized_keys for the throwaway user) — a passing
+          # dry-run here would mean the safety refusal itself is broken. `|| true`: GitHub
+          # Actions bash steps run with `pipefail`, and the script's expected exit-1 here
+          # would otherwise abort this step before the grep check below ever runs.
+          sudo ./41_harden_ssh.sh --dry-run --user lifeai-ci-test > /tmp/harden-ssh-output.txt 2>&1 || true
+          cat /tmp/harden-ssh-output.txt
+          grep -q "Refusing to disable password authentication" /tmp/harden-ssh-output.txt
+
+      - name: Run 90_verify_installation.sh for real (read-only, safe — expected to report gaps since nothing was actually installed above)
+        working-directory: scripts/vps
+        run: sudo ./90_verify_installation.sh --user lifeai-ci-test || true
+
   vps-compose-verify:
     name: Strato VPS compose topology — build, run, verify
     runs-on: ubuntu-latest
