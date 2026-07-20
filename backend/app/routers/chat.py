@@ -15,7 +15,7 @@ from app.providers.base import Message, ProviderError
 from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback
 from app.rag.retrieve import retrieve_context
-from app.rag.trust import assess_confidence, build_trust_instructions
+from app.rag.trust import assess_confidence, build_trust_instructions, detect_conflicts
 from app.schemas import ChatMessageIn, ChatMessageOut, SourceRef
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(require_founder)])
@@ -54,8 +54,16 @@ async def chat(
         # fully populated — a refresh would just be an unnecessary extra round-trip.
 
     hits = await retrieve_context(db, user.id, payload.message, top_k=5)
-    trust = assess_confidence(hits)
-    context_block = "\n\n".join(f"[{h['title']}]\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
+    # Deleted sources can never appear here at all — app/rag/vector_store.py's search()
+    # excludes Document.deleted_at IS NOT NULL at the query level, not just in the UI.
+    conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
+    trust = assess_confidence(hits, conflicting_pairs)
+
+    def _label(h: dict) -> str:
+        status = h.get("active_truth_status")
+        return f"[{h['title']}] (status: {status})" if status and status != "active" else f"[{h['title']}]"
+
+    context_block = "\n\n".join(f"{_label(h)}\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
 
     history = (
         db.query(MessageModel)
@@ -67,7 +75,8 @@ async def chat(
 
     system_content = (
         f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
-        f"TILLFÖRLITLIGHETSINSTRUKTION:\n{build_trust_instructions(trust.level)}"
+        f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
+        f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
     )
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
@@ -113,7 +122,13 @@ async def chat(
     db.commit()
 
     sources = [
-        SourceRef(document_id=uuid.UUID(h["document_id"]), title=h["title"], snippet=h["text"][:240], score=h["score"])
+        SourceRef(
+            document_id=uuid.UUID(h["document_id"]),
+            title=h["title"],
+            snippet=h["text"][:240],
+            score=h["score"],
+            active_truth_status=h.get("active_truth_status"),
+        )
         for h in hits
     ]
     return ChatMessageOut(
@@ -125,4 +140,5 @@ async def chat(
         confidence=trust.level,
         confidence_score=trust.score,
         providers_attempted=attempted,
+        conflicts_detected=trust.conflicts_detected,
     )

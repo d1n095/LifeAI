@@ -106,6 +106,7 @@ class SourceRef(BaseModel):
     title: str
     snippet: str
     score: float
+    active_truth_status: str | None = None
 
 
 class ChatMessageOut(BaseModel):
@@ -117,6 +118,7 @@ class ChatMessageOut(BaseModel):
     confidence: str  # "high" | "medium" | "low" | "none"
     confidence_score: float
     providers_attempted: list[str] = []  # >1 entry means fallback engaged
+    conflicts_detected: bool = False
 
 
 class MessageOut(BaseModel):

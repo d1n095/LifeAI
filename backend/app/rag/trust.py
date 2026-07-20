@@ -1,30 +1,91 @@
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
+
+from sqlalchemy.orm import Session
+
+from app.models.source_relationship import RelationshipType, SourceRelationship
 
 HIGH_THRESHOLD = 0.75
 MEDIUM_THRESHOLD = 0.55
+
+NON_ACTIVE_STATUSES = {"historical", "proposed", "superseded", "disputed"}
 
 
 @dataclass
 class TrustAssessment:
     level: str  # "high" | "medium" | "low" | "none"
     score: float
+    # Founder Knowledge Studio v1 additions (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) — the
+    # top-matching source's own declared epistemic status, and whether any two sources
+    # actually retrieved for this answer are known (via a "contradicts" SourceRelationship)
+    # to disagree with each other. Both are machine-readable, not just baked into the prose
+    # instruction string, so a caller (or a future UI) can act on them directly.
+    top_source_status: str | None = None
+    conflicts_detected: bool = False
+    conflicting_document_ids: list[tuple[str, str]] = field(default_factory=list)
 
 
-def assess_confidence(hits: list[dict]) -> TrustAssessment:
+def assess_confidence(hits: list[dict], conflicting_pairs: list[tuple[str, str]] | None = None) -> TrustAssessment:
     """Confidence is derived from the strongest retrieved source, not from the model itself —
     an LLM cannot reliably self-report how well-grounded its own answer is, but a similarity
-    score against the actual knowledge base is a concrete, checkable signal."""
+    score against the actual knowledge base is a concrete, checkable signal.
+
+    A source's own active_truth_status now participates directly: a chunk that matches the
+    query extremely well is still, by the founder's own classification, historical/proposed/
+    superseded/disputed material — MainAI must never let a strong similarity score alone
+    manufacture "high" confidence out of content the founder has explicitly marked as not
+    currently authoritative. See app/models/document.py's ActiveTruthStatus docstring.
+    """
     if not hits:
         return TrustAssessment(level="none", score=0.0)
 
-    top_score = max(hit["score"] for hit in hits)
+    top_hit = max(hits, key=lambda h: h["score"])
+    top_score = top_hit["score"]
+    top_status = top_hit.get("active_truth_status")
+
     if top_score >= HIGH_THRESHOLD:
         level = "high"
     elif top_score >= MEDIUM_THRESHOLD:
         level = "medium"
     else:
         level = "low"
-    return TrustAssessment(level=level, score=top_score)
+
+    if top_status in NON_ACTIVE_STATUSES and level == "high":
+        level = "medium"
+
+    conflicting_pairs = conflicting_pairs or []
+    return TrustAssessment(
+        level=level,
+        score=top_score,
+        top_source_status=top_status,
+        conflicts_detected=bool(conflicting_pairs),
+        conflicting_document_ids=conflicting_pairs,
+    )
+
+
+def detect_conflicts(db: Session, owner_id: uuid.UUID, document_ids: list[str]) -> list[tuple[str, str]]:
+    """Structural conflict detection: two sources actually retrieved for this answer that
+    are linked by a `contradicts` SourceRelationship (see app/models/source_relationship.py).
+    Deliberately NOT an attempt to detect disagreement from the chunk text itself — that
+    would require real NLP/LLM judgement this function has no access to and shouldn't
+    fabricate; a `contradicts` edge only exists because the founder (or a future workbench
+    analysis, see DEL 9) explicitly recorded it. No edge recorded means no conflict is
+    reported, even if two retrieved chunks happen to disagree in fact — that's a known,
+    honestly-scoped limitation, not a silent claim of completeness."""
+    if len(document_ids) < 2:
+        return []
+    ids = [uuid.UUID(d) for d in set(document_ids)]
+    rows = (
+        db.query(SourceRelationship)
+        .filter(
+            SourceRelationship.owner_id == owner_id,
+            SourceRelationship.relationship_type == RelationshipType.contradicts,
+            SourceRelationship.from_source_id.in_(ids),
+            SourceRelationship.to_source_id.in_(ids),
+        )
+        .all()
+    )
+    return [(str(r.from_source_id), str(r.to_source_id)) for r in rows]
 
 
 # Appended to the system prompt based on confidence — this is the actual enforcement
@@ -55,6 +116,43 @@ TRUST_INSTRUCTIONS: dict[str, str] = {
     ),
 }
 
+STATUS_INSTRUCTIONS: dict[str, str] = {
+    "historical": (
+        "OBS: Den starkast matchande källan är märkt som HISTORISK material av grundaren — "
+        "den beskriver ett tidigare läge, inte nödvändigtvis hur det ser ut nu. Presentera "
+        "aldrig historiskt material som aktuell sanning; säg uttryckligen att källan är "
+        "historisk och att läget kan ha ändrats."
+    ),
+    "proposed": (
+        "OBS: Den starkast matchande källan är märkt som ETT FÖRSLAG av grundaren, inte ett "
+        "beslut. Presentera den aldrig som om den redan gäller — säg uttryckligen att det är "
+        "ett förslag som inte (eller inte nödvändigtvis) är beslutat."
+    ),
+    "superseded": (
+        "OBS: Den starkast matchande källan är märkt som ERSATT av grundaren — ett nyare "
+        "beslut eller dokument har tagit dess plats. Presentera den aldrig som gällande utan "
+        "att säga att den är ersatt och att svaret kan vara inaktuellt."
+    ),
+    "disputed": (
+        "OBS: Den starkast matchande källan är märkt som OMTVISTAD av grundaren — dess "
+        "innehåll är inte bekräftat eller är ifrågasatt. Presentera den aldrig som säker "
+        "fakta; säg uttryckligen att källan är omtvistad."
+    ),
+}
 
-def build_trust_instructions(level: str) -> str:
-    return TRUST_INSTRUCTIONS.get(level, TRUST_INSTRUCTIONS["none"])
+CONFLICT_INSTRUCTION = (
+    "OBS: Minst två av de hämtade källorna är märkta som varandras MOTSÄGELSER av grundaren "
+    "(en 'contradicts'-relation). Dölj aldrig detta — säg uttryckligen att källorna motsäger "
+    "varandra, beskriv båda ståndpunkterna separat, och gissa inte vilken som är korrekt."
+)
+
+
+def build_trust_instructions(
+    level: str, top_source_status: str | None = None, conflicts_detected: bool = False
+) -> str:
+    parts = [TRUST_INSTRUCTIONS.get(level, TRUST_INSTRUCTIONS["none"])]
+    if top_source_status in STATUS_INSTRUCTIONS:
+        parts.append(STATUS_INSTRUCTIONS[top_source_status])
+    if conflicts_detected:
+        parts.append(CONFLICT_INSTRUCTION)
+    return "\n\n".join(parts)
