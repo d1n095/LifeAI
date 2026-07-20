@@ -62,9 +62,51 @@ fi
 
 # Reuses the existing role-provisioning + alembic-migration entrypoint unchanged — not
 # duplicated here. See backend/docker-entrypoint.sh.
-(cd /app/backend && E2E_BACKEND_HOST=127.0.0.1 E2E_BACKEND_PORT=8000 \
-  ./docker-entrypoint.sh "${BACKEND_CMD[@]}") &
+#
+# TEST_DELAY_BACKEND_STARTUP_SECONDS is a test-only hook (never set in a real deployment —
+# only .github/workflows/ci.yml's combined-container-verify job sets it) that reproduces a
+# slow backend startup on demand: sleeping here, before docker-entrypoint.sh even runs,
+# means the backend port genuinely isn't listening yet for that long, the same as if role
+# provisioning/migrations/uvicorn boot were just slow. It exists to make the fix below
+# provable against the real container, not just asserted.
+(cd /app/backend && \
+  if [ -n "${TEST_DELAY_BACKEND_STARTUP_SECONDS:-}" ]; then \
+    echo "[entrypoint] TEST HOOK: delaying backend startup by ${TEST_DELAY_BACKEND_STARTUP_SECONDS}s (TEST_DELAY_BACKEND_STARTUP_SECONDS is set)"; \
+    sleep "${TEST_DELAY_BACKEND_STARTUP_SECONDS}"; \
+  fi; \
+  E2E_BACKEND_HOST=127.0.0.1 E2E_BACKEND_PORT=8000 ./docker-entrypoint.sh "${BACKEND_CMD[@]}") &
 BACKEND_PID=$!
+
+echo "[entrypoint] backend pid=$BACKEND_PID (127.0.0.1:8000, loopback-only) — waiting for it to become healthy before starting the frontend..."
+
+# Verified production bug: without this wait, Next's proxy route (app/(shell)'s /api/*
+# handler, see frontend/lib/api.ts) starts accepting public traffic and immediately tries
+# 127.0.0.1:8000 before FastAPI has finished role provisioning + `alembic upgrade head` +
+# uvicorn boot — every request in that window gets ECONNREFUSED, surfaced to the browser as
+# a 502. Gating frontend startup on a real /api/health 200 (not just "the process exists")
+# closes that window entirely instead of relying on timing that happens to work locally.
+BACKEND_HEALTH_URL="http://127.0.0.1:8000/api/health"
+BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS="${BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS:-90}"
+backend_ready=0
+elapsed=0
+while [ "$elapsed" -lt "$BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS" ]; do
+  if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+    echo "[entrypoint] backend process (pid=$BACKEND_PID) exited before becoming healthy."
+    break
+  fi
+  if curl -sf -o /dev/null "$BACKEND_HEALTH_URL"; then
+    backend_ready=1
+    break
+  fi
+  sleep 1
+  elapsed=$((elapsed + 1))
+done
+
+if [ "$backend_ready" -ne 1 ]; then
+  echo "[entrypoint] backend did not become healthy at $BACKEND_HEALTH_URL within ${BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS}s — aborting startup, never starting the frontend."
+  exit 1
+fi
+echo "[entrypoint] backend is healthy after ${elapsed}s — starting frontend."
 
 # Next's standalone server.js resolves .next/ relative to its OWN working directory, not
 # relative to the script's location — found the hard way, running this without the `cd`
@@ -74,7 +116,7 @@ BACKEND_PID=$!
 (cd /app/frontend-standalone && PORT="${PORT:-3000}" node server.js) &
 FRONTEND_PID=$!
 
-echo "[entrypoint] backend pid=$BACKEND_PID (127.0.0.1:8000, loopback-only), frontend pid=$FRONTEND_PID (0.0.0.0:${PORT:-3000})"
+echo "[entrypoint] frontend pid=$FRONTEND_PID (0.0.0.0:${PORT:-3000})"
 
 # See the top-of-file note on why this isn't just `wait -n "$BACKEND_PID" "$FRONTEND_PID"`
 # under `set -e`. Treating its result as data (via `if`), not a script error, is the fix.

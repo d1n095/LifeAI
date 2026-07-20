@@ -798,6 +798,86 @@ jobs:
         if: always()
         run: docker rm -f lifeai-c || true
 
+      # ---- Container D: startup race — proves scripts/entrypoint-combined.sh's health-gated
+      # frontend startup against the REAL image, not just by reading the script. Verified
+      # production bug: frontend previously started (and Next's proxy began accepting public
+      # traffic) concurrently with backend, so any request arriving before FastAPI finished
+      # role provisioning + migrations + uvicorn boot got ECONNREFUSED -> 502.
+      # TEST_DELAY_BACKEND_STARTUP_SECONDS (see the entrypoint script) reproduces that slow
+      # boot on demand. ----
+      - name: Start container D (delayed backend startup)
+        run: |
+          docker run -d --name lifeai-d \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3021:3000 \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3021 \
+            -e PUBLIC_APP_URL=http://localhost:3021 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e TEST_DELAY_BACKEND_STARTUP_SECONDS=10 \
+            lifeai-combined:ci
+
+      - name: Verify the frontend refuses connections while backend startup is delayed
+        run: |
+          sleep 4
+          docker logs lifeai-d 2>&1 | grep -q "TEST HOOK: delaying backend startup" || (echo "::error::delay hook did not engage — this test isn't exercising the race at all" && exit 1)
+          if curl -sf --max-time 2 http://localhost:3021/api/health > /dev/null; then
+            echo "::error::frontend accepted a connection before backend became healthy — the startup race is back" && exit 1
+          fi
+          if docker logs lifeai-d 2>&1 | grep -q "frontend pid="; then
+            echo "::error::frontend was started before the backend health check passed" && exit 1
+          fi
+          echo "Confirmed: no listener on :3021 and frontend not started while backend startup is delayed, as expected."
+
+      - name: Verify the frontend starts and serves traffic once backend becomes healthy
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://localhost:3021/api/health && break
+            sleep 1
+          done
+          curl -sS http://localhost:3021/api/health
+          docker logs lifeai-d 2>&1 | grep -q "backend is healthy" || (echo "::error::entrypoint never logged that the backend became healthy" && exit 1)
+          docker logs lifeai-d 2>&1 | grep -q "frontend pid=" || (echo "::error::frontend never started even after the backend became healthy" && exit 1)
+          docker logs lifeai-d 2>&1 | tail -20
+
+      - name: Verify a backend that never becomes healthy fails the whole container clearly
+        run: |
+          docker rm -f lifeai-d || true
+          docker run -d --name lifeai-d-timeout \
+            --add-host=host.docker.internal:host-gateway \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3022 \
+            -e PUBLIC_APP_URL=http://localhost:3022 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e TEST_DELAY_BACKEND_STARTUP_SECONDS=999 \
+            -e BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS=5 \
+            lifeai-combined:ci
+          timeout 30 docker wait lifeai-d-timeout
+          docker logs lifeai-d-timeout 2>&1 | tail -20
+          docker logs lifeai-d-timeout 2>&1 | grep -q "aborting startup, never starting the frontend" || (echo "::error::entrypoint did not log a clear timeout abort" && exit 1)
+          if docker logs lifeai-d-timeout 2>&1 | grep -q "frontend pid="; then
+            echo "::error::frontend started even though the backend health check timed out" && exit 1
+          fi
+          EXIT_CODE=$(docker inspect lifeai-d-timeout --format '{{.State.ExitCode}}')
+          [ "$EXIT_CODE" = "1" ] || (echo "::error::expected exit code 1 (clear health-check-timeout abort), got $EXIT_CODE" && exit 1)
+          docker rm -f lifeai-d-timeout || true
+
+      - name: Stop container D
+        if: always()
+        run: docker rm -f lifeai-d lifeai-d-timeout || true
+
       - name: Upload Playwright report (combined container)
         if: always()
         uses: actions/upload-artifact@v4
