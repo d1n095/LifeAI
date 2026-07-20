@@ -931,6 +931,7 @@ jobs:
             -e SECRET_KEY=ci-combined-secret-key \
             -e DATABASE_URL="postgresql://postgres:postgres@host.docker.internal:5432/lifeos_combined_ci_fresh_role" \
             -e MAINAI_APP_PASSWORD=ci_combined_app_pw_fresh \
+            -e MAINAI_APP_ROTATE_PASSWORD=true \
             -e REDIS_URL="$CONTAINER_REDIS_URL" \
             -e FOUNDER_EMAIL=founder@lifeos.local \
             -e FOUNDER_PASSWORD=TestFounderPassword123! \
@@ -946,9 +947,15 @@ jobs:
           done
           curl -sS http://localhost:3024/api/health
           docker logs lifeai-e-retry 2>&1 | tail -30
-          # Role is freshly created in this brand-new database, so ensure_app_role.py's
-          # self-test-connect retry loop runs and must show it actually retried the
-          # simulated failures rather than giving up immediately.
+          # Postgres roles are cluster-global, not database-scoped: mainai_app already
+          # exists (containers A-D provisioned it earlier in this same job's shared Postgres
+          # service), even though lifeos_combined_ci_fresh_role is a brand-new database. So
+          # this step must force MAINAI_APP_ROTATE_PASSWORD=true — otherwise
+          # ensure_app_role.py correctly (by design) leaves the existing password alone,
+          # APP_DATABASE_URL is then built from a password Postgres was never told to
+          # accept, and the container fails to boot for a real (not simulated) reason. With
+          # rotation forced, the ALTER ROLE path runs and self-tests the new credential,
+          # which is what exercises the simulated-failure retry loop below.
           docker logs lifeai-e-retry 2>&1 | grep -q "TEST HOOK: TEST_FORCE_APP_DB_CONNECT_FAILURES simulated failure" || (echo "::error::the simulated-failure test hook never engaged" && exit 1)
           docker logs lifeai-e-retry 2>&1 | grep -qE "mainai_app-anslutningen (misslyckades|fungerar)" || (echo "::error::no retry/backoff log lines from the self-test-connect loop" && exit 1)
           # And, despite those simulated failures, the container must have booted normally —
