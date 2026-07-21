@@ -1676,8 +1676,18 @@ jobs:
 
       - name: Verify the broken deployment was detected and recorded as failed
         run: |
-          record=$(find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -exec jq -r 'select(.backend_image | contains("bad")) | .result' {} \;)
-          [ "$record" = "failed_verification" ] || (echo "::error::expected the broken deployment's record to be 'failed_verification', got '$record'" && exit 1)
+          # Identify "the broken deployment's own record" by recency, not by grepping for
+          # "bad" inside its image digest — a digest is a content hash of the real backend/
+          # frontend source, so whether the literal substring "bad" appears in it is pure
+          # coincidence (confirmed: it does NOT reliably appear). Each deploy.sh invocation
+          # writes exactly one NEW timestamped record (see deploy.sh Step 7), and rollback.sh's
+          # own *-rollback.json records have no backend_image field at all (select(has(...))
+          # excludes those cleanly instead of jq erroring on `null | contains(...)`). The
+          # broken attempt ran second, so its own record is deterministically the latest one
+          # that has a backend_image.
+          record=$(find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -print0 \
+              | xargs -0 jq -s '[.[] | select(has("backend_image"))] | sort_by(.timestamp) | last | .result')
+          [ "$record" = "\"failed_verification\"" ] || (echo "::error::expected the broken deployment's record to be 'failed_verification', got $record" && exit 1)
           echo "Confirmed: broken deployment correctly detected and recorded as failed."
 
       - name: Verify automatic rollback actually restored the good images and real traffic works again
