@@ -585,7 +585,7 @@ jobs:
   combined-container-verify:
     name: Combined container — build, run, verify
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/verify-combined-container'
+    if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1200,7 +1200,7 @@ jobs:
   vps-scripts-check:
     name: VPS bootstrap scripts — shellcheck + dry-run
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps'
     steps:
       - uses: actions/checkout@v4
 
@@ -1256,7 +1256,7 @@ jobs:
   vps-compose-verify:
     name: Strato VPS compose topology — build, run, verify
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1550,7 +1550,7 @@ jobs:
   vps-deploy-rollback-test:
     name: VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1726,7 +1726,7 @@ jobs:
   vps-backup-restore-test:
     name: VPS backup.sh / restore.sh — archive structure, checksums, and restore behavior
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps'
     env:
       TEST_COMPOSE_DIR: ${{ github.workspace }}/backup-test/opt-lifeai
       TEST_OUTPUT_DIR: ${{ github.workspace }}/backup-test/var-backups-lifeai
