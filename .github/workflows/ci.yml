@@ -1310,7 +1310,7 @@ jobs:
           cat > "${{ github.workspace }}/ci-secrets.env" <<EOF
           SECRET_KEY=ci-vps-secret-key
           MAINAI_APP_PASSWORD=ci_vps_app_pw
-          FOUNDER_EMAIL=founder@lifeos.local
+          FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
           FOUNDER_PASSWORD=TestFounderPassword123!
           DATABASE_URL=$CI_DATABASE_URL
           REDIS_URL=$CI_REDIS_URL
@@ -1616,7 +1616,7 @@ jobs:
           cat > "$TEST_ENV_FILE" <<EOF
           SECRET_KEY=ci-deploy-test-secret
           MAINAI_APP_PASSWORD=ci_deploy_test_pw
-          FOUNDER_EMAIL=founder@lifeos.local
+          FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
           FOUNDER_PASSWORD=TestFounderPassword123!
           DATABASE_URL=$CI_DATABASE_URL
           REDIS_URL=$CI_REDIS_URL
