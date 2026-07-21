@@ -104,3 +104,16 @@ parse_common_flags() {
 # docs/VPS_SECRETS_INVENTORY.md). Defined once here so the two can never drift apart.
 # shellcheck disable=SC2034 # used by every script that sources this file, not by lib.sh itself
 LIFEAI_REQUIRED_ENV_VARS="SECRET_KEY MAINAI_APP_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD DATABASE_URL REDIS_URL FRONTEND_ORIGINS PUBLIC_APP_URL SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL DOMAIN BACKEND_IMAGE FRONTEND_IMAGE"
+
+# Validates that $1 is a digest-pinned image reference: a non-empty image name (no
+# whitespace, no bare '@') followed by @sha256: and exactly 64 lowercase hexadecimal
+# characters, anchored across the whole string. A bare `*@sha256:*` glob (this repo's
+# original check) also matches an empty digest — e.g. a template placeholder left as
+# `ghcr.io/example/backend@sha256:` after a copy-paste — so deploy.sh must use this instead
+# of a case/glob check. $2 is the variable name, used only in the die() message.
+validate_digest_pinned_image() {
+    local image="$1" label="$2"
+    if [[ ! "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+        die "$label ('$image') is not a valid digest-pinned image reference (expected a non-empty image name followed by '@sha256:' and exactly 64 lowercase hexadecimal characters). Never deploy a mutable tag or an incomplete digest."
+    fi
+}

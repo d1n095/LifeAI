@@ -113,6 +113,36 @@ def test_smtp_mode_check_passes_with_exactly_one_mode(monkeypatch):
     main_module._check_smtp_mode()  # must not raise
 
 
+def test_smtp_mode_check_passes_with_tls_true_ssl_false(monkeypatch):
+    monkeypatch.setattr(main_module.settings, "smtp_host", "smtp.strato.com")
+    monkeypatch.setattr(main_module.settings, "smtp_use_tls", True)
+    monkeypatch.setattr(main_module.settings, "smtp_use_ssl", False)
+    main_module._check_smtp_mode()  # must not raise
+
+
+def test_smtp_mode_check_rejects_both_false_in_production(monkeypatch):
+    """SMTP_HOST set but neither mode true, in production: _send_via_smtp() would fall
+    through to a plain, unencrypted smtplib.SMTP connection with no .starttls() call —
+    real mail sent in cleartext. Must fail at startup, not on the first delivery attempt."""
+    monkeypatch.setattr(main_module.settings, "environment", "production")
+    monkeypatch.setattr(main_module.settings, "smtp_host", "smtp.strato.com")
+    monkeypatch.setattr(main_module.settings, "smtp_use_tls", False)
+    monkeypatch.setattr(main_module.settings, "smtp_use_ssl", False)
+    with pytest.raises(RuntimeError, match="SMTP_USE_TLS"):
+        main_module._check_smtp_mode()
+
+
+def test_smtp_mode_check_allows_both_false_in_development(monkeypatch):
+    """Non-production environments (dev/CI, often pointed at a throwaway/placeholder
+    SMTP_HOST) keep today's behavior unchanged — this check only fails closed in
+    production."""
+    monkeypatch.setattr(main_module.settings, "environment", "development")
+    monkeypatch.setattr(main_module.settings, "smtp_host", "smtp.strato.com")
+    monkeypatch.setattr(main_module.settings, "smtp_use_tls", False)
+    monkeypatch.setattr(main_module.settings, "smtp_use_ssl", False)
+    main_module._check_smtp_mode()  # must not raise
+
+
 def test_smtp_configured_check_rejects_missing_host(monkeypatch):
     monkeypatch.setattr(main_module.settings, "smtp_host", None)
     with pytest.raises(RuntimeError, match="SMTP_HOST"):

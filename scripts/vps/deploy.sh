@@ -118,14 +118,8 @@ FRONTEND_IMAGE=$(grep -E "^FRONTEND_IMAGE=" "$ENV_FILE" | head -n1 | cut -d= -f2
 DOMAIN_VALUE=$(grep -E "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
 [ -n "$BACKEND_IMAGE" ] || die "BACKEND_IMAGE is empty in $ENV_FILE."
 [ -n "$FRONTEND_IMAGE" ] || die "FRONTEND_IMAGE is empty in $ENV_FILE."
-case "$BACKEND_IMAGE" in
-    *@sha256:*) ;;
-    *) die "BACKEND_IMAGE ('$BACKEND_IMAGE') is not digest-pinned (expected '...@sha256:...'). Never deploy a mutable tag." ;;
-esac
-case "$FRONTEND_IMAGE" in
-    *@sha256:*) ;;
-    *) die "FRONTEND_IMAGE ('$FRONTEND_IMAGE') is not digest-pinned (expected '...@sha256:...'). Never deploy a mutable tag." ;;
-esac
+validate_digest_pinned_image "$BACKEND_IMAGE" "BACKEND_IMAGE"
+validate_digest_pinned_image "$FRONTEND_IMAGE" "FRONTEND_IMAGE"
 log_info "Deploying:"
 log_info "  BACKEND_IMAGE=$BACKEND_IMAGE"
 log_info "  FRONTEND_IMAGE=$FRONTEND_IMAGE"

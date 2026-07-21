@@ -101,14 +101,27 @@ def _check_smtp_mode() -> None:
     smtp.strato.com:465) are two different wire protocols selected by app/email.py's
     _send_via_smtp(); a server only speaks one of them on a given port, so both flags true is
     a real misconfiguration, not a harmless redundancy. Fail at startup, not on the first
-    delivery attempt."""
-    if settings.smtp_host and settings.smtp_use_tls and settings.smtp_use_ssl:
+    delivery attempt.
+
+    Both flags false is a separate misconfiguration: _send_via_smtp() then falls through to a
+    plain, unencrypted smtplib.SMTP connection with no .starttls() call — real mail sent over
+    the wire in cleartext. That's only rejected in production; non-production environments
+    (dev/CI, often pointed at a throwaway/placeholder SMTP_HOST) are left exactly as before."""
+    if not settings.smtp_host:
+        return
+    if settings.smtp_use_tls and settings.smtp_use_ssl:
         raise RuntimeError(
             "SMTP_USE_TLS och SMTP_USE_SSL är båda satta till true. De är ömsesidigt "
             "uteslutande anslutningslägen (STARTTLS respektive implicit TLS/SSL) — välj "
             "exakt ett beroende på vad SMTP-servern på SMTP_PORT faktiskt talar. "
             "T.ex. Strato: port 465 => SMTP_USE_SSL=true, SMTP_USE_TLS=false. "
             "Port 587 (de flesta andra) => SMTP_USE_TLS=true, SMTP_USE_SSL=false."
+        )
+    if settings.environment == "production" and not settings.smtp_use_tls and not settings.smtp_use_ssl:
+        raise RuntimeError(
+            "SMTP_HOST är satt men varken SMTP_USE_TLS eller SMTP_USE_SSL är true. I "
+            "produktion skulle detta skicka e-post okrypterat i klartext. Sätt exakt en av "
+            "dem till true beroende på vad SMTP-servern på SMTP_PORT faktiskt talar."
         )
 
 

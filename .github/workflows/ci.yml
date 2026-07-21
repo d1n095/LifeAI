@@ -1225,6 +1225,42 @@ jobs:
             bash -n "$f"
           done
 
+      - name: Unit-test validate_digest_pinned_image() (lib.sh)
+        # Exercises the shared helper deploy.sh calls for both BACKEND_IMAGE and
+        # FRONTEND_IMAGE directly, in isolation, against every rejection case a bare
+        # `*@sha256:*` glob would miss (it also matches an empty digest) plus one passing
+        # complete digest-pinned reference.
+        working-directory: scripts/vps
+        run: |
+          source ./lib.sh
+
+          expect_reject() {
+            local desc="$1" image="$2"
+            if (validate_digest_pinned_image "$image" "TEST_IMAGE") 2>/tmp/digest-check-err.txt; then
+              echo "FAIL: expected rejection for case '$desc' (image='$image') but it passed"
+              exit 1
+            fi
+            echo "OK (rejected as expected): $desc"
+          }
+
+          expect_accept() {
+            local desc="$1" image="$2"
+            if ! (validate_digest_pinned_image "$image" "TEST_IMAGE"); then
+              echo "FAIL: expected acceptance for case '$desc' (image='$image') but it was rejected"
+              exit 1
+            fi
+            echo "OK (accepted as expected): $desc"
+          }
+
+          expect_reject "empty image name" "@sha256:$(printf 'a%.0s' {1..64})"
+          expect_reject "empty digest" "ghcr.io/example/backend@sha256:"
+          expect_reject "short digest" "ghcr.io/example/backend@sha256:$(printf 'a%.0s' {1..63})"
+          expect_reject "uppercase digest" "ghcr.io/example/backend@sha256:$(printf 'A%.0s' {1..64})"
+          expect_reject "non-hex digest" "ghcr.io/example/backend@sha256:$(printf 'g%.0s' {1..64})"
+          expect_reject "whitespace" "ghcr.io/example/backend @sha256:$(printf 'a%.0s' {1..64})"
+          expect_reject "mutable tag without digest" "ghcr.io/example/backend:latest"
+          expect_accept "valid complete digest-pinned reference" "ghcr.io/example/backend@sha256:$(printf 'a%.0s' {1..64})"
+
       - name: Run 00_preflight.sh for real (read-only, safe)
         working-directory: scripts/vps
         run: sudo ./00_preflight.sh --min-disk-gb 1 --min-mem-mb 100
