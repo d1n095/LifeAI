@@ -199,53 +199,68 @@ jq -n \
 log_info "Recorded: $RECORD_FILE"
 
 mark_result() {
-    local result="$1"
-    jq --arg r "$result" '.result = $r' "$RECORD_FILE" > "$RECORD_FILE.tmp" && mv "$RECORD_FILE.tmp" "$RECORD_FILE"
+    local result="$1" reason="${2:-}"
+    jq --arg r "$result" --arg reason "$reason" '.result = $r | .failure_reason = (if $reason == "" then null else $reason end)' \
+        "$RECORD_FILE" > "$RECORD_FILE.tmp" && mv "$RECORD_FILE.tmp" "$RECORD_FILE"
 }
 
 log_info "== Step 8/11: starting services =="
+# A deliberately-broken image (one that never passes its own HEALTHCHECK) doesn't necessarily
+# surface as "started but then failed the checks below" — Compose's own service_healthy
+# dependency gate can make `compose up -d` itself return non-zero before this script ever
+# reaches Step 9/10 (reproduced for real by vps-deploy-rollback-test's intentionally-broken
+# image: "dependency failed to start: container ... is unhealthy"). Recreate already replaced
+# whatever was running before this point, so a plain `die` here — the ORIGINAL behavior — left
+# a broken deployment in place with NO automatic rollback attempt at all. DEPLOY_OK captures
+# both failure shapes so exactly one rollback code path handles either.
+DEPLOY_OK=1
+FAILURE_REASON=""
 if ! compose up -d; then
-    mark_result "failed_to_start"
-    die "docker compose up failed. See docker compose logs. Deployment record: $RECORD_FILE"
+    log_error "docker compose up failed."
+    DEPLOY_OK=0
+    FAILURE_REASON="compose_up_failed"
 fi
 
-log_info "== Step 9/11: waiting up to ${HEALTH_TIMEOUT}s for all services to become healthy =="
-DEADLINE=$((SECONDS + HEALTH_TIMEOUT))
-ALL_HEALTHY=0
-while [ "$SECONDS" -lt "$DEADLINE" ]; do
-    UNHEALTHY=0
-    for name in backend frontend caddy; do
-        cid=$(compose ps -q "$name")
-        [ -n "$cid" ] || {
-            UNHEALTHY=1
+if [ "$DEPLOY_OK" = "1" ]; then
+    log_info "== Step 9/11: waiting up to ${HEALTH_TIMEOUT}s for all services to become healthy =="
+    DEADLINE=$((SECONDS + HEALTH_TIMEOUT))
+    ALL_HEALTHY=0
+    while [ "$SECONDS" -lt "$DEADLINE" ]; do
+        UNHEALTHY=0
+        for name in backend frontend caddy; do
+            cid=$(compose ps -q "$name")
+            [ -n "$cid" ] || {
+                UNHEALTHY=1
+                break
+            }
+            status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$cid")
+            if [ "$status" != "healthy" ] && [ "$status" != "no-healthcheck" ]; then
+                UNHEALTHY=1
+            fi
+        done
+        if [ "$UNHEALTHY" = "0" ]; then
+            ALL_HEALTHY=1
             break
-        }
-        status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$cid")
-        if [ "$status" != "healthy" ] && [ "$status" != "no-healthcheck" ]; then
-            UNHEALTHY=1
         fi
+        sleep 3
     done
-    if [ "$UNHEALTHY" = "0" ]; then
-        ALL_HEALTHY=1
-        break
-    fi
-    sleep 3
-done
 
-DEPLOY_OK=1
-if [ "$ALL_HEALTHY" != "1" ]; then
-    log_error "Not all services became healthy within ${HEALTH_TIMEOUT}s."
-    DEPLOY_OK=0
-else
-    log_info "== Step 10/11: verifying a real request through Caddy =="
-    if [ "$DOMAIN_VALUE" = ":80" ] || [ -z "$DOMAIN_VALUE" ]; then
-        HEALTH_URL="http://localhost/api/health"
-    else
-        HEALTH_URL="https://$DOMAIN_VALUE/api/health"
-    fi
-    if ! curl -sSf --max-time 10 "$HEALTH_URL" > /dev/null; then
-        log_error "Post-deploy health check against $HEALTH_URL failed."
+    if [ "$ALL_HEALTHY" != "1" ]; then
+        log_error "Not all services became healthy within ${HEALTH_TIMEOUT}s."
         DEPLOY_OK=0
+        FAILURE_REASON="not_healthy_within_timeout"
+    else
+        log_info "== Step 10/11: verifying a real request through Caddy =="
+        if [ "$DOMAIN_VALUE" = ":80" ] || [ -z "$DOMAIN_VALUE" ]; then
+            HEALTH_URL="http://localhost/api/health"
+        else
+            HEALTH_URL="https://$DOMAIN_VALUE/api/health"
+        fi
+        if ! curl -sSf --max-time 10 "$HEALTH_URL" > /dev/null; then
+            log_error "Post-deploy health check against $HEALTH_URL failed."
+            DEPLOY_OK=0
+            FAILURE_REASON="health_endpoint_unreachable"
+        fi
     fi
 fi
 
@@ -257,8 +272,8 @@ if [ "$DEPLOY_OK" = "1" ]; then
     exit 0
 fi
 
-log_error "== Step 11/11: deployment verification FAILED — automatically rolling back =="
-mark_result "failed_verification"
+log_error "== Step 11/11: deployment failed ($FAILURE_REASON) — automatically rolling back =="
+mark_result "failed_verification" "$FAILURE_REASON"
 ROLLBACK_ARGS=(--compose-dir "$COMPOSE_DIR" --env-file "$ENV_FILE" --confirm)
 if [ -n "$EXTRA_COMPOSE_FILE" ]; then
     ROLLBACK_ARGS+=(--extra-compose-file "$EXTRA_COMPOSE_FILE")

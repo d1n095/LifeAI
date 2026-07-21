@@ -123,15 +123,34 @@ while [ "$SECONDS" -lt "$DEADLINE" ]; do
     sleep 3
 done
 
+# Container-health alone doesn't prove the restored stack actually serves traffic — verify a
+# real request through Caddy, the same way deploy.sh's own Step 10 does, using the DOMAIN that
+# is now active in $ENV_FILE (rollback.sh doesn't touch DOMAIN itself, only the image digests,
+# but it may have changed since the target deployment if an operator edited it by hand).
+ROLLBACK_OK="$ALL_HEALTHY"
+if [ "$ROLLBACK_OK" = "1" ]; then
+    log_info "Verifying a real request through Caddy after rollback."
+    DOMAIN_VALUE=$(grep -E "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
+    if [ "$DOMAIN_VALUE" = ":80" ] || [ -z "$DOMAIN_VALUE" ]; then
+        HEALTH_URL="http://localhost/api/health"
+    else
+        HEALTH_URL="https://$DOMAIN_VALUE/api/health"
+    fi
+    if ! curl -sSf --max-time 10 "$HEALTH_URL" > /dev/null; then
+        log_error "Post-rollback health check against $HEALTH_URL failed."
+        ROLLBACK_OK=0
+    fi
+fi
+
 ROLLBACK_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-if [ "$ALL_HEALTHY" = "1" ]; then
-    log_info "Rollback successful — all services healthy on the restored images."
+if [ "$ROLLBACK_OK" = "1" ]; then
+    log_info "Rollback successful — all services healthy and serving real traffic on the restored images."
     jq -n --arg ts "$ROLLBACK_TIMESTAMP" --arg target "$TARGET_TIMESTAMP" '{timestamp: $ts, rolled_back_to: $target, result: "success"}' \
         > "$DEPLOYMENTS_DIR/$ROLLBACK_TIMESTAMP-rollback.json"
     compose ps
     exit 0
 else
-    log_error "Rollback completed but services did not become healthy. This needs immediate manual investigation — see docs/VPS_OPERATIONS_RUNBOOK.md."
+    log_error "Rollback completed but services did not become healthy or did not serve a real request. This needs immediate manual investigation — see docs/VPS_OPERATIONS_RUNBOOK.md."
     jq -n --arg ts "$ROLLBACK_TIMESTAMP" --arg target "$TARGET_TIMESTAMP" '{timestamp: $ts, rolled_back_to: $target, result: "failed"}' \
         > "$DEPLOYMENTS_DIR/$ROLLBACK_TIMESTAMP-rollback.json"
     exit 1
