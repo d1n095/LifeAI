@@ -13,8 +13,8 @@ one builds on.
 ```json
 {
   "integration_branch": "claude/integrate-founder-vps",
-  "head_commit": "afe118d",
-  "head_commit_full": "afe118d7abfa7dc7216d80506553e53d1cfa8808",
+  "head_commit": "52f8878",
+  "head_commit_full": "52f8878185ab7e7cf4ab7e52c821aa426ba3f965",
   "working_tree": "clean",
   "source_branches": {
     "claude/strato-vps-prep": {
@@ -52,7 +52,25 @@ one builds on.
       "commit": "afe118d",
       "type": "ci-aggregation-fix",
       "summary": "Fix a genuine CI aggregation defect: all-checks-passed did not actually require the 5 VPS/combined-container jobs",
-      "detail": "all-checks-passed's needs: list never included combined-container-verify or the four vps-* jobs, so even after the branch-gate commit let them run on this branch, their failure (as seen in run 29807988506: vps-compose-verify and vps-deploy-rollback-test both failed) could not affect the aggregate — it reported success anyway. Fixed by adding all five to needs:. The existing if: always() keeps all-checks-passed running even when a dependency is skipped, and the existing contains(needs.*.result, 'failure'/'cancelled') check now covers them. Jobs that are still branch-gated off correctly report result=\"skipped\" on branches that don't enable them (e.g. claude/det-kommer-mer-879lcm), which the check already treats as passing, so nothing there changed. Only a genuine failure of one of these jobs on a branch where it actually executes now fails the aggregate. deploy-render's own gate (claude/det-kommer-mer-879lcm only, needs.all-checks-passed.result == 'success') was left untouched — this does not enable any deployment."
+      "detail": "all-checks-passed's needs: list never included combined-container-verify or the four vps-* jobs, so even after the branch-gate commit let them run on this branch, their failure (as seen in run 29807988506: vps-compose-verify and vps-deploy-rollback-test both failed) could not affect the aggregate — it reported success anyway. Fixed by adding all five to needs:. The existing if: always() keeps all-checks-passed running even when a dependency is skipped, and the existing contains(needs.*.result, 'failure'/'cancelled') check now covers them. Jobs that are still branch-gated off correctly report result=\"skipped\" on branches that don't enable them (e.g. claude/det-kommer-mer-879lcm at the time), which the check already treats as passing, so nothing there changed. Only a genuine failure of one of these jobs on a branch where it actually executes now fails the aggregate. deploy-render's own gate (claude/det-kommer-mer-879lcm only, needs.all-checks-passed.result == 'success') was left untouched — this does not enable any deployment."
+    },
+    {
+      "commit": "a24c318",
+      "type": "docs",
+      "summary": "Add this checkpoint file (initial version)",
+      "detail": "Documentation-only commit recording the state as of CI run 29812450928 (commit afe118d)."
+    },
+    {
+      "commit": "92eb9eb",
+      "type": "security-ci-fix",
+      "summary": "Permanently disable the obsolete Render deploy CI job",
+      "detail": "deploy-render previously called Render's Deploy Hook URLs whenever RENDER_BACKEND_DEPLOY_HOOK_URL/RENDER_FRONTEND_DEPLOY_HOOK_URL secrets were set — its \"disabled\" state depended entirely on those secrets staying absent, so adding them back at any point would have silently re-enabled real Render deploys on every push to claude/det-kommer-mer-879lcm. Removed the curl/secrets-reading steps entirely (not just gated further), so no code path in this workflow can ever contact Render regardless of what secrets exist in the repo. Kept as a no-op job (not deleted) so branch-protection rules referencing it by name keep resolving, with its name and log output now explicitly stating it's permanently disabled and why. Also marked docs/RENDER_DEPLOY.md and the relevant paragraph in docs/OPERATIONS.md as superseded by the Strato VPS architecture — historical investigation content (LifeAI-1 naming, pgvector/database-role research, SMTP troubleshooting) preserved, but deployment-instruction sections clearly flagged as no longer applicable. OPERATIONS.md also notes a linked Render Blueprint's dashboard-side \"Auto Sync\" setting is outside this repo's code control and should be confirmed off manually if ever enabled."
+    },
+    {
+      "commit": "52f8878",
+      "type": "ci-policy",
+      "summary": "Extend the 5 VPS/combined-container branch gates to also run on claude/det-kommer-mer-879lcm, ahead of promotion",
+      "detail": "combined-container-verify, vps-scripts-check, vps-compose-verify, vps-deploy-rollback-test, and vps-backup-restore-test's branch gates each got one more OR clause for claude/det-kommer-mer-879lcm (the default branch), so that after this integration branch is promoted, every future push to the default branch keeps exercising the VPS/combined-container topology instead of silently going back to skipping it — the same gap already found and fixed for the integration branch itself in commit 52fa38a. All previously-enabled branches (claude/strato-vps-prep, claude/verify-combined-container, claude/integrate-founder-vps) are unaffected. deploy-render's gate and permanently-disabled no-op body (commit 92eb9eb) were left untouched."
     }
   ],
   "local_verification_done_before_ci": [
@@ -65,9 +83,10 @@ one builds on.
     "frontend: npx next build (Docker mode, NEXT_PUBLIC_API_URL set) — .next/standalone produced as expected",
     "frontend: npx next build (Vercel mode, VERCEL=1) — .next/standalone correctly absent"
   ],
-  "ci_run_id": 29812450928,
+  "ci_run_id": 29815074887,
   "ci_run_conclusion": "success",
-  "ci_run_commit": "afe118d",
+  "ci_run_commit": "52f8878",
+  "ci_run_note": "This is the run after the CI-policy commit (52f8878) that extended the 5 VPS/combined-container branch gates to also cover claude/det-kommer-mer-879lcm. It confirms that change alone did not break anything on claude/integrate-founder-vps before promotion was attempted. Earlier run 29812450928 (commit afe118d) was the first fully-green run after the merge and CI defect fixes; both are recorded here for a complete history.",
   "job_results": {
     "lint-and-typecheck (Frontend — TypeScript & ESLint)": "success",
     "npm-audit (Frontend — npm audit)": "success",
@@ -85,8 +104,9 @@ one builds on.
     "vps-deploy-rollback-test (VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle)": "success",
     "vps-backup-restore-test (VPS backup.sh / restore.sh — archive structure, checksums, restore behavior)": "success",
     "all-checks-passed (All required checks passed)": "success — genuinely required all 15 jobs above, including the 5 VPS/combined-container jobs, not just an aggregate name",
-    "deploy-render (Deploy to Render)": "skipped — its gate (github.ref == 'refs/heads/claude/det-kommer-mer-879lcm') was never touched, and this branch is not that branch, so no deploy was triggered or possible"
+    "deploy-render (Deploy to Render (PERMANENTLY DISABLED — superseded by Strato VPS))": "skipped on this run — this push was to claude/integrate-founder-vps, not claude/det-kommer-mer-879lcm, so the job's own gate correctly excluded it. On the eventual promotion push to claude/det-kommer-mer-879lcm this job WILL run (its gate matches that branch), but its body now makes no network call at all regardless — see commit 92eb9eb."
   },
+  "promotion_readiness": "YES — verified via: (1) all 16 jobs on CI run 29815074887 individually confirmed success/correctly-skipped, (2) Render deploy path permanently neutralized at the code level (commit 92eb9eb), not just via absent secrets, (3) the 5 VPS/combined-container jobs' gates now also cover claude/det-kommer-mer-879lcm so they keep running after promotion (commit 52f8878), (4) claude/det-kommer-mer-879lcm confirmed a strict ancestor of this branch (0 commits behind, 63 commits ahead as of this checkpoint) so promotion can be a genuine non-force fast-forward.",
   "prior_failing_run_for_context": {
     "ci_run_id": 29807988506,
     "conclusion": "failure",
@@ -99,7 +119,8 @@ one builds on.
     "CI aggregation defect: all-checks-passed did not depend on the 5 VPS/combined-container jobs, so their failure couldn't fail the aggregate (fixed in afe118d)"
   ],
   "no_application_or_production_behavior_changed": "All three fixes above are CI-only (workflow branch gates, CI-only test fixtures, CI aggregation logic). No production code path, no default value in backend/app/config.py, and no behavior of _check_no_placeholder_secrets() itself was changed, weakened, bypassed, or removed.",
-  "exact_next_action_when_strato_vps_is_delivered": "Do NOT deploy from claude/integrate-founder-vps directly and do NOT deploy from claude/strato-vps-prep or claude/founder-knowledge-studio-v1 individually — this integration branch exists only to prove the two feature lines merge and pass CI together. The default branch (claude/det-kommer-mer-879lcm) still carries its own Render-specific deploy gate (deploy-render, gated to that branch) that must not be triggered by an obsolete/premature deploy. Promotion of this integration branch's content into the default branch is a separate, explicit action to be handled on its own — not part of this checkpoint — specifically so that promotion can be reviewed for the Render deploy-gate implications before it happens. Once promotion is done deliberately, the first real action on the actual Strato VPS remains what docs/checkpoints/VPS_PREP_CHECKPOINT_2026-07-21.md already specifies: follow docs/STRATO_VPS_DEPLOY.md from Steg 1 (scripts/vps/00_preflight.sh through 50_enable_auto_updates.sh, then 30_setup_directories.sh), populate /etc/lifeai/lifeai.env from the required env vars in scripts/vps/lib.sh, then scripts/vps/deploy.sh --confirm for the first real deploy.",
-  "production_safety_confirmation": "Default branch (claude/det-kommer-mer-879lcm): untouched — no merge or push to it occurred anywhere in this integration work. Render: untouched — deploy-render's gate is unchanged and restricted to the default branch only; CI run 29812450928 shows it as 'skipped' on this branch, confirming no deploy was triggered. Production: untouched — nothing in this branch's history contacts any real production system. Real Strato VPS: never contacted — no SSH, no real domain, no real secrets anywhere; vps-compose-verify, vps-deploy-rollback-test, and vps-backup-restore-test all ran against fake local Docker images, fake digest-pinned throwaway builds, and fake CI-only secrets files (including the corrected FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid) inside GitHub Actions' own ephemeral runners. claude/strato-vps-prep and claude/founder-knowledge-studio-v1: both confirmed unchanged at their pre-integration commits (3d1fda9 and 893ef74 respectively) — this integration work only ever committed to and pushed claude/integrate-founder-vps."
+  "exact_next_action_when_strato_vps_is_delivered": "Once claude/det-kommer-mer-879lcm is promoted (fast-forwarded) to this integration branch's HEAD, the first real action on the actual Strato VPS remains what docs/checkpoints/VPS_PREP_CHECKPOINT_2026-07-21.md already specifies: follow docs/STRATO_VPS_DEPLOY.md from Steg 1 (scripts/vps/00_preflight.sh through 50_enable_auto_updates.sh, then 30_setup_directories.sh), populate /etc/lifeai/lifeai.env from the required env vars in scripts/vps/lib.sh, then scripts/vps/deploy.sh --confirm for the first real deploy. This checkpoint update itself performs no deploy of any kind — see promotion_readiness above and the promotion record this checkpoint is about to be followed by.",
+  "promotion_plan": "claude/det-kommer-mer-879lcm (at ab225da at the time of this checkpoint update, a strict ancestor of this branch) will be fast-forwarded to claude/integrate-founder-vps's HEAD (52f8878) via a plain non-force push (git push origin 52f8878:refs/heads/claude/det-kommer-mer-879lcm) — never git push --force. claude/strato-vps-prep, claude/founder-knowledge-studio-v1, and claude/integrate-founder-vps itself are all left in place, not deleted. After the push, CI on claude/det-kommer-mer-879lcm will be verified job-by-job, including confirming deploy-render (which will now match that branch's gate and execute) performs no network/deployment action.",
+  "production_safety_confirmation": "Default branch (claude/det-kommer-mer-879lcm): at the time of this checkpoint update, still at ab225da — untouched by any merge or push in this integration work so far; promotion (a plain fast-forward, see promotion_plan above) is the very next action after this checkpoint is committed. Render: untouched — deploy-render's code path can no longer make any network call at all (commit 92eb9eb), independent of which branch or which secrets exist; CI run 29815074887 shows it as 'skipped' on this branch (correct, since this push wasn't to the default branch). Production: untouched — nothing in this branch's history contacts any real production system. Real Strato VPS: never contacted — no SSH, no real domain, no real secrets anywhere; vps-compose-verify, vps-deploy-rollback-test, and vps-backup-restore-test all ran against fake local Docker images, fake digest-pinned throwaway builds, and fake CI-only secrets files (including the corrected FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid) inside GitHub Actions' own ephemeral runners. claude/strato-vps-prep and claude/founder-knowledge-studio-v1: both confirmed unchanged at their pre-integration commits (3d1fda9 and 893ef74 respectively) — this integration work only ever committed to and pushed claude/integrate-founder-vps."
 }
 ```
