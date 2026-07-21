@@ -1858,10 +1858,21 @@ jobs:
       - migration-check
       - e2e-tests
       - same-origin-proxy-test
+      - combined-container-verify
+      - vps-scripts-check
+      - vps-compose-verify
+      - vps-deploy-rollback-test
+      - vps-backup-restore-test
     if: always()
     steps:
       - name: Fail if any required job failed
         run: |
+          # combined-container-verify and the four vps-* jobs are branch-gated (see their own
+          # `if:` conditions) and legitimately report result="skipped" on every branch other
+          # than the ones that enable them (claude/verify-combined-container,
+          # claude/strato-vps-prep, claude/integrate-founder-vps) — that must keep passing.
+          # What must NOT keep passing is one of them actually running and failing, which is
+          # exactly what "failure" (as opposed to "skipped") means here.
           if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
             echo "::error::One or more required checks failed."
             exit 1
