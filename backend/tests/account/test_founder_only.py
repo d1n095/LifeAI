@@ -66,6 +66,63 @@ def test_non_founder_denied_every_protected_route(client, make_verified_user):
     assert client.get("/api/auth/me").status_code == 200
 
 
+def test_legacy_admin_role_denied_founder_access(client, make_verified_user):
+    """admin/member predate the Founder-only launch (see app/models/user.py's UserRole
+    docstring) and are currently unreachable via registration, but nothing in the schema
+    prevents a row with role=admin existing (e.g. from before this restriction shipped, or a
+    future migration). Confirms such a row is denied exactly like an ordinary member — role
+    alone never grants MainAI access, only role AND the fixed founder id together do."""
+    user, password = make_verified_user(role="admin")
+    login = client.post("/api/auth/login", json={"email": user.email, "password": password})
+    assert login.status_code == 200
+    assert login.json()["role"] == "admin"
+
+    for path in ["/api/conversations", "/api/documents", "/api/projects", "/api/admin/providers/status"]:
+        res = client.get(path)
+        assert res.status_code == 403, f"{path} should 403 for role=admin, got {res.status_code}"
+
+
+def test_founder_role_without_the_fixed_id_is_still_denied(client, make_verified_user):
+    """The exact guarantee app/deps.py's require_founder() docstring claims: "a role check
+    alone would trust any row someone managed to mark role=founder" — this proves that
+    claim, not just the role half of it. A row with role=founder but a different primary
+    key (make_verified_user never sets id, so this gets a random uuid4, never
+    FOUNDER_USER_ID) must still be denied. If require_founder() ever regressed to a
+    role-only check, this is the test that would catch it — test_non_founder_denied_every_
+    protected_route above uses role="member" by default and would NOT catch that specific
+    regression."""
+    user, password = make_verified_user(role="founder")
+    from app.founder import FOUNDER_USER_ID
+
+    assert user.id != FOUNDER_USER_ID  # sanity check on the test's own premise
+
+    login = client.post("/api/auth/login", json={"email": user.email, "password": password})
+    assert login.status_code == 200
+    assert login.json()["role"] == "founder"  # the JWT/session honestly reflects the DB role...
+
+    # ...but require_founder() must still refuse every protected route, because the id
+    # doesn't match FOUNDER_USER_ID.
+    for path in ["/api/conversations", "/api/documents", "/api/projects", "/api/admin/providers/status"]:
+        res = client.get(path)
+        assert res.status_code == 403, f"{path} should 403 for a founder-role row with the wrong id, got {res.status_code}"
+
+
+def test_login_with_unknown_email_returns_the_same_generic_error_as_wrong_password(client):
+    """No user-enumeration signal via login: an email that was never registered must fail
+    identically (status code and message) to a correct email with a wrong password — see
+    app/routers/auth.py's login(), which already collapses `user is None`,
+    `not user.is_active`, and a wrong password into one branch. This test exists to lock
+    that property in, not to test something currently broken."""
+    unknown = client.post(
+        "/api/auth/login", json={"email": "never-registered@example.com", "password": "SomePassword123!"}
+    )
+    wrong_password = client.post(
+        "/api/auth/login", json={"email": "founder@lifeos.local", "password": "definitely-wrong"}
+    )
+    assert unknown.status_code == wrong_password.status_code == 401
+    assert unknown.json()["detail"] == wrong_password.json()["detail"]
+
+
 def test_founder_account_is_the_single_fixed_row(client, db_session):
     # Bootstrap already ran (the `client` fixture's `with TestClient(app)` triggers FastAPI's
     # startup event) — confirms app/bootstrap.py's bootstrap_founder_user() provisioned

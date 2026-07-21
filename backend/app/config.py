@@ -1,5 +1,7 @@
 from functools import lru_cache
+from urllib.parse import urlsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,6 +40,15 @@ class Settings(BaseSettings):
     # keyed by IP since there's no authenticated user yet at that point)
     rate_limit_chat_per_minute: int = 20
     rate_limit_default_per_minute: int = 120
+    # Import is heavier than ordinary CRUD (a ZIP can contain up to 500 files, each chunked
+    # and embedded — see app/rag/zip_import.py/app/rag/library_import.py) and, unlike chat,
+    # has no per-request AI-provider cost ceiling of its own to lean on, so it gets its own,
+    # stricter limit rather than sharing rate_limit_default_per_minute.
+    rate_limit_library_import_per_minute: int = 10
+    # Founder Workbench analysis calls a real AI provider (same per-request cost profile as
+    # chat) but is a heavier prompt (question + retrieved context + a critique pass) — kept
+    # equal to chat's default rather than looser, since there's no cheaper fallback path.
+    rate_limit_workbench_per_minute: int = 20
     rate_limit_login_per_minute: int = 10
     rate_limit_refresh_per_minute: int = 30
     rate_limit_logout_per_minute: int = 30
@@ -134,6 +145,47 @@ class Settings(BaseSettings):
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
+
+    # Fail fast on a malformed connection string at process startup (when Settings() is
+    # first constructed) rather than surfacing as a confusing low-level driver error deep
+    # inside SQLAlchemy/redis-py the first time something actually tries to connect.
+    # Deliberately checks *shape* only (scheme + host present, expected scheme family) — not
+    # reachability, which is what app/main.py's _check_redis_reachable() and the DB
+    # connection itself already verify separately.
+    @field_validator("database_url", "app_database_url")
+    @classmethod
+    def _validate_postgres_url(cls, value: str, info) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("postgresql", "postgres") or not parts.hostname:
+            raise ValueError(
+                f"{info.field_name.upper()} ser inte ut som en giltig Postgres-anslutningssträng "
+                f"(förväntar postgresql://användare:lösenord@host:port/databas)."
+            )
+        return value
+
+    @field_validator("redis_url")
+    @classmethod
+    def _validate_redis_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme not in ("redis", "rediss") or not parts.hostname:
+            raise ValueError(
+                "REDIS_URL ser inte ut som en giltig Redis-anslutningssträng (förväntar "
+                "redis://... eller rediss://... med ett host)."
+            )
+        return value
+
+    @field_validator("public_app_url")
+    @classmethod
+    def _validate_public_app_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(
+                "PUBLIC_APP_URL ser inte ut som en giltig URL (förväntar http(s)://host, "
+                "används i verifierings-/återställningsmail-länkar)."
+            )
+        return value
 
 
 @lru_cache

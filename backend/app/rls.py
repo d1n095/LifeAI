@@ -8,6 +8,25 @@ RLS_STATEMENTS = [
     "ALTER TABLE conversations FORCE ROW LEVEL SECURITY",
     "ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE document_chunks FORCE ROW LEVEL SECURITY",
+    # Founder Knowledge Studio v1 (migration 0006) — documents moved from "shared company
+    # knowledge" to owner-scoped once Knowledge Studio made per-document access control a
+    # real product requirement (see app/models/document.py's docstring update).
+    "ALTER TABLE documents ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE documents FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE knowledge_versions ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE knowledge_versions FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE knowledge_import_jobs ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE knowledge_import_jobs FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE source_relationships ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE source_relationships FORCE ROW LEVEL SECURITY",
+    # Claim-level trust (migration 0007, STEG 10) — see app/models/knowledge_claim.py.
+    "ALTER TABLE knowledge_claims ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE knowledge_claims FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE claim_relationships ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE claim_relationships FORCE ROW LEVEL SECURITY",
+    # Audio/video import v1 (migration 0009, STEG 12) — see app/models/media_url_import.py.
+    "ALTER TABLE media_url_imports ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE media_url_imports FORCE ROW LEVEL SECURITY",
 ]
 
 # One policy per table: rows are only visible/writable when they belong to the user bound
@@ -34,18 +53,54 @@ POLICY_DEFINITIONS = [
         # is still shared metadata. See app/rag/vector_store.py and app/rag/ingest.py.
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
+    {
+        "table": "documents",
+        "name": "documents_isolation",
+        "expr": "uploaded_by = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "knowledge_versions",
+        "name": "knowledge_versions_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "knowledge_import_jobs",
+        "name": "knowledge_import_jobs_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "source_relationships",
+        "name": "source_relationships_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "knowledge_claims",
+        "name": "knowledge_claims_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "claim_relationships",
+        "name": "claim_relationships_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "media_url_imports",
+        "name": "media_url_imports_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
 ]
 
 
 def apply_rls(engine: Engine) -> None:
     """Idempotently enable Postgres Row-Level Security on user-owned tables.
 
-    Conversations and document_chunks have strict per-user isolation. Documents/projects/
-    tasks themselves are still intentionally shared company knowledge (see
-    docs/MAINAI_0.1_PLAN.md) and only track `created_by` for attribution, not access control
-    — document_chunks (the pgvector-backed embedded text actually used for search) is a
-    deliberate exception to that, not a contradiction of it: see
-    app/models/document_chunk.py's docstring.
+    Conversations, document_chunks, documents, knowledge_versions, knowledge_import_jobs,
+    source_relationships, knowledge_claims, claim_relationships and media_url_imports all
+    have strict per-user isolation (see migrations 0006/0007/0009 —
+    docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md). Projects/tasks
+    remain intentionally shared company knowledge (see docs/MAINAI_0.1_PLAN.md) and only track
+    `created_by` for attribution, not access control — that distinction predates Founder
+    Knowledge Studio and wasn't part of tonight's change.
     """
     with engine.begin() as conn:
         for statement in RLS_STATEMENTS:

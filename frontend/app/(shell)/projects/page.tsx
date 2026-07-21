@@ -27,30 +27,50 @@ export default function ProjectsPage() {
     refresh();
   }, []);
 
+  // All three below were previously un-caught: a failed create/update (network error,
+  // session expired, ...) left the form/checkbox exactly where it was with zero feedback —
+  // indistinguishable from the click not registering at all. Same error state and message
+  // already used above for refresh() failures.
   async function addProject() {
     if (!newProject.trim()) return;
-    await api.createProject({ name: newProject.trim(), status: "active" });
-    setNewProject("");
-    await refresh();
+    try {
+      await api.createProject({ name: newProject.trim(), status: "active" });
+      setNewProject("");
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    }
   }
 
   async function addTask() {
     if (!newTask.trim()) return;
-    await api.createTask({ title: newTask.trim(), status: "todo", priority: "medium" });
-    setNewTask("");
-    await refresh();
+    try {
+      await api.createTask({ title: newTask.trim(), status: "todo", priority: "medium" });
+      setNewTask("");
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    }
   }
 
   async function toggleTask(task: TaskItem) {
     const status = task.status === "done" ? "todo" : "done";
-    await api.updateTask(task.id, { ...task, status });
-    await refresh();
+    try {
+      await api.updateTask(task.id, { ...task, status });
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    }
   }
 
   return (
     <div className="space-y-8">
       <h1 className="text-xl font-semibold">Projekt & roadmap</h1>
-      {error && <div className="text-sm text-red-300">{error}</div>}
+      {error && (
+        <div role="alert" className="text-sm text-red-300">
+          {error}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="rounded-xl border border-border bg-panel p-4">

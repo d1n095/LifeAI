@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.context.resolver import ConversationMessage, resolve_context
 from app.db import get_db
 from app.deps import require_founder
 from app.limiter import limiter
@@ -15,7 +16,7 @@ from app.providers.base import Message, ProviderError
 from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback
 from app.rag.retrieve import retrieve_context
-from app.rag.trust import assess_confidence, build_trust_instructions
+from app.rag.trust import assess_confidence, build_trust_instructions, detect_claim_conflicts, detect_conflicts
 from app.schemas import ChatMessageIn, ChatMessageOut, SourceRef
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(require_founder)])
@@ -54,8 +55,21 @@ async def chat(
         # fully populated — a refresh would just be an unnecessary extra round-trip.
 
     hits = await retrieve_context(db, user.id, payload.message, top_k=5)
-    trust = assess_confidence(hits)
-    context_block = "\n\n".join(f"[{h['title']}]\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
+    # Deleted sources can never appear here at all — app/rag/vector_store.py's search()
+    # excludes Document.deleted_at IS NOT NULL at the query level, not just in the UI.
+    conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
+    trust = assess_confidence(hits, conflicting_pairs)
+    # Claim-level conflicts (STEG 10) can surface a disagreement source-level detection
+    # alone would miss — see app/rag/trust.py's detect_claim_conflicts() docstring. ORed in,
+    # never replaces the source-level check.
+    if not trust.conflicts_detected and detect_claim_conflicts(db, user.id, [h["chunk_id"] for h in hits if h.get("chunk_id")]):
+        trust.conflicts_detected = True
+
+    def _label(h: dict) -> str:
+        status = h.get("active_truth_status")
+        return f"[{h['title']}] (status: {status})" if status and status != "active" else f"[{h['title']}]"
+
+    context_block = "\n\n".join(f"{_label(h)}\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
 
     history = (
         db.query(MessageModel)
@@ -65,9 +79,20 @@ async def chat(
         .all()
     )
 
+    # Conversation Context Resolver v1 (see app/context/resolver.py, docs/CONTEXT_RESOLVER_V1.md)
+    # — a rule-based classification of what kind of turn this message is (continuation, new
+    # topic, correction, ...). Purely observational tonight: it doesn't yet change retrieval
+    # or the system prompt (see that doc's "not built tonight" section for the deliberately
+    # deferred deeper integration) — surfaced on the response so the founder and a future UI
+    # can see it and build on it without this endpoint's core behavior depending on it.
+    context_resolution = resolve_context(
+        payload.message, [ConversationMessage(role=m.role.value, content=m.content, created_at=m.created_at) for m in history]
+    )
+
     system_content = (
         f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
-        f"TILLFÖRLITLIGHETSINSTRUKTION:\n{build_trust_instructions(trust.level)}"
+        f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
+        f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
     )
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
@@ -113,7 +138,15 @@ async def chat(
     db.commit()
 
     sources = [
-        SourceRef(document_id=uuid.UUID(h["document_id"]), title=h["title"], snippet=h["text"][:240], score=h["score"])
+        SourceRef(
+            document_id=uuid.UUID(h["document_id"]),
+            title=h["title"],
+            snippet=h["text"][:240],
+            score=h["score"],
+            active_truth_status=h.get("active_truth_status"),
+            start_seconds=h.get("start_seconds"),
+            end_seconds=h.get("end_seconds"),
+        )
         for h in hits
     ]
     return ChatMessageOut(
@@ -125,4 +158,7 @@ async def chat(
         confidence=trust.level,
         confidence_score=trust.score,
         providers_attempted=attempted,
+        conflicts_detected=trust.conflicts_detected,
+        context_intent=context_resolution.intent,
+        context_confidence=context_resolution.confidence,
     )

@@ -135,6 +135,9 @@ export type ChatSource = {
   title: string;
   snippet: string;
   score: number;
+  active_truth_status?: string | null;
+  start_seconds?: number | null;
+  end_seconds?: number | null;
 };
 
 export type Confidence = "high" | "medium" | "low" | "none";
@@ -148,6 +151,9 @@ export type ChatResponse = {
   confidence: Confidence;
   confidence_score: number;
   providers_attempted: string[];
+  conflicts_detected?: boolean;
+  context_intent?: string | null;
+  context_confidence?: string | null;
 };
 
 export type ConversationItem = {
@@ -186,6 +192,141 @@ export type ProjectItem = {
   description: string | null;
   status: string;
   created_at: string;
+};
+
+// --- Founder Knowledge Studio v1 (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) ---
+
+export type Classification = "vision" | "architecture" | "decisions" | "history" | "security" | "general";
+export type ActiveTruthStatus = "active" | "historical" | "proposed" | "superseded" | "disputed";
+
+export type KnowledgeSourceItem = {
+  id: string;
+  title: string;
+  source: string;
+  media_type: string | null;
+  original_filename: string | null;
+  category: string | null;
+  classification: Classification;
+  active_truth_status: ActiveTruthStatus;
+  status: string;
+  chunk_count: number;
+  checksum: string | null;
+  project_id: string | null;
+  version_number: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  imported_at: string | null;
+  media_duration_seconds: number | null;
+  transcript_provider: string | null;
+};
+
+export type KnowledgeVersionItem = {
+  id: string;
+  version_number: number;
+  checksum: string;
+  extraction_version: string;
+  raw_metadata: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type SourceRelationshipItem = {
+  id: string;
+  from_source_id: string;
+  to_source_id: string;
+  relationship_type: string;
+  note: string | null;
+  created_at: string;
+};
+
+export type ClaimConfidence = "certain" | "likely" | "uncertain" | "conflict" | "no_basis";
+export type ClaimStatus = "active" | "historical" | "proposed" | "disputed";
+
+export type KnowledgeClaimItem = {
+  id: string;
+  claim_text: string;
+  status: ClaimStatus;
+  confidence: ClaimConfidence;
+  grounding_score: number;
+  chunk_id: string | null;
+  created_at: string;
+};
+
+export type MediaSegmentItem = {
+  chunk_index: number;
+  text: string;
+  start_seconds: number | null;
+  end_seconds: number | null;
+};
+
+export type KnowledgeSourceDetail = KnowledgeSourceItem & {
+  versions: KnowledgeVersionItem[];
+  relationships: SourceRelationshipItem[];
+  chunk_preview: string[];
+  claims: KnowledgeClaimItem[];
+  segments: MediaSegmentItem[];
+};
+
+export type FileOutcome = {
+  filename: string;
+  status: "indexed" | "duplicate" | "failed" | "skipped";
+  reason: string | null;
+  source_id: string | null;
+};
+
+export type ImportJobItem = {
+  id: string;
+  status: "pending" | "running" | "completed" | "failed" | "partial";
+  source_filename: string | null;
+  source_checksum: string | null;
+  progress_current: number;
+  progress_total: number;
+  succeeded_count: number;
+  failed_count: number;
+  skipped_count: number;
+  failure_reason: string | null;
+  manifest: Record<string, unknown> | null;
+  file_results: FileOutcome[] | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  attempt_count: number;
+  max_attempts: number;
+  last_failure_transient: boolean | null;
+};
+
+export type LibrarySearchHit = {
+  document_id: string;
+  title: string;
+  text: string;
+  score: number;
+  classification: Classification;
+  active_truth_status: ActiveTruthStatus;
+  media_type: string | null;
+  text_match: boolean;
+};
+
+export type LibraryListFilters = {
+  project_id?: string;
+  classification?: string;
+  active_truth_status?: string;
+  q?: string;
+};
+
+// --- Founder Workbench (DEL 9) ---
+
+export type WorkbenchLabel = "idea" | "proposal" | "decision" | "history";
+
+export type WorkbenchAnalysis = {
+  question: string;
+  conclusion: string;
+  critique: string | null;
+  sources: ChatSource[];
+  confidence: Confidence;
+  confidence_score: number;
+  conflicts_detected: boolean;
+  provider: string;
+  model: string;
 };
 
 export type TaskItem = {
@@ -303,4 +444,50 @@ export const api = {
       body: JSON.stringify({ role, provider, model }),
     }),
   usageSummary: () => request<UsageSummaryRow[]>("/api/admin/usage/summary"),
+
+  importToLibrary: (file: File, projectId?: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return request<ImportJobItem>(`/api/library/import${qs}`, { method: "POST", body: form });
+  },
+  getImportJob: (id: string) => request<ImportJobItem>(`/api/library/jobs/${id}`),
+  listLibrary: (filters: LibraryListFilters = {}) => {
+    const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => !!v) as [string, string][]).toString();
+    return request<KnowledgeSourceItem[]>(`/api/library${qs ? `?${qs}` : ""}`);
+  },
+  getLibrarySource: (id: string) => request<KnowledgeSourceDetail>(`/api/library/${id}`),
+  // Not a request() call: this is a direct <audio>/<video> src URL. The browser attaches
+  // the session cookie itself for a same-origin request (API_URL is empty in the normal
+  // same-origin-proxied deployment — see this file's top comment), so no fetch/blob-URL
+  // indirection is needed here.
+  getLibraryMediaUrl: (id: string) => `${API_URL}/api/library/${id}/media`,
+  deleteLibrarySource: (id: string) =>
+    request(`/api/library/${id}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }),
+  createSourceRelationship: (sourceId: string, toSourceId: string, relationshipType: string, note?: string) =>
+    request<SourceRelationshipItem>(`/api/library/${sourceId}/relationships`, {
+      method: "POST",
+      body: JSON.stringify({ to_source_id: toSourceId, relationship_type: relationshipType, note }),
+    }),
+  searchLibrary: (query: string, filters: LibraryListFilters = {}) => {
+    const qs = new URLSearchParams({
+      q: query,
+      ...Object.fromEntries(Object.entries(filters).filter(([, v]) => !!v)),
+    } as Record<string, string>).toString();
+    return request<LibrarySearchHit[]>(`/api/library/search/hybrid?${qs}`);
+  },
+
+  analyzeWorkbench: (question: string, projectId?: string, documentId?: string) =>
+    request<WorkbenchAnalysis>("/api/workbench/analyze", {
+      method: "POST",
+      body: JSON.stringify({ question, project_id: projectId || null, document_id: documentId || null }),
+    }),
+  saveWorkbenchResult: (payload: {
+    question: string;
+    conclusion: string;
+    critique?: string | null;
+    label: WorkbenchLabel;
+    project_id?: string | null;
+    source_document_ids?: string[];
+  }) => request<KnowledgeSourceItem>("/api/workbench/save", { method: "POST", body: JSON.stringify(payload) }),
 };

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -42,5 +42,12 @@ class DocumentChunk(Base):
     text: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(settings.embedding_dim))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # STEG 12: set together, both or neither — a chunk built from a timed transcript
+    # segment (app/rag/media_import.py) carries the [start, end) it was built from, so a
+    # citation can open the source at the exact moment instead of just the source itself.
+    # NULL for every ordinary text chunk (app/rag/ingest.py never sets these).
+    start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     document = relationship("Document", viewonly=True)

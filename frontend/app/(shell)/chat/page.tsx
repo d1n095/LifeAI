@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { api, ChatSource, Confidence, ConversationItem } from "@/lib/api";
 import { useVoice } from "@/lib/useVoice";
 import Orb, { OrbState } from "@/components/Orb";
@@ -14,6 +15,7 @@ type ChatEntry = {
   confidence?: Confidence;
   confidenceScore?: number;
   providersAttempted?: string[];
+  conflictsDetected?: boolean;
 };
 
 export default function ChatPage() {
@@ -101,6 +103,7 @@ export default function ChatPage() {
           confidence: res.confidence,
           confidenceScore: res.confidence_score,
           providersAttempted: res.providers_attempted,
+          conflictsDetected: res.conflicts_detected,
         },
       ]);
       if (readAloud) voice.speak(res.reply);
@@ -230,17 +233,56 @@ export default function ChatPage() {
                 {entry.content}
               </div>
               {entry.confidence && (
-                <div className="mt-2">
+                <div className="mt-2 flex flex-wrap items-center gap-2">
                   <ConfidenceBadge confidence={entry.confidence} score={entry.confidenceScore ?? 0} />
+                  {/* Trust Engine's conflicts_detected (app/rag/trust.py) was computed and
+                      returned by every /api/chat response but never shown anywhere in this
+                      UI — a founder had no visible warning that a source-level or
+                      claim-level contradiction (app/rag/trust.py's detect_conflicts /
+                      detect_claim_conflicts) was flagged internally, even next to a "hög
+                      tillförlitlighet" badge. Found during STEG 14's full vertical review. */}
+                  {entry.conflictsDetected && (
+                    <span
+                      role="alert"
+                      className="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/15 px-2.5 py-1 text-xs text-red-300"
+                      title="Källorna bakom svaret motsäger varandra — se källorna nedan innan du litar på svaret."
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+                      Motstridiga källor
+                    </span>
+                  )}
                 </div>
               )}
               {entry.sources && entry.sources.length > 0 && (
                 <div className="mt-2 text-xs text-white/40 space-y-1">
                   <div>Källor:</div>
                   {entry.sources.map((s, j) => (
-                    <div key={j} className="pl-2 border-l border-border">
+                    <Link
+                      key={j}
+                      // STEG 12/13: a citation from a timed transcript chunk carries
+                      // start_seconds — the ?t= param is read by the library detail page
+                      // (app/(shell)/library/[id]/page.tsx) to seek+play the media element
+                      // to that exact moment, not just open the source.
+                      href={
+                        s.start_seconds != null
+                          ? `/library/${s.document_id}?t=${s.start_seconds}`
+                          : `/library/${s.document_id}`
+                      }
+                      className="block pl-2 border-l border-border hover:border-accent hover:text-white/70"
+                      title={
+                        s.start_seconds != null
+                          ? "Öppna källan i Founder Knowledge Studio och spela upp från citatet"
+                          : "Öppna källan i Founder Knowledge Studio"
+                      }
+                    >
                       {s.title} ({s.score.toFixed(2)})
-                    </div>
+                      {s.active_truth_status && s.active_truth_status !== "active" && (
+                        <span className="ml-1 text-amber-300/70">[{s.active_truth_status}]</span>
+                      )}
+                      {s.start_seconds != null && (
+                        <span className="ml-1 text-white/30">▶ {Math.floor(s.start_seconds / 60)}:{(Math.floor(s.start_seconds) % 60).toString().padStart(2, "0")}</span>
+                      )}
+                    </Link>
                   ))}
                 </div>
               )}

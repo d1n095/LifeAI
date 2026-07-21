@@ -106,6 +106,12 @@ class SourceRef(BaseModel):
     title: str
     snippet: str
     score: float
+    active_truth_status: str | None = None
+    # STEG 12: set only when this citation comes from a timed transcript chunk
+    # (app/rag/media_import.py) — lets the frontend player open the source at the exact
+    # moment instead of just the source itself.
+    start_seconds: float | None = None
+    end_seconds: float | None = None
 
 
 class ChatMessageOut(BaseModel):
@@ -117,6 +123,9 @@ class ChatMessageOut(BaseModel):
     confidence: str  # "high" | "medium" | "low" | "none"
     confidence_score: float
     providers_attempted: list[str] = []  # >1 entry means fallback engaged
+    conflicts_detected: bool = False
+    context_intent: str | None = None  # see app/context/resolver.py — observational only tonight
+    context_confidence: str | None = None
 
 
 class MessageOut(BaseModel):
@@ -219,3 +228,223 @@ class UsageSummaryRow(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     cost_usd: float | None  # None means at least one row in this group has unknown pricing
+
+
+# --- Founder Knowledge Studio v1 (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) ---
+
+
+class KnowledgeVersionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    version_number: int
+    checksum: str
+    extraction_version: str
+    raw_metadata: dict | None
+    created_at: datetime
+
+
+class SourceRelationshipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    from_source_id: uuid.UUID
+    to_source_id: uuid.UUID
+    relationship_type: str
+    note: str | None
+    created_at: datetime
+
+
+class SourceRelationshipIn(BaseModel):
+    to_source_id: uuid.UUID
+    relationship_type: str
+    note: str | None = None
+
+    @field_validator("relationship_type")
+    @classmethod
+    def valid_relationship_type(cls, v: str) -> str:
+        allowed = {"derived_from", "supersedes", "contradicts", "supports", "duplicates", "belongs_to"}
+        if v not in allowed:
+            raise ValueError(f"Ogiltig relationstyp. Måste vara en av: {', '.join(sorted(allowed))}.")
+        return v
+
+
+class KnowledgeSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    source: str
+    media_type: str | None
+    original_filename: str | None
+    category: str | None
+    classification: str
+    active_truth_status: str
+    status: str
+    chunk_count: int
+    checksum: str | None
+    project_id: uuid.UUID | None
+    version_number: int
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+    imported_at: datetime | None
+    media_duration_seconds: float | None = None
+    transcript_provider: str | None = None
+
+
+class KnowledgeClaimOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    claim_text: str
+    status: str
+    confidence: str  # computed via app/rag/trust.py's assess_claim_confidence(), not the stored extraction-time value
+    grounding_score: float
+    chunk_id: uuid.UUID | None
+    created_at: datetime
+
+
+class MediaSegmentOut(BaseModel):
+    """STEG 13: the FULL timestamped chunk list for a media source — deliberately separate
+    from chunk_preview (which stays truncated to CHUNK_PREVIEW_COUNT/CHUNK_PREVIEW_LENGTH
+    for text sources) since the Library UI's transcript view/search needs every chunk, not a
+    preview, to be useful."""
+
+    chunk_index: int
+    text: str
+    start_seconds: float | None
+    end_seconds: float | None
+
+
+class KnowledgeSourceDetailOut(KnowledgeSourceOut):
+    versions: list[KnowledgeVersionOut] = []
+    relationships: list[SourceRelationshipOut] = []
+    chunk_preview: list[str] = []
+    claims: list[KnowledgeClaimOut] = []
+    segments: list[MediaSegmentOut] = []
+
+
+class ImportJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    status: str
+    source_filename: str | None
+    source_checksum: str | None
+    progress_current: int
+    progress_total: int
+    succeeded_count: int
+    failed_count: int
+    skipped_count: int
+    failure_reason: str | None
+    manifest: dict | None
+    file_results: list | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    attempt_count: int
+    max_attempts: int
+    last_failure_transient: bool | None
+
+
+class LibrarySearchHit(BaseModel):
+    document_id: uuid.UUID
+    title: str
+    text: str
+    score: float
+    classification: str
+    active_truth_status: str
+    media_type: str | None
+    text_match: bool = False
+    start_seconds: float | None = None
+    end_seconds: float | None = None
+
+
+# --- STEG 12: secure URL-import model (intent only, never fetched — see
+# app/models/media_url_import.py) ---
+
+MEDIA_URL_PLATFORMS = {"youtube", "vimeo", "generic"}
+
+
+class MediaUrlImportIn(BaseModel):
+    url: str
+    platform: str
+    consent_confirmed: bool = False
+    rights_note: str | None = None
+    project_id: uuid.UUID | None = None
+
+    @field_validator("url")
+    @classmethod
+    def http_url_only(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("URL får inte vara tom.")
+        if len(v) > 2000:
+            raise ValueError("URL:en är för lång (max 2000 tecken).")
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("Endast http(s)-URL:er stöds.")
+        return v
+
+    @field_validator("platform")
+    @classmethod
+    def known_platform(cls, v: str) -> str:
+        if v not in MEDIA_URL_PLATFORMS:
+            raise ValueError(f"Okänd plattform. Tillåtna: {', '.join(sorted(MEDIA_URL_PLATFORMS))}.")
+        return v
+
+    @field_validator("rights_note")
+    @classmethod
+    def bounded_rights_note(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 4000:
+            raise ValueError("Rättighetsnoteringen är för lång (max 4000 tecken).")
+        return v
+
+
+class MediaUrlImportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    url: str
+    platform: str
+    consent_confirmed: bool
+    rights_note: str | None
+    status: str
+    project_id: uuid.UUID | None
+    created_at: datetime
+
+
+class DeleteConfirmIn(BaseModel):
+    confirm: bool = False
+
+
+# --- Founder Workbench (DEL 9) ---
+
+
+class WorkbenchAnalyzeIn(BaseModel):
+    question: str
+    project_id: uuid.UUID | None = None
+    document_id: uuid.UUID | None = None
+
+
+class WorkbenchAnalyzeOut(BaseModel):
+    question: str
+    conclusion: str
+    critique: str | None
+    sources: list[SourceRef]
+    confidence: str
+    confidence_score: float
+    conflicts_detected: bool
+    provider: str
+    model: str
+
+
+class WorkbenchSaveIn(BaseModel):
+    question: str
+    conclusion: str
+    critique: str | None = None
+    label: str
+    project_id: uuid.UUID | None = None
+    source_document_ids: list[uuid.UUID] = []
+
+    @field_validator("label")
+    @classmethod
+    def valid_label(cls, v: str) -> str:
+        allowed = {"idea", "proposal", "decision", "history"}
+        if v not in allowed:
+            raise ValueError(f"Ogiltig etikett. Måste vara en av: {', '.join(sorted(allowed))}.")
+        return v

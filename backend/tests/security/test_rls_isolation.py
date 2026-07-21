@@ -9,6 +9,9 @@ from app.config import get_settings
 from app.models.conversation import Conversation
 from app.models.document import Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
+from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.knowledge_version import KnowledgeVersion
+from app.models.source_relationship import RelationshipType, SourceRelationship
 from app.rag.vector_store import search, upsert_chunks
 
 EMBEDDING_DIM = get_settings().embedding_dim
@@ -26,12 +29,22 @@ def _fake_vector(seed: float) -> list[float]:
 
 
 def _make_document(session, owner_id) -> Document:
-    # documents itself isn't RLS-protected (shared company knowledge, see app/rls.py's
-    # docstring) — no SET LOCAL needed for this insert specifically.
+    # documents is RLS-protected as of migration 0006 (Founder Knowledge Studio v1 — see
+    # app/models/document.py's docstring): owner-scoped now, no longer "shared company
+    # knowledge". SET LOCAL must be set to owner_id before this insert or RLS's WITH CHECK
+    # rejects it outright.
+    _set_rls_user(session, owner_id)
     document = Document(title="Testdokument", source=DocumentSource.upload, uploaded_by=owner_id)
     session.add(document)
     session.commit()
-    session.refresh(document)
+    # No session.refresh(): id/created_at/updated_at are all populated client-side by
+    # SQLAlchemy at flush (see app/models/document.py's defaults), and the session is
+    # expire_on_commit=False (app/db.py) — a refresh would force a brand-new SELECT in a
+    # fresh transaction, where app/db.py's after_begin listener re-applies RLS from the
+    # per-request contextvar (empty here, this is a raw test session) instead of the
+    # SET LOCAL above, which only lasted for the transaction that just committed. That's
+    # not a bug in RLS, just an unnecessary refresh tripping over the isolation this file
+    # exists to test — same reasoning as app/routers/chat.py's identical no-refresh comment.
     return document
 
 
@@ -184,3 +197,119 @@ def test_cannot_write_document_chunk_for_another_user(db_session, make_verified_
         assert False, "insert should have been rejected by document_chunks_isolation's WITH CHECK"
     except Exception:
         db_session.rollback()
+
+
+# --- Founder Knowledge Studio v1 (migration 0006) — documents_isolation and the three new
+# tables. See app/models/document.py's docstring: documents moved from "shared company
+# knowledge" to strictly owner-scoped, which is what makes these tests necessary now (they
+# would have been meaningless — everyone could see every document — before this migration).
+
+
+def test_user_never_reads_another_users_documents(db_session, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    _make_document(db_session, user_a.id)
+    _make_document(db_session, user_b.id)
+
+    _set_rls_user(db_session, user_a.id)
+    visible_to_a = db_session.query(Document).all()
+    assert len(visible_to_a) == 1
+    assert visible_to_a[0].uploaded_by == user_a.id
+
+    _set_rls_user(db_session, user_b.id)
+    visible_to_b = db_session.query(Document).all()
+    assert len(visible_to_b) == 1
+    assert visible_to_b[0].uploaded_by == user_b.id
+
+
+def test_cannot_write_document_for_another_user(db_session, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(Document(title="ska aldrig lyckas", source=DocumentSource.upload, uploaded_by=user_b.id))
+    try:
+        db_session.commit()
+        assert False, "insert should have been rejected by documents_isolation's WITH CHECK"
+    except Exception:
+        db_session.rollback()
+
+
+def test_user_never_reads_another_users_knowledge_versions(db_session, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    doc_a = _make_document(db_session, user_a.id)
+    doc_b = _make_document(db_session, user_b.id)
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(
+        KnowledgeVersion(
+            source_id=doc_a.id, owner_id=user_a.id, version_number=1, checksum="a" * 64, extraction_version="v1"
+        )
+    )
+    db_session.commit()
+
+    _set_rls_user(db_session, user_b.id)
+    db_session.add(
+        KnowledgeVersion(
+            source_id=doc_b.id, owner_id=user_b.id, version_number=1, checksum="b" * 64, extraction_version="v1"
+        )
+    )
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    visible_to_a = db_session.query(KnowledgeVersion).all()
+    assert [v.checksum for v in visible_to_a] == ["a" * 64]
+
+
+def test_user_never_reads_another_users_import_jobs(db_session, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(ImportJob(owner_id=user_a.id, status=ImportJobStatus.completed, source_filename="a.zip"))
+    db_session.commit()
+
+    _set_rls_user(db_session, user_b.id)
+    db_session.add(ImportJob(owner_id=user_b.id, status=ImportJobStatus.completed, source_filename="b.zip"))
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    visible_to_a = db_session.query(ImportJob).all()
+    assert [j.source_filename for j in visible_to_a] == ["a.zip"]
+
+
+def test_user_never_reads_another_users_source_relationships(db_session, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    doc_a1 = _make_document(db_session, user_a.id)
+    doc_a2 = _make_document(db_session, user_a.id)
+    doc_b1 = _make_document(db_session, user_b.id)
+    doc_b2 = _make_document(db_session, user_b.id)
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(
+        SourceRelationship(
+            owner_id=user_a.id,
+            from_source_id=doc_a1.id,
+            to_source_id=doc_a2.id,
+            relationship_type=RelationshipType.supersedes,
+        )
+    )
+    db_session.commit()
+
+    _set_rls_user(db_session, user_b.id)
+    db_session.add(
+        SourceRelationship(
+            owner_id=user_b.id,
+            from_source_id=doc_b1.id,
+            to_source_id=doc_b2.id,
+            relationship_type=RelationshipType.contradicts,
+        )
+    )
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    visible_to_a = db_session.query(SourceRelationship).all()
+    assert len(visible_to_a) == 1
+    assert visible_to_a[0].relationship_type == RelationshipType.supersedes

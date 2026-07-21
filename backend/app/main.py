@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
 from app.rls import apply_rls
-from app.routers import account, admin, auth, chat, conversations, documents, health, knowledge, projects
+from app.routers import account, admin, auth, chat, conversations, documents, health, knowledge, library, projects, workbench
 from app.scheduler import start_scheduler, stop_scheduler
 
 settings = get_settings()
@@ -46,6 +46,8 @@ app.include_router(conversations.router)
 app.include_router(documents.router)
 app.include_router(projects.router)
 app.include_router(knowledge.router)
+app.include_router(library.router)
+app.include_router(workbench.router)
 app.include_router(admin.router)
 
 
@@ -70,6 +72,8 @@ def on_startup():
 
     if settings.environment == "production":
         _check_smtp_configured()
+        _check_no_placeholder_secrets()
+        _check_cookies_secure()
 
     if settings.redis_url:
         _check_redis_reachable()
@@ -122,6 +126,29 @@ def _check_smtp_configured() -> None:
         )
 
 
+def _redact_url_credentials(url: str) -> str:
+    """Returns `url` with any userinfo password replaced by `***`, for safe inclusion in a
+    startup error message. Startup exceptions routinely end up in the regular application
+    log / Render's log stream (far broader read-access and longer retention than a secret
+    manager) — see app/email.py and app/routers/health.py, which already deliberately never
+    echo connection strings or exception details past a generic message for exactly this
+    reason. Falls back to returning the input unchanged if it doesn't parse as a URL at all,
+    rather than raising a second, more confusing error out of an error handler."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.password:
+        return url
+    userinfo = f"{parts.username}:***" if parts.username else ":***"
+    netloc = f"{userinfo}@{parts.hostname or ''}"
+    if parts.port:
+        netloc += f":{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def _check_redis_reachable() -> None:
     """Fail fast, not silently: if REDIS_URL is set, rate limiting is expected to actually
     be distributed (see app/limiter.py) — an unreachable Redis at startup should stop the
@@ -134,9 +161,46 @@ def _check_redis_reachable() -> None:
         client.ping()
     except redis.RedisError as exc:
         raise RuntimeError(
-            f"REDIS_URL är satt ({settings.redis_url}) men Redis kunde inte nås vid uppstart. "
-            "Rate limiting kräver en fungerande delad lagring i den här konfigurationen — "
-            "kontrollera att Redis-tjänsten kör innan backend startas."
+            f"REDIS_URL är satt ({_redact_url_credentials(settings.redis_url)}) men Redis "
+            "kunde inte nås vid uppstart. Rate limiting kräver en fungerande delad lagring i "
+            "den här konfigurationen — kontrollera att Redis-tjänsten kör innan backend "
+            "startas."
         ) from exc
     finally:
         client.close()
+
+
+def _check_no_placeholder_secrets() -> None:
+    """Every one of these has an insecure, publicly-readable-in-this-repo default value —
+    fine for local dev (see docker-compose.yml), but if any of them is still that default
+    once ENVIRONMENT=production, the deployment is either misconfigured (an operator forgot
+    to set it in the Render dashboard) or, worse, an attacker who has read this file already
+    knows a working credential for the single account with full MainAI access. Fail loudly
+    at startup rather than silently accepting a knowable password."""
+    placeholder_fields = {
+        "SECRET_KEY": settings.secret_key == "change-me-in-production",
+        "FOUNDER_PASSWORD": settings.founder_password == "change-me-in-production",
+        "FOUNDER_EMAIL": settings.founder_email == "founder@lifeos.local",
+    }
+    still_default = [name for name, is_placeholder in placeholder_fields.items() if is_placeholder]
+    if still_default:
+        raise RuntimeError(
+            f"Följande miljövariabler är fortfarande satta till sina osäkra/oanvändbara "
+            f"standardvärden i en produktionsmiljö (ENVIRONMENT=production): "
+            f"{', '.join(still_default)}. Sätt riktiga värden i Render-dashboarden "
+            "(sync: false i render.yaml — aldrig committade) innan produktionsdeploy."
+        )
+
+
+def _check_cookies_secure() -> None:
+    """COOKIE_SECURE=false in production would let the session cookies (which are what
+    require_founder() ultimately trusts) be sent over plain HTTP — trivially interceptable
+    on any network path that isn't fully HTTPS end-to-end. See docs/AUTH_THREAT_MODEL.md.
+    There's no legitimate production configuration where this should be false; the default
+    (true) already matches — this only fires if something explicitly overrode it."""
+    if not settings.cookie_secure:
+        raise RuntimeError(
+            "COOKIE_SECURE är satt till false i en produktionsmiljö (ENVIRONMENT=production). "
+            "Sessionskakorna skulle då kunna skickas okrypterat — sätt COOKIE_SECURE=true "
+            "(standardvärdet) eller ta bort variabeln helt så standardvärdet gäller."
+        )

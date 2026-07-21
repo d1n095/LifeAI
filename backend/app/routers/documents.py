@@ -21,7 +21,12 @@ router = APIRouter(prefix="/api/documents", tags=["documents"], dependencies=[De
 
 @router.get("", response_model=list[DocumentOut])
 def list_documents(db: Session = Depends(get_db)):
-    return db.query(Document).order_by(Document.created_at.desc()).all()
+    # Document now has a soft-delete flag (deleted_at — see migration 0006 and
+    # app/routers/library.py's delete_source): a source removed through the newer Founder
+    # Knowledge Studio Library UI must not keep reappearing here, in the older /documents
+    # view of the same underlying table. Found as a real bug (not assumed) — an E2E test
+    # deleting a source via /library still saw it listed via /documents.
+    return db.query(Document).filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
 
 
 @router.post("/upload", response_model=DocumentOut)
