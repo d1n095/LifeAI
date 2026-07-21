@@ -181,13 +181,23 @@ repo-administratörsåtgärd):
    check — den är beroende av alla andra jobb, så ett enda kryss räcker.
 4. (Rekommenderat) Kryssa även i "Require branches to be up to date before merging".
 
-Efter `all-checks-passed` finns även `deploy-render`, som anropar Render-tjänsternas Deploy
-Hook-URL:er (om de är satta som repo-secrets) — det är vägen en Render-deploy triggas på via
-GitHub Actions. **Detta är inte nödvändigtvis den enda vägen**: om ett Render Blueprint är
-länkat mot repot med Auto Sync påslaget kan Render själv applicera `render.yaml`-ändringar
-(inklusive ett runtime-byte) direkt vid push till den länkade branchen, oberoende av
-GitHub Actions och oberoende av om deploy-hook-secreten är satt. Se avsnittet om Auto Sync i
-`docs/RENDER_DEPLOY.md` innan du pushar ändringar till `render.yaml`.
+Efter `all-checks-passed` finns även `deploy-render` — **permanent avstängt sedan
+2026-07-21, superseded av den manuellt gate:ade Strato VPS-arkitekturen** (se
+`docs/STRATO_VPS_DEPLOY.md`). Jobbet gör inte längre något nätverksanrop och läser inte
+längre några Render-hemligheter alls — det är inte bara villkorat på att secrets saknas,
+själva koden som skulle anropat Render Deploy Hook-URL:erna är borttagen ur
+`.github/workflows/ci.yml`. Historiskt (innan 2026-07-21) var detta vägen en Render-deploy
+triggades på via GitHub Actions; det stycket nedan är kvar som historik.
+
+**Detta täcker fortfarande inte varje väg till en Render-deploy**: om ett Render Blueprint
+fortfarande är länkat mot repot i Render-dashboarden med "Auto Sync" påslaget kan Render
+själv applicera `render.yaml`-ändringar (inklusive ett runtime-byte) direkt vid push till
+den länkade branchen, oberoende av GitHub Actions och oberoende av att `deploy-render`-jobbet
+ovan nu är avstängt — det är en Render-dashboard-inställning, inte något en kodändring i det
+här repot kan styra. Bekräfta manuellt i Render-dashboarden att Auto Sync är avstängt (manuell
+sync) om du vill vara säker på att ingen push någonsin kan nå Render. Se avsnittet om Auto
+Sync i `docs/RENDER_DEPLOY.md` (nu markerat superseded, men innehållet om Auto Sync-risken
+gäller fortfarande tills det bekräftats avstängt i dashboarden).
 
 ## Incidenthantering
 

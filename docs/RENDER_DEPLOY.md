@@ -1,5 +1,17 @@
 # Render-driftsättning
 
+> **SUPERSEDED, 2026-07-21 — Render-driftsättning är inte längre den aktiva vägen.**
+> Render ersattes av den manuellt gate:ade Strato VPS-arkitekturen — se
+> `docs/STRATO_VPS_DEPLOY.md` och `docs/VPS_ARCHITECTURE.md` för den nuvarande vägen till
+> produktion. `.github/workflows/ci.yml`s `deploy-render`-jobb är permanent avstängt (gör
+> inget nätverksanrop längre, oavsett vilka secrets som finns satta i repot) — se
+> `docs/checkpoints/INTEGRATION_FOUNDER_VPS_2026-07-21.md` för den ändringen. Resten av det
+> här dokumentet är bevarat som historisk utredning (Render-namnkonflikten, pgvector- och
+> databasroll-utredningarna, SMTP-felsökningen m.m.) — inga instruktioner nedan ska följas
+> för att faktiskt driftsätta något längre. Om ett Render Blueprint fortfarande är länkat mot
+> det här repot i Render-dashboarden, bekräfta manuellt att "Auto Sync" är avstängt där också
+> (det är en dashboard-inställning, inte något en kodändring i det här repot kan styra).
+
 Detta dokument beskriver `render.yaml` (repo-roten) — ett [Render
 Blueprint](https://render.com/docs/blueprint-spec) för en enda Render Free-webbtjänst som kör
 hela stacken: Next.js-frontend och FastAPI-backend som syskonprocesser i **samma container**,
@@ -462,6 +474,13 @@ dokumentations-/försvar-i-djupet-skäl.
 
 ## Deploy sker bara via CI, aldrig av ett push i sig
 
+> **SUPERSEDED, 2026-07-21:** avsnittet nedan beskriver hur `deploy-render` *tidigare*
+> fungerade, som historik. Sedan 2026-07-21 gör jobbet inget nätverksanrop alls längre —
+> curl-anropen mot Deploy Hook-URL:erna är borttagna ur `.github/workflows/ci.yml`, inte
+> bara villkorade på saknade secrets. Att lägga till `RENDER_BACKEND_DEPLOY_HOOK_URL`/
+> `RENDER_FRONTEND_DEPLOY_HOOK_URL` som GitHub Actions-secrets i dag skulle alltså **inte**
+> återaktivera något — koden som skulle läst dem finns inte kvar.
+
 `render.yaml` sätter `autoDeploy: false`. Enda utlösaren är jobbet `deploy-render` i
 `.github/workflows/ci.yml`, som körs efter — och bara om — `all-checks-passed` blir grönt, och
 bara på push till exakt `claude/det-kommer-mer-879lcm`. Det anropar tjänstens **Deploy Hook**-
@@ -493,6 +512,9 @@ https://github.com/d1n095/LifeAI/actions/runs/29733943975. Ingen ny miljövariab
 eller dashboard-inställning krävs för fixen — den ligger helt i applikationskoden.
 
 ### Vad som konkret återstår: ett enda manuellt klick
+
+> **SUPERSEDED, 2026-07-21:** stegen nedan är historik, inte en aktuell instruktion. Render
+> är inte längre den avsedda vägen till produktion — se `docs/STRATO_VPS_DEPLOY.md`.
 
 Eftersom `render.yaml` har `autoDeploy: false` och CI:s `deploy-render`-jobb är ett medvetet
 no-op tills `RENDER_BACKEND_DEPLOY_HOOK_URL`/`RENDER_FRONTEND_DEPLOY_HOOK_URL` sätts som

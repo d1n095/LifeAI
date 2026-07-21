@@ -1880,37 +1880,32 @@ jobs:
           echo "All required checks passed."
 
   # ---------------------------------------------------------------------------------------
-  # Render deploy — the ONLY thing that ever triggers a Render deploy for this stack.
-  # render.yaml sets autoDeploy: false on both Render web services specifically so a push
-  # alone can never deploy; this job is gated on all-checks-passed and only runs for pushes
-  # to the production branch (not PRs, not other branches). It's a safe no-op until
-  # RENDER_BACKEND_DEPLOY_HOOK_URL / RENDER_FRONTEND_DEPLOY_HOOK_URL are added as GitHub
-  # Actions secrets — see docs/RENDER_DEPLOY.md. Each hook is independent: either, both, or
-  # neither can be configured without failing this job.
+  # Render deploy — PERMANENTLY DISABLED, 2026-07-21.
+  #
+  # Render deployment was superseded by the manually-gated Strato VPS architecture (see
+  # docs/STRATO_VPS_DEPLOY.md, docs/VPS_ARCHITECTURE.md, scripts/vps/deploy.sh). This job
+  # deliberately no longer references secrets.RENDER_BACKEND_DEPLOY_HOOK_URL or
+  # secrets.RENDER_FRONTEND_DEPLOY_HOOK_URL, and makes no network call of any kind — so this
+  # is not "disabled because the hook secrets happen to be unset" (a state that silently
+  # re-enables itself the moment someone adds those secrets back), it is disabled by deleting
+  # the code path that could ever call out to Render, period. Re-enabling a real Render
+  # deploy would require deliberately restoring the curl steps this job used to run — see
+  # git history for this file before 2026-07-21 if that's ever genuinely needed again.
+  #
+  # This job is kept (rather than deleted outright) only so branch protection rules that
+  # already reference a specific job name keep resolving, and so CI history keeps showing
+  # explicitly *why* no deploy happened rather than the job disappearing silently. It still
+  # only ever runs on push to the historical production branch, and now does nothing there
+  # but report its own disabled status.
   # ---------------------------------------------------------------------------------------
   deploy-render:
-    name: Deploy to Render
+    name: Deploy to Render (PERMANENTLY DISABLED — superseded by Strato VPS)
     runs-on: ubuntu-latest
     needs: all-checks-passed
     if: github.event_name == 'push' && github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' && needs.all-checks-passed.result == 'success'
     steps:
-      - name: Trigger backend deploy hook
-        env:
-          HOOK_URL: ${{ secrets.RENDER_BACKEND_DEPLOY_HOOK_URL }}
+      - name: Report that Render deploy is permanently disabled
         run: |
-          if [ -z "$HOOK_URL" ]; then
-            echo "RENDER_BACKEND_DEPLOY_HOOK_URL is not set — skipping backend deploy. See docs/RENDER_DEPLOY.md."
-            exit 0
-          fi
-          curl -fsS -X POST "$HOOK_URL"
-          echo "Backend deploy triggered."
-      - name: Trigger frontend deploy hook
-        env:
-          HOOK_URL: ${{ secrets.RENDER_FRONTEND_DEPLOY_HOOK_URL }}
-        run: |
-          if [ -z "$HOOK_URL" ]; then
-            echo "RENDER_FRONTEND_DEPLOY_HOOK_URL is not set — skipping frontend deploy. See docs/RENDER_DEPLOY.md."
-            exit 0
-          fi
-          curl -fsS -X POST "$HOOK_URL"
-          echo "Frontend deploy triggered."
+          echo "Render deployment is permanently disabled — superseded by the manually-gated"
+          echo "Strato VPS architecture (see docs/STRATO_VPS_DEPLOY.md). This job intentionally"
+          echo "makes no network call and does not read any Render deploy-hook secret."
