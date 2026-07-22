@@ -8,7 +8,7 @@ finns i det här repot — inga hypotetiska verktyg.
 ## Snabbkommandon
 
 ```bash
-# Status för alla tre tjänster
+# Status för alla fem tjänster (caddy, backend, frontend, redis, worker)
 sudo docker compose --env-file /etc/lifeai/lifeai.env -f /opt/lifeai/docker-compose.vps.yml ps
 
 # Loggar (senaste 100 rader, alla tjänster)
@@ -16,6 +16,11 @@ sudo docker compose --env-file /etc/lifeai/lifeai.env -f /opt/lifeai/docker-comp
 
 # Hälsokontroll genom hela kedjan
 curl -sS https://<din-domän>/api/health
+
+# Life Library-workerns egen status (kö, senaste heartbeat, lagringsutrymme) — se
+# "Life Library-workern" nedan. Kräver ett inloggat grundare-cookie (samma origin, samma
+# CSRF-mönster som alla andra /api/library-rutter).
+curl -sS https://<din-domän>/api/library/ops/status
 
 # Deployhistorik (senaste 10)
 ls -t /opt/lifeai/deployments/*.json | head -10 | xargs -I{} sh -c 'echo "--- {} ---"; cat {}'
@@ -41,7 +46,9 @@ inget.
   bootstrap-tillståndet (brandvägg, auto-updates, katalogbehörigheter) fortfarande är intakt.
 - Granska `docker system df` för att se om gamla, oanvända images/volymer byggts upp
   (`docker image prune` — ALDRIG `docker system prune -a --volumes` blint, det kan radera
-  `caddy_data`/`caddy_config` om de för tillfället inte är i bruk).
+  `caddy_data`/`caddy_config`/`lifeai_uploads` om de för tillfället inte är i bruk —
+  `lifeai_uploads` är nu Life Library-originalens ENDA kopia utanför Postgres metadata, se
+  `docs/VPS_BACKUP_RESTORE.md`).
 
 ## Incidenter
 
@@ -129,6 +136,29 @@ ls -la /var/backups/lifeai/           # gamla backup.sh-arkiv — backup.sh prun
                                        # automatiskt (--keep, default 7), men kontrollera om
                                        # den inte körts på ett tag
 ```
+
+### Life Library-workern (durable-worker-paketet)
+
+Symptom: importer fastnar på "pending"/"running" i UI:t utan att någonsin bli klara.
+1. `sudo docker compose --env-file /etc/lifeai/lifeai.env -f /opt/lifeai/docker-compose.vps.yml ps worker` — förväntas `running`. Om den restart-loopar: `logs worker` för stacktrace.
+2. `curl -sS https://<domän>/api/library/ops/status` (inloggad grundare) — kontrollera:
+   - `worker_reachable: false` → ingen heartbeat senaste `3 × WORKER_LEASE_SECONDS`. Workern
+     är troligen nere eller fastnat — se steg 1.
+   - `storage_writable: false` → `lifeai_uploads`-volymen är inte skrivbar. Kontrollera
+     volymens ägare/behörigheter (`docker run --rm -v lifeai_uploads:/vol alpine ls -la /vol`)
+     och att den faktiskt är monterad (`docker inspect` mot backend/worker-containern).
+   - `free_disk_bytes` lågt → se "Disken tar slut" nedan, `lifeai_uploads` växer med varje
+     unikt uppladdat original (innehållsadresserat, så identiskt innehåll dedupliceras
+     automatiskt — bara genuint nytt innehåll tar nytt utrymme).
+   - `oldest_pending_age_seconds` stort och `queue_length > 0` → workern hänger med jobb men
+     bearbetar dem inte, eller är helt nere (se steg 1).
+3. Workern kräver ingen egen omstartsåtgärd utöver vad `restart: unless-stopped` redan ger —
+   ett krascht/dödat jobb blir automatiskt återtagbart av vilken worker som helst efter att
+   dess lease (`WORKER_LEASE_SECONDS`, default 120s) löper ut, se
+   `docs/VPS_ARCHITECTURE.md`s beskrivning av `app/worker.py`.
+4. Om `lifeai_uploads` i sig verkar skadad eller saknar filer databasen refererar till (jobb
+   markeras "failed" med en lagringsrelaterad felorsak): återställ volymen enligt
+   `docs/VPS_BACKUP_RESTORE.md` snarare än att felsöka filsystemet manuellt.
 
 ### Certifikatförnyelse misslyckas / TLS slutar fungera
 
