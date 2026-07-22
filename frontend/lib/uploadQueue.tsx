@@ -82,18 +82,36 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...changes } : it)));
   }, []);
 
-  // pump() and runUpload()/pollJob() are mutually recursive (pump starts uploads, uploads
-  // call pump again when they finish to fill the freed slot) — kept in refs so each can
+  // The concurrency limit is enforced by this plain synchronous counter, NOT by counting
+  // "active" statuses in React state — deriving it from state was found to let a 4th upload
+  // slip through (a real race: two pump() calls in quick succession can each read a state
+  // snapshot from before the other's just-started item's status has actually committed).
+  // A ref-based semaphore has no such window: incremented the instant pump() decides to
+  // start an item, decremented exactly once when that item reaches ANY terminal state (via
+  // finishItem below), both perfectly synchronous with the decision itself.
+  const activeCountRef = useRef(0);
+
+  // pump()/finishItem() and runUpload()/pollJob() are mutually recursive (pump starts
+  // uploads, finishItem frees a slot and asks pump to fill it) — kept in refs so each can
   // reference the other's latest closure without a dependency-cycle in useCallback.
   const pumpRef = useRef<() => void>(() => {});
+  const finishItem = useCallback(() => {
+    activeCountRef.current -= 1;
+    pumpRef.current();
+  }, []);
 
   const pollJob = useCallback(
-    async (id: string, jobId: string) => {
+    // countsTowardLimit is false only for recovered server jobs (DEL 3) — those never went
+    // through pump()'s increment (they're already running server-side independently of this
+    // browser tab's upload slots), so their completion must not decrement activeCountRef
+    // either, or the semaphore would drift negative and silently grant extra concurrency.
+    async (id: string, jobId: string, countsTowardLimit: boolean = true) => {
+      const finish = countsTowardLimit ? finishItem : () => pumpRef.current();
       patch(id, { status: "processing" });
       for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt++) {
         if (cancelledRef.current.has(id)) {
           patch(id, { status: "cancelled" });
-          pumpRef.current();
+          finish();
           return;
         }
         try {
@@ -101,12 +119,12 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
           patch(id, { job });
           if (job.status === "completed" || job.status === "partial") {
             patch(id, { status: "completed" });
-            pumpRef.current();
+            finish();
             return;
           }
           if (job.status === "failed") {
             patch(id, { status: "failed", error: job.failure_reason || "Importen misslyckades." });
-            pumpRef.current();
+            finish();
             return;
           }
         } catch {
@@ -116,18 +134,21 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
         await sleep(POLL_INTERVAL_MS);
       }
       patch(id, { status: "failed", error: "Tidsgränsen för statuskontroll överskreds." });
-      pumpRef.current();
+      finish();
     },
-    [patch]
+    [patch, finishItem]
   );
 
   const runUpload = useCallback(
     async (id: string) => {
       const entry = filesRef.current.get(id);
-      if (!entry) return;
+      if (!entry) {
+        finishItem();
+        return;
+      }
       if (cancelledRef.current.has(id)) {
         patch(id, { status: "cancelled" });
-        pumpRef.current();
+        finishItem();
         return;
       }
       patch(id, { status: "uploading", error: null });
@@ -140,29 +161,44 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
         } else {
           patch(id, { status: "failed", error: e.message || "Uppladdningen misslyckades." });
         }
-        pumpRef.current();
+        finishItem();
         return;
       }
       if (cancelledRef.current.has(id)) {
         patch(id, { status: "cancelled", jobId: job.id, job });
-        pumpRef.current();
+        finishItem();
         return;
       }
       patch(id, { status: "received", jobId: job.id, job });
+      // The import call itself can already return a terminal job (e.g. the backend's
+      // whole-upload idempotency check in app/routers/library.py's import_package returns an
+      // already-completed job synchronously for byte-identical content) — start polling only
+      // when there's actually something to wait for, instead of an unconditional extra round
+      // trip to GET .../jobs/{id} for a status that's already final.
+      if (job.status === "completed" || job.status === "partial") {
+        patch(id, { status: "completed" });
+        finishItem();
+        return;
+      }
+      if (job.status === "failed") {
+        patch(id, { status: "failed", error: job.failure_reason || "Importen misslyckades." });
+        finishItem();
+        return;
+      }
       await pollJob(id, job.id);
     },
-    [patch, pollJob]
+    [patch, pollJob, finishItem]
   );
 
   const pump = useCallback(() => {
     setItems((prev) => {
-      const activeCount = prev.filter((it) => isActive(it.status)).length;
-      let slots = MAX_CONCURRENT - activeCount;
+      let slots = MAX_CONCURRENT - activeCountRef.current;
       if (slots <= 0) return prev;
       for (const it of prev) {
         if (slots <= 0) break;
         if (it.status === "queued" && !startedRef.current.has(it.id)) {
           startedRef.current.add(it.id);
+          activeCountRef.current += 1;
           slots -= 1;
           runUpload(it.id);
         }
@@ -263,7 +299,7 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
     for (const it of items) {
       if (it.recovered && it.jobId && !startedRef.current.has(it.id) && isActive(it.status)) {
         startedRef.current.add(it.id);
-        pollJob(it.id, it.jobId);
+        pollJob(it.id, it.jobId, false);
       }
     }
   }, [items, pollJob]);
