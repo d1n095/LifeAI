@@ -166,6 +166,53 @@ def test_get_job_status(client):
     assert job["status"] == "completed"
 
 
+# --- Life Library upload consolidation package: server-recoverable job status (DEL 3) ---
+
+
+def test_list_jobs_requires_founder(client, make_verified_user):
+    user, password = make_verified_user()
+    login = client.post("/api/auth/login", json={"email": user.email, "password": password})
+    assert login.status_code == 200
+    assert client.get("/api/library/jobs").status_code == 403
+
+
+def test_list_jobs_returns_the_founders_recent_jobs_newest_first(client):
+    csrf = _login(client)
+    _import_and_wait(client, csrf, "job-list-a.txt", b"innehall a")
+    _import_and_wait(client, csrf, "job-list-b.txt", b"innehall b")
+
+    res = client.get("/api/library/jobs")
+    assert res.status_code == 200
+    jobs = res.json()
+    filenames = [j["source_filename"] for j in jobs]
+    assert "job-list-a.txt" in filenames
+    assert "job-list-b.txt" in filenames
+    assert filenames.index("job-list-b.txt") < filenames.index("job-list-a.txt")  # newest first
+
+
+def test_list_jobs_lets_the_ui_recover_a_still_running_job_after_reload(client, superuser_db):
+    """The UI must be able to recover server job state after a page reload/fresh login and
+    must never show 'completed' before the server actually says so — this endpoint is what
+    makes that possible: an in-flight (pending/running) job is listed with its real status,
+    not silently dropped. A real background import always finishes synchronously within
+    TestClient's request/response cycle (see _wait_for_job's own docstring), so a still-
+    running job is set up directly here rather than relying on catching one mid-flight."""
+    from app.models.import_job import ImportJob, ImportJobStatus
+
+    _login(client)
+    owner_id = client.get("/api/auth/me").json()["id"]
+
+    running_job = ImportJob(
+        owner_id=owner_id, status=ImportJobStatus.running, source_filename="slow.txt", source_checksum="a" * 64
+    )
+    superuser_db.add(running_job)
+    superuser_db.commit()
+
+    jobs = client.get("/api/library/jobs").json()
+    match = next(j for j in jobs if j["source_filename"] == "slow.txt")
+    assert match["status"] == "running"
+
+
 def test_source_detail_includes_versions_and_chunk_preview(client):
     csrf = _login(client)
     job = _import_and_wait(client, csrf, "detail.txt", b"Text som ska bli en chunk-forhandsvisning.")
@@ -212,6 +259,38 @@ def test_delete_requires_explicit_confirmation(client):
     confirmed = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
     assert confirmed.status_code == 200
     assert client.get(f"/api/library/{source_id}").status_code == 404  # gone from a normal read
+
+
+def test_deleting_a_source_still_mid_pipeline_leaves_it_in_a_definitive_failed_state(client, superuser_db):
+    """DEL 5's 'väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd': a
+    founder can delete a source whose background indexing hasn't reached a terminal
+    IndexStatus yet (a narrow but real race between DEL 4's earlier document creation and
+    the async extraction/embedding steps still running). Simulates that race directly
+    rather than relying on real timing: after a normal completed import, the document's
+    status is rewound to a non-terminal one, then deleted — the row must come out the other
+    side with a real terminal status, not frozen mid-pipeline forever."""
+    import uuid as uuid_mod
+
+    from app.models.document import Document, IndexStatus
+
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "mid-pipeline.txt", b"innehall som hinner bli klart forst")
+    source_id = job["file_results"][0]["source_id"]
+
+    doc = superuser_db.get(Document, uuid_mod.UUID(source_id))
+    doc.status = IndexStatus.embedding
+    doc.error_message = None
+    superuser_db.add(doc)
+    superuser_db.commit()
+
+    res = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+
+    superuser_db.expire_all()
+    doc2 = superuser_db.get(Document, uuid_mod.UUID(source_id))
+    assert doc2.deleted_at is not None
+    assert doc2.status == IndexStatus.failed
+    assert doc2.error_message is not None
 
 
 def test_deleted_source_is_excluded_from_list_and_search(client):

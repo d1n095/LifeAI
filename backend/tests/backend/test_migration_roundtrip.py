@@ -40,18 +40,25 @@ def _revision_count() -> int:
 
 
 def _schema_snapshot() -> dict:
-    """Whole-schema fingerprint: every table's column set, keyed by table name. Anything a
-    migration touches (new table, new column, dropped column) shows up here without this
-    test needing to know which migration or which table in advance. Excludes
-    `alembic_version` itself — Alembic's own bookkeeping table, which legitimately survives
-    a `downgrade base` (it just ends up empty), not application schema."""
+    """Whole-schema fingerprint: every table's column set plus every native enum type's
+    label set, keyed by table/type name. Anything a migration touches (new table, new
+    column, dropped column, an ADD VALUE on an existing enum like migration 0011's) shows up
+    here without this test needing to know which migration or which table in advance. Enum
+    labels are included alongside columns because a migration can be purely additive at the
+    enum level (no new/changed columns at all) — Postgres's ALTER TYPE ... ADD VALUE is
+    exactly that shape, and a snapshot of column names alone would never notice it ran.
+    Excludes `alembic_version` itself — Alembic's own bookkeeping table, which legitimately
+    survives a `downgrade base` (it just ends up empty), not application schema."""
     migration_engine.dispose()  # drop pooled connections so the inspector sees the current schema, not a stale cached one
     inspector = inspect(migration_engine)
-    return {
+    snapshot = {
         table: frozenset(col["name"] for col in inspector.get_columns(table))
         for table in inspector.get_table_names()
         if table != "alembic_version"
     }
+    for enum in inspector.get_enums():
+        snapshot[f"enum:{enum['name']}"] = frozenset(enum["labels"])
+    return snapshot
 
 
 def test_latest_migration_upgrade_downgrade_upgrade_round_trip():

@@ -10,7 +10,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
 from app.limiter import limiter
-from app.models.document import ActiveTruthStatus, Document, KnowledgeClassification
+from app.models.document import ActiveTruthStatus, Document, IndexStatus, KnowledgeClassification
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
@@ -173,6 +173,24 @@ def _run_import_job_background(job_id: uuid.UUID, owner_id: uuid.UUID, raw: byte
             db.close()
 
     asyncio.run(run())
+
+
+RECENT_JOBS_LIMIT = 50
+
+
+@router.get("/jobs", response_model=list[ImportJobOut])
+def list_import_jobs(db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """Life Library upload consolidation package (DEL 3): lets the frontend's upload queue
+    recover real server job state after a page reload or a fresh login — both pending/running
+    (still in-flight) and recently finished jobs are returned, newest first, so the client
+    never has to guess or show 'completed' before the server actually says so."""
+    return (
+        db.query(ImportJob)
+        .filter_by(owner_id=user.id)
+        .order_by(ImportJob.created_at.desc())
+        .limit(RECENT_JOBS_LIMIT)
+        .all()
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=ImportJobOut)
@@ -349,6 +367,14 @@ def delete_source(
     db.query(DocumentChunk).filter_by(document_id=source_id).delete(synchronize_session=False)
     document.deleted_at = datetime.utcnow()
     document.chunk_count = 0
+    # DEL 5's "väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd": DEL 4's
+    # earlier document creation means a source can now be deleted while its own indexing is
+    # still mid-pipeline (extracting/extracted/embedding, or the legacy pending/indexing).
+    # Rather than leaving the row frozen at a non-terminal IndexStatus forever once it's
+    # hidden by deleted_at, give it a definitive terminal status right here.
+    if document.status not in (IndexStatus.indexed, IndexStatus.failed):
+        document.status = IndexStatus.failed
+        document.error_message = "Källan togs bort innan bearbetningen slutfördes."
     db.add(document)
     db.commit()
     return {"status": "deleted"}

@@ -18,7 +18,23 @@ class DocumentSource(str, enum.Enum):
 
 
 class IndexStatus(str, enum.Enum):
+    """Life Library upload consolidation package: granular pipeline steps so material
+    received from a founder can be preserved and inspected even when a later step
+    (extraction, embedding) fails or a provider is unavailable — see
+    docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's successor package. `pending`/`indexing` are kept
+    only so already-stored rows and any code that still references them keep deserializing;
+    new rows are created as `original_stored` and move forward through the granular states
+    below instead. `awaiting_classification` is modeled now but not yet transitioned through
+    by the synchronous pipeline (app/rag/library_import.py) — classification is decided at
+    import time today — so a future worker can start using it without another migration or
+    UI change."""
+
     pending = "pending"
+    original_stored = "original_stored"
+    extracting = "extracting"
+    extracted = "extracted"
+    awaiting_classification = "awaiting_classification"
+    embedding = "embedding"
     indexing = "indexing"
     indexed = "indexed"
     failed = "failed"
@@ -60,7 +76,7 @@ class Document(Base):
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     content_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[IndexStatus] = mapped_column(Enum(IndexStatus), default=IndexStatus.pending)
+    status: Mapped[IndexStatus] = mapped_column(Enum(IndexStatus), default=IndexStatus.original_stored)
     chunk_count: Mapped[int] = mapped_column(default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

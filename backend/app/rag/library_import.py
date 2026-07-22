@@ -118,21 +118,6 @@ async def _import_one_file(
 
     suffix = PurePosixPath(filename).suffix.lower()
     media_kind = media_import.media_kind_for(filename)
-    text_content: str | None = None
-    if media_kind is None:
-        try:
-            text_content = extract_text(filename, content)
-        except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
-            return FileOutcome(filename=filename, status="failed", reason=f"Kunde inte extrahera text: {exc}")
-    else:
-        # STEG 12: MIME/size check happens before anything is written to the database — a
-        # rejected media file becomes a per-file FileOutcome, exactly like a text-extraction
-        # failure above, never a job-level failure (see app/rag/media_import.py's
-        # MediaImportError docstring).
-        try:
-            media_import.validate_media_bytes(filename, content, media_kind)
-        except media_import.MediaImportError as exc:
-            return FileOutcome(filename=filename, status="failed", reason=str(exc))
 
     classification_raw = manifest_entry.get("classification")
     classification = classification_raw if classification_raw in VALID_CLASSIFICATIONS else KnowledgeClassification.general.value
@@ -179,9 +164,41 @@ async def _import_one_file(
     db.add(version)
     db.commit()
 
+    # Life Library upload consolidation: the Document row above already exists (status
+    # IndexStatus.original_stored) BEFORE extraction/validation is attempted — a failure from
+    # here on is recorded ON that row (status=failed, error_message set) rather than losing
+    # the received upload entirely, which is what happened when extraction ran before any
+    # row existed. See IndexStatus's docstring for the full state list.
     if media_kind is None:
+        document.status = IndexStatus.extracting
+        db.add(document)
+        db.commit()
+        try:
+            text_content = extract_text(filename, content)
+        except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
+            document.status = IndexStatus.failed
+            document.error_message = f"Kunde inte extrahera text: {exc}"
+            db.add(document)
+            db.commit()
+            return FileOutcome(
+                filename=filename, status="failed", reason=document.error_message, source_id=str(document.id)
+            )
+        document.status = IndexStatus.extracted
+        db.add(document)
+        db.commit()
         await index_document(db, document, text_content)
     else:
+        # STEG 12: MIME/size check — a rejected media file becomes a per-file FileOutcome,
+        # exactly like a text-extraction failure above, never a job-level failure (see
+        # app/rag/media_import.py's MediaImportError docstring).
+        try:
+            media_import.validate_media_bytes(filename, content, media_kind)
+        except media_import.MediaImportError as exc:
+            document.status = IndexStatus.failed
+            document.error_message = str(exc)
+            db.add(document)
+            db.commit()
+            return FileOutcome(filename=filename, status="failed", reason=str(exc), source_id=str(document.id))
         await media_import.index_media_document(db, document, content, filename, media_kind)
 
     if document.status == IndexStatus.failed:

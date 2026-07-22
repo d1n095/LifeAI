@@ -349,6 +349,85 @@ async def test_a_genuinely_job_level_transient_error_exhausts_attempts_and_fails
     assert job.last_failure_transient is True
 
 
+# --- Life Library upload consolidation package: granular IndexStatus modeling (see
+# docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's successor package) ---
+
+
+@pytest.mark.asyncio
+async def test_extraction_failure_preserves_the_document_row_instead_of_losing_the_upload(
+    db_session, make_verified_user, monkeypatch
+):
+    """Before this fix, extract_text() raising meant _import_one_file returned a FileOutcome
+    with no source_id at all — no Document row was ever created for that file, so the
+    founder had no way to see the upload was even received. An embedding/extraction outage
+    must never make received material disappear: the Document row now exists (created
+    before extraction is attempted) and is marked IndexStatus.failed afterwards, preserving
+    the checksum/original_filename/received-at record even though indexing never happened."""
+    from app.rag import library_import as li
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id)
+
+    def _always_fails(filename, content):
+        raise ValueError("kunde inte tolka filen")
+
+    monkeypatch.setattr(li, "extract_text", _always_fails)
+
+    await run_import_job(db_session, job.id, user.id, b"nagot innehall", "broken.txt")
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.failed
+    assert job.file_results[0]["source_id"] is not None
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="broken.txt").first()
+    assert doc is not None
+    assert doc.status == IndexStatus.failed
+    assert doc.error_message is not None
+    assert doc.checksum is not None
+
+
+@pytest.mark.asyncio
+async def test_document_status_passes_through_extracting_and_embedding_before_indexed(
+    db_session, make_verified_user, monkeypatch
+):
+    """DEL 4 of the upload-consolidation package: the pipeline must expose granular,
+    steppable status (extracting -> extracted -> embedding -> indexed) rather than jumping
+    straight from pending to indexing/indexed, so a future durable worker can resume from
+    exactly where it left off without the UI needing to change shape."""
+    from app.providers.openai_provider import OpenAIProvider
+    from app.rag import library_import as li
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id)
+
+    observed: dict[str, str | None] = {}
+    real_extract = li.extract_text
+    real_embed = OpenAIProvider.embed
+
+    def _observing_extract(filename, content):
+        doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename=filename).first()
+        observed["status_during_extract"] = doc.status.value if doc else None
+        return real_extract(filename, content)
+
+    async def _observing_embed(self, texts, model):
+        doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="granular.txt").first()
+        observed["status_during_embed"] = doc.status.value if doc else None
+        return await real_embed(self, texts, model)
+
+    monkeypatch.setattr(li, "extract_text", _observing_extract)
+    monkeypatch.setattr(OpenAIProvider, "embed", _observing_embed)
+
+    await run_import_job(db_session, job.id, user.id, b"text att extrahera och embedda", "granular.txt")
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.completed
+    assert observed["status_during_extract"] == IndexStatus.extracting.value
+    assert observed["status_during_embed"] == IndexStatus.embedding.value
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="granular.txt").first()
+    assert doc.status == IndexStatus.indexed
+
+
 @pytest.mark.asyncio
 async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
     db_session, superuser_db, make_verified_user, monkeypatch
