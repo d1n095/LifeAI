@@ -18,26 +18,34 @@ class DocumentSource(str, enum.Enum):
 
 
 class IndexStatus(str, enum.Enum):
-    """Life Library upload consolidation package: granular pipeline steps so material
-    received from a founder can be preserved and inspected even when a later step
-    (extraction, embedding) fails or a provider is unavailable — see
-    docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's successor package. `pending`/`indexing` are kept
-    only so already-stored rows and any code that still references them keep deserializing;
-    new rows are created as `original_stored` and move forward through the granular states
-    below instead. `awaiting_classification` is modeled now but not yet transitioned through
-    by the synchronous pipeline (app/rag/library_import.py) — classification is decided at
-    import time today — so a future worker can start using it without another migration or
-    UI change."""
+    """Life Library pipeline steps so material received from a founder can be preserved and
+    inspected even when a later step (extraction, embedding) fails or a provider is
+    unavailable. `pending`/`indexing` are kept only so already-stored rows and any code that
+    still references them keep deserializing; new rows are created as `received` and move
+    forward through the granular states below instead.
+
+    Durable-worker package additions: `received` (the Document row exists, but the original
+    file hasn't started streaming to durable storage yet — a narrow, request-scoped state),
+    `original_storing` (streaming to app/storage/ is in progress), `classifying` (DEL 4:
+    modeled alongside `awaiting_classification` for a future auto-classification step — the
+    worker today still decides classification synchronously at import time, so nothing
+    transitions through either of these two yet, but the UI/API already understand them),
+    `cancelled` (DEL 5: a founder deleted the source while the worker was still processing
+    it — see app/worker.py's cancellation checks)."""
 
     pending = "pending"
+    received = "received"
+    original_storing = "original_storing"
     original_stored = "original_stored"
     extracting = "extracting"
     extracted = "extracted"
     awaiting_classification = "awaiting_classification"
+    classifying = "classifying"
     embedding = "embedding"
     indexing = "indexing"
     indexed = "indexed"
     failed = "failed"
+    cancelled = "cancelled"
 
 
 class ActiveTruthStatus(str, enum.Enum):
@@ -65,6 +73,20 @@ class KnowledgeClassification(str, enum.Enum):
     general = "general"
 
 
+class DeletionStatus(str, enum.Enum):
+    """Life Library durable-worker package: tracks physical removal of a Document's original
+    blob (app/storage/) SEPARATELY from the Document row's own soft-delete
+    (Document.deleted_at) — the row can be soft-deleted (invisible to the founder) long
+    before its blob is actually, physically purged, and purge failure must be visible on its
+    own rather than silently retried forever or silently abandoned. See
+    app/rag/library_import.py's maybe_purge_blob()."""
+
+    none = "none"  # nothing scheduled — the normal state for a live (non-deleted) document
+    pending = "pending"  # soft-deleted; physical purge not yet attempted or not yet safe (still referenced)
+    purged = "purged"  # physically removed from storage
+    failed = "failed"  # a purge attempt raised — surfaced separately so it isn't confused with "pending"
+
+
 class Document(Base):
     __tablename__ = "documents"
 
@@ -76,7 +98,7 @@ class Document(Base):
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     content_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[IndexStatus] = mapped_column(Enum(IndexStatus), default=IndexStatus.original_stored)
+    status: Mapped[IndexStatus] = mapped_column(Enum(IndexStatus), default=IndexStatus.received)
     chunk_count: Mapped[int] = mapped_column(default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -117,3 +139,16 @@ class Document(Base):
     # import (app/rag/library_import.py's media_kind branch) — every text/document import
     # leaves this NULL, exactly as small as before this column existed.
     media_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+
+    # --- Life Library durable-worker package (app/storage/, app/worker.py) ---
+    # storage_key: the content-addressed key (see app/storage/local_fs.py) this document's
+    # ORIGINAL uploaded bytes live at in the persistent volume — distinct from `checksum`
+    # (already sha256, reused as the blob's content hash too) and from `media_blob` (STEG
+    # 13's separate in-database copy, kept for now; storage_key is the durable-on-disk copy
+    # every document gets, not just media). NULL until the worker has verified a successful,
+    # fsync'd write — see IndexStatus.original_stored's docstring: the status only advances
+    # past `original_storing` once storage_key is set AND verified.
+    storage_key: Mapped[str | None] = mapped_column(String(140), nullable=True, index=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deletion_status: Mapped[DeletionStatus] = mapped_column(Enum(DeletionStatus), default=DeletionStatus.none)

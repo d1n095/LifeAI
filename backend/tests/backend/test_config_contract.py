@@ -135,6 +135,11 @@ CONFIG_MATRIX: dict[str, dict] = {
     "ollama_base_url": {"required_in_production": False, "secret": False, "default": "http://ollama:11434", "validates": "none"},
     "chat_fallback_order": {"required_in_production": False, "secret": False, "default": "openai,anthropic,gemini", "validates": "none"},
     "frontend_origins": {"required_in_production": True, "secret": False, "default": "http://localhost:3000", "validates": "none — CORSMiddleware simply rejects any origin not in the list"},
+    "storage_root": {"required_in_production": True, "secret": False, "default": "/var/lib/lifeai/uploads", "validates": "none — LocalFilesystemStorage fails at write time if the directory isn't writable, not at startup"},
+    "worker_poll_interval_seconds": {"required_in_production": False, "secret": False, "default": 2.0, "validates": "none — used as-is by app/worker.py's poll loop"},
+    "worker_lease_seconds": {"required_in_production": False, "secret": False, "default": 120, "validates": "none — used as-is by app/jobs/lease.py's claim/renew queries"},
+    "worker_concurrency": {"required_in_production": False, "secret": False, "default": 1, "validates": "none — not yet enforced as a hard cap, see app/worker.py's known limitations"},
+    "worker_id": {"required_in_production": False, "secret": False, "default": None, "validates": "none — falls back to socket.gethostname() when unset, see app/worker.py's _worker_id"},
 }
 
 

@@ -7,6 +7,7 @@ os.environ.setdefault() only fills in what isn't already set.
 """
 
 import os
+import tempfile
 
 os.environ.setdefault("DATABASE_URL", "postgresql://lifeos@localhost:5433/lifeos_test")
 os.environ.setdefault("APP_DATABASE_URL", "postgresql://mainai_app:mainai_app_pw@localhost:5433/lifeos_test")
@@ -18,6 +19,11 @@ os.environ.setdefault("PUBLIC_APP_URL", "http://127.0.0.1:3020")
 os.environ.setdefault("ENABLE_SCHEDULED_CLEANUP", "false")  # tests trigger cleanup explicitly
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")  # DB 1, kept apart from dev's DB 0
 os.environ.setdefault("OPENAI_API_KEY", "fake-key-for-tests")
+# Life Library durable-worker package: a disposable directory outside the repo, unique per
+# test-process invocation (tempfile.mkdtemp, not a fixed path) so parallel/rerun test
+# sessions never share or collide over stored blobs — see app/storage/local_fs.py.
+os.environ.setdefault("STORAGE_ROOT", tempfile.mkdtemp(prefix="lifeai-test-storage-"))
+os.environ.setdefault("WORKER_LEASE_SECONDS", "5")  # short lease so reclaim-after-expiry tests stay fast
 
 import subprocess  # noqa: E402
 import uuid  # noqa: E402
