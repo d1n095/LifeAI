@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # Restores a backup.sh archive. By design, restores ONLY into an explicit, disposable target
 # directory — never in place over a live /opt/lifeai, and never over the live caddy_data/
-# caddy_config Docker volumes — unless --overwrite-live-volumes is passed in addition to
-# --confirm, a second, deliberately separate gate for the one genuinely destructive path.
+# caddy_config/lifeai_uploads Docker volumes — unless --overwrite-live-volumes is passed in
+# addition to --confirm, a second, deliberately separate gate for the one genuinely
+# destructive path.
 #
 # Verifies the archive's checksum and structure BEFORE extracting anything, so a corrupted or
 # truncated backup file is refused loudly instead of silently restoring partial/garbage state.
+# For the uploads volume specifically (durable-worker package), also re-verifies every
+# restored blob's own content-addressed sha256 AND the restored set against the backup-time
+# manifest — see step 3b below — since a whole-archive checksum alone can't catch a single
+# corrupted blob inside an otherwise-intact tar.gz.
 #
 # Usage:
 #   ./restore.sh --from <path/to/lifeai-backup-TIMESTAMP.tar.gz> --target-dir <dir> --confirm
 #     [--overwrite-live-volumes]
 #
-# After a normal (non---overwrite-live-volumes) restore, the caddy_data/caddy_config contents
-# land in NEW Docker volumes named lifeai_restore_<timestamp>_caddy_data/_caddy_config —
-# inspect them, then manually decide whether/how to bring that state into the live stack (see
+# After a normal (non---overwrite-live-volumes) restore, the caddy_data/caddy_config/uploads
+# contents land in NEW Docker volumes named
+# lifeai_restore_<timestamp>_caddy_data/_caddy_config/_uploads — inspect them, then manually
+# decide whether/how to bring that state into the live stack (see
 # docs/VPS_BACKUP_RESTORE.md's restore drill). This script never makes that call for you.
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
@@ -112,7 +118,8 @@ log_info "NOTE: /etc/lifeai/lifeai.env was never in this archive — re-provisio
 
 log_info "== 3/4: restoring Docker volumes =="
 BACKUP_TIMESTAMP=$(basename -- "$FROM" | sed -E 's/^lifeai-backup-(.*)\.tar\.gz$/\1/')
-for short_name in caddy_data caddy_config; do
+RESTORED_UPLOADS_VOLUME=""
+for short_name in caddy_data caddy_config uploads; do
     vol_archive="$STAGING_DIR/$short_name.tar.gz"
     [ -f "$vol_archive" ] || { log_warn "$short_name.tar.gz not present in this backup — skipping."; continue; }
 
@@ -132,8 +139,43 @@ for short_name in caddy_data caddy_config; do
             -v "$STAGING_DIR:/backup:ro" \
             alpine:3 sh -c "rm -rf /vol/* /vol/..?* /vol/.[!.]* 2>/dev/null; tar xzf /backup/$short_name.tar.gz -C /vol"
         log_info "Restored $short_name into volume: $target_volume"
+        [ "$short_name" = "uploads" ] && RESTORED_UPLOADS_VOLUME="$target_volume"
     fi
 done
+
+if [ -n "$RESTORED_UPLOADS_VOLUME" ]; then
+    log_info "== 3b/4: verifying restored Life Library originals (content-addressing + manifest) =="
+    # Content-addressed by design (backend/app/storage/local_fs.py): a blob's own path IS its
+    # claimed sha256, so re-hashing every restored file and comparing against its own
+    # directory structure catches corruption introduced by the backup/restore round trip
+    # itself — independent of, and in addition to, the whole-archive sha256 already verified
+    # in step 1/4 above (which only proves the .tar.gz itself wasn't corrupted, not that
+    # every individual blob inside it still hashes to its own filename).
+    # busybox's own sha256sum/find/sort (already in alpine:3) are all that's needed here — no
+    # package install, so this works the same offline as it does with network access.
+    MISMATCHES=$(docker run --rm -v "$RESTORED_UPLOADS_VOLUME:/vol:ro" alpine:3 sh -c \
+        "find /vol -type f -not -path '/vol/tmp/*' | while read -r f; do
+            expected=\$(basename \"\$f\")
+            actual=\$(sha256sum \"\$f\" | cut -d' ' -f1)
+            [ \"\$expected\" = \"\$actual\" ] || echo \"MISMATCH: \$f (expected \$expected, got \$actual)\"
+        done")
+    if [ -n "$MISMATCHES" ]; then
+        die "Restored uploads volume failed content-addressing verification:
+$MISMATCHES"
+    fi
+    log_info "Confirmed: every restored blob's own sha256 matches its content-addressed path."
+
+    if [ -f "$STAGING_DIR/uploads-manifest.txt" ]; then
+        RESTORED_KEYS=$(docker run --rm -v "$RESTORED_UPLOADS_VOLUME:/vol:ro" alpine:3 \
+            sh -c "find /vol -type f -not -path '/vol/tmp/*' | sed 's#^/vol/##' | sort")
+        if ! diff <(sort "$STAGING_DIR/uploads-manifest.txt") <(echo "$RESTORED_KEYS") > /dev/null; then
+            die "Restored uploads volume does not match the backup-time manifest (uploads-manifest.txt) — some blobs are missing or unexpected extras appeared."
+        fi
+        log_info "Confirmed: restored blob set exactly matches the backup-time manifest ($(echo "$RESTORED_KEYS" | grep -c . ) file(s))."
+    else
+        log_warn "No uploads-manifest.txt in this backup (older backup, or lifeai_uploads didn't exist yet) — skipping manifest comparison."
+    fi
+fi
 
 log_info "== 4/4: done =="
 if [ "$OVERWRITE_LIVE_VOLUMES" = "1" ]; then
