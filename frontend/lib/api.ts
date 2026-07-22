@@ -452,6 +452,9 @@ export const api = {
     return request<ImportJobItem>(`/api/library/import${qs}`, { method: "POST", body: form });
   },
   getImportJob: (id: string) => request<ImportJobItem>(`/api/library/jobs/${id}`),
+  // DEL 3: the founder's recent/active import jobs, newest first — lets the upload queue
+  // (frontend/lib/uploadQueue.tsx) recover real server state after a reload or fresh login.
+  listImportJobs: () => request<ImportJobItem[]>("/api/library/jobs"),
   listLibrary: (filters: LibraryListFilters = {}) => {
     const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => !!v) as [string, string][]).toString();
     return request<KnowledgeSourceItem[]>(`/api/library${qs ? `?${qs}` : ""}`);
