@@ -275,6 +275,65 @@ def test_delete_requires_explicit_confirmation(client):
     assert client.get(f"/api/library/{source_id}").status_code == 404  # gone from a normal read
 
 
+def test_a_failed_upload_can_be_deleted_cleanly_and_repeated_delete_is_idempotent(client, superuser_db):
+    """Founder bug report: a Document that reached the terminal IndexStatus.failed (an
+    extraction or storage failure, not a mid-pipeline race — see the sibling test below for
+    that case) must be deletable through the exact same DELETE /api/library/{id} route every
+    other source uses. Investigated end-to-end (live backend + live frontend, not just this
+    test) after a report that clicking "Ta bort" on a failed row appeared to do nothing —
+    no bug was found in this exact request path (confirmed via a real Postgres-backed
+    request here, and separately via a real browser click-through against a live server in
+    this session); this test is the permanent regression guard for that investigation,
+    covering the founder's own five acceptance criteria:
+      1. a failed upload/import can be deleted
+      3. the backend returns the correct status (200, then 404 for a re-delete)
+      4. the source disappears from a normal Library read afterwards
+      5. a repeated delete does not 500 — it 404s cleanly, exactly like deleting any other
+         already-deleted or nonexistent source id does
+    (Criterion 2 — the frontend sends the right request — is a UI-layer property this
+    backend test can't exercise directly; it was verified separately via a live browser
+    session in the same investigation, see the delivery report.)"""
+    import uuid as uuid_mod
+
+    from app.models.document import Document, IndexStatus
+
+    csrf = _login(client)
+    owner_id = uuid_mod.UUID(client.get("/api/auth/me").json()["id"])
+
+    # A document that reached a genuine terminal failure — e.g. extraction failed after the
+    # original file was already durably stored — rather than an in-progress row, matching
+    # what the founder's real Library actually shows for a failed import.
+    doc = Document(
+        uploaded_by=owner_id,
+        title="misslyckad-import.txt",
+        original_filename="misslyckad-import.txt",
+        checksum="c" * 64,
+        status=IndexStatus.failed,
+        error_message="Extraktion misslyckades (simulerat för test).",
+        chunk_count=0,
+    )
+    superuser_db.add(doc)
+    superuser_db.commit()
+    source_id = str(doc.id)
+
+    # 1 + 4: visible before deletion, through the same read path the Library UI uses.
+    assert client.get(f"/api/library/{source_id}").status_code == 200
+
+    # 3: the actual delete succeeds with a clean 200.
+    res = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    assert res.json() == {"status": "deleted"}
+
+    # 4: gone from a normal read and from the list.
+    assert client.get(f"/api/library/{source_id}").status_code == 404
+    assert all(d["id"] != source_id for d in client.get("/api/library").json())
+
+    # 5: repeating the exact same delete call must not 500 — a clean 404, not a crash.
+    repeat = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+    assert repeat.status_code == 404
+    assert repeat.status_code != 500
+
+
 def test_deleting_a_source_still_mid_pipeline_leaves_it_in_a_definitive_terminal_state(client, superuser_db):
     """DEL 5's 'väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd': a
     founder can delete a source whose background indexing hasn't reached a terminal
