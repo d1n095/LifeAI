@@ -102,8 +102,13 @@ parse_common_flags() {
 # backup.sh (which writes this list, names only, into its manifest so a from-scratch restore
 # has a checklist of what to re-provision from your own secret store — see
 # docs/VPS_SECRETS_INVENTORY.md). Defined once here so the two can never drift apart.
+#
+# REDIS_PASSWORD, not REDIS_URL: Redis now runs as its own private container
+# (docker-compose.vps.yml's `redis` service) instead of an external service like Upstash, and
+# REDIS_URL is constructed automatically by Compose from this password
+# (redis://:<password>@redis:6379/0) — never filled in by hand.
 # shellcheck disable=SC2034 # used by every script that sources this file, not by lib.sh itself
-LIFEAI_REQUIRED_ENV_VARS="SECRET_KEY MAINAI_APP_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD DATABASE_URL REDIS_URL FRONTEND_ORIGINS PUBLIC_APP_URL SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL DOMAIN BACKEND_IMAGE FRONTEND_IMAGE"
+LIFEAI_REQUIRED_ENV_VARS="SECRET_KEY MAINAI_APP_PASSWORD FOUNDER_EMAIL FOUNDER_PASSWORD DATABASE_URL REDIS_PASSWORD FRONTEND_ORIGINS PUBLIC_APP_URL SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM_EMAIL DOMAIN BACKEND_IMAGE FRONTEND_IMAGE"
 
 # Validates that $1 is a digest-pinned image reference: a non-empty image name (no
 # whitespace, no bare '@') followed by @sha256: and exactly 64 lowercase hexadecimal
@@ -116,4 +121,34 @@ validate_digest_pinned_image() {
     if [[ ! "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
         die "$label ('$image') is not a valid digest-pinned image reference (expected a non-empty image name followed by '@sha256:' and exactly 64 lowercase hexadecimal characters). Never deploy a mutable tag or an incomplete digest."
     fi
+}
+
+# Validates that $1 (REDIS_PASSWORD's value) is non-empty, at least 20 characters, and —
+# deliberately — restricted to [A-Za-z0-9]. That charset restriction is this project's
+# chosen answer to "URL-encode it or handle it safely": docker-compose.vps.yml builds
+# REDIS_URL as redis://:${REDIS_PASSWORD}@redis:6379/0 via plain Compose variable
+# interpolation, which does NOT percent-encode anything — a password containing `:`, `@`,
+# `/`, `%`, `#`, `?`, whitespace, or any other URL-meaningful/shell-meaningful character
+# would silently produce a broken or mis-parsed connection string (redis-py's own
+# urlsplit-based parsing in backend/app/config.py would split on the wrong character), and
+# redis-server's own --requirepass / redis-cli's -a additionally split on whitespace
+# regardless of URL concerns. Refusing every non-alphanumeric character up front is simpler
+# and more robust than implementing percent-encoding/decoding on both ends (Compose
+# interpolation, redis-server, redis-cli, and redis-py would all need to agree on the same
+# scheme) for a value this project always recommends generating with `openssl rand -hex 32`
+# anyway (already pure lowercase hex, a subset of this charset). Never logs or echoes the
+# value itself, only pass/fail.
+validate_redis_password() {
+    local password="$1"
+    if [ -z "$password" ]; then
+        die "REDIS_PASSWORD is empty. Generate one with: openssl rand -hex 32"
+    fi
+    if [ "${#password}" -lt 20 ]; then
+        die "REDIS_PASSWORD is shorter than 20 characters — too weak. Generate one with: openssl rand -hex 32"
+    fi
+    case "$password" in
+        *[![:alnum:]]*)
+            die "REDIS_PASSWORD contains a character other than A-Z, a-z, or 0-9 — refusing. REDIS_URL is built by plain, non-encoding string interpolation (redis://:\$REDIS_PASSWORD@redis:6379/0), so punctuation, whitespace, or symbols could silently break or mis-parse the connection string. Generate one with: openssl rand -hex 32 (already alphanumeric)."
+            ;;
+    esac
 }

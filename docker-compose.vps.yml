@@ -1,6 +1,11 @@
 # Strato VPS production topology — see docs/STRATO_VPS_DEPLOY.md for the full installation
-# order. This is deliberately NOT docker-compose.yml (local dev): no local postgres/redis
-# (Supabase Session Pooler / Upstash remain external, see the secrets file), no `build:`
+# order. This is deliberately NOT docker-compose.yml (local dev): Postgres remains external
+# (Supabase Session Pooler, see the secrets file) but Redis runs as its own private,
+# non-persistent container right here (see the `redis` service below — actually running
+# Valkey, a protocol-compatible fork; see that service's own comment for why) — it's only
+# ever used for rate-limit counters and short-lived job locks (app/limiter.py,
+# app/cleanup.py), nothing that needs to survive a restart, so there is no external Redis
+# dependency (Upstash or otherwise) on this deployment path at all. No `build:` anywhere
 # (images are built and pushed by GitHub Actions — see .github/workflows/build-images.yml —
 # and only ever pulled here by digest), and only `caddy` publishes anything to the host.
 #
@@ -16,11 +21,18 @@
 # the actual VPS) — in production, leave it unset and the default applies.
 #
 # Container hardening (init/security_opt/cap_drop/read_only/tmpfs/pids_limit/mem_limit/cpus)
-# is applied uniformly to all three services and verified against the REAL images in
+# is applied uniformly to all four services and verified against the REAL images in
 # .github/workflows/ci.yml's vps-compose-verify job — see docs/VPS_DOCKER_HARDENING.md for
 # what was evaluated, what was applied, and why. mem_limit/cpus below are conservative
 # starting points sized for a small VPS, not a hard architectural ceiling — tune them to the
 # real server's specs during the first deployment (docs/STRATO_VPS_DEPLOY.md).
+#
+# Two private Docker networks, not one: `lifeai_internal` (Caddy/frontend/backend) and
+# `lifeai_data` (backend/redis only, `internal: true` — no route out to the internet even
+# for the containers on it). Redis holds nothing frontend or Caddy ever need, and a
+# vulnerability in either of those two is a much more likely first foothold than one in
+# backend — putting Redis on a network they can't even resolve, let alone connect to, is a
+# free extra containment layer beyond "Redis requires a password".
 
 services:
   caddy:
@@ -93,6 +105,15 @@ services:
       - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
     environment:
       ENVIRONMENT: production
+      # Single `$` deliberately (not `$$`) — Compose SHOULD substitute the real value here,
+      # baking the finished connection string into this one container's env, exactly like
+      # BACKEND_IMAGE/DOMAIN above are baked in from the same secrets file. app/config.py's
+      # existing REDIS_URL support (redis:// or rediss://, with or without a password) is
+      # unchanged — this is just what gets fed into it now, see app/limiter.py.
+      REDIS_URL: redis://:${REDIS_PASSWORD:?sätt REDIS_PASSWORD i /etc/lifeai/lifeai.env}@redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/api/health"]
       interval: 10s
@@ -101,6 +122,7 @@ services:
       start_period: 20s
     networks:
       - lifeai_internal
+      - lifeai_data
     logging:
       driver: json-file
       options:
@@ -176,9 +198,110 @@ services:
         max-file: "5"
     # Deliberately no `ports:` — only Caddy ever reaches this, via lifeai_internal.
 
+  redis:
+    # Valkey, not Redis — see docs/VPS_ARCHITECTURE.md's "Redis vs Valkey" section for the
+    # full reasoning. Short version: Redis itself moved to a source-available (non-OSI-open)
+    # license starting with Redis 7.4, so a floating `redis:7-alpine` tag risks silently
+    # tracking a non-BSD-licensed build over time. Valkey is the Linux Foundation-governed,
+    # BSD-3-Clause fork — protocol-identical (RESP2/RESP3), so redis-py (backend/app/
+    # limiter.py, backend/app/main.py::_check_redis_reachable()) connects to it with zero
+    # code changes, and the official image ships `redis-server`/`redis-cli` as compatibility
+    # symlinks to `valkey-server`/`valkey-cli` (verified directly against this exact image),
+    # so every command/healthcheck line below is unchanged from a plain Redis setup too.
+    # Service key stays `redis` (not `valkey`) so the Docker-DNS hostname backend connects to
+    # (`redis`) and the REDIS_URL/REDIS_PASSWORD variable names below stay stable regardless
+    # of which engine is running underneath.
+    #
+    # Pinned by exact version AND digest — never a floating tag like `8-alpine` (which
+    # silently tracks whatever the latest 8.x patch happens to be at pull time) — the same
+    # discipline BACKEND_IMAGE/FRONTEND_IMAGE already require, applied to a base image this
+    # repo doesn't build itself. Re-pin deliberately (new version, re-verify, new digest) —
+    # never let this drift silently.
+    #
+    # Alpine-based for a small footprint. Runs entirely private: no `ports:`, no data
+    # persisted to disk (this app only ever uses it for rate-limit counters and short-lived
+    # job locks — app/limiter.py, app/cleanup.py — nothing that needs to survive a restart,
+    # see docs/VPS_ARCHITECTURE.md), and reachable ONLY from the backend container, over the
+    # private `lifeai_data` network.
+    image: valkey/valkey:8.1.9-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /data
+    pids_limit: 50
+    mem_limit: 128m
+    cpus: "0.25"
+    environment:
+      # Baked in by Compose from /etc/lifeai/lifeai.env at deploy time (see
+      # scripts/vps/lib.sh's validate_redis_password() for the fail-closed check on this
+      # value, including the character-set restriction that makes URL-encoding unnecessary
+      # — see that function's comment) — never written anywhere else, never printed by any
+      # script. Honest disclosure, not a claim of perfect secrecy: this value DOES appear in
+      # `docker inspect`'s `.Config.Env` and is readable by anything with `docker exec`/
+      # `docker inspect` access to this container (i.e. VPS root, or the Docker socket) —
+      # the same trust boundary root already has over /etc/lifeai/lifeai.env itself. What
+      # this setup actually defends against is exposure to non-root users, the network, and
+      # normal logs/CI output — see docs/VPS_ARCHITECTURE.md's "Var lösenordet faktiskt syns"
+      # for the full, verified breakdown (docker inspect Cmd/Healthcheck, /proc/1/cmdline,
+      # /proc/1/environ, docker top, healthcheck logs, deploy/CI output).
+      #
+      # The `$$` in `command`/`healthcheck` below (as opposed to the single `$` here) is
+      # deliberate: it stops COMPOSE from substituting it, so the real value is resolved by
+      # redis-server/redis-cli from THIS container's own environment at runtime instead of
+      # ever being baked as a literal string into the image's resolved command/healthcheck
+      # config (which `docker inspect`/`docker compose config` would otherwise print in
+      # cleartext) — verified directly, see the architecture doc.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?sätt REDIS_PASSWORD i /etc/lifeai/lifeai.env}
+    entrypoint: ["sh", "-c"]
+    # redis-server takes --requirepass as a startup argument (no environment-variable form
+    # exists) — but verified directly (see docs/VPS_ARCHITECTURE.md): redis-server/
+    # valkey-server overwrite their OWN process title after startup for exactly this kind of
+    # privacy reason, so the live process's /proc/1/cmdline reads back as just
+    # `redis-server *:6379`, never the real arguments — and separately, its own
+    # /proc/1/environ is zeroed out too. Neither the password nor --requirepass survives
+    # into the running process's inspectable state, only into Docker's own container
+    # metadata (.Config.Env, see above).
+    command:
+      - 'exec redis-server --requirepass "$$REDIS_PASSWORD" --save "" --appendonly no'
+    healthcheck:
+      # REDISCLI_AUTH (an env var redis-cli itself reads), not `-a`/`--pass` — verified
+      # directly: `-a` puts the password in redis-cli's OWN process argv for the (brief)
+      # life of that healthcheck invocation, visible via `docker top`/`ps`/`/proc/<pid>/
+      # cmdline` to anyone who can list processes in this container — a plain-argv-listing
+      # exposure that requires no special privilege beyond process-listing access, wider
+      # than the /proc/<pid>/environ exposure REDISCLI_AUTH uses instead (readable only by
+      # the same UID or root, same trust boundary as .Config.Env above). See
+      # docs/VPS_ARCHITECTURE.md.
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lifeai_data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Deliberately no `ports:` — only the backend, over lifeai_data, ever reaches this.
+    # Frontend and Caddy are not on lifeai_data at all, so they can't even resolve `redis`
+    # via Docker DNS, let alone connect to it.
+
 networks:
   lifeai_internal:
     driver: bridge
+  # internal: true — Docker never gives this network a route out (no NAT to the internet,
+  # not even for the containers on it) on top of it already having no host port publication
+  # for redis. Backend is the only service on both networks; frontend/caddy are on neither.
+  lifeai_data:
+    driver: bridge
+    internal: true
 
 volumes:
   caddy_data:

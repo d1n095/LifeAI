@@ -40,15 +40,25 @@ Internet (443/80)
    ┌─────────┐   ingen ports:-publicering — bara nåbar via lifeai_internal
    │ backend │   (FastAPI — samma image som Render, se backend/Dockerfile)
    └────┬────┘
-        │  publik internet (utanför VPS:en)
-        ▼
-  Supabase Session Pooler (Postgres)   Upstash (Redis)
+        │                              │  lifeai_data (privat, internal: true —
+        │  publik internet             │  ingen route ut alls, inte bara ingen
+        │  (utanför VPS:en)             ▼  host-publicering)
+        ▼                         ┌───────┐
+  Supabase Session Pooler    │ redis │   (valkey/valkey:8.1.9-alpine, digest-pinnad,
+      (Postgres)             └───────┘    requirepass, tmpfs /data, se Steg 2)
 ```
 
-Postgres och Redis körs INTE på VPS:en — samma externa Supabase Free (Session pooler, port
-5432) och Upstash Free som redan används för Render, se `docs/RENDER_DEPLOY.md`s
-"Databasrollerna"-avsnitt. VPS:en har därmed inget eget stateful data förutom hemlighetsfilen
-och Caddys egna TLS-certifikat (se "Backup och rollback" nedan).
+Postgres körs INTE på VPS:en — samma externa Supabase Free (Session pooler, port 5432) som
+redan används för Render, se `docs/RENDER_DEPLOY.md`s "Databasrollerna"-avsnitt. **Redis körs
+numera privat på VPS:en själv, som Valkey** (`docker-compose.vps.yml`s `redis`-tjänst — se
+`docs/VPS_ARCHITECTURE.md`s "Redis vs Valkey" för varför) istället för en extern tjänst som
+Upstash — ingen extra kostnad, inget extra konto. Den håller ingen data på
+disk (tmpfs `/data`, `--save ""`) eftersom den bara används för hastighetsbegränsnings-
+räknare och kortlivade jobblås (`app/limiter.py`, `app/cleanup.py`), aldrig något som behöver
+överleva en omstart — se `docs/VPS_ARCHITECTURE.md`. VPS:en har därmed inget eget
+**permanent** stateful data förutom hemlighetsfilen och Caddys egna TLS-certifikat (se
+"Backup och rollback" nedan); Redis är stateful under drift men medvetet inte något som
+backas upp eller behöver återställas.
 
 Backend- och frontend-images byggs INTE på VPS:en. `.github/workflows/build-images.yml` bygger
 och pushar dem till GHCR (`ghcr.io/d1n095/lifeai-backend`, `ghcr.io/d1n095/lifeai-frontend`),
@@ -60,7 +70,8 @@ skriver in — se "Första manuella deploy" nedan.
 - En Strato VPS med Ubuntu 24.04 LTS, root-/sudo-åtkomst via SSH.
 - En domän (eller subdomän) vars DNS A-post pekar på VPS:ens publika IPv4-adress — krävs för
   att Caddy ska kunna slutföra Let's Encrypts HTTP-01-utmaning på port 80/443.
-- Samma Supabase- och Upstash-uppgifter som redan finns för Render (inga nya konton behövs).
+- Samma Supabase-uppgifter som redan finns för Render (inget nytt konto behövs). Redis
+  behöver INGET konto alls — den körs privat på VPS:en, se Steg 2.
 - En GitHub Personal Access Token med enbart `read:packages`-scope, för att VPS:en ska kunna
   `docker login ghcr.io` och pulla privata images (skapas separat från alla andra hemligheter,
   se Steg 3 nedan).
@@ -126,9 +137,17 @@ sudo chmod 600 /etc/lifeai/lifeai.env
 sudo nano /etc/lifeai/lifeai.env   # fyll i varje värde, se .env.vps.example för vad varje rad styr
 ```
 
-Generera `SECRET_KEY` och `MAINAI_APP_PASSWORD` med `openssl rand -hex 32` var — **egna,
-oberoende värden, återanvänd aldrig Renders**, så en eventuell kompromettering av det ena
-systemet aldrig automatiskt ger tillgång till det andra.
+Generera `SECRET_KEY`, `MAINAI_APP_PASSWORD` och `REDIS_PASSWORD` med `openssl rand -hex 32`
+var — **egna, oberoende värden, återanvänd aldrig Renders**, så en eventuell
+kompromettering av det ena systemet aldrig automatiskt ger tillgång till det andra.
+`REDIS_PASSWORD` är nytt här: `docker-compose.vps.yml` konstruerar `REDIS_URL` automatiskt
+från den (`redis://:<lösenord>@redis:6379/0`) — fyll ALDRIG i `REDIS_URL` själv i den här
+filen, den finns inte längre som ett eget fält. `REDIS_PASSWORD` MÅSTE vara enbart
+bokstäver/siffror (A-Z, a-z, 0-9) — `redis://:${REDIS_PASSWORD}@...` byggs av Compose utan
+URL-kodning, så tecken som `:`/`@`/`/`/`%` eller whitespace skulle kunna trasa sönder
+anslutningssträngen. `openssl rand -hex 32` ger redan exakt detta (gemener hex) —
+`scripts/vps/lib.sh`s `validate_redis_password()` stoppar deployen om värdet bryter mot
+detta, se `deploy.sh`.
 
 `BACKEND_IMAGE`/`FRONTEND_IMAGE` lämnas tomma här — de fylls i i Steg 5, det manuella
 deploy-steget, aldrig innan.
@@ -267,8 +286,8 @@ fullständig felsökning om även rollback misslyckas.
 ## Verifiering efter deploy
 
 1. `https://<din-domän>/api/health` → `{"status":"ok"}` (går genom hela kedjan: Caddy →
-   frontend → backend → Supabase/Upstash).
-2. `sudo docker compose -f /opt/lifeai/docker-compose.vps.yml ps` → alla tre tjänster
+   frontend → backend → Supabase (Postgres) / lokal redis-container).
+2. `sudo docker compose -f /opt/lifeai/docker-compose.vps.yml ps` → alla fyra tjänster
    `running (healthy)`.
 3. `sudo docker port <backend-container>` och `sudo docker port <frontend-container>` → tomt
    (ingen host-publicering) — samma kontroll som `vps-compose-verify`-CI-jobbet gör
@@ -280,14 +299,27 @@ fullständig felsökning om även rollback misslyckas.
 
 `.github/workflows/ci.yml`s `vps-compose-verify`-jobb (branch-gated på
 `claude/strato-vps-prep`) bygger de RIKTIGA `backend/Dockerfile`/`frontend/Dockerfile`-imagen
-och kör den RIKTIGA `docker-compose.vps.yml` (plus en CI-bara `docker-compose.vps.ci.yml`-
-overlay som bara lägger till `host.docker.internal`-åtkomst till en tillfällig Postgres/Redis
-på GitHub Actions-runnern — se den filens kommentarer) och verifierar:
+och kör den RIKTIGA `docker-compose.vps.yml` — inklusive dess egen `redis`-tjänst, inte en
+stand-in — plus en CI-bara `docker-compose.vps.ci.yml`-overlay som bara lägger till
+`host.docker.internal`-åtkomst till en tillfällig Postgres på GitHub Actions-runnern (Redis
+behöver ingen sådan overlay-rad alls — se den filens kommentarer) och verifierar bland annat:
 
+- Exakt de förväntade tjänsterna körs: caddy, backend, frontend, redis — inte fler, inte färre.
 - Caddy är den enda tjänsten som publicerar något till host.
 - Backend är overksamt onåbar utifrån (även via containerns eget nätverks-IP, inte bara host).
-- `restart: unless-stopped` och begränsad `json-file`-loggning är faktiskt satt på alla tre
+- Redis ligger bara på det privata `lifeai_data`-nätverket (`internal: true`, ingen route ut
+  alls); frontend/caddy är inte anslutna till det nätverket överhuvudtaget; backend är
+  anslutet till både `lifeai_internal` och `lifeai_data`.
+- Redis kräver faktiskt det konfigurerade lösenordet (en oautentiserad `PING` avvisas) och
+  dess egen Docker-hälsokontroll (som själv autentiserar) rapporterar verkligen `healthy`.
+- Backend-containerns egen `REDIS_URL` har rätt form (`redis://:<lösenord>@redis:6379/0`) —
+  själva anslutningen är redan bevisad av att `_check_redis_reachable()` i
+  `backend/app/main.py` skulle ha stoppat hela uppstarten annars.
+- `restart: unless-stopped` och begränsad `json-file`-loggning är faktiskt satt på alla fyra
   containrar, inte bara skrivet i YAML utan att verkligen tillämpas.
+- Redis kör som root (ingen icke-root-användare i basavbilden, precis som Caddy) men med
+  ALLA capabilities borttagna och INGA återlagda — striktare än Caddy, som behöver en enda
+  (`NET_BIND_SERVICE`) för att kunna binda port 80/443.
 - Ett riktigt HTTP-anrop genom hela kedjan (Caddy → frontend → backend → Postgres) svarar
   korrekt.
 

@@ -40,10 +40,101 @@ Internet
 │  - CORS-allowlist (FRONTEND_ORIGINS), CSRF via app/deps.py, RLS via    │
 │    Postgres SET LOCAL app.current_user_id                              │
 └────────────────────────────────────────────────────────────────────────┘
-   │  publikt internet (utanför VPS:en) — TLS till Supabase/Upstash
-   ▼
-Supabase (Postgres, Session Pooler, port 5432)   Upstash (Redis)
+   │                                             │
+   │  publikt internet (utanför VPS:en)          │  lifeai_data — privat nätverk,
+   │  — TLS till Supabase                        │  internal: true (ingen route ut
+   ▼                                             ▼  alls, inte bara ingen host-port)
+Supabase (Postgres, Session Pooler,     redis (valkey/valkey:8.1.9-alpine, digest-
+  port 5432)                              pinnad, requirepass, tmpfs /data — ingen
+                                           disk-persistens, se "Redis vs Valkey" nedan)
 ```
+
+## Redis vs Valkey — vald lösning och motivering
+
+**Vald lösning: Valkey**, inte Redis, för den privata cache-tjänsten på VPS:en. Exakt
+avbild, digest-pinnad, aldrig en flytande tagg:
+
+```
+valkey/valkey:8.1.9-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
+```
+
+(`valkey-server --version` inuti containern: `Valkey server v=8.1.9`; `INFO server`
+rapporterar `server_name:valkey`, `valkey_version:8.1.9` — bekräftat direkt mot den
+verkliga, körande containern, inte antaget.) Docker Compose-tjänsten heter fortfarande
+`redis` (samma DNS-namn, samma `REDIS_URL`/`REDIS_PASSWORD`-variabelnamn som redan används i
+koden och mallen) — bara avbilden bakom den bytt.
+
+Bedömning mot de fyra kraven:
+
+1. **Kompatibilitet med nuvarande Python-klient:** total. Valkey talar exakt samma
+   RESP2/RESP3-protokoll som Redis — `redis-py` (den klient `backend/app/limiter.py` och
+   `backend/app/main.py::_check_redis_reachable()` redan använder via `redis.from_url()`)
+   gör ingen skillnad mellan servrarna. Inget i applikationskoden behövde ändras. De
+   funktionella testerna (autentisering, `PING`/`PONG`, healthcheck) är körda mot den
+   RIKTIGA, digest-pinnade containern ovan — inte antagna.
+2. **Stabil officiell container-image:** `valkey/valkey` på Docker Hub är Valkey-projektets
+   egen officiella image, aktivt underhållen. Verifierat direkt (pullad och körd i den här
+   granskningen): binärerna heter `valkey-server`/`valkey-cli`, men avbilden installerar
+   `redis-server`/`redis-cli` som symlänkar till dem för bakåtkompatibilitet — så
+   `docker-compose.vps.yml`s `command:`/`healthcheck:`-rader (som anropar `redis-server`/
+   `redis-cli`) fungerar oförändrade.
+3. **Låg resursförbrukning:** samma Alpine-baserade, C-implementerade, i praktiken
+   entrådiga arkitektur som Redis — jämförbar minnes-/CPU-fotavtryck. Samma
+   `mem_limit`/`cpus`/`pids_limit` som redan var satta för Redis gäller oförändrat (verifierat
+   live: håller sig inom 128 MB).
+4. **Öppen och långsiktigt hållbar — licens:** detta är den avgörande skillnaden. Redis Inc
+   bytte Redis' licens med Redis 7.4 (mars 2024) från det permissiva BSD-3-Clause till en
+   källkodstillgänglig (men inte OSI-godkänd öppen källkod) dubbellicens (RSALv2/SSPLv1). En
+   flytande tagg som `redis:7-alpine` följer i praktiken den senaste patch-versionen inom
+   major-version 7 — vilket över tid riskerar att tyst börja peka på en build under den nya
+   licensen utan att någon rad i den här repot ändrats. Valkey 8.1.9 är licensierad under
+   **BSD-3-Clause** (bekräftat mot Valkey-projektets egen källkodsrepo — den körande
+   containeravbilden själv bakar inte in en LICENSE-fil, sökt igenom men inte hittad, så
+   licensuppgiften kommer från projektet, inte avbildens filsystem). Valkey är
+   Linux Foundation-styrd (grundad av bland andra AWS, Google Cloud, Oracle, Ericsson och
+   flera av Redis' ursprungliga underhållare efter licensbytet) och har inget sådant
+   licensrisk-scenario.
+
+**Inget verkligt tekniskt problem hittades** som skulle motivera att tillfälligt behålla
+Redis — kompatibiliteten är total och verifierad. Valkey väljs alltså enligt
+självständighetsmålet.
+
+**Avstådt:** att skriva om `backend/app/config.py`/`backend/app/limiter.py` — inget behövde
+ändras där, exakt det uppdraget bad om att undvika.
+
+## Var lösenordet (REDIS_PASSWORD) faktiskt syns — verifierat, inte antaget
+
+**Ärlig utgångspunkt:** root på VPS:en (eller vem som helst med `docker exec`/`docker
+inspect`-åtkomst till `redis`-containern, vilket i praktiken kräver root eller
+Docker-socket-åtkomst) KAN läsa värdet. Det påståendet görs inte om att vara omöjligt att
+läsa för serverns root-operatör — samma tillitsgräns som redan gäller för
+`/etc/lifeai/lifeai.env` självt. Målet är att det inte exponeras för icke-root-användare,
+nätverket, eller vanliga loggar/CI.
+
+Varje kanal nedan är verifierad direkt mot den riktiga, digest-pinnade containern (inte
+antagen):
+
+| Kanal | Visar lösenordet? | Verifierat hur |
+|---|---|---|
+| `docker inspect .Config.Cmd` / `.Entrypoint` | **Nej** — literalt `"$REDIS_PASSWORD"` | `docker inspect` mot en riktig körande container |
+| `docker inspect .Config.Healthcheck.Test` | **Nej** — literalt `"$REDIS_PASSWORD"` | Samma |
+| `docker inspect .Config.Env` | **Ja** | Förväntat och accepterat — samma tillitsgräns som `/etc/lifeai/lifeai.env` |
+| `docker compose config` (upplöst YAML) | **Nej** för `command`/`healthcheck` (literalt `$REDIS_PASSWORD`) | Kört direkt mot compose-filen |
+| Den körande `redis-server`-processens `/proc/<pid>/cmdline` (INTE PID 1 när `init: true` är satt — det är `docker-init`; den riktiga processen är dess barn) | **Nej** — `redis-server`/`valkey-server` skriver om sin egen processtitel efter uppstart (välkänt Redis/Valkey-beteende), läses tillbaka som bara `redis-server *:6379` | `ps aux` och `/proc/<pid>/cmdline` inuti en riktig container, jämfört före/efter identifiering av rätt PID |
+| Samma process `/proc/<pid>/environ` | **Nej** — nollställd av processen själv (byte-storlek finns kvar, innehållet är utsuddat) | `grep`/`wc -c` mot `/proc/<pid>/environ` för den bekräftade `redis-server`-processen |
+| `docker top`/`ps aux` (från host ELLER inifrån containern) | **Nej** — samma processtitel-omskrivning | `docker top` mot en riktig container |
+| `docker-init`s (PID 1, när `init: true`) egen `/proc/1/cmdline` | **Nej** — visar den URSPRUNGLIGA, ICKE-EXPANDERADE kommandosträngen (`"$REDIS_PASSWORD"` som text, aldrig substituerat) | Samma |
+| `docker-init`s (PID 1) egen `/proc/1/environ` | **Ja** — `docker-init` gör ingen processtitel-trick, ärver bara containerns miljö normalt | Samma tillitsgräns som `.Config.Env` ovan — kräver samma root/exec-åtkomst |
+| Healthcheck-loggen (`docker inspect .State.Health.Log`) | **Nej** — `Output` är tom (kommandot pipas genom `grep -q`, och `redis-cli`/`valkey-cli` skriver aldrig ut lösenordet självt) | Verifierat mot en riktig healthcheck-körning, både lyckad och innan autentisering fungerade |
+| `redis-cli`/`valkey-cli`s EGEN process-argv under healthcheck | **Åtgärdat i denna omgång** — bytt från `-a "$REDIS_PASSWORD"` (satte lösenordet i cli-processens egen, kortlivade argv — bredare exponering, läsbar av vem som helst med processlistningsåtkomst i containern) till `REDISCLI_AUTH` (miljövariabel `redis-cli` självt läser) — samma smalare tillitsgräns som `.Config.Env` (kräver samma UID eller root), inte den bredare argv-listningsytan | Verifierad princip (POSIX exec-semantik: en `VAR=val cmd`-prefixad miljövariabel hamnar aldrig i `cmd`s egen argv) — INTE fångad live pga healthcheck-processens livslängd på under 100 ms, för snabb för tillförlitlig `ps`-fångst i denna granskning |
+| `scripts/vps/deploy.sh` / `scripts/vps/lib.sh`s utskrifter | **Nej** — `validate_redis_password()`s samtliga felmeddelanden nämner bara variabelnamnet `REDIS_PASSWORD`, aldrig `$password`s innehåll (granskad rad för rad) | Källkodsgranskning av samtliga `REDIS_PASSWORD`-träffar i båda filerna |
+| CI-loggar (`.github/workflows/ci.yml`) | **Nej** — CI:s testlösenord är ett hårdkodat CI-bara testvärde (`ci-vps-compose-verify-redis-password-...`, aldrig en riktig hemlighet), och samtliga nya CI-steg skriver bara ut härledda statusord (`Confirmed: ...`), aldrig råa värden | Källkodsgranskning av samtliga nya CI-steg i denna och föregående granskningsrunda |
+
+**Kvarstående, accepterad exponeringsyta (oförändrad av detta arbete, gäller ALLA
+hemligheter i `/etc/lifeai/lifeai.env` lika mycket):** `docker inspect .Config.Env` och
+`docker exec`/`printenv` inuti containern. Detta kräver samma root-/Docker-socket-åtkomst
+som redan krävs för att läsa `/etc/lifeai/lifeai.env` direkt — ingen NY tillitsgräns, bara
+samma gamla, nu explicit dokumenterad istället för underförstådd.
 
 ## Tillitsgränser, explicit
 
@@ -53,14 +144,16 @@ Supabase (Postgres, Session Pooler, port 5432)   Upstash (Redis)
 | Caddy → frontend | Vidarebefordrad HTTP, `X-Forwarded-*`-headers | Privat Docker-nätverk, ingen extern åtkomst möjlig eftersom frontend saknar `ports:` |
 | Frontend → backend | Server-till-server `fetch()`, `INTERNAL_API_URL=http://backend:8000` | Samma privata nätverk; webbläsaren når ALDRIG detta hopp direkt |
 | Backend → Supabase | TLS, Session Pooler-uppkoppling, två separata roller (superuser för migrationer, `mainai_app` för request-serving) | RLS med `FORCE ROW LEVEL SECURITY`, `mainai_app` kan aldrig kringgå RLS eftersom den inte är ägare/superuser |
-| Backend → Upstash | TLS, `REDIS_URL` | Delad rate-limit-räknare, ingen känslig data lagras i Redis (bara räknare/nycklar) |
+| Backend → redis (lokal container) | Okrypterat inom Docker, `REDIS_URL` med lösenord (`requirepass`) | Privat `lifeai_data`-nätverk (`internal: true`, ingen route ut alls) — inte "brandväggat", konstruktivt onåbart för allt utom backend; ingen känslig data lagras i Redis (bara räknare/nycklar), och ingen disk-persistens (tmpfs) |
+| frontend/caddy → redis | — (finns inte) | frontend/caddy är inte anslutna till `lifeai_data` överhuvudtaget — inte ens ett nätverkslager att försöka autentisera mot |
 | Hemlighetsfil → containrar | `/etc/lifeai/lifeai.env` (root-ägd, `chmod 600`) läses via `env_file:` | Aldrig i Git, aldrig läsbar för den vanliga deploy-användaren, bara för root/Docker-daemonen |
 
 ## Publika kontra privata gränssnitt
 
 - **Publikt (nått från internet):** enbart Caddy på 80/443. Verifierat i CI (`vps-compose-verify`s "Verify Caddy is the only container publishing anything to the host").
 - **Privat (bara Docker-nätverket `lifeai_internal`):** frontend:3000, backend:8000. Ingen av dem har en `ports:`-rad i `docker-compose.vps.yml` — inte "brandväggad", utan konstruktivt onåbar utifrån eftersom ingen NAT/DNAT-regel någonsin skapas för dem.
-- **Extern, utanför VPS:en helt:** Supabase (Session Pooler, port 5432) och Upstash (Redis). VPS:en har alltså inget eget stateful data för applikationens kärndata — se `docs/VPS_BACKUP_RESTORE.md` för vad som faktiskt behöver säkerhetskopieras på själva VPS:en (i praktiken bara hemlighetsfilen och Caddys TLS-certifikat).
+- **Privat, ett steg smalare (bara Docker-nätverket `lifeai_data`, `internal: true`):** redis:6379. Bara backend är anslutet till detta nätverk — frontend och caddy är inte anslutna till det överhuvudtaget, så de kan inte ens *försöka* nå det (ingen DNS-post, ingen route), inte bara nekas med lösenord. Verifierat i CI (`vps-compose-verify`s nätverksisoleringssteg).
+- **Extern, utanför VPS:en helt:** Supabase (Session Pooler, port 5432) — det enda som fortfarande är externt. Redis kör numera privat på VPS:en själv (se `redis`-tjänsten i `docker-compose.vps.yml`), men utan disk-persistens (tmpfs `/data`), så VPS:en har fortfarande inget eget **permanent** stateful data för applikationens kärndata — se `docs/VPS_BACKUP_RESTORE.md` för vad som faktiskt behöver säkerhetskopieras på själva VPS:en (i praktiken bara hemlighetsfilen och Caddys TLS-certifikat; Redis är medvetet exkluderat, se den policyn).
 
 ## Autentisering, cookies och CSRF (`backend/app/deps.py`, `backend/app/cookies.py`)
 
@@ -116,9 +209,11 @@ försvar-i-djupet-skäl, satt till den riktiga VPS-domänen (`https://<domän>`)
 - **Hastighetsbegränsning** (`app/limiter.py`): nycklas på autentiserad användare där möjligt,
   annars IP (se ovanstående avsnitt om betrodda proxy-headers). Kräver `REDIS_URL` satt i
   produktion för att vara delad över flera repliker — VPS:en kör i praktiken alltid EN
-  backend-replik (`docker-compose.vps.yml` skalar inte horisontellt), men Upstash används
-  ändå för konsekvens med Render-konfigurationen och för att inte tyst tappa skyddet om
-  antalet repliker någonsin ändras.
+  backend-replik (`docker-compose.vps.yml` skalar inte horisontellt), men den lokala
+  `redis`-tjänsten körs ändå för konsekvens med Render-konfigurationen och för att inte tyst
+  tappa skyddet om antalet repliker någonsin ändras. Att Redis nu körs på samma VPS (istället
+  för en extern tjänst som Upstash) ändrar inte den här egenskapen — `REDIS_URL` pekar bara
+  på `redis:6379` istället för en extern host.
 - **Uppladdningsgräns**: `backend/app/routers/documents.py` avvisar allt över 25 MB — men
   EFTER att hela kroppen redan lästs in i minnet (`len(raw) > MAX_UPLOAD_BYTES`). Caddy själv
   hade INGEN egen kroppsstorleksgräns innan detta VPS-arbete (se

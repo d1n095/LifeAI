@@ -16,7 +16,7 @@ riktiga filer och riktiga Docker-volymer — se `.github/workflows/ci.yml`s
 | Caddys egen autosparade config | Docker-volymen `caddy_config` | Ja |
 | `/etc/lifeai/lifeai.env` (alla hemligheter) | `/etc/lifeai` | **Nej, avsiktligt** — se nedan |
 | Postgres-databasen (all applikationsdata) | Supabase, INTE denna VPS | **Nej** — Supabases eget ansvar |
-| Redis (rate limiting, sessioner) | Upstash, INTE denna VPS | **Nej** — förlust är ofarlig, se nedan |
+| Redis/Valkey (rate limiting, jobblås) | **Lokal container på denna VPS** (`docker-compose.vps.yml`s `redis`-tjänst — ERSATTE tidigare extern Upstash/Redis Cloud) — men `tmpfs`, ingen disk-persistens | **Nej** — förlust är ofarlig OCH det finns inget att förlora på disk, se nedan |
 | Docker-containrarnas egna loggar | `json-file`-loggdrivrutinen | **Nej** — redan rullande, inte katastrofrelevant |
 | Uppladdade filer | Finns inte lokalt på VPS:en alls | N/A — se nedan |
 
@@ -33,14 +33,27 @@ lösenordshanterare) — exakt samma steg som den allra första deployen
 (`docs/STRATO_VPS_DEPLOY.md` Steg 2). Se `docs/VPS_SECRETS_INVENTORY.md` för den fullständiga
 inventeringen (namn/kategorier, aldrig värden).
 
-### Varför Postgres/Redis inte täcks
+### Varför Postgres inte täcks
 
 Databasen är Supabase-hostad, aldrig på den här VPS:en alls — ett VPS-lokalt backup-skript kan
 inte ärligt hävda att det täcker en tjänst det aldrig rör vid. Supabase har sina egna
 backup-mekanismer (point-in-time recovery m.m. beroende på plan); det är ett separat, medvetet
-beslut som ligger utanför den här VPS-förberedelsens omfattning. Redis är Upstash-hostad och
-innehåller enbart rate-limit-räknare och sessionsdata — att förlora den är ofarligt (räknare
-nollställs, användare loggas ut, ingenting permanent går förlorat).
+beslut som ligger utanför den här VPS-förberedelsens omfattning.
+
+### Varför Redis/Valkey inte täcks (ERSATT: numera lokal, inte längre extern)
+
+**Historiskt (INTE längre aktuellt):** Redis kördes tidigare hos Upstash, en extern
+leverantör — samma skäl som Postgres (VPS-skriptet rör aldrig en tjänst det inte äger).
+
+**Aktuellt:** cache-tjänsten (`redis`-tjänsten i `docker-compose.vps.yml`, kör Valkey — se
+`docs/VPS_ARCHITECTURE.md`s "Redis vs Valkey") kör numera PRIVAT på denna VPS. Den täcks
+ändå inte av backup-skriptet, men av en annan, giltig anledning: den använder `tmpfs` för
+`/data` och startas alltid om med `--save ""` — det finns inget på disk att säkerhetskopiera
+överhuvudtaget, eftersom containern designades för att aldrig skriva något beständigt (bara
+hastighetsbegränsningsräknare och kortlivade jobblås — `app/limiter.py`, `app/cleanup.py`).
+Att förlora dess innehåll (t.ex. vid en omstart) är ofarligt: räknare nollställs, användare
+loggas ut, ingenting permanent går förlorat — precis som när den kördes hos Upstash, bara
+nu av en lokal, inte en extern, anledning.
 
 ### Varför inga uppladdade filer
 
@@ -125,8 +138,12 @@ namngivna volymer och en helt fristående katalog.
    `required_env_var_names`-lista och din egen säkra hemlighetslagring — se
    `docs/STRATO_VPS_DEPLOY.md` Steg 2 och `docs/VPS_SECRETS_INVENTORY.md`.
 3. Kör `sudo ./scripts/vps/deploy.sh --confirm` som vanligt.
-4. Postgres/Redis behöver ingen åtgärd härifrån — de är redan externa och opåverkade av en
-   VPS-diskförlust. Om Supabase/Upstash SJÄLVA behöver återställas, följ deras egna
-   återställningsflöden (utanför den här dokumentets omfattning).
+4. Postgres behöver ingen åtgärd härifrån — den är extern (Supabase) och opåverkad av en
+   VPS-diskförlust. Om Supabase SJÄLV behöver återställas, följ dess egna
+   återställningsflöden (utanför den här dokumentets omfattning). Redis/Valkey-tjänsten
+   behöver heller ingen återställning — `docker compose up -d` (steg 3 ovan) skapar en helt
+   ny, tom cache-container automatiskt (`tmpfs`, ingen data att återställa till att börja
+   med); den enda förutsättningen är att `REDIS_PASSWORD` finns i den återställda
+   `/etc/lifeai/lifeai.env` (steg 2 ovan).
 
 Se `docs/VPS_OPERATIONS_RUNBOOK.md` för den bredare incidenthanteringsprocessen.

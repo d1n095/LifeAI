@@ -17,7 +17,10 @@
 #     docs/VPS_BACKUP_RESTORE.md.
 #   - The Postgres database: Supabase-hosted, never on this VPS at all — Supabase's own
 #     backup responsibility, not something a VPS-local script could honestly claim to cover.
-#   - Redis: Upstash-hosted, ephemeral rate-limit/session cache — safe to lose entirely.
+#   - Redis/Valkey: runs locally on this VPS now (docker-compose.vps.yml's `redis` service,
+#     replacing the former external Upstash dependency), but on tmpfs with no disk
+#     persistence (--save "") — ephemeral rate-limit/job-lock cache, nothing on disk to back
+#     up in the first place, safe to lose entirely either way.
 #   - Docker's own json-file container logs: ephemeral, already size/count-limited by
 #     docker-compose.vps.yml's own logging driver config, not disaster-recovery-relevant.
 #   - Uploaded files: this app stores none on the VPS's own disk — document content lives in

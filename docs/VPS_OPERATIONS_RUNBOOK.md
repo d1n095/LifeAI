@@ -72,8 +72,13 @@ Detta är den akuta situationen — tjänsten kan vara nere.
 4. Om `rollback.sh` körde men tjänsterna ändå inte blev friska ("Rollback completed but
    services did not become healthy"): felet är troligen INTE i applikationskoden (samma
    digest som redan kördes framgångsrikt innan) utan i något som ändrats UTANFÖR koden sedan
-   dess — kontrollera: Supabase/Upstash-tillgänglighet (`docs/VPS_ARCHITECTURE.md`s externa
-   beroenden), diskutrymme (`df -h`), och om `/etc/lifeai/lifeai.env` av misstag redigerats.
+   dess — kontrollera: Supabase-tillgänglighet (`docs/VPS_ARCHITECTURE.md`s externa
+   beroenden — numera bara Postgres/Supabase, Redis/Valkey kör lokalt sedan
+   "Redis vs Valkey"-bytet), `redis`-tjänstens EGEN hälsa lokalt
+   (`sudo docker compose -f /opt/lifeai/docker-compose.vps.yml ps redis` — förväntas
+   `running (healthy)`; om inte, `sudo docker compose ... logs redis` och kontrollera att
+   `REDIS_PASSWORD` faktiskt finns och är giltigt i `/etc/lifeai/lifeai.env`), diskutrymme
+   (`df -h`), och om `/etc/lifeai/lifeai.env` av misstag redigerats.
 5. Om ingenting ovan löser det: detta är en verklig P1. Dokumentera exakt vad som prövats
    (för framtida uppdatering av denna runbook) och eskalera till Dennis direkt — det finns
    ingen ytterligare automatiserad återhämtningsväg i det här repot.

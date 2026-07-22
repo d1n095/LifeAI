@@ -120,6 +120,10 @@ DOMAIN_VALUE=$(grep -E "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
 [ -n "$FRONTEND_IMAGE" ] || die "FRONTEND_IMAGE is empty in $ENV_FILE."
 validate_digest_pinned_image "$BACKEND_IMAGE" "BACKEND_IMAGE"
 validate_digest_pinned_image "$FRONTEND_IMAGE" "FRONTEND_IMAGE"
+
+REDIS_PASSWORD_VALUE=$(grep -E "^REDIS_PASSWORD=" "$ENV_FILE" | head -n1 | cut -d= -f2-)
+validate_redis_password "$REDIS_PASSWORD_VALUE"
+
 log_info "Deploying:"
 log_info "  BACKEND_IMAGE=$BACKEND_IMAGE"
 log_info "  FRONTEND_IMAGE=$FRONTEND_IMAGE"

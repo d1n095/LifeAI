@@ -47,9 +47,20 @@ smalnar av hotmodellen betydligt jämfört med en fleranvändar-SaaS:
    registrering är helt avstängd (`ENVIRONMENT=production` gate, se
    `docs/VPS_ARCHITECTURE.md`s "Vad som skiljer VPS:en"-tabell och backend-testerna för
    `require_founder`). Den här hotvektorn existerar bara i icke-produktionsmiljöer.
-6. **Kompromissad Supabase/Upstash-uppkoppling** — utanför den här VPS-hotmodellens
-   omfattning (extern leverantör), men noterat: `DATABASE_URL`/`REDIS_URL` är TLS, och
-   `mainai_app`-rollen kan aldrig kringgå RLS (se `docs/VPS_ARCHITECTURE.md`s tillitsgränser).
+6. **Kompromissad Supabase-uppkoppling** — utanför den här VPS-hotmodellens omfattning
+   (extern leverantör), men noterat: `DATABASE_URL` är TLS, och `mainai_app`-rollen kan
+   aldrig kringgå RLS (se `docs/VPS_ARCHITECTURE.md`s tillitsgränser).
+7. **Kompromissad frontend/caddy används som språngbräda mot cache-tjänsten** — MITIGERAT
+   genom nätverkstopologi, inte bara lösenord: `redis`/Valkey-tjänsten (**ERSATTE tidigare
+   extern Upstash/Redis Cloud-beroende — kör numera privat lokalt på VPS:en**, se
+   `docs/VPS_ARCHITECTURE.md`s "Redis vs Valkey") ligger på ett separat privat Docker-nätverk
+   (`lifeai_data`, `internal: true`) som ENDAST backend är anslutet till. frontend och caddy
+   är inte anslutna till `lifeai_data` överhuvudtaget — även om endera komprometterades helt
+   skulle de sakna varje route till cache-tjänsten (ingen DNS-post, inget nätverksgränssnitt
+   att skicka trafik över), inte bara nekas av `requirepass`. Cache-tjänsten lagrar heller
+   ingen känslig data (bara hastighetsbegränsningsräknare/jobblås) och ingen data på disk
+   (`tmpfs`), så även ett fullständigt containerintrång ger ingen varaktig datakälla att
+   stjäla.
 
 ## Caddy header review
 

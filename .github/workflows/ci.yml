@@ -1304,27 +1304,26 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       # host.docker.internal (via docker-compose.vps.ci.yml's extra_hosts) is how the backend
-      # container reaches these runner-level services — see combined-container-verify's env
-      # block for the same reasoning.
+      # container reaches this runner-level service — see combined-container-verify's env
+      # block for the same reasoning. Redis needs no equivalent: it's docker-compose.vps.
+      # yml's own `redis` service now, not a runner-level GitHub Actions service — this job
+      # exercises the REAL private-Redis topology, not a stand-in for it.
       CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_vps_ci
-      CI_REDIS_URL: redis://host.docker.internal:6379/0
       # Job-level, not just on the "up" step: docker-compose.vps.yml's `${VAR:?...}`
       # interpolation guards run on EVERY invocation of `docker compose -f
       # docker-compose.vps.yml ...` — including `logs` and `down` — not just `up`. Scoping
       # these to a single step (an earlier version of this job did that) makes every later
       # step in the SAME job fail to even parse the compose file, masking the real failure
-      # behind an unrelated interpolation error instead of showing it.
+      # behind an unrelated interpolation error instead of showing it. REDIS_PASSWORD joins
+      # BACKEND_IMAGE/FRONTEND_IMAGE/DOMAIN here for the exact same reason: docker-compose.vps.
+      # yml's `redis`/`backend` services both interpolate `${REDIS_PASSWORD:?...}` directly at
+      # parse time, the same mechanism, not the `env_file:`-based ci-secrets.env below.
       BACKEND_IMAGE: lifeai-vps-backend:ci
       FRONTEND_IMAGE: lifeai-vps-frontend:ci
       DOMAIN: ":80"
+      REDIS_PASSWORD: ci-vps-compose-verify-redis-password-1234567890
       LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
     steps:
       - uses: actions/checkout@v4
@@ -1349,7 +1348,6 @@ jobs:
           FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
           FOUNDER_PASSWORD=TestFounderPassword123!
           DATABASE_URL=$CI_DATABASE_URL
-          REDIS_URL=$CI_REDIS_URL
           FRONTEND_ORIGINS=http://localhost:80
           PUBLIC_APP_URL=http://localhost:80
           SMTP_HOST=ci-smtp-placeholder.invalid
@@ -1358,6 +1356,10 @@ jobs:
           SMTP_PASSWORD=ci
           SMTP_FROM_EMAIL=no-reply@lifeos.local
           EOF
+          # REDIS_PASSWORD is deliberately NOT in this file: it's a Compose top-level
+          # interpolation variable (like BACKEND_IMAGE/DOMAIN above), set as a job-level env
+          # var instead — see this job's `env:` block. This file only supplies what backend/
+          # frontend read via `env_file:` at container-runtime.
           # Unlike combined-container-verify (which sets ENVIRONMENT=development to skip the
           # SMTP fail-closed startup gate), docker-compose.vps.yml hardcodes
           # ENVIRONMENT=production directly in the service definition — the REAL VPS always
@@ -1377,9 +1379,16 @@ jobs:
           done
           curl -sS http://localhost:80/api/health
 
+      - name: Verify exactly the expected services are running, including redis
+        run: |
+          got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps --services | sort | tr '\n' ' ')
+          expected="backend caddy frontend redis "
+          [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
+          echo "Confirmed: exactly caddy, backend, frontend, redis — no more, no fewer."
+
       - name: Verify Caddy is the only container publishing anything to the host
         run: |
-          for name in backend frontend; do
+          for name in backend frontend redis; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             ports=$(docker port "$cid" || true)
             if [ -n "$ports" ]; then
@@ -1387,6 +1396,48 @@ jobs:
             fi
             echo "Confirmed: $name publishes nothing to the host."
           done
+
+      - name: Verify Redis network isolation — only backend can reach it, over lifeai_data only
+        run: |
+          redis_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q redis)
+          redis_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$redis_cid")
+          case "$redis_nets" in
+            *lifeai_internal*) echo "::error::redis is on lifeai_internal — it must ONLY be on lifeai_data, unreachable from frontend/caddy: $redis_nets" && exit 1 ;;
+          esac
+          case "$redis_nets" in
+            *lifeai_data*) ;;
+            *) echo "::error::redis is not on lifeai_data at all: $redis_nets" && exit 1 ;;
+          esac
+          echo "Confirmed: redis is only on lifeai_data ($redis_nets)."
+
+          backend_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q backend)
+          backend_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$backend_cid")
+          for net in lifeai_internal lifeai_data; do
+            case "$backend_nets" in
+              *"$net"*) ;;
+              *) echo "::error::backend is missing $net — it must be on both lifeai_internal and lifeai_data: $backend_nets" && exit 1 ;;
+            esac
+          done
+          echo "Confirmed: backend is on both lifeai_internal and lifeai_data ($backend_nets)."
+
+          for name in frontend caddy; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid")
+            case "$nets" in
+              *lifeai_data*) echo "::error::$name is on lifeai_data — it must never be able to reach redis: $nets" && exit 1 ;;
+            esac
+            # Not on the network at all -> no route to redis's IP and no Docker-DNS entry for
+            # it either, by construction (same reasoning docker-compose.vps.yml's own comments
+            # use for backend/frontend's missing `ports:`) — no need to also probe for DNS
+            # resolution from inside each container, which would just re-test the same fact
+            # through a less reliable, image-dependent tool (getent/nslookup availability
+            # differs between caddy's Alpine base and frontend's Debian-slim base).
+            echo "Confirmed: $name is not on lifeai_data ($nets) — no route to redis exists."
+          done
+
+          internal_flag=$(docker network inspect "$(docker network ls --filter "label=com.docker.compose.project=lifeai_vps_ci" --filter "name=lifeai_data" --format '{{.ID}}' | head -n1)" -f '{{.Internal}}')
+          [ "$internal_flag" = "true" ] || (echo "::error::lifeai_data network is not internal:true (got: $internal_flag)" && exit 1)
+          echo "Confirmed: lifeai_data has no route out at all (internal: true)."
 
       - name: Verify the backend has no listener reachable from the host's own network interfaces
         # NOT a check against the container's bridge-network IP: backend/Dockerfile's uvicorn
@@ -1406,14 +1457,14 @@ jobs:
 
       - name: Verify restart policy and log rotation are actually applied
         run: |
-          for name in caddy backend frontend; do
+          for name in caddy backend frontend redis; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid")
             [ "$policy" = "unless-stopped" ] || (echo "::error::$name has restart policy '$policy', expected unless-stopped" && exit 1)
             logdriver=$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$cid")
             [ "$logdriver" = "json-file" ] || (echo "::error::$name uses log driver '$logdriver', expected json-file with size limits" && exit 1)
           done
-          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all three services."
+          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all four services."
 
       - name: Verify a full request actually reaches the backend/database through Caddy -> frontend -> backend
         run: |
@@ -1425,6 +1476,46 @@ jobs:
           # the proof the whole chain (Caddy -> frontend -> backend -> Postgres) is wired
           # correctly end to end, same as same-origin-proxy-test's reasoning.
           [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected a real backend response (403/404, registration disabled) through the full VPS chain, got $RES" && exit 1)
+
+      - name: Verify Redis requires the configured password and the healthy status is real
+        run: |
+          redis_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q redis)
+
+          if docker exec "$redis_cid" redis-cli ping 2>&1 | grep -q PONG; then
+            echo "::error::redis answered PING with no password at all — requirepass is not actually enforced" && exit 1
+          fi
+          echo "Confirmed: an unauthenticated PING is rejected (NOAUTH)."
+
+          # REDISCLI_AUTH (env var), not -a: matches the real healthcheck in
+          # docker-compose.vps.yml exactly — -a would put the password in redis-cli's own
+          # short-lived process argv (visible via ps/docker top to anyone who can list
+          # processes in this container), REDISCLI_AUTH keeps it in that process's
+          # environment instead (readable only by the same UID or root, same trust boundary
+          # docker inspect's .Config.Env already has).
+          pong=$(docker exec -e REDIS_PASSWORD="$REDIS_PASSWORD" "$redis_cid" sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --no-auth-warning ping')
+          [ "$pong" = "PONG" ] || (echo "::error::authenticated PING did not return PONG (got: $pong)" && exit 1)
+          echo "Confirmed: the configured REDIS_PASSWORD authenticates successfully (via REDISCLI_AUTH, never -a)."
+
+          health=$(docker inspect -f '{{.State.Health.Status}}' "$redis_cid")
+          [ "$health" = "healthy" ] || (echo "::error::redis's own Docker healthcheck reports '$health', expected healthy" && exit 1)
+          echo "Confirmed: redis's healthcheck (which itself authenticates) is genuinely healthy, not just unset/ignored."
+
+      - name: Verify the backend container actually reaches Redis through REDIS_URL (not just that both are running)
+        run: |
+          backend_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q backend)
+          resolved_url=$(docker exec "$backend_cid" printenv REDIS_URL)
+          case "$resolved_url" in
+            redis://:*@redis:6379/0) ;;
+            *) echo "::error::backend's REDIS_URL does not look like redis://:<password>@redis:6379/0 (got a value with unexpected shape)" && exit 1 ;;
+          esac
+          echo "Confirmed: backend's REDIS_URL is shaped correctly (value itself not printed)."
+          # The rate limiter (app/limiter.py) only ever touches Redis on an actual rate-limited
+          # request, and /api/health deliberately doesn't exercise it — the real, deployed
+          # app/main.py::_check_redis_reachable() already refused to even START if REDIS_URL
+          # were unreachable (see backend/app/main.py), and this whole job would already have
+          # failed at "Start the real VPS compose topology" above if that check had failed. A
+          # second, redundant probe here would just re-test the same fact through a noisier
+          # path.
 
       - name: Verify backend/frontend run as their dedicated non-root user
         # See docs/VPS_DOCKER_HARDENING.md — backend/frontend/Dockerfile both create a
@@ -1461,9 +1552,25 @@ jobs:
           esac
           echo "Confirmed: caddy runs as root (UID 0, required by the upstream image) but with ALL capabilities dropped except the one (NET_BIND_SERVICE) it actually needs — verified via docker inspect, not assumed."
 
+      - name: Verify redis's root process has NO capabilities added back at all
+        # valkey/valkey:8.1.9-alpine (digest-pinned, see docker-compose.vps.yml) has no
+        # built-in non-root user either (same situation as caddy — confirmed: no dedicated
+        # "valkey"/"redis" entry it switches to), but unlike caddy it never binds a
+        # privileged (<1024) port, so — unlike caddy's one restored capability — it needs
+        # cap_add: [] here. Root with the full capability set dropped
+        # and NONE restored is a materially smaller blast radius than caddy's already-minimal
+        # one.
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q redis)
+          uid=$(docker exec "$cid" id -u)
+          [ "$uid" = "0" ] || (echo "::error::redis is running as UID $uid — if a future base image ships a non-root user, switch to it and update this check, don't just accept whatever UID appears" && exit 1)
+          capadd=$(docker inspect -f '{{.HostConfig.CapAdd}}' "$cid")
+          [ "$capadd" = "[]" ] || (echo "::error::redis has capabilities added back (got: $capadd) — it needs none, unlike caddy" && exit 1)
+          echo "Confirmed: redis runs as root (UID 0, required by the upstream image) with ALL capabilities dropped and NONE restored."
+
       - name: Verify container-level security controls are actually applied, not just declared
         run: |
-          for name in caddy backend frontend; do
+          for name in caddy backend frontend redis; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
 
             privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' "$cid")
@@ -1548,12 +1655,12 @@ jobs:
         if: failure()
         run: |
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
-          for name in backend frontend caddy; do
+          for name in backend frontend caddy redis; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
             if [ -n "$cid" ]; then
               echo "--- $name health ---"
               docker inspect -f '{{json .State.Health}}' "$cid" || true
-              echo "--- $name listening sockets (/proc/net/tcp, port 3000 = 0BB8, port 8000 = 1F40) ---"
+              echo "--- $name listening sockets (/proc/net/tcp, port 3000 = 0BB8, port 8000 = 1F40, port 6379 = 18EB) ---"
               docker exec "$cid" cat /proc/net/tcp || true
             fi
           done
@@ -1598,18 +1705,17 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
-      redis:
-        image: redis:7-alpine
-        ports: ["6379:6379"]
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s --health-timeout 5s --health-retries 10
       registry:
         image: registry:2
         ports: ["5000:5000"]
     env:
+      # No runner-level redis service here: Redis is docker-compose.vps.yml's own `redis`
+      # service now, and deploy.sh's compose() wrapper already passes
+      # `--env-file "$TEST_ENV_FILE"` for every invocation (see scripts/vps/deploy.sh) — so
+      # REDIS_PASSWORD below (in the secrets file, not this env: block) is exactly what real
+      # top-level Compose interpolation on the actual VPS looks like, no CI-only stand-in
+      # needed the way postgres still requires one.
       CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_deploy_ci
-      CI_REDIS_URL: redis://host.docker.internal:6379/0
       TEST_COMPOSE_DIR: ${{ github.workspace }}/deploy-test/opt-lifeai
       TEST_ENV_FILE: ${{ github.workspace }}/deploy-test/etc-lifeai.env
     steps:
@@ -1655,7 +1761,7 @@ jobs:
           FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
           FOUNDER_PASSWORD=TestFounderPassword123!
           DATABASE_URL=$CI_DATABASE_URL
-          REDIS_URL=$CI_REDIS_URL
+          REDIS_PASSWORD=ci-deploy-rollback-test-redis-password-1234567890
           FRONTEND_ORIGINS=http://localhost:80
           PUBLIC_APP_URL=http://localhost:80
           SMTP_HOST=ci-smtp-placeholder.invalid
