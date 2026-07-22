@@ -1928,6 +1928,16 @@ jobs:
           docker volume create lifeai_caddy_config > /dev/null
           docker run --rm -v lifeai_caddy_data:/vol alpine:3 sh -c "echo FAKE-TLS-CERT-DATA > /vol/cert.pem"
           docker run --rm -v lifeai_caddy_config:/vol alpine:3 sh -c "echo '{\"fake\":\"config\"}' > /vol/autosave.json"
+          # Durable-worker package: lifeai_uploads holds Life Library originals, content-
+          # addressed as {sha256[:2]}/{sha256} (see backend/app/storage/local_fs.py) — a
+          # disclosed synthetic string, never real private content, is enough to exercise
+          # backup.sh's uploads.tar.gz/uploads-manifest.txt and restore.sh's own
+          # content-addressing + manifest verification for real.
+          docker volume create lifeai_uploads > /dev/null
+          SYNTH="Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data."
+          SHA=$(printf '%s' "$SYNTH" | sha256sum | cut -d' ' -f1)
+          echo "SYNTH_SHA=$SHA" >> "$GITHUB_ENV"
+          docker run --rm -v lifeai_uploads:/vol alpine:3 sh -c "mkdir -p /vol/tmp /vol/${SHA:0:2} && printf '%s' '$SYNTH' > /vol/${SHA:0:2}/${SHA}"
 
       - name: Run backup.sh for real
         run: |
@@ -1950,9 +1960,10 @@ jobs:
         run: |
           mkdir -p /tmp/backup-inspect
           tar xzf "$ARCHIVE" -C /tmp/backup-inspect
-          for member in opt-lifeai.tar.gz caddy_data.tar.gz caddy_config.tar.gz manifest.json; do
+          for member in opt-lifeai.tar.gz caddy_data.tar.gz caddy_config.tar.gz uploads.tar.gz uploads-manifest.txt manifest.json; do
             [ -f "/tmp/backup-inspect/$member" ] || (echo "::error::backup archive is missing expected member: $member" && exit 1)
           done
+          grep -qx "${SYNTH_SHA:0:2}/${SYNTH_SHA}" /tmp/backup-inspect/uploads-manifest.txt || (echo "::error::uploads-manifest.txt does not list the synthetic test blob" && exit 1)
           # The whole point of this check: /etc/lifeai/lifeai.env (or any file that looks like
           # it) must never appear anywhere in the archive, at any nesting level.
           find /tmp/backup-inspect -iname '*lifeai.env*' | grep -q . && (echo "::error::a secrets-file-like entry was found in the backup archive" && exit 1)
@@ -2002,6 +2013,10 @@ jobs:
 
       - name: Restore for real into a disposable target and verify the content matches
         run: |
+          # restore.sh itself already runs the content-addressing + uploads-manifest.txt
+          # verification (see its own "3b/4" step) as part of this exact invocation — a
+          # non-zero exit here would already mean that check failed, so this step's own
+          # assertions below are on top of, not instead of, that.
           ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir "$TEST_RESTORE_DIR" --confirm
           diff "$TEST_COMPOSE_DIR/docker-compose.vps.yml" "$TEST_RESTORE_DIR/docker-compose.vps.yml"
           diff "$TEST_COMPOSE_DIR/Caddyfile" "$TEST_RESTORE_DIR/Caddyfile"
@@ -2014,6 +2029,14 @@ jobs:
           live_content=$(docker run --rm -v lifeai_caddy_data:/vol:ro alpine:3 cat /vol/cert.pem)
           [ "$live_content" = "FAKE-TLS-CERT-DATA" ] || (echo "::error::the live caddy_data volume was unexpectedly modified" && exit 1)
           echo "Confirmed: restore produced correct file and volume content without touching anything live."
+
+          restored_uploads_vol=$(docker volume ls --format '{{.Name}}' | grep '^lifeai_restore_.*_uploads$')
+          [ -n "$restored_uploads_vol" ] || (echo "::error::expected a lifeai_restore_*_uploads volume to exist after restore" && exit 1)
+          restored_blob=$(docker run --rm -v "$restored_uploads_vol:/vol:ro" alpine:3 cat "/vol/${SYNTH_SHA:0:2}/${SYNTH_SHA}")
+          [ "$restored_blob" = "Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data." ] || (echo "::error::restored uploads volume content did not match the original synthetic file" && exit 1)
+          live_uploads_content=$(docker run --rm -v lifeai_uploads:/vol:ro alpine:3 cat "/vol/${SYNTH_SHA:0:2}/${SYNTH_SHA}")
+          [ "$live_uploads_content" = "Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data." ] || (echo "::error::the live lifeai_uploads volume was unexpectedly modified" && exit 1)
+          echo "Confirmed: the Life Library uploads volume restored byte-identical, live volume untouched."
 
       - name: Tear down
         if: always()

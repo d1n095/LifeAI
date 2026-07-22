@@ -153,7 +153,7 @@ samma gamla, nu explicit dokumenterad istället för underförstådd.
 - **Publikt (nått från internet):** enbart Caddy på 80/443. Verifierat i CI (`vps-compose-verify`s "Verify Caddy is the only container publishing anything to the host").
 - **Privat (bara Docker-nätverket `lifeai_internal`):** frontend:3000, backend:8000. Ingen av dem har en `ports:`-rad i `docker-compose.vps.yml` — inte "brandväggad", utan konstruktivt onåbar utifrån eftersom ingen NAT/DNAT-regel någonsin skapas för dem.
 - **Privat, ett steg smalare (bara Docker-nätverket `lifeai_data`, `internal: true`):** redis:6379. Bara backend är anslutet till detta nätverk — frontend och caddy är inte anslutna till det överhuvudtaget, så de kan inte ens *försöka* nå det (ingen DNS-post, ingen route), inte bara nekas med lösenord. Verifierat i CI (`vps-compose-verify`s nätverksisoleringssteg).
-- **Extern, utanför VPS:en helt:** Supabase (Session Pooler, port 5432) — det enda som fortfarande är externt. Redis kör numera privat på VPS:en själv (se `redis`-tjänsten i `docker-compose.vps.yml`), men utan disk-persistens (tmpfs `/data`), så VPS:en har fortfarande inget eget **permanent** stateful data för applikationens kärndata — se `docs/VPS_BACKUP_RESTORE.md` för vad som faktiskt behöver säkerhetskopieras på själva VPS:en (i praktiken bara hemlighetsfilen och Caddys TLS-certifikat; Redis är medvetet exkluderat, se den policyn).
+- **Extern, utanför VPS:en helt:** Supabase (Session Pooler, port 5432) — extraherad text/embeddings/metadata. Redis kör privat på VPS:en (se `redis`-tjänsten i `docker-compose.vps.yml`), utan disk-persistens (tmpfs `/data`). **Sedan durable-worker-paketet har VPS:en dock ETT eget permanent stateful datalager:** `lifeai_uploads` (Life Library-originalfiler, innehållsadresserade) — se ovanstående "Filsystem, uppladdningar och persistens"-avsnitt och `docs/VPS_BACKUP_RESTORE.md` för vad som faktiskt behöver säkerhetskopieras (hemlighetsfilen, Caddys TLS-certifikat, OCH nu `lifeai_uploads`; Redis förblir medvetet exkluderat).
 
 ## Autentisering, cookies och CSRF (`backend/app/deps.py`, `backend/app/cookies.py`)
 
@@ -277,11 +277,39 @@ mitt i en förfrågan — se filens egen kommentar för den fullständiga förkl
 
 ## Filsystem, uppladdningar och persistens
 
-Applikationen lagrar **ingen** användardata i containerns filsystem — dokumentuppladdningar
-processas i minnet och lagras som `document_chunks`/embeddings i Postgres (pgvector), inte
-som filer på disk (se `backend/app/rag/vector_store.py`). Det enda VPS-lokala stateful datat
-är Caddys eget `caddy_data`-volym (TLS-certifikat) och den root-ägda hemlighetsfilen — se
-`docs/VPS_BACKUP_RESTORE.md`.
+**Uppdaterat av durable-worker-paketet (Life Library).** Extraherad text/embeddings lagras
+fortfarande som `document_chunks` i Postgres (pgvector) — det har inte ändrats. Men det
+**ursprungliga uppladdade filinnehållet** (den råa filen en användare laddade upp, innan
+extraktion) lagras nu innehållsadresserat (`{sha256[:2]}/{sha256}`, aldrig av
+användarens filnamn — se `backend/app/storage/local_fs.py`) på en **egen, namngiven,
+persistent Docker-volym**, `lifeai_uploads`, monterad på `/var/lib/lifeai/uploads` i BÅDE
+`backend` (skriver vid uppladdning) och den nya `worker`-tjänsten (läser vid bearbetning).
+Detta är den ENDA skrivbara volymen någon container i topologin har utöver Caddys egen
+`caddy_data`/`caddy_config` — `backend`/`worker` är annars `read_only: true` med bara `/tmp`
+som `tmpfs`.
+
+**worker (ny tjänst, samma avbild som `backend`, annat `command:`)**: en fristående
+poll-loop (`python -m app.worker`) som hämtar väntande `ImportJob`-rader ur Postgres via
+`FOR UPDATE SKIP LOCKED` och bearbetar dem — ersätter den gamla process-bundna FastAPI
+`BackgroundTask`-vägen (som inte överlevde en backend-omstart). Ingen `ports:`, ingen
+Caddy-routing, aldrig nåbar direkt. Delar `lifeai_internal` (utgående internet till
+Supabase/AI-leverantörer) och `lifeai_data` (Redis, för STEG 11:s befintliga
+distribuerade lås, omskopat till `(owner, innehålls-checksumma)`) med `backend`, exakt
+samma nätverksprofil. Se `backend/app/worker.py`s moduldocstring för klaim/lease/
+retry-mekaniken i detalj.
+
+**Varför en egen tjänst och inte bara ett nytt anrop i backend:** en `BackgroundTask` lever
+och dör med den HTTP-förfrågan/processen som schemalade den — en backend-omstart (deploy,
+krasch, `docker compose restart`) tappade tidigare varje pågående import helt. Nu är
+Postgres själv källan till sanning för vilka jobb som väntar/körs (`ImportJob.status`), och
+`worker` kan startas om, skalas, eller till och med köras på en annan container helt utan
+att jobb tappas — bara att de tar lite längre tid innan de plockas upp igen (nästa
+poll-cykel, eller efter att en förfallen lease gör ett övergivet jobb återtagbart, se
+`app/jobs/lease.py`).
+
+**Migrationer körs bara i `backend`**, inte i `worker` — trots att de delar avbild och
+ENTRYPOINT (`backend/docker-entrypoint.sh`), sätter `worker` `RUN_MIGRATIONS=false` så två
+containrar aldrig racear `alembic upgrade head` mot samma databas vid samtidig uppstart.
 
 ## Vad detta dokument INTE täcker
 
