@@ -1,7 +1,10 @@
+import os
+import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, field_validator
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
@@ -19,10 +22,11 @@ from app.models.media_url_import import MediaUrlImport
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
-from app.rag.library_import import run_import_job
+from app.rag.library_import import maybe_purge_blob
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
-from app.rag.zip_import import sha256_bytes
+from app.storage import get_storage
+from app.storage.base import StorageError, StorageSizeLimitExceeded
 from app.schemas import (
     DeleteConfirmIn,
     ImportJobOut,
@@ -33,6 +37,7 @@ from app.schemas import (
     MediaSegmentOut,
     MediaUrlImportIn,
     MediaUrlImportOut,
+    OpsStatusOut,
     SourceRelationshipIn,
     SourceRelationshipOut,
 )
@@ -98,24 +103,43 @@ def _visible_document_query(db: Session, owner_id: uuid.UUID):
 @limiter.limit(f"{settings.rate_limit_library_import_per_minute}/minute")
 async def import_package(
     request: Request,
-    background_tasks: BackgroundTasks,
     file: UploadFile,
     project_id: uuid.UUID | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ):
-    raw = await file.read()
-    if len(raw) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail=f"Filen är för stor (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
-    if not raw:
-        raise HTTPException(status_code=400, detail="Filen är tom.")
+    """Life Library durable-worker package: streams the upload straight to durable storage
+    (app/storage/), computing size and sha256 as it goes — never buffers the whole file in
+    memory (no `await file.read()` on the full body). Responds with the job id as soon as the
+    original is safely, verifiedly stored; app/worker.py's poll loop does the actual
+    extraction/indexing work asynchronously from here on, so this request never blocks on
+    that (see app/rag/library_import.py's module docstring for the full architecture)."""
     if project_id is not None:
         from app.models.project import Project
 
         if db.query(Project).filter_by(id=project_id).first() is None:
             raise HTTPException(status_code=404, detail="Projektet hittades inte.")
 
-    checksum = sha256_bytes(raw)
+    storage = get_storage()
+
+    def _read_chunk() -> bytes:
+        return file.file.read(1 << 20)
+
+    try:
+        # The whole streaming write (chunk reads from the incoming multipart body AND writes
+        # to the destination temp file) runs in a worker thread — run_in_threadpool, not a
+        # bare call — so this sync I/O never blocks the event loop other requests share.
+        blob = await run_in_threadpool(storage.write_stream, _read_chunk, max_bytes=MAX_UPLOAD_BYTES)
+    except StorageSizeLimitExceeded:
+        raise HTTPException(status_code=413, detail=f"Filen är för stor (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}")
+
+    if blob.size_bytes == 0:
+        storage.delete(blob.storage_key)
+        raise HTTPException(status_code=400, detail="Filen är tom.")
+
+    checksum = blob.sha256
 
     # Whole-upload idempotency: re-uploading byte-identical content (the same ZIP or the
     # same single file) returns the original completed job instead of a new one — see
@@ -151,28 +175,17 @@ async def import_package(
         status=ImportJobStatus.pending,
         source_filename=file.filename,
         source_checksum=checksum,
+        source_storage_key=blob.storage_key,
+        source_size_bytes=blob.size_bytes,
+        source_media_type=file.content_type,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
-
-    background_tasks.add_task(_run_import_job_background, job.id, user.id, raw, file.filename or "upload", project_id)
+    # No BackgroundTasks call here anymore — app/worker.py's poll loop picks up `pending`
+    # jobs on its own, restart-safe (see that module's docstring). The original is already
+    # durably stored by the time this response is sent, regardless of what happens next.
     return job
-
-
-def _run_import_job_background(job_id: uuid.UUID, owner_id: uuid.UUID, raw: bytes, filename: str, project_id: uuid.UUID | None) -> None:
-    import asyncio
-
-    from app.db import SessionLocal
-
-    async def run():
-        db = SessionLocal()
-        try:
-            await run_import_job(db, job_id, owner_id, raw, filename, project_id=project_id)
-        finally:
-            db.close()
-
-    asyncio.run(run())
 
 
 RECENT_JOBS_LIMIT = 50
@@ -367,17 +380,95 @@ def delete_source(
     db.query(DocumentChunk).filter_by(document_id=source_id).delete(synchronize_session=False)
     document.deleted_at = datetime.utcnow()
     document.chunk_count = 0
-    # DEL 5's "väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd": DEL 4's
-    # earlier document creation means a source can now be deleted while its own indexing is
-    # still mid-pipeline (extracting/extracted/embedding, or the legacy pending/indexing).
-    # Rather than leaving the row frozen at a non-terminal IndexStatus forever once it's
-    # hidden by deleted_at, give it a definitive terminal status right here.
-    if document.status not in (IndexStatus.indexed, IndexStatus.failed):
-        document.status = IndexStatus.failed
+    # DEL 5's "väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd": a source
+    # can be deleted while its own indexing is still mid-pipeline (received/original_storing/
+    # extracting/extracted/embedding, or the legacy pending/indexing). Rather than leaving
+    # the row frozen at a non-terminal IndexStatus forever once it's hidden by deleted_at,
+    # give it a definitive terminal status right here — `cancelled`, not `failed`: nothing
+    # actually went wrong, the founder just chose to stop it.
+    if document.status not in (IndexStatus.indexed, IndexStatus.failed, IndexStatus.cancelled):
+        document.status = IndexStatus.cancelled
         document.error_message = "Källan togs bort innan bearbetningen slutfördes."
+
+    # The worker checks cancellation between pipeline steps for the general (multi-file ZIP
+    # batch) case — but the common case, a single-file import, has its own job row that's
+    # ENTIRELY about this one document, so cancel it outright rather than waiting for the
+    # worker's own next per-file check to notice. A multi-file job keeps running for its
+    # other files; only this document's own status (above) reflects the cancellation there.
+    if document.import_job_id is not None:
+        job = db.get(ImportJob, document.import_job_id)
+        if job is not None and job.status in (ImportJobStatus.pending, ImportJobStatus.running) and job.progress_total <= 1:
+            job.status = ImportJobStatus.cancelled
+            job.completed_at = datetime.utcnow()
+            db.add(job)
+
+    db.add(document)
+    db.flush()  # deleted_at must be visible to maybe_purge_blob's "still referenced?" query below
+
+    storage = get_storage()
+    document.deletion_status = maybe_purge_blob(db, storage, document.storage_key)
     db.add(document)
     db.commit()
     return {"status": "deleted"}
+
+
+@router.get("/ops/status", response_model=OpsStatusOut)
+def ops_status(db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """Life Library durable-worker package (DEL 6): founder-only visibility into whether the
+    worker is actually alive and keeping up — no private paths or secrets (see
+    OpsStatusOut's docstring), just aggregated numbers a founder can act on ('the worker
+    looks stuck, go check the container')."""
+    now = datetime.utcnow()
+
+    queue_length = db.query(ImportJob).filter_by(owner_id=user.id, status=ImportJobStatus.pending).count()
+    running_jobs = db.query(ImportJob).filter_by(owner_id=user.id, status=ImportJobStatus.running).count()
+
+    oldest_pending_row = (
+        db.query(ImportJob.created_at)
+        .filter_by(owner_id=user.id, status=ImportJobStatus.pending)
+        .order_by(ImportJob.created_at.asc())
+        .first()
+    )
+    oldest_pending_age_seconds = (now - oldest_pending_row[0]).total_seconds() if oldest_pending_row else None
+
+    since = now - timedelta(hours=24)
+    failed_last_24h = (
+        db.query(ImportJob)
+        .filter(ImportJob.owner_id == user.id, ImportJob.status == ImportJobStatus.failed, ImportJob.completed_at >= since)
+        .count()
+    )
+
+    last_heartbeat_row = (
+        db.query(ImportJob.last_heartbeat_at)
+        .filter(ImportJob.owner_id == user.id, ImportJob.last_heartbeat_at.isnot(None))
+        .order_by(ImportJob.last_heartbeat_at.desc())
+        .first()
+    )
+    last_heartbeat_at = last_heartbeat_row[0] if last_heartbeat_row else None
+    # "Reachable" = some worker renewed a lease recently enough that it can't have silently
+    # died without anyone noticing yet — a generous multiple of the lease itself (not the
+    # poll interval), since a worker with nothing to do simply never heartbeats at all
+    # between jobs; this only flags a worker that claimed a job and then went quiet mid-work.
+    worker_reachable = last_heartbeat_at is not None and (now - last_heartbeat_at) < timedelta(
+        seconds=settings.worker_lease_seconds * 3
+    )
+
+    storage_writable = os.access(settings.storage_root, os.W_OK) if os.path.isdir(settings.storage_root) else False
+    try:
+        free_disk_bytes = shutil.disk_usage(settings.storage_root).free
+    except OSError:
+        free_disk_bytes = None
+
+    return OpsStatusOut(
+        worker_reachable=worker_reachable,
+        queue_length=queue_length,
+        running_jobs=running_jobs,
+        oldest_pending_age_seconds=oldest_pending_age_seconds,
+        failed_last_24h=failed_last_24h,
+        storage_writable=storage_writable,
+        free_disk_bytes=free_disk_bytes,
+        last_heartbeat_at=last_heartbeat_at,
+    )
 
 
 @router.post("/{source_id}/relationships", response_model=SourceRelationshipOut)
