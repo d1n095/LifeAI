@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, KnowledgeSourceItem, LibrarySearchHit, ProjectItem } from "@/lib/api";
+import { api, KnowledgeSourceItem, LibraryOpsStatus, LibrarySearchHit, ProjectItem } from "@/lib/api";
 import { useUploadQueue, UploadQueueItem } from "@/lib/uploadQueue";
 import { useTwoStepDelete } from "@/lib/useTwoStepDelete";
 
@@ -34,6 +34,90 @@ const QUEUE_STATUS_LABELS: Record<UploadQueueItem["status"], string> = {
   failed: "Misslyckades",
   cancelled: "Avbruten",
 };
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return "okänt";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatAge(seconds: number | null): string {
+  if (seconds === null) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}min`;
+  return `${Math.round(seconds / 3600)}h`;
+}
+
+// Founder-only operations status for the durable-worker package (GET /api/library/ops/status)
+// — requirement: worker reachable, queue length, running jobs, oldest pending age, failed in
+// the last 24h, storage writable, free disk space, last heartbeat. The endpoint itself never
+// returns private file paths or secrets (see backend/app/schemas.py's OpsStatusOut), so this
+// component renders every field it gets as-is, nothing filtered client-side.
+function LibraryOpsStatusBar() {
+  const [status, setStatus] = useState<LibraryOpsStatus | null>(null);
+  const [statusError, setStatusError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const s = await api.getLibraryOpsStatus();
+        if (!cancelled) {
+          setStatus(s);
+          setStatusError(false);
+        }
+      } catch {
+        if (!cancelled) setStatusError(true);
+      }
+    }
+    poll();
+    const interval = setInterval(poll, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  if (statusError || !status) return null; // silent — this is a supplementary diagnostic, not a blocking error
+
+  const problems: string[] = [];
+  if (!status.worker_reachable) problems.push("Workern svarar inte");
+  if (!status.storage_writable) problems.push("Lagringen är inte skrivbar");
+  if (status.failed_last_24h > 0) problems.push(`${status.failed_last_24h} misslyckade senaste dygnet`);
+
+  return (
+    <div
+      className={`rounded-lg border px-4 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1 ${
+        problems.length > 0 ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-border bg-panel text-white/50"
+      }`}
+      aria-label="Bearbetningsstatus"
+    >
+      <span className="flex items-center gap-1.5">
+        <span
+          className={`inline-block h-2 w-2 rounded-full ${status.worker_reachable ? "bg-emerald-400" : "bg-red-400"}`}
+          aria-hidden="true"
+        />
+        {status.worker_reachable ? "Worker aktiv" : "Worker onåbar"}
+      </span>
+      <span>Kö: {status.queue_length}</span>
+      <span>Bearbetar: {status.running_jobs}</span>
+      {status.oldest_pending_age_seconds !== null && <span>Äldsta väntande: {formatAge(status.oldest_pending_age_seconds)}</span>}
+      <span>Misslyckade (24h): {status.failed_last_24h}</span>
+      <span>Ledigt lagringsutrymme: {formatBytes(status.free_disk_bytes)}</span>
+      {problems.length > 0 && (
+        <span role="alert" className="font-medium">
+          {problems.join(" · ")}
+        </span>
+      )}
+    </div>
+  );
+}
 
 export default function LibraryPage() {
   const [sources, setSources] = useState<KnowledgeSourceItem[]>([]);
@@ -144,6 +228,8 @@ export default function LibraryPage() {
           <p className="text-white/50 text-sm mt-1">Den enda inläsningscentralen: importera, organisera och sök i grundarens kunskapsbibliotek.</p>
         </div>
       </div>
+
+      <LibraryOpsStatusBar />
 
       {error && (
         <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
