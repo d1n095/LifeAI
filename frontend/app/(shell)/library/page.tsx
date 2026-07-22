@@ -339,7 +339,12 @@ export default function LibraryPage() {
           )}
         </div>
       ) : (
-        <div className="rounded-xl border border-border overflow-x-auto">
+        // relative: without a positioned ancestor here, the "Åtgärder" column header's
+        // visually-hidden (absolutely positioned) span below escapes this scroll
+        // container's clipping entirely and inflates document.documentElement.scrollWidth
+        // at narrow viewports, even though nothing is actually visible outside the
+        // viewport — found via a real mobile-viewport overflow check, not asserted.
+        <div className="relative rounded-xl border border-border overflow-x-auto">
           <table className="w-full text-sm">
             <caption className="sr-only">Källor i kunskapsbiblioteket</caption>
             <thead className="bg-panel text-white/50 text-xs uppercase">
