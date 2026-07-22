@@ -1761,7 +1761,7 @@ jobs:
           FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
           FOUNDER_PASSWORD=TestFounderPassword123!
           DATABASE_URL=$CI_DATABASE_URL
-          REDIS_PASSWORD=ci-deploy-rollback-test-redis-password-1234567890
+          REDIS_PASSWORD=ciDeployRollbackRedisPassword1234567890abcdef
           FRONTEND_ORIGINS=http://localhost:80
           PUBLIC_APP_URL=http://localhost:80
           SMTP_HOST=ci-smtp-placeholder.invalid
