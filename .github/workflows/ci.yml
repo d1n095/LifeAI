@@ -1379,16 +1379,51 @@ jobs:
           done
           curl -sS http://localhost:80/api/health
 
-      - name: Verify exactly the expected services are running, including redis
+      - name: Verify exactly the expected services are running, including redis and worker
         run: |
           got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps --services | sort | tr '\n' ' ')
-          expected="backend caddy frontend redis "
+          expected="backend caddy frontend redis worker "
           [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
-          echo "Confirmed: exactly caddy, backend, frontend, redis — no more, no fewer."
+          echo "Confirmed: exactly caddy, backend, frontend, redis, worker — no more, no fewer."
+
+      - name: Verify the durable-worker package's worker is actually alive and polling, not restart-looping
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Status}}' "$cid")
+            [ "$status" = "running" ] && break
+            sleep 1
+          done
+          status=$(docker inspect -f '{{.State.Status}}' "$cid")
+          [ "$status" = "running" ] || (echo "::error::worker is not running (status: $status)" && docker logs "$cid" && exit 1)
+          restarts=$(docker inspect -f '{{.RestartCount}}' "$cid")
+          [ "$restarts" = "0" ] || (echo "::error::worker has restarted $restarts time(s) — it should start cleanly and stay up" && docker logs "$cid" && exit 1)
+          docker logs "$cid" 2>&1 | grep -q "Worker .* startar" || (echo "::error::worker's own startup log line never appeared" && docker logs "$cid" && exit 1)
+          echo "Confirmed: worker is running, has not restarted, and logged its own startup line."
+
+      - name: Verify backend and worker share the same persistent uploads volume, mounted read-write at the storage_root path
+        run: |
+          for name in backend worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            mounts=$(docker inspect -f '{{range .Mounts}}{{.Name}}:{{.Destination}}:{{.RW}} {{end}}' "$cid")
+            case "$mounts" in
+              *"lifeai_uploads:/var/lib/lifeai/uploads:true"*) ;;
+              *) echo "::error::$name is missing a read-write lifeai_uploads mount at /var/lib/lifeai/uploads (got: $mounts)" && exit 1 ;;
+            esac
+          done
+          echo "Confirmed: backend and worker both mount the same named lifeai_uploads volume, read-write, at /var/lib/lifeai/uploads."
+
+      - name: Verify only backend runs migrations on startup, not worker
+        run: |
+          worker_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          run_migrations=$(docker exec "$worker_cid" printenv RUN_MIGRATIONS || true)
+          [ "$run_migrations" = "false" ] || (echo "::error::worker's RUN_MIGRATIONS is '$run_migrations', expected 'false'" && exit 1)
+          docker logs "$worker_cid" 2>&1 | grep -q "RUN_MIGRATIONS=false, hoppar" || (echo "::error::worker's logs don't show the migration-skip message" && exit 1)
+          echo "Confirmed: worker skips alembic upgrade head on startup — only backend runs it."
 
       - name: Verify Caddy is the only container publishing anything to the host
         run: |
-          for name in backend frontend redis; do
+          for name in backend frontend redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             ports=$(docker port "$cid" || true)
             if [ -n "$ports" ]; then
@@ -1410,15 +1445,17 @@ jobs:
           esac
           echo "Confirmed: redis is only on lifeai_data ($redis_nets)."
 
-          backend_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q backend)
-          backend_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$backend_cid")
-          for net in lifeai_internal lifeai_data; do
-            case "$backend_nets" in
-              *"$net"*) ;;
-              *) echo "::error::backend is missing $net — it must be on both lifeai_internal and lifeai_data: $backend_nets" && exit 1 ;;
-            esac
+          for svc in backend worker; do
+            svc_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$svc")
+            svc_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$svc_cid")
+            for net in lifeai_internal lifeai_data; do
+              case "$svc_nets" in
+                *"$net"*) ;;
+                *) echo "::error::$svc is missing $net — it must be on both lifeai_internal and lifeai_data: $svc_nets" && exit 1 ;;
+              esac
+            done
+            echo "Confirmed: $svc is on both lifeai_internal and lifeai_data ($svc_nets)."
           done
-          echo "Confirmed: backend is on both lifeai_internal and lifeai_data ($backend_nets)."
 
           for name in frontend caddy; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
@@ -1457,14 +1494,14 @@ jobs:
 
       - name: Verify restart policy and log rotation are actually applied
         run: |
-          for name in caddy backend frontend redis; do
+          for name in caddy backend frontend redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid")
             [ "$policy" = "unless-stopped" ] || (echo "::error::$name has restart policy '$policy', expected unless-stopped" && exit 1)
             logdriver=$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$cid")
             [ "$logdriver" = "json-file" ] || (echo "::error::$name uses log driver '$logdriver', expected json-file with size limits" && exit 1)
           done
-          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all four services."
+          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all five services."
 
       - name: Verify a full request actually reaches the backend/database through Caddy -> frontend -> backend
         run: |
@@ -1525,12 +1562,12 @@ jobs:
         # construction, not by a mistake in this compose file. See the next step for why
         # that's an accepted, mitigated trade-off rather than a gap.
         run: |
-          for name in backend frontend; do
+          for name in backend frontend worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             uid=$(docker exec "$cid" id -u)
             [ "$uid" = "10001" ] || (echo "::error::$name is running as UID $uid, expected the dedicated non-root UID 10001" && exit 1)
           done
-          echo "Confirmed: backend/frontend run as UID 10001 (never root)."
+          echo "Confirmed: backend/frontend/worker run as UID 10001 (never root) — worker shares backend's own image and Dockerfile USER directive."
 
       - name: Verify caddy's root process is mitigated by a near-empty capability set
         # caddy:2-alpine has no built-in non-root user to switch to (confirmed: no "caddy"
@@ -1570,7 +1607,7 @@ jobs:
 
       - name: Verify container-level security controls are actually applied, not just declared
         run: |
-          for name in caddy backend frontend redis; do
+          for name in caddy backend frontend redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
 
             privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' "$cid")
@@ -1655,7 +1692,7 @@ jobs:
         if: failure()
         run: |
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
-          for name in backend frontend caddy redis; do
+          for name in backend frontend caddy redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
             if [ -n "$cid" ]; then
               echo "--- $name health ---"

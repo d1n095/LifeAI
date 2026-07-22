@@ -22,7 +22,18 @@ if [ -n "${MAINAI_APP_PASSWORD:-}" ]; then
   rm -f "$RENDER_ENV_FILE"
 fi
 
-echo "Kör alembic upgrade head..."
-alembic upgrade head
+if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
+  echo "Kör alembic upgrade head..."
+  alembic upgrade head
+else
+  # The durable-worker package's worker service (docker-compose.vps.yml) runs from this
+  # exact image with a different `command:`, not a different image — without this, worker
+  # and backend containers starting at the same time would both run `alembic upgrade head`
+  # concurrently against the same database. Alembic's own advisory lock makes that safe
+  # rather than corrupting, but it's still pure redundant work and unnecessary lock
+  # contention on every deploy, so the worker sets RUN_MIGRATIONS=false and lets backend be
+  # the one place migrations actually run.
+  echo "RUN_MIGRATIONS=false, hoppar över alembic upgrade head."
+fi
 
 exec "$@"
