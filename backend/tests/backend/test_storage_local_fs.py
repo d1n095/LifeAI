@@ -38,6 +38,24 @@ def test_write_then_read_round_trips_exact_bytes(tmp_path):
         assert f.read() == payload
 
 
+def test_a_blob_survives_being_read_by_a_brand_new_storage_instance(tmp_path):
+    """Durability doesn't depend on any single process's in-memory state: a fresh
+    LocalFilesystemStorage constructed against the same root (standing in for a backend or
+    worker process restart, since a real restart is exactly 'a new process constructs a new
+    instance against the same persistent volume') must see everything an earlier instance
+    wrote."""
+    payload = b"overlever en omstart" * 500
+    writer = LocalFilesystemStorage(str(tmp_path))
+    blob = writer.write_stream(_chunks(payload), max_bytes=10_000_000)
+    del writer
+
+    reader = LocalFilesystemStorage(str(tmp_path))
+    assert reader.exists(blob.storage_key)
+    assert reader.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes)
+    with reader.open_read(blob.storage_key) as f:
+        assert f.read() == payload
+
+
 def test_identical_content_deduplicates_to_the_same_key_and_a_single_file_on_disk(tmp_path):
     storage = LocalFilesystemStorage(str(tmp_path))
     payload = b"samma innehall varje gang"
