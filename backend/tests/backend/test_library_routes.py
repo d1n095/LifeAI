@@ -3,6 +3,7 @@ real HTTP surface (TestClient), not the orchestrator directly (see test_library_
 for that), so route wiring, auth/CSRF, request validation and response shaping are all
 exercised together, the same way a real client would hit them."""
 
+import asyncio
 import io
 import time
 import uuid
@@ -14,15 +15,28 @@ FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 
 
+def _run_worker_once() -> bool:
+    """Durable-worker package: POST /api/library/import no longer schedules a FastAPI
+    BackgroundTask — it only writes the original file and creates a pending ImportJob (see
+    app/routers/library.py's import_package). A real worker process (app/worker.py) picks
+    pending jobs up independently via its own poll loop, but no such process runs during
+    pytest, so tests must explicitly simulate one poll cycle. This runs the exact same
+    Worker.run_once() a production worker runs: claim via Postgres FOR UPDATE SKIP LOCKED,
+    then process to completion (including any in-process retries). Returns False if nothing
+    was pending to claim."""
+    from app.worker import Worker
+
+    return asyncio.run(Worker().run_once())
+
+
 def _wait_for_job(client, job_id: str, *, timeout: float = 5.0) -> dict:
-    """POST /api/library/import schedules the actual work as a FastAPI BackgroundTask,
-    which — unlike a plain function call — is NOT guaranteed to have finished by the time
-    TestClient's .post() returns (it runs in Starlette's background-task threadpool, whose
-    completion isn't awaited by the test client the way a real browser watching a job's
-    status endpoint effectively is). Polling GET /jobs/{id} here is both the correct fix and
-    a more realistic exercise of the same status endpoint the future Library UI polls."""
+    """Drives worker poll cycles synchronously (see _run_worker_once) instead of relying on
+    background-task completion. One cycle already fully resolves a job to a terminal status
+    in practice (process_claimed_job retries in-process), but the timeout loop is kept as a
+    hang-guard rather than assuming that's always true."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        _run_worker_once()
         res = client.get(f"/api/library/jobs/{job_id}")
         assert res.status_code == 200
         job = res.json()
@@ -261,14 +275,17 @@ def test_delete_requires_explicit_confirmation(client):
     assert client.get(f"/api/library/{source_id}").status_code == 404  # gone from a normal read
 
 
-def test_deleting_a_source_still_mid_pipeline_leaves_it_in_a_definitive_failed_state(client, superuser_db):
+def test_deleting_a_source_still_mid_pipeline_leaves_it_in_a_definitive_terminal_state(client, superuser_db):
     """DEL 5's 'väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd': a
     founder can delete a source whose background indexing hasn't reached a terminal
     IndexStatus yet (a narrow but real race between DEL 4's earlier document creation and
     the async extraction/embedding steps still running). Simulates that race directly
     rather than relying on real timing: after a normal completed import, the document's
     status is rewound to a non-terminal one, then deleted — the row must come out the other
-    side with a real terminal status, not frozen mid-pipeline forever."""
+    side with a real terminal status, not frozen mid-pipeline forever. Durable-worker
+    package: a source deleted mid-pipeline is a cancellation, not a failure — the file/job
+    were never broken, the founder just chose to stop them — so the terminal status is now
+    IndexStatus.cancelled, not .failed (see app/routers/library.py's delete_source)."""
     import uuid as uuid_mod
 
     from app.models.document import Document, IndexStatus
@@ -289,7 +306,7 @@ def test_deleting_a_source_still_mid_pipeline_leaves_it_in_a_definitive_failed_s
     superuser_db.expire_all()
     doc2 = superuser_db.get(Document, uuid_mod.UUID(source_id))
     assert doc2.deleted_at is not None
-    assert doc2.status == IndexStatus.failed
+    assert doc2.status == IndexStatus.cancelled
     assert doc2.error_message is not None
 
 
