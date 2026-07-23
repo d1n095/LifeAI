@@ -585,7 +585,7 @@ jobs:
   combined-container-verify:
     name: Combined container — build, run, verify
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/verify-combined-container'
+    if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -798,6 +798,377 @@ jobs:
         if: always()
         run: docker rm -f lifeai-c || true
 
+      # ---- Container D: startup race — proves scripts/entrypoint-combined.sh's health-gated
+      # frontend startup against the REAL image, not just by reading the script. Verified
+      # production bug: frontend previously started (and Next's proxy began accepting public
+      # traffic) concurrently with backend, so any request arriving before FastAPI finished
+      # role provisioning + migrations + uvicorn boot got ECONNREFUSED -> 502.
+      # TEST_DELAY_BACKEND_STARTUP_SECONDS (see the entrypoint script) reproduces that slow
+      # boot on demand. ----
+      - name: Start container D (delayed backend startup)
+        run: |
+          docker run -d --name lifeai-d \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3021:3000 \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3021 \
+            -e PUBLIC_APP_URL=http://localhost:3021 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e TEST_DELAY_BACKEND_STARTUP_SECONDS=10 \
+            lifeai-combined:ci
+
+      - name: Verify the frontend refuses connections while backend startup is delayed
+        run: |
+          sleep 4
+          docker logs lifeai-d 2>&1 | grep -q "TEST HOOK: delaying backend startup" || (echo "::error::delay hook did not engage — this test isn't exercising the race at all" && exit 1)
+          if curl -sf --max-time 2 http://localhost:3021/api/health > /dev/null; then
+            echo "::error::frontend accepted a connection before backend became healthy — the startup race is back" && exit 1
+          fi
+          if docker logs lifeai-d 2>&1 | grep -q "frontend pid="; then
+            echo "::error::frontend was started before the backend health check passed" && exit 1
+          fi
+          echo "Confirmed: no listener on :3021 and frontend not started while backend startup is delayed, as expected."
+
+      - name: Verify the frontend starts and serves traffic once backend becomes healthy
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://localhost:3021/api/health && break
+            sleep 1
+          done
+          curl -sS http://localhost:3021/api/health
+          docker logs lifeai-d 2>&1 | grep -q "backend is healthy" || (echo "::error::entrypoint never logged that the backend became healthy" && exit 1)
+          docker logs lifeai-d 2>&1 | grep -q "frontend pid=" || (echo "::error::frontend never started even after the backend became healthy" && exit 1)
+          docker logs lifeai-d 2>&1 | tail -20
+
+      - name: Verify a backend that never becomes healthy fails the whole container clearly
+        run: |
+          docker rm -f lifeai-d || true
+          docker run -d --name lifeai-d-timeout \
+            --add-host=host.docker.internal:host-gateway \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3022 \
+            -e PUBLIC_APP_URL=http://localhost:3022 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e TEST_DELAY_BACKEND_STARTUP_SECONDS=999 \
+            -e BACKEND_HEALTH_CHECK_TIMEOUT_SECONDS=5 \
+            lifeai-combined:ci
+          timeout 30 docker wait lifeai-d-timeout
+          docker logs lifeai-d-timeout 2>&1 | tail -20
+          docker logs lifeai-d-timeout 2>&1 | grep -q "aborting startup, never starting the frontend" || (echo "::error::entrypoint did not log a clear timeout abort" && exit 1)
+          if docker logs lifeai-d-timeout 2>&1 | grep -q "frontend pid="; then
+            echo "::error::frontend started even though the backend health check timed out" && exit 1
+          fi
+          EXIT_CODE=$(docker inspect lifeai-d-timeout --format '{{.State.ExitCode}}')
+          [ "$EXIT_CODE" = "1" ] || (echo "::error::expected exit code 1 (clear health-check-timeout abort), got $EXIT_CODE" && exit 1)
+          docker rm -f lifeai-d-timeout || true
+
+      - name: Stop container D
+        if: always()
+        run: docker rm -f lifeai-d lifeai-d-timeout || true
+
+      # ---- Container E: Supabase Session Pooler auth hardening — proves
+      # backend/scripts/ensure_app_role.py's two fixes against the REAL image. Verified
+      # production incident: the pre-fix script ran ALTER ROLE ... PASSWORD unconditionally
+      # on every boot, which risked a transient "password authentication failed" the next
+      # time mainai_app connected while Supabase's Session Pooler (Supavisor) auth cache
+      # caught up — with no retry anywhere in the app, that killed the whole container even
+      # though the credential was correct. ----
+      - name: Verify a repeated start against an already-provisioned role does not rotate the password
+        run: |
+          docker run -d --name lifeai-e-repeat \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3023:3000 \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="$CONTAINER_DATABASE_URL" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3023 \
+            -e PUBLIC_APP_URL=http://localhost:3023 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3023/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3023/api/health
+          # This is a REPEATED start: container A already provisioned mainai_app against the
+          # same lifeos_combined_ci database earlier in this job, so the role already exists
+          # here with the correct password — exactly the "ordinary restart" case the incident
+          # was about.
+          docker logs lifeai-e-repeat 2>&1 | grep -q "lösenordet ändras INTE" || (echo "::error::a restart against an already-provisioned role must skip the password ALTER — it didn't" && exit 1)
+          if docker logs lifeai-e-repeat 2>&1 | grep -qE "CREATE ROLE|roterat"; then
+            echo "::error::a normal restart rotated/recreated the password — this is exactly the incident this fix prevents" && exit 1
+          fi
+          docker rm -f lifeai-e-repeat || true
+
+      - name: Create a second database for the fresh-role retry test
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_combined_ci_fresh_role;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_combined_ci_fresh_role;"
+
+      - name: Verify simulated transient DB auth failures are retried, not fatal
+        run: |
+          docker run -d --name lifeai-e-retry \
+            --add-host=host.docker.internal:host-gateway \
+            -p 3024:3000 \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="postgresql://postgres:postgres@host.docker.internal:5432/lifeos_combined_ci_fresh_role" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw_fresh \
+            -e MAINAI_APP_ROTATE_PASSWORD=true \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3024 \
+            -e PUBLIC_APP_URL=http://localhost:3024 \
+            -e PORT=3000 \
+            -e E2E_MOCK_MODE=true \
+            -e TEST_FORCE_APP_DB_CONNECT_FAILURES=3 \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3024/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3024/api/health
+          docker logs lifeai-e-retry 2>&1 | tail -30
+          # Postgres roles are cluster-global, not database-scoped: mainai_app already
+          # exists (containers A-D provisioned it earlier in this same job's shared Postgres
+          # service), even though lifeos_combined_ci_fresh_role is a brand-new database. So
+          # this step must force MAINAI_APP_ROTATE_PASSWORD=true — otherwise
+          # ensure_app_role.py correctly (by design) leaves the existing password alone,
+          # APP_DATABASE_URL is then built from a password Postgres was never told to
+          # accept, and the container fails to boot for a real (not simulated) reason. With
+          # rotation forced, the ALTER ROLE path runs and self-tests the new credential,
+          # which is what exercises the simulated-failure retry loop below.
+          docker logs lifeai-e-retry 2>&1 | grep -q "TEST HOOK: TEST_FORCE_APP_DB_CONNECT_FAILURES simulated failure" || (echo "::error::the simulated-failure test hook never engaged" && exit 1)
+          docker logs lifeai-e-retry 2>&1 | grep -qE "mainai_app-anslutningen (misslyckades|fungerar)" || (echo "::error::no retry/backoff log lines from the self-test-connect loop" && exit 1)
+          # And, despite those simulated failures, the container must have booted normally —
+          # this is the actual point: a transient auth failure must not be fatal.
+          docker logs lifeai-e-retry 2>&1 | grep -q "backend is healthy" || (echo "::error::backend never became healthy despite the retry loop absorbing the simulated failures" && exit 1)
+          docker rm -f lifeai-e-retry || true
+
+      # ---- Container F: Render Free memory-pressure check — proves or disproves the
+      # hypothesis that a real page load (not just the lightweight /api/health probe) pushes
+      # the combined container's memory past Render Free's documented 512 MB limit, causing
+      # the kernel OOM killer to SIGKILL the whole cgroup silently (no app-level log line,
+      # no graceful error — exactly what would explain a public 502 on "/" while Render's
+      # own /api/health probe, cheap enough to survive, keeps reporting 200). 512m is the
+      # commonly documented Render Free web-service RAM ceiling; not independently
+      # reconfirmed against Render's current docs from inside this sandbox (no outbound
+      # access to render.com here), so if Render has since changed that number this
+      # simulated ceiling may drift from the real one — treat 512m as the best available
+      # proxy, not a guaranteed match. --memory-swap equal to --memory disables swap
+      # entirely, matching a container platform that has none.
+      #
+      # Uses its OWN dedicated database (lifeos_combined_ci_memtest) and forces
+      # MAINAI_APP_ROTATE_PASSWORD=true, deliberately not reusing lifeos_combined_ci or
+      # ci_combined_app_pw the way containers A-D do. mainai_app is a cluster-global Postgres
+      # role (same shared Postgres service container across this whole job — see the
+      # incident this job's Container E steps already document), and Container E's own
+      # retry-test step just above rotated that global role's password to
+      # ci_combined_app_pw_fresh. Reusing ci_combined_app_pw here would silently point at a
+      # password Postgres no longer accepts — a real, permanent auth failure that has nothing
+      # to do with what this container actually tests (memory pressure), and would show up
+      # misleadingly as this step failing before the memory test even ran.
+      - name: Create a dedicated database for the memory-pressure test
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_combined_ci_memtest;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_combined_ci_memtest;"
+
+      - name: Start container F (Render Free memory-pressure simulation, 512m/no-swap, real PORT=10000)
+        run: |
+          # PORT=10000, and the container-side half of the -p mapping, are literally 10000 here —
+          # not the 3000 every other container (A-E) in this job uses. The actual production
+          # incident happened with Render's real $PORT (10000, confirmed in the Render deploy log
+          # this branch is investigating); every prior CI container only ever exercised 3000,
+          # leaving a real, unexamined gap between what CI covers and what Render actually runs.
+          docker run -d --name lifeai-f \
+            --add-host=host.docker.internal:host-gateway \
+            --memory=512m --memory-swap=512m \
+            -p 3025:10000 \
+            -v "${{ github.workspace }}/e2e-data:/app/e2e-data" \
+            -e SECRET_KEY=ci-combined-secret-key \
+            -e DATABASE_URL="postgresql://postgres:postgres@host.docker.internal:5432/lifeos_combined_ci_memtest" \
+            -e MAINAI_APP_PASSWORD=ci_combined_app_pw_memtest \
+            -e MAINAI_APP_ROTATE_PASSWORD=true \
+            -e REDIS_URL="$CONTAINER_REDIS_URL" \
+            -e FOUNDER_EMAIL=founder@lifeos.local \
+            -e FOUNDER_PASSWORD=TestFounderPassword123! \
+            -e FRONTEND_ORIGINS=http://localhost:3025 \
+            -e PUBLIC_APP_URL=http://localhost:3025 \
+            -e PORT=10000 \
+            -e E2E_MOCK_MODE=true \
+            -e E2E_EMAIL_LOG_PATH=/app/e2e-data/e2e_test_emails.jsonl \
+            lifeai-combined:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3025/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:3025/api/health
+          echo "Memory limit actually applied inside the container:"
+          docker exec lifeai-f sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes'
+          echo "Static asset (edge-probe.html — no SSR, no React) via the public \$PORT:"
+          curl -sS -o /dev/null -w "edge-probe.html -> %{http_code}\n" http://localhost:3025/edge-probe.html
+          curl -sS http://localhost:3025/edge-probe.html | grep -q "edge-probe-ok" || (echo "::error::edge-probe.html did not serve its expected static content via the public \$PORT" && exit 1)
+          echo "Diagnostic route /api/edge-probe (Next-native, no backend/DB/Redis) via the public \$PORT — quick reachability check:"
+          curl -sS -o /dev/null -w "/api/edge-probe?probe_id=ci-boot-check -> %{http_code}\n" "http://localhost:3025/api/edge-probe?probe_id=ci-boot-check"
+          echo "Confirming the catch-all /api/* proxy (frontend/app/api/[...path]/route.ts) still handles an unrelated backend path unaffected by the new literal route:"
+          curl -sS -o /dev/null -w "/api/auth/me -> %{http_code}\n" http://localhost:3025/api/auth/me
+
+      - name: Validate /api/edge-probe — probe_id enforcement, boot-id stability, log-injection and secret-leak safety
+        run: |
+          BASE=http://localhost:3025
+
+          echo "--- Missing probe_id -> 400 ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE/api/edge-probe")
+          [ "$CODE" = "400" ] || (echo "::error::missing probe_id did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- Empty probe_id -> 400 ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE/api/edge-probe?probe_id=")
+          [ "$CODE" = "400" ] || (echo "::error::empty probe_id did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- 65-character probe_id (one over the limit) -> 400 ---"
+          LONG_ID=$(printf 'a%.0s' $(seq 1 65))
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" -G --data-urlencode "probe_id=$LONG_ID" "$BASE/api/edge-probe")
+          [ "$CODE" = "400" ] || (echo "::error::65-char probe_id did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- Disallowed characters in probe_id -> 400 ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" -G --data-urlencode 'probe_id=bad id!' "$BASE/api/edge-probe")
+          [ "$CODE" = "400" ] || (echo "::error::probe_id with disallowed characters did not return 400 (got $CODE)" && exit 1)
+
+          echo "--- CR/LF log-injection attempt in probe_id -> 400, never leaks into the container log ---"
+          CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$BASE/api/edge-probe?probe_id=inject%0d%0a%5Bfake%5D-line")
+          [ "$CODE" = "400" ] || (echo "::error::CR/LF-bearing probe_id did not return 400 (got $CODE)" && exit 1)
+          if docker logs lifeai-f 2>&1 | grep -q "fake.-line\|inject.fake"; then
+            echo "::error::a rejected probe_id leaked into the container log" && exit 1
+          fi
+
+          echo "--- Valid probe_id -> 200, correct plain-text body, all required headers ---"
+          FIRST_ID="ci-probe-first-${RANDOM}"
+          HEADERS_1=$(curl -sS -D - -o /tmp/edge-probe-body-1.txt "$BASE/api/edge-probe?probe_id=$FIRST_ID")
+          grep -q "^LifeAI edge probe OK" /tmp/edge-probe-body-1.txt || (echo "::error::unexpected /api/edge-probe response body" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^content-type: text/plain; charset=utf-8" || (echo "::error::wrong Content-Type on /api/edge-probe" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^cache-control: no-store" || (echo "::error::missing Cache-Control: no-store on /api/edge-probe" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^x-lifeai-probe: edge-v1" || (echo "::error::missing X-LifeAI-Probe: edge-v1 header" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^x-lifeai-process-id: " || (echo "::error::missing X-LifeAI-Process-ID header" && exit 1)
+          echo "$HEADERS_1" | grep -qi "^x-lifeai-probe-id: $FIRST_ID" || (echo "::error::X-LifeAI-Probe-ID header does not echo the validated probe_id" && exit 1)
+          BOOT_ID_1=$(echo "$HEADERS_1" | grep -i "^x-lifeai-boot-id:" | tr -d '\r' | awk '{print $2}')
+          [ -n "$BOOT_ID_1" ] || (echo "::error::missing X-LifeAI-Boot-ID header" && exit 1)
+
+          echo "--- Second valid call, same running process -> identical boot_id ---"
+          SECOND_ID="ci-probe-second-${RANDOM}"
+          HEADERS_2=$(curl -sS -D - -o /dev/null "$BASE/api/edge-probe?probe_id=$SECOND_ID")
+          BOOT_ID_2=$(echo "$HEADERS_2" | grep -i "^x-lifeai-boot-id:" | tr -d '\r' | awk '{print $2}')
+          [ "$BOOT_ID_1" = "$BOOT_ID_2" ] || (echo "::error::boot_id changed between two calls in the same process ($BOOT_ID_1 vs $BOOT_ID_2)" && exit 1)
+
+          echo "--- A call carrying Cookie/Authorization/X-Forwarded-For must never leak their values into the log, only a boolean presence indicator ---"
+          SECRET_ID="ci-probe-secret-${RANDOM}"
+          curl -sS -o /dev/null \
+            -H "Cookie: session=super-secret-cookie-value" \
+            -H "Authorization: Bearer super-secret-token" \
+            -H "X-Forwarded-For: 203.0.113.99" \
+            "$BASE/api/edge-probe?probe_id=$SECRET_ID"
+          if docker logs lifeai-f 2>&1 | grep -q "super-secret-cookie-value"; then
+            echo "::error::a Cookie value leaked into the container log" && exit 1
+          fi
+          if docker logs lifeai-f 2>&1 | grep -q "super-secret-token"; then
+            echo "::error::an Authorization value leaked into the container log" && exit 1
+          fi
+          if docker logs lifeai-f 2>&1 | grep -q "203.0.113.99"; then
+            echo "::error::a full X-Forwarded-For address leaked into the container log" && exit 1
+          fi
+          docker logs lifeai-f 2>&1 | grep -q "\[edge-probe\].*probe_id=$SECRET_ID.*forwarded_for_present=true" \
+            || (echo "::error::expected structured log line for the secret-header test call was not found" && exit 1)
+          docker logs lifeai-f 2>&1 | grep -q "\[edge-probe\].*boot_id=$BOOT_ID_1.*pid=.*probe_id=$FIRST_ID" \
+            || (echo "::error::expected structured log line for the first valid call was not found" && exit 1)
+          echo "All /api/edge-probe validation checks passed."
+
+      - name: Confirm the public frontend $PORT is the sole externally-reachable port (unambiguous for Render)
+        run: |
+          docker port lifeai-f
+          # Exactly one published mapping, and it must be the frontend's $PORT (container-side
+          # 10000, mapped to host 3025 above, matching Render's actual assigned port exactly) —
+          # never 8000 (FastAPI, loopback-only by design; see Container A's identical check
+          # earlier in this job) and never anything else. If a future change to
+          # Dockerfile.combined or entrypoint-combined.sh ever published a second port, Render
+          # would have two candidate ports to route to instead of one — the exact class of
+          # ambiguity this step exists to rule out.
+          # `docker port` prints one line per (container-port, host-family) pair — a single
+          # `-p 3025:10000` mapping normally shows up as two lines (0.0.0.0 and [::]), not one.
+          # Count DISTINCT container-side "port/proto" prefixes instead of raw lines, so this
+          # doesn't false-positive on the ordinary IPv4+IPv6 duplication.
+          DISTINCT_CONTAINER_PORTS=$(docker port lifeai-f | awk '{print $1}' | sort -u | wc -l)
+          if [ "$DISTINCT_CONTAINER_PORTS" -ne 1 ]; then
+            echo "::error::expected exactly one distinct published container-side port, found $DISTINCT_CONTAINER_PORTS: $(docker port lifeai-f)" && exit 1
+          fi
+          docker port lifeai-f | grep -q "^10000/tcp -> " || (echo "::error::the published container-side port is not 10000 (Render's actual \$PORT)" && exit 1)
+          if docker port lifeai-f | grep -q "^8000/tcp"; then
+            echo "::error::port 8000 (FastAPI) is published — it must never be reachable from outside the container" && exit 1
+          fi
+
+      - name: Simulate a real browser page load of /, /login, /edge-probe.html and /api/edge-probe under the memory ceiling, repeatedly
+        run: |
+          # Unlike Container A-E's health-check-only traffic, this fetches the actual HTML documents
+          # for / and /login, then every /_next/static/* asset those documents reference — the same
+          # request pattern a real browser makes on first paint (HTML + JS chunks + CSS), repeated
+          # several times to simulate more than one visitor without waiting for a real 15-minute
+          # Render Free idle window. /edge-probe.html and /api/edge-probe ride along on every round
+          # too — a static asset with no SSR/React involved and a Next-native route handler with no
+          # backend/DB/Redis involved, to separate "Next's process/port/routing as a whole is
+          # broken" from "page rendering specifically is broken".
+          for round in $(seq 1 5); do
+            echo "--- round $round ---"
+            for page in / /login /edge-probe.html "/api/edge-probe?probe_id=ci-load-round-$round"; do
+              html=$(curl -sS --max-time 10 "http://localhost:3025$page")
+              code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:3025$page")
+              echo "$page -> $code"
+              if [ "$code" != "200" ]; then
+                echo "::error::$page returned $code on round $round under the memory ceiling" && exit 1
+              fi
+              assets=$(echo "$html" | grep -oE '/_next/static/[A-Za-z0-9._/-]+' | sort -u)
+              for asset in $assets; do
+                acode=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "http://localhost:3025$asset")
+                if [ "$acode" != "200" ]; then
+                  echo "::error::asset $asset returned $acode on round $round under the memory ceiling" && exit 1
+                fi
+              done
+            done
+            echo "Memory usage after round $round:"
+            docker stats --no-stream --format '{{.Name}}: {{.MemUsage}} ({{.MemPerc}})' lifeai-f
+            if [ "$(docker inspect -f '{{.State.Running}}' lifeai-f)" != "true" ]; then
+              echo "::error::container is no longer running after round $round" && exit 1
+            fi
+          done
+          curl -sS http://localhost:3025/api/health
+          echo "Final OOMKilled status: $(docker inspect -f '{{.State.OOMKilled}}' lifeai-f)"
+          if [ "$(docker inspect -f '{{.State.OOMKilled}}' lifeai-f)" = "true" ]; then
+            echo "::error::container WAS OOM-killed under the 512m Render-Free-equivalent memory ceiling — this reproduces the hypothesis" && exit 1
+          fi
+
+      - name: Stop container F
+        if: always()
+        run: |
+          docker logs lifeai-f 2>&1 | tail -60
+          docker rm -f lifeai-f || true
+
       - name: Upload Playwright report (combined container)
         if: always()
         uses: actions/upload-artifact@v4
@@ -805,6 +1176,872 @@ jobs:
           name: playwright-report-combined
           path: frontend/playwright-report-combined/
           retention-days: 14
+
+  # ---------------------------------------------------------------------------------------
+  # Strato VPS topology — builds the REAL backend/frontend Dockerfiles and runs the REAL
+  # docker-compose.vps.yml (+ the CI-only docker-compose.vps.ci.yml override) against them,
+  # exactly as docs/STRATO_VPS_DEPLOY.md documents for the actual server, minus the images
+  # coming from GHCR (built locally here instead — see docker-compose.vps.ci.yml's comment)
+  # and minus a real domain/TLS (DOMAIN=":80", see Caddyfile). Verifies the specific
+  # architectural property this whole VPS plan exists to guarantee (see the "ROTORSAK
+  # BEKRÄFTAD AV RENDER SUPPORT" section of docs/RENDER_DEPLOY.md): a real reverse proxy in
+  # front of separate frontend/backend containers, with the backend never reachable except
+  # through the private Docker network. Branch-gated like combined-container-verify — this
+  # doesn't need to run on every push to every branch, only when this branch's own compose
+  # topology actually changes.
+  # ---------------------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------------------
+  # scripts/vps/*.sh — shellcheck every script, then exercise each mutating script's
+  # --dry-run path (side-effect-free by construction, see lib.sh's run() helper) so a syntax
+  # or logic error is caught before it's ever run for real against an actual server. The
+  # read-only scripts (00_preflight.sh, 90_verify_installation.sh) are run for real here —
+  # there's nothing unsafe about that, they never mutate anything regardless of --dry-run.
+  # ---------------------------------------------------------------------------------------
+  vps-scripts-check:
+    name: VPS bootstrap scripts — shellcheck + dry-run
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Shellcheck every script
+        # `-x` (follow sourced files) resolves each script's `source "$SCRIPT_DIR/lib.sh"`
+        # via the `# shellcheck source=./lib.sh` hints — those hints are relative to the
+        # directory the check runs FROM, so this must run from inside scripts/vps/, not the
+        # repo root (verified against the real failure this produced when it didn't).
+        working-directory: scripts/vps
+        run: |
+          for f in *.sh; do
+            echo "--- $f ---"
+            shellcheck -x "$f"
+          done
+
+      - name: Bash syntax check every script
+        run: |
+          for f in scripts/vps/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: Unit-test validate_digest_pinned_image() (lib.sh)
+        # Exercises the shared helper deploy.sh calls for both BACKEND_IMAGE and
+        # FRONTEND_IMAGE directly, in isolation, against every rejection case a bare
+        # `*@sha256:*` glob would miss (it also matches an empty digest) plus one passing
+        # complete digest-pinned reference.
+        working-directory: scripts/vps
+        run: |
+          source ./lib.sh
+
+          expect_reject() {
+            local desc="$1" image="$2"
+            if (validate_digest_pinned_image "$image" "TEST_IMAGE") 2>/tmp/digest-check-err.txt; then
+              echo "FAIL: expected rejection for case '$desc' (image='$image') but it passed"
+              exit 1
+            fi
+            echo "OK (rejected as expected): $desc"
+          }
+
+          expect_accept() {
+            local desc="$1" image="$2"
+            if ! (validate_digest_pinned_image "$image" "TEST_IMAGE"); then
+              echo "FAIL: expected acceptance for case '$desc' (image='$image') but it was rejected"
+              exit 1
+            fi
+            echo "OK (accepted as expected): $desc"
+          }
+
+          expect_reject "empty image name" "@sha256:$(printf 'a%.0s' {1..64})"
+          expect_reject "empty digest" "ghcr.io/example/backend@sha256:"
+          expect_reject "short digest" "ghcr.io/example/backend@sha256:$(printf 'a%.0s' {1..63})"
+          expect_reject "uppercase digest" "ghcr.io/example/backend@sha256:$(printf 'A%.0s' {1..64})"
+          expect_reject "non-hex digest" "ghcr.io/example/backend@sha256:$(printf 'g%.0s' {1..64})"
+          expect_reject "whitespace" "ghcr.io/example/backend @sha256:$(printf 'a%.0s' {1..64})"
+          expect_reject "mutable tag without digest" "ghcr.io/example/backend:latest"
+          expect_accept "valid complete digest-pinned reference" "ghcr.io/example/backend@sha256:$(printf 'a%.0s' {1..64})"
+
+      - name: Run 00_preflight.sh for real (read-only, safe)
+        working-directory: scripts/vps
+        run: sudo ./00_preflight.sh --min-disk-gb 1 --min-mem-mb 100
+
+      - name: Exercise every mutating script's --dry-run path
+        working-directory: scripts/vps
+        run: |
+          sudo ./10_install_docker.sh --dry-run
+          sudo ./20_create_deploy_user.sh --dry-run --user lifeai-ci-test
+          # 30_setup_directories.sh correctly refuses when the user doesn't exist yet (a real
+          # safety check, not a limitation of this test) — create a throwaway local user
+          # first so the dry-run actually exercises the directory-creation logic too.
+          sudo useradd -m lifeai-ci-test
+          sudo ./30_setup_directories.sh --dry-run --user lifeai-ci-test
+          sudo ./40_configure_firewall.sh --dry-run
+          sudo ./50_enable_auto_updates.sh --dry-run
+          # This MUST fail closed (no authorized_keys for the throwaway user) — a passing
+          # dry-run here would mean the safety refusal itself is broken. `|| true`: GitHub
+          # Actions bash steps run with `pipefail`, and the script's expected exit-1 here
+          # would otherwise abort this step before the grep check below ever runs.
+          sudo ./41_harden_ssh.sh --dry-run --user lifeai-ci-test > /tmp/harden-ssh-output.txt 2>&1 || true
+          cat /tmp/harden-ssh-output.txt
+          grep -q "Refusing to disable password authentication" /tmp/harden-ssh-output.txt
+
+      - name: Run 90_verify_installation.sh for real (read-only, safe — expected to report gaps since nothing was actually installed above)
+        working-directory: scripts/vps
+        run: sudo ./90_verify_installation.sh --user lifeai-ci-test || true
+
+  vps-compose-verify:
+    name: Strato VPS compose topology — build, run, verify
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # host.docker.internal (via docker-compose.vps.ci.yml's extra_hosts) is how the backend
+      # container reaches this runner-level service — see combined-container-verify's env
+      # block for the same reasoning. Redis needs no equivalent: it's docker-compose.vps.
+      # yml's own `redis` service now, not a runner-level GitHub Actions service — this job
+      # exercises the REAL private-Redis topology, not a stand-in for it.
+      CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_vps_ci
+      # Job-level, not just on the "up" step: docker-compose.vps.yml's `${VAR:?...}`
+      # interpolation guards run on EVERY invocation of `docker compose -f
+      # docker-compose.vps.yml ...` — including `logs` and `down` — not just `up`. Scoping
+      # these to a single step (an earlier version of this job did that) makes every later
+      # step in the SAME job fail to even parse the compose file, masking the real failure
+      # behind an unrelated interpolation error instead of showing it. REDIS_PASSWORD joins
+      # BACKEND_IMAGE/FRONTEND_IMAGE/DOMAIN here for the exact same reason: docker-compose.vps.
+      # yml's `redis`/`backend` services both interpolate `${REDIS_PASSWORD:?...}` directly at
+      # parse time, the same mechanism, not the `env_file:`-based ci-secrets.env below.
+      BACKEND_IMAGE: lifeai-vps-backend:ci
+      FRONTEND_IMAGE: lifeai-vps-frontend:ci
+      DOMAIN: ":80"
+      REDIS_PASSWORD: ci-vps-compose-verify-redis-password-1234567890
+      LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create database for the VPS-compose run
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_vps_ci;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_vps_ci;"
+
+      - name: Build the real backend and frontend images
+        run: |
+          docker build -t lifeai-vps-backend:ci ./backend
+          docker build -t lifeai-vps-frontend:ci ./frontend
+
+      - name: Write the CI-only secrets file (never used on the real VPS)
+        run: |
+          cat > "${{ github.workspace }}/ci-secrets.env" <<EOF
+          SECRET_KEY=ci-vps-secret-key
+          MAINAI_APP_PASSWORD=ci_vps_app_pw
+          FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
+          FOUNDER_PASSWORD=TestFounderPassword123!
+          DATABASE_URL=$CI_DATABASE_URL
+          FRONTEND_ORIGINS=http://localhost:80
+          PUBLIC_APP_URL=http://localhost:80
+          SMTP_HOST=ci-smtp-placeholder.invalid
+          SMTP_PORT=587
+          SMTP_USERNAME=ci
+          SMTP_PASSWORD=ci
+          SMTP_FROM_EMAIL=no-reply@lifeos.local
+          EOF
+          # REDIS_PASSWORD is deliberately NOT in this file: it's a Compose top-level
+          # interpolation variable (like BACKEND_IMAGE/DOMAIN above), set as a job-level env
+          # var instead — see this job's `env:` block. This file only supplies what backend/
+          # frontend read via `env_file:` at container-runtime.
+          # Unlike combined-container-verify (which sets ENVIRONMENT=development to skip the
+          # SMTP fail-closed startup gate), docker-compose.vps.yml hardcodes
+          # ENVIRONMENT=production directly in the service definition — the REAL VPS always
+          # runs with that gate active, so watering it down here would mean this job no
+          # longer tests the actual production startup path. A placeholder SMTP_HOST that
+          # satisfies app/main.py's _check_smtp_configured() (a presence check, not a real
+          # connection attempt) is enough: nothing in this job's test steps ever triggers an
+          # actual send (registration is disabled — founder-only launch — and the request
+          # this job makes against it is expected to be rejected before reaching app/email.py).
+
+      - name: Start the real VPS compose topology
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci up -d
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:80/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:80/api/health
+
+      - name: Verify exactly the expected services are running, including redis and worker
+        run: |
+          got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps --services | sort | tr '\n' ' ')
+          expected="backend caddy frontend redis worker "
+          [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
+          echo "Confirmed: exactly caddy, backend, frontend, redis, worker — no more, no fewer."
+
+      - name: Verify the durable-worker package's worker is actually alive and polling, not restart-looping
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Status}}' "$cid")
+            [ "$status" = "running" ] && break
+            sleep 1
+          done
+          status=$(docker inspect -f '{{.State.Status}}' "$cid")
+          [ "$status" = "running" ] || (echo "::error::worker is not running (status: $status)" && docker logs "$cid" && exit 1)
+          restarts=$(docker inspect -f '{{.RestartCount}}' "$cid")
+          [ "$restarts" = "0" ] || (echo "::error::worker has restarted $restarts time(s) — it should start cleanly and stay up" && docker logs "$cid" && exit 1)
+          docker logs "$cid" 2>&1 | grep -q "Worker .* startar" || (echo "::error::worker's own startup log line never appeared" && docker logs "$cid" && exit 1)
+          echo "Confirmed: worker is running, has not restarted, and logged its own startup line."
+
+      - name: Verify backend and worker share the same persistent uploads volume, mounted read-write at the storage_root path
+        run: |
+          for name in backend worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            mounts=$(docker inspect -f '{{range .Mounts}}{{.Name}}:{{.Destination}}:{{.RW}} {{end}}' "$cid")
+            case "$mounts" in
+              *"lifeai_uploads:/var/lib/lifeai/uploads:true"*) ;;
+              *) echo "::error::$name is missing a read-write lifeai_uploads mount at /var/lib/lifeai/uploads (got: $mounts)" && exit 1 ;;
+            esac
+          done
+          echo "Confirmed: backend and worker both mount the same named lifeai_uploads volume, read-write, at /var/lib/lifeai/uploads."
+
+      - name: Verify only backend runs migrations on startup, not worker
+        run: |
+          worker_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          run_migrations=$(docker exec "$worker_cid" printenv RUN_MIGRATIONS || true)
+          [ "$run_migrations" = "false" ] || (echo "::error::worker's RUN_MIGRATIONS is '$run_migrations', expected 'false'" && exit 1)
+          docker logs "$worker_cid" 2>&1 | grep -q "RUN_MIGRATIONS=false, hoppar" || (echo "::error::worker's logs don't show the migration-skip message" && exit 1)
+          echo "Confirmed: worker skips alembic upgrade head on startup — only backend runs it."
+
+      - name: Verify Caddy is the only container publishing anything to the host
+        run: |
+          for name in backend frontend redis worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            ports=$(docker port "$cid" || true)
+            if [ -n "$ports" ]; then
+              echo "::error::$name publishes a host port — it must never be reachable except through caddy: $ports" && exit 1
+            fi
+            echo "Confirmed: $name publishes nothing to the host."
+          done
+
+      - name: Verify Redis network isolation — only backend can reach it, over lifeai_data only
+        run: |
+          redis_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q redis)
+          redis_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$redis_cid")
+          case "$redis_nets" in
+            *lifeai_internal*) echo "::error::redis is on lifeai_internal — it must ONLY be on lifeai_data, unreachable from frontend/caddy: $redis_nets" && exit 1 ;;
+          esac
+          case "$redis_nets" in
+            *lifeai_data*) ;;
+            *) echo "::error::redis is not on lifeai_data at all: $redis_nets" && exit 1 ;;
+          esac
+          echo "Confirmed: redis is only on lifeai_data ($redis_nets)."
+
+          for svc in backend worker; do
+            svc_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$svc")
+            svc_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$svc_cid")
+            for net in lifeai_internal lifeai_data; do
+              case "$svc_nets" in
+                *"$net"*) ;;
+                *) echo "::error::$svc is missing $net — it must be on both lifeai_internal and lifeai_data: $svc_nets" && exit 1 ;;
+              esac
+            done
+            echo "Confirmed: $svc is on both lifeai_internal and lifeai_data ($svc_nets)."
+          done
+
+          for name in frontend caddy; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid")
+            case "$nets" in
+              *lifeai_data*) echo "::error::$name is on lifeai_data — it must never be able to reach redis: $nets" && exit 1 ;;
+            esac
+            # Not on the network at all -> no route to redis's IP and no Docker-DNS entry for
+            # it either, by construction (same reasoning docker-compose.vps.yml's own comments
+            # use for backend/frontend's missing `ports:`) — no need to also probe for DNS
+            # resolution from inside each container, which would just re-test the same fact
+            # through a less reliable, image-dependent tool (getent/nslookup availability
+            # differs between caddy's Alpine base and frontend's Debian-slim base).
+            echo "Confirmed: $name is not on lifeai_data ($nets) — no route to redis exists."
+          done
+
+          internal_flag=$(docker network inspect "$(docker network ls --filter "label=com.docker.compose.project=lifeai_vps_ci" --filter "name=lifeai_data" --format '{{.ID}}' | head -n1)" -f '{{.Internal}}')
+          [ "$internal_flag" = "true" ] || (echo "::error::lifeai_data network is not internal:true (got: $internal_flag)" && exit 1)
+          echo "Confirmed: lifeai_data has no route out at all (internal: true)."
+
+      - name: Verify the backend has no listener reachable from the host's own network interfaces
+        # NOT a check against the container's bridge-network IP: backend/Dockerfile's uvicorn
+        # binds 0.0.0.0:8000 *inside its own container*, so other containers on
+        # lifeai_internal (frontend, and technically caddy) CAN reach that bridge IP directly
+        # — that's required, expected container-to-container behavior, not a hole (unlike
+        # Dockerfile.combined's loopback-only bind, which combined-container-verify's
+        # equivalent check tests against). The real security property `ports:` (or its
+        # absence) controls is whether the HOST's own interfaces — what the public internet
+        # would actually reach on a real VPS at its public IP — have a listener at all. They
+        # don't, because docker-compose.vps.yml never publishes anything for backend/frontend.
+        run: |
+          if curl -sf --max-time 3 "http://127.0.0.1:8000/api/health" > /dev/null; then
+            echo "::error::something is listening on the RUNNER's own 127.0.0.1:8000 — backend must never be published to the host" && exit 1
+          fi
+          echo "Confirmed: the host itself has no listener on port 8000 — nothing outside lifeai_internal (and on a real VPS, nothing outside the Docker daemon's own host) can ever reach the backend directly."
+
+      - name: Verify restart policy and log rotation are actually applied
+        run: |
+          for name in caddy backend frontend redis worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid")
+            [ "$policy" = "unless-stopped" ] || (echo "::error::$name has restart policy '$policy', expected unless-stopped" && exit 1)
+            logdriver=$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$cid")
+            [ "$logdriver" = "json-file" ] || (echo "::error::$name uses log driver '$logdriver', expected json-file with size limits" && exit 1)
+          done
+          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all five services."
+
+      - name: Verify a full request actually reaches the backend/database through Caddy -> frontend -> backend
+        run: |
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"vps-ci-smoke-test@example.com","password":"Test1234Password!","website":""}')
+          # Public registration is intentionally disabled (founder-only launch, see
+          # app/routers/auth.py) — 403/404 here (not a network error, not a 502) is exactly
+          # the proof the whole chain (Caddy -> frontend -> backend -> Postgres) is wired
+          # correctly end to end, same as same-origin-proxy-test's reasoning.
+          [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected a real backend response (403/404, registration disabled) through the full VPS chain, got $RES" && exit 1)
+
+      - name: Verify Redis requires the configured password and the healthy status is real
+        run: |
+          redis_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q redis)
+
+          if docker exec "$redis_cid" redis-cli ping 2>&1 | grep -q PONG; then
+            echo "::error::redis answered PING with no password at all — requirepass is not actually enforced" && exit 1
+          fi
+          echo "Confirmed: an unauthenticated PING is rejected (NOAUTH)."
+
+          # REDISCLI_AUTH (env var), not -a: matches the real healthcheck in
+          # docker-compose.vps.yml exactly — -a would put the password in redis-cli's own
+          # short-lived process argv (visible via ps/docker top to anyone who can list
+          # processes in this container), REDISCLI_AUTH keeps it in that process's
+          # environment instead (readable only by the same UID or root, same trust boundary
+          # docker inspect's .Config.Env already has).
+          pong=$(docker exec -e REDIS_PASSWORD="$REDIS_PASSWORD" "$redis_cid" sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --no-auth-warning ping')
+          [ "$pong" = "PONG" ] || (echo "::error::authenticated PING did not return PONG (got: $pong)" && exit 1)
+          echo "Confirmed: the configured REDIS_PASSWORD authenticates successfully (via REDISCLI_AUTH, never -a)."
+
+          health=$(docker inspect -f '{{.State.Health.Status}}' "$redis_cid")
+          [ "$health" = "healthy" ] || (echo "::error::redis's own Docker healthcheck reports '$health', expected healthy" && exit 1)
+          echo "Confirmed: redis's healthcheck (which itself authenticates) is genuinely healthy, not just unset/ignored."
+
+      - name: Verify the backend container actually reaches Redis through REDIS_URL (not just that both are running)
+        run: |
+          backend_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q backend)
+          resolved_url=$(docker exec "$backend_cid" printenv REDIS_URL)
+          case "$resolved_url" in
+            redis://:*@redis:6379/0) ;;
+            *) echo "::error::backend's REDIS_URL does not look like redis://:<password>@redis:6379/0 (got a value with unexpected shape)" && exit 1 ;;
+          esac
+          echo "Confirmed: backend's REDIS_URL is shaped correctly (value itself not printed)."
+          # The rate limiter (app/limiter.py) only ever touches Redis on an actual rate-limited
+          # request, and /api/health deliberately doesn't exercise it — the real, deployed
+          # app/main.py::_check_redis_reachable() already refused to even START if REDIS_URL
+          # were unreachable (see backend/app/main.py), and this whole job would already have
+          # failed at "Start the real VPS compose topology" above if that check had failed. A
+          # second, redundant probe here would just re-test the same fact through a noisier
+          # path.
+
+      - name: Verify backend/frontend run as their dedicated non-root user
+        # See docs/VPS_DOCKER_HARDENING.md — backend/frontend/Dockerfile both create a
+        # dedicated UID 10001 user and USER-switch to it. Caddy is checked separately below:
+        # the official caddy:2-alpine image ships NO non-root user at all (verified directly
+        # — grepping its /etc/passwd has no "caddy" entry), so it runs as UID 0 by
+        # construction, not by a mistake in this compose file. See the next step for why
+        # that's an accepted, mitigated trade-off rather than a gap.
+        run: |
+          for name in backend frontend worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            uid=$(docker exec "$cid" id -u)
+            [ "$uid" = "10001" ] || (echo "::error::$name is running as UID $uid, expected the dedicated non-root UID 10001" && exit 1)
+          done
+          echo "Confirmed: backend/frontend/worker run as UID 10001 (never root) — worker shares backend's own image and Dockerfile USER directive."
+
+      - name: Verify caddy's root process is mitigated by a near-empty capability set
+        # caddy:2-alpine has no built-in non-root user to switch to (confirmed: no "caddy"
+        # entry in its /etc/passwd) and needs CAP_NET_BIND_SERVICE to bind ports 80/443 at
+        # all — building and maintaining a custom non-root Caddy image just to avoid
+        # displaying UID 0 would add a whole extra image to build/push/keep updated for a
+        # marginal gain over what's already true here: cap_drop ALL leaves this root process
+        # with effectively ONE capability, not the full root capability set a compromised
+        # process would otherwise get. This step verifies that mitigation is real, not just
+        # asserted.
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q caddy)
+          uid=$(docker exec "$cid" id -u)
+          [ "$uid" = "0" ] || (echo "::error::caddy is running as UID $uid — if a future base image ships a non-root user, switch to it and update this check, don't just accept whatever UID appears" && exit 1)
+          capeff=$(docker inspect -f '{{.HostConfig.CapAdd}}' "$cid")
+          case "$capeff" in
+            *NET_BIND_SERVICE*) ;;
+            *) echo "::error::caddy does not have exactly the NET_BIND_SERVICE capability added back (got: $capeff)" && exit 1 ;;
+          esac
+          echo "Confirmed: caddy runs as root (UID 0, required by the upstream image) but with ALL capabilities dropped except the one (NET_BIND_SERVICE) it actually needs — verified via docker inspect, not assumed."
+
+      - name: Verify redis's root process has NO capabilities added back at all
+        # valkey/valkey:8.1.9-alpine (digest-pinned, see docker-compose.vps.yml) has no
+        # built-in non-root user either (same situation as caddy — confirmed: no dedicated
+        # "valkey"/"redis" entry it switches to), but unlike caddy it never binds a
+        # privileged (<1024) port, so — unlike caddy's one restored capability — it needs
+        # cap_add: [] here. Root with the full capability set dropped
+        # and NONE restored is a materially smaller blast radius than caddy's already-minimal
+        # one.
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q redis)
+          uid=$(docker exec "$cid" id -u)
+          [ "$uid" = "0" ] || (echo "::error::redis is running as UID $uid — if a future base image ships a non-root user, switch to it and update this check, don't just accept whatever UID appears" && exit 1)
+          capadd=$(docker inspect -f '{{.HostConfig.CapAdd}}' "$cid")
+          [ "$capadd" = "[]" ] || (echo "::error::redis has capabilities added back (got: $capadd) — it needs none, unlike caddy" && exit 1)
+          echo "Confirmed: redis runs as root (UID 0, required by the upstream image) with ALL capabilities dropped and NONE restored."
+
+      - name: Verify container-level security controls are actually applied, not just declared
+        run: |
+          for name in caddy backend frontend redis worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+
+            privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' "$cid")
+            [ "$privileged" = "false" ] || (echo "::error::$name is running privileged" && exit 1)
+
+            readonly_fs=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$cid")
+            [ "$readonly_fs" = "true" ] || (echo "::error::$name does not have a read-only root filesystem" && exit 1)
+
+            nnp=$(docker inspect -f '{{.HostConfig.SecurityOpt}}' "$cid")
+            case "$nnp" in
+              *no-new-privileges:true*) ;;
+              *) echo "::error::$name is missing security_opt no-new-privileges:true (got: $nnp)" && exit 1 ;;
+            esac
+
+            capdrop=$(docker inspect -f '{{.HostConfig.CapDrop}}' "$cid")
+            case "$capdrop" in
+              *ALL*) ;;
+              *) echo "::error::$name does not drop ALL capabilities (got: $capdrop)" && exit 1 ;;
+            esac
+
+            pidslimit=$(docker inspect -f '{{.HostConfig.PidsLimit}}' "$cid")
+            if [ -z "$pidslimit" ] || [ "$pidslimit" = "0" ]; then
+              echo "::error::$name has no pids_limit applied" && exit 1
+            fi
+
+            # No Docker socket and no sensitive host directory ever mounted into any of the
+            # three containers — the only bind mount in the whole topology is the read-only
+            # Caddyfile.
+            mounts=$(docker inspect -f '{{range .Mounts}}{{.Type}}:{{.Source}}:{{.Destination}} {{end}}' "$cid")
+            case "$mounts" in
+              *docker.sock*) echo "::error::$name has the Docker socket mounted — this must never happen" && exit 1 ;;
+            esac
+            case "$name" in
+              caddy)
+                case "$mounts" in
+                  *"bind:"*Caddyfile*":/etc/caddy/Caddyfile"*) ;;
+                  *) echo "::error::caddy's bind mounts changed unexpectedly: $mounts" && exit 1 ;;
+                esac
+                ;;
+              *)
+                case "$mounts" in
+                  *"bind:"*) echo "::error::$name has an unexpected bind mount: $mounts" && exit 1 ;;
+                esac
+                ;;
+            esac
+          done
+          echo "Confirmed: no privileged containers, read-only root filesystems, no-new-privileges, all capabilities dropped, pids_limit set, no Docker socket or unexpected host mounts anywhere in the topology."
+
+      - name: Verify Caddy's own config validates inside the running container
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q caddy)
+          docker exec "$cid" caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Verify Caddy enforces the request-body size limit before it ever reaches the app
+        run: |
+          # 31 MB of zero bytes — 1 MB over the Caddyfile's request_body max_size 30MB.
+          # /dev/zero is unavailable to `curl --data-binary @-` sanely at this size without
+          # writing it out first — use `head -c` against /dev/zero into a real temp file.
+          head -c 32000000 /dev/zero > /tmp/oversized-body.bin
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @/tmp/oversized-body.bin)
+          rm -f /tmp/oversized-body.bin
+          # Caddy's request_body directive responds 413 Payload Too Large. Explicitly NOT
+          # 403/404 (the app-level response for this route) or 502 (backend unreachable) —
+          # this proves Caddy itself is the one rejecting it, before frontend/backend ever
+          # see the oversized body.
+          [ "$RES" = "413" ] || (echo "::error::expected 413 Payload Too Large from Caddy's request_body limit, got $RES" && exit 1)
+          echo "Confirmed: a body over the configured limit is rejected by Caddy itself (413), never reaching frontend/backend."
+
+      - name: Verify security response headers are present
+        run: |
+          HEADERS=$(curl -sS -D - -o /dev/null http://localhost:80/api/health)
+          echo "$HEADERS"
+          echo "$HEADERS" | grep -qi "^x-content-type-options: nosniff" || (echo "::error::missing X-Content-Type-Options: nosniff" && exit 1)
+          echo "$HEADERS" | grep -qi "^x-frame-options: DENY" || (echo "::error::missing X-Frame-Options: DENY" && exit 1)
+          echo "$HEADERS" | grep -qi "^referrer-policy: strict-origin-when-cross-origin" || (echo "::error::missing Referrer-Policy" && exit 1)
+          echo "$HEADERS" | grep -qi "^server:" && (echo "::error::Server header leaked despite -Server" && exit 1)
+          echo "Confirmed: hardening response headers present, Server header suppressed."
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
+          for name in backend frontend caddy redis worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
+            if [ -n "$cid" ]; then
+              echo "--- $name health ---"
+              docker inspect -f '{{json .State.Health}}' "$cid" || true
+              echo "--- $name listening sockets (/proc/net/tcp, port 3000 = 0BB8, port 8000 = 1F40, port 6379 = 18EB) ---"
+              docker exec "$cid" cat /proc/net/tcp || true
+            fi
+          done
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci down -v || true
+
+      - name: Verify teardown left no orphan containers, networks, or volumes
+        if: always()
+        run: |
+          leftover_containers=$(docker ps -a --filter "label=com.docker.compose.project=lifeai_vps_ci" --format '{{.Names}}')
+          [ -z "$leftover_containers" ] || (echo "::error::orphan containers survived teardown: $leftover_containers" && exit 1)
+          leftover_networks=$(docker network ls --filter "label=com.docker.compose.project=lifeai_vps_ci" --format '{{.Name}}')
+          [ -z "$leftover_networks" ] || (echo "::error::orphan networks survived teardown: $leftover_networks" && exit 1)
+          leftover_volumes=$(docker volume ls --filter "label=com.docker.compose.project=lifeai_vps_ci" --format '{{.Name}}')
+          [ -z "$leftover_volumes" ] || (echo "::error::orphan volumes survived teardown (expected -v to remove them): $leftover_volumes" && exit 1)
+          echo "Confirmed: clean shutdown, no orphan containers/networks/volumes left behind."
+
+  # ---------------------------------------------------------------------------------------
+  # scripts/vps/deploy.sh and rollback.sh, exercised for real end to end: deploy a known-good
+  # topology, record it, deploy an intentionally-broken image, watch deploy.sh detect the
+  # failure and auto-rollback, then confirm the real request path works again on the restored
+  # images. Uses a throwaway local Docker registry (not GHCR, not the real VPS) so
+  # BACKEND_IMAGE/FRONTEND_IMAGE can be genuine, digest-pinned references — the exact
+  # mechanism deploy.sh's own safety check requires — without needing real registry
+  # credentials or contacting GHCR at all.
+  # ---------------------------------------------------------------------------------------
+  vps-deploy-rollback-test:
+    name: VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      registry:
+        image: registry:2
+        ports: ["5000:5000"]
+    env:
+      # No runner-level redis service here: Redis is docker-compose.vps.yml's own `redis`
+      # service now, and deploy.sh's compose() wrapper already passes
+      # `--env-file "$TEST_ENV_FILE"` for every invocation (see scripts/vps/deploy.sh) — so
+      # REDIS_PASSWORD below (in the secrets file, not this env: block) is exactly what real
+      # top-level Compose interpolation on the actual VPS looks like, no CI-only stand-in
+      # needed the way postgres still requires one.
+      CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_deploy_ci
+      TEST_COMPOSE_DIR: ${{ github.workspace }}/deploy-test/opt-lifeai
+      TEST_ENV_FILE: ${{ github.workspace }}/deploy-test/etc-lifeai.env
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create database for this test
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_deploy_ci;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_deploy_ci;"
+
+      - name: Build the real backend/frontend images and an intentionally-broken backend image
+        run: |
+          docker build -t localhost:5000/lifeai-backend:good ./backend
+          docker build -t localhost:5000/lifeai-frontend:good ./frontend
+          printf 'FROM alpine:latest\nCMD ["sleep", "infinity"]\n' > /tmp/Dockerfile.broken
+          docker build -t localhost:5000/lifeai-backend:bad -f /tmp/Dockerfile.broken /tmp
+
+      - name: Push to the local registry and capture real digests
+        id: digests
+        run: |
+          for ref in localhost:5000/lifeai-backend:good localhost:5000/lifeai-frontend:good localhost:5000/lifeai-backend:bad; do
+            docker push "$ref"
+          done
+          good_backend=$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5000/lifeai-backend:good)
+          good_frontend=$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5000/lifeai-frontend:good)
+          bad_backend=$(docker inspect --format '{{index .RepoDigests 0}}' localhost:5000/lifeai-backend:bad)
+          echo "good_backend=$good_backend" >> "$GITHUB_OUTPUT"
+          echo "good_frontend=$good_frontend" >> "$GITHUB_OUTPUT"
+          echo "bad_backend=$bad_backend" >> "$GITHUB_OUTPUT"
+          echo "Good backend digest: $good_backend"
+          echo "Good frontend digest: $good_frontend"
+          echo "Bad backend digest: $bad_backend"
+
+      - name: Set up an isolated fake /opt/lifeai and /etc/lifeai for this test
+        run: |
+          mkdir -p "$TEST_COMPOSE_DIR/deployments"
+          cp docker-compose.vps.yml docker-compose.vps.ci.yml Caddyfile "$TEST_COMPOSE_DIR/"
+          cat > "$TEST_ENV_FILE" <<EOF
+          SECRET_KEY=ci-deploy-test-secret
+          MAINAI_APP_PASSWORD=ci_deploy_test_pw
+          FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
+          FOUNDER_PASSWORD=TestFounderPassword123!
+          DATABASE_URL=$CI_DATABASE_URL
+          REDIS_PASSWORD=ciDeployRollbackRedisPassword1234567890abcdef
+          FRONTEND_ORIGINS=http://localhost:80
+          PUBLIC_APP_URL=http://localhost:80
+          SMTP_HOST=ci-smtp-placeholder.invalid
+          SMTP_PORT=587
+          SMTP_USERNAME=ci
+          SMTP_PASSWORD=ci
+          SMTP_FROM_EMAIL=no-reply@lifeos.local
+          DOMAIN=:80
+          BACKEND_IMAGE=${{ steps.digests.outputs.good_backend }}
+          FRONTEND_IMAGE=${{ steps.digests.outputs.good_frontend }}
+          EOF
+          chmod 600 "$TEST_ENV_FILE"
+          # docker-compose.vps.ci.yml adds host.docker.internal for the backend service only —
+          # needed here too, for the exact same reason as vps-compose-verify.
+
+      - name: Inject a throwaway ghcr.io credential entry so deploy.sh's presence check passes
+        # This test deliberately never talks to GHCR (it uses a local registry instead — see
+        # above) — deploy.sh's own GHCR-credential-presence check is a real safety feature for
+        # the actual VPS, not something this test should bypass by weakening the script. A
+        # fake-but-present entry satisfies the presence check exactly the way a real
+        # `docker login ghcr.io` would, without this job ever needing real GHCR access.
+        run: |
+          mkdir -p ~/.docker
+          [ -f ~/.docker/config.json ] || echo '{}' > ~/.docker/config.json
+          jq '.auths["ghcr.io"] = {"auth": "Y2ktdGVzdDpjaS10ZXN0"}' ~/.docker/config.json > /tmp/docker-config.json
+          mv /tmp/docker-config.json ~/.docker/config.json
+
+      - name: Deploy the known-good topology for real
+        run: |
+          cd "$TEST_COMPOSE_DIR"
+          sudo -E "$GITHUB_WORKSPACE/scripts/vps/deploy.sh" --confirm --compose-dir "$TEST_COMPOSE_DIR" --env-file "$TEST_ENV_FILE" --extra-compose-file "$TEST_COMPOSE_DIR/docker-compose.vps.ci.yml" --timeout 90
+
+      - name: Verify the deployment record was written with result=success
+        run: |
+          record=$(find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -exec jq -r '.result' {} \; | tail -n1)
+          [ "$record" = "success" ] || (echo "::error::expected the deployment record's result to be 'success', got '$record'" && exit 1)
+          echo "Confirmed: good deployment recorded as success."
+
+      - name: Verify the full request path works on the good deployment
+        run: |
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"deploy-ci-smoke-test@example.com","password":"Test1234Password!","website":""}')
+          [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected 403/404 through the deployed stack, got $RES" && exit 1)
+
+      - name: Attempt to deploy an intentionally broken backend image
+        run: |
+          sed -i "s|^BACKEND_IMAGE=.*|BACKEND_IMAGE=${{ steps.digests.outputs.bad_backend }}|" "$TEST_ENV_FILE"
+          cd "$TEST_COMPOSE_DIR"
+          # This MUST exit non-zero (deploy.sh reports failure even after a successful
+          # auto-rollback, since the DEPLOY itself failed) — `|| true` only prevents this
+          # expected failure from aborting the job before the checks below run.
+          sudo -E "$GITHUB_WORKSPACE/scripts/vps/deploy.sh" --confirm --compose-dir "$TEST_COMPOSE_DIR" --env-file "$TEST_ENV_FILE" --extra-compose-file "$TEST_COMPOSE_DIR/docker-compose.vps.ci.yml" --timeout 45 || true
+
+      - name: Verify the broken deployment was detected and recorded as failed
+        run: |
+          # Identify "the broken deployment's own record" by recency, not by grepping for
+          # "bad" inside its image digest — a digest is a content hash of the real backend/
+          # frontend source, so whether the literal substring "bad" appears in it is pure
+          # coincidence (confirmed: it does NOT reliably appear). Each deploy.sh invocation
+          # writes exactly one NEW timestamped record (see deploy.sh Step 7), and rollback.sh's
+          # own *-rollback.json records have no backend_image field at all (select(has(...))
+          # excludes those cleanly instead of jq erroring on `null | contains(...)`). The
+          # broken attempt ran second, so its own record is deterministically the latest one
+          # that has a backend_image.
+          record=$(find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -print0 \
+              | xargs -0 jq -s '[.[] | select(has("backend_image"))] | sort_by(.timestamp) | last | .result')
+          [ "$record" = "\"failed_verification\"" ] || (echo "::error::expected the broken deployment's record to be 'failed_verification', got $record" && exit 1)
+          echo "Confirmed: broken deployment correctly detected and recorded as failed."
+
+      - name: Verify automatic rollback actually restored the good images and real traffic works again
+        run: |
+          current_backend=$(grep -E "^BACKEND_IMAGE=" "$TEST_ENV_FILE" | cut -d= -f2-)
+          [ "$current_backend" = "${{ steps.digests.outputs.good_backend }}" ] || (echo "::error::expected BACKEND_IMAGE to be restored to the good digest after rollback, got $current_backend" && exit 1)
+          RES=$(curl -sS -o /dev/null -w "%{http_code}" -X POST http://localhost:80/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"deploy-ci-smoke-test-2@example.com","password":"Test1234Password!","website":""}')
+          [ "$RES" = "403" ] || [ "$RES" = "404" ] || (echo "::error::expected 403/404 through the ROLLED-BACK stack, got $RES" && exit 1)
+          echo "Confirmed: rollback restored the known-good digests and the real request path works again."
+
+      - name: Dump deployment records and logs on failure
+        if: failure()
+        run: |
+          echo "--- deployment records ---"
+          find "$TEST_COMPOSE_DIR/deployments" -maxdepth 1 -name '*.json' -exec sh -c 'echo "$1:"; cat "$1"; echo' _ {} \;
+          cd "$TEST_COMPOSE_DIR"
+          docker compose --env-file "$TEST_ENV_FILE" -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai logs || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          cd "$TEST_COMPOSE_DIR" || exit 0
+          sudo docker compose --env-file "$TEST_ENV_FILE" -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai down -v || true
+          docker rm -f "$(docker ps -aq --filter ancestor=localhost:5000/lifeai-backend:bad)" 2> /dev/null || true
+
+  # ---------------------------------------------------------------------------------------
+  # scripts/vps/backup.sh and restore.sh, exercised for real: a genuine archive is produced
+  # from a fake /opt/lifeai plus real Docker volumes with known content, then verified for
+  # structure, exclusions (no secrets), permissions, and checksum — followed by real restore
+  # runs covering the happy path, the disposable-target-only guard, and both corruption modes
+  # (checksum mismatch, invalid tar). No compose stack needed here — backup.sh/restore.sh
+  # operate on files and Docker volumes directly, independent of any running service.
+  # ---------------------------------------------------------------------------------------
+  vps-backup-restore-test:
+    name: VPS backup.sh / restore.sh — archive structure, checksums, and restore behavior
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    env:
+      TEST_COMPOSE_DIR: ${{ github.workspace }}/backup-test/opt-lifeai
+      TEST_OUTPUT_DIR: ${{ github.workspace }}/backup-test/var-backups-lifeai
+      TEST_RESTORE_DIR: ${{ github.workspace }}/backup-test/restored
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up a fake /opt/lifeai and known-content Docker volumes
+        run: |
+          mkdir -p "$TEST_COMPOSE_DIR/deployments" "$TEST_OUTPUT_DIR"
+          cp docker-compose.vps.yml Caddyfile "$TEST_COMPOSE_DIR/"
+          cat > "$TEST_COMPOSE_DIR/deployments/20260101T000000Z.json" <<'EOF'
+          {"timestamp":"20260101T000000Z","result":"success","backend_image":"x@sha256:0000000000000000000000000000000000000000000000000000000000000000","frontend_image":"y@sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+          EOF
+          # backup.sh hardcodes the "lifeai" Compose project prefix (matching deploy.sh's own
+          # `-p lifeai`) — created directly here rather than via a real `compose up`, since
+          # this job tests backup/restore in isolation, not the full running stack (see
+          # vps-deploy-rollback-test for that).
+          docker volume create lifeai_caddy_data > /dev/null
+          docker volume create lifeai_caddy_config > /dev/null
+          docker run --rm -v lifeai_caddy_data:/vol alpine:3 sh -c "echo FAKE-TLS-CERT-DATA > /vol/cert.pem"
+          docker run --rm -v lifeai_caddy_config:/vol alpine:3 sh -c "echo '{\"fake\":\"config\"}' > /vol/autosave.json"
+          # Durable-worker package: lifeai_uploads holds Life Library originals, content-
+          # addressed as {sha256[:2]}/{sha256} (see backend/app/storage/local_fs.py) — a
+          # disclosed synthetic string, never real private content, is enough to exercise
+          # backup.sh's uploads.tar.gz/uploads-manifest.txt and restore.sh's own
+          # content-addressing + manifest verification for real.
+          docker volume create lifeai_uploads > /dev/null
+          SYNTH="Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data."
+          SHA=$(printf '%s' "$SYNTH" | sha256sum | cut -d' ' -f1)
+          echo "SYNTH_SHA=$SHA" >> "$GITHUB_ENV"
+          docker run --rm -v lifeai_uploads:/vol alpine:3 sh -c "mkdir -p /vol/tmp /vol/${SHA:0:2} && printf '%s' '$SYNTH' > /vol/${SHA:0:2}/${SHA}"
+
+      - name: Run backup.sh for real
+        run: |
+          ./scripts/vps/backup.sh --compose-dir "$TEST_COMPOSE_DIR" --output-dir "$TEST_OUTPUT_DIR" --keep 7
+          echo "ARCHIVE=$(ls "$TEST_OUTPUT_DIR"/lifeai-backup-*.tar.gz)" >> "$GITHUB_ENV"
+
+      - name: Verify archive permissions are not world/group readable
+        run: |
+          perms=$(stat -c '%a' "$ARCHIVE")
+          [ "$perms" = "600" ] || (echo "::error::expected archive permissions 600, got $perms" && exit 1)
+          perms_sha=$(stat -c '%a' "$ARCHIVE.sha256")
+          [ "$perms_sha" = "600" ] || (echo "::error::expected checksum file permissions 600, got $perms_sha" && exit 1)
+
+      - name: Verify checksum file matches the archive
+        run: |
+          cd "$TEST_OUTPUT_DIR"
+          sha256sum -c "$(basename "$ARCHIVE").sha256"
+
+      - name: Verify archive structure and manifest, and that no secret ever appears in it
+        run: |
+          mkdir -p /tmp/backup-inspect
+          tar xzf "$ARCHIVE" -C /tmp/backup-inspect
+          for member in opt-lifeai.tar.gz caddy_data.tar.gz caddy_config.tar.gz uploads.tar.gz uploads-manifest.txt manifest.json; do
+            [ -f "/tmp/backup-inspect/$member" ] || (echo "::error::backup archive is missing expected member: $member" && exit 1)
+          done
+          grep -qx "${SYNTH_SHA:0:2}/${SYNTH_SHA}" /tmp/backup-inspect/uploads-manifest.txt || (echo "::error::uploads-manifest.txt does not list the synthetic test blob" && exit 1)
+          # The whole point of this check: /etc/lifeai/lifeai.env (or any file that looks like
+          # it) must never appear anywhere in the archive, at any nesting level.
+          find /tmp/backup-inspect -iname '*lifeai.env*' | grep -q . && (echo "::error::a secrets-file-like entry was found in the backup archive" && exit 1)
+          jq -e '.required_env_var_names | index("SECRET_KEY")' /tmp/backup-inspect/manifest.json > /dev/null || (echo "::error::manifest.json is missing the expected required_env_var_names list" && exit 1)
+          mkdir -p /tmp/backup-inspect-opt
+          tar xzf /tmp/backup-inspect/opt-lifeai.tar.gz -C /tmp/backup-inspect-opt
+          [ -f /tmp/backup-inspect-opt/docker-compose.vps.yml ] || (echo "::error::opt-lifeai.tar.gz is missing docker-compose.vps.yml" && exit 1)
+          [ -f /tmp/backup-inspect-opt/deployments/20260101T000000Z.json ] || (echo "::error::opt-lifeai.tar.gz is missing the deployment record" && exit 1)
+          echo "Confirmed: archive structure is correct and contains no secrets."
+
+      - name: Verify restore.sh refuses to target /opt/lifeai directly
+        run: |
+          set +e
+          ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir /opt/lifeai --confirm
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused to target /opt/lifeai" && exit 1)
+
+      - name: Verify restore.sh refuses without --confirm
+        run: |
+          set +e
+          ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir "$TEST_RESTORE_DIR" > /dev/null 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused without --confirm" && exit 1)
+
+      - name: Verify restore.sh refuses a checksum-mismatched archive
+        run: |
+          cp "$ARCHIVE" "$TEST_OUTPUT_DIR/tampered.tar.gz"
+          cp "$ARCHIVE.sha256" "$TEST_OUTPUT_DIR/tampered.tar.gz.sha256"
+          sed -i "s#$(basename "$ARCHIVE")#tampered.tar.gz#" "$TEST_OUTPUT_DIR/tampered.tar.gz.sha256"
+          printf '\x00' >> "$TEST_OUTPUT_DIR/tampered.tar.gz"
+          set +e
+          ./scripts/vps/restore.sh --from "$TEST_OUTPUT_DIR/tampered.tar.gz" --target-dir "$TEST_RESTORE_DIR-tampered" --confirm
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused a checksum-mismatched archive" && exit 1)
+
+      - name: Verify restore.sh refuses a corrupt (non-tar) archive
+        run: |
+          echo "not a real tar file" > "$TEST_OUTPUT_DIR/garbage.tar.gz"
+          set +e
+          ./scripts/vps/restore.sh --from "$TEST_OUTPUT_DIR/garbage.tar.gz" --target-dir "$TEST_RESTORE_DIR-garbage" --confirm
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || (echo "::error::restore.sh should have refused a corrupt/non-tar archive" && exit 1)
+
+      - name: Restore for real into a disposable target and verify the content matches
+        run: |
+          # restore.sh itself already runs the content-addressing + uploads-manifest.txt
+          # verification (see its own "3b/4" step) as part of this exact invocation — a
+          # non-zero exit here would already mean that check failed, so this step's own
+          # assertions below are on top of, not instead of, that.
+          ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir "$TEST_RESTORE_DIR" --confirm
+          diff "$TEST_COMPOSE_DIR/docker-compose.vps.yml" "$TEST_RESTORE_DIR/docker-compose.vps.yml"
+          diff "$TEST_COMPOSE_DIR/Caddyfile" "$TEST_RESTORE_DIR/Caddyfile"
+          diff "$TEST_COMPOSE_DIR/deployments/20260101T000000Z.json" "$TEST_RESTORE_DIR/deployments/20260101T000000Z.json"
+          restored_vol=$(docker volume ls --format '{{.Name}}' | grep '^lifeai_restore_.*_caddy_data$')
+          [ -n "$restored_vol" ] || (echo "::error::expected a lifeai_restore_*_caddy_data volume to exist after restore" && exit 1)
+          content=$(docker run --rm -v "$restored_vol:/vol:ro" alpine:3 cat /vol/cert.pem)
+          [ "$content" = "FAKE-TLS-CERT-DATA" ] || (echo "::error::restored caddy_data volume content did not match the original" && exit 1)
+          # The LIVE volumes must be untouched by a default (non---overwrite-live-volumes) restore.
+          live_content=$(docker run --rm -v lifeai_caddy_data:/vol:ro alpine:3 cat /vol/cert.pem)
+          [ "$live_content" = "FAKE-TLS-CERT-DATA" ] || (echo "::error::the live caddy_data volume was unexpectedly modified" && exit 1)
+          echo "Confirmed: restore produced correct file and volume content without touching anything live."
+
+          restored_uploads_vol=$(docker volume ls --format '{{.Name}}' | grep '^lifeai_restore_.*_uploads$')
+          [ -n "$restored_uploads_vol" ] || (echo "::error::expected a lifeai_restore_*_uploads volume to exist after restore" && exit 1)
+          restored_blob=$(docker run --rm -v "$restored_uploads_vol:/vol:ro" alpine:3 cat "/vol/${SYNTH_SHA:0:2}/${SYNTH_SHA}")
+          [ "$restored_blob" = "Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data." ] || (echo "::error::restored uploads volume content did not match the original synthetic file" && exit 1)
+          live_uploads_content=$(docker run --rm -v lifeai_uploads:/vol:ro alpine:3 cat "/vol/${SYNTH_SHA:0:2}/${SYNTH_SHA}")
+          [ "$live_uploads_content" = "Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data." ] || (echo "::error::the live lifeai_uploads volume was unexpectedly modified" && exit 1)
+          echo "Confirmed: the Life Library uploads volume restored byte-identical, live volume untouched."
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker volume ls --format '{{.Name}}' | grep '^lifeai_' | xargs -r docker volume rm > /dev/null 2>&1 || true
 
   # ---------------------------------------------------------------------------------------
   # Single required status check for branch protection — see docs/OPERATIONS.md for how to
@@ -823,10 +2060,21 @@ jobs:
       - migration-check
       - e2e-tests
       - same-origin-proxy-test
+      - combined-container-verify
+      - vps-scripts-check
+      - vps-compose-verify
+      - vps-deploy-rollback-test
+      - vps-backup-restore-test
     if: always()
     steps:
       - name: Fail if any required job failed
         run: |
+          # combined-container-verify and the four vps-* jobs are branch-gated (see their own
+          # `if:` conditions) and legitimately report result="skipped" on every branch other
+          # than the ones that enable them (claude/verify-combined-container,
+          # claude/strato-vps-prep, claude/integrate-founder-vps) — that must keep passing.
+          # What must NOT keep passing is one of them actually running and failing, which is
+          # exactly what "failure" (as opposed to "skipped") means here.
           if [ "${{ contains(needs.*.result, 'failure') }}" = "true" ] || [ "${{ contains(needs.*.result, 'cancelled') }}" = "true" ]; then
             echo "::error::One or more required checks failed."
             exit 1
@@ -834,37 +2082,32 @@ jobs:
           echo "All required checks passed."
 
   # ---------------------------------------------------------------------------------------
-  # Render deploy — the ONLY thing that ever triggers a Render deploy for this stack.
-  # render.yaml sets autoDeploy: false on both Render web services specifically so a push
-  # alone can never deploy; this job is gated on all-checks-passed and only runs for pushes
-  # to the production branch (not PRs, not other branches). It's a safe no-op until
-  # RENDER_BACKEND_DEPLOY_HOOK_URL / RENDER_FRONTEND_DEPLOY_HOOK_URL are added as GitHub
-  # Actions secrets — see docs/RENDER_DEPLOY.md. Each hook is independent: either, both, or
-  # neither can be configured without failing this job.
+  # Render deploy — PERMANENTLY DISABLED, 2026-07-21.
+  #
+  # Render deployment was superseded by the manually-gated Strato VPS architecture (see
+  # docs/STRATO_VPS_DEPLOY.md, docs/VPS_ARCHITECTURE.md, scripts/vps/deploy.sh). This job
+  # deliberately no longer references secrets.RENDER_BACKEND_DEPLOY_HOOK_URL or
+  # secrets.RENDER_FRONTEND_DEPLOY_HOOK_URL, and makes no network call of any kind — so this
+  # is not "disabled because the hook secrets happen to be unset" (a state that silently
+  # re-enables itself the moment someone adds those secrets back), it is disabled by deleting
+  # the code path that could ever call out to Render, period. Re-enabling a real Render
+  # deploy would require deliberately restoring the curl steps this job used to run — see
+  # git history for this file before 2026-07-21 if that's ever genuinely needed again.
+  #
+  # This job is kept (rather than deleted outright) only so branch protection rules that
+  # already reference a specific job name keep resolving, and so CI history keeps showing
+  # explicitly *why* no deploy happened rather than the job disappearing silently. It still
+  # only ever runs on push to the historical production branch, and now does nothing there
+  # but report its own disabled status.
   # ---------------------------------------------------------------------------------------
   deploy-render:
-    name: Deploy to Render
+    name: Deploy to Render (PERMANENTLY DISABLED — superseded by Strato VPS)
     runs-on: ubuntu-latest
     needs: all-checks-passed
     if: github.event_name == 'push' && github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' && needs.all-checks-passed.result == 'success'
     steps:
-      - name: Trigger backend deploy hook
-        env:
-          HOOK_URL: ${{ secrets.RENDER_BACKEND_DEPLOY_HOOK_URL }}
+      - name: Report that Render deploy is permanently disabled
         run: |
-          if [ -z "$HOOK_URL" ]; then
-            echo "RENDER_BACKEND_DEPLOY_HOOK_URL is not set — skipping backend deploy. See docs/RENDER_DEPLOY.md."
-            exit 0
-          fi
-          curl -fsS -X POST "$HOOK_URL"
-          echo "Backend deploy triggered."
-      - name: Trigger frontend deploy hook
-        env:
-          HOOK_URL: ${{ secrets.RENDER_FRONTEND_DEPLOY_HOOK_URL }}
-        run: |
-          if [ -z "$HOOK_URL" ]; then
-            echo "RENDER_FRONTEND_DEPLOY_HOOK_URL is not set — skipping frontend deploy. See docs/RENDER_DEPLOY.md."
-            exit 0
-          fi
-          curl -fsS -X POST "$HOOK_URL"
-          echo "Frontend deploy triggered."
+          echo "Render deployment is permanently disabled — superseded by the manually-gated"
+          echo "Strato VPS architecture (see docs/STRATO_VPS_DEPLOY.md). This job intentionally"
+          echo "makes no network call and does not read any Render deploy-hook secret."

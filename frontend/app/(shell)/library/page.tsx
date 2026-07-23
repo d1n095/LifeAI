@@ -2,13 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import {
-  api,
-  ImportJobItem,
-  KnowledgeSourceItem,
-  LibrarySearchHit,
-  ProjectItem,
-} from "@/lib/api";
+import { api, KnowledgeSourceItem, LibraryOpsStatus, LibrarySearchHit, ProjectItem } from "@/lib/api";
+import { useUploadQueue, UploadQueueItem } from "@/lib/uploadQueue";
+import { useTwoStepDelete } from "@/lib/useTwoStepDelete";
 
 const CLASSIFICATIONS = ["vision", "architecture", "decisions", "history", "security", "general"];
 const TRUTH_STATUSES = ["active", "historical", "proposed", "superseded", "disputed"];
@@ -29,16 +25,110 @@ const STATUS_COLORS: Record<string, string> = {
   disputed: "bg-red-500/20 text-red-300",
 };
 
+const QUEUE_STATUS_LABELS: Record<UploadQueueItem["status"], string> = {
+  queued: "I kö",
+  uploading: "Laddar upp…",
+  received: "Mottagen…",
+  processing: "Bearbetar…",
+  completed: "Klar",
+  failed: "Misslyckades",
+  cancelled: "Avbruten",
+};
+
+function formatBytes(bytes: number | null): string {
+  if (bytes === null) return "okänt";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatAge(seconds: number | null): string {
+  if (seconds === null) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}min`;
+  return `${Math.round(seconds / 3600)}h`;
+}
+
+// Founder-only operations status for the durable-worker package (GET /api/library/ops/status)
+// — requirement: worker reachable, queue length, running jobs, oldest pending age, failed in
+// the last 24h, storage writable, free disk space, last heartbeat. The endpoint itself never
+// returns private file paths or secrets (see backend/app/schemas.py's OpsStatusOut), so this
+// component renders every field it gets as-is, nothing filtered client-side.
+function LibraryOpsStatusBar() {
+  const [status, setStatus] = useState<LibraryOpsStatus | null>(null);
+  const [statusError, setStatusError] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const s = await api.getLibraryOpsStatus();
+        if (!cancelled) {
+          setStatus(s);
+          setStatusError(false);
+        }
+      } catch {
+        if (!cancelled) setStatusError(true);
+      }
+    }
+    poll();
+    const interval = setInterval(poll, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  if (statusError || !status) return null; // silent — this is a supplementary diagnostic, not a blocking error
+
+  const problems: string[] = [];
+  if (!status.worker_reachable) problems.push("Workern svarar inte");
+  if (!status.storage_writable) problems.push("Lagringen är inte skrivbar");
+  if (status.failed_last_24h > 0) problems.push(`${status.failed_last_24h} misslyckade senaste dygnet`);
+
+  return (
+    <div
+      className={`rounded-lg border px-4 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1 ${
+        problems.length > 0 ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-border bg-panel text-white/50"
+      }`}
+      aria-label="Bearbetningsstatus"
+    >
+      <span className="flex items-center gap-1.5">
+        <span
+          className={`inline-block h-2 w-2 rounded-full ${status.worker_reachable ? "bg-emerald-400" : "bg-red-400"}`}
+          aria-hidden="true"
+        />
+        {status.worker_reachable ? "Worker aktiv" : "Worker onåbar"}
+      </span>
+      <span>Kö: {status.queue_length}</span>
+      <span>Bearbetar: {status.running_jobs}</span>
+      {status.oldest_pending_age_seconds !== null && <span>Äldsta väntande: {formatAge(status.oldest_pending_age_seconds)}</span>}
+      <span>Misslyckade (24h): {status.failed_last_24h}</span>
+      <span>Ledigt lagringsutrymme: {formatBytes(status.free_disk_bytes)}</span>
+      {problems.length > 0 && (
+        <span role="alert" className="font-medium">
+          {problems.join(" · ")}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function LibraryPage() {
   const [sources, setSources] = useState<KnowledgeSourceItem[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [uploading, setUploading] = useState(false);
-  const [activeJob, setActiveJob] = useState<ImportJobItem | null>(null);
+  const { items: queueItems, enqueue, retry, cancel, dismiss } = useUploadQueue();
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const refreshedForRef = useRef(new Set<string>());
 
   const [classification, setClassification] = useState("");
   const [truthStatus, setTruthStatus] = useState("");
@@ -73,50 +163,29 @@ export default function LibraryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [classification, truthStatus, projectId]);
 
-  async function pollJob(jobId: string) {
-    for (let i = 0; i < 120; i++) {
-      let job: ImportJobItem;
-      try {
-        job = await api.getImportJob(jobId);
-      } catch (e: any) {
-        setError(e.message);
-        return;
+  // A queue item reaching "completed" means a real server job finished — refresh the source
+  // list so the newly indexed document shows up without the founder having to reload.
+  // Tracked per queue-item id so the same completion doesn't trigger a refetch repeatedly.
+  useEffect(() => {
+    for (const item of queueItems) {
+      if (item.status === "completed" && !refreshedForRef.current.has(item.id)) {
+        refreshedForRef.current.add(item.id);
+        refresh();
       }
-      setActiveJob(job);
-      if (job.status !== "pending" && job.status !== "running") {
-        if (job.status === "failed") {
-          setError(job.failure_reason || "Importen misslyckades.");
-        }
-        await refresh();
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queueItems]);
 
-  async function handleImport(files: FileList | null) {
+  function handleFilesChosen(files: FileList | null) {
     if (!files || files.length === 0) return;
-    setUploading(true);
-    setError(null);
-    setActiveJob(null);
-    try {
-      for (const file of Array.from(files)) {
-        const job = await api.importToLibrary(file, projectId || undefined);
-        setActiveJob(job);
-        await pollJob(job.id);
-      }
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setUploading(false);
-      if (fileInput.current) fileInput.current.value = "";
-    }
+    enqueue(files, projectId || undefined);
+    if (fileInput.current) fileInput.current.value = "";
   }
 
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
-    handleImport(e.dataTransfer.files);
+    handleFilesChosen(e.dataTransfer.files);
   }
 
   async function handleSearch() {
@@ -145,16 +214,22 @@ export default function LibraryPage() {
     setSearchResults(null);
   }
 
+  function handleSourceDeleted(id: string) {
+    setSources((prev) => prev.filter((s) => s.id !== id));
+  }
+
   const projectName = (id: string | null) => projects.find((p) => p.id === id)?.name;
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold">Founder Knowledge Studio</h1>
-          <p className="text-white/50 text-sm mt-1">Importera, organisera och sök i grundarens kunskapsbibliotek.</p>
+          <h1 className="text-xl font-semibold">Life Library</h1>
+          <p className="text-white/50 text-sm mt-1">Den enda inläsningscentralen: importera, organisera och sök i grundarens kunskapsbibliotek.</p>
         </div>
       </div>
+
+      <LibraryOpsStatusBar />
 
       {error && (
         <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
@@ -175,65 +250,71 @@ export default function LibraryPage() {
         }`}
       >
         <p className="text-sm text-white/60 mb-3">
-          Dra och släpp en ZIP eller en enskild fil (PDF, DOCX, TXT, Markdown, JSON, HTML) här
+          Dra och släpp en eller flera filer (ZIP, PDF, DOCX, TXT, Markdown, JSON, HTML, MP3, MP4) här
         </p>
         <label className="inline-block rounded-lg bg-accent px-4 py-2 text-sm font-medium cursor-pointer">
-          {uploading ? "Importerar…" : "Välj fil att importera"}
+          Välj filer att importera
           <input
             ref={fileInput}
             type="file"
+            multiple
             accept=".zip,.pdf,.docx,.txt,.md,.markdown,.json,.html,.htm,.mp3,.mp4"
             aria-label="Importera till kunskapsbiblioteket"
             className="hidden"
-            disabled={uploading}
-            onChange={(e) => handleImport(e.target.files)}
+            onChange={(e) => handleFilesChosen(e.target.files)}
           />
         </label>
+        <p className="text-xs text-white/30 mt-2">Du kan lägga till fler filer medan andra fortfarande bearbetas.</p>
 
-        {activeJob && (
-          <div className="mt-4 text-left mx-auto max-w-md" role="status" aria-live="polite">
-            <div className="flex justify-between text-xs text-white/50 mb-1">
-              <span>{activeJob.source_filename}</span>
-              <span>{activeJob.status}</span>
-            </div>
-            <div className="h-2 rounded-full bg-white/10 overflow-hidden">
-              <div
-                className="h-full bg-accent transition-all"
-                style={{
-                  width:
-                    activeJob.progress_total > 0
-                      ? `${Math.round((activeJob.progress_current / activeJob.progress_total) * 100)}%`
-                      : activeJob.status === "completed"
-                        ? "100%"
-                        : "10%",
-                }}
-              />
-            </div>
-            {/* STEG 11: a job that's back in "pending" with attempt_count > 0 is between
-                automatic retries (app/jobs/retry.py's backoff), not a fresh import — make
-                that distinction visible instead of looking like the upload silently reset. */}
-            {activeJob.status === "pending" && activeJob.attempt_count > 0 && (
-              <p className="text-xs text-amber-300 mt-1">
-                Tillfälligt fel — försöker igen automatiskt (försök {activeJob.attempt_count + 1} av{" "}
-                {activeJob.max_attempts})…
-              </p>
-            )}
-            {activeJob.status !== "pending" && activeJob.status !== "running" && (
-              <>
-                <p className="text-xs text-white/40 mt-1">
-                  {activeJob.succeeded_count} importerade, {activeJob.skipped_count} hoppade över/dubbletter,{" "}
-                  {activeJob.failed_count} misslyckade
-                </p>
-                {activeJob.status === "failed" && activeJob.attempt_count > 0 && (
-                  <p className="text-xs text-white/40 mt-1">
-                    {activeJob.last_failure_transient
-                      ? `Gav upp efter ${activeJob.attempt_count} automatiska återförsök — pröva att importera igen manuellt.`
-                      : "Permanent fel — importen försöktes inte igen automatiskt."}
-                  </p>
+        {queueItems.length > 0 && (
+          <ul className="mt-4 text-left mx-auto max-w-lg space-y-2" aria-label="Uppladdningskö" aria-live="polite">
+            {queueItems.map((item) => (
+              <li key={item.id} className="rounded-lg border border-border bg-panel px-3 py-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-white/80">{item.filename}</span>
+                  <span className="shrink-0 text-white/50">{QUEUE_STATUS_LABELS[item.status]}</span>
+                </div>
+                {item.status === "failed" && (
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <span role="alert" className="text-red-300">
+                      {item.error || "Okänt fel."}
+                    </span>
+                    {!item.recovered && (
+                      <button
+                        type="button"
+                        onClick={() => retry(item.id)}
+                        className="shrink-0 rounded border border-border px-2 py-0.5 text-white/70 hover:text-white"
+                      >
+                        Försök igen
+                      </button>
+                    )}
+                  </div>
                 )}
-              </>
-            )}
-          </div>
+                {item.status === "queued" && (
+                  <div className="mt-1 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => cancel(item.id)}
+                      className="rounded border border-border px-2 py-0.5 text-white/50 hover:text-white"
+                    >
+                      Avbryt
+                    </button>
+                  </div>
+                )}
+                {(item.status === "completed" || item.status === "cancelled") && (
+                  <div className="mt-1 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => dismiss(item.id)}
+                      className="rounded border border-border px-2 py-0.5 text-white/40 hover:text-white"
+                    >
+                      Dölj
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 
@@ -344,7 +425,12 @@ export default function LibraryPage() {
           )}
         </div>
       ) : (
-        <div className="rounded-xl border border-border overflow-x-auto">
+        // relative: without a positioned ancestor here, the "Åtgärder" column header's
+        // visually-hidden (absolutely positioned) span below escapes this scroll
+        // container's clipping entirely and inflates document.documentElement.scrollWidth
+        // at narrow viewports, even though nothing is actually visible outside the
+        // viewport — found via a real mobile-viewport overflow check, not asserted.
+        <div className="relative rounded-xl border border-border overflow-x-auto">
           <table className="w-full text-sm">
             <caption className="sr-only">Källor i kunskapsbiblioteket</caption>
             <thead className="bg-panel text-white/50 text-xs uppercase">
@@ -355,40 +441,26 @@ export default function LibraryPage() {
                 <th scope="col" className="text-left px-4 py-3">Indexering</th>
                 <th scope="col" className="text-left px-4 py-3">Projekt</th>
                 <th scope="col" className="text-left px-4 py-3">Version</th>
+                <th scope="col" className="text-left px-4 py-3">
+                  <span className="sr-only">Åtgärder</span>
+                </th>
               </tr>
             </thead>
             <tbody>
               {loading && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-white/30" role="status">
+                  <td colSpan={7} className="px-4 py-6 text-center text-white/30" role="status">
                     Laddar…
                   </td>
                 </tr>
               )}
               {!loading &&
                 sources.map((s) => (
-                  <tr key={s.id} className="border-t border-border/60 hover:bg-white/5">
-                    <td className="px-4 py-3">
-                      <Link href={`/library/${s.id}`} className="text-white/90 hover:text-accent underline-offset-2 hover:underline">
-                        {s.title}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3 text-white/50">{s.classification}</td>
-                    <td className="px-4 py-3">
-                      <span className={`rounded px-2 py-1 text-xs ${STATUS_COLORS[s.active_truth_status]}`}>
-                        {STATUS_LABELS[s.active_truth_status]}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-white/50">
-                      {s.status} ({s.chunk_count})
-                    </td>
-                    <td className="px-4 py-3 text-white/50">{projectName(s.project_id) || "—"}</td>
-                    <td className="px-4 py-3 text-white/50">v{s.version_number}</td>
-                  </tr>
+                  <SourceRow key={s.id} source={s} projectName={projectName(s.project_id)} onDeleted={handleSourceDeleted} />
                 ))}
               {!loading && sources.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-6 text-center text-white/30">
+                  <td colSpan={7} className="px-4 py-6 text-center text-white/30">
                     Inget material importerat ännu.
                   </td>
                 </tr>
@@ -398,5 +470,77 @@ export default function LibraryPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function SourceRow({
+  source,
+  projectName,
+  onDeleted,
+}: {
+  source: KnowledgeSourceItem;
+  projectName: string | undefined;
+  onDeleted: (id: string) => void;
+}) {
+  const { confirming, deleting, error, requestConfirm, cancelConfirm, confirmDelete } = useTwoStepDelete(async () => {
+    await api.deleteLibrarySource(source.id);
+    onDeleted(source.id);
+  });
+
+  return (
+    <tr className="border-t border-border/60 hover:bg-white/5">
+      <td className="px-4 py-3">
+        <Link href={`/library/${source.id}`} className="text-white/90 hover:text-accent underline-offset-2 hover:underline">
+          {source.title}
+        </Link>
+      </td>
+      <td className="px-4 py-3 text-white/50">{source.classification}</td>
+      <td className="px-4 py-3">
+        <span className={`rounded px-2 py-1 text-xs ${STATUS_COLORS[source.active_truth_status]}`}>
+          {STATUS_LABELS[source.active_truth_status]}
+        </span>
+      </td>
+      <td className="px-4 py-3 text-white/50">
+        {source.status} ({source.chunk_count})
+      </td>
+      <td className="px-4 py-3 text-white/50">{projectName || "—"}</td>
+      <td className="px-4 py-3 text-white/50">v{source.version_number}</td>
+      <td className="px-4 py-3">
+        {error && (
+          <div role="alert" className="mb-1 text-xs text-red-300">
+            {error}
+          </div>
+        )}
+        {!confirming ? (
+          <button
+            type="button"
+            onClick={requestConfirm}
+            aria-label={`Ta bort ${source.title}`}
+            className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
+          >
+            Ta bort
+          </button>
+        ) : (
+          <div className="flex gap-1">
+            <button
+              type="button"
+              onClick={confirmDelete}
+              disabled={deleting}
+              className="rounded bg-red-500/80 px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
+            >
+              {deleting ? "Tar bort…" : "Bekräfta"}
+            </button>
+            <button
+              type="button"
+              onClick={cancelConfirm}
+              disabled={deleting}
+              className="rounded border border-border px-2 py-1 text-xs disabled:opacity-50"
+            >
+              Avbryt
+            </button>
+          </div>
+        )}
+      </td>
+    </tr>
   );
 }

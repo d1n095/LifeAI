@@ -181,13 +181,23 @@ repo-administratörsåtgärd):
    check — den är beroende av alla andra jobb, så ett enda kryss räcker.
 4. (Rekommenderat) Kryssa även i "Require branches to be up to date before merging".
 
-Efter `all-checks-passed` finns även `deploy-render`, som anropar Render-tjänsternas Deploy
-Hook-URL:er (om de är satta som repo-secrets) — det är vägen en Render-deploy triggas på via
-GitHub Actions. **Detta är inte nödvändigtvis den enda vägen**: om ett Render Blueprint är
-länkat mot repot med Auto Sync påslaget kan Render själv applicera `render.yaml`-ändringar
-(inklusive ett runtime-byte) direkt vid push till den länkade branchen, oberoende av
-GitHub Actions och oberoende av om deploy-hook-secreten är satt. Se avsnittet om Auto Sync i
-`docs/RENDER_DEPLOY.md` innan du pushar ändringar till `render.yaml`.
+Efter `all-checks-passed` finns även `deploy-render` — **permanent avstängt sedan
+2026-07-21, superseded av den manuellt gate:ade Strato VPS-arkitekturen** (se
+`docs/STRATO_VPS_DEPLOY.md`). Jobbet gör inte längre något nätverksanrop och läser inte
+längre några Render-hemligheter alls — det är inte bara villkorat på att secrets saknas,
+själva koden som skulle anropat Render Deploy Hook-URL:erna är borttagen ur
+`.github/workflows/ci.yml`. Historiskt (innan 2026-07-21) var detta vägen en Render-deploy
+triggades på via GitHub Actions; det stycket nedan är kvar som historik.
+
+**Detta täcker fortfarande inte varje väg till en Render-deploy**: om ett Render Blueprint
+fortfarande är länkat mot repot i Render-dashboarden med "Auto Sync" påslaget kan Render
+själv applicera `render.yaml`-ändringar (inklusive ett runtime-byte) direkt vid push till
+den länkade branchen, oberoende av GitHub Actions och oberoende av att `deploy-render`-jobbet
+ovan nu är avstängt — det är en Render-dashboard-inställning, inte något en kodändring i det
+här repot kan styra. Bekräfta manuellt i Render-dashboarden att Auto Sync är avstängt (manuell
+sync) om du vill vara säker på att ingen push någonsin kan nå Render. Se avsnittet om Auto
+Sync i `docs/RENDER_DEPLOY.md` (nu markerat superseded, men innehållet om Auto Sync-risken
+gäller fortfarande tills det bekräftats avstängt i dashboarden).
 
 ## Incidenthantering
 
@@ -255,3 +265,41 @@ pooler används istället för Direct connection) och `backend/tests/backend/tes
 för regressionstestet. Om detta fel dyker upp igen efter framtida ändringar i skriptet: det är
 nästan alltid ett tecken på att någon kod börjat lita på `DATABASE_URL`s användarnamn som ett
 rollnamn igen istället för att fråga databasen.
+
+### Backend startar (nästan) men kraschar sedan: `FATAL: (NODENOTIFIER) no tenant identifier provided (external_id or sni_hostname required)`
+
+Verifierat fel 2026-07-20 på en riktig produktionsdeploy, EFTER att `ensure_app_role.py` redan
+lyckats — det här är alltså inte samma fel som ovan. Uppstår när appens egna runtime-anslutningar
+(via `APP_DATABASE_URL`, den begränsade `mainai_app`-rollen) går genom Supabases Session pooler:
+Supavisor kräver ett `.{project-ref}`-suffix på **varje** användarnamn den routar (samma suffix
+som `DATABASE_URL`s eget användarnamn redan har, t.ex. `postgres.ruwihvifpgftcwakdmvo`), annars
+vet den inte vilket projekts Postgres anslutningen hör till. `ensure_app_role.py` byggde tidigare
+`APP_DATABASE_URL`s användarnamn som bara `mainai_app`, utan det suffixet. Fixat i skriptets
+`_app_username()` — suffixet kopieras nu från `DATABASE_URL`s användarnamn när ett finns. Se
+`docs/RENDER_DEPLOY.md`s avsnitt "Databasrollerna" och
+`backend/tests/backend/test_ensure_app_role.py`.
+
+### Backend startar (nästan) men kraschar sedan: `password authentication failed for user "mainai_app"` — och rot-URL:en ger 502 trots att `/api/health` gav 200 i loggen
+
+Verifierat fel 2026-07-20 på en riktig produktionsdeploy — ett TREDJE, separat pooler-fel, inte
+samma som de två ovan. Uppstod EFTER att både `ensure_app_role.py` och backend-hälsokontrollen
+redan lyckats. Rotorsak: `ensure_app_role.py` roterade `mainai_app`s lösenord **på varje
+enda uppstart**, även när det redan var korrekt — under Supabases Session Pooler (Supavisor)
+kan det göra poolerns egen auth-cache kortvarigt inaktuell, så nästa anslutning med SAMMA
+lösenord kan avvisas i några sekunder innan cachen hinner uppdateras. `app/main.py`s
+`on_startup()` gjorde sin första `APP_DATABASE_URL`-anslutning utan något återförsök alls, så
+den transienta avvisningen tog ner hela processen. Den efterföljande 502:an på rot-URL:en
+(trots att loggen visade en senare lyckad uppstart och flera `/api/health 200`) var en
+sekundäreffekt: Render hade redan låst deployen som misslyckad utifrån det första kraschade
+försöket och rev troligen ner den instans som faktiskt blev frisk — inte en separat bugg i
+frontend eller entrypointen (`node server.js` lyssnade bevisligen korrekt fram till en extern,
+signalstyrd avstängning, inte en krasch).
+
+Fixat: `ensure_app_role.py` ändrar nu bara lösenordet vid första rollskapandet eller ett
+uttryckligt `MAINAI_APP_ROTATE_PASSWORD=true` (se `docs/RENDER_DEPLOY.md`), och gör en
+självtest-anslutning med återförsök/backoff varje gång lösenordet faktiskt ändras.
+`app/main.py`/`app/db.py`s nya `call_with_db_retry` ger samma skydd som ett andra lager kring
+appens egen uppstart. Se `docs/RENDER_DEPLOY.md`s avsnitt "Databasrollerna" ("Ett tredje,
+separat pooler-fel"), `backend/tests/backend/test_ensure_app_role.py`,
+`backend/tests/backend/test_db_retry.py`, och Container E i
+`.github/workflows/ci.yml`s `combined-container-verify`.

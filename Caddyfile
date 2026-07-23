@@ -1,0 +1,54 @@
+# Strato VPS — the ONLY publicly reachable process in the whole stack (see
+# docker-compose.vps.yml). Caddy handles automatic HTTPS (Let's Encrypt) for a real DOMAIN;
+# for CI verification (docs/STRATO_VPS_DEPLOY.md, .github/workflows/ci.yml's
+# vps-compose-verify job) DOMAIN is set to the special address ":80", which Caddy treats as
+# "serve plain HTTP on port 80 for any Host header" — no ACME involved, since CI has no real
+# domain or public port 443 to prove ownership of.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Reject a body larger than the app will ever accept BEFORE proxying it anywhere.
+	# backend/app/routers/documents.py already enforces a 25 MB application-level limit, but
+	# only after reading the full body into memory — without a limit here, a client could
+	# force Caddy and the Next.js proxy to stream an arbitrarily large body all the way to
+	# the backend before that check ever runs, a resource-exhaustion vector independent of
+	# the eventual (correct) rejection. 30 MB gives the app's own 25 MB check headroom for
+	# multipart overhead without meaningfully weakening the limit. See
+	# docs/VPS_ARCHITECTURE.md's "Hastighetsbegränsning, uppladdningsgränser, kroppsstorlek".
+	request_body {
+		max_size 30MB
+	}
+
+	# Everything — /api/* and the app UI — goes to the frontend's own Next.js server, which
+	# proxies /api/* to the backend server-side over the private lifeai_internal network
+	# (see frontend/app/api/[...path]/route.ts, INTERNAL_API_URL=http://backend:8000). Caddy
+	# never talks to the backend directly, matching docker-compose.vps.yml's isolation.
+	reverse_proxy frontend:3000
+
+	header {
+		# Don't leak the reverse proxy's own identity to the internet.
+		-Server
+		# Standard, low-risk hardening headers — evaluated against this app specifically
+		# (see docs/VPS_THREAT_MODEL.md's "Caddy header review"), not a blind copy-paste:
+		# the app is a founder-only tool never intended to be embedded in a frame, doesn't
+		# rely on browser MIME-sniffing, and doesn't need cross-origin referrer leakage.
+		# Deliberately NOT adding Content-Security-Policy here — this app's actual script/
+		# style/connect sources need a real audit before a CSP could be added without risking
+		# breaking the UI; see the threat model doc for why that's tracked as a follow-up
+		# instead of guessed at.
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		# Only meaningful once a real domain (not ":80") is in use — Caddy only ever serves
+		# this over the HTTPS listener it manages for a real hostname, so this header is
+		# inert (never sent) during the CI job's plain-HTTP run against ":80".
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}

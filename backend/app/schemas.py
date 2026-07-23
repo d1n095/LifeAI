@@ -343,6 +343,22 @@ class ImportJobOut(BaseModel):
     last_failure_transient: bool | None
 
 
+class OpsStatusOut(BaseModel):
+    """Life Library durable-worker package (DEL 6): founder-only operational status —
+    aggregated counts/booleans/timestamps only, deliberately never a private filesystem path
+    or any secret (storage_root itself, connection strings, etc. never appear here — see
+    app/routers/library.py's ops_status())."""
+
+    worker_reachable: bool
+    queue_length: int
+    running_jobs: int
+    oldest_pending_age_seconds: float | None
+    failed_last_24h: int
+    storage_writable: bool
+    free_disk_bytes: int | None
+    last_heartbeat_at: datetime | None
+
+
 class LibrarySearchHit(BaseModel):
     document_id: uuid.UUID
     title: str

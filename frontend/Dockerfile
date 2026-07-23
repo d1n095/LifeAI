@@ -18,16 +18,34 @@ WORKDIR /app
 # the proxy (see lib/api.ts's comment on that escape hatch).
 ARG NEXT_PUBLIC_API_URL=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Never phone home to Vercel's telemetry collector from a build running in our own CI/VPS.
+ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
 
 FROM node:20-slim AS runner
+
+LABEL org.opencontainers.image.title="LifeAI/MainAI frontend" \
+      org.opencontainers.image.description="Next.js standalone server — the only service besides Caddy on the private Docker network; proxies /api/* to the backend server-side. See docs/VPS_ARCHITECTURE.md." \
+      org.opencontainers.image.source="https://github.com/d1n095/LifeAI" \
+      org.opencontainers.image.licenses="UNLICENSED"
+
 WORKDIR /app
-ENV NODE_ENV=production
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
+
+# Same rationale as backend/Dockerfile: a dedicated, unprivileged, non-login user. Ownership
+# is set via `--chown` on the COPY steps below instead of a separate `chown -R` pass, since
+# the builder stage already laid these files down read-only-from-the-app's-perspective.
+RUN groupadd --system --gid 10001 nextjs \
+    && useradd --system --uid 10001 --gid nextjs --home-dir /app --no-create-home --shell /usr/sbin/nologin nextjs
+
+COPY --from=builder --chown=nextjs:nextjs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nextjs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nextjs /app/public ./public
+
+USER nextjs
 
 EXPOSE 3000
 CMD ["node", "server.js"]

@@ -3,6 +3,7 @@ real HTTP surface (TestClient), not the orchestrator directly (see test_library_
 for that), so route wiring, auth/CSRF, request validation and response shaping are all
 exercised together, the same way a real client would hit them."""
 
+import asyncio
 import io
 import time
 import uuid
@@ -14,15 +15,28 @@ FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 
 
+def _run_worker_once() -> bool:
+    """Durable-worker package: POST /api/library/import no longer schedules a FastAPI
+    BackgroundTask — it only writes the original file and creates a pending ImportJob (see
+    app/routers/library.py's import_package). A real worker process (app/worker.py) picks
+    pending jobs up independently via its own poll loop, but no such process runs during
+    pytest, so tests must explicitly simulate one poll cycle. This runs the exact same
+    Worker.run_once() a production worker runs: claim via Postgres FOR UPDATE SKIP LOCKED,
+    then process to completion (including any in-process retries). Returns False if nothing
+    was pending to claim."""
+    from app.worker import Worker
+
+    return asyncio.run(Worker().run_once())
+
+
 def _wait_for_job(client, job_id: str, *, timeout: float = 5.0) -> dict:
-    """POST /api/library/import schedules the actual work as a FastAPI BackgroundTask,
-    which — unlike a plain function call — is NOT guaranteed to have finished by the time
-    TestClient's .post() returns (it runs in Starlette's background-task threadpool, whose
-    completion isn't awaited by the test client the way a real browser watching a job's
-    status endpoint effectively is). Polling GET /jobs/{id} here is both the correct fix and
-    a more realistic exercise of the same status endpoint the future Library UI polls."""
+    """Drives worker poll cycles synchronously (see _run_worker_once) instead of relying on
+    background-task completion. One cycle already fully resolves a job to a terminal status
+    in practice (process_claimed_job retries in-process), but the timeout loop is kept as a
+    hang-guard rather than assuming that's always true."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        _run_worker_once()
         res = client.get(f"/api/library/jobs/{job_id}")
         assert res.status_code == 200
         job = res.json()
@@ -166,6 +180,53 @@ def test_get_job_status(client):
     assert job["status"] == "completed"
 
 
+# --- Life Library upload consolidation package: server-recoverable job status (DEL 3) ---
+
+
+def test_list_jobs_requires_founder(client, make_verified_user):
+    user, password = make_verified_user()
+    login = client.post("/api/auth/login", json={"email": user.email, "password": password})
+    assert login.status_code == 200
+    assert client.get("/api/library/jobs").status_code == 403
+
+
+def test_list_jobs_returns_the_founders_recent_jobs_newest_first(client):
+    csrf = _login(client)
+    _import_and_wait(client, csrf, "job-list-a.txt", b"innehall a")
+    _import_and_wait(client, csrf, "job-list-b.txt", b"innehall b")
+
+    res = client.get("/api/library/jobs")
+    assert res.status_code == 200
+    jobs = res.json()
+    filenames = [j["source_filename"] for j in jobs]
+    assert "job-list-a.txt" in filenames
+    assert "job-list-b.txt" in filenames
+    assert filenames.index("job-list-b.txt") < filenames.index("job-list-a.txt")  # newest first
+
+
+def test_list_jobs_lets_the_ui_recover_a_still_running_job_after_reload(client, superuser_db):
+    """The UI must be able to recover server job state after a page reload/fresh login and
+    must never show 'completed' before the server actually says so — this endpoint is what
+    makes that possible: an in-flight (pending/running) job is listed with its real status,
+    not silently dropped. A real background import always finishes synchronously within
+    TestClient's request/response cycle (see _wait_for_job's own docstring), so a still-
+    running job is set up directly here rather than relying on catching one mid-flight."""
+    from app.models.import_job import ImportJob, ImportJobStatus
+
+    _login(client)
+    owner_id = client.get("/api/auth/me").json()["id"]
+
+    running_job = ImportJob(
+        owner_id=owner_id, status=ImportJobStatus.running, source_filename="slow.txt", source_checksum="a" * 64
+    )
+    superuser_db.add(running_job)
+    superuser_db.commit()
+
+    jobs = client.get("/api/library/jobs").json()
+    match = next(j for j in jobs if j["source_filename"] == "slow.txt")
+    assert match["status"] == "running"
+
+
 def test_source_detail_includes_versions_and_chunk_preview(client):
     csrf = _login(client)
     job = _import_and_wait(client, csrf, "detail.txt", b"Text som ska bli en chunk-forhandsvisning.")
@@ -212,6 +273,100 @@ def test_delete_requires_explicit_confirmation(client):
     confirmed = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
     assert confirmed.status_code == 200
     assert client.get(f"/api/library/{source_id}").status_code == 404  # gone from a normal read
+
+
+def test_a_failed_upload_can_be_deleted_cleanly_and_repeated_delete_is_idempotent(client, superuser_db):
+    """Founder bug report: a Document that reached the terminal IndexStatus.failed (an
+    extraction or storage failure, not a mid-pipeline race — see the sibling test below for
+    that case) must be deletable through the exact same DELETE /api/library/{id} route every
+    other source uses. Investigated end-to-end (live backend + live frontend, not just this
+    test) after a report that clicking "Ta bort" on a failed row appeared to do nothing —
+    no bug was found in this exact request path (confirmed via a real Postgres-backed
+    request here, and separately via a real browser click-through against a live server in
+    this session); this test is the permanent regression guard for that investigation,
+    covering the founder's own five acceptance criteria:
+      1. a failed upload/import can be deleted
+      3. the backend returns the correct status (200, then 404 for a re-delete)
+      4. the source disappears from a normal Library read afterwards
+      5. a repeated delete does not 500 — it 404s cleanly, exactly like deleting any other
+         already-deleted or nonexistent source id does
+    (Criterion 2 — the frontend sends the right request — is a UI-layer property this
+    backend test can't exercise directly; it was verified separately via a live browser
+    session in the same investigation, see the delivery report.)"""
+    import uuid as uuid_mod
+
+    from app.models.document import Document, IndexStatus
+
+    csrf = _login(client)
+    owner_id = uuid_mod.UUID(client.get("/api/auth/me").json()["id"])
+
+    # A document that reached a genuine terminal failure — e.g. extraction failed after the
+    # original file was already durably stored — rather than an in-progress row, matching
+    # what the founder's real Library actually shows for a failed import.
+    doc = Document(
+        uploaded_by=owner_id,
+        title="misslyckad-import.txt",
+        original_filename="misslyckad-import.txt",
+        checksum="c" * 64,
+        status=IndexStatus.failed,
+        error_message="Extraktion misslyckades (simulerat för test).",
+        chunk_count=0,
+    )
+    superuser_db.add(doc)
+    superuser_db.commit()
+    source_id = str(doc.id)
+
+    # 1 + 4: visible before deletion, through the same read path the Library UI uses.
+    assert client.get(f"/api/library/{source_id}").status_code == 200
+
+    # 3: the actual delete succeeds with a clean 200.
+    res = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    assert res.json() == {"status": "deleted"}
+
+    # 4: gone from a normal read and from the list.
+    assert client.get(f"/api/library/{source_id}").status_code == 404
+    assert all(d["id"] != source_id for d in client.get("/api/library").json())
+
+    # 5: repeating the exact same delete call must not 500 — a clean 404, not a crash.
+    repeat = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+    assert repeat.status_code == 404
+    assert repeat.status_code != 500
+
+
+def test_deleting_a_source_still_mid_pipeline_leaves_it_in_a_definitive_terminal_state(client, superuser_db):
+    """DEL 5's 'väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd': a
+    founder can delete a source whose background indexing hasn't reached a terminal
+    IndexStatus yet (a narrow but real race between DEL 4's earlier document creation and
+    the async extraction/embedding steps still running). Simulates that race directly
+    rather than relying on real timing: after a normal completed import, the document's
+    status is rewound to a non-terminal one, then deleted — the row must come out the other
+    side with a real terminal status, not frozen mid-pipeline forever. Durable-worker
+    package: a source deleted mid-pipeline is a cancellation, not a failure — the file/job
+    were never broken, the founder just chose to stop them — so the terminal status is now
+    IndexStatus.cancelled, not .failed (see app/routers/library.py's delete_source)."""
+    import uuid as uuid_mod
+
+    from app.models.document import Document, IndexStatus
+
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "mid-pipeline.txt", b"innehall som hinner bli klart forst")
+    source_id = job["file_results"][0]["source_id"]
+
+    doc = superuser_db.get(Document, uuid_mod.UUID(source_id))
+    doc.status = IndexStatus.embedding
+    doc.error_message = None
+    superuser_db.add(doc)
+    superuser_db.commit()
+
+    res = client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+
+    superuser_db.expire_all()
+    doc2 = superuser_db.get(Document, uuid_mod.UUID(source_id))
+    assert doc2.deleted_at is not None
+    assert doc2.status == IndexStatus.cancelled
+    assert doc2.error_message is not None
 
 
 def test_deleted_source_is_excluded_from_list_and_search(client):

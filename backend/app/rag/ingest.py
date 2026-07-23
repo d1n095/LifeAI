@@ -34,7 +34,11 @@ async def index_document(db: Session, document: Document, text_content: str) -> 
         db.commit()
         return
 
-    document.status = IndexStatus.indexing
+    # Life Library upload consolidation: `embedding` (not the legacy `indexing`) is the
+    # granular status for "chunking/embedding is in progress" — see IndexStatus's docstring.
+    # The document row itself (and its extracted text, held in `text_content` by the caller)
+    # already exists before this point, so a failure below never loses the received material.
+    document.status = IndexStatus.embedding
     db.add(document)
     db.commit()
 

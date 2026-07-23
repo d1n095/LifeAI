@@ -6,7 +6,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
-from app.db import SessionLocal, migration_engine
+from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
 from app.rls import apply_rls
 from app.routers import account, admin, auth, chat, conversations, documents, health, knowledge, library, projects, workbench
@@ -58,7 +58,15 @@ def on_startup():
     # docs/OPERATIONS.md), never by the app itself at request-serving startup. RLS
     # enable/policy statements are also defined in the migrations, but apply_rls() is kept
     # here too as an idempotent safety net (cheap no-op if already applied) — see app/rls.py.
-    apply_rls(migration_engine)
+    #
+    # Both DB touches below go through call_with_db_retry (app/db.py): verified production
+    # incident, 2026-07-20 — this was the ONE unprotected first-ever connection to
+    # APP_DATABASE_URL in the whole boot sequence, and a brief Supabase Session Pooler
+    # auth-cache propagation lag right after backend/scripts/ensure_app_role.py provisioned
+    # the role killed the entire process here ("Application startup failed. Exiting."), even
+    # though the exact same credential worked moments later. ensure_app_role.py now also
+    # retries its own self-test connection, so this is defense in depth, not the only guard.
+    call_with_db_retry(lambda: apply_rls(migration_engine))
 
     _check_smtp_mode()
 
@@ -70,11 +78,14 @@ def on_startup():
     if settings.redis_url:
         _check_redis_reachable()
 
-    db = SessionLocal()
-    try:
-        bootstrap_founder_user(db)
-    finally:
-        db.close()
+    def _bootstrap():
+        db = SessionLocal()
+        try:
+            bootstrap_founder_user(db)
+        finally:
+            db.close()
+
+    call_with_db_retry(_bootstrap)
 
     start_scheduler()
 
@@ -90,14 +101,27 @@ def _check_smtp_mode() -> None:
     smtp.strato.com:465) are two different wire protocols selected by app/email.py's
     _send_via_smtp(); a server only speaks one of them on a given port, so both flags true is
     a real misconfiguration, not a harmless redundancy. Fail at startup, not on the first
-    delivery attempt."""
-    if settings.smtp_host and settings.smtp_use_tls and settings.smtp_use_ssl:
+    delivery attempt.
+
+    Both flags false is a separate misconfiguration: _send_via_smtp() then falls through to a
+    plain, unencrypted smtplib.SMTP connection with no .starttls() call — real mail sent over
+    the wire in cleartext. That's only rejected in production; non-production environments
+    (dev/CI, often pointed at a throwaway/placeholder SMTP_HOST) are left exactly as before."""
+    if not settings.smtp_host:
+        return
+    if settings.smtp_use_tls and settings.smtp_use_ssl:
         raise RuntimeError(
             "SMTP_USE_TLS och SMTP_USE_SSL är båda satta till true. De är ömsesidigt "
             "uteslutande anslutningslägen (STARTTLS respektive implicit TLS/SSL) — välj "
             "exakt ett beroende på vad SMTP-servern på SMTP_PORT faktiskt talar. "
             "T.ex. Strato: port 465 => SMTP_USE_SSL=true, SMTP_USE_TLS=false. "
             "Port 587 (de flesta andra) => SMTP_USE_TLS=true, SMTP_USE_SSL=false."
+        )
+    if settings.environment == "production" and not settings.smtp_use_tls and not settings.smtp_use_ssl:
+        raise RuntimeError(
+            "SMTP_HOST är satt men varken SMTP_USE_TLS eller SMTP_USE_SSL är true. I "
+            "produktion skulle detta skicka e-post okrypterat i klartext. Sätt exakt en av "
+            "dem till true beroende på vad SMTP-servern på SMTP_PORT faktiskt talar."
         )
 
 

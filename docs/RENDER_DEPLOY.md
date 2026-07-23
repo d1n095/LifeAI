@@ -1,5 +1,17 @@
 # Render-driftsättning
 
+> **SUPERSEDED, 2026-07-21 — Render-driftsättning är inte längre den aktiva vägen.**
+> Render ersattes av den manuellt gate:ade Strato VPS-arkitekturen — se
+> `docs/STRATO_VPS_DEPLOY.md` och `docs/VPS_ARCHITECTURE.md` för den nuvarande vägen till
+> produktion. `.github/workflows/ci.yml`s `deploy-render`-jobb är permanent avstängt (gör
+> inget nätverksanrop längre, oavsett vilka secrets som finns satta i repot) — se
+> `docs/checkpoints/INTEGRATION_FOUNDER_VPS_2026-07-21.md` för den ändringen. Resten av det
+> här dokumentet är bevarat som historisk utredning (Render-namnkonflikten, pgvector- och
+> databasroll-utredningarna, SMTP-felsökningen m.m.) — inga instruktioner nedan ska följas
+> för att faktiskt driftsätta något längre. Om ett Render Blueprint fortfarande är länkat mot
+> det här repot i Render-dashboarden, bekräfta manuellt att "Auto Sync" är avstängt där också
+> (det är en dashboard-inställning, inte något en kodändring i det här repot kan styra).
+
 Detta dokument beskriver `render.yaml` (repo-roten) — ett [Render
 Blueprint](https://render.com/docs/blueprint-spec) för en enda Render Free-webbtjänst som kör
 hela stacken: Next.js-frontend och FastAPI-backend som syskonprocesser i **samma container**,
@@ -22,14 +34,12 @@ detta dokument tidigare gjorde) angav `name: LifeAI` utan `-1`. Detta är en rim
 grundad i Renders dokumenterade beteende, inte en bekräftad logg av vad som faktiskt hände i det
 här kontot.
 
-**Viktigt att verifiera innan Blueprintet syncas mot den här filen:** grundaren har även
-observerat att den befintliga tjänsten just nu kör som en **Node-tjänst, inte Docker** — Root
-Directory `frontend`, Build Command `npm ci && npm run build`, Start Command `npm start`. Det är
-den äldre, separata frontend-arkitekturen (se historiken i denna fil), inte den kombinerade
-containern. `render.yaml` anger `runtime: docker`, `dockerfilePath: ./Dockerfile.combined`,
-`dockerContext: .` (repo-roten, inget Root Directory-fält behövs i själva filen) — men det krävs
-en verklig runtime-övergång i Render för att den befintliga tjänsten faktiskt ska byta från
-Node till Docker. Se "Klick-steg i Render" nedan för hur den övergången görs säkert.
+**Status 2026-07-20, verifierat direkt i dashboarden:** Blueprintet är redan syncat och har
+redan adopterat den befintliga tjänsten. Den kör redan `runtime: docker` mot
+`dockerfilePath: ./Dockerfile.combined` med tom Root Directory, exakt som `render.yaml`
+beskriver — den äldre, separata Node-frontend-arkitekturen är inte längre i drift. Se
+"Klick-steg i Render" nedan för vad som faktiskt återstår (en enda manuell redeploy, inte en
+runtime-övergång).
 
 ## Varför en enda container, inte separat frontend/backend
 
@@ -174,6 +184,248 @@ aldrig någon pooler i vägen, så `current_user` där är alltid helt enkelt an
 användarnamn (t.ex. `lifeos`) — samma beteende som innan denna fix, verifierat av
 `test_full_script_run_against_real_local_postgres_is_idempotent` i samma testfil.
 
+**Ett andra, separat pooler-fel — uppdaterat 2026-07-20:** ovanstående fix löste rollkraschen i
+`ensure_app_role.py` självt, men en verifierad produktionsdeploy på `ed85ff3` kraschade ändå,
+den här gången EFTER att `ensure_app_role.py` lyckats — appens egna runtime-anslutningar (via
+`APP_DATABASE_URL`, den begränsade `mainai_app`-rollen) avvisades av Supavisor med:
+```
+FATAL: (NODENOTIFIER) no tenant identifier provided (external_id or sni_hostname required)
+```
+Orsaken: `ensure_app_role.py` byggde `APP_DATABASE_URL`s användarnamn som bara `mainai_app`,
+utan poolerns `.{project-ref}`-suffix (som `DATABASE_URL`s eget användarnamn,
+`postgres.ruwihvifpgftcwakdmvo`, redan har). Supavisor kräver suffixet på **varje** anslutning
+den routar, inte bara admin-anslutningen — utan det vet den inte vilket projekts Postgres
+anslutningen ska gå till. Fixat i `_app_username()` i samma skript: suffixet kopieras från
+`DATABASE_URL`s användarnamn till `mainai_app`s användarnamn när ett finns (poolat läge); en
+vanlig lokal, icke-poolad admin-användare (inget suffix) lämnas orörd. Se
+`test_app_database_url_carries_the_pooler_tenant_suffix` och
+`test_app_database_url_stays_unsuffixed_for_a_plain_non_pooled_admin_username` i
+`backend/tests/backend/test_ensure_app_role.py`.
+
+**Ett tredje, separat pooler-fel — uppdaterat 2026-07-20:** en verifierad produktionsdeploy på
+`acac6d1` (som redan har både fixarna ovan) kraschade en tredje gång, EFTER att både
+`ensure_app_role.py` OCH backend-hälsokontrollen (se "startup-race"-avsnittet nedan) lyckats:
+```
+sqlalchemy.exc.OperationalError: (psycopg2.OperationalError) connection to server at
+"aws-1-us-west-2.pooler.supabase.com" ... FATAL: password authentication failed for user "mainai_app"
+ERROR:    Application startup failed. Exiting.
+```
+**Rotorsak:** `ensure_app_role.py` körde `ALTER ROLE mainai_app LOGIN PASSWORD ...`
+**ovillkorligt vid varje enda uppstart**, även när lösenordet redan var korrekt. Under
+Supabases Session Pooler (Supavisor) kan den ALTER ROLE:en göra att poolerns egen
+auth-cache blir kortvarigt inaktuell — en anslutning som `mainai_app` strax därefter, med
+exakt samma (korrekta, precis satta) lösenord, observerades misslyckas med "password
+authentication failed", för att sedan lyckas rakt av på nästa uppstartsförsök, utan någon
+kod- eller lösenordsändring alls. Appens egen uppstart (`app/main.py`s `on_startup()`, den
+FÖRSTA anslutningen någonsin till `APP_DATABASE_URL` i hela uppstartskedjan) hade ingen
+återförsöksmekanism alls — en enda transient avvisning där tog ner hela processen
+("Application startup failed. Exiting."), trots att appen i övrigt var frisk.
+
+En sekundäreffekt av just DENNA krasch observerades också: Render-dashboarden visade "Exited
+with status 1" som deployens sluttatus (från detta FÖRSTA, kraschade uppstartsförsöket), men
+loggen fortsatte sedan med ett NYTT uppstartsförsök som lyckades helt — backend blev frisk,
+frontend startade, flera `/api/health`-kontroller gav 200 — innan en ren, signalstyrd
+avstängning (`[entrypoint] shutting down... shutdown complete`, INTE en krasch — den
+loggraden syns bara vid en riktig SIGTERM, inte vid ett dött delprocess). Samtidigt gav
+`https://lifeai-1.onrender.com` (rot-URL:en) 502 trots att `/api/health` gav 200 i loggen.
+Den mest sannolika förklaringen: Render hade redan låst deployens status som misslyckad
+utifrån det FÖRSTA kraschade försöket och rev senare ner den instans som faktiskt blivit
+frisk (interna hälsokontroller i loggen kommer från Renders egna interna probe-adresser,
+`10.238.x.x`, inte från publik trafik via edgen) — inte en separat bugg i frontend eller
+entrypointen. Frontendens `node server.js` lyssnade bevisligen korrekt (flera lyckade
+hälsokontroller, `✓ Ready in 0ms` från Next.js) fram till den externa SIGTERM:en. Detta är
+alltså en förväntad, sekundär konsekvens av det första kraschade försöket, inte ett eget fel
+att fixa i containern — att förhindra den första kraschen (nedan) förhindrar hela kedjan.
+
+**Fix, i `backend/scripts/ensure_app_role.py`:**
+1. Lösenordet ändras nu bara när rollen skapas för första gången, eller när
+   `MAINAI_APP_ROTATE_PASSWORD=true` är explicit satt för just den deployen — aldrig som en
+   bieffekt av en vanlig omstart. Se miljövariabeltabellen nedan.
+2. Varje gång lösenordet faktiskt ändras (skapande eller uttrycklig rotation) gör skriptet nu
+   en självtest-anslutning mot det nya `APP_DATABASE_URL` med exponentiell backoff (1s/2s/4s/8s)
+   innan det rapporterar att det är klart — absorberar precis den propageringsfördröjning som
+   orsakade kraschen, redan under provisioneringssteget, innan appen själv någonsin försöker.
+3. `app/main.py`s `on_startup()` (och `app/db.py`s nya `call_with_db_retry`) har nu samma
+   återförsök/backoff runt sina DB-beröringar, som ett andra skyddslager — en transient
+   pooler-avvisning där tar inte längre ner en i övrigt frisk container.
+4. Det schemalagda städjobbet (`app/scheduler.py`) var redan resilient (fångar och loggar,
+   kraschar aldrig processen) — verifierat oförändrat, inte en ny regression.
+
+Se `backend/tests/backend/test_ensure_app_role.py` (`test_password_is_not_rotated_on_a_normal_restart_when_the_role_already_exists`,
+`test_explicit_rotate_password_env_var_rotates_and_self_tests_the_new_credential`,
+`test_self_test_connection_retries_transient_failures_then_succeeds`,
+`test_self_test_connection_gives_up_and_raises_after_exhausting_every_attempt`),
+`backend/tests/backend/test_db_retry.py`, och Container E i `.github/workflows/ci.yml`s
+`combined-container-verify`-jobb (kör mot den riktiga avbildningen: en upprepad start mot en
+redan provisionerad roll roterar inte lösenordet, och simulerade transienta
+anslutningsfel — via test-kroken `TEST_FORCE_APP_DB_CONNECT_FAILURES`, som aldrig sätts i en
+riktig deploy — visas faktiskt återförsökta och containern blir ändå frisk).
+
+**Ett fjärde, ännu olöst fall — 2026-07-20, efter merge av `888b41a` (som redan innehåller
+alla tre fixarna ovan):** en manuell deploy gick grön/Live, Render-loggen visade en
+oavbruten ström av `GET /api/health 200 OK` (Renders egen interna prob, `10.238.x.x`) i
+minst en och en halv minut efter "Your service is live 🎉" — men `https://lifeai-1.onrender.com/`
+gav 502 och förblev så i flera minuter, inte den korta självläkande blipp som fall tre visade
+sig vara. Alltså INTE samma mönster: det första kraschade försöket i fall tre visade sig vara
+en sekundäreffekt av en instans som Render redan låst som misslyckad; här finns inget
+kraschat försök i loggen alls — bara en frisk container och en 502 på den publika adressen
+samtidigt.
+
+Tre hypoteser är sedan dess uttömt testade mot den riktiga avbildningen, alla motbevisade
+med mätdata, inte antaganden:
+
+1. **En vanlig appkodsbugg** — uteslutet genom en full processreproduktion (riktigt
+   Next.js-standalone-bygge + riktig backend + riktig Postgres/Redis, samma
+   `entrypoint-combined.sh`, produktionslika miljövariabler): `/`, `/login` och `/api/health`
+   gav alla 200 konsekvent i över 70 sekunder, matchande exakt det friska fönstret i den
+   riktiga Render-loggen.
+2. **Fel/otydlig port trots `PORT=10000`** — Container F i `combined-container-verify`
+   kör nu uttryckligen med `PORT=10000` (Renders faktiska tilldelade värde, bekräftat i
+   deploy-loggen — alla tidigare CI-containrar A-E körde bara `PORT=3000`, en verklig,
+   otestad lucka). `docker port` visar exakt en distinkt publicerad containersida-port,
+   `10000/tcp` (aldrig `8000`, FastAPI förblir loopback-only). Ingen ambiguitet hittad.
+3. **OOM under Render Frees minnesgräns** — Container F körs med `--memory=512m
+   --memory-swap=512m` (Render Frees vanligen dokumenterade gräns, inte independent
+   omkontrollerad mot Renders aktuella dokumentation eftersom den här sandlådan saknar
+   utgående nätåtkomst dit). Fem omgångar av riktiga sidladdningar av `/`, `/login`,
+   `/edge-probe.html` och `/api/edge-probe` (HTML + varje `/_next/static/*`-tillgång sidan
+   refererar, samma mönster en riktig webbläsare gör) höll minnesanvändningen platt runt
+   124–130 MiB av 512 MiB (~25 %) — `docker inspect .State.OOMKilled` var `false`
+   genomgående. Ingen OOM reproducerad.
+
+**Diagnostik tillagd på `claude/fix-render-public-port` (inte mergad, inte deployad) för att
+avgöra var i kedjan felet faktiskt sitter, nästa gång ett kontrollerat deployförsök görs.**
+Ingen `middleware.ts`, ingen generell request-loggning — en enda isolerad diagnostikroute
+plus den redan existerande statiska kontrollen:
+
+- `frontend/public/edge-probe.html` — en helt statisk fil, ingen React/SSR/serverkod alls.
+  Om den är nåbar publikt men `/` inte är det, är felet specifikt i sidrendering, inte i
+  Next.js-processen/porten/routingen som helhet.
+- `frontend/app/api/edge-probe/route.ts` — `GET /api/edge-probe?probe_id=<id>`, en isolerad
+  Next-native route. Proxas INTE till backend (till skillnad från allt annat under `/api/*`,
+  se `frontend/app/api/[...path]/route.ts` — Next.js föredrar alltid en statisk
+  segment-route över `[...path]`-catch-all:en för en exakt träff), rör ingen databas, Redis
+  eller AI, kräver ingen custom server och ändrar inget i Next.js egen startupflöde.
+  - Kräver `probe_id` som query-parameter: `^[A-Za-z0-9_-]{1,64}$`, annars `400 Bad
+    Request` — ett saknat, tomt, för långt eller otillåtet `probe_id` **ekas eller loggas
+    aldrig**, vilket förhindrar logginjektion.
+  - Svar vid giltigt `probe_id`: `200`, `Content-Type: text/plain; charset=utf-8`,
+    `Cache-Control: no-store`, kroppen `LifeAI edge probe OK`, samt headers
+    `X-LifeAI-Probe: edge-v1`, `X-LifeAI-Process-ID` (Node-processens PID),
+    `X-LifeAI-Boot-ID` (skapas en gång per Node-process — `crypto.randomUUID()` som en
+    modulnivå-konstant, samma värde för varje anrop så länge processen lever, nytt värde
+    efter omstart) och `X-LifeAI-Probe-ID` (det validerade värdet ekas tillbaka).
+  - Loggar bara lyckade (giltiga) anrop, ett strukturerat fält per rad: `[edge-probe]
+    time=<UTC ISO> boot_id=<...> pid=<...> probe_id=<...> host=<saniterad, max 255 tecken>
+    proto=<saniterad, max 255 tecken> forwarded_for_present=<true|false>`. `Host` och
+    `X-Forwarded-Proto` saniteras (C0-styrtecken och DEL, vilket täcker CR/LF, tas bort
+    innan loggning) så att ingen av dem kan injicera falska loggrader. `X-Forwarded-For`
+    loggas ENDAST som en boolesk indikator — aldrig adressvärdet. `Cookie`, `Authorization`,
+    fullständiga IP-adresser, övriga headers och hela querysträngen loggas aldrig.
+
+**Renders shell/CLI-baserade localhost-testning i en levande instans** — dokumenterat efter
+bästa nuvarande kännedom, INTE omkontrollerat mot Renders live-dokumentation (den här
+sandlådan har ingen utgående nätåtkomst till render.com, bekräftat via `$HTTPS_PROXY/
+__agentproxy/status`, som visar ett explicit policy-avslag för `lifeai-1.onrender.com`).
+Render har historiskt erbjudit en webbläsarbaserad "Shell"-flik per tjänst i dashboarden som
+öppnar en terminal INUTI den körande containern — därifrån skulle `curl -sS
+"localhost:$PORT/api/edge-probe?probe_id=shell-check"` bevisa om appen själv svarar korrekt
+helt oberoende av Renders publika edge, eftersom anropet aldrig lämnar containern.
+Shell-fliken har traditionellt varit en funktion på Renders betalda planer, inte på Free —
+det är oklart om det fortfarande stämmer eller om LifeAI-1:s Free-tjänst har tillgång till
+den; kontrollera själv i dashboarden (Shell-fliken, om den finns, under tjänstens sidomeny)
+snarare än att lita på det här stycket som ett aktuellt faktum.
+
+**Vad som ska kontrolleras vid nästa enda kontrollerade deployförsök, för att slutgiltigt
+avgöra var felet sitter:**
+
+1. Efter att Render visar tjänsten Live: besök
+   `https://lifeai-1.onrender.com/api/edge-probe?probe_id=render-check-<datum>` (ett eget,
+   unikt `probe_id` — gör det lätt att hitta exakt den raden i en lång logg) i webbläsaren
+   eller med `curl -v`. Testa även `https://lifeai-1.onrender.com/edge-probe.html`.
+2. Kontrollera **samtidigt** containerloggen i Render-dashboarden för en rad som börjar
+   `[edge-probe]` och innehåller just det `probe_id`:t.
+3. Kontrollera **samtidigt** om `/api/health`-strömmen (Renders egen probe) fortfarande visar
+   `200 OK`-rader.
+
+Fyra möjliga utfall, och vad vart och ett bevisar:
+
+- **Publik dynamisk probe ger 502, OCH probe-ID:t saknas i containerloggen** → anropet når
+  aldrig containern. Felet sitter troligen i Renders egen edge/routing före containern —
+  utanför vad en kodändring i det här repot kan påverka.
+- **Probe-ID:t loggas OCH routen producerade ett lyckat svar internt, men klienten ändå får
+  502** → felet ligger på returvägen mellan container och Renders edge — ett
+  container-/HTTP-svarsproblem, värt att undersöka vidare i kod (t.ex. `Connection`/
+  `Transfer-Encoding`-hantering, eller något Render-specifikt om proxy-headers).
+- **Dynamisk probe fungerar men statisk `/edge-probe.html` misslyckas** (eller tvärtom) →
+  problemet är specifikt i statisk filhantering eller i route-handler-exekvering, inte i
+  Next.js-processen/porten som helhet — värt att isolera vidare.
+- **Båda proberna svarar 200, MEN `/` fortfarande ger 502** → Next.js-processen och porten
+  fungerar i sig — felet är specifikt i sidrenderingen av `/` (eller `/login`), inte i
+  processen/porten/routingen som helhet. Nästa steg då: jämföra `/` mot `/edge-probe.html`
+  för vad som faktiskt skiljer dem åt i renderingsvägen (klientkomponent, `AuthGuard`, etc.).
+- **Allt fungerar (probes och `/`)** → den tidigare 502:an var tidsbunden eller
+  cutover-relaterad. Dokumentera tidpunkten och `boot_id` från detta försök utan att gissa
+  vidare — om den behöver undersökas igen finns nu ett konkret, återanvändbart verktyg för
+  det.
+
+## ROTORSAK BEKRÄFTAD AV RENDER SUPPORT — 2026-07-20, ersätter alla ovanstående hypoteser
+
+**Detta avsnitt är den slutgiltiga förklaringen.** Allt ovanför denna rubrik (de tre
+motbevisade hypoteserna — appkodsbugg, portambiguitet, OOM — och den efterföljande
+`/api/edge-probe`-diagnostiken) var seriös, bevisdriven felsökning som metodiskt uteslöt
+varje förklaring som gick att testa från kod och CI. Den satte oss i rätt läge för att ställa
+Render support en precis fråga, men ingen av de hypoteserna var den faktiska rotorsaken.
+Render support har nu bekräftat den riktiga förklaringen direkt, och den är arkitekturell,
+inte en bugg i det här repots kod:
+
+**`Dockerfile.combined` kör två separata webbservrar i EN Render Web Service** — FastAPI
+(uvicorn) bundet till `127.0.0.1:8000` och Next.js bundet till `0.0.0.0:$PORT` (10000 i
+produktion), övervakade som syskonprocesser av `scripts/entrypoint-combined.sh`. Render
+Web Services förutsätter EN process som lyssnar på `$PORT` och kan enligt Render supports
+egen bekräftelse **icke-deterministiskt välja mellan flera upptäckta webbservrar** i samma
+tjänst, snarare än att garanterat och konsekvent routa publik trafik till Next.js-processen.
+Detta förklarar exakt det uppmätta mönstret som annars var svårförklarat: Renders EGEN
+interna hälsokontroll (som i denna arkitektur alltid till slut når fram till Next.js →
+loopback → FastAPI, oavsett vilken av de två processerna Render "råkar" upptäcka för sitt eget
+bruk) kunde visa `200 OK` kontinuerligt, medan den PUBLIKA edgen route:ade en del eller all
+trafik till fel destination internt i sin egen infrastruktur — konsekvent med att både en
+helt statisk fil (`/edge-probe.html`, noll serverkod) och en enkel dynamisk route
+(`/api/edge-probe`) gav `502` samtidigt.
+
+Render dokumenterar detta explicit som en känd begränsning och rekommenderar uttryckligen
+SEPARATA tjänster för frontend och backend istället för att köra flera webbservrar i en och
+samma Web Service:
+<https://render.com/docs/faq#can-i-deploy-multiple-apps-to-a-single-render-service>
+
+**Varför `Dockerfile.combined` ändå byggdes så här från början, och varför det INTE var en
+uppenbar designbrist i förväg:** Render Free-planen erbjuder ingen "Private Service"-typ (se
+toppen av den här filens ursprungliga kommentarer och `render.yaml`s egen motivering) — utan
+en andra betald tjänst fanns ingen Render-inbyggd väg att köra FastAPI overksamt-men-privat
+bredvid Next.js. Den kombinerade enda-container-lösningen med loopback-isolering
+(`127.0.0.1:8000`, aldrig publicerad) var den enda kostnadsfria vägen att uppnå både "en
+tjänst, 0 kr/mån" och "backend aldrig direkt nåbar utifrån" SAMTIDIGT på Render specifikt.
+Vad som saknades i den ursprungliga designen var inte loopback-isoleringen i sig (den fungerar
+korrekt och är fortfarande bevisligen säker — se `Verify port 8000 is not reachable from
+outside the container` i `combined-container-verify`), utan antagandet att Render skulle
+route:a konsekvent till "processen som faktiskt lyssnar på \$PORT" i alla lägen. Den
+bekräftade sanningen är att Render inte garanterar det när fler än en webbserver är
+upptäckbar i samma tjänst, oavsett vilken port de facto är rätt.
+
+**Konsekvens för det här repot:** `claude/fix-render-public-port`s diagnostikrutter
+(`/api/edge-probe`, `/edge-probe.html`) har fyllt sitt syfte — de bevisade att felet inte
+satt i applikationskoden, portkonfigurationen eller minnesgränsen, vilket i sin tur gjorde det
+möjligt att ställa Render support en tillräckligt precis fråga för att få den riktiga
+rotorsaken bekräftad. **Ingen ytterligare Render-diagnostikfunktion byggs eller planeras.**
+Ingen ny Render-deploy görs för att testa detta vidare — arkitekturen i sig (en enda tjänst,
+två webbservrar) är den bekräftade begränsningen, inte något ett till försök skulle kunna
+runda. Se `docs/STRATO_VPS_DEPLOY.md` för den nya produktionsvägen: en riktig Strato-VPS med
+Docker Compose, separata backend-/frontend-containrar på ett privat Docker-nätverk, och Caddy
+som den enda publikt exponerade processen — samma säkerhetsegenskap (backend aldrig direkt
+nåbar utifrån) som `Dockerfile.combined` försökte uppnå, men med en arkitektur Render supports
+egen rekommendation bekräftar är korrekt: separata tjänster/processer bakom en riktig
+reverse proxy, inte flera webbservrar i en och samma tjänst.
+
 ## Miljövariabler — fullständig lista
 
 ### Genererade hemligheter (Render slumpar värdet — hamnar aldrig i repot)
@@ -188,10 +440,16 @@ användarnamn (t.ex. `lifeos`) — samma beteende som innan denna fix, verifiera
 | Variabel | Vad du sätter |
 |---|---|
 | `FOUNDER_EMAIL` / `FOUNDER_PASSWORD` | Det enda grundarkontot MainAI någonsin tillåter (fast primärnyckel, se `backend/app/founder.py`) — skapas automatiskt vid första uppstart om det inte redan finns |
-| `DATABASE_URL` | Supabase Free — **DIRECT**-anslutningen, port 5432, inte den poolade 6543:an |
+| `DATABASE_URL` | Supabase Free — **Session pooler**-anslutningen (Supavisor, port 5432) — INTE Direct (IPv6-only, onåbar från Render Free) och INTE Transaction pooler (port 6543, stödjer inte sessionsnivå-DDL). Se "Databasrollerna" ovan. |
 | `REDIS_URL` | Upstash Free |
 | `SMTP_HOST` / `SMTP_USERNAME` / `SMTP_PASSWORD` / `SMTP_FROM_EMAIL` | **Obligatoriskt i produktion** (`ENVIRONMENT=production` utan `SMTP_HOST` gör att backend vägrar starta, se `_check_smtp_configured` i `app/main.py`) — en gratis transaktionell e-postleverantör (t.ex. Resend eller Brevos gratisnivå) räcker |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` | Fyll i minst en |
+
+### Valfri, manuell drift-åtgärd (aldrig satt av render.yaml)
+
+| Variabel | Vad du sätter |
+|---|---|
+| `MAINAI_APP_ROTATE_PASSWORD` | `true` för att uttryckligen rotera `mainai_app`s lösenord på just NÄSTA deploy — sätt den, deploya en gång, ta sedan bort den igen. En vanlig omstart/redeploy rör aldrig lösenordet (se "Ett tredje, separat pooler-fel" ovan) — detta är den enda avsiktliga vägen att ändra det. |
 
 ### Redan satta, synliga värden i `render.yaml`
 
@@ -216,74 +474,63 @@ dokumentations-/försvar-i-djupet-skäl.
 
 ## Deploy sker bara via CI, aldrig av ett push i sig
 
+> **SUPERSEDED, 2026-07-21:** avsnittet nedan beskriver hur `deploy-render` *tidigare*
+> fungerade, som historik. Sedan 2026-07-21 gör jobbet inget nätverksanrop alls längre —
+> curl-anropen mot Deploy Hook-URL:erna är borttagna ur `.github/workflows/ci.yml`, inte
+> bara villkorade på saknade secrets. Att lägga till `RENDER_BACKEND_DEPLOY_HOOK_URL`/
+> `RENDER_FRONTEND_DEPLOY_HOOK_URL` som GitHub Actions-secrets i dag skulle alltså **inte**
+> återaktivera något — koden som skulle läst dem finns inte kvar.
+
 `render.yaml` sätter `autoDeploy: false`. Enda utlösaren är jobbet `deploy-render` i
-`.github/workflows/ci.yml`, som körs efter — och bara om — `all-checks-passed` blir grönt. Det
-anropar tjänstens **Deploy Hook**-URL via `RENDER_DEPLOY_HOOK_URL`, en GitHub Actions-secret som
-**inte finns än** — så länge den saknas är jobbet ett ofarligt no-op.
+`.github/workflows/ci.yml`, som körs efter — och bara om — `all-checks-passed` blir grönt, och
+bara på push till exakt `claude/det-kommer-mer-879lcm`. Det anropar tjänstens **Deploy Hook**-
+URL:er via två separata GitHub Actions-secrets, `RENDER_BACKEND_DEPLOY_HOOK_URL` och
+`RENDER_FRONTEND_DEPLOY_HOOK_URL` — **ingen av dem finns än** (verifierat i jobbloggen för
+commit `f9f3899`: båda skriver "is not set — skipping" och avslutar med kod 0) — så länge de
+saknas är jobbet ett ofarligt no-op, oberoende av varandra.
 
 ## Klick-steg i Render
 
-**Status 2026-07-19, verifierat direkt av grundaren i dashboarden:** den befintliga tjänsten
-`LifeAI-1` kör i dagsläget som en Node-tjänst (Root Directory `frontend`, Build Command
-`npm ci && npm run build`, Start Command `npm start`) — **inte** den kombinerade
-Docker-containern som `render.yaml` beskriver. Alla nödvändiga secrets är redan manuellt
-sparade på tjänsten. Det som återstår är att faktiskt byta tjänstens runtime till Docker och
-peka den på `Dockerfile.combined`.
+**Status 2026-07-20, verifierat direkt av grundaren i dashboarden — ersätter allt tidigare
+"återstår att byta till Docker"-innehåll i det här avsnittet, som är inaktuellt:** tjänsten
+`LifeAI-1` är redan adopterad av Render Blueprintet, kör redan `Runtime: Docker`, har redan en
+tom Root Directory, och bygger redan mot `Dockerfile.combined` — runtime-övergången
+Node → Docker som föregående version av det här avsnittet beskrev som återstående är alltså
+redan genomförd. `DATABASE_URL` pekar redan på Supabases **Session pooler** (port 5432), inte
+Direct connection (som är IPv6-only och onåbar från Render Free) — se "Databasrollerna" ovan.
 
-### Två olika mekanismer i Render — vet vilken du använder
+**Senaste kända produktionsstart nådde `ensure_app_role.py` och kraschade med:**
+```
+role "postgres.<project-ref>" does not exist
+```
+Rotorsaken var att skriptet antog att `DATABASE_URL`s användarnamn (Session poolerns
+pooler-inloggningsidentitet, formen `postgres.<project-ref>`) var ett riktigt Postgres-
+rollnamn. **Fixat och mergat till `claude/det-kommer-mer-879lcm`** (commit `f9f3899`, mergar in
+`claude/fix-supabase-pooler-role`s två commits `e428ab9`/`e3e4633`) — skriptet frågar nu
+`SELECT current_user` för den faktiska anslutna rollen istället. CI grön på merge-commiten:
+https://github.com/d1n095/LifeAI/actions/runs/29733943975. Ingen ny miljövariabel, hemlighet
+eller dashboard-inställning krävs för fixen — den ligger helt i applikationskoden.
 
-1. **Tjänstens egen "Update Source"-dialog** (Settings → Build & Deploy på den befintliga
-   tjänsten). Grundaren har observerat att den här dialogen erbjuder `Runtime: Docker` men
-   **inget fält för Dockerfile Path**, och knappen heter direkt "Deploy" — dvs. den kan byta
-   runtime men verkar inte kunna peka ut `./Dockerfile.combined`, och trycker du på knappen
-   startar den sannolikt en deploy omedelbart.
-2. **Render Blueprint-sync** (via `render.yaml` i det här repot). Blueprint-synken läser
-   `dockerfilePath`/`dockerContext` direkt ur filen och kan enligt Renders egen changelog byta
-   en befintlig tjänsts runtime (Node → Docker) genom att bara ändra `runtime`-fältet och
-   synca — se https://render.com/changelog/change-an-existing-services-runtime-via-api-or-blueprint.
-   Det är alltså **Blueprint-synken, inte "Update Source"-dialogen**, som är rätt väg för att
-   få med `dockerfilePath` korrekt.
+### Vad som konkret återstår: ett enda manuellt klick
 
-### Innan Blueprintet syncas — verifiera detta i dashboarden (kritiskt, kan annars trigga en
-### oavsiktlig deploy)
+> **SUPERSEDED, 2026-07-21:** stegen nedan är historik, inte en aktuell instruktion. Render
+> är inte längre den avsedda vägen till produktion — se `docs/STRATO_VPS_DEPLOY.md`.
 
-Render Blueprints har en egen **Auto Sync**-inställning (Blueprint → Settings) som, om den är
-påslagen, applicerar `render.yaml`-ändringar (inklusive en runtime-övergång) **automatiskt vid
-varje push till den länkade branchen** — oberoende av GitHub Actions och oberoende av att
-`RENDER_DEPLOY_HOOK_URL` saknas som secret. `render.yaml`s eget `autoDeploy: false`-fält
-täcker *inte* detta — det gäller bara "ny commit på branchen" via tjänstens vanliga
-deploy-mekanism, inte ett Blueprint-syncat konfigurationsbyte.
+Eftersom `render.yaml` har `autoDeploy: false` och CI:s `deploy-render`-jobb är ett medvetet
+no-op tills `RENDER_BACKEND_DEPLOY_HOOK_URL`/`RENDER_FRONTEND_DEPLOY_HOOK_URL` sätts som
+GitHub Actions-secrets (verifierat i klartext i jobbloggen för merge-commiten ovan — ingen
+deploy triggades av den här sessionens push), har den senaste fixen INTE nått produktionen
+automatiskt. Nästa steg är:
 
-**Innan nästa push av den här filen till `claude/det-kommer-mer-879lcm`:**
+**I Render-dashboarden, på den befintliga `LifeAI-1`-tjänsten: Manual Deploy → "Deploy latest
+commit".**
 
-1. Kontrollera i Render-dashboarden om ett Blueprint redan är länkat mot det här repot/den här
-   branchen. Om ja: kontrollera Blueprintets **Auto Sync**-inställning.
-2. Om Auto Sync är påslagen: stäng av den (sätt till manuell sync) innan koden pushas, så att
-   push av den rättade `render.yaml` inte i sig triggar runtime-bytet och en deploy.
-3. Om inget Blueprint är länkat än: runtime-bytet sker inte förrän du själv initierar en
-   Blueprint-sync i dashboarden — då finns ingen push-triggad risk, men bekräfta ändå att
-   "New → Blueprint" i Render pekar mot rätt repo/branch och **adopterar** `LifeAI-1` (matchar
-   på namnet) istället för att föreslå en ny tjänst, innan du bekräftar synken.
-
-**Följande krävs innan Blueprintet kan appliceras, och görs ett steg i taget — invänta
-bekräftelse innan nästa:**
-
-1. Skapa ett Supabase-projekt (gratisnivå), aktivera `vector`-tillägget om det inte redan är
-   på, och hämta **DIRECT**-anslutningssträngen (port 5432).
-2. Skapa en Upstash Redis-databas (gratisnivå) och hämta dess anslutnings-URL.
-3. Bekräfta i Render-dashboarden att `plan: free` faktiskt är den aktuella plan-slugen för
-   webbtjänster (Postgres-planen `starter` visade sig vara ett föråldrat namn under det här
-   arbetet — samma typ av namnbyte kan gälla här, verifierat först).
-4. Fyll i `sync: false`-variablerna i tabellen ovan i dashboarden (grundaren har rapporterat
-   att detta redan är gjort för den befintliga tjänsten — bekräfta att alla nycklar i tabellen
-   ovan faktiskt finns satta, inte bara några).
-5. Verifiera Auto Sync-läget enligt föregående avsnitt.
-6. Först därefter: initiera Blueprint-synken/runtime-bytet manuellt i dashboarden.
-
-Inget av detta har körts än via den här sessionen — det här dokumentet beskriver vad som
-**kommer** krävas, inte vad som redan är gjort mot den riktiga Render-tjänsten. De observerade
-faktan (tjänstenamn, Root Directory, Build/Start Command) kommer direkt från grundarens egen
-inspektion av dashboarden, inte från kod i det här repot.
+Det hämtar och bygger om `claude/det-kommer-mer-879lcm`s senaste commit (`f9f3899`, som
+innehåller pooler-fixen) mot samma redan korrekta Docker-runtime/`Dockerfile.combined`/
+`DATABASE_URL`-konfiguration tjänsten redan har — ingen Blueprint-sync, ingen
+runtime-övergång, ingen ny secret eller dashboard-ändring behövs. Om starten fortfarande
+kraschar efter det klicket är felet något annat än den nu fixade rollbuggen och bör
+undersökas separat innan fler ändringar görs.
 
 ## Verifiering efter en fullständig deploy (för senare, när vi är där)
 

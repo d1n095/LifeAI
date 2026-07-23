@@ -148,7 +148,11 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
         db.commit()
         return
 
-    document.status = IndexStatus.indexing
+    # Life Library upload consolidation: transcription is this pipeline's "extraction" step
+    # (see app/rag/ingest.py's identical granular-status treatment) — the Document row
+    # already exists (IndexStatus.original_stored) before this runs, so a transcription or
+    # embedding failure below never loses the received media file.
+    document.status = IndexStatus.extracting
     db.add(document)
     db.commit()
 
@@ -163,6 +167,9 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
             db.commit()
             return
 
+        document.status = IndexStatus.embedding
+        db.add(document)
+        db.commit()
         embed_provider, model = resolve_active(db, role="embedding")
         vectors = await embed_provider.embed([c.text for c in timed_chunks], model=model)
 

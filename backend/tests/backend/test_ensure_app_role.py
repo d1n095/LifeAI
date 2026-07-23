@@ -76,6 +76,208 @@ def test_default_privileges_use_current_user_not_pooler_login_identity(monkeypat
     assert (pooler_username,) not in identifier_args
 
 
+def test_app_database_url_carries_the_pooler_tenant_suffix(monkeypatch, tmp_path):
+    """Reproduces a second, distinct Supabase Session Pooler production crash — this one
+    AFTER ensure_app_role.py succeeds: Supavisor rejects any connection whose username lacks
+    the `.<tenant-id>` suffix with "no tenant identifier provided (external_id or
+    sni_hostname required)", not just the admin connection. The pre-fix code built
+    APP_DATABASE_URL's username as the bare role name ("mainai_app"), dropping the tenant
+    suffix DATABASE_URL's own username carries (`postgres.<project-ref>`) — so every runtime
+    request-serving connection the app made after boot was rejected by the pooler, even
+    though ensure_app_role.py itself (using the admin DATABASE_URL, which does have the
+    suffix) had just succeeded moments earlier. The fix copies the tenant suffix onto the
+    app role's username too."""
+    module = _load_module()
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://postgres.ruwihvifpgftcwakdmvo:adminpw@aws-1-us-west-2.pooler.supabase.com:5432/postgres",
+    )
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "app-pw")
+    env_file = tmp_path / "render_env.sh"
+    monkeypatch.setenv("RENDER_ENV_FILE", str(env_file))
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    fake_cursor.fetchone.return_value = ("postgres",)
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+    monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
+
+    module.main()
+
+    written = env_file.read_text()
+    assert "APP_DATABASE_URL=" in written
+    app_url = written.split('APP_DATABASE_URL="', 1)[1].split('"', 1)[0]
+    app_username = urlparse(app_url).username
+    assert app_username == "mainai_app.ruwihvifpgftcwakdmvo"
+
+
+def test_app_database_url_stays_unsuffixed_for_a_plain_non_pooled_admin_username(monkeypatch, tmp_path):
+    """Local Docker Compose / any direct (non-pooled) Postgres has a plain admin username
+    (e.g. `lifeos`) with no tenant suffix to copy — must not gain a spurious ".something"
+    appended, which would just be a made-up role name that doesn't exist."""
+    module = _load_module()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://lifeos:adminpw@localhost:5432/lifeos")
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "app-pw")
+    env_file = tmp_path / "render_env.sh"
+    monkeypatch.setenv("RENDER_ENV_FILE", str(env_file))
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    fake_cursor.fetchone.return_value = ("lifeos",)
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+    monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
+
+    module.main()
+
+    written = env_file.read_text()
+    app_url = written.split('APP_DATABASE_URL="', 1)[1].split('"', 1)[0]
+    assert urlparse(app_url).username == "mainai_app"
+
+
+def test_password_is_not_rotated_on_a_normal_restart_when_the_role_already_exists(monkeypatch):
+    """The actual verified production incident: the pre-fix script ran `ALTER ROLE ...
+    PASSWORD` unconditionally on every single boot, even when mainai_app already existed
+    with the correct password. Under Supabase's Session Pooler, that put every ordinary
+    restart at risk of a transient "password authentication failed" on the very next
+    connection while Supavisor's own auth cache caught up (see the module docstring) — a
+    real deploy hit exactly this and crashed. A normal restart against an
+    already-provisioned role must never touch the password, and must therefore never need
+    the self-test-connect retry either (nothing changed to test)."""
+    module = _load_module()
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://postgres.ruwihvifpgftcwakdmvo:adminpw@aws-1-us-west-2.pooler.supabase.com:5432/postgres",
+    )
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "app-pw")
+    monkeypatch.delenv("MAINAI_APP_ROTATE_PASSWORD", raising=False)
+    monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    # First fetchone() is for "SELECT current_user", second is the role-exists check —
+    # (1,) is truthy/non-None, i.e. the role already exists.
+    fake_cursor.fetchone.side_effect = [("postgres",), (1,)]
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+
+    connect_calls: list[tuple] = []
+
+    def _fake_connect(*a, **kw):
+        connect_calls.append((a, kw))
+        return fake_conn
+
+    monkeypatch.setattr(module.psycopg2, "connect", _fake_connect)
+
+    executed_sql_templates: list[str] = []
+    real_sql = module.sql.SQL
+
+    def _spy_sql(text_arg):
+        executed_sql_templates.append(text_arg)
+        return real_sql(text_arg)
+
+    monkeypatch.setattr(module.sql, "SQL", _spy_sql)
+
+    module.main()
+
+    assert not any("CREATE ROLE" in t or "ALTER ROLE" in t for t in executed_sql_templates)
+    # Only the one admin connection — no self-test-connect call, since the password was
+    # never touched.
+    assert len(connect_calls) == 1
+
+
+def test_explicit_rotate_password_env_var_rotates_and_self_tests_the_new_credential(monkeypatch):
+    """MAINAI_APP_ROTATE_PASSWORD=true is the explicit, one-off opt-in an operator uses when
+    they actually want to rotate the password on a specific deploy — this is the ONE case
+    where the password does change on a boot against an already-existing role, and where the
+    self-test-connect retry (the actual fix for the production incident) must run."""
+    module = _load_module()
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://postgres.ruwihvifpgftcwakdmvo:adminpw@aws-1-us-west-2.pooler.supabase.com:5432/postgres",
+    )
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "app-pw")
+    monkeypatch.setenv("MAINAI_APP_ROTATE_PASSWORD", "true")
+    monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    fake_cursor.fetchone.side_effect = [("postgres",), (1,)]
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+
+    connect_calls: list[tuple] = []
+
+    def _fake_connect(*a, **kw):
+        connect_calls.append((a, kw))
+        return fake_conn
+
+    monkeypatch.setattr(module.psycopg2, "connect", _fake_connect)
+
+    executed_sql_templates: list[str] = []
+    real_sql = module.sql.SQL
+
+    def _spy_sql(text_arg):
+        executed_sql_templates.append(text_arg)
+        return real_sql(text_arg)
+
+    monkeypatch.setattr(module.sql, "SQL", _spy_sql)
+
+    module.main()
+
+    assert any("ALTER ROLE" in t for t in executed_sql_templates)
+    # The admin connection, plus at least one self-test-connect attempt against the new
+    # credential.
+    assert len(connect_calls) >= 2
+
+
+def test_self_test_connection_retries_transient_failures_then_succeeds(monkeypatch):
+    """Unit-level proof of the retry/backoff mechanism itself — the same mechanism proven
+    end-to-end against the real Dockerfile.combined image in combined-container-verify's
+    delayed-app-role container (see .github/workflows/ci.yml)."""
+    module = _load_module()
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+
+    call_count = {"n": 0}
+
+    def _flaky_connect(*a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            raise module.psycopg2.OperationalError("simulated transient failure")
+        return MagicMock()
+
+    monkeypatch.setattr(module.psycopg2, "connect", _flaky_connect)
+    module._self_test_connection("postgresql://irrelevant", attempts=5, base_delay_seconds=0.01)
+    assert call_count["n"] == 3
+
+
+def test_self_test_connection_gives_up_and_raises_after_exhausting_every_attempt(monkeypatch):
+    """A connection that NEVER succeeds must still fail loudly (not hang forever, not be
+    silently swallowed) — this is what distinguishes a real wrong credential from transient
+    pooler propagation lag."""
+    module = _load_module()
+    monkeypatch.setattr(module.time, "sleep", lambda *_: None)
+
+    def _always_fails(*a, **kw):
+        raise module.psycopg2.OperationalError("permanently wrong password")
+
+    monkeypatch.setattr(module.psycopg2, "connect", _always_fails)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="efter 3 försök"):
+        module._self_test_connection("postgresql://irrelevant", attempts=3, base_delay_seconds=0.01)
+
+
 def test_full_script_run_against_real_local_postgres_is_idempotent(monkeypatch):
     """Runs the real, unmocked script against the actual local Postgres test database this
     suite already uses (see conftest.py's `_test_database` fixture) — the ordinary

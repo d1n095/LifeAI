@@ -142,6 +142,28 @@ class Settings(BaseSettings):
     # allow_credentials=True anyway, which cookie-based auth requires).
     frontend_origins: str = "http://localhost:3000"
 
+    # Life Library durable-worker package (app/storage/) — the persistent Docker volume
+    # original files are streamed into. Must be the SAME filesystem/volume across the
+    # backend and worker containers (see docker-compose.vps.yml), since app/storage/
+    # local_fs.py's atomic write relies on a same-filesystem rename from its own tmp/
+    # subdirectory — never point this at the container's own /tmp (a separate tmpfs on the
+    # VPS, see docker-compose.vps.yml's read_only+tmpfs config).
+    storage_root: str = "/var/lib/lifeai/uploads"
+
+    # Worker (app/worker.py): how often an idle worker polls for a new/reclaimable job, how
+    # long a claimed job's lease lasts before another worker may reclaim it as abandoned, and
+    # how many jobs one worker process handles at once. Kept low by default — this package's
+    # explicit "låg resursbudget" requirement for the current VPS — but configurable per
+    # docs/VPS_OPERATIONS_RUNBOOK.md if the server is upgraded later.
+    worker_poll_interval_seconds: float = 2.0
+    worker_lease_seconds: int = 120
+    worker_concurrency: int = 1
+    # Identifies which worker process/container claimed a job (GET /api/library/ops/status,
+    # troubleshooting) — defaults to the container's own hostname (stable per-container,
+    # unique per replica) rather than a random id, so a founder reading ops status or logs
+    # can tell which container to look at.
+    worker_id: str | None = None
+
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]

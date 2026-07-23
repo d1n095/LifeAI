@@ -39,6 +39,14 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
   "host",
   "content-length", // recomputed by fetch() from the actual streamed body
+  // Meaningful for exactly the client->this-hop leg, not this hop's own outbound fetch() —
+  // and undici (Node's fetch implementation) throws `NotSupportedError: expect header not
+  // supported` if it's forwarded, since Expect is a forbidden header per the Fetch spec.
+  // Many HTTP clients (curl included) attach "Expect: 100-continue" automatically once a
+  // request body crosses a size threshold, so without stripping this, any sufficiently large
+  // POST/PUT/PATCH through this proxy would crash outright — found via
+  // vps-compose-verify's oversized-body CI check, not a hypothetical.
+  "expect",
 ]);
 
 function copyHeaders(source: Headers): Headers {

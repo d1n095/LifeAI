@@ -1,8 +1,16 @@
+import logging
+import time
+from typing import Callable, TypeVar
+
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import get_settings
 from app.request_context import current_user_id
+
+logger = logging.getLogger("mainai.db")
+_T = TypeVar("_T")
 
 settings = get_settings()
 
@@ -49,3 +57,35 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def call_with_db_retry(fn: Callable[[], _T], *, attempts: int = 5, base_delay_seconds: float = 1.0) -> _T:
+    """Retries fn() with exponential backoff (1s/2s/4s/8s by default) on a transient DB
+    connection failure. Verified production incident, 2026-07-20: app/main.py's on_startup()
+    made its first-ever mainai_app connection with no retry at all, so a brief Supabase
+    Session Pooler auth-cache propagation lag right after ensure_app_role.py provisioned or
+    changed the role's password (see that script's module docstring) killed the whole
+    process — "ERROR: Application startup failed. Exiting." — even though the exact same
+    credential worked fine moments later. Used only around DB-touching startup code, not
+    request handling (a request-scoped failure should surface to that one caller immediately,
+    not silently retry for several seconds behind the scenes). Re-raises after the last
+    attempt so a genuinely broken connection still fails startup loudly, as before."""
+    last_exc: OperationalError | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except OperationalError as exc:
+            last_exc = exc
+            if attempt == attempts:
+                break
+            delay = base_delay_seconds * (2 ** (attempt - 1))
+            logger.warning(
+                "DB-anslutning misslyckades vid uppstart (försök %d/%d): %s — försöker igen om %.1fs.",
+                attempt,
+                attempts,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc

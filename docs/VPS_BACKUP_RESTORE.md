@@ -1,0 +1,167 @@
+# VPS Backup & Restore
+
+Policy, verklig omfattning och en övningsprocedur för `scripts/vps/backup.sh` och
+`scripts/vps/restore.sh`. Se `docs/VPS_ARCHITECTURE.md` för den fullständiga bilden av var
+tillstånd faktiskt lever. Allt nedan är verifierat genom att faktiskt köra båda skripten mot
+riktiga filer och riktiga Docker-volymer — se `.github/workflows/ci.yml`s
+`vps-backup-restore-test`-jobb.
+
+## Vad som faktiskt säkerhetskopieras
+
+| Data | Var det lever | Täcks av `backup.sh`? |
+|---|---|---|
+| `docker-compose.vps.yml`, `Caddyfile` | `/opt/lifeai` | Ja |
+| Deploy-poster (digests, tidsstämplar, resultat — se `scripts/vps/deploy.sh`) | `/opt/lifeai/deployments/*.json` | Ja |
+| TLS-certifikat, ACME-kontostate | Docker-volymen `caddy_data` | Ja |
+| Caddys egen autosparade config | Docker-volymen `caddy_config` | Ja |
+| `/etc/lifeai/lifeai.env` (alla hemligheter) | `/etc/lifeai` | **Nej, avsiktligt** — se nedan |
+| Postgres-databasen (all applikationsdata) | Supabase, INTE denna VPS | **Nej** — Supabases eget ansvar |
+| Redis/Valkey (rate limiting, jobblås) | **Lokal container på denna VPS** (`docker-compose.vps.yml`s `redis`-tjänst — ERSATTE tidigare extern Upstash/Redis Cloud) — men `tmpfs`, ingen disk-persistens | **Nej** — förlust är ofarlig OCH det finns inget att förlora på disk, se nedan |
+| Docker-containrarnas egna loggar | `json-file`-loggdrivrutinen | **Nej** — redan rullande, inte katastrofrelevant |
+| Life Library-originalfiler (uppladdat innehåll, innehållsadresserat) | Docker-volymen `lifeai_uploads` (`backend`/`worker`, se `docs/VPS_ARCHITECTURE.md`s "Filsystem, uppladdningar och persistens") | **Ja, sedan durable-worker-paketet** — se nedan |
+
+### Varför hemligheter inte finns i arkivet
+
+`backup.sh` skriver aldrig in `/etc/lifeai/lifeai.env` i arkivet. Ett okrypterat tar-arkiv på
+samma disk som originalet är inget verkligt skydd för hemligheter — det multiplicerar bara var
+en läcka kan komma ifrån, utan att faktiskt lösa "vad händer om disken förloras". I stället
+skriver arkivet in `required_env_var_names` (bara NAMN, aldrig värden — samma lista
+`scripts/vps/deploy.sh` redan validerar mot, delad via `scripts/vps/lib.sh`s
+`$LIFEAI_REQUIRED_ENV_VARS`) i sin `manifest.json`, så en katastrofåterställning har en
+checklista över vad som behöver återskapas från din egen säkra hemlighetslagring (t.ex. en
+lösenordshanterare) — exakt samma steg som den allra första deployen
+(`docs/STRATO_VPS_DEPLOY.md` Steg 2). Se `docs/VPS_SECRETS_INVENTORY.md` för den fullständiga
+inventeringen (namn/kategorier, aldrig värden).
+
+### Varför Postgres inte täcks
+
+Databasen är Supabase-hostad, aldrig på den här VPS:en alls — ett VPS-lokalt backup-skript kan
+inte ärligt hävda att det täcker en tjänst det aldrig rör vid. Supabase har sina egna
+backup-mekanismer (point-in-time recovery m.m. beroende på plan); det är ett separat, medvetet
+beslut som ligger utanför den här VPS-förberedelsens omfattning.
+
+### Varför Redis/Valkey inte täcks (ERSATT: numera lokal, inte längre extern)
+
+**Historiskt (INTE längre aktuellt):** Redis kördes tidigare hos Upstash, en extern
+leverantör — samma skäl som Postgres (VPS-skriptet rör aldrig en tjänst det inte äger).
+
+**Aktuellt:** cache-tjänsten (`redis`-tjänsten i `docker-compose.vps.yml`, kör Valkey — se
+`docs/VPS_ARCHITECTURE.md`s "Redis vs Valkey") kör numera PRIVAT på denna VPS. Den täcks
+ändå inte av backup-skriptet, men av en annan, giltig anledning: den använder `tmpfs` för
+`/data` och startas alltid om med `--save ""` — det finns inget på disk att säkerhetskopiera
+överhuvudtaget, eftersom containern designades för att aldrig skriva något beständigt (bara
+hastighetsbegränsningsräknare och kortlivade jobblås — `app/limiter.py`, `app/cleanup.py`).
+Att förlora dess innehåll (t.ex. vid en omstart) är ofarligt: räknare nollställs, användare
+loggas ut, ingenting permanent går förlorat — precis som när den kördes hos Upstash, bara
+nu av en lokal, inte en extern, anledning.
+
+### Uppladdade filer (`lifeai_uploads`) — täcks, sedan durable-worker-paketet
+
+**Historiskt (INTE längre aktuellt):** appen sparade inget dokumentinnehåll som filer på
+disk — allt landade i Postgres (`document_chunks`), och det fanns inget lokalt filträd att
+säkerhetskopiera.
+
+**Aktuellt:** originalfilen bakom varje Life Library-import (den råa filen innan
+extraktion) lagras nu innehållsadresserat på `lifeai_uploads`
+(`backend/app/storage/local_fs.py`) — den enda källan till dessa bytes utanför Postgres,
+som bara lagrar METADATA om filen (`Document.storage_key`/`sha256`/`size_bytes`), aldrig
+själva innehållet. Att förlora den här volymen utan en backup betyder att varje redan
+importerat original är borta för gott, även om databasen ser intakt ut. `backup.sh`
+arkiverar den som `uploads.tar.gz` och skriver samtidigt `uploads-manifest.txt` (listan
+över alla innehållsadresserade nycklar vid backup-tillfället); `restore.sh` verifierar
+efter återställning att (1) varje återställd blobs egen sha256 matchar dess sökväg och (2)
+den återställda mängden nycklar exakt matchar `uploads-manifest.txt` — se skriptens egna
+kommentarer.
+
+## Köra en backup
+
+```bash
+cd /opt/lifeai
+sudo ./scripts/vps/backup.sh
+```
+
+Skriver `/var/backups/lifeai/lifeai-backup-<TIDSSTÄMPEL>.tar.gz` (mode 0600) plus en
+`.sha256`-checksummefil bredvid. Behåller de senaste 7 arkiven som standard (`--keep N` för
+att ändra). Kräver INTE root — `/opt/lifeai` och `/var/backups/lifeai` ägs redan av
+deploy-användaren (se `scripts/vps/30_setup_directories.sh`), och att läsa Docker-volymer
+kräver bara den användarens docker-gruppmedlemskap.
+
+**Rekommenderad frekvens:** innan varje `deploy.sh`-körning (fångar TLS-certifikatstate innan
+en riskabel ändring) plus en daglig cron-rad om du vill ha kontinuerlig täckning — det finns
+ingen automatisk schemaläggning inbyggd i skriptet självt (medvetet: att lägga till en
+`cron`/`systemd timer`-rad är ett enda extra steg för Dennis att göra på den riktiga servern,
+och att gissa fel schemaläggningsbeslut i kod som aldrig körs mot en riktig server är sämre än
+att dokumentera det som ett manuellt steg här).
+
+## Verifiera ett arkiv utan att återställa
+
+```bash
+sha256sum -c /var/backups/lifeai/lifeai-backup-<TIDSSTÄMPEL>.tar.gz.sha256
+```
+
+## Återställningsövning (kör detta periodiskt, inte bara vid en verklig incident)
+
+En backup du aldrig har testat att återställa är inte en verifierad backup. Kör den här
+övningen efter varje större ändring av `docker-compose.vps.yml`/`Caddyfile`, och annars minst
+en gång per kvartal:
+
+1. **Välj det senaste arkivet:**
+   ```bash
+   ARCHIVE=$(ls -t /var/backups/lifeai/lifeai-backup-*.tar.gz | head -n1)
+   ```
+2. **Återställ till ett engångskatalog** (skriptet vägrar av design att peka direkt på
+   `/opt/lifeai` — se skriptets egen huvudkommentar):
+   ```bash
+   sudo ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir /tmp/restore-drill --confirm
+   ```
+3. **Inspektera resultatet:**
+   - `diff /tmp/restore-drill/docker-compose.vps.yml /opt/lifeai/docker-compose.vps.yml`
+     (ska vara identiska om inget har ändrats sedan backupen togs).
+   - `docker volume ls | grep lifeai_restore_` — de nya, ISOLERADE volymerna med
+     TLS-certifikat/Caddy-config/Life Library-original.
+   - `docker run --rm -v <lifeai_restore_...>:/vol:ro alpine ls -la /vol` för att bekräfta
+     att certifikatfilerna faktiskt finns där.
+   - `restore.sh` har redan (steg 3b i dess egen output) verifierat `lifeai_uploads`s
+     innehåll mot både innehållsadressering och `uploads-manifest.txt` automatiskt — ett
+     lyckat skriptkörning utan `die`-fel ÄR den verifieringen, inget extra manuellt steg
+     krävs för den delen.
+4. **Städa upp övningen:**
+   ```bash
+   sudo rm -rf /tmp/restore-drill
+   docker volume rm <lifeai_restore_...caddy_data> <lifeai_restore_...caddy_config> <lifeai_restore_...uploads>
+   ```
+5. **Dokumentera resultatet** (datum, vilket arkiv, om något var oväntat) — en enkel rad i
+   din egen driftlogg räcker; det finns inget krav på ett specifikt format här.
+
+Ingenting i steg 1–4 rör den körande stacken — `restore.sh` skapar bara nya, separat
+namngivna volymer och en helt fristående katalog.
+
+## Vid en verklig katastrof (disken/servern är helt förlorad)
+
+1. Provisionera en ny VPS och kör `scripts/vps/00_preflight.sh` t.o.m.
+   `scripts/vps/50_enable_auto_updates.sh` enligt `docs/STRATO_VPS_DEPLOY.md`.
+2. Återställ det senaste arkivet till `/tmp/restore-drill` (steg 1–2 ovan), inspektera det, och
+   kopiera sedan manuellt in `docker-compose.vps.yml`/`Caddyfile`/`deployments/` i det nya,
+   riktiga `/opt/lifeai` — skriptet gör aldrig den sista kopieringen åt dig, se dess
+   huvudkommentar.
+3. Kör `sudo ./scripts/vps/restore.sh --from <arkiv> --target-dir /tmp/restore-drill
+   --overwrite-live-volumes --confirm` **i stället** för steg 2 ovan om du vill återställa
+   TLS-certifikaten OCH Life Library-originalen direkt in i de riktiga
+   `caddy_data`/`caddy_config`/`lifeai_uploads`-volymerna (undviker att Let's
+   Encrypt-hastighetsgränser triggas av en helt ny certifikatbegäran, och återger
+   grundaren tillgång till redan importerat material utan att behöva ladda upp allt igen)
+   — detta är den enda vägen som rör "levande" state, och kräver den extra flaggan
+   uttryckligen.
+2. Skapa `/etc/lifeai/lifeai.env` från grunden med hjälp av `manifest.json`s
+   `required_env_var_names`-lista och din egen säkra hemlighetslagring — se
+   `docs/STRATO_VPS_DEPLOY.md` Steg 2 och `docs/VPS_SECRETS_INVENTORY.md`.
+3. Kör `sudo ./scripts/vps/deploy.sh --confirm` som vanligt.
+4. Postgres behöver ingen åtgärd härifrån — den är extern (Supabase) och opåverkad av en
+   VPS-diskförlust. Om Supabase SJÄLV behöver återställas, följ dess egna
+   återställningsflöden (utanför den här dokumentets omfattning). Redis/Valkey-tjänsten
+   behöver heller ingen återställning — `docker compose up -d` (steg 3 ovan) skapar en helt
+   ny, tom cache-container automatiskt (`tmpfs`, ingen data att återställa till att börja
+   med); den enda förutsättningen är att `REDIS_PASSWORD` finns i den återställda
+   `/etc/lifeai/lifeai.env` (steg 2 ovan).
+
+Se `docs/VPS_OPERATIONS_RUNBOOK.md` för den bredare incidenthanteringsprocessen.

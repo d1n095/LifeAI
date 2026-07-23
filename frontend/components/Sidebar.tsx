@@ -12,7 +12,6 @@ const NAV = [
   { href: "/workbench", label: "Workbench" },
   { href: "/knowledge", label: "Kunskapsdatabas" },
   { href: "/projects", label: "Projekt" },
-  { href: "/documents", label: "Dokument" },
   { href: "/admin", label: "Admin" },
   { href: "/account", label: "Konto" },
 ];

@@ -4,6 +4,7 @@ import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api, KnowledgeSourceDetail, KnowledgeSourceItem } from "@/lib/api";
+import { useTwoStepDelete } from "@/lib/useTwoStepDelete";
 
 function formatTimestamp(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));
@@ -72,8 +73,12 @@ function LibrarySourceDetailInner() {
   const [mediaError, setMediaError] = useState(false);
   const [transcriptQuery, setTranscriptQuery] = useState("");
 
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  const { confirming: confirmingDelete, deleting, error: deleteError, requestConfirm, cancelConfirm, confirmDelete } = useTwoStepDelete(
+    async () => {
+      await api.deleteLibrarySource(params.id);
+      router.replace("/library");
+    }
+  );
 
   const [otherSources, setOtherSources] = useState<KnowledgeSourceItem[]>([]);
   const [relTarget, setRelTarget] = useState("");
@@ -102,18 +107,6 @@ function LibrarySourceDetailInner() {
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id]);
-
-  async function handleDelete() {
-    setDeleting(true);
-    setError(null);
-    try {
-      await api.deleteLibrarySource(params.id);
-      router.replace("/library");
-    } catch (e: any) {
-      setError(e.message);
-      setDeleting(false);
-    }
-  }
 
   async function handleAddRelationship(e: React.FormEvent) {
     e.preventDefault();
@@ -417,10 +410,15 @@ function LibrarySourceDetailInner() {
         <p className="text-sm text-white/50 mb-3">
           Tar bort källan och gör dess innehåll osökbart omedelbart. Det går inte att ångra.
         </p>
+        {deleteError && (
+          <div role="alert" className="mb-3 text-sm text-red-300">
+            {deleteError}
+          </div>
+        )}
         {!confirmingDelete ? (
           <button
             type="button"
-            onClick={() => setConfirmingDelete(true)}
+            onClick={requestConfirm}
             className="rounded-lg border border-red-500/50 px-4 py-2 text-sm text-red-300"
           >
             Radera källa
@@ -429,16 +427,17 @@ function LibrarySourceDetailInner() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={handleDelete}
+              onClick={confirmDelete}
               disabled={deleting}
               className="rounded-lg bg-red-500/80 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
-              {deleting ? "Raderar…" : "Bekräfta radering"}
+              {deleting ? "Tar bort…" : "Bekräfta radering"}
             </button>
             <button
               type="button"
-              onClick={() => setConfirmingDelete(false)}
-              className="rounded-lg border border-border px-4 py-2 text-sm"
+              onClick={cancelConfirm}
+              disabled={deleting}
+              className="rounded-lg border border-border px-4 py-2 text-sm disabled:opacity-50"
             >
               Avbryt
             </button>
