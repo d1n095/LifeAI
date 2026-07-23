@@ -200,3 +200,194 @@ def test_manifest_json_that_is_not_an_object_is_rejected_as_metadata_error():
 def test_default_compression_ratio_constant_is_reasonable():
     # Sanity check on the module's own default — not a magic number nobody looked at.
     assert 10 <= MAX_COMPRESSION_RATIO <= 1000
+
+
+# --- P2: nested ZIP handling, encryption detection, archive_path/archive_chain provenance ---
+# See docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10 for the full spec these tests verify.
+
+
+def _make_encrypted_zip(files: dict[str, bytes], password: bytes) -> bytes:
+    """pyzipfile can't write real AES/ZipCrypto-encrypted entries, so this shells out to the
+    system `zip` binary to produce a genuinely password-protected archive — anything less
+    would test our own mock, not the real RuntimeError/NotImplementedError zipfile raises for
+    an actually encrypted entry."""
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    if shutil.which("zip") is None:
+        pytest.skip("system 'zip' binary not available to build a genuinely encrypted archive")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        for name, content in files.items():
+            file_path = tmp_path / name
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(content)
+        archive_path = tmp_path / "out.zip"
+        subprocess.run(
+            ["zip", "-P", password.decode(), "-r", str(archive_path), "."],
+            cwd=tmp_path,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return archive_path.read_bytes()
+
+
+def test_nested_zip_one_level_extracts_and_indexes_normally():
+    inner = _make_zip({"contract.txt": b"lease terms"})
+    raw = _make_zip({"backup.zip": inner, "top.txt": b"top level"})
+    result = validate_and_extract_zip(raw, outer_filename="backup.zip")
+    ok_names = {e.filename for e in result.ok_entries}
+    assert ok_names == {"top.txt", "contract.txt"}
+    nested = next(e for e in result.ok_entries if e.filename == "contract.txt")
+    assert nested.archive_path == "backup.zip!/backup.zip!/contract.txt"
+    top = next(e for e in result.ok_entries if e.filename == "top.txt")
+    assert top.archive_path is None
+    assert top.archive_chain is None
+
+
+def test_nested_zip_at_max_depth_boundary_still_extracts():
+    level3 = _make_zip({"deepest.txt": b"bottom of the well"})
+    level2 = _make_zip({"level3.zip": level3})
+    level1 = _make_zip({"level2.zip": level2})
+    raw = _make_zip({"level1.zip": level1})
+    result = validate_and_extract_zip(raw, max_nesting_depth=3)
+    assert any(e.filename == "deepest.txt" and e.status == "ok" for e in result.entries)
+
+
+def test_nested_zip_exceeding_max_depth_is_rejected_not_the_whole_import():
+    level3 = _make_zip({"deepest.txt": b"too deep"})
+    level2 = _make_zip({"level3.zip": level3})
+    level1 = _make_zip({"level2.zip": level2, "sibling.txt": b"still fine"})
+    raw = _make_zip({"level1.zip": level1})
+    result = validate_and_extract_zip(raw, max_nesting_depth=1)
+    rejected = [e for e in result.entries if e.status == "rejected" and "ästlingsdjup" in (e.reason or "")]
+    assert len(rejected) == 1
+    assert any(e.filename == "sibling.txt" and e.status == "ok" for e in result.entries)
+
+
+def test_nested_zip_shared_budget_rejects_a_bomb_that_looks_small_per_level():
+    """The critical P2 security property: three SIBLING nested archives, each individually
+    well under the total-byte budget on its own, must still be caught once their combined
+    size crosses it — proving the budget is genuinely SHARED across every nested archive
+    (not reset or evaluated independently per nesting branch). Each inner archive's own
+    content (40_001 incompressible-ish bytes) alone would pass a 100_000-byte budget; three
+    of them (120_003 bytes total) must not."""
+    per_file_bytes = 40_001
+    # os.urandom, not a repeated byte — DEFLATE would otherwise compress a repeated byte to
+    # almost nothing, but info.file_size (what the budget counts) is the UNCOMPRESSED size
+    # regardless, so this choice only matters for making the intent of the test obvious.
+    import os
+
+    nested_1 = _make_zip({"leaf.txt": os.urandom(per_file_bytes)})
+    nested_2 = _make_zip({"leaf.txt": os.urandom(per_file_bytes)})
+    nested_3 = _make_zip({"leaf.txt": os.urandom(per_file_bytes)})
+    raw = _make_zip({"a.zip": nested_1, "b.zip": nested_2, "c.zip": nested_3})
+    with pytest.raises(ZipSecurityError, match="totala uppackade storlek"):
+        validate_and_extract_zip(raw, max_total_bytes=100_000, max_file_bytes=1_000_000)
+
+
+def test_corrupt_nested_archive_is_rejected_as_one_entry_not_the_whole_batch():
+    corrupt_zip_bytes = b"PK\x03\x04" + b"not actually a valid central directory"
+    raw = _make_zip({"broken.zip": corrupt_zip_bytes, "fine.txt": b"still imports"})
+    result = validate_and_extract_zip(raw)
+    rejected = [e for e in result.entries if e.filename == "broken.zip"]
+    assert len(rejected) == 1
+    assert rejected[0].status == "rejected"
+    assert any(e.filename == "fine.txt" and e.status == "ok" for e in result.entries)
+
+
+def test_encrypted_top_level_entry_gets_a_distinct_encrypted_status_not_generic_rejected():
+    raw = _make_encrypted_zip({"secret.txt": b"classified"}, password=b"hunter2")
+    result = validate_and_extract_zip(raw)
+    encrypted = [e for e in result.entries if e.status == "encrypted"]
+    assert len(encrypted) == 1
+    assert "lösenordsskyddat" in encrypted[0].reason.lower()
+
+
+def test_encrypted_entry_inside_a_nested_archive_is_still_correctly_classified():
+    inner = _make_encrypted_zip({"secret.txt": b"classified"}, password=b"hunter2")
+    raw = _make_zip({"vault.zip": inner})
+    result = validate_and_extract_zip(raw)
+    encrypted = [e for e in result.entries if e.status == "encrypted"]
+    assert len(encrypted) == 1
+    assert encrypted[0].filename == "secret.txt"
+
+
+def test_encrypted_status_is_never_treated_as_resumable_by_the_worker():
+    """A minimal sanity check that "encrypted" is disjoint from "ok" — the worker/import
+    orchestrator (app/rag/library_import.py) treats any non-"ok" ZipEntryResult as excluded
+    from the batch, so this alone is what keeps an encrypted file out of the index."""
+    raw = _make_encrypted_zip({"secret.txt": b"classified"}, password=b"hunter2")
+    result = validate_and_extract_zip(raw)
+    assert result.ok_entries == []
+
+
+def test_archive_chain_provenance_is_recorded_correctly_for_a_nested_file():
+    inner = _make_zip({"contracts/lease.pdf": b"%PDF-1.4\nfake but valid header"})
+    raw = _make_zip({"users/docs.zip": inner})
+    outer_checksum = sha256_bytes(raw)
+    inner_checksum = sha256_bytes(inner)
+    result = validate_and_extract_zip(raw, outer_filename="backup.zip")
+    entry = next(e for e in result.ok_entries if e.filename == "contracts/lease.pdf")
+    assert entry.archive_chain == [
+        {"filename": "backup.zip", "checksum": outer_checksum},
+        {"filename": "users/docs.zip", "checksum": inner_checksum},
+        {"filename": "contracts/lease.pdf", "checksum": entry.checksum},
+    ]
+
+
+def test_archive_path_matches_the_documented_format_exactly():
+    inner = _make_zip({"contracts/lease.pdf": b"%PDF-1.4\nfake but valid header"})
+    raw = _make_zip({"users/docs.zip": inner})
+    result = validate_and_extract_zip(raw, outer_filename="backup.zip")
+    entry = next(e for e in result.ok_entries if e.filename == "contracts/lease.pdf")
+    assert entry.archive_path == "backup.zip!/users/docs.zip!/contracts/lease.pdf"
+
+
+def test_archive_path_is_deterministic_across_repeated_imports_of_identical_bytes():
+    inner = _make_zip({"a.txt": b"same content"})
+    raw = _make_zip({"nested.zip": inner})
+    result1 = validate_and_extract_zip(raw, outer_filename="pkg.zip")
+    result2 = validate_and_extract_zip(raw, outer_filename="pkg.zip")
+    path1 = next(e for e in result1.ok_entries if e.filename == "a.txt").archive_path
+    path2 = next(e for e in result2.ok_entries if e.filename == "a.txt").archive_path
+    assert path1 == path2 == "pkg.zip!/nested.zip!/a.txt"
+
+
+def _archive_path_segments(path: str) -> list[str]:
+    # Splits on both the archive-boundary separator and ordinary "/" so ".." can be checked
+    # as a genuine path segment, not just a substring.
+    segments: list[str] = []
+    for archive_segment in path.split("!/"):
+        segments.extend(archive_segment.split("/"))
+    return segments
+
+
+def test_archive_path_never_contains_raw_backslashes_or_traversal_segments():
+    inner = _make_zip({"sub/deep.txt": b"safe nested path"})
+    raw = _make_zip({"nested.zip": inner})
+    result = validate_and_extract_zip(raw, outer_filename="pkg.zip")
+    entry = next(e for e in result.ok_entries if e.filename == "sub/deep.txt")
+    assert "\\" not in entry.archive_path
+    assert ".." not in _archive_path_segments(entry.archive_path)
+
+
+def test_top_level_files_have_no_archive_path_unchanged_from_before_p2():
+    raw = _make_zip({"a.txt": b"top level, no nesting involved"})
+    result = validate_and_extract_zip(raw)
+    assert result.ok_entries[0].archive_path is None
+    assert result.ok_entries[0].archive_chain is None
+
+
+def test_existing_500_file_and_200mb_limits_still_enforced_at_top_level():
+    files = {f"file{i}.txt": b"x" for i in range(10)}
+    raw = _make_zip(files)
+    with pytest.raises(ZipSecurityError, match="För många filer"):
+        validate_and_extract_zip(raw, max_files=5)
+    raw2 = _make_zip({"a.txt": b"x" * 1000, "b.txt": b"x" * 1000})
+    with pytest.raises(ZipSecurityError, match="totala uppackade storlek"):
+        validate_and_extract_zip(raw2, max_total_bytes=1500)

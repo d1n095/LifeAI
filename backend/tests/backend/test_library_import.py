@@ -568,3 +568,96 @@ async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
 
     session_a.close()
     session_b.close()
+
+
+# --- P2: nested ZIP provenance and encrypted-entry wiring through the real pipeline ---
+# See tests/backend/test_zip_import_security.py for the exhaustive zip_import.py-level
+# coverage of nesting/budget/encryption itself; these confirm the result actually reaches
+# ImportJob.file_results, KnowledgeVersion.raw_metadata and job-level counts correctly.
+
+
+@pytest.mark.asyncio
+async def test_nested_zip_file_is_indexed_with_archive_path_in_job_and_version_metadata(db_session, make_verified_user):
+    user, _ = make_verified_user()
+    inner = _make_zip({"contracts/lease.txt": b"Hyresavtal: 12 manader, 8500 kr/manad."})
+    raw = _make_zip({"users/docs.zip": inner})
+    job = _make_job(db_session, user.id, raw, "backup.zip")
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.completed
+    assert job.succeeded_count == 1
+
+    expected_path = "backup.zip!/users/docs.zip!/contracts/lease.txt"
+    file_result = next(r for r in job.file_results if r["filename"] == "contracts/lease.txt")
+    assert file_result["archive_path"] == expected_path
+    assert file_result["archive_chain"][0]["filename"] == "backup.zip"
+    assert file_result["archive_chain"][-1]["filename"] == "contracts/lease.txt"
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id).first()
+    version = db_session.query(KnowledgeVersion).filter_by(source_id=doc.id).first()
+    assert version.raw_metadata["archive_path"] == expected_path
+    assert version.raw_metadata["archive_chain"] == file_result["archive_chain"]
+
+
+@pytest.mark.asyncio
+async def test_top_level_zip_file_still_has_no_archive_path_after_p2(db_session, make_verified_user):
+    """Regression guard: a plain, non-nested ZIP package must behave byte-for-byte like
+    before P2 — no archive_path/archive_chain anywhere for a top-level file."""
+    raw = _make_zip({"a.txt": b"top level only, no nesting"})
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, raw, "package.zip")
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    file_result = job.file_results[0]
+    assert file_result["archive_path"] is None
+    assert file_result["archive_chain"] is None
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id).first()
+    version = db_session.query(KnowledgeVersion).filter_by(source_id=doc.id).first()
+    assert "archive_path" not in version.raw_metadata
+
+
+@pytest.mark.asyncio
+async def test_encrypted_entry_in_a_zip_is_reported_with_its_own_status_and_does_not_fail_the_job(db_session, make_verified_user):
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    if shutil.which("zip") is None:
+        pytest.skip("system 'zip' binary not available to build a genuinely encrypted archive")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "secret.txt").write_bytes(b"classified content")
+        archive_path = tmp_path / "vault.zip"
+        subprocess.run(
+            ["zip", "-P", "hunter2", "-r", str(archive_path), "secret.txt"],
+            cwd=tmp_path,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        encrypted_inner = archive_path.read_bytes()
+
+    raw = _make_zip({"vault.zip": encrypted_inner, "readable.txt": b"this one is fine"})
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, raw, "package.zip")
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    # One real success (readable.txt) plus one encrypted entry that could never be
+    # attempted — not a failure, so the job still completes rather than going `partial`.
+    assert job.status == ImportJobStatus.completed
+    assert job.succeeded_count == 1
+    assert job.failed_count == 0
+    encrypted_result = next(r for r in job.file_results if r["filename"] == "secret.txt")
+    assert encrypted_result["status"] == "encrypted"
+    assert "lösenordsskyddat" in encrypted_result["reason"].lower()
+    # Never indexed as a Document — an encrypted entry is excluded from the batch entirely.
+    assert db_session.query(Document).filter_by(uploaded_by=user.id).count() == 1

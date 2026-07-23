@@ -70,9 +70,15 @@ class JobCancelled(Exception):
 @dataclass
 class FileOutcome:
     filename: str
-    status: str  # "indexed" | "duplicate" | "failed" | "skipped" | "cancelled" | "blocked"
+    status: str  # "indexed" | "duplicate" | "failed" | "skipped" | "cancelled" | "blocked" | "encrypted"
     reason: str | None = None
     source_id: str | None = None
+    # P2: only set for a file that came from inside a nested ZIP archive — mirrors
+    # ZipEntryResult.archive_path/archive_chain (see app/rag/zip_import.py), carried through
+    # unchanged so ImportJob.file_results retains the same provenance the extraction step
+    # already computed. None for a top-level file, exactly like before P2.
+    archive_path: str | None = None
+    archive_chain: list[dict] | None = None
 
 
 def _manifest_entry_for(manifest: dict | None, filename: str) -> dict:
@@ -158,7 +164,14 @@ def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | No
 
 
 async def _resume_blocked_document(
-    db: Session, document: Document, owner_id: uuid.UUID, filename: str, content: bytes
+    db: Session,
+    document: Document,
+    owner_id: uuid.UUID,
+    filename: str,
+    content: bytes,
+    *,
+    archive_path: str | None = None,
+    archive_chain: list[dict] | None = None,
 ) -> FileOutcome:
     """P1: re-attempts embedding for a Document already paused on `awaiting_provider`/
     `blocked_provider` — reuses the SAME row and its existing KnowledgeVersion rather than
@@ -188,7 +201,14 @@ async def _resume_blocked_document(
         document.error_message = f"Kunde inte extrahera text: {exc}"
         db.add(document)
         db.commit()
-        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="failed",
+            reason=document.error_message,
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
     document.status = IndexStatus.extracted
     db.add(document)
     db.commit()
@@ -196,9 +216,23 @@ async def _resume_blocked_document(
     await index_document(db, document, text_content)
 
     if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
-        return FileOutcome(filename=filename, status="blocked", reason=document.error_message, source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="blocked",
+            reason=document.error_message,
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
     if document.status != IndexStatus.indexed:
-        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="failed",
+            reason=document.error_message,
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
 
     if version is not None:
         try:
@@ -206,7 +240,13 @@ async def _resume_blocked_document(
         except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
             pass
 
-    return FileOutcome(filename=filename, status="indexed", source_id=str(document.id))
+    return FileOutcome(
+        filename=filename,
+        status="indexed",
+        source_id=str(document.id),
+        archive_path=archive_path,
+        archive_chain=archive_chain,
+    )
 
 
 async def _import_one_file(
@@ -222,6 +262,8 @@ async def _import_one_file(
     import_job_id: uuid.UUID | None,
     manifest_entry: dict,
     max_upload_bytes: int,
+    archive_path: str | None = None,
+    archive_chain: list[dict] | None = None,
 ) -> FileOutcome:
     # Idempotency at the file level: identical content (by checksum) already owned by this
     # user is never re-imported as a second copy — DEL 2's "vara idempotent vid samma
@@ -237,8 +279,17 @@ async def _import_one_file(
         # _resume_blocked_document's docstring). Every other existing status (indexed, or any
         # of the terminal *_failed statuses) is still a real duplicate, unchanged from before P1.
         if existing.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
-            return await _resume_blocked_document(db, existing, owner_id, filename, content)
-        return FileOutcome(filename=filename, status="duplicate", reason="Identiskt innehåll finns redan.", source_id=str(existing.id))
+            return await _resume_blocked_document(
+                db, existing, owner_id, filename, content, archive_path=archive_path, archive_chain=archive_chain
+            )
+        return FileOutcome(
+            filename=filename,
+            status="duplicate",
+            reason="Identiskt innehåll finns redan.",
+            source_id=str(existing.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
 
     suffix = PurePosixPath(filename).suffix.lower()
     media_kind = media_import.media_kind_for(filename)
@@ -254,6 +305,8 @@ async def _import_one_file(
             filename=filename,
             status="failed",
             reason="Manifestets deklarerade checksumma matchar inte filens faktiska innehåll.",
+            archive_path=archive_path,
+            archive_chain=archive_chain,
         )
 
     # The Document row exists (status `received`) BEFORE the original is durably stored or
@@ -283,13 +336,20 @@ async def _import_one_file(
     db.add(document)
     db.commit()
 
+    raw_metadata = {"original_filename": filename, "size_bytes": len(content), "media_type": document.media_type}
+    # P2: provenance for a file that came from inside a nested ZIP — see
+    # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.6. Omitted entirely (not just None) for a
+    # top-level file, unchanged from before P2.
+    if archive_path is not None:
+        raw_metadata["archive_path"] = archive_path
+        raw_metadata["archive_chain"] = archive_chain
     version = KnowledgeVersion(
         source_id=document.id,
         owner_id=owner_id,
         version_number=1,
         checksum=checksum,
         extraction_version=EXTRACTION_VERSION,
-        raw_metadata={"original_filename": filename, "size_bytes": len(content), "media_type": document.media_type},
+        raw_metadata=raw_metadata,
     )
     db.add(version)
     db.commit()
@@ -298,7 +358,14 @@ async def _import_one_file(
         document.status = IndexStatus.cancelled
         db.add(document)
         db.commit()
-        return FileOutcome(filename=filename, status="cancelled", reason="Importen avbröts.", source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="cancelled",
+            reason="Importen avbröts.",
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
 
     # DEL 1 (persistent original storage): write, fsync, verify — see
     # app/storage/local_fs.py's write_stream. Only once this succeeds does the document
@@ -318,7 +385,14 @@ async def _import_one_file(
         document.error_message = f"Kunde inte lagra originalfilen: {exc}"
         db.add(document)
         db.commit()
-        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="failed",
+            reason=document.error_message,
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
 
     document.storage_key = blob.storage_key
     document.size_bytes = blob.size_bytes
@@ -331,7 +405,14 @@ async def _import_one_file(
         document.status = IndexStatus.cancelled
         db.add(document)
         db.commit()
-        return FileOutcome(filename=filename, status="cancelled", reason="Importen avbröts.", source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="cancelled",
+            reason="Importen avbröts.",
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
 
     if media_kind is None:
         document.status = IndexStatus.extracting
@@ -348,7 +429,12 @@ async def _import_one_file(
             db.add(document)
             db.commit()
             return FileOutcome(
-                filename=filename, status="failed", reason=document.error_message, source_id=str(document.id)
+                filename=filename,
+                status="failed",
+                reason=document.error_message,
+                source_id=str(document.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
             )
         document.status = IndexStatus.extracted
         db.add(document)
@@ -370,7 +456,14 @@ async def _import_one_file(
             document.error_message = str(exc)
             db.add(document)
             db.commit()
-            return FileOutcome(filename=filename, status="failed", reason=str(exc), source_id=str(document.id))
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=str(exc),
+                source_id=str(document.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
         await media_import.index_media_document(db, document, content, filename, media_kind)
 
     # P1: awaiting_provider/blocked_provider is a PAUSE, not a failure — the file is safely
@@ -379,9 +472,23 @@ async def _import_one_file(
     # (storage_failed/extraction_failed/indexing_failed, or the legacy generic `failed`) is a
     # genuine, terminal per-file failure.
     if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
-        return FileOutcome(filename=filename, status="blocked", reason=document.error_message, source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="blocked",
+            reason=document.error_message,
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
     if document.status != IndexStatus.indexed:
-        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+        return FileOutcome(
+            filename=filename,
+            status="failed",
+            reason=document.error_message,
+            source_id=str(document.id),
+            archive_path=archive_path,
+            archive_chain=archive_chain,
+        )
 
     # Claim extraction (STEG 10, app/rag/claims.py) runs after indexing succeeds, on the
     # chunks index_document just created. A failure here must never turn a successfully
@@ -394,7 +501,13 @@ async def _import_one_file(
     except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
         pass
 
-    return FileOutcome(filename=filename, status="indexed", source_id=str(document.id))
+    return FileOutcome(
+        filename=filename,
+        status="indexed",
+        source_id=str(document.id),
+        archive_path=archive_path,
+        archive_chain=archive_chain,
+    )
 
 
 async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) -> None:
@@ -478,7 +591,9 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
     outcomes: list[FileOutcome] = []
 
     if suffix == ".zip":
-        zip_result = validate_and_extract_zip(raw)  # ZipSecurityError propagates — permanent, see app/worker.py
+        # P2: outer_filename seeds the first segment of any nested entry's archive_path (e.g.
+        # "backup.zip!/users/docs.zip!/contracts/lease.pdf") — see zip_import.py's docstring.
+        zip_result = validate_and_extract_zip(raw, outer_filename=filename)  # ZipSecurityError propagates — permanent, see app/worker.py
         job.manifest = zip_result.manifest
         entries = zip_result.entries
         job.progress_total = len(entries)
@@ -500,10 +615,39 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
             # other JSON file in the package does.
             if entry.status == "ok" and PurePosixPath(entry.filename).name.lower() == "manifest.json":
                 outcomes.append(
-                    FileOutcome(filename=entry.filename, status="skipped", reason="Manifestfil, importeras inte som ett eget dokument.")
+                    FileOutcome(
+                        filename=entry.filename,
+                        status="skipped",
+                        reason="Manifestfil, importeras inte som ett eget dokument.",
+                        archive_path=entry.archive_path,
+                        archive_chain=entry.archive_chain,
+                    )
+                )
+            elif entry.status == "encrypted":
+                # P2: kept as its own distinct FileOutcome.status (not folded into generic
+                # "skipped") purely for diagnostic clarity in ImportJob.file_results — see
+                # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.5. Counted alongside
+                # skipped/duplicate in the job-level summary below; never resumable/blocked in
+                # the P1 provider-pause sense.
+                outcomes.append(
+                    FileOutcome(
+                        filename=entry.filename,
+                        status="encrypted",
+                        reason=entry.reason,
+                        archive_path=entry.archive_path,
+                        archive_chain=entry.archive_chain,
+                    )
                 )
             elif entry.status != "ok":
-                outcomes.append(FileOutcome(filename=entry.filename, status="skipped", reason=entry.reason))
+                outcomes.append(
+                    FileOutcome(
+                        filename=entry.filename,
+                        status="skipped",
+                        reason=entry.reason,
+                        archive_path=entry.archive_path,
+                        archive_chain=entry.archive_chain,
+                    )
+                )
             else:
                 manifest_entry = _manifest_entry_for(zip_result.manifest, entry.filename)
                 outcome = await _import_one_file(
@@ -518,6 +662,8 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
                     import_job_id=job.id,
                     manifest_entry=manifest_entry,
                     max_upload_bytes=len(raw) or 1,
+                    archive_path=entry.archive_path,
+                    archive_chain=entry.archive_chain,
                 )
                 outcomes.append(outcome)
             job.progress_current = len(outcomes)
@@ -565,13 +711,18 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
     failed = sum(1 for o in outcomes if o.status == "failed")
     skipped = sum(1 for o in outcomes if o.status == "skipped")
     cancelled = sum(1 for o in outcomes if o.status == "cancelled")
+    # P2: an encrypted/password-protected entry — never attempted, never resumable. Counted
+    # alongside skipped/duplicate for job-level status purposes (see docs/
+    # MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.5); kept as its own FileOutcome.status only for
+    # clearer per-file diagnostics.
+    encrypted = sum(1 for o in outcomes if o.status == "encrypted")
     # P1: files paused on awaiting_provider/blocked_provider — nothing genuinely failed here,
     # the job is just waiting for the AI provider (see IndexStatus's docstring).
     blocked = sum(1 for o in outcomes if o.status == "blocked")
 
     job.succeeded_count = succeeded
     job.failed_count = failed
-    job.skipped_count = skipped + duplicates
+    job.skipped_count = skipped + duplicates + encrypted
     job.blocked_count = blocked
 
     if cancelled and not succeeded:
@@ -583,10 +734,10 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
         # automatically once the active provider verifies ok, so `completed_at` is
         # deliberately left unset — the job isn't done, it's waiting.
         job.status = ImportJobStatus.blocked
-    elif failed and (succeeded or duplicates or skipped or blocked):
+    elif failed and (succeeded or duplicates or skipped or blocked or encrypted):
         job.status = ImportJobStatus.partial
         job.completed_at = datetime.utcnow()
-    elif failed and not (succeeded or duplicates or skipped or blocked):
+    elif failed and not (succeeded or duplicates or skipped or blocked or encrypted):
         job.status = ImportJobStatus.failed
         job.failure_reason = "Alla filer i paketet misslyckades."
         job.completed_at = datetime.utcnow()

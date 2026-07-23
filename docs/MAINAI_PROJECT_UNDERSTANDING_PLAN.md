@@ -823,6 +823,32 @@ rapporteras med siffror, samma stil som PR #6:s resursmätning):
    flera tusen filer visar sig ta orimligt lång tid (t.ex. tiotals minuter) dokumenteras det
    explicit som en känd begränsning snarare än att gränsen höjs blint.
 
+#### 10.7.1 Resultat (kört, inte gissat)
+
+`tests/backend/test_zip_import_capacity.py::test_capacity_2500_files_through_the_real_import_pipeline`
+(körs explicit via `RUN_CAPACITY_TEST=1`, inte del av standardsviten — se filens egen
+docstring för varför):
+
+- **Paket:** 2 500 filer, 2 nästlingsnivåer (region.zip → shard.zip → textfiler), 48 210 bytes
+  totalt (realistiskt för textdokument, inte en byte-tung stress-test).
+- **Väg:** den riktiga `run_import_job()` — riktig Postgres (inkl. RLS), riktig
+  lagringsbackend, mockad men strukturellt realistisk embedding-/chattleverantör (samma mock
+  som resten av `test_library_import.py` använder) — inte `zip_import.py` isolerat.
+- **Mätt tid:** 447,7 s totalt, 179,1 ms/fil.
+- **Mätt minne:** 11,3 MB Python-heap-topp (tracemalloc), 175,0 MB processens RSS-vattenmärke
+  (oförändrat före/efter — ingen minnesläcka över 2 500 filer).
+- **Beslut: `MAX_FILES=500` behålls oförändrad**, medvetet INTE höjd. Motivering: den uppmätta
+  kostnaden per fil är dominerad av databas-rundresor (ett `db.commit()` per fil, sekventiell
+  worker), exakt som förväntat — men mätningen mockar leverantörsanropen och fångar därför
+  INTE den riktiga nätverkslatensen mot en verklig embedding-/chattleverantör, som i
+  produktion sannolikt dominerar över DB-kostnaden. Att höja gränsen på enbart den här siffran
+  vore precis den gissning kravet i §10.7 uttryckligen förbjuder. Vid 500 filer ger den
+  uppmätta takten en bästa-scenario-tid på ~90 s — en rimlig, konservativ gräns. Se
+  kommentaren ovanför `MAX_FILES` i `app/rag/zip_import.py` för samma motivering i koden.
+- **Känd begränsning:** ingen mätning finns ännu mot en riktig (icke-mockad) AI-leverantör —
+  om `MAX_FILES` ska omprövas igen bör det ske med ett motsvarande test mot en verklig
+  leverantör, inte en extrapolering av den här mätningen.
+
 ### 10.8 Tester
 
 - `test_nested_zip_one_level_extracts_and_indexes_normally`
