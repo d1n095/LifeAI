@@ -685,8 +685,11 @@ validate_and_extract_zip(raw, *, max_files=..., max_total_bytes=..., max_file_by
              status="encrypted",
              reason="Filen/arkivet är lösenordsskyddat — kan inte läsas automatiskt."
        - annars: exakt samma flöde som idag (magic bytes, checksum, content)
-       - varje ZipEntryResult får ett nytt, valfritt fält archive_path: list[dict] | None
-         (None för toppnivåfiler — bakåtkompatibelt, oförändrat för icke-nästlade paket)
+       - varje ZipEntryResult får två nya, valfria fält (se §10.6 för det exakta formatet):
+           archive_path: str | None    -- människoläsbar sökväg, t.ex.
+                                           "backup.zip!/users/docs.zip!/contracts/lease.pdf"
+           archive_chain: list[dict] | None  -- samma kedja, maskinverifierbar (checksum per nivå)
+         (båda None för toppnivåfiler — bakåtkompatibelt, oförändrat för icke-nästlade paket)
 ```
 
 **Den avgörande regeln, uttryckt konkret:** `budget` (den ackumulerade
@@ -717,17 +720,65 @@ diagnostiktexten blir tydligare.
 
 ### 10.6 Provenienskrav
 
-Den fullständiga kedjan för en fil som kom från en nästlad zip:
+#### 10.6.1 `archive_path` — exakt format
+
+Varje fil som kommer från ett nästlat arkiv får en stabil, människoläsbar sökväg som visar
+HELA kedjan av innesluta arkiv, till exempel:
+
+```
+backup.zip!/users/docs.zip!/contracts/lease.pdf
+```
+
+**Konstruktion, deterministisk, ren funktion av indata:**
+
+```
+archive_path = "!/".join(segment for segment in [outer_filename, *inner_paths, final_path])
+```
+
+där varje `segment`:
+
+- är den **normaliserade** posten (`name.replace("\\", "/")`, ALDRIG rå Windows-backslash i
+  slutresultatet — samma normalisering `_is_safe_member_name()` redan gör internt, bara nu
+  även använd för att BYGGA strängen, inte bara validera den),
+- redan har passerat `_is_safe_member_name()` OFÖRÄNDRAT — path traversal (`..`), absoluta
+  sökvägar och enhetsbokstäver är alltså strukturellt omöjliga i `archive_path`, inte bara
+  "osannolika": om en post inte klarar den kontrollen avbryts hela importen (`ZipSecurityError`,
+  oförändrat beteende) INNAN någon `archive_path` ens byggs för den,
+- separeras med **`!/`** mellan varje arkivgräns (aldrig bara `/`, som inte skulle gå att
+  skilja från en vanlig undermapp) — samma konvention som JAR-URL:er redan använder för
+  nästlade arkiv, valt för att vara otvetydigt och plattformsoberoende, inte en egen
+  uppfinning.
+
+**Determinism, konkret:** samma yttre arkiv-bytes + samma interna sökväg ger ALLTID samma
+`archive_path`-sträng — konstruktionen använder bara postens namn (redan en fast egenskap av
+arkivets bytes, inte något som beror på bearbetningsordning, tidsstämplar eller
+dict-iterationsordning i Python). Två OLIKA uppladdningar av identiskt innehåll under olika
+filnamn ger olika `archive_path`-strängar (den är beskrivande för DEN HÄR importen, inte en
+innehålls-identitet) — det är `archive_chain`s checksummor och `Document.checksum` som redan
+ger den strikta, innehållsbaserade identiteten, oförändrat.
+
+#### 10.6.2 Den fullständiga kedjan
 
 ```
 Document.storage_key (den extraherade filens EGEN durabla blob, oförändrat från idag)
   -> Document.import_job_id
   -> ImportJob.source_storage_key (det YTTRE arkivets EGEN durabla blob — den enda som lagras)
-  -> KnowledgeVersion.raw_metadata["zip_chain"] = [
-       {"filename": "sub/inner.zip", "checksum": "<sha256 av det nästlade arkivets bytes>"},
-       {"filename": "doc.pdf", "checksum": "<sha256 av den extraherade filen, = Document.checksum>"}
+  -> KnowledgeVersion.raw_metadata["archive_path"] = "backup.zip!/users/docs.zip!/contracts/lease.pdf"
+  -> KnowledgeVersion.raw_metadata["archive_chain"] = [
+       {"filename": "backup.zip", "checksum": "<= ImportJob.source_checksum>"},
+       {"filename": "users/docs.zip", "checksum": "<sha256 av det nästlade arkivets bytes>"},
+       {"filename": "contracts/lease.pdf", "checksum": "<sha256 av den extraherade filen, = Document.checksum>"}
      ]
 ```
+
+`archive_path` (sträng) är den människoläsbara, visningsbara varianten. `archive_chain`
+(strukturerad lista) är samma kedja fast maskinverifierbar — varje nivås checksumma, inklusive
+den yttersta som redan är identisk med `ImportJob.source_checksum`. Båda beräknas en gång, vid
+import, och sparas — de räknas aldrig om i efterhand, så en framtida källhänvisning (chatt,
+Workbench) kan visa "från `backup.zip!/users/docs.zip!/contracts/lease.pdf`" direkt från redan
+lagrad metadata utan att öppna arkivet igen. **Att faktiskt koppla in `archive_path` i en
+körande källhänvisning (`SourceRef`, `chat.py`) är INTE en del av P2** (se §10.9) — P2:s jobb
+är bara att fältet finns, är korrekt ifyllt och aldrig behöver räknas om senare.
 
 **Varför nästlade arkiv inte behöver sin egen `storage_key`:** determinism. Samma yttre
 zip-bytes producerar, varje gång de packas upp igen, exakt samma nästlade arkiv och exakt
@@ -735,9 +786,23 @@ samma extraherade filer (zip-formatet har inget icke-deterministiskt inslag som 
 det). Att lagra en nästlad zip separat vore att spara en andra kopia av data som redan är
 100 % återhärledbar från den första — samma princip som redan gäller för identiskt filinnehåll
 i `app/storage/local_fs.py`s innehållsadressering. Om du (grundaren) senare vill se exakt vilket
-nästlat arkiv en fil kom ifrån räcker `zip_chain`-metadatan + en omkörning av
+nästlat arkiv en fil kom ifrån räcker `archive_chain`-metadatan + en omkörning av
 `validate_and_extract_zip()` mot det redan lagrade yttre arkivet — ingen extra lagring krävs
 för att kunna svara på den frågan.
+
+#### 10.6.3 Var `archive_path`/`archive_chain` sparas — inga nya kolumner
+
+- **`ImportJob.file_results`** (redan `JSON`): varje post får de två nya, valfria nycklarna
+  `"archive_path"`/`"archive_chain"` — samma dict som redan byggs av `FileOutcome.__dict__`
+  i `_run_once()`, bara två nya fält på `FileOutcome`-dataclassen (`archive_path: str | None`,
+  `archive_chain: list[dict] | None`, båda default `None`).
+- **`KnowledgeVersion.raw_metadata`** (redan `JSON`): samma två nycklar, satta av
+  `_import_one_file()`/`_resume_blocked_document()` när `KnowledgeVersion`-raden skapas — exakt
+  samma mönster som `original_filename`/`size_bytes`/`media_type` redan sparas där idag.
+- **Ingen ny kolumn på `Document`.** `Document.checksum` är redan den extraherade filens egen
+  checksumma (= sista posten i `archive_chain`) — ingen dubblering.
+- **Bekräftat: ingen migration krävs** för `archive_path`/`archive_chain` — samma slutsats som
+  §10.4 redan drog för nästlingsstödet i stort, nu även uttryckligen för proveniensfälten.
 
 ### 10.7 Kapacitetstest (kravet, inte bara en idé)
 
@@ -773,11 +838,23 @@ rapporteras med siffror, samma stil som PR #6:s resursmätning):
 - `test_encrypted_status_is_never_treated_as_resumable_by_the_worker` — bevisar att
   `"encrypted"` INTE hamnar i `ImportJobStatus.blocked` eller återköas av
   `_requeue_blocked_jobs` (skiljer den tydligt från P1:s `awaiting_provider`/`blocked_provider`).
-- `test_zip_chain_provenance_is_recorded_correctly_for_a_nested_file` — verifierar att
-  `KnowledgeVersion.raw_metadata["zip_chain"]` innehåller rätt filnamn och checksummor för en
-  fil två nivåer ner.
+- `test_archive_chain_provenance_is_recorded_correctly_for_a_nested_file` — verifierar att
+  `KnowledgeVersion.raw_metadata["archive_chain"]` innehåller rätt filnamn och checksummor för
+  en fil två nivåer ner, inklusive att den yttersta postens checksumma matchar
+  `ImportJob.source_checksum`.
+- `test_archive_path_matches_the_documented_format_exactly` — bevisar konkret
+  `"backup.zip!/users/docs.zip!/contracts/lease.pdf"`-formatet (rätt separator `!/` mellan
+  varje arkivgräns, inte bara mellan mappar inuti samma arkiv).
+- `test_archive_path_is_deterministic_across_repeated_imports_of_identical_bytes` —
+  packar upp samma arkiv två gånger (t.ex. via en riktig re-upload), verifierar att
+  `archive_path` blir en identisk sträng båda gångerna.
+- `test_archive_path_never_contains_raw_backslashes_or_traversal_segments` — matar in ett
+  konstgjort postnamn med `\`-separatorer (vanligt i Windows-skapade zip-filer) och bevisar att
+  den resulterande `archive_path`-strängen bara innehåller `/`, aldrig `\`, och att en post som
+  inte klarar `_is_safe_member_name()` aldrig når fram till att få ett `archive_path` alls
+  (hela importen avbryts innan, oförändrat beteende).
 - `test_top_level_files_have_no_archive_path_unchanged_from_before_p2` — regressionsskydd:
-  ett icke-nästlat paket beter sig exakt som idag.
+  ett icke-nästlat paket beter sig exakt som idag (`archive_path`/`archive_chain` båda `None`).
 - `test_existing_500_file_and_200mb_limits_still_enforced_at_top_level` — regressionsskydd
   för dagens redan testade gränser.
 - Kapacitetstestet (§10.7) som ett eget, tydligt namngivet test/skript med rapporterade
@@ -811,3 +888,8 @@ rapporteras med siffror, samma stil som PR #6:s resursmätning):
   provenienstillägget i `library_import.py`.
 - **Ingen ändring av P1:s provider-verifieringslogik** — nästlad uppackning är ren,
   AI-fri Python-logik, rör aldrig `ensure_verified()`/`_requeue_blocked_jobs()`.
+- **`archive_path`/`archive_chain` kopplas INTE in i `SourceRef`/chat-källhänvisningar i P2.**
+  Fälten sparas fullständigt och korrekt vid import (§10.6), men att faktiskt VISA
+  "från backup.zip!/users/docs.zip!/..." i ett chattsvar eller i Workbench är en separat,
+  senare uppgift (`app/schemas.py`s `SourceRef`, `chat.py`) — precis som §6.9 i den övergripande
+  planen redan säger att bounded-retrieval-frågor hör till P4:s frågelager, inte P2.
