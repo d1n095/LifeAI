@@ -354,11 +354,20 @@ export type TaskItem = {
   created_at: string;
 };
 
+export type ProviderVerification = {
+  result: "ok" | "invalid_key" | "unreachable" | "rate_limited" | "unsupported" | "not_configured";
+  message: string;
+  checked_by: "system" | "founder";
+  checked_at: string;
+};
+
 export type ProviderStatus = {
   name: string;
   configured: boolean;
   active_chat: boolean;
   active_embedding: boolean;
+  chat_verification: ProviderVerification | null;
+  embedding_verification: ProviderVerification | null;
 };
 
 export type UsageSummaryRow = {
@@ -456,6 +465,12 @@ export const api = {
     request("/api/admin/providers/config", {
       method: "PUT",
       body: JSON.stringify({ role, provider, model }),
+    }),
+  // P1: "Testa nu" — an explicit, real verification call, bypassing the cache.
+  verifyProvider: (provider: string, role: "chat" | "embedding") =>
+    request<ProviderVerification>("/api/admin/providers/verify", {
+      method: "POST",
+      body: JSON.stringify({ provider, role }),
     }),
   usageSummary: () => request<UsageSummaryRow[]>("/api/admin/usage/summary"),
 

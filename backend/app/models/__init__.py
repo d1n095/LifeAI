@@ -12,6 +12,7 @@ from app.models.media_url_import import MediaUrlImport
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.provider_config import ProviderConfig
+from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
 from app.models.source_relationship import SourceRelationship
@@ -35,6 +36,7 @@ __all__ = [
     "Project",
     "Task",
     "ProviderConfig",
+    "ProviderVerificationCheck",
     "RefreshToken",
     "RevokedAccessToken",
     "SourceRelationship",

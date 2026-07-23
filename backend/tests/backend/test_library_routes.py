@@ -60,7 +60,7 @@ def _fake_embedding_provider(monkeypatch):
 
     dim = get_settings().embedding_dim
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [[0.02] * dim for _ in texts]
 
     # A real import now also runs claim extraction (app/rag/claims.py, STEG 10) after

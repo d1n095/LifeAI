@@ -34,7 +34,7 @@ def _fake_embedding_provider(monkeypatch):
     from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [[0.01 * (i + 1)] * EMBEDDING_DIM for i, _ in enumerate(texts)]
 
     # Import now also runs claim extraction (app/rag/claims.py, STEG 10) right after
@@ -431,7 +431,9 @@ async def test_extraction_failure_preserves_the_document_row_instead_of_losing_t
 
     doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="broken.txt").first()
     assert doc is not None
-    assert doc.status == IndexStatus.failed
+    # P1: reclassified from the old undifferentiated IndexStatus.failed — see
+    # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7.
+    assert doc.status == IndexStatus.extraction_failed
     assert doc.error_message is not None
     assert doc.checksum is not None
     # The original survives even though extraction never got anywhere near succeeding.
@@ -470,7 +472,7 @@ async def test_document_status_passes_through_the_full_granular_pipeline_before_
         observed["status_during_extract"] = _current_status()
         return real_extract(filename, content)
 
-    async def _observing_embed(self, texts, model):
+    async def _observing_embed(self, texts, model, **kwargs):
         observed["status_during_embed"] = _current_status()
         return await real_embed(self, texts, model)
 
@@ -519,7 +521,7 @@ async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
 
     EMBED_DIM = get_settings().embedding_dim
 
-    async def _slow_embed(self, texts, model):
+    async def _slow_embed(self, texts, model, **kwargs):
         await asyncio.sleep(0.2)
         return [[0.01 * (i + 1)] * EMBED_DIM for i, _ in enumerate(texts)]
 

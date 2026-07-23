@@ -16,14 +16,14 @@ class OllamaProvider(LLMProvider):
         # Local provider is always "configured" — availability is checked at call time.
         return True
 
-    async def chat(self, messages: list[Message], model: str, **kwargs) -> ChatResult:
+    async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
         payload = {
             "model": model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": False,
         }
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -41,10 +41,10 @@ class OllamaProvider(LLMProvider):
             },
         )
 
-    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+    async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
         vectors = []
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 for text in texts:
                     resp = await client.post(
                         f"{self.settings.ollama_base_url}/api/embeddings",

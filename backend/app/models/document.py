@@ -31,7 +31,23 @@ class IndexStatus(str, enum.Enum):
     worker today still decides classification synchronously at import time, so nothing
     transitions through either of these two yet, but the UI/API already understand them),
     `cancelled` (DEL 5: a founder deleted the source while the worker was still processing
-    it — see app/worker.py's cancellation checks)."""
+    it — see app/worker.py's cancellation checks).
+
+    P1 (provider pre-flight verification) additions — splitting the single, undifferentiated
+    `failed` into five distinguishable outcomes (see
+    docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7 and app/providers/verification.py):
+    `awaiting_provider` (no provider configured for the role at all — a pause, not a
+    failure), `blocked_provider` (a provider is configured but the real pre-flight
+    verification call did not return ok — invalid key, unreachable, rate-limited, or the
+    wrong provider chosen for the role; also a pause, resumed automatically once
+    verification succeeds, see app/worker.py's _requeue_blocked_jobs), `storage_failed` (the
+    original couldn't be durably stored — terminal, needs a new upload), `extraction_failed`
+    (the file's content couldn't be turned into text — terminal, the content itself is the
+    problem), `indexing_failed` (extraction succeeded and pre-flight verification passed, but
+    the real embedding call still failed — terminal-but-not-automatically-retried, a
+    genuinely new, presumably rarer failure). `failed` itself is kept only for the one
+    remaining internal-invariant guard (a document with no owner) — every operationally
+    reachable failure path now uses one of the five names above instead."""
 
     pending = "pending"
     received = "received"
@@ -46,6 +62,11 @@ class IndexStatus(str, enum.Enum):
     indexed = "indexed"
     failed = "failed"
     cancelled = "cancelled"
+    awaiting_provider = "awaiting_provider"
+    blocked_provider = "blocked_provider"
+    storage_failed = "storage_failed"
+    extraction_failed = "extraction_failed"
+    indexing_failed = "indexing_failed"
 
 
 class ActiveTruthStatus(str, enum.Enum):
