@@ -919,3 +919,288 @@ docstring för varför):
   "från backup.zip!/users/docs.zip!/..." i ett chattsvar eller i Workbench är en separat,
   senare uppgift (`app/schemas.py`s `SourceRef`, `chat.py`) — precis som §6.9 i den övergripande
   planen redan säger att bounded-retrieval-frågor hör till P4:s frågelager, inte P2.
+
+---
+
+## 11. P7A — Tidig governance-ingestion: exakt implementationsplan
+
+**Status:** designförslag, grundat i faktisk läsning av koden på commit `15487e2429dc68def3a207b3befcd3862f52e0a7`
+(P2, godkänd som PR #8, draft), ovanpå P1 (`5690aa21c9c799a06deca3c5994878a5c93a6bcd`, PR #7,
+draft). Ingen kod skriven, ingen migration körd, ingen merge, ingen deploy. Nästa paket i
+byggordningen (§8) — flyttat tidigt i den beslutade revideringen eftersom P7A varken kräver
+eller påverkar P3–P6 (§6.7a).
+
+### 11.1 Fasens exakta mål
+
+Tre konkreta, var för sig testbara mål — inget annat:
+
+1. **Ett importerat dokument som VERKAR beskriva MainAI:s roll/beteende/arbetssätt/begränsningar
+   eller relation till grundaren identifieras automatiskt** — via en billig
+   nyckelords-/mönsterförfilter följt av ett riktat, strukturerat AI-anrop, ALDRIG en tyst
+   automatisk markering. Går genom SAMMA Life Library-importkö som allt annat material, ingen
+   separat uppladdningsväg.
+2. **En identifierad kandidat blir ett `interpretation_proposals`-förslag** grundaren kan se,
+   granska i klartext (dokumentets titel, ett utdrag, AI:ns motivering, föreslagen `scope`) och
+   `approve`/`reject`/redigera-och-godkänna — aldrig något som skrivs direkt utan mänsklig
+   bekräftelse.
+3. **Ett godkänt förslag har `status=approved` på sin `governance_documents`-rad, ALDRIG
+   `active`** — och har därmed, ovillkorligen, **noll effekt på MainAI:s faktiska beteende**.
+   `app/routers/chat.py` rörs inte alls av det här paketet. Aktivering är P7B, en senare, separat,
+   dubbelspärrad fas (§6.7b) som ännu inte är byggd.
+
+### 11.2 Vad som redan finns (bekräftat genom läsning av koden)
+
+- **Provenienskedjan `Document → KnowledgeVersion → DocumentChunk`** — redan byggd (Founder
+  Knowledge Studio v1), inklusive `Document.import_job_id`/`storage_key` (§5:s fullständiga
+  kedja ner till den lagrade originalfilen finns redan för varje kandidat).
+- **`app/rag/claims.py`** — det direkta mönstret P7A:s klassificeringsanrop ska efterlikna: ett
+  strukturerat, JSON-only AI-anrop via `app.providers.registry.chat_with_fallback`, en
+  determinstisk fejk-leverantör i tester, ett explicit kostnadstak
+  (`MAX_CHUNKS_PER_DOCUMENT=20`), och ett best-effort-anrop precis efter indexering som ALDRIG
+  får en lyckad import att bli `failed` om AI-anropet fallerar (`except Exception: pass` i
+  `_import_one_file`/`_resume_blocked_document`).
+- **`app/providers/verification.py`s `ensure_verified(db, role, *, checked_by="system")`** (P1)
+  — redan byggd, cachead pre-flight-kontroll. P7A:s klassificeringsanrop är ett `role="chat"`-
+  anrop, inte `"embedding"` — samma roll `app/routers/chat.py`/`workbench.py` redan verifierar.
+- **`app/audit.py`s `record_audit()`** — redan det etablerade mönstret för varje
+  besluts-/tillståndsändring i systemet (kontoradering, provider-aktivering); P7A:s
+  approve/reject-endpoints återanvänder det oförändrat.
+- **`app/deps.py`s `require_founder`** — redan använt som `dependencies=[Depends(require_founder)]`
+  på hela `app/routers/admin.py`; samma mönster för en ny `app/routers/governance.py`
+  (enanvändarsystem, ingen ny behörighetsmodell behövs).
+- **`app/rls.py`** — det etablerade `ALTER TABLE ... FORCE ROW LEVEL SECURITY`-mönstret för varje
+  ägarscopead tabell (`documents`, `knowledge_versions`, `knowledge_import_jobs`,
+  `knowledge_claims`, ...); två nya tabeller läggs till på exakt samma sätt.
+- **Migrationsdisciplinen** (0006→0013): additiva `ALTER TYPE ... ADD VALUE`/`CREATE TABLE`,
+  aldrig en destruktiv ändring av en befintlig kolumn — P7A:s migration `0014` följer samma
+  mönster.
+- **`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.4/§4.5** — datamodellen för
+  `governance_documents`/`interpretation_proposals` är redan fullt specificerad i det tidigare
+  designarbetet den här sessionen; P7A implementerar den specifikationen, uppfinner den inte om.
+
+### 11.3 Luckor (vad som saknas idag)
+
+- **Ingen `governance_documents`-tabell, ingen `interpretation_proposals`-tabell** — inga spår i
+  `app/models/` eller `alembic/versions/` (verifierat: `grep -rln "governance\|interpretation_proposal"
+  app/` ger noll träffar).
+- **Ingen AI-driven klassificering av NÅGOT slag sker automatiskt idag** — `Document.classification`
+  sätts idag antingen manuellt via `manifest.json` eller defaultar till `general`
+  (`library_import.py`s `_import_one_file`), aldrig av ett AI-anrop.
+- **Ingen "är det här ett styrdokument?"-heuristik eller -prompt existerar.**
+- **Ingen tolkningskö-UI** — inget existerande frontend-mönster för "AI föreslår, grundaren
+  godkänner/avvisar" utöver `Task.suggested_by_ai`s smala badge (`app/(shell)/projects/page.tsx`,
+  ingen egen godkänn/avvisa-interaktion, bara en visuell markering).
+
+### 11.4 Datamodeller och migrationer
+
+**En ny migration, `0014_governance_ingestion.py`**, additiv, samma mönster som 0006–0013:
+
+```
+governance_documents
+  id                        UUID PK
+  owner_id                  UUID FK -> users.id, NOT NULL (RLS-scopning, samma mönster som
+                                                             knowledge_versions/knowledge_import_jobs)
+  source_document_id        UUID FK -> documents.id, NOT NULL
+  version                   INTEGER NOT NULL DEFAULT 1
+  scope                     ENUM governancescope
+                               (role | behavior | working_method | constraint |
+                                founder_relationship | uncategorized)
+                             NOT NULL DEFAULT 'uncategorized'
+  status                    ENUM governancedocumentstatus
+                               (proposal | draft | approved | active | superseded | revoked)
+                             NOT NULL DEFAULT 'proposal'
+  compiled_prompt_fragment  TEXT NULL   -- beräknad och lagrad redan i P7A (se §11.5), men LÄST
+                                        -- av chat.py EXKLUSIVT när status=active — en gräns P7A
+                                        -- aldrig kan uppfylla, bara P7B
+  approved_at                TIMESTAMPTZ NULL
+  approved_by                UUID FK -> users.id NULL
+  activated_at                TIMESTAMPTZ NULL   -- kolumnen skapas nu (§4.4:s enda-tabell-beslut),
+  activated_by                UUID FK -> users.id NULL   -- men INGEN kodväg i P7A skriver den
+  superseded_by                UUID FK -> governance_documents.id NULL
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+
+interpretation_proposals
+  id             UUID PK
+  owner_id       UUID FK -> users.id, NOT NULL
+  proposal_type  ENUM interpretationproposaltype (classify_document)
+                   -- ENDAST detta värde i P7A:s migration — classify_claim/create_relationship/
+                   -- create_entity/update_entity/promote_governance läggs till av P4 via en egen,
+                   -- additiv ALTER TYPE ... ADD VALUE-migration, inte här (samma princip som redan
+                   -- höll för IndexStatus 0011/0013: bara det som faktiskt används av den fasens
+                   -- kod, aldrig spekulativa framtida värden i förväg)
+  target_ref     TEXT NOT NULL        -- "governance_document:<uuid>" för P7A:s enda typ
+  payload        JSON NOT NULL         -- {"suggested_scope": ..., "confidence": ..., "excerpt": ...}
+  rationale      TEXT NOT NULL         -- AI:ns motivering i klartext, alltid mänskligt läsbar
+  status         ENUM interpretationproposalstatus
+                   (pending | approved | rejected | edited_and_approved)
+                 NOT NULL DEFAULT 'pending'
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  decided_at     TIMESTAMPTZ NULL
+  decided_by     UUID FK -> users.id NULL
+```
+
+**RLS:** `ALTER TABLE governance_documents FORCE ROW LEVEL SECURITY` och samma för
+`interpretation_proposals`, ägarscopeat på `owner_id` — exakt samma två rader som redan finns i
+`app/rls.py` för `knowledge_import_jobs`, bara två nya tabellnamn.
+
+**Den avgörande, testbara regeln (§4.4, oförändrad av P7A):** ingen kodväg i det här paketet
+får NÅGONSIN skriva `governance_documents.status = 'active'/'superseded'/'revoked'` eller sätta
+`activated_at`/`activated_by`. `activated_at`/`activated_by`-kolumnerna skapas nu (eftersom
+tabellen enligt §4.4 medvetet är EN tabell som spänner över både P7A och P7B, inte två separata),
+men förblir `NULL` för varje rad P7A någonsin skapar, garanterat av ett dedikerat regressionstest
+(§11.8).
+
+### 11.5 API-, worker- och frontendflöden
+
+**Ny modul `app/rag/governance.py`** (samma nivå/mönster som `app/rag/claims.py`):
+
+```python
+GOVERNANCE_KEYWORD_HINTS = [
+    # svenska
+    "mainai ska", "du är mainai", "instruktion till mainai", "systemprompt",
+    "arbetssätt för mainai", "regler för mainai", "mainais roll", "hur mainai ska bete sig",
+    # engelska
+    "mainai should", "you are mainai", "system prompt", "instructions for mainai",
+    "mainai's role", "mainai's behavior",
+]
+# Billig, textbaserad förfilter INNAN något AI-anrop görs — samma "billig kontroll före dyrt
+# anrop"-disciplin som redan finns i zip_import.pys komprimeringskvot-förfilter och claims.pys
+# MAX_CHUNKS_PER_DOCUMENT-tak. Exakt ordlista är en kalibreringsdetalj för
+# implementationsfasen (risk för falska positiva/negativa), inte ett arkitekturbeslut.
+
+def _looks_like_governance_candidate(text: str) -> bool: ...
+
+async def identify_governance_candidate(
+    db: Session, document: Document, owner_id: uuid.UUID, text_content: str
+) -> None:
+    """Best-effort, exakt samma felmönster som extract_claims_for_document: ett fel här
+    FÅR ALDRIG göra en lyckad import till 'failed'. Körs EN gång per dokument (idempotens:
+    hoppar tyst över om en governance_documents-rad redan finns för source_document_id)."""
+```
+
+Anropas från `library_import.py`s `_import_one_file()`/`_resume_blocked_document()`, i samma
+try/except-block och på samma plats som dagens `extract_claims_for_document(...)`-anrop (efter
+att `document.status == IndexStatus.indexed` är bekräftat) — INTE ett extra steg som kan
+blockera eller pausa den vanliga pipelinen. Om `ensure_verified(db, role="chat")` inte är `ok`
+hoppar identifieringen tyst över för den körningen (samma princip som en misslyckad
+`extract_claims_for_document` redan tyst hoppar över) — ingen ny återförsökskö byggs i P7A
+(se §11.9).
+
+Vid en positiv klassificering: en `governance_documents`-rad (`status="proposal"`,
+`compiled_prompt_fragment` beräknad av en liten, deterministisk mall-funktion,
+`compile_prompt_fragment(scope, document.title, text_content)`) och en
+`interpretation_proposals`-rad (`proposal_type="classify_document"`, `status="pending"`)
+skapas i SAMMA transaktion.
+
+**Ny router `app/routers/governance.py`**, `prefix="/api/governance"`,
+`dependencies=[Depends(require_founder)]` (samma engångsmönster som `admin.py`):
+
+```
+GET  /api/governance/proposals?status=pending
+  -> lista över interpretation_proposals (proposal_type=classify_document), joinat med
+     governance_documents + Document.title för visning
+
+POST /api/governance/proposals/{id}/approve
+  body: {"scope": Optional[GovernanceScope]}   -- grundaren kan ändra AI:ns förslag
+  -> governance_documents.status = "approved", approved_at/approved_by satta
+  -> interpretation_proposals.status = "approved" (oförändrat scope) eller
+     "edited_and_approved" (scope överskrivet)
+  -> record_audit(action="governance_proposal_approved", entity_type="governance_document", ...)
+
+POST /api/governance/proposals/{id}/reject
+  -> interpretation_proposals.status = "rejected", decided_at/decided_by satta
+  -> governance_documents-raden lämnas OFÖRÄNDRAD (status="proposal" kvarstår — en avvisning är
+     ett beslut på FÖRSLAGET, inte en radering av kandidaten; grundaren kan alltid komma tillbaka
+     och godkänna den senare, samma oföränderlighetsprincip som resten av systemet)
+  -> record_audit(action="governance_proposal_rejected", ...)
+```
+
+**Frontend:** ny route `app/(shell)/governance/page.tsx`, listmönster kopierat från
+`app/(shell)/admin/page.tsx`s "lista + inline-knapp"-struktur (samma `busy`-per-rad-mönster som
+P1:s "Testa nu"-knapp). Varje rad: dokumenttitel (länk till `/library/{document_id}`), AI:ns
+motivering i klartext, ett redigerbart `scope`-väljarfält, Godkänn/Avvisa-knappar. **Obligatoriskt
+UI-krav** (redan flaggat som en risk i §7): en permanent, väl synlig banner/etikett — "Har ingen
+effekt på MainAI:s beteende ännu — aktivering är ett separat, framtida steg" — överallt
+`governance_documents` visas, eftersom ALLA rader P7A någonsin producerar per definition är
+icke-aktiva.
+
+### 11.6 Provenienskrav
+
+Varje `governance_documents`-rad är spårbar via exakt samma redan byggda kedja §5 redan
+dokumenterar för påståenden: `governance_documents.source_document_id → Document.storage_key`
+(originalfilens egen blob) `→ Document.import_job_id → ImportJob.source_storage_key` (hela
+ZIP-arkivets blob, om importerat i ett paket) — inget nytt proveniensbegrepp uppfinns, `source_document_id`
+är bara en ny startpunkt i en redan existerande kedja. Om källdokumentet kom från en nästlad ZIP
+(P2) bär dess `KnowledgeVersion.raw_metadata` redan `archive_path`/`archive_chain` (§10.6) —
+`governance_documents` behöver inte duplicera det, bara peka på `source_document_id`.
+
+`compiled_prompt_fragment` beräknas deterministiskt av `scope` + `document.title` +
+`text_content` (samma extraherade text som redan användes för indexering/claims, ingen ny
+extraktion) — samma determinism-princip som P2:s `archive_path`.
+
+### 11.7 Behörighet och governance
+
+- **`require_founder`** på varje ny endpoint — enanvändarsystem, samma mönster som ALL annan
+  admin-/skrivfunktionalitet.
+- **RLS FORCE ROW LEVEL SECURITY** på båda nya tabeller (§11.4) — ingen rad läsbar/skrivbar
+  utanför `owner_id`, verifierat med ett dedikerat isolationstest (samma mönster som
+  `test_rls_isolation.py`).
+- **`record_audit()`** på varje approve/reject — vem godkände/avvisade vad och när, samma
+  auditlogg-disciplin som redan gäller överallt.
+- **Skriv-gränsen i §11.4 är den centrala governance-regeln för hela P7A:** endast två kodvägar
+  (de två nya endpointsen) får någonsin ändra `governance_documents`/`interpretation_proposals`
+  efter skapandet — ingen bakväg, ingen batch-skript, ingen direkt DB-mutation någon annanstans
+  i kodbasen.
+
+### 11.8 Tester
+
+- `test_governance_keyword_prefilter_matches_and_rejects_expected_examples` — den billiga
+  förfiltreringen, inget AI-anrop.
+- `test_identify_governance_candidate_creates_proposal_for_a_real_candidate` — deterministisk
+  fejk-chattleverantör (samma mönster som `test_library_import.py`s `_fake_chat`), en positiv
+  klassificering ger EN `governance_documents`-rad + EN `interpretation_proposals`-rad.
+- `test_identify_governance_candidate_is_a_noop_for_ordinary_content` — fejkleverantören svarar
+  "inte en kandidat", ingen rad skapas.
+- `test_identify_governance_candidate_is_idempotent_on_reimport` — anropas två gånger för samma
+  `source_document_id`, exakt en rad kvarstår.
+- `test_blocked_chat_provider_never_fails_the_import` — `ensure_verified(role="chat")` returnerar
+  ej-ok, dokumentet blir ändå `indexed`, ingen governance-rad skapas, ingen exception läcker.
+- `test_governance_status_never_becomes_active_anywhere_in_p7a` — regressionstest: efter en full
+  approve-cykel (och en avvisning) är `activated_at`/`activated_by` fortfarande `NULL` och
+  `status` aldrig `active`/`superseded`/`revoked` på någon rad skapad av P7A:s kodvägar.
+  Fullföljs av en kod-granskning som bekräftar att endast `app/routers/governance.py`s
+  `approve`-endpoint skriver `status="approved"`, ingen annan plats.
+- `test_approve_endpoint_sets_approved_fields_and_audit_log` / `test_reject_endpoint_leaves_governance_document_untouched`.
+- `test_governance_proposal_edited_scope_gets_edited_and_approved_status`.
+- `test_rls_isolation_governance_documents_and_interpretation_proposals` — en annan ägares rader
+  är aldrig läsbara/skrivbara, matchar `test_rls_isolation.py`s befintliga mönster.
+- `test_compiled_prompt_fragment_is_deterministic_and_computed_at_proposal_time`.
+- Migration: round-trip (`upgrade → downgrade → upgrade`), `alembic heads` visar fortsatt en
+  enda head efter `0014`.
+- Frontend (om UI byggs i samma paket): `tsc --noEmit`, ESLint, `next build`, samt ett Playwright-
+  test av godkänn/avvisa-flödet som uttryckligen verifierar att "ingen effekt ännu"-bannern syns.
+
+### 11.9 Uttrycklig avgränsning mot senare faser
+
+- **Ingen aktivering (P7B).** `governance_documents.status` blir aldrig `active`/`superseded`/
+  `revoked` i P7A:s kod; `activated_at`/`activated_by` skapas som kolumner (§4.4:s
+  enda-tabell-beslut) men skrivs aldrig. `app/routers/chat.py`s systemprompt-uppbyggnad rörs
+  inte alls.
+- **Ingen retroaktiv skanning av redan importerat material.** Identifiering körs bara för NYA
+  importer framåt från och med P7A:s driftsättning — samma medvetna begränsning som P1:s
+  "gamla `failed`-poster omklassificeras inte retroaktivt".
+- **Ingen ny återförsökskö för en missad identifiering** (t.ex. p.g.a. blockerad
+  chat-provider vid importtillfället) — best-effort, exakt som `extract_claims_for_document`
+  redan är. En manuell "sök igenom biblioteket efter styrdokument"-funktion är en möjlig,
+  avgränsad framtida uppföljning, inte del av P7A.
+- **Inga övriga `interpretation_proposals.proposal_type`-värden** (`classify_claim`,
+  `create_relationship`, `create_entity`, `update_entity`, `promote_governance`) — de hör till
+  P3/P4/P6 och läggs till genom en egen, additiv migration när respektive fas byggs.
+- **Ingen `claim_type`-klassificering (P3), ingen relationsupptäckt/projektkarta (P4), ingen
+  förståelserapport (P5), inget `founder_memory_notes`/korrigeringsloop (P6).**
+- **Ingen ändring av P1 eller P2** — `app/providers/verification.py` läses (via `ensure_verified`)
+  men ändras inte; `app/rag/zip_import.py`/`library_import.py`s P2-tillägg (nästling,
+  `archive_path`/`archive_chain`, `encrypted`-status) rörs inte.
+- **Ingen `GitHub som levande källa`** (§6.8) — förberedd men inte byggd, oförändrat av P7A.
+- **Ingen merge eller deploy** i det här paketet — planeringssteget, precis som P1/P2:s
+  motsvarande första steg.
