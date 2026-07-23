@@ -147,6 +147,22 @@ def _is_safe_member_name(name: str) -> bool:
     return ".." not in parts
 
 
+def _sanitize_outer_filename(name: str) -> str:
+    """The top-level package's own filename (`outer_filename`, e.g. ImportJob.source_filename)
+    comes straight from an untrusted HTTP upload (app/routers/library.py's `file.filename`) —
+    unlike every in-archive member name, it is NEVER run through _is_safe_member_name(). It
+    only ever becomes the first, label-only segment of a nested file's archive_path (§10.6),
+    never a real filesystem path, but a crafted upload name could otherwise inject a literal
+    ".."/absolute-path prefix or even a fake ARCHIVE_PATH_SEPARATOR ("!/") into that
+    provenance string. Taking only the final path component (after normalizing backslashes)
+    strips any directory prefix — including any "..", any absolute-path prefix, and any "/"
+    that could form a forged "!/" boundary — leaving just a plain display name, exactly like
+    every in-archive segment already gets via _normalize_member_name()."""
+    normalized = name.replace("\\", "/")
+    base = PurePosixPath(normalized).name
+    return base or "archive.zip"
+
+
 def _normalize_member_name(name: str) -> str:
     """P2: the single normalization step archive_path segments are built from — always
     forward slashes, regardless of how the archive itself stored the entry (some
@@ -372,10 +388,11 @@ def validate_and_extract_zip(
     level (a single flat list — see _extract_recursive's docstring), each individually marked
     ok/skipped/rejected/encrypted.
 
-    `outer_filename` is the top-level package's own name (e.g. `ImportJob.source_filename`) —
-    used ONLY as the first segment of a nested file's archive_path (see
-    docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.6); it never affects validation, and
-    top-level (non-nested) entries never reference it at all."""
+    `outer_filename` is the top-level package's own name (e.g. `ImportJob.source_filename`,
+    itself an untrusted HTTP upload filename — see _sanitize_outer_filename()) — used ONLY as
+    the first segment of a nested file's archive_path (see
+    docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.6), always sanitized first; it never affects
+    validation, and top-level (non-nested) entries never reference it at all."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile as exc:
@@ -386,7 +403,7 @@ def validate_and_extract_zip(
     _extract_recursive(
         zf,
         depth=0,
-        chain_prefix=[{"filename": outer_filename, "checksum": sha256_bytes(raw)}],
+        chain_prefix=[{"filename": _sanitize_outer_filename(outer_filename), "checksum": sha256_bytes(raw)}],
         budget=budget,
         max_files=max_files,
         max_total_bytes=max_total_bytes,

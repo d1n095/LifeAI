@@ -376,6 +376,27 @@ def test_archive_path_never_contains_raw_backslashes_or_traversal_segments():
     assert ".." not in _archive_path_segments(entry.archive_path)
 
 
+def test_outer_filename_traversal_attempt_is_sanitized_out_of_archive_path():
+    """outer_filename comes straight from an untrusted HTTP upload filename (see
+    app/routers/library.py's file.filename) and is never run through _is_safe_member_name()
+    the way an in-archive entry name is — this proves a crafted upload name can't inject a
+    ".."/absolute-path prefix, nor a fake ARCHIVE_PATH_SEPARATOR ("!/") boundary, into the
+    resulting archive_path."""
+    inner = _make_zip({"a.txt": b"content"})
+    raw = _make_zip({"nested.zip": inner})
+
+    result = validate_and_extract_zip(raw, outer_filename="../../etc/passwd.zip")
+    entry = next(e for e in result.ok_entries if e.filename == "a.txt")
+    assert entry.archive_path == "passwd.zip!/nested.zip!/a.txt"
+    assert ".." not in entry.archive_path
+
+    result2 = validate_and_extract_zip(raw, outer_filename="evil!/injected.zip")
+    entry2 = next(e for e in result2.ok_entries if e.filename == "a.txt")
+    # The crafted name's own embedded "/" is stripped along with everything before it (only
+    # the final path component survives) — it can never reconstruct a forged "!/" boundary.
+    assert entry2.archive_path == "injected.zip!/nested.zip!/a.txt"
+
+
 def test_top_level_files_have_no_archive_path_unchanged_from_before_p2():
     raw = _make_zip({"a.txt": b"top level, no nesting involved"})
     result = validate_and_extract_zip(raw)
