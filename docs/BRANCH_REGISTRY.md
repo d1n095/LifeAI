@@ -1,9 +1,10 @@
-# Branch-/PR-register — levande översikt
+# Branch-/PR-register — projektets levande karta
 
-Detta dokument är den manuella motsvarigheten till vad MainAI själv ska kunna göra en dag
-(se `CLAUDE.md` §3 och `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`). Det ska hållas
-uppdaterat varje gång en branch/PR skapas, mergas, stängs eller fryses — se `CLAUDE.md` §2
-för när.
+Detta är INTE bara en lista över brancher — det är projektets levande karta, och den
+manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUDE.md`s
+"Målet"-avsnitt och `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`). Den ska hållas uppdaterad
+varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
+dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-23 (commit-SHA:er och
 PR-nummer nedan är hämtade direkt via `git`/`mcp__github__pull_request_read`, inte
@@ -36,13 +37,13 @@ kan börja på riktigt.
 
 ## Fristående, orelaterade fixar (grenade direkt från huvudgrenen)
 
-Dessa rör INTE P1/P2/P7A-kedjan och ska inte blandas in i den — se `CLAUDE.md` §1 för
-varför de fick egna brancher/PR:er istället för att fogas in i en pågående.
+Dessa rör INTE P1/P2/P7A-kedjan och ska inte blandas in i den — se `CLAUDE.md`s
+grundprincip för varför de fick egna brancher/PR:er istället för att fogas in i en pågående.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
 | `claude/frontend-npm-audit-next-16-2-11` | [#9](https://github.com/d1n095/LifeAI/pull/9) | Öppen, **18/18 CI-checkar gröna**, `mergeable_state: clean`. Ej mergad. | `next` 16.2.10 → 16.2.11 (stänger `npm audit --audit-level=high`, 9 säkerhetsfixar, inga brytande ändringar) | `claude/det-kommer-mer-879lcm` @ a141065 |
-| `claude/development-workflow-principles` | Skapas i den här sessionen | Under uppbyggnad | Den här filen + `CLAUDE.md` — arbetsprinciper, inget applikationskod | `claude/det-kommer-mer-879lcm` @ a141065 |
+| `claude/development-workflow-principles` | [#10](https://github.com/d1n095/LifeAI/pull/10) | Öppen, väntar på CI/granskning. Ej mergad. | Den här filen + `CLAUDE.md` — arbetsprinciper, inget applikationskod | `claude/det-kommer-mer-879lcm` @ a141065 |
 
 **Efter att PR #9 mergas:** `claude/life-library-durable-worker-merged`/`claude/founder-knowledge-studio-v1`
 (PR #7) och därefter `claude/p2-zip-hardening-plan` (PR #8) behöver var sin uppdatering
@@ -60,6 +61,33 @@ npm-audit-fixen och bli gröna på den punkten — inte automatiskt, ett separat
 5. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` (redan rätt
    grenad) när PR #8 är i ett stabilt läge — men det kräver ett separat, uttryckligt beslut
    (branchen är fryst just nu).
+
+## Konflikter
+
+Inga kända filkonflikter mellan aktiva brancher just nu. `PR #9` och `PR #10` är båda
+grenade direkt från `claude/det-kommer-mer-879lcm` @ a141065 och rör helt olika filer
+(`frontend/package.json`/`package-lock.json` respektive `CLAUDE.md`/`docs/BRANCH_REGISTRY.md`)
+— ingen konflikt mellan dem, oavsett mergeordning. Den enda kända, redan dokumenterade
+beroendekonflikten är strukturell, inte en filkonflikt: P1→P2→P7A-kedjan måste mergas i sin
+egen ordning (se "Rekommenderad merge-ordning" nedan) eftersom varje branch bygger på
+föregåendes tip-commit.
+
+Om en verklig filkonflikt upptäcks i framtiden ska den listas här explicit — vilka brancher,
+vilka filer, och vilken lösning som föreslås — inte bara upptäckas i förbigående när en merge
+misslyckas.
+
+## Risk för dubbelarbete
+
+Ingen känd, aktiv risk för dubbelarbete just nu — verifierat genom att jämföra varje aktiv
+branch/PR:s scope (tabellerna ovan) mot varandra: inga två brancher bygger samma
+funktionalitet parallellt. Den närmaste risken är strukturell: om P7A:s implementation
+påbörjas innan PR #7/#8 mergats, riskerar den branchen (redan grenad från PR #8:s tip) att
+behöva en omfattande rebase när PR #7/#8 väl mergas — därför är P7A medvetet fryst tills ett
+uttryckligt beslut tas (se `claude/p7a-governance-ingestion-plan` i tabellen ovan).
+
+Innan en ny branch/implementation påbörjas: jämför dess tilltänkta scope mot ALLA rader i
+tabellerna ovan, inte bara den senaste. Om något överlappar, uppdatera det här avsnittet
+INNAN arbetet påbörjas, inte efteråt.
 
 ## Stale/redan sammanslagna brancher (kandidater för städning, INTE raderade)
 
