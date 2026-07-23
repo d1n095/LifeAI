@@ -948,6 +948,18 @@ Tre konkreta, var för sig testbara mål — inget annat:
    `app/routers/chat.py` rörs inte alls av det här paketet. Aktivering är P7B, en senare, separat,
    dubbelspärrad fas (§6.7b) som ännu inte är byggd.
 
+**Slutgranskningstillägg (efter preliminärt godkännande): den grundläggande auktoritetsgränsen,
+uttryckt så konkret att den går att testa maskinellt.** Ett uppladdat dokument blir ALDRIG
+styrande enbart genom att klassificeras eller genom att ett klassificeringsförslag godkänns.
+P7A:s ENDA möjliga effekt av vilken kombination av API-anrop, worker-körning eller
+databasoperation som helst är att markera ett dokument som en MÖJLIG governance-källa
+(`status` ur mängden `proposal | draft | approved`). Värdena `active`/`superseded`/`revoked`
+kan INTE sättas via P7A:s API (inga endpoints skriver dem), P7A:s worker-kod
+(`identify_governance_candidate` skriver ENDAST `status="proposal"` vid skapande, aldrig någon
+annan övergång), P7A:s databasflöde (se §11.4:s nya `CHECK`-villkor — en DB-nivå-spärr, inte
+bara applikationsdisciplin), eller frontend (ingen UI-kontroll i P7A kan någonsin trigga en
+sådan skrivning, eftersom ingen sådan endpoint existerar att anropa).
+
 ### 11.2 Vad som redan finns (bekräftat genom läsning av koden)
 
 - **Provenienskedjan `Document → KnowledgeVersion → DocumentChunk`** — redan byggd (Founder
@@ -993,61 +1005,152 @@ Tre konkreta, var för sig testbara mål — inget annat:
 
 ### 11.4 Datamodeller och migrationer
 
-**En ny migration, `0014_governance_ingestion.py`**, additiv, samma mönster som 0006–0013:
+**En ny migration, `0014_governance_ingestion.py`**, additiv, samma mönster som 0006–0013.
+**Reviderad efter slutgranskningen** (se ändringarna markerat **NYTT**/**ÄNDRAT** nedan) för att
+täcka evidens, idempotens per klassificeringsversion, och stale-hantering (granskningspunkter
+2/4/5/9):
 
 ```
 governance_documents
-  id                        UUID PK
-  owner_id                  UUID FK -> users.id, NOT NULL (RLS-scopning, samma mönster som
-                                                             knowledge_versions/knowledge_import_jobs)
-  source_document_id        UUID FK -> documents.id, NOT NULL
-  version                   INTEGER NOT NULL DEFAULT 1
-  scope                     ENUM governancescope
-                               (role | behavior | working_method | constraint |
-                                founder_relationship | uncategorized)
-                             NOT NULL DEFAULT 'uncategorized'
-  status                    ENUM governancedocumentstatus
-                               (proposal | draft | approved | active | superseded | revoked)
-                             NOT NULL DEFAULT 'proposal'
-  compiled_prompt_fragment  TEXT NULL   -- beräknad och lagrad redan i P7A (se §11.5), men LÄST
-                                        -- av chat.py EXKLUSIVT när status=active — en gräns P7A
-                                        -- aldrig kan uppfylla, bara P7B
-  approved_at                TIMESTAMPTZ NULL
-  approved_by                UUID FK -> users.id NULL
-  activated_at                TIMESTAMPTZ NULL   -- kolumnen skapas nu (§4.4:s enda-tabell-beslut),
-  activated_by                UUID FK -> users.id NULL   -- men INGEN kodväg i P7A skriver den
-  superseded_by                UUID FK -> governance_documents.id NULL
-  created_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                          UUID PK
+  owner_id                    UUID FK -> users.id ON DELETE CASCADE, NOT NULL (RLS-scopning,
+                                          samma mönster som knowledge_versions/knowledge_import_jobs)
+  source_document_id          UUID FK -> documents.id ON DELETE CASCADE, NOT NULL
+                                        -- CASCADE matchar det redan etablerade mönstret för
+                                        -- knowledge_versions.source_id/source_relationships
+                                        -- (INTE knowledge_claims stil SET NULL, som är för en
+                                        -- sekundär/anrikande länk, inte huvudägandet)
+  source_knowledge_version_id UUID FK -> knowledge_versions.id ON DELETE SET NULL, NULL   -- NYTT
+                                        -- Exakt VILKEN oföränderliga textsnapshot som
+                                        -- klassificerades — samma FK-stil som
+                                        -- knowledge_claims.knowledge_version_id (SET NULL, en
+                                        -- sekundär referens; source_document_id är huvudankaret
+                                        -- och det som faktiskt styr radens livslängd via CASCADE)
+  classification_version      VARCHAR NOT NULL                                            -- NYTT
+                                        -- t.ex. "governance-classify-v1" — samma dedikerade-
+                                        -- kolumn-mönster som KnowledgeVersion.extraction_version,
+                                        -- INTE begravd i en JSON-payload. Bumpas när
+                                        -- prompten/heuristiken ändras i sak (§11.9)
+  version                     INTEGER NOT NULL DEFAULT 1   -- N:te gången DETTA dokument klassats
+                                        -- som governance-kandidat (ny rad per ny
+                                        -- knowledge_version/classification_version, se idempotens
+                                        -- nedan) — aldrig en UPDATE av en befintlig rad
+  scope                       ENUM governancescope
+                                 (role | behavior | working_method | constraint |
+                                  founder_relationship | uncategorized)
+                               NOT NULL DEFAULT 'uncategorized'
+                                        -- P7A:s motsvarighet till "föreslagen dokumenttyp"
+                                        -- (granskningspunkt 2) — samma fält, ingen ny kolumn
+  status                      ENUM governancedocumentstatus
+                                 (proposal | draft | approved | active | superseded | revoked)
+                               NOT NULL DEFAULT 'proposal'
+  compiled_prompt_fragment    TEXT NULL   -- beräknad och lagrad redan i P7A (§11.5), men LÄST av
+                                          -- chat.py EXKLUSIVT när status=active — en gräns P7A
+                                          -- aldrig kan uppfylla, bara P7B
+  approved_at                  TIMESTAMPTZ NULL
+  approved_by                  UUID FK -> users.id ON DELETE SET NULL, NULL
+  activated_at                  TIMESTAMPTZ NULL   -- kolumnen skapas nu (§4.4:s enda-tabell-beslut),
+  activated_by                  UUID FK -> users.id ON DELETE SET NULL, NULL   -- men INGEN kodväg
+                                                                              -- i P7A skriver den
+  superseded_by                  UUID FK -> governance_documents.id ON DELETE SET NULL, NULL
+  created_at                   TIMESTAMPTZ NOT NULL DEFAULT now()
+
+  -- NYTT: DB-nivå-spärr, inte bara applikationsdisciplin (granskningspunkt 1/9) — P7A:s enda
+  -- skrivbara statusvärden är de tre som faktiskt kan uppstå i det här paketet. P7B:s EGEN
+  -- migration måste explicit DROPPA det här villkoret (ALTER TABLE ... DROP CONSTRAINT ...)
+  -- innan den någonsin kan sätta active/superseded/revoked — en medveten, tydlig,
+  -- lättgranskad enda rad i P7B:s migration, inte en tyst lucka som P7B kan råka missa.
+  CONSTRAINT governance_documents_p7a_status_check
+    CHECK (status IN ('proposal', 'draft', 'approved'))
+
+  -- NYTT: idempotens vid DB-nivå (granskningspunkt 4/9) — exakt en governance_documents-rad
+  -- per (dokument, källversion, klassificeringsversion). En NY knowledge_version ELLER en NY
+  -- classification_version får skapa en NY rad (§11.5); samma tripel kan aldrig dubbleras,
+  -- inte ens vid en racekörning (applikationens "kolla-innan-skriv" i §11.5 är en optimering,
+  -- inte den enda spärren).
+  UNIQUE INDEX ix_governance_documents_dedup
+    ON (source_document_id, source_knowledge_version_id, classification_version)
+  INDEX ix_governance_documents_source_document_id ON (source_document_id)
+  INDEX ix_governance_documents_status ON (status)
 
 interpretation_proposals
-  id             UUID PK
-  owner_id       UUID FK -> users.id, NOT NULL
-  proposal_type  ENUM interpretationproposaltype (classify_document)
-                   -- ENDAST detta värde i P7A:s migration — classify_claim/create_relationship/
-                   -- create_entity/update_entity/promote_governance läggs till av P4 via en egen,
-                   -- additiv ALTER TYPE ... ADD VALUE-migration, inte här (samma princip som redan
-                   -- höll för IndexStatus 0011/0013: bara det som faktiskt används av den fasens
-                   -- kod, aldrig spekulativa framtida värden i förväg)
-  target_ref     TEXT NOT NULL        -- "governance_document:<uuid>" för P7A:s enda typ
-  payload        JSON NOT NULL         -- {"suggested_scope": ..., "confidence": ..., "excerpt": ...}
-  rationale      TEXT NOT NULL         -- AI:ns motivering i klartext, alltid mänskligt läsbar
-  status         ENUM interpretationproposalstatus
-                   (pending | approved | rejected | edited_and_approved)
-                 NOT NULL DEFAULT 'pending'
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-  decided_at     TIMESTAMPTZ NULL
-  decided_by     UUID FK -> users.id NULL
+  id                     UUID PK
+  owner_id               UUID FK -> users.id ON DELETE CASCADE, NOT NULL
+  proposal_type          ENUM interpretationproposaltype (classify_document)
+                            -- ENDAST detta värde i P7A:s migration — classify_claim/
+                            -- create_relationship/create_entity/update_entity/promote_governance
+                            -- läggs till av P4 via en egen, additiv ALTER TYPE ... ADD VALUE-
+                            -- migration, inte här (samma princip som redan höll för IndexStatus
+                            -- 0011/0013: bara det som faktiskt används av den fasens kod)
+  governance_document_id UUID FK -> governance_documents.id ON DELETE CASCADE, NOT NULL   -- NYTT
+                            -- en RIKTIG FK, inte bara en sträng inuti target_ref, eftersom P7A:s
+                            -- enda proposal_type alltid pekar på exakt en governance_documents-
+                            -- rad (referensintegritet, granskningspunkt 9). target_ref (nedan)
+                            -- behålls OFÖRÄNDRAD enligt §4.5:s ursprungliga, generiska
+                            -- specifikation — framtida proposal_types (P4) som pekar på andra
+                            -- tabelltyper får sin egen dedikerade FK-kolumn när de byggs, inte en
+                            -- polymorf lösning uppfunnen i förväg för typer som inte finns än
+  target_ref              TEXT NOT NULL        -- "governance_document:<uuid>" (§4.5, oförändrad)
+  payload                 JSON NOT NULL         -- ÄNDRAT, se nedan för det utökade skiftet
+  rationale                TEXT NOT NULL         -- AI:ns motivering i klartext, alltid läsbar
+  provider_name            VARCHAR NOT NULL                                                -- NYTT
+  model                    VARCHAR NOT NULL                                                -- NYTT
+                            -- från ChatResult.provider/.model (samma objekt chat_with_fallback
+                            -- redan returnerar) — vilken leverantör/modell som faktiskt
+                            -- producerade DEN HÄR bedömningen (granskningspunkt 2)
+  status                  ENUM interpretationproposalstatus
+                             (pending | approved | rejected | edited_and_approved | stale)   -- ÄNDRAT: +stale
+                           NOT NULL DEFAULT 'pending'
+  decision_comment          TEXT NULL                                                       -- NYTT
+                            -- grundarens egen fritextkommentar vid approve/reject (granskningspunkt 6)
+  created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+  decided_at               TIMESTAMPTZ NULL
+  decided_by               UUID FK -> users.id ON DELETE SET NULL, NULL
+
+  INDEX ix_interpretation_proposals_type_status ON (proposal_type, status)
+  INDEX ix_interpretation_proposals_governance_document_id ON (governance_document_id)
 ```
 
+**`payload`s utökade form (granskningspunkt 2 — evidens, inte bara en gissning):**
+
+```json
+{
+  "suggested_scope": "working_method",
+  "confidence": 0.82,
+  "evidence": [
+    {"excerpt": "MainAI ska alltid fråga innan den...", "chunk_id": "<uuid eller null>"},
+    {"excerpt": "Grundarens relation till MainAI är...", "chunk_id": "<uuid eller null>"}
+  ]
+}
+```
+
+`evidence` är en lista av 1–3 KONKRETA, ordagranna citat AI:n måste ange som stöd för sin
+klassificering (aldrig bara en fri sammanfattning) — se §11.5 för hur varje citat i bästa fall
+kopplas till ett existerande `DocumentChunk.id` (redan skapat av `index_document()` innan
+`identify_governance_candidate` någonsin körs). `chunk_id` är `null` om en exakt
+substrängsmatchning mot chunkarna misslyckas (t.ex. AI:n parafraserade lätt) — då finns
+citat-TEXTEN ändå kvar som evidens, bara utan den extra chunk-länken.
+
 **RLS:** `ALTER TABLE governance_documents FORCE ROW LEVEL SECURITY` och samma för
-`interpretation_proposals`, ägarscopeat på `owner_id` — exakt samma två rader som redan finns i
-`app/rls.py` för `knowledge_import_jobs`, bara två nya tabellnamn.
+`interpretation_proposals`, ägarscopeat på `owner_id` — exakt samma mönster som redan finns i
+`app/rls.py` för `knowledge_import_jobs`, bara två nya tabellnamn. Gäller redan idag trots att
+systemet bara har en grundare, av samma skäl `app/rls.py`s docstring redan ger för `documents`/
+`knowledge_versions`: en framtida UserAI-fas ska inte kräva att RLS läggs till i efterhand.
+
+**Radering (granskningspunkt 9):** en full kontoradering (`app/routers/account.py`, redan byggd)
+gör idag `db.query(Document).filter_by(uploaded_by=user_id).delete(...)` — ett RIKTIGT
+hård-delete av `Document`-rader, inte bara mjuk-radering. `source_document_id ON DELETE CASCADE`
+betyder att `governance_documents`/`interpretation_proposals` försvinner tillsammans med kontot,
+exakt som GDPR-rätten till radering kräver — skilt från §11.5/§11.9:s regel att en AVVISNING
+(reject) aldrig raderar en rad; det är en produktbeslut om ETT API-anrop, inte en garanti om att
+raden aldrig kan försvinna av en helt annan, legitim anledning (kontoradering).
 
 **Den avgörande, testbara regeln (§4.4, oförändrad av P7A):** ingen kodväg i det här paketet
 får NÅGONSIN skriva `governance_documents.status = 'active'/'superseded'/'revoked'` eller sätta
-`activated_at`/`activated_by`. `activated_at`/`activated_by`-kolumnerna skapas nu (eftersom
-tabellen enligt §4.4 medvetet är EN tabell som spänner över både P7A och P7B, inte två separata),
-men förblir `NULL` för varje rad P7A någonsin skapar, garanterat av ett dedikerat regressionstest
+`activated_at`/`activated_by` — nu även SPÄRRAT på databasnivå av `CHECK`-villkoret ovan, inte
+bara applikationsdisciplin. `activated_at`/`activated_by`-kolumnerna skapas nu (eftersom tabellen
+enligt §4.4 medvetet är EN tabell som spänner över både P7A och P7B, inte två separata), men
+förblir `NULL` för varje rad P7A någonsin skapar, garanterat av ett dedikerat regressionstest
 (§11.8).
 
 ### 11.5 API-, worker- och frontendflöden
@@ -1055,6 +1158,8 @@ men förblir `NULL` för varje rad P7A någonsin skapar, garanterat av ett dedik
 **Ny modul `app/rag/governance.py`** (samma nivå/mönster som `app/rag/claims.py`):
 
 ```python
+GOVERNANCE_CLASSIFICATION_VERSION = "governance-classify-v1"
+
 GOVERNANCE_KEYWORD_HINTS = [
     # svenska
     "mainai ska", "du är mainai", "instruktion till mainai", "systemprompt",
@@ -1067,30 +1172,89 @@ GOVERNANCE_KEYWORD_HINTS = [
 # anrop"-disciplin som redan finns i zip_import.pys komprimeringskvot-förfilter och claims.pys
 # MAX_CHUNKS_PER_DOCUMENT-tak. Exakt ordlista är en kalibreringsdetalj för
 # implementationsfasen (risk för falska positiva/negativa), inte ett arkitekturbeslut.
-
+#
+# GRÄNS (granskningspunkt 3, hård regel): denna funktion FÅR ALDRIG returnera något annat än
+# bool, och ett True-resultat FÅR ALDRIG i sig skapa en governance_documents-/
+# interpretation_proposals-rad. Den avgör ENBART om det dyra AI-anropet nedan ska köras — precis
+# som ett nyckelordsträff-larm, inte en dom. Ett dedikerat test (§11.8) bevisar att en
+# keyword-träff UTAN en efterföljande positiv AI-klassificering aldrig lämnar något spår i
+# databasen.
 def _looks_like_governance_candidate(text: str) -> bool: ...
-
-async def identify_governance_candidate(
-    db: Session, document: Document, owner_id: uuid.UUID, text_content: str
-) -> None:
-    """Best-effort, exakt samma felmönster som extract_claims_for_document: ett fel här
-    FÅR ALDRIG göra en lyckad import till 'failed'. Körs EN gång per dokument (idempotens:
-    hoppar tyst över om en governance_documents-rad redan finns för source_document_id)."""
 ```
 
-Anropas från `library_import.py`s `_import_one_file()`/`_resume_blocked_document()`, i samma
-try/except-block och på samma plats som dagens `extract_claims_for_document(...)`-anrop (efter
-att `document.status == IndexStatus.indexed` är bekräftat) — INTE ett extra steg som kan
-blockera eller pausa den vanliga pipelinen. Om `ensure_verified(db, role="chat")` inte är `ok`
-hoppar identifieringen tyst över för den körningen (samma princip som en misslyckad
-`extract_claims_for_document` redan tyst hoppar över) — ingen ny återförsökskö byggs i P7A
-(se §11.9).
+**Klassificeringsprompten (granskningspunkt 3 — skydd mot falska positiva):** AI-anropet får
+INTE bara frågan "beskriver det här dokumentet MainAI:s beteende?" — det måste uttryckligen
+avvisa fem namngivna kategorier som annars är den mest sannolika källan till falska positiva,
+eftersom de legitimt kan innehålla samma nyckelord utan att FAKTISKT vara riktade till MainAI:
+
+- **Avtal/kontrakt** mellan grundaren och tredje part (nämner ofta "roller", "arbetssätt",
+  "skyldigheter" — men gäller AVTALSPARTERNA, inte MainAI).
+- **Lagtexter/juridiska texter** (samma vokabulär av "regler"/"begränsningar", men är extern
+  lagstiftning, inte en instruktion till MainAI).
+- **Mötesanteckningar** som NÄMNER MainAI i förbigående ("vi diskuterade att MainAI borde...") —
+  ett omnämnande i en anteckning är INTE en instruktion adresserad till MainAI.
+- **Citerade/återgivna policydokument** — ett dokument som ÅTERGER eller refererar till någon
+  annans policy (t.ex. ett klipp ur en extern leverantörs villkor) beskriver inte MainAI:s egen
+  styrning.
+- **Dokument som beskriver en ANNAN organisations regler/arbetssätt** — bara för att ett dokument
+  handlar om "hur ett system ska bete sig" betyder inte att det handlar om MainAI specifikt.
+
+Kontraktet: AI-svaret måste vara strukturerat JSON (`{"is_candidate": bool, "scope": str|null,
+"confidence": float, "evidence": [{"excerpt": str}, ...]}`), och prompten kräver EXPLICIT att
+`is_candidate=true` bara får sättas om dokumentet är DIREKT ADRESSERAT TILL eller SKRIVET FÖR
+att styra MainAI:s eget beteende — inte bara nämner, citerar, eller tangentiellt berör ämnet.
+Exakt promptformulering är en implementationsdetalj, men detta kontrakt (fem namngivna
+undantagskategorier + "direkt adresserat"-kravet) är en del av planen, inte valfritt att hoppa
+över — se §11.8 för de fem motsvarande testfallen.
+
+```python
+async def identify_governance_candidate(
+    db: Session, document: Document, owner_id: uuid.UUID, knowledge_version_id: uuid.UUID,
+    text_content: str,
+) -> None:
+    """Best-effort, exakt samma felmönster som extract_claims_for_document: ett fel här
+    FÅR ALDRIG göra en lyckad import till 'failed'. Idempotent på (source_document_id,
+    knowledge_version_id, classification_version) — se §11.4:s UNIQUE-index, som är den
+    verkliga spärren; ett applikationsnivå-kontroll-innan-skriv här är bara en snabb
+    genväg för det vanliga fallet, inte den enda garantin mot dubbletter."""
+```
+
+Anropas från `library_import.py`s `_import_one_file()` OCH `_resume_blocked_document()` (**ÄNDRAT**
+efter slutgranskningen, se nedan), i samma try/except-block och på samma plats som dagens
+`extract_claims_for_document(...)`-anrop (efter att `document.status == IndexStatus.indexed` är
+bekräftat) — INTE ett extra steg som kan blockera eller pausa den vanliga pipelinen.
+
+**Providerfel (granskningspunkt 8 — tydlig, retrybar status utan dubbletter):** om
+`ensure_verified(db, role="chat")` inte är `ok`:
+- Identifieringen skapar INGEN rad (samma som "inte en kandidat" ur ett utifrån-perspektiv) och
+  loggas strukturerat: `logger.info("governance-identifiering hoppades över: chattleverantör ej
+  verifierad (%s)", outcome.result)` — synligt i drift/felsökning, samt via den redan byggda
+  `/admin`-sidans providerstatus (P1), utan att en ny UI-yta behöver byggas i P7A.
+- Detta är AUTOMATISKT och OVILLKORLIGEN dubblettsäkert att försöka igen senare, av samma skäl
+  som idempotensen i §11.4 fungerar: eftersom INGEN rad skapades finns inget att kollidera med
+  — nästa försök (oavsett vad som utlöser det) skapar en helt normal, första rad.
+- **Konkret, redan byggd återförsöksväg utan att P1 rörs:** `identify_governance_candidate`
+  anropas nu ÄVEN från `_resume_blocked_document()` (som redan finns, redan anropar
+  `extract_claims_for_document` på samma sätt) — så om EMBEDDING-rollen också var blockerad och
+  P1:s befintliga `_requeue_blocked_jobs()` senare återupptar dokumentet (ingen ändring av P1:s
+  kod, bara en ny anropspunkt i en redan existerande hook), får governance-identifieringen ett
+  gratis, automatiskt nytt försök då.
+- **Känd, uttryckligt dokumenterad begränsning:** ett rent CHATT-fel (embedding gick bra, bara
+  klassificeringsanropet fallerade transient) triggar INGEN automatisk återkörning i P7A — ingen
+  ny bakgrundskö byggs (§11.9). Säkert eftersom inget felaktigt tillstånd lämnas kvar (ingen rad,
+  inget att städa), men innebär att ett sådant dokument förblir oklassificerat tills en framtida,
+  ännu inte byggd, manuell "sök igenom biblioteket"-funktion finns (§11.9).
 
 Vid en positiv klassificering: en `governance_documents`-rad (`status="proposal"`,
-`compiled_prompt_fragment` beräknad av en liten, deterministisk mall-funktion,
-`compile_prompt_fragment(scope, document.title, text_content)`) och en
-`interpretation_proposals`-rad (`proposal_type="classify_document"`, `status="pending"`)
-skapas i SAMMA transaktion.
+`source_knowledge_version_id`/`classification_version` satta, `compiled_prompt_fragment`
+beräknad av en liten, deterministisk mall-funktion, `compile_prompt_fragment(scope,
+document.title, text_content)`) och en `interpretation_proposals`-rad
+(`proposal_type="classify_document"`, `status="pending"`, `provider_name`/`model` från
+`ChatResult`, `payload.evidence` enligt §11.4) skapas i SAMMA transaktion. Varje citat i
+`evidence` matchas (bästa-försök, ren substrängssökning) mot dokumentets redan skapade
+`DocumentChunk`-rader (skapade av `index_document()` INNAN detta anrop någonsin körs) för att
+fylla i `chunk_id` — misslyckad matchning lämnar bara `chunk_id=null`, citat-TEXTEN finns kvar
+oavsett (§11.6).
 
 **Ny router `app/routers/governance.py`**, `prefix="/api/governance"`,
 `dependencies=[Depends(require_founder)]` (samma engångsmönster som `admin.py`):
@@ -1098,31 +1262,59 @@ skapas i SAMMA transaktion.
 ```
 GET  /api/governance/proposals?status=pending
   -> lista över interpretation_proposals (proposal_type=classify_document), joinat med
-     governance_documents + Document.title för visning
+     governance_documents + Document (id, title) för visning. Svarsschemat inkluderar
+     EXPLICIT document_id/document_title (granskningspunkt 2: grundaren måste kunna öppna
+     originalkällan direkt från förslaget, inte via en separat uppslagning).
+     NYTT: denna endpoint kör samma stale-kontroll som approve (nedan) för varje 'pending'-rad
+     innan svaret skickas — en rad vars källa inte längre är åtkomlig markeras 'stale' HÄR,
+     lat utvärderad vid läsning, ingen separat bakgrundsjobb/cron krävs.
 
 POST /api/governance/proposals/{id}/approve
-  body: {"scope": Optional[GovernanceScope]}   -- grundaren kan ändra AI:ns förslag
+  body: {"scope": Optional[GovernanceScope], "comment": Optional[str]}   -- NYTT: comment
+  -> NYTT: kontrollerar FÖRST att source_document_id.deleted_at IS NULL och att
+     source_knowledge_version_id fortfarande existerar — om inte: transaktionen sätter
+     interpretation_proposals.status="stale" och returnerar ett tydligt fel, INGET godkännande
+     sker (granskningspunkt 5: ett stale förslag får aldrig godkännas)
   -> governance_documents.status = "approved", approved_at/approved_by satta
   -> interpretation_proposals.status = "approved" (oförändrat scope) eller
      "edited_and_approved" (scope överskrivet)
-  -> record_audit(action="governance_proposal_approved", entity_type="governance_document", ...)
+  -> record_audit(action="governance_proposal_approved", entity_type="governance_document",
+                   entity_id=str(governance_document.id),
+                   detail=f"proposal_id={proposal.id} knowledge_version_id={...} "
+                          f"governance_document_version={...} comment={comment!r}")
+     -- NYTT: detail bär nu uttryckligen proposal-ID, dokumentversion och en eventuell
+     -- kommentar (granskningspunkt 6), inte bara den implicita entity_id/action
 
 POST /api/governance/proposals/{id}/reject
-  -> interpretation_proposals.status = "rejected", decided_at/decided_by satta
-  -> governance_documents-raden lämnas OFÖRÄNDRAD (status="proposal" kvarstår — en avvisning är
-     ett beslut på FÖRSLAGET, inte en radering av kandidaten; grundaren kan alltid komma tillbaka
-     och godkänna den senare, samma oföränderlighetsprincip som resten av systemet)
-  -> record_audit(action="governance_proposal_rejected", ...)
+  body: {"comment": Optional[str]}   -- NYTT
+  -> interpretation_proposals.status = "rejected", decided_at/decided_by/decision_comment satta
+  -> governance_documents-raden och HELA payloaden (evidens, rationale) lämnas OFÖRÄNDRAD och
+     ORADERAD (status="proposal" kvarstår — en avvisning är ett beslut på FÖRSLAGET, inte en
+     radering av kandidaten ELLER dess bevisunderlag, granskningspunkt 6; grundaren kan alltid
+     komma tillbaka och godkänna den senare, samma oföränderlighetsprincip som resten av
+     systemet). Skiljt från en HELT SEPARAT, legitim raderingsväg: full kontoradering
+     (§11.4) tar bort raden via CASCADE — det är GDPR-radering, inte en produktfunktion i
+     P7A:s UI.
+  -> record_audit(action="governance_proposal_rejected", entity_id=..., detail=f"... comment={comment!r}")
 ```
+
+**Behörighet är alltid genomdriven på serversidan, aldrig bara UI-döljning (granskningspunkt 7):**
+`require_founder` körs på VARJE anrop till dessa endpoints oavsett vad frontend visar eller
+döljer, och RLS (§11.4) blockerar dessutom på databasnivå om en anropare på något sätt kringgår
+applikationslagret. Ett dedikerat test (§11.8) anropar endpointsen direkt (inte via UI:t) utan
+`require_founder`-behörighet och verifierar ett `403`, oberoende av frontend.
 
 **Frontend:** ny route `app/(shell)/governance/page.tsx`, listmönster kopierat från
 `app/(shell)/admin/page.tsx`s "lista + inline-knapp"-struktur (samma `busy`-per-rad-mönster som
-P1:s "Testa nu"-knapp). Varje rad: dokumenttitel (länk till `/library/{document_id}`), AI:ns
-motivering i klartext, ett redigerbart `scope`-väljarfält, Godkänn/Avvisa-knappar. **Obligatoriskt
+P1:s "Testa nu"-knapp). Varje rad: dokumenttitel (länk till `/library/{document_id}`, direkt från
+`document_id` i API-svaret), AI:ns motivering i klartext, citat-evidensen (§11.4), leverantör/
+modell, ett redigerbart `scope`-väljarfält, ett fritextfält för kommentar, Godkänn/Avvisa-knappar.
+En `stale`-markerad rad visas gråmarkerad utan Godkänn-knapp (bara Avvisa/arkivera). **Obligatoriskt
 UI-krav** (redan flaggat som en risk i §7): en permanent, väl synlig banner/etikett — "Har ingen
 effekt på MainAI:s beteende ännu — aktivering är ett separat, framtida steg" — överallt
 `governance_documents` visas, eftersom ALLA rader P7A någonsin producerar per definition är
-icke-aktiva.
+icke-aktiva. Denna banner är UX, inte säkerhetskontrollen — säkerhetskontrollen är §11.4:s
+`CHECK`-villkor och den tomma mängden endpoints som kan skriva `active`.
 
 ### 11.6 Provenienskrav
 
@@ -1134,6 +1326,19 @@ ZIP-arkivets blob, om importerat i ett paket) — inget nytt proveniensbegrepp u
 (P2) bär dess `KnowledgeVersion.raw_metadata` redan `archive_path`/`archive_chain` (§10.6) —
 `governance_documents` behöver inte duplicera det, bara peka på `source_document_id`.
 
+**Utökat (efter slutgranskningen): en andra, mer finkornig proveniensnivå — evidensen, inte bara
+dokumentet.** `source_knowledge_version_id` (§11.4) pekar exakt på VILKEN oföränderlig
+textsnapshot som klassificerades, inte bara "dokumentet i allmänhet" — nödvändigt eftersom ett
+dokument i princip kan få en ny `KnowledgeVersion` senare (§4.1:s modell stödjer flera versioner
+per källa, även om dagens skrivvägar bara skapar en). Varje enskilt citat i
+`interpretation_proposals.payload.evidence` är i sin tur spårbart ner till en specifik
+`DocumentChunk.id` (bästa-försök-matchning, §11.5) — en grundare som ifrågasätter ETT specifikt
+citat kan alltså verifiera det mot exakt den textsnutt AI:n pekade på, inte bara "någonstans i
+dokumentet". Denna kedja, i sin helhet: `interpretation_proposals.payload.evidence[].chunk_id →
+DocumentChunk → governance_documents.source_knowledge_version_id → KnowledgeVersion →
+governance_documents.source_document_id → Document.storage_key/import_job_id` — samma
+"inget hopp, inget ungefär"-princip §5 redan kräver för `project_entity`-kedjan.
+
 `compiled_prompt_fragment` beräknas deterministiskt av `scope` + `document.title` +
 `text_content` (samma extraherade text som redan användes för indexering/claims, ingen ny
 extraktion) — samma determinism-princip som P2:s `archive_path`.
@@ -1144,41 +1349,125 @@ extraktion) — samma determinism-princip som P2:s `archive_path`.
   admin-/skrivfunktionalitet.
 - **RLS FORCE ROW LEVEL SECURITY** på båda nya tabeller (§11.4) — ingen rad läsbar/skrivbar
   utanför `owner_id`, verifierat med ett dedikerat isolationstest (samma mönster som
-  `test_rls_isolation.py`).
-- **`record_audit()`** på varje approve/reject — vem godkände/avvisade vad och när, samma
-  auditlogg-disciplin som redan gäller överallt.
+  `test_rls_isolation.py`). Precis som `app/rls.py`s befintliga motivering för `documents`/
+  `knowledge_versions`: RLS läggs på nu, redan i ett enanvändarsystem, så att en framtida
+  UserAI-fas med fler ägare aldrig kräver att isolationen läggs till i efterhand.
+- **Behörighet är ALLTID genomdriven på serversidan, aldrig UI-döljning (granskningspunkt 7, uttryckligt
+  krav från slutgranskningen).** Frontend visar/döljer knappar av UX-skäl, men det är INTE
+  säkerhetskontrollen — den är `require_founder` (backend) + `FORCE ROW LEVEL SECURITY` (DB),
+  två oberoende lager. Ett dedikerat test (§11.8) anropar `POST /api/governance/proposals/{id}
+  /approve` DIREKT (ingen frontend inblandad, ingen `require_founder`-behörighet) och verifierar
+  `403` — inte bara "knappen syns inte".
+- **`record_audit()`** på varje approve/reject — vem godkände/avvisade vad och när, PLUS
+  (§11.5, granskningspunkt 6) proposal-ID, den beslutade dokumentversionen och en eventuell
+  fritextkommentar i `detail`, samma auditlogg-disciplin som redan gäller överallt.
 - **Skriv-gränsen i §11.4 är den centrala governance-regeln för hela P7A:** endast två kodvägar
   (de två nya endpointsen) får någonsin ändra `governance_documents`/`interpretation_proposals`
   efter skapandet — ingen bakväg, ingen batch-skript, ingen direkt DB-mutation någon annanstans
-  i kodbasen.
+  i kodbasen. Nu även spärrat på databasnivå för de mest känsliga värdena (`CHECK`-villkoret i
+  §11.4) — behörighetskontrollen är alltså inte den ENDA spärren mot en otillåten
+  `active`-skrivning, bara den första av två oberoende lager.
 
 ### 11.8 Tester
 
+**Grundflöde:**
 - `test_governance_keyword_prefilter_matches_and_rejects_expected_examples` — den billiga
   förfiltreringen, inget AI-anrop.
 - `test_identify_governance_candidate_creates_proposal_for_a_real_candidate` — deterministisk
   fejk-chattleverantör (samma mönster som `test_library_import.py`s `_fake_chat`), en positiv
-  klassificering ger EN `governance_documents`-rad + EN `interpretation_proposals`-rad.
+  klassificering ger EN `governance_documents`-rad + EN `interpretation_proposals`-rad med
+  `provider_name`/`model`/`payload.evidence` korrekt ifyllda.
 - `test_identify_governance_candidate_is_a_noop_for_ordinary_content` — fejkleverantören svarar
   "inte en kandidat", ingen rad skapas.
-- `test_identify_governance_candidate_is_idempotent_on_reimport` — anropas två gånger för samma
-  `source_document_id`, exakt en rad kvarstår.
-- `test_blocked_chat_provider_never_fails_the_import` — `ensure_verified(role="chat")` returnerar
-  ej-ok, dokumentet blir ändå `indexed`, ingen governance-rad skapas, ingen exception läcker.
+
+**Granskningspunkt 1 (ingen automatisk auktoritet) — NYTT:**
 - `test_governance_status_never_becomes_active_anywhere_in_p7a` — regressionstest: efter en full
   approve-cykel (och en avvisning) är `activated_at`/`activated_by` fortfarande `NULL` och
   `status` aldrig `active`/`superseded`/`revoked` på någon rad skapad av P7A:s kodvägar.
   Fullföljs av en kod-granskning som bekräftar att endast `app/routers/governance.py`s
   `approve`-endpoint skriver `status="approved"`, ingen annan plats.
-- `test_approve_endpoint_sets_approved_fields_and_audit_log` / `test_reject_endpoint_leaves_governance_document_untouched`.
+- `test_db_check_constraint_rejects_a_raw_attempt_to_set_status_active` — ett direkt `UPDATE`
+  mot `governance_documents` (förbi hela applikationslagret) som försöker sätta `status='active'`
+  MÅSTE misslyckas med en `CHECK`-överträdelse — bevisar att spärren är databasnivå, inte bara
+  applikationsdisciplin.
+
+**Granskningspunkt 2 (evidens) — NYTT:**
+- `test_proposal_payload_contains_scope_confidence_rationale_evidence_provider_model_and_classification_version`
+  — ett enda, uttryckligt test som kontrollerar HELA den krävda evidenslistan finns på en skapad
+  rad.
+- `test_evidence_excerpt_is_linked_to_a_real_chunk_id_when_a_substring_match_succeeds` /
+  `test_evidence_excerpt_keeps_the_quoted_text_even_when_no_chunk_match_is_found`.
+- `test_proposal_response_includes_document_id_so_the_founder_can_open_the_original_source`.
+
+**Granskningspunkt 3 (heuristikens roll, falska positiva) — NYTT, det viktigaste tillägget:**
+- `test_keyword_match_alone_never_creates_a_governance_row_without_a_positive_ai_classification`
+  — förfiltret träffar, men fejkleverantören svarar `is_candidate=false`: NOLL rader skapas.
+- Fem dedikerade fall, en fejk-leverantör kalibrerad att korrekt avvisa varje kategori:
+  `test_a_real_contract_between_founder_and_third_party_is_not_a_governance_candidate`,
+  `test_legal_statute_text_is_not_a_governance_candidate`,
+  `test_meeting_notes_that_merely_mention_mainai_are_not_a_governance_candidate`,
+  `test_a_quoted_third_party_policy_document_is_not_a_governance_candidate`,
+  `test_a_document_describing_another_organizations_rules_is_not_a_governance_candidate`.
+- `test_classification_prompt_explicitly_requires_direct_addressing_not_mere_mention` — en
+  kod-/prompt-granskning som bekräftar att de fem undantagskategorierna och
+  "direkt adresserat"-kravet (§11.5) faktiskt finns i den skickade systemprompten, inte bara i
+  planen.
+
+**Granskningspunkt 4 (idempotens och versionering) — ÄNDRAT/UTÖKAT:**
+- `test_identify_governance_candidate_is_idempotent_for_the_same_knowledge_version_and_classification_version`
+  — anropas två gånger för exakt samma `(source_document_id, knowledge_version_id,
+  classification_version)`, exakt en rad kvarstår (ersätter det tidigare, grövre
+  dokument-nivå-testet).
+- `test_a_new_knowledge_version_creates_a_new_governance_document_row_without_overwriting_the_old_one`.
+- `test_a_new_classification_version_creates_a_new_proposal_and_preserves_history` — bumpad
+  `GOVERNANCE_CLASSIFICATION_VERSION`, gammal rad orörd, ny rad skapas.
+- `test_unique_index_prevents_a_duplicate_even_under_a_simulated_race` — två parallella
+  `identify_governance_candidate`-anrop för samma tripel, en av dem misslyckas på
+  DB-constrainten, ingen dubblett smiter igenom applikationslagrets kontroll-innan-skriv.
+
+**Granskningspunkt 5 (stale proposals) — NYTT:**
+- `test_proposal_becomes_stale_when_source_document_is_deleted_and_cannot_be_approved`.
+- `test_stale_check_runs_lazily_on_list_and_persists_the_stale_status`.
+- `test_a_stale_proposal_can_still_be_rejected_or_viewed_just_not_approved`.
+
+**Granskningspunkt 6 (audit och avslag) — ÄNDRAT/UTÖKAT:**
+- `test_approve_endpoint_sets_approved_fields_and_audit_log_with_proposal_id_document_version_and_comment`.
+- `test_reject_endpoint_leaves_governance_document_and_all_evidence_untouched` — inklusive att
+  `payload`/`rationale` är byte-för-byte oförändrade efter en avvisning.
 - `test_governance_proposal_edited_scope_gets_edited_and_approved_status`.
+- `test_account_deletion_cascades_governance_rows_but_a_single_reject_never_does` — bekräftar
+  distinktionen §11.4/§11.5 gör mellan GDPR-radering (CASCADE, en helt annan kodväg) och en
+  vanlig avvisning (aldrig radering).
+
+**Granskningspunkt 7 (behörighet) — NYTT:**
+- `test_governance_endpoints_reject_a_request_without_require_founder_directly_at_the_api_layer`
+  — anropar endpointsen direkt (inget UI inblandat) och verifierar `403`.
 - `test_rls_isolation_governance_documents_and_interpretation_proposals` — en annan ägares rader
-  är aldrig läsbara/skrivbara, matchar `test_rls_isolation.py`s befintliga mönster.
-- `test_compiled_prompt_fragment_is_deterministic_and_computed_at_proposal_time`.
+  är aldrig läsbara/skrivbara ens med giltig autentisering, matchar `test_rls_isolation.py`s
+  befintliga mönster.
+
+**Granskningspunkt 8 (providerfel) — NYTT:**
+- `test_blocked_chat_provider_never_fails_the_import` — `ensure_verified(role="chat")` returnerar
+  ej-ok, dokumentet blir ändå `indexed`, ingen governance-rad skapas, ingen exception läcker.
+- `test_blocked_chat_provider_is_logged_clearly_for_operational_visibility`.
+- `test_resuming_a_blocked_document_also_retries_governance_identification_with_no_duplicate_risk`
+  — `_resume_blocked_document`s befintliga återupptagningsväg (P1, oförändrad) ger governance-
+  identifieringen ett gratis nytt försök, och en tidigare misslyckad/utebliven identifiering
+  skapar aldrig en dubblett om den nu lyckas.
+
+**Granskningspunkt 9 (migration 0014) — NYTT:**
+- `test_migration_0014_foreign_keys_have_the_documented_ondelete_behavior` — `source_document_id`
+  CASCADE, `source_knowledge_version_id`/`approved_by`/`activated_by`/`decided_by` SET NULL,
+  `governance_document_id` (på `interpretation_proposals`) CASCADE.
+- `test_migration_0014_unique_index_and_check_constraint_exist_and_are_enforced`.
 - Migration: round-trip (`upgrade → downgrade → upgrade`), `alembic heads` visar fortsatt en
   enda head efter `0014`.
+
+**Övrigt:**
+- `test_compiled_prompt_fragment_is_deterministic_and_computed_at_proposal_time`.
 - Frontend (om UI byggs i samma paket): `tsc --noEmit`, ESLint, `next build`, samt ett Playwright-
-  test av godkänn/avvisa-flödet som uttryckligen verifierar att "ingen effekt ännu"-bannern syns.
+  test av godkänn/avvisa-flödet som uttryckligen verifierar att "ingen effekt ännu"-bannern syns
+  och att en `stale`-rad visas utan Godkänn-knapp.
 
 ### 11.9 Uttrycklig avgränsning mot senare faser
 
@@ -1189,10 +1478,13 @@ extraktion) — samma determinism-princip som P2:s `archive_path`.
 - **Ingen retroaktiv skanning av redan importerat material.** Identifiering körs bara för NYA
   importer framåt från och med P7A:s driftsättning — samma medvetna begränsning som P1:s
   "gamla `failed`-poster omklassificeras inte retroaktivt".
-- **Ingen ny återförsökskö för en missad identifiering** (t.ex. p.g.a. blockerad
-  chat-provider vid importtillfället) — best-effort, exakt som `extract_claims_for_document`
-  redan är. En manuell "sök igenom biblioteket efter styrdokument"-funktion är en möjlig,
-  avgränsad framtida uppföljning, inte del av P7A.
+- **Ingen NY bakgrundsjobbskö/cron för en missad identifiering.** §11.5 (efter
+  slutgranskningen) lägger till EN anropspunkt i en redan existerande hook
+  (`_resume_blocked_document`, oförändrad P1-kod) — inget nytt jobb, ingen ny worker-loop. Ett
+  rent transient CHATT-fel (embedding gick bra) triggar fortfarande ingen automatisk
+  återkörning i P7A — best-effort, samma princip som `extract_claims_for_document` redan har,
+  men nu explicit loggad (§11.5) istället för helt tyst. En manuell "sök igenom biblioteket efter
+  styrdokument"-funktion är en möjlig, avgränsad framtida uppföljning, inte del av P7A.
 - **Inga övriga `interpretation_proposals.proposal_type`-värden** (`classify_claim`,
   `create_relationship`, `create_entity`, `update_entity`, `promote_governance`) — de hör till
   P3/P4/P6 och läggs till genom en egen, additiv migration när respektive fas byggs.
