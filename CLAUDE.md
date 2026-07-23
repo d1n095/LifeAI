@@ -49,7 +49,11 @@ karta och ska alltid visa:
 - vilka PR:er som är öppna,
 - vad varje branch ansvarar för,
 - beroenden mellan brancher,
-- rekommenderad merge-ordning,
+- **rekommenderad merge-ordning,**
+- **vilka brancher som blockerar andra,**
+- **vilka brancher som kan mergas oberoende,**
+- **vilka brancher som väntar på ett beroende innan de bör uppdateras** (se "Merge-regeln"
+  nedan — det här är INTE samma sak som att uppdatera dem i förväg),
 - konflikter,
 - risk för dubbelarbete,
 - vilka brancher som blivit inaktuella,
@@ -66,6 +70,20 @@ karta och ska alltid visa:
 
 Registret ska verifieras mot faktiskt git-läge och GitHub API
 (`mcp__github__pull_request_read`, `git merge-base`) — aldrig memorerat eller gissat.
+
+## Merge-regeln — rebasa inte i förväg "för säkerhets skull"
+
+**En branch får inte rebasas eller uppdateras i förväg "för säkerhets skull".** Rebase eller
+GitHubs "Update branch" ska normalt ske FÖRST när branchens faktiska beroende faktiskt har
+mergats — inte tidigare, inte som en förebyggande åtgärd. På så sätt undviks upprepade
+rebases, onödiga mergekonflikter och dubbelarbete: en branch som rebasas mot en bas som
+sedan ändras igen innan den egna branchen mergat har bara flyttat problemet, inte löst det.
+
+Konkret: om branch B beror på branch A (A måste mergas eller uppdateras innan B blir
+konfliktfri), rör INTE B förrän A faktiskt är mergad — även om det "känns säkrare" att
+uppdatera B:s bas redan nu. `docs/BRANCH_REGISTRY.md` ska explicit visa vilka brancher som
+väntar på ett beroende (se nästa avsnitt) så att det här inte behöver gissas fram varje
+gång.
 
 ## Standardbeteende — kontrollera innan du börjar
 

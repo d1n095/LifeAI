@@ -43,24 +43,61 @@ grundprincip för varför de fick egna brancher/PR:er istället för att fogas i
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
 | `claude/frontend-npm-audit-next-16-2-11` | [#9](https://github.com/d1n095/LifeAI/pull/9) | Öppen, **18/18 CI-checkar gröna**, `mergeable_state: clean`. Ej mergad. | `next` 16.2.10 → 16.2.11 (stänger `npm audit --audit-level=high`, 9 säkerhetsfixar, inga brytande ändringar) | `claude/det-kommer-mer-879lcm` @ a141065 |
-| `claude/development-workflow-principles` | [#10](https://github.com/d1n095/LifeAI/pull/10) | Öppen, väntar på CI/granskning. Ej mergad. | Den här filen + `CLAUDE.md` — arbetsprinciper, inget applikationskod | `claude/det-kommer-mer-879lcm` @ a141065 |
+| `claude/development-workflow-principles` | [#10](https://github.com/d1n095/LifeAI/pull/10) | Öppen, innehåll godkänt i sak. 16/18 CI-checkar gröna — de 2 som fallerar (`Frontend — npm audit`, `All required checks passed`) beror på samma ärvda, orelaterade problem som PR #9 löser (basen har ännu inte fixen). `mergeable_state: unstable`. Ej mergad, ska INTE uppdateras förrän PR #9 faktiskt mergat (se Merge-regeln). | Den här filen + `CLAUDE.md` — arbetsprinciper, inget applikationskod | `claude/det-kommer-mer-879lcm` @ a141065 |
 
 **Efter att PR #9 mergas:** `claude/life-library-durable-worker-merged`/`claude/founder-knowledge-studio-v1`
 (PR #7) och därefter `claude/p2-zip-hardening-plan` (PR #8) behöver var sin uppdatering
 (rebase eller GitHubs "Update branch") mot den nya huvudgrenen för att själva ärva
 npm-audit-fixen och bli gröna på den punkten — inte automatiskt, ett separat, senare steg.
 
+## Merge-regeln (se `CLAUDE.md`)
+
+**Ingen branch rebasas eller uppdateras i förväg "för säkerhets skull".** Rebase/"Update
+branch" sker FÖRST när branchens faktiska beroende faktiskt har mergats, aldrig tidigare.
+Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE branchen än) och
+"kan mergas oberoende" (ingen väntan alls) — de är inte samma sak.
+
 ## Rekommenderad merge-ordning (just nu)
 
 1. **PR #9** (dependency-fix) → `claude/det-kommer-mer-879lcm`. Inga beroenden, redan grön.
-2. **`claude/development-workflow-principles`** → `claude/det-kommer-mer-879lcm`. Inga
-   beroenden, ren dokumentation.
-3. **PR #7** (P1) → sin bas. Uppdatera/rebasa mot ny huvudgren först om PR #9 redan mergat,
-   för att ärva npm-audit-fixen.
-4. **PR #8** (P2) → sin bas (PR #7:s branch), efter att PR #7 mergat/uppdaterats.
+2. **PR #10** (den här filen + `CLAUDE.md`) → `claude/det-kommer-mer-879lcm`. Uppdateras mot
+   ny huvudgren FÖRST efter att PR #9 faktiskt mergat (se Merge-regeln) — inte innan.
+3. **PR #7** (P1) → sin bas. Uppdateras/rebasas mot ny huvudgren FÖRST efter att PR #9
+   faktiskt mergat, för att ärva npm-audit-fixen — inte i förväg.
+4. **PR #8** (P2) → sin bas (PR #7:s branch). Rebasas FÖRST efter att PR #7 faktiskt mergat
+   — inte innan, även om PR #9 redan mergat.
 5. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` (redan rätt
-   grenad) när PR #8 är i ett stabilt läge — men det kräver ett separat, uttryckligt beslut
-   (branchen är fryst just nu).
+   grenad) FÖRST efter att PR #8 faktiskt mergat OCH ett separat, uttryckligt beslut tagits
+   (branchen är fryst just nu) — inte i förväg.
+
+## Vilka brancher blockerar andra
+
+- **PR #9 blockerar (CI-mässigt) att PR #10:s och PR #7:s egna `npm audit`-checkar blir
+  gröna** — inte innehållsmässigt (PR #10/#7 rör ingen frontend-fil), men strukturellt tills
+  de ärver fixen.
+- **PR #7 blockerar PR #8** strukturellt — PR #8 är grenad från PR #7:s tip, så en ren,
+  konfliktfri diff för PR #8 förutsätter att PR #7 är mergad eller stabil.
+- **PR #8 blockerar P7A:s implementation-start** — samma strukturella skäl, P7A är grenad
+  från PR #8:s tip.
+
+## Vilka brancher kan mergas oberoende
+
+- **PR #9** — helt oberoende. Kan mergas när som helst, väntar på ingenting.
+- **PR #10** — innehållsmässigt oberoende av samtliga andra brancher (rör bara `CLAUDE.md`/
+  `docs/BRANCH_REGISTRY.md`, ingen applikationskod). CI-gaten är dock delad med PR #9:s
+  problem (se ovan) — själva MERGEN är inte beroende av något, men att bli GRÖN i CI är det.
+
+## Vilka brancher väntar på ett beroende innan de bör uppdateras
+
+Enligt Merge-regeln — dessa ska INTE röras förrän beroendet faktiskt är mergat, inte i
+förväg:
+
+- **PR #10** väntar på att **PR #9** mergar innan dess bas ska uppdateras.
+- **PR #7** väntar på att **PR #9** mergar innan dess bas ska uppdateras (för att ärva
+  npm-audit-fixen).
+- **PR #8** väntar på att **PR #7** mergar innan dess bas ska rebasas.
+- **P7A** väntar på att **PR #8** mergar OCH ett separat beslut innan implementation
+  påbörjas.
 
 ## Konflikter
 
@@ -69,7 +106,7 @@ grenade direkt från `claude/det-kommer-mer-879lcm` @ a141065 och rör helt olik
 (`frontend/package.json`/`package-lock.json` respektive `CLAUDE.md`/`docs/BRANCH_REGISTRY.md`)
 — ingen konflikt mellan dem, oavsett mergeordning. Den enda kända, redan dokumenterade
 beroendekonflikten är strukturell, inte en filkonflikt: P1→P2→P7A-kedjan måste mergas i sin
-egen ordning (se "Rekommenderad merge-ordning" nedan) eftersom varje branch bygger på
+egen ordning (se "Rekommenderad merge-ordning" ovan) eftersom varje branch bygger på
 föregåendes tip-commit.
 
 Om en verklig filkonflikt upptäcks i framtiden ska den listas här explicit — vilka brancher,
