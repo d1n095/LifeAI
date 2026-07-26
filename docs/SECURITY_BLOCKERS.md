@@ -277,7 +277,50 @@ mot riktade botattacker fortfarande inte implementerat (se ovan, oförändrat). 
 protection för CI måste aktiveras manuellt i GitHub-inställningarna — se
 `docs/OPERATIONS.md`.
 
-## 3. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
+## 3. `brace-expansion` (GHSA-mh99-v99m-4gvg) — inget kompatibelt fix ännu
+
+**Status: dokumenterad, avsiktligt allowlistad undantag i CI, inte löst.** `npm audit`
+flaggar 9 höga fynd som alla härrör från EN advisory: `brace-expansion` <=5.0.7 (DoS via
+obegränsad expansion → OOM-krasch), nådd transitivt via `eslint`/`minimatch`s hela
+dev-verktygskedja (`@eslint/config-array`, `@eslint/eslintrc`, `eslint-plugin-import`,
+`eslint-plugin-jsx-a11y`, `eslint-plugin-react`, `eslint-config-next`).
+
+**Utrett och avvisat, i den ordningen:**
+1. **`overrides: { "brace-expansion": "5.0.8" }` (den patchade versionen) projektbrett** —
+   krashar `eslint`: `minimatch@3.1.5` (den version `eslint@9.39.5`s hela kedja fortfarande
+   använder) anropar `brace-expansion` som en CommonJS-funktion; `5.0.8` är en helt omskriven
+   ESM/CJS-paket med annan exportform (`TypeError: expand is not a function`).
+2. **Uppgradera `eslint` till `10.8.0`** (npms egen `npm audit fix --force`-rekommendation)
+   — löser `brace-expansion`-instansen i `eslint`s EGEN trädgren (den använder därefter
+   `minimatch@10.2.5` → `brace-expansion@5.0.8`, verifierat säker), men krashar `eslint-config-next`s
+   buntade `eslint-plugin-react@7.37.5`: `TypeError: contextOrFilename.getFilename is not a
+   function` — ESLint 10 tog bort `context.getFilename()`. Detta är samma genuina
+   verktygsinkompatibilitet som redan dokumenterades i punkt 1 ovan (2026-07-18, då `eslint`
+   medvetet pinnades till 9.39.5 av exakt detta skäl) — inte nytt, bara samma vägg mött igen
+   från ett annat håll.
+3. **Ingen patchad `1.x`/`2.x`/`3.x`/`4.x`-release av `brace-expansion` finns** — projektets
+   maintainer fixade buggen enbart i `5.0.8`; `eslint-plugin-import`/`jsx-a11y`/`react`s
+   senaste publicerade versioner (2.32.0 / 6.10.2 / 7.37.5) pinnar fortfarande
+   `minimatch: ^3.1.2` → `brace-expansion@^1.1.7`, oförändrat i väntan på att de själva
+   uppdaterar. `eslint-config-next` har ingen nyare release än `16.2.11` (redan senaste,
+   se PR #9) som drar in uppdaterade versioner av dessa.
+
+**Varför detta är en låg verklig risk just nu:** `brace-expansion` nås här uteslutande via
+`eslint`s egna dev-beroenden — ett lint-verktyg som körs på betrodd, lokal källkod
+(`npm run lint`/CI), aldrig i produktionsbygget eller klientbundeln, och aldrig på
+externt/obetrott indata. En DoS i den processen kan i värsta fall krascha en CI-körning,
+inte produktionstjänsten.
+
+**Hantering:** `frontend/scripts/check-npm-audit.js` — en liten, daterad, ID-specifik
+allowlist (endast GHSA-mh99-v99m-4gvg/advisory-id `1124334`) som körs istället för
+`npm audit --audit-level=high` direkt i `npm-audit`-jobbet i `.github/workflows/ci.yml`.
+Den blockerar fortfarande CI på VILKET SOM HELST annat högt/kritiskt fynd — det här är inte
+en generell avstängning av `npm audit`, bara ett smalt undantag för denna redan utredda,
+fix-lösa post. **Ta bort raden i allowlistan** så fort `eslint-config-next` (eller
+`eslint-plugin-react`/`import`/`jsx-a11y` var för sig) publicerar en release kompatibel med
+`eslint@10.x`, eller `brace-expansion` får en patchad `1.x`-release.
+
+## 4. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
 
 `backend/app/providers/pricing.py` innehåller manuellt underhållna listpriser. De driftar
 över tid om leverantörerna ändrar priser. Inte en säkerhetsbrist, men en driftsrisk om någon

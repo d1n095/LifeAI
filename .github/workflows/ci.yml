@@ -48,9 +48,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
-      # Fails the job on any high/critical vulnerability — moderate-and-below are tracked
+      # Fails the job on any high/critical vulnerability, except the small, dated,
+      # ID-scoped allowlist in scripts/check-npm-audit.js — moderate-and-below are tracked
       # but don't block (see docs/SECURITY_BLOCKERS.md for the current baseline).
-      - run: npm audit --audit-level=high
+      - run: node scripts/check-npm-audit.js
         working-directory: frontend
 
   frontend-build:
