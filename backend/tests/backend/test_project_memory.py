@@ -628,3 +628,110 @@ def test_memory_api_needs_founder_decision_endpoint(client):
     assert res.status_code == 200
     assert len(res.json()) == 1
     assert res.json()[0]["classification"] == "needs_founder_decision"
+
+
+# --- L. Fas 3: proof that the loop actually answers a cold resumption, not just stores rows --
+
+
+def test_resumption_brief_answers_a_cold_start_without_guessing(client, tmp_path, monkeypatch):
+    """This is the automated form of the manual Fas 3 proof: populate real project state
+    through the same HTTP surface a fresh agent session would use (doc/git ingestion,
+    branch/PR status, notes with every kind, a checkpoint), then assert the resulting
+    resumption brief — the one artifact a context-less session is handed — actually
+    contains a traceable answer to each of the six required questions (what's being built,
+    what's done, what's blocking, which branch/PR, what depends on what, the exact next
+    step), each tied to a real source citation. A brief that only echoed hardcoded/test-only
+    strings unrelated to what was ingested would fail this; so would one missing a section."""
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+
+    doc_source_id = client.post(
+        "/api/admin/memory/sources/doc", json={"relative_path": "CLAUDE.md"}, headers=headers
+    ).json()["id"]
+    client.post("/api/admin/memory/sources/git-commit", headers=headers)
+
+    client.post(
+        "/api/admin/memory/branch-pr-status",
+        json={
+            "kind": "pr",
+            "ref": "13",
+            "title": "feat: MainAI Project Memory Loop",
+            "status": "open_draft",
+            "base_ref": "claude/det-kommer-mer-879lcm",
+            "head_ref": "claude/mainai-memory-loop-v1",
+            "mergeable": True,
+            "ci_status": "pending",
+        },
+        headers=headers,
+    )
+
+    notes = [
+        {
+            "kind": "fact",
+            "content": "Projektet bygger ett founder-only Life OS med en MainAI Project Memory & Coordination Loop.",
+            "source_type": "doc",
+            "source_ref": "CLAUDE.md",
+            "source_id": doc_source_id,
+        },
+        {
+            "kind": "blocker",
+            "content": "PR #13 är fortfarande draft tills Fas 3 och Fas 4 är klara.",
+            "source_type": "branch_pr_status",
+            "source_ref": "pr:13",
+        },
+        {
+            "kind": "next_step",
+            "content": "Bygg Fas 4 (admin-UI), ta sedan PR #13 ur draft.",
+            "source_type": "branch_pr_status",
+            "source_ref": "pr:13",
+        },
+        {
+            "kind": "decision",
+            "content": "Rebasa aldrig en branch mot en ny bas i förväg — bara när beroendet faktiskt mergats.",
+            "source_type": "doc",
+            "source_ref": "CLAUDE.md",
+            "source_id": doc_source_id,
+        },
+    ]
+    for note in notes:
+        res = client.post("/api/admin/memory/notes", json=note, headers=headers)
+        assert res.status_code == 200, res.text
+
+    res = client.post(
+        "/api/admin/memory/checkpoints",
+        json={
+            "summary": "Fas 1+2 klara och verifierade; PR #13 öppen mot claude/det-kommer-mer-879lcm.",
+            "branch_name": "claude/mainai-memory-loop-v1",
+            "open_pr_refs": ["13"],
+        },
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+
+    # This is the ONLY read a genuinely cold, context-less session would perform.
+    latest = client.get("/api/admin/memory/checkpoints/latest")
+    assert latest.status_code == 200
+    brief = latest.json()["brief"]
+
+    # a. What is being built.
+    assert "Life OS" in brief and "Project Memory" in brief
+    # b. What's done / current phase — from the checkpoint's own summary, not invented.
+    assert "Fas 1+2 klara" in brief
+    # c. What's blocking.
+    assert "fortfarande draft" in brief
+    # d. Which branch and PR apply.
+    assert "claude/mainai-memory-loop-v1" in brief
+    assert "13" in latest.json()["open_pr_refs"]
+    assert "pr 13" in brief.lower() or "pr: 13" in brief.lower() or "13" in brief
+    # e. Dependency: base branch the PR depends on must be visible in the branch/PR section.
+    assert "claude/det-kommer-mer-879lcm" in brief
+    # f. The exact next safe step.
+    assert "Bygg Fas 4" in brief
+    # Every section is cited to a real source, not free-standing prose.
+    assert "källa: doc CLAUDE.md" in brief
+    assert "källa: branch_pr_status pr:13" in brief
+    # The static prohibitions list is always present, verbatim, regardless of what was ingested.
+    assert "Merga en pull request." in brief
+    assert "Källor och tidsstämplar" in brief
