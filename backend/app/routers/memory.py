@@ -21,7 +21,9 @@ from app.project_memory import (
     ingest_doc,
     ingest_git_commit,
     ingest_github_status,
+    ingest_system_map,
     is_checkpoint_stale,
+    latest_system_map,
     list_checkpoints,
     list_current_branch_pr_status,
     list_notes,
@@ -30,6 +32,7 @@ from app.project_memory import (
     read_checkpoint_brief,
     read_source_content,
     resolve_note,
+    retrieve_relevant_context,
 )
 from app.schemas import (
     ProjectBranchPRStatusOut,
@@ -331,3 +334,41 @@ def get_checkpoint_stale(checkpoint_id: uuid.UUID, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="Ingen sådan checkpoint.")
     stale, reasons = is_checkpoint_stale(db, checkpoint)
     return ProjectCheckpointStaleOut(stale=stale, reasons=reasons)
+
+
+# --- Conversation & knowledge retrieval (MainAI Core, 2026-07-26) ---------------------------
+
+
+@router.get("/retrieve")
+def retrieve_context(query: str = "", limit_per_category: int = 5, db: Session = Depends(get_db)):
+    """Category-distinguishing, relevance-ranked memory retrieval for MainAI's own chat loop
+    (or any other caller) — never the whole memory dumped into one blob. See
+    app/project_memory.retrieve_relevant_context()."""
+    result = retrieve_relevant_context(db, query, limit_per_category=limit_per_category)
+    return {category: [ProjectNoteOut.model_validate(n).model_dump(mode="json") for n in notes] for category, notes in result.items()}
+
+
+# --- System map ("moderkortsvy") -------------------------------------------------------------
+
+
+@router.post("/system-map", response_model=ProjectSourceOut)
+def ingest_system_map_route(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    try:
+        source = ingest_system_map(db, ingested_by=user.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_audit(db, user_id=user.id, action="project_system_map_ingested", entity_type="project_source", entity_id=str(source.id), request=request)
+    return source
+
+
+@router.get("/system-map/latest", response_model=ProjectSourceDetailOut)
+def get_latest_system_map(db: Session = Depends(get_db)):
+    source = latest_system_map(db)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Ingen systemkarta ingesterad ännu.")
+    content = read_source_content(source) if source.storage_key else ""
+    return ProjectSourceDetailOut(**ProjectSourceOut.model_validate(source).model_dump(), content=content)

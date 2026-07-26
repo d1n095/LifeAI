@@ -21,6 +21,8 @@ ingest_github_status()).
 """
 
 import io
+import json
+import re
 import subprocess
 import uuid
 from datetime import datetime
@@ -44,6 +46,7 @@ from app.storage import get_storage
 
 MAX_BRIEF_BYTES = 2 * 1024 * 1024  # a resumption brief is text; 2MB is already generous
 MAX_DOC_BYTES = 10 * 1024 * 1024  # a governing doc is text; 10MB is already generous
+MAX_SYSTEM_MAP_BYTES = 5 * 1024 * 1024  # a system map is structured JSON text, not a blob dump
 
 PROHIBITIONS = [
     "Merga en pull request.",
@@ -345,7 +348,148 @@ def latest_git_commit_source(db: Session) -> ProjectSource | None:
     return db.execute(stmt).scalars().first()
 
 
-# --- Conflict / duplicate-work detection ---------------------------------------------------
+# --- System map ("moderkortsvy") -------------------------------------------------------------
+
+_ROUTER_PREFIX_RE = re.compile(r"APIRouter\(\s*prefix=[\"']([^\"']+)[\"']")
+_ROUTE_DECORATOR_RE = re.compile(r"@router\.(get|post|put|patch|delete)\(\s*[\"']([^\"']+)[\"']")
+_MODEL_CLASS_RE = re.compile(r"^class\s+(\w+)\(Base\)", re.MULTILINE)
+_TABLENAME_RE = re.compile(r"__tablename__\s*=\s*[\"'](\w+)[\"']")
+_MIGRATION_REVISION_RE = re.compile(r"^revision\s*=\s*[\"'](\w+)[\"']", re.MULTILINE)
+_MIGRATION_DOWN_REVISION_RE = re.compile(r"^down_revision\s*=\s*[\"']?(\w+)?[\"']?", re.MULTILINE)
+
+
+def _scan_backend_routers(backend_root: Path) -> list[dict]:
+    routers = []
+    routers_dir = backend_root / "app" / "routers"
+    if not routers_dir.is_dir():
+        return routers
+    for path in sorted(routers_dir.glob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        prefix_match = _ROUTER_PREFIX_RE.search(text)
+        routes = [f"{method.upper()} {prefix_match.group(1) if prefix_match else ''}{path_suffix}" for method, path_suffix in _ROUTE_DECORATOR_RE.findall(text)]
+        if prefix_match or routes:
+            routers.append({"module": f"app/routers/{path.name}", "prefix": prefix_match.group(1) if prefix_match else None, "routes": routes})
+    return routers
+
+
+def _scan_backend_models(backend_root: Path) -> list[dict]:
+    models = []
+    models_dir = backend_root / "app" / "models"
+    if not models_dir.is_dir():
+        return models
+    for path in sorted(models_dir.glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        classes = _MODEL_CLASS_RE.findall(text)
+        tables = _TABLENAME_RE.findall(text)
+        if classes or tables:
+            models.append({"module": f"app/models/{path.name}", "classes": classes, "tables": tables})
+    return models
+
+
+def _scan_migrations(backend_root: Path) -> list[dict]:
+    migrations = []
+    versions_dir = backend_root / "alembic" / "versions"
+    if not versions_dir.is_dir():
+        return migrations
+    for path in sorted(versions_dir.glob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        revision_match = _MIGRATION_REVISION_RE.search(text)
+        down_match = _MIGRATION_DOWN_REVISION_RE.search(text)
+        first_line = next((line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith('"""')), "")
+        migrations.append(
+            {
+                "file": path.name,
+                "revision": revision_match.group(1) if revision_match else None,
+                "down_revision": down_match.group(1) if down_match and down_match.group(1) else None,
+                "summary": first_line[:200],
+            }
+        )
+    return migrations
+
+
+def _scan_frontend_routes(project_root: Path) -> list[str]:
+    app_dir = project_root / "frontend" / "app"
+    if not app_dir.is_dir():
+        return []
+    routes = []
+    for page_path in sorted(app_dir.rglob("page.tsx")):
+        rel = page_path.relative_to(app_dir).parent
+        # Next.js route groups like "(shell)" don't appear in the actual URL path.
+        segments = [seg for seg in rel.parts if not (seg.startswith("(") and seg.endswith(")"))]
+        route = "/" + "/".join(segments) if segments else "/"
+        routes.append(route)
+    return routes
+
+
+def build_system_map(project_root: Path) -> dict:
+    """A structured, machine-readable snapshot of LifeAI's actual shape — routers, models/
+    tables, migrations, frontend routes — built by scanning real source files under
+    PROJECT_ROOT (same text-reading approach as ingest_doc(), no new architecture). This is
+    the concrete "moderkortsvy" CLAUDE.md's 2026-07-26 MainAI Core direction asks for: what
+    exists, derived from the code itself, not from memory or assumption.
+
+    Deliberately narrow for this first slice: no queues/workers/storage/provider inventory yet
+    (those already have their own admin-visible status — /api/admin/library/ops,
+    /api/admin/providers — this map does not duplicate them, it indexes structure). Extending
+    the map's breadth is a separate, later increment, not a blocker to it being useful now."""
+    backend_root = project_root / "backend"
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "routers": _scan_backend_routers(backend_root),
+        "models": _scan_backend_models(backend_root),
+        "migrations": _scan_migrations(backend_root),
+        "frontend_routes": _scan_frontend_routes(project_root),
+    }
+
+
+def ingest_system_map(db: Session, *, ingested_by: str) -> ProjectSource:
+    """Builds the system map and stores it durably via the same content-addressed storage
+    backend everything else in this module uses — the DB row only indexes it, exactly like
+    ingest_doc()."""
+    project_root = _require_project_root()
+    system_map = build_system_map(project_root)
+    content = json.dumps(system_map, indent=2, ensure_ascii=False).encode("utf-8")
+    if len(content) > MAX_SYSTEM_MAP_BYTES:
+        raise ValueError(f"Systemkartan är större än {MAX_SYSTEM_MAP_BYTES} bytes — avbryter ingestion.")
+
+    storage = get_storage()
+    reader = io.BytesIO(content)
+    blob = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=MAX_SYSTEM_MAP_BYTES)
+
+    commit_sha: str | None = None
+    try:
+        commit_sha = _run_git(project_root, "rev-parse", "HEAD")
+    except Exception:  # noqa: BLE001 - git may be unavailable; system-map ingestion must still succeed
+        commit_sha = None
+
+    source = ProjectSource(
+        source_type="system_map",
+        source_ref="lifeai",
+        content_sha256=blob.sha256,
+        storage_key=blob.storage_key,
+        commit_sha=commit_sha,
+        raw_data={
+            "router_count": len(system_map["routers"]),
+            "model_count": len(system_map["models"]),
+            "migration_count": len(system_map["migrations"]),
+            "frontend_route_count": len(system_map["frontend_routes"]),
+        },
+        ingested_by=ingested_by,
+    )
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+    return source
+
+
+def latest_system_map(db: Session) -> ProjectSource | None:
+    stmt = select(ProjectSource).where(ProjectSource.source_type == "system_map").order_by(ProjectSource.ingested_at.desc()).limit(1)
+    return db.execute(stmt).scalars().first()
+
+
+# --- Conversation & knowledge retrieval -----------------------------------------------------
 
 
 def _tokenize(text: str) -> set[str]:
@@ -356,6 +500,56 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+# The categories a caller (MainAI's own chat loop, or any consumer) must keep visually and
+# structurally distinct — never dumped together as one undifferentiated blob of "memory" (see
+# CLAUDE.md's 2026-07-26 "MainAI Core" direction: verified facts vs. founder decisions vs.
+# not-yet-decided ideas vs. history vs. current status vs. uncertain/conflicting conclusions).
+_RETRIEVAL_CATEGORY_BY_KIND: dict[NoteKind, str] = {
+    NoteKind.fact: "verifierade_fakta_och_status",
+    NoteKind.decision: "grundarens_beslut",
+    NoteKind.idea: "ej_beslutade_ideer",
+    NoteKind.blocker: "blockerare",
+    NoteKind.next_step: "nasta_steg",
+    NoteKind.uncertainty: "osakra_eller_motstridiga",
+}
+
+
+def retrieve_relevant_context(db: Session, query: str, *, limit_per_category: int = 5) -> dict:
+    """Selects the notes actually relevant to `query` instead of dumping the entire memory
+    into every prompt (CLAUDE.md's explicit "Minnet får inte dumpas okontrollerat" requirement).
+
+    Ranking is the same honestly-limited keyword/Jaccard-overlap heuristic
+    detect_conflicts_and_duplicates() already uses — not semantic embeddings (no new
+    infrastructure introduced for this first slice; see module docstring's reuse principle).
+    An empty query returns the most recent open notes per category instead of ranking (there
+    is nothing to rank against).
+
+    Returns a dict keyed by _RETRIEVAL_CATEGORY_BY_KIND's values, each a list of
+    {note, score}, plus a separate `historik` bucket (resolved/superseded notes matching the
+    query) so history is never confused with current state."""
+    query_tokens = _tokenize(query)
+    open_notes = list_notes(db, status=NoteStatus.open)
+
+    def _ranked(notes: list[ProjectNote]) -> list[ProjectNote]:
+        if not query_tokens:
+            return notes[:limit_per_category]
+        scored = [(n, score) for n in notes if (score := _jaccard(query_tokens, _tokenize(n.content))) > 0]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [n for n, _score in scored[:limit_per_category]]
+
+    result: dict[str, list[ProjectNote]] = {}
+    for kind, category in _RETRIEVAL_CATEGORY_BY_KIND.items():
+        result[category] = _ranked([n for n in open_notes if n.kind == kind])
+
+    historical_stmt = select(ProjectNote).where(ProjectNote.status != NoteStatus.open).order_by(ProjectNote.resolved_at.desc())
+    historical = list(db.execute(historical_stmt).scalars())
+    if query_tokens:
+        historical = [n for n in historical if _jaccard(query_tokens, _tokenize(n.content)) > 0]
+    result["historik"] = historical[:limit_per_category]
+
+    return result
 
 
 def detect_conflicts_and_duplicates(db: Session, *, similarity_threshold: float = 0.4) -> dict:
@@ -456,6 +650,7 @@ def generate_resumption_brief(
         (NoteKind.decision, "## Beslut (gällande)"),
         (NoteKind.next_step, "## Vad som pågår / nästa steg"),
         (NoteKind.uncertainty, "## Osäkerheter och konflikter"),
+        (NoteKind.idea, "## Idéer (ännu inte beslutade)"),
     ):
         matching = [n for n in open_notes if n.kind == kind]
         lines.append(heading)

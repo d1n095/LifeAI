@@ -14,13 +14,17 @@ class NoteKind(str, enum.Enum):
 
     `fact`/`uncertainty` cover "what are we building, what phase, what's done" and "open
     questions/conflicts" (Fas 2's Current Project State requirement) — `decision`/`blocker`/
-    `next_step` remain the original three from the first slice."""
+    `next_step` remain the original three from the first slice. `idea` (MainAI Core, 2026-07-26)
+    is distinct from `decision`: an idea/wish is NOT yet acted on — retrieval and the
+    resumption brief must never present one as settled, which is exactly why it isn't just a
+    `fact` with a note attached."""
 
     fact = "fact"
     decision = "decision"
     blocker = "blocker"
     next_step = "next_step"
     uncertainty = "uncertainty"
+    idea = "idea"
 
 
 class NoteStatus(str, enum.Enum):

@@ -1,3 +1,4 @@
+from app.models.agent_task import AgentRole, AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.models.audit import AuditLog
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
@@ -21,6 +22,11 @@ from app.models.usage import UsageLog
 from app.models.user import User
 
 __all__ = [
+    "AgentRole",
+    "AgentTask",
+    "AgentTaskEvent",
+    "AgentTaskEventType",
+    "AgentTaskStatus",
     "AuditLog",
     "ClaimRelationship",
     "CompanyInfo",

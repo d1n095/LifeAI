@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.models.project_memory import NoteKind, NoteStatus, ProjectCheckpointNote, SideIssueClassification
 from app.project_memory import (
     add_note,
+    build_system_map,
     classify_note,
     create_checkpoint,
     detect_conflicts_and_duplicates,
@@ -34,7 +35,9 @@ from app.project_memory import (
     ingest_doc,
     ingest_git_commit,
     ingest_github_status,
+    ingest_system_map,
     is_checkpoint_stale,
+    latest_system_map,
     list_checkpoints,
     list_current_branch_pr_status,
     list_notes,
@@ -43,6 +46,7 @@ from app.project_memory import (
     read_checkpoint_brief,
     read_source_content,
     resolve_note,
+    retrieve_relevant_context,
 )
 
 FOUNDER_EMAIL = "founder@lifeos.local"
@@ -151,8 +155,8 @@ def test_generate_resumption_brief_cites_every_open_note_and_groups_by_kind(db_s
 
 def test_generate_resumption_brief_says_none_explicitly_when_a_category_is_empty():
     brief = generate_resumption_brief(summary="Allt klart.", branch_name="main", open_pr_refs=[], open_notes=[])
-    # 5 = "Öppna PR:er" plus the blocker/decision/next_step/uncertainty sections, all empty
-    assert brief.count("(inga)") == 5
+    # 6 = "Öppna PR:er" plus the blocker/decision/next_step/uncertainty/idea sections, all empty
+    assert brief.count("(inga)") == 6
     assert "**Öppna PR:er:** (inga)" in brief
 
 
@@ -735,3 +739,136 @@ def test_resumption_brief_answers_a_cold_start_without_guessing(client, tmp_path
     # The static prohibitions list is always present, verbatim, regardless of what was ingested.
     assert "Merga en pull request." in brief
     assert "Källor och tidsstämplar" in brief
+
+
+# --- L. MainAI Core: conversation & knowledge retrieval (2026-07-26) -----------------------
+
+
+def test_retrieve_relevant_context_ranks_by_overlap_not_just_recency(db_session):
+    add_note(db_session, kind=NoteKind.blocker, content="CI:n är trasig på grund av npm audit", source_type="pr", source_ref="#9", created_by="test")
+    add_note(db_session, kind=NoteKind.blocker, content="Databasen saknar en RLS-policy för dokument", source_type="doc", source_ref="CLAUDE.md", created_by="test")
+    add_note(db_session, kind=NoteKind.next_step, content="Fixa npm audit sårbarheten i frontend", source_type="pr", source_ref="#9", created_by="test")
+
+    result = retrieve_relevant_context(db_session, "npm audit sårbarhet i CI")
+
+    blockers = result["blockerare"]
+    assert len(blockers) == 1
+    assert "npm audit" in blockers[0].content
+    next_steps = result["nasta_steg"]
+    assert len(next_steps) == 1
+    assert "npm audit" in next_steps[0].content
+
+
+def test_retrieve_relevant_context_distinguishes_categories(db_session):
+    add_note(db_session, kind=NoteKind.fact, content="LifeAI bygger MainAI som ett Life OS", source_type="doc", source_ref="CLAUDE.md", created_by="test")
+    add_note(db_session, kind=NoteKind.decision, content="Grundaren beslutade att aldrig auto-merga utan gate", source_type="doc", source_ref="CLAUDE.md", created_by="test")
+    add_note(db_session, kind=NoteKind.idea, content="Idé: kanske bygga en mobilapp senare, ej beslutat", source_type="doc", source_ref="CLAUDE.md", created_by="test")
+    add_note(db_session, kind=NoteKind.uncertainty, content="Oklart om Redis-instansen räcker för skalning", source_type="doc", source_ref="CLAUDE.md", created_by="test")
+    resolve_note(
+        db_session,
+        add_note(db_session, kind=NoteKind.blocker, content="Gammal blockerare om auto-merge-gate", source_type="doc", source_ref="CLAUDE.md", created_by="test").id,
+        resolved_by="test",
+        resolution_note="löst",
+    )
+
+    result = retrieve_relevant_context(db_session, "auto-merga")
+
+    assert any("aldrig auto-merga" in n.content for n in result["grundarens_beslut"])
+    assert all("mobilapp" not in n.content for n in result["grundarens_beslut"])
+
+    # An idea must never appear in the decisions bucket, and vice versa — that's the exact
+    # distinction CLAUDE.md requires between "grundarens beslut" and "idéer som ännu inte
+    # beslutats". Checked with an empty (recency-based, unranked) query since categorization
+    # by kind is orthogonal to relevance-ranking against a specific question.
+    all_categories = retrieve_relevant_context(db_session, "")
+    assert any("mobilapp" in n.content for n in all_categories["ej_beslutade_ideer"])
+    assert all("mobilapp" not in n.content for n in all_categories["grundarens_beslut"])
+    assert any("aldrig auto-merga" in n.content for n in all_categories["grundarens_beslut"])
+    assert all("aldrig auto-merga" not in n.content for n in all_categories["ej_beslutade_ideer"])
+
+    result_history = retrieve_relevant_context(db_session, "auto-merge-gate")
+    assert any("auto-merge-gate" in n.content for n in result_history["historik"])
+
+
+def test_retrieve_relevant_context_empty_query_returns_recent_open_notes(db_session):
+    add_note(db_session, kind=NoteKind.fact, content="Statusfakta ett", source_type="doc", source_ref="CLAUDE.md", created_by="test")
+    result = retrieve_relevant_context(db_session, "")
+    assert len(result["verifierade_fakta_och_status"]) == 1
+
+
+# --- M. MainAI Core: system map ("moderkortsvy") --------------------------------------------
+
+
+def _init_fake_repo_with_lifeai_structure(tmp_path) -> str:
+    """A throwaway repo shaped enough like the real LifeAI layout (one router, one model, one
+    migration, one frontend page) for build_system_map() to have something real to scan —
+    real file reads, no mocked filesystem."""
+    (tmp_path / "backend" / "app" / "routers").mkdir(parents=True)
+    (tmp_path / "backend" / "app" / "models").mkdir(parents=True)
+    (tmp_path / "backend" / "alembic" / "versions").mkdir(parents=True)
+    (tmp_path / "frontend" / "app" / "admin" / "widgets").mkdir(parents=True)
+
+    (tmp_path / "backend" / "app" / "routers" / "widgets.py").write_text(
+        'from fastapi import APIRouter\n\nrouter = APIRouter(prefix="/api/widgets", tags=["widgets"])\n\n\n'
+        '@router.get("/list")\ndef list_widgets():\n    ...\n\n\n@router.post("/create")\ndef create_widget():\n    ...\n'
+    )
+    (tmp_path / "backend" / "app" / "models" / "widget.py").write_text(
+        "from app.db import Base\n\n\nclass Widget(Base):\n    __tablename__ = \"widgets\"\n"
+    )
+    (tmp_path / "backend" / "alembic" / "versions" / "0099_widgets.py").write_text(
+        '"""Adds the widgets table.\n\nRevision ID: 0099\n"""\n\nrevision = "0099"\ndown_revision = "0098"\n'
+    )
+    (tmp_path / "frontend" / "app" / "admin" / "widgets" / "page.tsx").write_text("export default function Page() { return null; }\n")
+
+    def _git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    _git("init", "-q")
+    _git("config", "user.email", "test@example.com")
+    _git("config", "user.name", "Test")
+    _git("add", ".")
+    _git("commit", "-q", "-m", "initial")
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    return result.stdout.strip()
+
+
+def test_build_system_map_finds_routers_models_migrations_and_frontend_routes(tmp_path):
+    _init_fake_repo_with_lifeai_structure(tmp_path)
+    system_map = build_system_map(tmp_path)
+
+    routers = system_map["routers"]
+    assert len(routers) == 1
+    assert routers[0]["prefix"] == "/api/widgets"
+    assert "GET /api/widgets/list" in routers[0]["routes"]
+    assert "POST /api/widgets/create" in routers[0]["routes"]
+
+    models = system_map["models"]
+    assert len(models) == 1
+    assert "Widget" in models[0]["classes"]
+    assert "widgets" in models[0]["tables"]
+
+    migrations = system_map["migrations"]
+    assert len(migrations) == 1
+    assert migrations[0]["revision"] == "0099"
+    assert migrations[0]["down_revision"] == "0098"
+
+    assert "/admin/widgets" in system_map["frontend_routes"]
+
+
+def test_ingest_system_map_stores_durably_and_records_counts(db_session, tmp_path, monkeypatch):
+    commit_sha = _init_fake_repo_with_lifeai_structure(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+
+    source = ingest_system_map(db_session, ingested_by="test")
+
+    assert source.source_type == "system_map"
+    assert source.commit_sha == commit_sha
+    assert source.raw_data["router_count"] == 1
+    assert source.raw_data["model_count"] == 1
+
+    stored = read_source_content(source)
+    assert '"routers"' in stored
+    assert "widgets" in stored
+
+    latest = latest_system_map(db_session)
+    assert latest.id == source.id

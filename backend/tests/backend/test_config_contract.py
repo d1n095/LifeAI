@@ -143,6 +143,10 @@ CONFIG_MATRIX: dict[str, dict] = {
     "worker_id": {"required_in_production": False, "secret": False, "default": None, "validates": "none — falls back to socket.gethostname() when unset, see app/worker.py's _worker_id"},
     "provider_verification_cache_seconds": {"required_in_production": False, "secret": False, "default": 300, "validates": "none — used as-is by app/providers/verification.py's ensure_verified"},
     "provider_verification_timeout_seconds": {"required_in_production": False, "secret": False, "default": 10.0, "validates": "none — passed as-is to provider.chat()/embed()'s timeout kwarg"},
+    "github_token": {"required_in_production": False, "secret": True, "default": None, "validates": "none — GitHub write operations are simply unavailable if unset, same graceful degradation as the provider API keys"},
+    "github_repo": {"required_in_production": False, "secret": False, "default": None, "validates": "none — 'owner/repo' format, checked at call time by app/integrations/github_client.py, not at startup"},
+    "github_write_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — a plain bool gate; off by default so MainAI only proposes PRs until explicitly turned on"},
+    "github_auto_merge_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates a merge capability that has no implementation yet (see app/integrations/github_client.py's docstring); always off in this slice"},
 }
 
 
