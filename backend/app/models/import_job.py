@@ -15,6 +15,20 @@ class ImportJobStatus(str, enum.Enum):
     completed = "completed"
     failed = "failed"
     partial = "partial"  # some files succeeded, some failed — see app/rag/library_import.py
+    # Life Library durable-worker package: the founder deleted every source this job would
+    # still have produced (or the job itself, before it produced anything) while it was
+    # still pending/running — see app/routers/library.py's delete_source and
+    # app/worker.py's cancellation checks between pipeline steps.
+    cancelled = "cancelled"
+    # P1 (provider pre-flight verification): every non-duplicate, non-skipped file in this
+    # job paused on `awaiting_provider`/`blocked_provider` — nothing genuinely failed, the
+    # job is just waiting. app/worker.py's _requeue_blocked_jobs flips it back to `pending`
+    # automatically once the active provider verifies ok, and run_import_job reprocesses it
+    # exactly like any other reclaimed job — no re-upload, see app/rag/library_import.py's
+    # _import_one_file existing-document handling. Like `cancelled`, this needs no migration:
+    # `knowledge_import_jobs.status` is a plain varchar(16), not a native Postgres enum (see
+    # migration 0006's docstring).
+    blocked = "blocked"
 
 
 class ImportJob(Base):
@@ -44,6 +58,10 @@ class ImportJob(Base):
     succeeded_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
     skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    # P1: files paused on awaiting_provider/blocked_provider — not genuinely failed, just
+    # waiting. Kept separate from failed_count so the Library UI can tell "something is
+    # actually broken" from "nothing is broken, we're waiting on the AI provider" at a glance.
+    blocked_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Per-file outcome: [{"filename": ..., "status": "indexed"|"failed"|"skipped", "reason": ..., "source_id": ...}]
@@ -60,3 +78,23 @@ class ImportJob(Base):
     # is_transient_error() — lets the Library UI show "kommer försökas igen automatiskt" vs.
     # "kräver en ny manuell import" instead of a single generic "misslyckades".
     last_failure_transient: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # --- Life Library durable-worker package (app/storage/, app/worker.py) ---
+    # The RAW uploaded package (a single file or a ZIP) as streamed durably to app/storage/
+    # by POST /api/library/import BEFORE any response is sent — source_checksum above is
+    # already this blob's sha256 (reused, not duplicated). The worker opens this file to do
+    # the actual extraction/indexing work, instead of receiving the bytes in-process.
+    source_storage_key: Mapped[str | None] = mapped_column(String(140), nullable=True)
+    source_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_media_type: Mapped[str | None] = mapped_column(String(96), nullable=True)
+
+    # Worker claim/lease (app/worker.py's claim_next_job — Postgres FOR UPDATE SKIP LOCKED,
+    # not a Redis lock: Postgres is the source of truth for which worker owns a job, exactly
+    # as this package's design requires). locked_by identifies the claiming
+    # worker/container (settings.worker_id); lease_expires_at is what lets a DIFFERENT
+    # worker safely reclaim a job whose owner crashed or was killed mid-processing — see
+    # claim_next_job's docstring. last_heartbeat_at is renewed alongside the lease on every
+    # per-step progress update, surfaced on GET /api/library/ops/status.
+    locked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

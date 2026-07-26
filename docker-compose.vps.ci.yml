@@ -4,11 +4,13 @@
 # job tests the REAL production compose file, not a rewritten copy of it.
 #
 # What this changes, and why it's CI-only:
-#   - backend: adds host.docker.internal so it can reach the runner-level postgres GitHub
-#     Actions service (see combined-container-verify job for the same pattern) — production
-#     instead reaches Supabase over the public internet, no extra_hosts entry needed there
-#     at all. Redis needs no such entry at all, in CI or production: it's docker-compose.vps.
-#     yml's own `redis` service in both places, reachable by Docker DNS as `redis` either way.
+#   - backend, worker: add host.docker.internal so they can reach the runner-level postgres
+#     GitHub Actions service (see combined-container-verify job for the same pattern) —
+#     production instead reaches Supabase over the public internet, no extra_hosts entry
+#     needed there at all. Both need it here: worker makes its own real Postgres connections
+#     (app/db.py) exactly like backend does, not just backend. Redis needs no such entry at
+#     all, in CI or production: it's docker-compose.vps.yml's own `redis` service in both
+#     places, reachable by Docker DNS as `redis` either way.
 #
 # caddy's own "80:80"/"443:443" publish from docker-compose.vps.yml is left untouched and
 # reused as-is (the job curls host port 80 directly) — ports are merged/concatenated across
@@ -18,5 +20,8 @@
 # since a ":80"-only site block never triggers Caddy's automatic HTTPS.
 services:
   backend:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
     extra_hosts:
       - "host.docker.internal:host-gateway"

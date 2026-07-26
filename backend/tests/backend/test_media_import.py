@@ -25,6 +25,7 @@ from app.rag.media_import import (
 )
 from app.rag.library_import import run_import_job
 from app.rag.vector_store import hybrid_search
+from app.storage import get_storage
 
 EMBEDDING_DIM = get_settings().embedding_dim
 
@@ -37,7 +38,7 @@ def _fake_embedding_provider(monkeypatch):
     from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [[0.01 * (i + 1)] * EMBEDDING_DIM for i, _ in enumerate(texts)]
 
     async def _fake_chat(self, messages, model, **kwargs):
@@ -54,11 +55,35 @@ def _set_rls_user(db_session, owner_id) -> None:
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
 
 
-def _make_job(db_session, owner_id):
+def _read_chunk_for(data: bytes, size: int = 1 << 16):
+    pos = 0
+
+    def _read():
+        nonlocal pos
+        chunk = data[pos : pos + size]
+        pos += len(chunk)
+        return chunk
+
+    return _read
+
+
+def _make_job(db_session, owner_id, raw: bytes = b"", filename: str = "test.mp3"):
+    """Durable-worker package: run_import_job() reads the original from app/storage/ via
+    ImportJob.source_storage_key rather than taking raw bytes directly — this helper does the
+    storage write a real POST /api/library/import would already have done (see
+    test_library_import.py's identical helper)."""
     from app.models.import_job import ImportJob, ImportJobStatus
 
     _set_rls_user(db_session, owner_id)
-    job = ImportJob(owner_id=owner_id, status=ImportJobStatus.pending)
+    blob = get_storage().write_stream(_read_chunk_for(raw), max_bytes=max(len(raw), 1))
+    job = ImportJob(
+        owner_id=owner_id,
+        status=ImportJobStatus.pending,
+        source_filename=filename,
+        source_checksum=blob.sha256,
+        source_storage_key=blob.storage_key,
+        source_size_bytes=blob.size_bytes,
+    )
     db_session.add(job)
     db_session.commit()
     return job
@@ -204,8 +229,8 @@ async def test_mp3_import_produces_timestamped_searchable_chunks(db_session, mak
 
     monkeypatch.setattr(MockTranscriptionProvider, "transcribe", _fake_transcribe)
 
-    job = _make_job(db_session, user.id)
-    await run_import_job(db_session, job.id, user.id, VALID_MP3, "founder-talk.mp3")
+    job = _make_job(db_session, user.id, VALID_MP3, "founder-talk.mp3")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status.value == "completed"
@@ -249,8 +274,8 @@ async def test_mp4_import_dispatches_to_media_pipeline_not_text_extraction(db_se
 
     monkeypatch.setattr(MockTranscriptionProvider, "transcribe", _fake_transcribe)
 
-    job = _make_job(db_session, user.id)
-    await run_import_job(db_session, job.id, user.id, VALID_MP4, "demo.mp4")
+    job = _make_job(db_session, user.id, VALID_MP4, "demo.mp4")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status.value == "completed"
@@ -265,10 +290,10 @@ async def test_invalid_media_signature_fails_the_file_not_the_whole_job(db_sessi
     per-file failure — mirrors ZipSecurityError's per-entry counterpart, never a job-level
     crash (see app/rag/media_import.py's MediaImportError docstring)."""
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     fake_mp3 = b"this is not an mp3 despite the extension" + b"\x00" * 32
+    job = _make_job(db_session, user.id, fake_mp3, "fake.mp3")
 
-    await run_import_job(db_session, job.id, user.id, fake_mp3, "fake.mp3")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status.value == "failed"
@@ -284,9 +309,9 @@ async def test_media_import_never_makes_the_placeholder_transcript_look_like_rea
     — runs for real. It must still succeed end-to-end (the pipeline itself is fully wired),
     but its content must stay honestly labeled as a placeholder, never invented speech."""
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
+    job = _make_job(db_session, user.id, VALID_MP3, "unmocked.mp3")
 
-    await run_import_job(db_session, job.id, user.id, VALID_MP3, "unmocked.mp3")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status.value == "completed"

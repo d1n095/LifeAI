@@ -21,6 +21,7 @@ from app.models.import_job import ImportJob, ImportJobStatus
 from app.rag.library_import import run_import_job
 from app.rag.retrieve import retrieve_context
 from app.rag.vector_store import hybrid_search
+from app.storage import get_storage
 
 EMBEDDING_DIM = get_settings().embedding_dim
 FILE_COUNT = 10
@@ -32,7 +33,7 @@ def _fake_embedding_provider(monkeypatch):
     from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [[0.01 * ((i % 97) + 1)] * EMBEDDING_DIM for i, _ in enumerate(texts)]
 
     # Import now also runs claim extraction (app/rag/claims.py, STEG 10), which calls the
@@ -57,11 +58,35 @@ def _make_zip() -> bytes:
     return buf.getvalue()
 
 
-def _make_job(db_session, owner_id) -> ImportJob:
+def _read_chunk_for(data: bytes, size: int = 1 << 16):
+    pos = 0
+
+    def _read():
+        nonlocal pos
+        chunk = data[pos : pos + size]
+        pos += len(chunk)
+        return chunk
+
+    return _read
+
+
+def _make_job(db_session, owner_id, raw: bytes, filename: str) -> ImportJob:
+    """Durable-worker package: run_import_job() reads the original from app/storage/ via
+    ImportJob.source_storage_key rather than taking raw bytes directly — this helper does the
+    storage write a real POST /api/library/import would already have done (see
+    test_library_import.py's identical helper)."""
     from sqlalchemy import text
 
     db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
-    job = ImportJob(owner_id=owner_id, status=ImportJobStatus.pending)
+    blob = get_storage().write_stream(_read_chunk_for(raw), max_bytes=max(len(raw), 1))
+    job = ImportJob(
+        owner_id=owner_id,
+        status=ImportJobStatus.pending,
+        source_filename=filename,
+        source_checksum=blob.sha256,
+        source_storage_key=blob.storage_key,
+        source_size_bytes=blob.size_bytes,
+    )
     db_session.add(job)
     db_session.commit()
     return job
@@ -70,11 +95,11 @@ def _make_job(db_session, owner_id) -> ImportJob:
 @pytest.mark.asyncio
 async def test_measure_import_and_search_performance(db_session, make_verified_user, capsys):
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     zip_bytes = _make_zip()
+    job = _make_job(db_session, user.id, zip_bytes, "prestandapaket.zip")
 
     import_start = time.monotonic()
-    await run_import_job(db_session, job.id, user.id, zip_bytes, "prestandapaket.zip")
+    await run_import_job(db_session, job.id, user.id)
     import_seconds = time.monotonic() - import_start
 
     db_session.refresh(job)

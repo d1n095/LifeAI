@@ -28,7 +28,7 @@ def _fake_provider(monkeypatch):
     async def _fake_chat(self, messages, model, **kwargs):
         return ChatResult(content=FAKE_ANSWER, provider="openai", model=model, raw_usage={"prompt_tokens": 12, "completion_tokens": 8})
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [MATCHING_VECTOR for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)

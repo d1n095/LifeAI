@@ -3,9 +3,14 @@
 #   - /opt/lifeai's non-secret files: docker-compose.vps.yml, Caddyfile, deployment records
 #     (scripts/vps/deploy.sh's and rollback.sh's *.json history — digests/timestamps/results
 #     only, never secrets, see deploy.sh's own record-writing code).
-#   - the caddy_data and caddy_config named Docker volumes (TLS certificates + Caddy's own
-#     autosaved config) — the only persistent Docker volumes docker-compose.vps.yml defines;
-#     backend/frontend have none (see docs/VPS_ARCHITECTURE.md).
+#   - the caddy_data, caddy_config, and lifeai_uploads named Docker volumes (TLS certificates
+#     + Caddy's own autosaved config, plus — since the durable-worker package — every
+#     original file the Life Library has ever accepted, content-addressed under
+#     lifeai_uploads, see backend/app/storage/local_fs.py). This is the WHOLE reason
+#     lifeai_uploads must be backed up: it's the only durable copy of an original file's
+#     bytes outside Postgres, which stores the metadata (Document.storage_key/sha256/
+#     size_bytes) but never the bytes themselves. Losing this volume without a backup means
+#     every already-imported original is gone even though the database still looks intact.
 #
 # Deliberately does NOT back up:
 #   - /etc/lifeai/lifeai.env (the secrets file). An unencrypted archive sitting on the same
@@ -23,8 +28,6 @@
 #     up in the first place, safe to lose entirely either way.
 #   - Docker's own json-file container logs: ephemeral, already size/count-limited by
 #     docker-compose.vps.yml's own logging driver config, not disaster-recovery-relevant.
-#   - Uploaded files: this app stores none on the VPS's own disk — document content lives in
-#     Postgres (document_chunks), not local files (see docs/VPS_ARCHITECTURE.md).
 #
 # Usage: ./backup.sh [--dry-run] [--compose-dir /opt/lifeai] [--output-dir /var/backups/lifeai] [--keep N]
 #
@@ -96,9 +99,9 @@ fi
 run tar czf "$STAGING_DIR/opt-lifeai.tar.gz" -C "$STAGING_DIR/opt-lifeai" .
 run rm -rf "$STAGING_DIR/opt-lifeai"
 
-log_info "== 2/4: archiving Docker volumes (caddy_data, caddy_config) =="
+log_info "== 2/4: archiving Docker volumes (caddy_data, caddy_config, lifeai_uploads) =="
 BACKED_UP_VOLUMES="[]"
-for vol in lifeai_caddy_data lifeai_caddy_config; do
+for vol in lifeai_caddy_data lifeai_caddy_config lifeai_uploads; do
     short_name="${vol#lifeai_}"
     if ! docker volume inspect "$vol" &> /dev/null; then
         log_warn "Volume $vol does not exist yet (no deploy has run) — skipping."
@@ -115,6 +118,22 @@ for vol in lifeai_caddy_data lifeai_caddy_config; do
     BACKED_UP_VOLUMES=$(echo "$BACKED_UP_VOLUMES" | jq --arg v "$short_name" '. + [$v]')
 done
 
+# lifeai_uploads holds content-addressed blobs (see backend/app/storage/local_fs.py) — its
+# own checksum is already in the filename/path of every blob it contains
+# ({sha256[:2]}/{sha256}), so a lightweight manifest of what's actually in the volume right
+# now (not re-hashed here — that's restore.sh's job, against the RESTORED copy, to catch
+# corruption introduced by the backup/restore round trip itself) lets a restore verify
+# nothing was silently dropped.
+if docker volume inspect lifeai_uploads &> /dev/null; then
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would write uploads-manifest.txt (list of content-addressed keys currently in lifeai_uploads)"
+    else
+        docker run --rm -v lifeai_uploads:/vol:ro alpine:3 \
+            sh -c "find /vol -type f -not -path '/vol/tmp/*' | sed 's#^/vol/##' | sort" \
+            > "$STAGING_DIR/uploads-manifest.txt"
+    fi
+fi
+
 log_info "== 3/4: writing manifest and combining into the final archive =="
 HOSTNAME_VALUE=$(hostname)
 MANIFEST=$(jq -n \
@@ -128,7 +147,7 @@ MANIFEST=$(jq -n \
         hostname: $hostname,
         compose_dir: $compose_dir,
         backed_up_volumes: $backed_up_volumes,
-        note: "opt-lifeai.tar.gz and any *_volume.tar.gz members contain no secrets. /etc/lifeai/lifeai.env is intentionally NOT included — see docs/VPS_BACKUP_RESTORE.md.",
+        note: "opt-lifeai.tar.gz and any *_volume.tar.gz members contain no secrets. /etc/lifeai/lifeai.env is intentionally NOT included — see docs/VPS_BACKUP_RESTORE.md. uploads.tar.gz (from lifeai_uploads) holds Life Library original files as content-addressed blobs; uploads-manifest.txt lists every key present at backup time for restore.sh to verify against.",
         required_env_var_names: ($required_env_vars | split(" "))
     }')
 if [ "$DRY_RUN" = "1" ]; then

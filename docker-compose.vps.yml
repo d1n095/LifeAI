@@ -90,14 +90,23 @@ services:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
-    # /tmp is the ONLY thing this app writes to at runtime — scripts/ensure_app_role.py hands
-    # its freshly-derived APP_DATABASE_URL back to docker-entrypoint.sh via a mktemp() file
-    # (see that script's module docstring). Everything else (schema, RLS, session state) is
-    # already in Postgres, not the container filesystem — verified by grepping the app for
-    # any other open(..., "w"/"a") / mkdir / tempfile use outside test-only tooling.
+    # /tmp and the uploads volume are the only things this app writes to at runtime.
+    # scripts/ensure_app_role.py hands its freshly-derived APP_DATABASE_URL back to
+    # docker-entrypoint.sh via a mktemp() file (see that script's module docstring).
+    # Everything else besides the durable-worker package's original-file storage (schema,
+    # RLS, session state) is already in Postgres, not the container filesystem.
+    #
+    # lifeai_uploads is a real named (persistent) Docker volume, NOT tmpfs — the whole point
+    # of the durable-worker package is that an original file survives a container restart,
+    # which tmpfs (RAM-backed, wiped on stop) cannot do. Mounted at the same path
+    # app/config.py's storage_root defaults to (/var/lib/lifeai/uploads) so no STORAGE_ROOT
+    # override is needed here. Shared with the worker service below — both read and write
+    # content-addressed blobs under the same root (see app/storage/local_fs.py).
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - lifeai_uploads:/var/lib/lifeai/uploads
     pids_limit: 200
     mem_limit: 512m
     cpus: "1.00"
@@ -132,6 +141,63 @@ services:
     # container must never receive public ingress directly. Only reachable from other
     # containers on lifeai_internal (and even then, only the frontend's proxy route ever
     # calls it — see frontend/app/api/[...path]/route.ts).
+
+  worker:
+    # Durable-worker package (see backend/app/worker.py's module docstring): the restart-safe
+    # replacement for the old process-bound FastAPI BackgroundTask import path. Same image as
+    # `backend` — built once, run with a different `command:` — not a separate build, so
+    # there is nothing new for GitHub Actions to build/push/pin here.
+    image: ${BACKEND_IMAGE:?sätt BACKEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-backend@sha256:...}
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - lifeai_uploads:/var/lib/lifeai/uploads
+    # Deliberately low: worker_concurrency defaults to 1 (app/config.py) and this process
+    # does nothing but poll Postgres and process at most one import at a time — no HTTP
+    # server, no request concurrency. Raise WORKER_CONCURRENCY/mem_limit/cpus together if a
+    # future package adds real in-process concurrency; until then this stays a light budget
+    # on top of backend/frontend/caddy/redis's own limits.
+    pids_limit: 100
+    mem_limit: 384m
+    cpus: "0.50"
+    env_file:
+      - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
+    environment:
+      ENVIRONMENT: production
+      # See docker-entrypoint.sh: only `backend` runs `alembic upgrade head` on startup — the
+      # worker shares its image but must not race it against the same database.
+      RUN_MIGRATIONS: "false"
+      REDIS_URL: redis://:${REDIS_PASSWORD:?sätt REDIS_PASSWORD i /etc/lifeai/lifeai.env}@redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        # Not a functional dependency (the worker talks to Postgres/Redis/storage directly,
+        # never to the backend container) — ordered after backend purely so the one
+        # migration run (backend's own startup) has already completed before the worker's
+        # first poll cycle touches the schema.
+        condition: service_healthy
+    # No healthcheck: no HTTP server to probe. Operational health (worker reachable, last
+    # heartbeat, queue depth, oldest pending job) is surfaced instead through the
+    # founder-only GET /api/library/ops/status endpoint — see docs/VPS_OPERATIONS_RUNBOOK.md.
+    networks:
+      - lifeai_internal
+      - lifeai_data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Deliberately no `ports:` — this process serves nothing; it only polls Postgres,
+    # coordinates via Redis, and writes to the shared uploads volume.
 
   frontend:
     # Digest-pinned, e.g. ghcr.io/d1n095/lifeai-frontend@sha256:...
@@ -306,3 +372,9 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  # Durable-worker package: original uploaded files (content-addressed, see
+  # app/storage/local_fs.py), shared between `backend` (writes on upload) and `worker`
+  # (reads during processing, writes nothing new). MUST be included in
+  # scripts/vps/backup.sh/restore.sh alongside caddy_data/caddy_config — see those scripts'
+  # own comments and docs/VPS_OPERATIONS_RUNBOOK.md for the backup/restore procedure.
+  lifeai_uploads:

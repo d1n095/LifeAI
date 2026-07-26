@@ -213,11 +213,37 @@ class ProviderConfigOut(ProviderConfigIn):
     is_active: bool
 
 
+class ProviderVerificationOut(BaseModel):
+    """P1: the latest real verification result for one (provider, role) pair — never just
+    whether a key string is present. `None` (the field is omitted on the Python side, not
+    this model) means "never verified yet", surfaced by the frontend as a neutral, not red,
+    state."""
+
+    result: str  # ok | invalid_key | unreachable | rate_limited | unsupported | not_configured
+    message: str
+    checked_by: str  # "system" | "founder"
+    checked_at: datetime
+
+
 class ProviderStatus(BaseModel):
     name: str
     configured: bool
     active_chat: bool
     active_embedding: bool
+    chat_verification: ProviderVerificationOut | None = None
+    embedding_verification: ProviderVerificationOut | None = None
+
+
+class ProviderVerifyIn(BaseModel):
+    provider: str
+    role: str  # "chat" | "embedding"
+
+    @field_validator("role")
+    @classmethod
+    def valid_role(cls, v: str) -> str:
+        if v not in ("chat", "embedding"):
+            raise ValueError("role måste vara 'chat' eller 'embedding'.")
+        return v
 
 
 class UsageSummaryRow(BaseModel):
@@ -341,6 +367,22 @@ class ImportJobOut(BaseModel):
     attempt_count: int
     max_attempts: int
     last_failure_transient: bool | None
+
+
+class OpsStatusOut(BaseModel):
+    """Life Library durable-worker package (DEL 6): founder-only operational status —
+    aggregated counts/booleans/timestamps only, deliberately never a private filesystem path
+    or any secret (storage_root itself, connection strings, etc. never appear here — see
+    app/routers/library.py's ops_status())."""
+
+    worker_reachable: bool
+    queue_length: int
+    running_jobs: int
+    oldest_pending_age_seconds: float | None
+    failed_last_24h: int
+    storage_writable: bool
+    free_disk_bytes: int | None
+    last_heartbeat_at: datetime | None
 
 
 class LibrarySearchHit(BaseModel):

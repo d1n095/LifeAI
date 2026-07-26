@@ -35,7 +35,7 @@ def _captured_chat_messages(monkeypatch):
         captured.append(messages)
         return ChatResult(content="Testsvar.", provider="openai", model=model, raw_usage={"prompt_tokens": 10, "completion_tokens": 5})
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [MATCHING_VECTOR for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)

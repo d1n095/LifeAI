@@ -1380,16 +1380,51 @@ jobs:
           done
           curl -sS http://localhost:80/api/health
 
-      - name: Verify exactly the expected services are running, including redis
+      - name: Verify exactly the expected services are running, including redis and worker
         run: |
           got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps --services | sort | tr '\n' ' ')
-          expected="backend caddy frontend redis "
+          expected="backend caddy frontend redis worker "
           [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
-          echo "Confirmed: exactly caddy, backend, frontend, redis — no more, no fewer."
+          echo "Confirmed: exactly caddy, backend, frontend, redis, worker — no more, no fewer."
+
+      - name: Verify the durable-worker package's worker is actually alive and polling, not restart-looping
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Status}}' "$cid")
+            [ "$status" = "running" ] && break
+            sleep 1
+          done
+          status=$(docker inspect -f '{{.State.Status}}' "$cid")
+          [ "$status" = "running" ] || (echo "::error::worker is not running (status: $status)" && docker logs "$cid" && exit 1)
+          restarts=$(docker inspect -f '{{.RestartCount}}' "$cid")
+          [ "$restarts" = "0" ] || (echo "::error::worker has restarted $restarts time(s) — it should start cleanly and stay up" && docker logs "$cid" && exit 1)
+          docker logs "$cid" 2>&1 | grep -q "Worker .* startar" || (echo "::error::worker's own startup log line never appeared" && docker logs "$cid" && exit 1)
+          echo "Confirmed: worker is running, has not restarted, and logged its own startup line."
+
+      - name: Verify backend and worker share the same persistent uploads volume, mounted read-write at the storage_root path
+        run: |
+          for name in backend worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            mounts=$(docker inspect -f '{{range .Mounts}}{{.Name}}:{{.Destination}}:{{.RW}} {{end}}' "$cid")
+            case "$mounts" in
+              *"lifeai_uploads:/var/lib/lifeai/uploads:true"*) ;;
+              *) echo "::error::$name is missing a read-write lifeai_uploads mount at /var/lib/lifeai/uploads (got: $mounts)" && exit 1 ;;
+            esac
+          done
+          echo "Confirmed: backend and worker both mount the same named lifeai_uploads volume, read-write, at /var/lib/lifeai/uploads."
+
+      - name: Verify only backend runs migrations on startup, not worker
+        run: |
+          worker_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          run_migrations=$(docker exec "$worker_cid" printenv RUN_MIGRATIONS || true)
+          [ "$run_migrations" = "false" ] || (echo "::error::worker's RUN_MIGRATIONS is '$run_migrations', expected 'false'" && exit 1)
+          docker logs "$worker_cid" 2>&1 | grep -q "RUN_MIGRATIONS=false, hoppar" || (echo "::error::worker's logs don't show the migration-skip message" && exit 1)
+          echo "Confirmed: worker skips alembic upgrade head on startup — only backend runs it."
 
       - name: Verify Caddy is the only container publishing anything to the host
         run: |
-          for name in backend frontend redis; do
+          for name in backend frontend redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             ports=$(docker port "$cid" || true)
             if [ -n "$ports" ]; then
@@ -1411,15 +1446,17 @@ jobs:
           esac
           echo "Confirmed: redis is only on lifeai_data ($redis_nets)."
 
-          backend_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q backend)
-          backend_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$backend_cid")
-          for net in lifeai_internal lifeai_data; do
-            case "$backend_nets" in
-              *"$net"*) ;;
-              *) echo "::error::backend is missing $net — it must be on both lifeai_internal and lifeai_data: $backend_nets" && exit 1 ;;
-            esac
+          for svc in backend worker; do
+            svc_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$svc")
+            svc_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$svc_cid")
+            for net in lifeai_internal lifeai_data; do
+              case "$svc_nets" in
+                *"$net"*) ;;
+                *) echo "::error::$svc is missing $net — it must be on both lifeai_internal and lifeai_data: $svc_nets" && exit 1 ;;
+              esac
+            done
+            echo "Confirmed: $svc is on both lifeai_internal and lifeai_data ($svc_nets)."
           done
-          echo "Confirmed: backend is on both lifeai_internal and lifeai_data ($backend_nets)."
 
           for name in frontend caddy; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
@@ -1458,14 +1495,14 @@ jobs:
 
       - name: Verify restart policy and log rotation are actually applied
         run: |
-          for name in caddy backend frontend redis; do
+          for name in caddy backend frontend redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             policy=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid")
             [ "$policy" = "unless-stopped" ] || (echo "::error::$name has restart policy '$policy', expected unless-stopped" && exit 1)
             logdriver=$(docker inspect -f '{{.HostConfig.LogConfig.Type}}' "$cid")
             [ "$logdriver" = "json-file" ] || (echo "::error::$name uses log driver '$logdriver', expected json-file with size limits" && exit 1)
           done
-          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all four services."
+          echo "Confirmed: restart: unless-stopped and bounded json-file logging on all five services."
 
       - name: Verify a full request actually reaches the backend/database through Caddy -> frontend -> backend
         run: |
@@ -1526,12 +1563,12 @@ jobs:
         # construction, not by a mistake in this compose file. See the next step for why
         # that's an accepted, mitigated trade-off rather than a gap.
         run: |
-          for name in backend frontend; do
+          for name in backend frontend worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             uid=$(docker exec "$cid" id -u)
             [ "$uid" = "10001" ] || (echo "::error::$name is running as UID $uid, expected the dedicated non-root UID 10001" && exit 1)
           done
-          echo "Confirmed: backend/frontend run as UID 10001 (never root)."
+          echo "Confirmed: backend/frontend/worker run as UID 10001 (never root) — worker shares backend's own image and Dockerfile USER directive."
 
       - name: Verify caddy's root process is mitigated by a near-empty capability set
         # caddy:2-alpine has no built-in non-root user to switch to (confirmed: no "caddy"
@@ -1571,7 +1608,7 @@ jobs:
 
       - name: Verify container-level security controls are actually applied, not just declared
         run: |
-          for name in caddy backend frontend redis; do
+          for name in caddy backend frontend redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
 
             privileged=$(docker inspect -f '{{.HostConfig.Privileged}}' "$cid")
@@ -1656,7 +1693,7 @@ jobs:
         if: failure()
         run: |
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
-          for name in backend frontend caddy redis; do
+          for name in backend frontend caddy redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
             if [ -n "$cid" ]; then
               echo "--- $name health ---"
@@ -1892,6 +1929,16 @@ jobs:
           docker volume create lifeai_caddy_config > /dev/null
           docker run --rm -v lifeai_caddy_data:/vol alpine:3 sh -c "echo FAKE-TLS-CERT-DATA > /vol/cert.pem"
           docker run --rm -v lifeai_caddy_config:/vol alpine:3 sh -c "echo '{\"fake\":\"config\"}' > /vol/autosave.json"
+          # Durable-worker package: lifeai_uploads holds Life Library originals, content-
+          # addressed as {sha256[:2]}/{sha256} (see backend/app/storage/local_fs.py) — a
+          # disclosed synthetic string, never real private content, is enough to exercise
+          # backup.sh's uploads.tar.gz/uploads-manifest.txt and restore.sh's own
+          # content-addressing + manifest verification for real.
+          docker volume create lifeai_uploads > /dev/null
+          SYNTH="Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data."
+          SHA=$(printf '%s' "$SYNTH" | sha256sum | cut -d' ' -f1)
+          echo "SYNTH_SHA=$SHA" >> "$GITHUB_ENV"
+          docker run --rm -v lifeai_uploads:/vol alpine:3 sh -c "mkdir -p /vol/tmp /vol/${SHA:0:2} && printf '%s' '$SYNTH' > /vol/${SHA:0:2}/${SHA}"
 
       - name: Run backup.sh for real
         run: |
@@ -1914,9 +1961,10 @@ jobs:
         run: |
           mkdir -p /tmp/backup-inspect
           tar xzf "$ARCHIVE" -C /tmp/backup-inspect
-          for member in opt-lifeai.tar.gz caddy_data.tar.gz caddy_config.tar.gz manifest.json; do
+          for member in opt-lifeai.tar.gz caddy_data.tar.gz caddy_config.tar.gz uploads.tar.gz uploads-manifest.txt manifest.json; do
             [ -f "/tmp/backup-inspect/$member" ] || (echo "::error::backup archive is missing expected member: $member" && exit 1)
           done
+          grep -qx "${SYNTH_SHA:0:2}/${SYNTH_SHA}" /tmp/backup-inspect/uploads-manifest.txt || (echo "::error::uploads-manifest.txt does not list the synthetic test blob" && exit 1)
           # The whole point of this check: /etc/lifeai/lifeai.env (or any file that looks like
           # it) must never appear anywhere in the archive, at any nesting level.
           find /tmp/backup-inspect -iname '*lifeai.env*' | grep -q . && (echo "::error::a secrets-file-like entry was found in the backup archive" && exit 1)
@@ -1966,6 +2014,10 @@ jobs:
 
       - name: Restore for real into a disposable target and verify the content matches
         run: |
+          # restore.sh itself already runs the content-addressing + uploads-manifest.txt
+          # verification (see its own "3b/4" step) as part of this exact invocation — a
+          # non-zero exit here would already mean that check failed, so this step's own
+          # assertions below are on top of, not instead of, that.
           ./scripts/vps/restore.sh --from "$ARCHIVE" --target-dir "$TEST_RESTORE_DIR" --confirm
           diff "$TEST_COMPOSE_DIR/docker-compose.vps.yml" "$TEST_RESTORE_DIR/docker-compose.vps.yml"
           diff "$TEST_COMPOSE_DIR/Caddyfile" "$TEST_RESTORE_DIR/Caddyfile"
@@ -1978,6 +2030,14 @@ jobs:
           live_content=$(docker run --rm -v lifeai_caddy_data:/vol:ro alpine:3 cat /vol/cert.pem)
           [ "$live_content" = "FAKE-TLS-CERT-DATA" ] || (echo "::error::the live caddy_data volume was unexpectedly modified" && exit 1)
           echo "Confirmed: restore produced correct file and volume content without touching anything live."
+
+          restored_uploads_vol=$(docker volume ls --format '{{.Name}}' | grep '^lifeai_restore_.*_uploads$')
+          [ -n "$restored_uploads_vol" ] || (echo "::error::expected a lifeai_restore_*_uploads volume to exist after restore" && exit 1)
+          restored_blob=$(docker run --rm -v "$restored_uploads_vol:/vol:ro" alpine:3 cat "/vol/${SYNTH_SHA:0:2}/${SYNTH_SHA}")
+          [ "$restored_blob" = "Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data." ] || (echo "::error::restored uploads volume content did not match the original synthetic file" && exit 1)
+          live_uploads_content=$(docker run --rm -v lifeai_uploads:/vol:ro alpine:3 cat "/vol/${SYNTH_SHA:0:2}/${SYNTH_SHA}")
+          [ "$live_uploads_content" = "Detta ar en syntetisk testfil for CI:s backup-restore-jobb, inga riktiga privata data." ] || (echo "::error::the live lifeai_uploads volume was unexpectedly modified" && exit 1)
+          echo "Confirmed: the Life Library uploads volume restored byte-identical, live volume untouched."
 
       - name: Tear down
         if: always()

@@ -2,7 +2,13 @@
 text extraction, chunking/embedding and ImportJob progress together. Runs against a real
 local Postgres (RLS included) and a deterministic fake embedding provider — see
 conftest.py's `db_session`/`make_verified_user` fixtures and the `_fake_embed` monkeypatch
-below. No real AI-provider key is used anywhere in this file."""
+below. No real AI-provider key is used anywhere in this file.
+
+Life Library durable-worker package: run_import_job() no longer takes `raw`/`filename`
+directly — it reads the original from app/storage/ via ImportJob.source_storage_key (see
+that module's docstring). `_make_job` below does the storage write a real
+POST /api/library/import would have already done, so every test still just calls
+`run_import_job(db_session, job.id, user.id)`."""
 
 import io
 import uuid
@@ -15,6 +21,7 @@ from app.models.document import ActiveTruthStatus, Document, IndexStatus, Knowle
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
 from app.rag.library_import import run_import_job
+from app.storage import get_storage
 
 EMBEDDING_DIM = get_settings().embedding_dim
 
@@ -27,7 +34,7 @@ def _fake_embedding_provider(monkeypatch):
     from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [[0.01 * (i + 1)] * EMBEDDING_DIM for i, _ in enumerate(texts)]
 
     # Import now also runs claim extraction (app/rag/claims.py, STEG 10) right after
@@ -48,7 +55,25 @@ def _make_zip(files: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-def _make_job(db_session, owner_id) -> ImportJob:
+def _read_chunk_for(data: bytes, size: int = 1 << 16):
+    pos = 0
+
+    def _read():
+        nonlocal pos
+        chunk = data[pos : pos + size]
+        pos += len(chunk)
+        return chunk
+
+    return _read
+
+
+def _store(raw: bytes):
+    """Writes `raw` to the real (test) storage backend, exactly like POST
+    /api/library/import does before this module ever runs — returns the StoredBlob."""
+    return get_storage().write_stream(_read_chunk_for(raw), max_bytes=max(len(raw), 1))
+
+
+def _make_job(db_session, owner_id, raw: bytes = b"", filename: str = "test.txt") -> ImportJob:
     from sqlalchemy import text
 
     from app.request_context import current_user_id as current_user_id_var
@@ -63,7 +88,15 @@ def _make_job(db_session, owner_id) -> ImportJob:
     # knowledge_import_jobs RLS policy silently filtered out the UPDATE.
     current_user_id_var.set(str(owner_id))
     db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
-    job = ImportJob(owner_id=owner_id, status=ImportJobStatus.pending)
+    blob = _store(raw)
+    job = ImportJob(
+        owner_id=owner_id,
+        status=ImportJobStatus.pending,
+        source_filename=filename,
+        source_checksum=blob.sha256,
+        source_storage_key=blob.storage_key,
+        source_size_bytes=blob.size_bytes,
+    )
     db_session.add(job)
     db_session.commit()
     return job
@@ -72,9 +105,9 @@ def _make_job(db_session, owner_id) -> ImportJob:
 @pytest.mark.asyncio
 async def test_single_text_file_import_succeeds(db_session, make_verified_user):
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
+    job = _make_job(db_session, user.id, b"Detta ar ett testdokument om MainAI.", "test.txt")
 
-    await run_import_job(db_session, job.id, user.id, b"Detta ar ett testdokument om MainAI.", "test.txt")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.completed
@@ -87,6 +120,10 @@ async def test_single_text_file_import_succeeds(db_session, make_verified_user):
     assert doc.checksum is not None
     assert doc.classification == KnowledgeClassification.general
     assert doc.active_truth_status == ActiveTruthStatus.active
+    # DEL 1 (persistent original storage): the document's own durable blob, verified
+    assert doc.storage_key is not None
+    assert doc.stored_at is not None
+    assert get_storage().verify(doc.storage_key, expected_sha256=doc.checksum, expected_size=doc.size_bytes)
 
     version = db_session.query(KnowledgeVersion).filter_by(source_id=doc.id).first()
     assert version is not None
@@ -96,10 +133,10 @@ async def test_single_text_file_import_succeeds(db_session, make_verified_user):
 @pytest.mark.asyncio
 async def test_zip_package_imports_every_supported_file(db_session, make_verified_user):
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     raw = _make_zip({"a.txt": b"Innehall A", "b.md": b"# Innehall B", "sub/c.txt": b"Innehall C"})
+    job = _make_job(db_session, user.id, raw, "package.zip")
 
-    await run_import_job(db_session, job.id, user.id, raw, "package.zip")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.completed
@@ -107,6 +144,7 @@ async def test_zip_package_imports_every_supported_file(db_session, make_verifie
     docs = db_session.query(Document).filter_by(uploaded_by=user.id).all()
     assert len(docs) == 3
     assert all(d.status == IndexStatus.indexed for d in docs)
+    assert all(d.storage_key is not None for d in docs)
 
 
 @pytest.mark.asyncio
@@ -114,10 +152,10 @@ async def test_partial_failure_does_not_abort_the_whole_package(db_session, make
     """One unsupported/skipped file inside an otherwise-good package must not stop the
     others from importing — DEL 3's "fel i en fil far inte korrumpera hela paketet"."""
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     raw = _make_zip({"good.txt": b"bra innehall", "unsupported.exe": b"MZfake", "also-good.md": b"# bra"})
+    job = _make_job(db_session, user.id, raw, "mixed.zip")
 
-    await run_import_job(db_session, job.id, user.id, raw, "mixed.zip")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.completed  # skipped files aren't "failures"
@@ -137,11 +175,11 @@ async def test_media_files_bundled_in_a_zip_are_skipped_not_silently_mishandled(
     successfully for its supported file, and the media entry is skipped cleanly (not
     misinterpreted as some other file type, not silently dropped without a reason)."""
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     valid_mp3 = b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 64
     raw = _make_zip({"notes.txt": b"vanligt textinnehall", "recording.mp3": valid_mp3})
+    job = _make_job(db_session, user.id, raw, "mixed-media.zip")
 
-    await run_import_job(db_session, job.id, user.id, raw, "mixed-media.zip")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.completed
@@ -156,11 +194,18 @@ async def test_media_files_bundled_in_a_zip_are_skipped_not_silently_mishandled(
 
 @pytest.mark.asyncio
 async def test_zip_security_violation_fails_the_job_cleanly_not_a_crash(db_session, make_verified_user):
-    user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
-    raw = _make_zip({"../../etc/passwd": b"pwned"})
+    """run_import_job (a single attempt) RAISES ZipSecurityError by design, so
+    app/worker.py's retry wrapper (process_claimed_job) can classify it as permanent — see
+    that function's docstring. Driving it through process_claimed_job here, like the other
+    permanent-failure tests below, is what actually exercises "the job ends up cleanly
+    failed, not an unhandled exception the caller has to deal with"."""
+    from app.worker import process_claimed_job
 
-    await run_import_job(db_session, job.id, user.id, raw, "evil.zip")
+    user, _ = make_verified_user()
+    raw = _make_zip({"../../etc/passwd": b"pwned"})
+    job = _make_job(db_session, user.id, raw, "evil.zip")
+
+    await process_claimed_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.failed
@@ -174,13 +219,13 @@ async def test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a
     db_session, make_verified_user
 ):
     user, _ = make_verified_user()
-    job1 = _make_job(db_session, user.id)
-    await run_import_job(db_session, job1.id, user.id, b"samma innehall varje gang", "same.txt")
+    job1 = _make_job(db_session, user.id, b"samma innehall varje gang", "same.txt")
+    await run_import_job(db_session, job1.id, user.id)
     db_session.refresh(job1)
     assert job1.succeeded_count == 1
 
-    job2 = _make_job(db_session, user.id)
-    await run_import_job(db_session, job2.id, user.id, b"samma innehall varje gang", "same-igen.txt")
+    job2 = _make_job(db_session, user.id, b"samma innehall varje gang", "same-igen.txt")
+    await run_import_job(db_session, job2.id, user.id)
     db_session.refresh(job2)
 
     assert job2.status == ImportJobStatus.completed
@@ -192,15 +237,15 @@ async def test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a
 @pytest.mark.asyncio
 async def test_manifest_classification_and_truth_status_are_applied(db_session, make_verified_user):
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     manifest = (
         b'{"package": "test", "documents": ['
         b'{"file": "old-decision.txt", "classification": "decisions", "active_truth_status": "superseded"}'
         b"]}"
     )
     raw = _make_zip({"manifest.json": manifest, "old-decision.txt": b"Det gamla beslutet var X."})
+    job = _make_job(db_session, user.id, raw, "with-manifest.zip")
 
-    await run_import_job(db_session, job.id, user.id, raw, "with-manifest.zip")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.manifest is not None
@@ -216,13 +261,11 @@ async def test_manifest_checksum_mismatch_rejects_that_file_only(db_session, mak
     file and the file's real content doesn't match it, that one file is rejected — the rest
     of the package still imports normally."""
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
-    manifest = (
-        b'{"documents": [{"file": "a.txt", "checksum": "' + b"0" * 64 + b'"}]}'
-    )
+    manifest = b'{"documents": [{"file": "a.txt", "checksum": "' + b"0" * 64 + b'"}]}'
     raw = _make_zip({"manifest.json": manifest, "a.txt": b"riktigt innehall", "b.txt": b"annat innehall"})
+    job = _make_job(db_session, user.id, raw, "checksum-mismatch.zip")
 
-    await run_import_job(db_session, job.id, user.id, raw, "checksum-mismatch.zip")
+    await run_import_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.partial
@@ -240,7 +283,7 @@ def _fast_backoff(monkeypatch):
     """Keeps retry tests fast — the backoff POLICY itself is unit-tested for real timing in
     test_job_retry.py; here only the RETRY BEHAVIOR (does it retry, how many times, does it
     give up) matters."""
-    monkeypatch.setattr("app.rag.library_import.compute_backoff_seconds", lambda attempt: 0.01)
+    monkeypatch.setattr("app.worker.compute_backoff_seconds", lambda attempt: 0.01)
 
 
 @pytest.mark.asyncio
@@ -249,14 +292,16 @@ async def test_transient_failure_is_retried_and_eventually_succeeds(db_session, 
     _import_one_file and turned into a FileOutcome — it never reaches the job-level retry
     loop (see the test below, which documents that explicitly). A genuinely job-level
     transient failure — the orchestration itself failing between files, e.g. a dropped DB
-    connection — is what run_import_job's retry loop actually reacts to, so this test
-    injects the failure at that level (patching _import_one_file itself) rather than deeper
-    inside it."""
+    connection — is what app/worker.py's process_claimed_job retry loop actually reacts to,
+    so this test injects the failure at that level (patching _import_one_file itself) rather
+    than deeper inside it, and drives the retry loop directly (process_claimed_job) instead
+    of the single-attempt run_import_job."""
     from app.rag import library_import as li
+    from app.worker import process_claimed_job
 
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     raw = _make_zip({"a.txt": b"Innehall A"})
+    job = _make_job(db_session, user.id, raw, "flaky.zip")
 
     calls = {"n": 0}
     real_import_one_file = li._import_one_file
@@ -269,7 +314,7 @@ async def test_transient_failure_is_retried_and_eventually_succeeds(db_session, 
 
     monkeypatch.setattr(li, "_import_one_file", _flaky_import_one_file)
 
-    await run_import_job(db_session, job.id, user.id, raw, "flaky.zip")
+    await process_claimed_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.completed
@@ -283,11 +328,13 @@ async def test_permanent_failure_is_not_retried(db_session, make_verified_user):
     """A malformed ZIP (ZipSecurityError, classified permanent — see app/jobs/retry.py)
     must fail immediately, not burn through retry attempts on something retrying can never
     fix."""
-    user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
-    raw = _make_zip({"../../etc/passwd": b"pwned"})
+    from app.worker import process_claimed_job
 
-    await run_import_job(db_session, job.id, user.id, raw, "evil.zip")
+    user, _ = make_verified_user()
+    raw = _make_zip({"../../etc/passwd": b"pwned"})
+    job = _make_job(db_session, user.id, raw, "evil.zip")
+
+    await process_claimed_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.failed
@@ -304,17 +351,18 @@ async def test_a_persistently_flaky_extractor_degrades_to_a_failed_file_not_a_jo
     scoped to job-orchestration failures, not per-file ones (contrast with the test below,
     which fails at the job-orchestration level and DOES retry)."""
     from app.rag import library_import as li
+    from app.worker import process_claimed_job
 
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
     raw = _make_zip({"a.txt": b"Innehall A"})
+    job = _make_job(db_session, user.id, raw, "always-flaky.zip")
 
     def _always_flaky(filename, content):
         raise ConnectionError("alltid nätverksfel")
 
     monkeypatch.setattr(li, "extract_text", _always_flaky)
 
-    await run_import_job(db_session, job.id, user.id, raw, "always-flaky.zip")
+    await process_claimed_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.failed  # the single file failed, and nothing else succeeded
@@ -328,25 +376,122 @@ async def test_a_genuinely_job_level_transient_error_exhausts_attempts_and_fails
     the job-level orchestration itself (e.g. a dropped DB connection between file-loop
     iterations) must be retried up to max_attempts and then permanently fail."""
     from app.rag import library_import as li
+    from app.worker import process_claimed_job
 
     user, _ = make_verified_user()
-    job = _make_job(db_session, user.id)
+    raw = _make_zip({"a.txt": b"Innehall A"})
+    job = _make_job(db_session, user.id, raw, "job-level-flaky.zip")
     job.max_attempts = 2
     db_session.add(job)
     db_session.commit()
-    raw = _make_zip({"a.txt": b"Innehall A"})
 
     async def _always_raises(*args, **kwargs):
         raise ConnectionError("databasen svarar inte")
 
     monkeypatch.setattr(li, "_import_one_file", _always_raises)
 
-    await run_import_job(db_session, job.id, user.id, raw, "job-level-flaky.zip")
+    await process_claimed_job(db_session, job.id, user.id)
 
     db_session.refresh(job)
     assert job.status == ImportJobStatus.failed
     assert job.attempt_count == job.max_attempts - 1
     assert job.last_failure_transient is True
+
+
+# --- Life Library upload consolidation package: granular IndexStatus modeling ---
+
+
+@pytest.mark.asyncio
+async def test_extraction_failure_preserves_the_document_row_instead_of_losing_the_upload(
+    db_session, make_verified_user, monkeypatch
+):
+    """Before this fix, extract_text() raising meant _import_one_file returned a FileOutcome
+    with no source_id at all — no Document row was ever created for that file, so the
+    founder had no way to see the upload was even received. An embedding/extraction outage
+    must never make received material disappear: the Document row now exists (created
+    before extraction is attempted) and is marked IndexStatus.failed afterwards, preserving
+    the checksum/original_filename/received-at record even though indexing never happened —
+    and, per the durable-worker package, the original bytes are STILL durably stored and
+    verifiable even though extraction never succeeded."""
+    from app.rag import library_import as li
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"nagot innehall", "broken.txt")
+
+    def _always_fails(filename, content):
+        raise ValueError("kunde inte tolka filen")
+
+    monkeypatch.setattr(li, "extract_text", _always_fails)
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.failed
+    assert job.file_results[0]["source_id"] is not None
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="broken.txt").first()
+    assert doc is not None
+    # P1: reclassified from the old undifferentiated IndexStatus.failed — see
+    # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7.
+    assert doc.status == IndexStatus.extraction_failed
+    assert doc.error_message is not None
+    assert doc.checksum is not None
+    # The original survives even though extraction never got anywhere near succeeding.
+    assert doc.storage_key is not None
+    assert get_storage().verify(doc.storage_key, expected_sha256=doc.checksum)
+
+
+@pytest.mark.asyncio
+async def test_document_status_passes_through_the_full_granular_pipeline_before_indexed(
+    db_session, make_verified_user, monkeypatch
+):
+    """Life Library durable-worker package: the pipeline must expose granular, steppable
+    status (original_storing -> original_stored -> extracting -> extracted -> embedding ->
+    indexed) rather than jumping straight from received to indexed, so a restart mid-pipeline
+    can resume from exactly where it left off without the UI needing to change shape."""
+    from app.providers.openai_provider import OpenAIProvider
+    from app.rag import library_import as li
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"text att extrahera och embedda", "granular.txt")
+
+    observed: dict[str, str | None] = {}
+    real_extract = li.extract_text
+    real_embed = OpenAIProvider.embed
+    real_store_bytes = li._store_bytes
+
+    def _current_status():
+        doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="granular.txt").first()
+        return doc.status.value if doc else None
+
+    def _observing_store_bytes(storage, content, *, max_bytes):
+        observed["status_during_store"] = _current_status()
+        return real_store_bytes(storage, content, max_bytes=max_bytes)
+
+    def _observing_extract(filename, content):
+        observed["status_during_extract"] = _current_status()
+        return real_extract(filename, content)
+
+    async def _observing_embed(self, texts, model, **kwargs):
+        observed["status_during_embed"] = _current_status()
+        return await real_embed(self, texts, model)
+
+    monkeypatch.setattr(li, "_store_bytes", _observing_store_bytes)
+    monkeypatch.setattr(li, "extract_text", _observing_extract)
+    monkeypatch.setattr(OpenAIProvider, "embed", _observing_embed)
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.completed
+    assert observed["status_during_store"] == IndexStatus.original_storing.value
+    assert observed["status_during_extract"] == IndexStatus.extracting.value
+    assert observed["status_during_embed"] == IndexStatus.embedding.value
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="granular.txt").first()
+    assert doc.status == IndexStatus.indexed
+    assert doc.storage_key is not None
+    assert doc.stored_at is not None
 
 
 @pytest.mark.asyncio
@@ -376,34 +521,40 @@ async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
 
     EMBED_DIM = get_settings().embedding_dim
 
-    async def _slow_embed(self, texts, model):
+    async def _slow_embed(self, texts, model, **kwargs):
         await asyncio.sleep(0.2)
         return [[0.01 * (i + 1)] * EMBED_DIM for i, _ in enumerate(texts)]
 
     monkeypatch.setattr(OpenAIProvider, "embed", _slow_embed)
 
     user, _ = make_verified_user()
-    checksum = "a" * 64
+    raw = _make_zip({"a.txt": b"Innehall A"})
+    blob = _store(raw)
     session_factory = sessionmaker(bind=migration_engine)
 
-    def _make_job_with_checksum(owner_id, checksum_value):
+    def _make_job_with_checksum(owner_id, filename):
         from sqlalchemy import text as sa_text
 
         session = session_factory()
         session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
-        job = ImportJob(owner_id=owner_id, status=ImportJobStatus.pending, source_checksum=checksum_value)
+        job = ImportJob(
+            owner_id=owner_id,
+            status=ImportJobStatus.pending,
+            source_filename=filename,
+            source_checksum=blob.sha256,
+            source_storage_key=blob.storage_key,
+            source_size_bytes=blob.size_bytes,
+        )
         session.add(job)
         session.commit()
         return session, job
 
-    session_a, job_a = _make_job_with_checksum(user.id, checksum)
-    session_b, job_b = _make_job_with_checksum(user.id, checksum)
-
-    raw = _make_zip({"a.txt": b"Innehall A"})
+    session_a, job_a = _make_job_with_checksum(user.id, "race-a.zip")
+    session_b, job_b = _make_job_with_checksum(user.id, "race-b.zip")
 
     results = await asyncio.gather(
-        run_import_job(session_a, job_a.id, user.id, raw, "race-a.zip"),
-        run_import_job(session_b, job_b.id, user.id, raw, "race-b.zip"),
+        run_import_job(session_a, job_a.id, user.id),
+        run_import_job(session_b, job_b.id, user.id),
     )
 
     session_a.refresh(job_a)

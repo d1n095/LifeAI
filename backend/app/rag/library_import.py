@@ -3,15 +3,16 @@ OR a ZIP package -> app/rag/zip_import.py's security gate -> app/rag/extract.py'
 extraction -> app/rag/ingest.py's existing chunk/embed/store pipeline -> a KnowledgeVersion
 snapshot -> ImportJob progress/result tracking. See docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md.
 
-No external worker/queue tonight (see that doc's "Background jobs" section for what a real
-one would need and why none was activated) — this runs synchronously inside a FastAPI
-BackgroundTasks callback, the same pattern app/routers/documents.py already uses for a single
-upload. The ImportJob row itself doesn't assume that, though: a future queue consumer could
-pick up a `pending` row and call run_import_job() exactly the way the background task does
-today, with no schema change.
+Life Library durable-worker package: the raw uploaded package is no longer passed around in
+memory — POST /api/library/import (app/routers/library.py) streams it straight to durable
+storage (app/storage/) before this module ever runs, and records where at
+ImportJob.source_storage_key. run_import_job() opens that file itself. This module is called
+from app/worker.py's poll loop now, not a FastAPI BackgroundTask — a crash between here and a
+job reaching a terminal status simply leaves it `pending`/`running` with an expired lease,
+and any worker (the same one restarted, or a different replica) picks it back up exactly like
+a fresh claim (see app/worker.py's claim_next_job).
 """
 
-import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -21,9 +22,10 @@ from pathlib import PurePosixPath
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
+from app.jobs.lease import renew_lease
 from app.jobs.lock import JobLock, JobLockUnavailable
-from app.jobs.retry import compute_backoff_seconds, is_transient_error
-from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus, KnowledgeClassification
+from app.models.document import ActiveTruthStatus, DeletionStatus, Document, DocumentSource, IndexStatus, KnowledgeClassification
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
@@ -32,8 +34,11 @@ from app.rag.extract import extract_text
 from app.rag.ingest import index_document
 from app.rag import media_import
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
+from app.storage import StorageBackend, StorageError, get_storage
 
 logger = logging.getLogger("mainai.rag.library_import")
+
+WORKER_LEASE_SECONDS = get_settings().worker_lease_seconds
 
 EXTRACTION_VERSION = "extract-v1"  # bump when chunking/extraction logic changes meaningfully
 
@@ -56,10 +61,16 @@ VALID_CLASSIFICATIONS = {c.value for c in KnowledgeClassification}
 VALID_TRUTH_STATUSES = {s.value for s in ActiveTruthStatus}
 
 
+class JobCancelled(Exception):
+    """Raised internally to unwind out of per-file processing the instant a cancellation is
+    observed — never escapes run_import_job (caught there and treated as a clean, expected
+    stop, not a failure to retry)."""
+
+
 @dataclass
 class FileOutcome:
     filename: str
-    status: str  # "indexed" | "duplicate" | "failed" | "skipped"
+    status: str  # "indexed" | "duplicate" | "failed" | "skipped" | "cancelled" | "blocked"
     reason: str | None = None
     source_id: str | None = None
 
@@ -81,7 +92,7 @@ def _manifest_entry_for(manifest: dict | None, filename: str) -> dict:
 
 
 def _set_rls_owner(db: Session, owner_id: uuid.UUID) -> None:
-    """Background tasks get a fresh session that never goes through app/deps.py's
+    """The worker gets a fresh session that never goes through app/deps.py's
     get_current_user (see app/rag/ingest.py's identical requirement). This whole orchestrator
     makes several separate db.commit() calls as it goes (progress updates), each of which
     ends the current transaction — app/db.py's after_begin listener re-applies SET LOCAL on
@@ -94,9 +105,115 @@ def _set_rls_owner(db: Session, owner_id: uuid.UUID) -> None:
     db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
 
 
+def _job_is_cancelled(db: Session, job_id: uuid.UUID) -> bool:
+    """A cheap, dedicated status-only read (not a full ORM load) — called between every
+    per-file step and before every major pipeline transition, so a delete-triggered
+    cancellation (app/routers/library.py's delete_source) is noticed promptly rather than
+    only at the next natural commit boundary."""
+    row = db.execute(text("SELECT status FROM knowledge_import_jobs WHERE id = :id"), {"id": str(job_id)}).first()
+    return row is not None and row[0] == ImportJobStatus.cancelled.value
+
+
+def _store_bytes(storage: StorageBackend, content: bytes, *, max_bytes: int):
+    """Adapts a plain in-memory bytes value (already validated/extracted from a ZIP entry,
+    or the whole single-file upload) to StorageBackend.write_stream's pull-based
+    read_chunk() interface — chunked, not because `content` isn't already fully in memory
+    here (the worker's own documented tradeoff, see this module's top docstring), but so the
+    write itself still goes through the exact same streaming-hash-and-atomic-write path a
+    truly-streamed source would."""
+    chunk_size = 1 << 20
+    pos = 0
+
+    def _read():
+        nonlocal pos
+        chunk = content[pos : pos + chunk_size]
+        pos += len(chunk)
+        return chunk
+
+    return storage.write_stream(_read, max_bytes=max_bytes)
+
+
+def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | None) -> DeletionStatus:
+    """Life Library durable-worker package (DEL 5): physically removes a blob ONLY when no
+    live (non-deleted) Document still points at it — content-addressing (see
+    app/storage/local_fs.py) means two different documents with byte-identical content
+    already share one physical file, so this reference count is a live DB query, not a
+    maintained counter that could drift. Returns the DeletionStatus to persist on the
+    caller's Document row: `purged` (removed, or nothing to remove), `pending` (still
+    referenced elsewhere — correct to leave the file in place), `failed` (a real I/O error,
+    surfaced distinctly rather than silently retried forever)."""
+    if storage_key is None:
+        return DeletionStatus.purged
+    still_referenced = (
+        db.query(Document.id).filter(Document.storage_key == storage_key, Document.deleted_at.is_(None)).first() is not None
+    )
+    if still_referenced:
+        return DeletionStatus.pending
+    try:
+        storage.delete(storage_key)
+        return DeletionStatus.purged
+    except StorageError:
+        logger.exception("Kunde inte radera blob %s fysiskt.", storage_key)
+        return DeletionStatus.failed
+
+
+async def _resume_blocked_document(
+    db: Session, document: Document, owner_id: uuid.UUID, filename: str, content: bytes
+) -> FileOutcome:
+    """P1: re-attempts embedding for a Document already paused on `awaiting_provider`/
+    `blocked_provider` — reuses the SAME row and its existing KnowledgeVersion rather than
+    creating a duplicate. Reached whenever a file with a matching checksum is seen again,
+    whether because the founder genuinely re-uploaded it or because app/worker.py's
+    automatic requeue (_requeue_blocked_jobs) replayed the same ImportJob after the provider
+    verified ok — both are the exact same code path. Neither needs the ORIGINAL http upload
+    again: `content` here always comes from re-reading the job's own durably stored original
+    (ImportJob.source_storage_key, see run_import_job/_run_once), never a fresh upload.
+    Re-extraction is cheap and local (no AI involved); the original bytes are never
+    re-stored — the document is already `original_stored`, and app/storage/'s
+    content-addressing would just no-op a re-write anyway."""
+    version = (
+        db.query(KnowledgeVersion)
+        .filter(KnowledgeVersion.source_id == document.id)
+        .order_by(KnowledgeVersion.version_number.desc())
+        .first()
+    )
+
+    document.status = IndexStatus.extracting
+    db.add(document)
+    db.commit()
+    try:
+        text_content = extract_text(filename, content)
+    except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
+        document.status = IndexStatus.extraction_failed
+        document.error_message = f"Kunde inte extrahera text: {exc}"
+        db.add(document)
+        db.commit()
+        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+    document.status = IndexStatus.extracted
+    db.add(document)
+    db.commit()
+
+    await index_document(db, document, text_content)
+
+    if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
+        return FileOutcome(filename=filename, status="blocked", reason=document.error_message, source_id=str(document.id))
+    if document.status != IndexStatus.indexed:
+        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+
+    if version is not None:
+        try:
+            await extract_claims_for_document(db, document, owner_id, version.id)
+        except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
+            pass
+
+    return FileOutcome(filename=filename, status="indexed", source_id=str(document.id))
+
+
 async def _import_one_file(
     db: Session,
+    storage: StorageBackend,
     owner_id: uuid.UUID,
+    job_id: uuid.UUID,
     filename: str,
     content: bytes,
     checksum: str,
@@ -104,6 +221,7 @@ async def _import_one_file(
     project_id: uuid.UUID | None,
     import_job_id: uuid.UUID | None,
     manifest_entry: dict,
+    max_upload_bytes: int,
 ) -> FileOutcome:
     # Idempotency at the file level: identical content (by checksum) already owned by this
     # user is never re-imported as a second copy — DEL 2's "vara idempotent vid samma
@@ -114,25 +232,16 @@ async def _import_one_file(
         .first()
     )
     if existing is not None:
+        # P1: a row already paused on the provider is NOT a duplicate — resume it in place
+        # instead of creating a second Document/KnowledgeVersion (see
+        # _resume_blocked_document's docstring). Every other existing status (indexed, or any
+        # of the terminal *_failed statuses) is still a real duplicate, unchanged from before P1.
+        if existing.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
+            return await _resume_blocked_document(db, existing, owner_id, filename, content)
         return FileOutcome(filename=filename, status="duplicate", reason="Identiskt innehåll finns redan.", source_id=str(existing.id))
 
     suffix = PurePosixPath(filename).suffix.lower()
     media_kind = media_import.media_kind_for(filename)
-    text_content: str | None = None
-    if media_kind is None:
-        try:
-            text_content = extract_text(filename, content)
-        except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
-            return FileOutcome(filename=filename, status="failed", reason=f"Kunde inte extrahera text: {exc}")
-    else:
-        # STEG 12: MIME/size check happens before anything is written to the database — a
-        # rejected media file becomes a per-file FileOutcome, exactly like a text-extraction
-        # failure above, never a job-level failure (see app/rag/media_import.py's
-        # MediaImportError docstring).
-        try:
-            media_import.validate_media_bytes(filename, content, media_kind)
-        except media_import.MediaImportError as exc:
-            return FileOutcome(filename=filename, status="failed", reason=str(exc))
 
     classification_raw = manifest_entry.get("classification")
     classification = classification_raw if classification_raw in VALID_CLASSIFICATIONS else KnowledgeClassification.general.value
@@ -147,6 +256,10 @@ async def _import_one_file(
             reason="Manifestets deklarerade checksumma matchar inte filens faktiska innehåll.",
         )
 
+    # The Document row exists (status `received`) BEFORE the original is durably stored or
+    # extraction is attempted — a failure at ANY later step is recorded ON this row instead
+    # of losing the received upload entirely. See IndexStatus's docstring for the full
+    # granular state list this function walks through.
     document = Document(
         title=manifest_entry.get("title") or filename,
         source=DocumentSource.zip_import if import_job_id else DocumentSource.upload,
@@ -160,9 +273,11 @@ async def _import_one_file(
         project_id=project_id,
         import_job_id=import_job_id,
         imported_at=datetime.utcnow(),
-        # STEG 13: only media imports keep the raw bytes around (for GET
-        # /api/library/{id}/media's player, app/routers/library.py) — every text/document
-        # import leaves this NULL, unchanged from before this field existed.
+        status=IndexStatus.received,
+        # STEG 13: media_blob is kept for now (the in-DB copy the player reads back from
+        # today) — storage_key below is the SEPARATE, durable-on-disk copy every document
+        # gets, superseding media_blob as the actual durability guarantee; not removing
+        # media_blob yet is a deliberate no-behavior-change choice for this package.
         media_blob=content if media_kind is not None else None,
     )
     db.add(document)
@@ -179,12 +294,93 @@ async def _import_one_file(
     db.add(version)
     db.commit()
 
+    if _job_is_cancelled(db, job_id):
+        document.status = IndexStatus.cancelled
+        db.add(document)
+        db.commit()
+        return FileOutcome(filename=filename, status="cancelled", reason="Importen avbröts.", source_id=str(document.id))
+
+    # DEL 1 (persistent original storage): write, fsync, verify — see
+    # app/storage/local_fs.py's write_stream. Only once this succeeds does the document
+    # advance past `original_storing`; a storage failure here is recorded as a normal
+    # `failed` outcome, exactly like an extraction failure, never a silently-lost upload.
+    document.status = IndexStatus.original_storing
+    db.add(document)
+    db.commit()
+    try:
+        blob = _store_bytes(storage, content, max_bytes=max_upload_bytes)
+    except StorageError as exc:
+        # P1: reclassified from the old undifferentiated `failed` — the original never made
+        # it into durable storage at all, so unlike awaiting_provider/blocked_provider this
+        # is terminal: there is nothing safely stored to resume from, a fresh upload is
+        # required (see docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7).
+        document.status = IndexStatus.storage_failed
+        document.error_message = f"Kunde inte lagra originalfilen: {exc}"
+        db.add(document)
+        db.commit()
+        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+
+    document.storage_key = blob.storage_key
+    document.size_bytes = blob.size_bytes
+    document.stored_at = datetime.utcnow()
+    document.status = IndexStatus.original_stored
+    db.add(document)
+    db.commit()
+
+    if _job_is_cancelled(db, job_id):
+        document.status = IndexStatus.cancelled
+        db.add(document)
+        db.commit()
+        return FileOutcome(filename=filename, status="cancelled", reason="Importen avbröts.", source_id=str(document.id))
+
     if media_kind is None:
+        document.status = IndexStatus.extracting
+        db.add(document)
+        db.commit()
+        try:
+            text_content = extract_text(filename, content)
+        except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
+            # P1: reclassified from the old undifferentiated `failed` — the file's CONTENT is
+            # the problem here, not the provider or storage, so this is terminal too (see
+            # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7).
+            document.status = IndexStatus.extraction_failed
+            document.error_message = f"Kunde inte extrahera text: {exc}"
+            db.add(document)
+            db.commit()
+            return FileOutcome(
+                filename=filename, status="failed", reason=document.error_message, source_id=str(document.id)
+            )
+        document.status = IndexStatus.extracted
+        db.add(document)
+        db.commit()
         await index_document(db, document, text_content)
     else:
+        # STEG 12: MIME/size check — a rejected media file becomes a per-file FileOutcome,
+        # exactly like a text-extraction failure above, never a job-level failure (see
+        # app/rag/media_import.py's MediaImportError docstring).
+        try:
+            media_import.validate_media_bytes(filename, content, media_kind)
+        except media_import.MediaImportError as exc:
+            document.status = IndexStatus.failed
+            # MediaImportError is raised only by our own app/rag/media_import.py validation
+            # code with a deliberate, pre-written message — never wraps an httpx/provider
+            # exception, so str(exc) here can never contain a URL, header or API key (unlike
+            # the embedding call site in app/rag/ingest.py — see
+            # app/providers/verification.py's classify_provider_exception docstring).
+            document.error_message = str(exc)
+            db.add(document)
+            db.commit()
+            return FileOutcome(filename=filename, status="failed", reason=str(exc), source_id=str(document.id))
         await media_import.index_media_document(db, document, content, filename, media_kind)
 
-    if document.status == IndexStatus.failed:
+    # P1: awaiting_provider/blocked_provider is a PAUSE, not a failure — the file is safely
+    # stored and extracted, just waiting on the AI provider, and app/worker.py's automatic
+    # requeue will retry it with no re-upload. Every other non-`indexed` status here
+    # (storage_failed/extraction_failed/indexing_failed, or the legacy generic `failed`) is a
+    # genuine, terminal per-file failure.
+    if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
+        return FileOutcome(filename=filename, status="blocked", reason=document.error_message, source_id=str(document.id))
+    if document.status != IndexStatus.indexed:
         return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
 
     # Claim extraction (STEG 10, app/rag/claims.py) runs after indexing succeeds, on the
@@ -201,32 +397,30 @@ async def _import_one_file(
     return FileOutcome(filename=filename, status="indexed", source_id=str(document.id))
 
 
-async def run_import_job(
-    db: Session,
-    job_id: uuid.UUID,
-    owner_id: uuid.UUID,
-    raw: bytes,
-    filename: str,
-    *,
-    project_id: uuid.UUID | None = None,
-) -> None:
-    """STEG 11 entry point: coordinates a distributed lock (app/jobs/lock.py) around the
-    actual work (_run_once below) and retries transient failures with exponential backoff
-    (app/jobs/retry.py) before giving up. Never raises — every terminal outcome (success,
-    permanent failure, or transient failure with attempts exhausted) is captured on the job
-    row itself, so a caller polling GET /api/library/jobs/{id} always sees a definitive
-    status rather than the request hanging or the job stuck at "running" forever.
+async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+    """Restart-safe worker entry point (DEL 3): one attempt at the actual import work for a
+    job app/worker.py's claim_next_job() has already atomically marked `running` under a
+    Postgres lease (`FOR UPDATE SKIP LOCKED`) — that claim is what guarantees no two workers
+    ever process the SAME job row concurrently. This function additionally acquires the
+    existing STEG 11 Redis JobLock, scoped by (owner, content checksum) rather than job id —
+    a DIFFERENT, narrower race the Postgres claim alone doesn't cover: two separate ImportJob
+    rows created from two near-simultaneous uploads of byte-identical content could each be
+    claimed by a different worker at the same time, and without this lock both could pass
+    _import_one_file's duplicate-checksum check before either commits its new Document row.
 
-    Resumability is an emergent property, not new logic: retrying calls _run_once again from
-    the top of the same file list, and _import_one_file's existing per-file checksum
-    idempotency check means any file already successfully imported on a prior attempt is
-    detected as a "duplicate" and skipped, not redone — a retry naturally only does the
-    remaining work.
+    Never raises for a normal per-file failure (those become FileOutcome entries); DOES
+    raise for a genuine, unexpected orchestration-level error. Unlike the old synchronous-
+    BackgroundTask design, this function itself does NOT retry — app/worker.py's caller owns
+    the retry/backoff loop (app/jobs/retry.py, reused unchanged), since the worker is what
+    now decides whether to keep this job claimed for a local retry or let it go back to
+    `pending` for any worker to reclaim on the next poll.
     """
     _set_rls_owner(db, owner_id)
     job = db.get(ImportJob, job_id)
     if job is None:
         return
+    if job.source_storage_key is None:
+        raise ValueError("Jobbet saknar en lagrad originalfil att bearbeta.")
 
     lock_key = f"import:{owner_id}:{job.source_checksum or job_id}"
     lock = JobLock(lock_key, lease_seconds=60)
@@ -251,74 +445,40 @@ async def run_import_job(
         return
 
     try:
-        while True:
-            try:
-                await _run_once(db, job, owner_id, raw, filename, project_id, lock if lock_held else None)
-                return
-            except Exception as exc:  # noqa: BLE001 - the job row is the only place this failure can safely surface
-                db.rollback()
-                _set_rls_owner(db, owner_id)
-                job = db.get(ImportJob, job_id)
-                if job is None:
-                    return
-                transient = is_transient_error(exc)
-                job.last_failure_transient = transient
-                if transient and job.attempt_count + 1 < job.max_attempts:
-                    job.attempt_count += 1
-                    job.status = ImportJobStatus.pending
-                    db.add(job)
-                    db.commit()
-                    delay = compute_backoff_seconds(job.attempt_count)
-                    logger.warning(
-                        "Import %s: tillfälligt fel (%s), försök %d/%d om %.1fs.", job_id, exc, job.attempt_count, job.max_attempts, delay
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                job.status = ImportJobStatus.failed
-                # ZipSecurityError's own message is already a clear, specific rejection
-                # reason (see app/rag/zip_import.py) — wrapping it in a generic "unexpected
-                # error" prefix would bury the actual, actionable explanation.
-                job.failure_reason = str(exc) if isinstance(exc, ZipSecurityError) else f"Oväntat fel under import: {exc}"
-                job.completed_at = datetime.utcnow()
-                db.add(job)
-                db.commit()
-                return
+        await _run_once(db, job, owner_id, job_id)
     finally:
         if lock_held:
             lock.release()
 
 
-async def _run_once(
-    db: Session,
-    job: ImportJob,
-    owner_id: uuid.UUID,
-    raw: bytes,
-    filename: str,
-    project_id: uuid.UUID | None,
-    lock: JobLock | None,
-) -> None:
-    """One attempt at the actual import work — everything run_import_job used to do inline
-    before STEG 11 added the retry/lock wrapper around it. Raises on failure (unlike the
-    outer function) so run_import_job's retry loop can classify and act on the exception;
-    never itself decides retry vs. permanent failure."""
+async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uuid.UUID) -> None:
+    """The actual import work for one attempt — opens the durably-stored original from
+    app/storage/ and runs it through the same zip/single-file pipeline as before. Raises on
+    an unexpected orchestration-level error (never on a per-file failure, which becomes a
+    FileOutcome instead) so app/worker.py's retry wrapper can classify and act on it."""
+    storage = get_storage()
+    try:
+        with storage.open_read(job.source_storage_key) as f:
+            raw = f.read()
+    except (FileNotFoundError, StorageError) as exc:
+        job.status = ImportJobStatus.failed
+        job.failure_reason = f"Originalfilen kunde inte läsas från lagringen: {exc}"
+        job.completed_at = datetime.utcnow()
+        db.add(job)
+        db.commit()
+        return
+
     job.status = ImportJobStatus.running
-    job.started_at = datetime.utcnow()
+    job.started_at = job.started_at or datetime.utcnow()
     db.add(job)
     db.commit()
 
+    filename = job.source_filename or "upload"
     suffix = PurePosixPath(filename).suffix.lower()
     outcomes: list[FileOutcome] = []
 
     if suffix == ".zip":
-        try:
-            zip_result = validate_and_extract_zip(raw)
-        except ZipSecurityError as exc:
-            # Permanent, not transient (see app/jobs/retry.py's is_transient_error) — a
-            # malicious/malformed ZIP will never succeed no matter how many times it's
-            # retried, so this is raised, not written directly as a terminal failure here;
-            # run_import_job's retry loop classifies it and skips straight to "failed".
-            raise
-
+        zip_result = validate_and_extract_zip(raw)  # ZipSecurityError propagates — permanent, see app/worker.py
         job.manifest = zip_result.manifest
         entries = zip_result.entries
         job.progress_total = len(entries)
@@ -326,6 +486,13 @@ async def _run_once(
         db.commit()
 
         for entry in entries:
+            if _job_is_cancelled(db, job_id):
+                outcomes.append(FileOutcome(filename=entry.filename, status="cancelled", reason="Importen avbröts."))
+                job.progress_current = len(outcomes)
+                job.file_results = [o.__dict__ for o in outcomes]
+                db.add(job)
+                db.commit()
+                continue
             # manifest.json describes the package (see zip_import.py's own parsing of
             # it into zip_result.manifest, already applied above) — it is package
             # metadata, not a knowledge source in its own right, so it's never imported
@@ -341,36 +508,53 @@ async def _run_once(
                 manifest_entry = _manifest_entry_for(zip_result.manifest, entry.filename)
                 outcome = await _import_one_file(
                     db,
+                    storage,
                     owner_id,
+                    job_id,
                     entry.filename,
                     entry.content,
                     entry.checksum,
-                    project_id=project_id,
+                    project_id=job.project_id,
                     import_job_id=job.id,
                     manifest_entry=manifest_entry,
+                    max_upload_bytes=len(raw) or 1,
                 )
                 outcomes.append(outcome)
             job.progress_current = len(outcomes)
             job.file_results = [o.__dict__ for o in outcomes]
             db.add(job)
             db.commit()
-            # Heartbeat: renews the lease so a large package doesn't outlive its lock while
-            # still genuinely being worked on. A failed renewal (lease already expired,
-            # possibly reacquired by another worker under an abandoned-job assumption) is
-            # logged, not fatal — the import keeps going rather than aborting mid-batch over
-            # a coordination signal, since the actual data-safety guarantee here is
-            # per-file/per-document idempotency (checksums), not the lock itself.
-            if lock is not None and not lock.renew():
-                logger.warning("Import %s: kunde inte förnya jobblåset — kan ha övertagits som övergivet.", job.id)
+            # Heartbeat: renews the Postgres lease so a large package doesn't outlive its
+            # claim while still genuinely being worked on — see app/jobs/lease.py's
+            # renew_lease docstring. A failed renewal (locked_by no longer matches — the
+            # lease already expired and another worker reclaimed this job as abandoned) is
+            # logged, not fatal: the import keeps going rather than aborting mid-batch over
+            # a coordination signal, matching the same "per-file idempotency is the real
+            # safety net, not the lock itself" philosophy STEG 11 already established.
+            if job.locked_by and not renew_lease(db, job_id, job.locked_by, WORKER_LEASE_SECONDS):
+                logger.warning("Import %s: kunde inte förnya jobbleasen — kan ha övertagits som övergivet.", job_id)
     else:
         job.progress_total = 1
         db.add(job)
         db.commit()
-        checksum = sha256_bytes(raw)
-        outcome = await _import_one_file(
-            db, owner_id, filename, raw, checksum, project_id=project_id, import_job_id=job.id, manifest_entry={}
-        )
-        outcomes.append(outcome)
+        if _job_is_cancelled(db, job_id):
+            outcomes.append(FileOutcome(filename=filename, status="cancelled", reason="Importen avbröts."))
+        else:
+            checksum = sha256_bytes(raw)
+            outcome = await _import_one_file(
+                db,
+                storage,
+                owner_id,
+                job_id,
+                filename,
+                raw,
+                checksum,
+                project_id=job.project_id,
+                import_job_id=job.id,
+                manifest_entry={},
+                max_upload_bytes=len(raw) or 1,
+            )
+            outcomes.append(outcome)
         job.progress_current = 1
         job.file_results = [o.__dict__ for o in outcomes]
         db.add(job)
@@ -380,17 +564,34 @@ async def _run_once(
     duplicates = sum(1 for o in outcomes if o.status == "duplicate")
     failed = sum(1 for o in outcomes if o.status == "failed")
     skipped = sum(1 for o in outcomes if o.status == "skipped")
+    cancelled = sum(1 for o in outcomes if o.status == "cancelled")
+    # P1: files paused on awaiting_provider/blocked_provider — nothing genuinely failed here,
+    # the job is just waiting for the AI provider (see IndexStatus's docstring).
+    blocked = sum(1 for o in outcomes if o.status == "blocked")
 
     job.succeeded_count = succeeded
     job.failed_count = failed
     job.skipped_count = skipped + duplicates
-    if failed and (succeeded or duplicates or skipped):
+    job.blocked_count = blocked
+
+    if cancelled and not succeeded:
+        job.status = ImportJobStatus.cancelled
+        job.completed_at = datetime.utcnow()
+    elif blocked and not (succeeded or failed):
+        # P1: every non-duplicate/non-skipped file is paused on the provider — this is NOT a
+        # terminal outcome. app/worker.py's _requeue_blocked_jobs flips this back to `pending`
+        # automatically once the active provider verifies ok, so `completed_at` is
+        # deliberately left unset — the job isn't done, it's waiting.
+        job.status = ImportJobStatus.blocked
+    elif failed and (succeeded or duplicates or skipped or blocked):
         job.status = ImportJobStatus.partial
-    elif failed and not (succeeded or duplicates or skipped):
+        job.completed_at = datetime.utcnow()
+    elif failed and not (succeeded or duplicates or skipped or blocked):
         job.status = ImportJobStatus.failed
         job.failure_reason = "Alla filer i paketet misslyckades."
+        job.completed_at = datetime.utcnow()
     else:
         job.status = ImportJobStatus.completed
-    job.completed_at = datetime.utcnow()
+        job.completed_at = datetime.utcnow()
     db.add(job)
     db.commit()

@@ -18,7 +18,7 @@ riktiga filer och riktiga Docker-volymer — se `.github/workflows/ci.yml`s
 | Postgres-databasen (all applikationsdata) | Supabase, INTE denna VPS | **Nej** — Supabases eget ansvar |
 | Redis/Valkey (rate limiting, jobblås) | **Lokal container på denna VPS** (`docker-compose.vps.yml`s `redis`-tjänst — ERSATTE tidigare extern Upstash/Redis Cloud) — men `tmpfs`, ingen disk-persistens | **Nej** — förlust är ofarlig OCH det finns inget att förlora på disk, se nedan |
 | Docker-containrarnas egna loggar | `json-file`-loggdrivrutinen | **Nej** — redan rullande, inte katastrofrelevant |
-| Uppladdade filer | Finns inte lokalt på VPS:en alls | N/A — se nedan |
+| Life Library-originalfiler (uppladdat innehåll, innehållsadresserat) | Docker-volymen `lifeai_uploads` (`backend`/`worker`, se `docs/VPS_ARCHITECTURE.md`s "Filsystem, uppladdningar och persistens") | **Ja, sedan durable-worker-paketet** — se nedan |
 
 ### Varför hemligheter inte finns i arkivet
 
@@ -55,12 +55,23 @@ Att förlora dess innehåll (t.ex. vid en omstart) är ofarligt: räknare nollst
 loggas ut, ingenting permanent går förlorat — precis som när den kördes hos Upstash, bara
 nu av en lokal, inte en extern, anledning.
 
-### Varför inga uppladdade filer
+### Uppladdade filer (`lifeai_uploads`) — täcks, sedan durable-worker-paketet
 
-Appen sparar inget dokumentinnehåll som filer på disk — allt landar i Postgres
-(`document_chunks`, se `docs/VPS_ARCHITECTURE.md` och `backend/app/rag/vector_store.py`).
-Verifierat genom att gå igenom `backend/app/routers/*.py` efter filskrivningar utanför
-test-only-verktyg — det finns inga.
+**Historiskt (INTE längre aktuellt):** appen sparade inget dokumentinnehåll som filer på
+disk — allt landade i Postgres (`document_chunks`), och det fanns inget lokalt filträd att
+säkerhetskopiera.
+
+**Aktuellt:** originalfilen bakom varje Life Library-import (den råa filen innan
+extraktion) lagras nu innehållsadresserat på `lifeai_uploads`
+(`backend/app/storage/local_fs.py`) — den enda källan till dessa bytes utanför Postgres,
+som bara lagrar METADATA om filen (`Document.storage_key`/`sha256`/`size_bytes`), aldrig
+själva innehållet. Att förlora den här volymen utan en backup betyder att varje redan
+importerat original är borta för gott, även om databasen ser intakt ut. `backup.sh`
+arkiverar den som `uploads.tar.gz` och skriver samtidigt `uploads-manifest.txt` (listan
+över alla innehållsadresserade nycklar vid backup-tillfället); `restore.sh` verifierar
+efter återställning att (1) varje återställd blobs egen sha256 matchar dess sökväg och (2)
+den återställda mängden nycklar exakt matchar `uploads-manifest.txt` — se skriptens egna
+kommentarer.
 
 ## Köra en backup
 
@@ -107,13 +118,17 @@ en gång per kvartal:
    - `diff /tmp/restore-drill/docker-compose.vps.yml /opt/lifeai/docker-compose.vps.yml`
      (ska vara identiska om inget har ändrats sedan backupen togs).
    - `docker volume ls | grep lifeai_restore_` — de nya, ISOLERADE volymerna med
-     TLS-certifikat/Caddy-config.
+     TLS-certifikat/Caddy-config/Life Library-original.
    - `docker run --rm -v <lifeai_restore_...>:/vol:ro alpine ls -la /vol` för att bekräfta
      att certifikatfilerna faktiskt finns där.
+   - `restore.sh` har redan (steg 3b i dess egen output) verifierat `lifeai_uploads`s
+     innehåll mot både innehållsadressering och `uploads-manifest.txt` automatiskt — ett
+     lyckat skriptkörning utan `die`-fel ÄR den verifieringen, inget extra manuellt steg
+     krävs för den delen.
 4. **Städa upp övningen:**
    ```bash
    sudo rm -rf /tmp/restore-drill
-   docker volume rm <lifeai_restore_...caddy_data> <lifeai_restore_...caddy_config>
+   docker volume rm <lifeai_restore_...caddy_data> <lifeai_restore_...caddy_config> <lifeai_restore_...uploads>
    ```
 5. **Dokumentera resultatet** (datum, vilket arkiv, om något var oväntat) — en enkel rad i
    din egen driftlogg räcker; det finns inget krav på ett specifikt format här.
@@ -131,9 +146,12 @@ namngivna volymer och en helt fristående katalog.
    huvudkommentar.
 3. Kör `sudo ./scripts/vps/restore.sh --from <arkiv> --target-dir /tmp/restore-drill
    --overwrite-live-volumes --confirm` **i stället** för steg 2 ovan om du vill återställa
-   TLS-certifikaten direkt in i de riktiga `caddy_data`/`caddy_config`-volymerna (undviker att
-   Let's Encrypt-hastighetsgränser triggas av en helt ny certifikatbegäran) — detta är den enda
-   vägen som rör "levande" state, och kräver den extra flaggan uttryckligen.
+   TLS-certifikaten OCH Life Library-originalen direkt in i de riktiga
+   `caddy_data`/`caddy_config`/`lifeai_uploads`-volymerna (undviker att Let's
+   Encrypt-hastighetsgränser triggas av en helt ny certifikatbegäran, och återger
+   grundaren tillgång till redan importerat material utan att behöva ladda upp allt igen)
+   — detta är den enda vägen som rör "levande" state, och kräver den extra flaggan
+   uttryckligen.
 2. Skapa `/etc/lifeai/lifeai.env` från grunden med hjälp av `manifest.json`s
    `required_env_var_names`-lista och din egen säkra hemlighetslagring — se
    `docs/STRATO_VPS_DEPLOY.md` Steg 2 och `docs/VPS_SECRETS_INVENTORY.md`.

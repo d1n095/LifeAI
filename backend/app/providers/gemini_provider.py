@@ -15,7 +15,7 @@ class GeminiProvider(LLMProvider):
     def is_configured(self) -> bool:
         return bool(self.settings.google_api_key)
 
-    async def chat(self, messages: list[Message], model: str, **kwargs) -> ChatResult:
+    async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
         if not self.is_configured():
             raise ProviderError("Google API-nyckel saknas.")
         system = "\n".join(m.content for m in messages if m.role == "system") or None
@@ -28,7 +28,7 @@ class GeminiProvider(LLMProvider):
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
         url = f"{BASE_URL}/models/{model}:generateContent?key={self.settings.google_api_key}"
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=timeout or 60) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -42,12 +42,12 @@ class GeminiProvider(LLMProvider):
         }
         return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
-    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+    async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
         if not self.is_configured():
             raise ProviderError("Google API-nyckel saknas.")
         vectors = []
         url = f"{BASE_URL}/models/{model}:embedContent?key={self.settings.google_api_key}"
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=timeout or 60) as client:
             for text in texts:
                 resp = await client.post(url, json={"content": {"parts": [{"text": text}]}})
                 resp.raise_for_status()

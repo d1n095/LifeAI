@@ -4,7 +4,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.document import Document, IndexStatus
+from app.models.provider_verification import VerificationResult
 from app.providers.registry import resolve_active
+from app.providers.verification import classify_provider_exception, ensure_verified
 from app.rag.chunking import chunk_text
 from app.rag.vector_store import upsert_chunks
 
@@ -34,31 +36,76 @@ async def index_document(db: Session, document: Document, text_content: str) -> 
         db.commit()
         return
 
-    document.status = IndexStatus.indexing
+    # Life Library upload consolidation: `embedding` (not the legacy `indexing`) is the
+    # granular status for "chunking/embedding is in progress" — see IndexStatus's docstring.
+    # The document row itself (and its extracted text, held in `text_content` by the caller)
+    # already exists before this point, so a failure below never loses the received material.
+    document.status = IndexStatus.embedding
     db.add(document)
     db.commit()
 
     try:
         chunks = chunk_text(text_content)
         if not chunks:
-            document.status = IndexStatus.failed
+            # P1: reclassified from the old undifferentiated `failed` — this is an
+            # extraction-adjacent problem (the content produced nothing chunkable), not a
+            # provider issue, same bucket as app/rag/library_import.py's extract_text()
+            # failure (see docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7).
+            document.status = IndexStatus.extraction_failed
             document.error_message = "Inget textinnehåll kunde extraheras."
             db.add(document)
             db.commit()
             return
 
         provider, model = resolve_active(db, role="embedding")
-        vectors = await provider.embed(chunks, model=model)
+
+        # P1: a real pre-flight check — never just is_configured() — BEFORE the actual
+        # embed() call is ever attempted. A provider that isn't verified pauses the document
+        # on awaiting_provider/blocked_provider instead of attempting (and failing) the call;
+        # app/worker.py's poll loop re-verifies periodically and requeues paused jobs
+        # automatically once this returns ok again — no re-upload, no exception raised here.
+        verification = await ensure_verified(db, role="embedding")
+        if verification.result != VerificationResult.ok:
+            document.status = (
+                IndexStatus.awaiting_provider
+                if verification.result == VerificationResult.not_configured
+                else IndexStatus.blocked_provider
+            )
+            document.error_message = (
+                f"{verification.message} Filen är säkert lagrad och bearbetas automatiskt så "
+                "snart leverantören svarar."
+            )
+            db.add(document)
+            db.commit()
+            return
+
+        try:
+            vectors = await provider.embed(chunks, model=model)
+        except Exception as exc:  # noqa: BLE001 - a genuinely new failure AFTER a passed pre-flight check
+            # P1: pre-flight passed but the real call still failed — a distinct, presumably
+            # rarer case from a paused awaiting_provider/blocked_provider document, so it is
+            # not automatically retried by the worker (see IndexStatus.indexing_failed's
+            # docstring). Never str(exc) — see classify_provider_exception's docstring for
+            # why (Gemini puts the API key in the request URL).
+            document.status = IndexStatus.indexing_failed
+            document.error_message = classify_provider_exception(exc).message
+            db.add(document)
+            db.commit()
+            return
+
         count = upsert_chunks(db, document.id, document.uploaded_by, chunks, vectors)
 
         document.status = IndexStatus.indexed
         document.chunk_count = count
         document.content_preview = text_content[:1000]
         document.error_message = None
-    except Exception as exc:  # noqa: BLE001 - surface any ingestion failure on the document row
+        db.add(document)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - any other, unexpected failure (e.g. upsert_chunks) — an
+        # internal-invariant guard, not part of the P1 taxonomy above; still never str(exc)
+        # since this branch can in principle wrap a provider-adjacent exception too.
         document.status = IndexStatus.failed
-        document.error_message = str(exc)
-    finally:
+        document.error_message = classify_provider_exception(exc).message
         db.add(document)
         db.commit()
 

@@ -313,6 +313,20 @@ export type LibraryListFilters = {
   q?: string;
 };
 
+// Durable-worker package: GET /api/library/ops/status — never carries private file paths or
+// secrets (see backend/app/schemas.py's OpsStatusOut docstring), so it's safe to render
+// as-is in the founder-only Library UI.
+export type LibraryOpsStatus = {
+  worker_reachable: boolean;
+  queue_length: number;
+  running_jobs: number;
+  oldest_pending_age_seconds: number | null;
+  failed_last_24h: number;
+  storage_writable: boolean;
+  free_disk_bytes: number | null;
+  last_heartbeat_at: string | null;
+};
+
 // --- Founder Workbench (DEL 9) ---
 
 export type WorkbenchLabel = "idea" | "proposal" | "decision" | "history";
@@ -340,11 +354,20 @@ export type TaskItem = {
   created_at: string;
 };
 
+export type ProviderVerification = {
+  result: "ok" | "invalid_key" | "unreachable" | "rate_limited" | "unsupported" | "not_configured";
+  message: string;
+  checked_by: "system" | "founder";
+  checked_at: string;
+};
+
 export type ProviderStatus = {
   name: string;
   configured: boolean;
   active_chat: boolean;
   active_embedding: boolean;
+  chat_verification: ProviderVerification | null;
+  embedding_verification: ProviderVerification | null;
 };
 
 export type UsageSummaryRow = {
@@ -443,6 +466,12 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ role, provider, model }),
     }),
+  // P1: "Testa nu" — an explicit, real verification call, bypassing the cache.
+  verifyProvider: (provider: string, role: "chat" | "embedding") =>
+    request<ProviderVerification>("/api/admin/providers/verify", {
+      method: "POST",
+      body: JSON.stringify({ provider, role }),
+    }),
   usageSummary: () => request<UsageSummaryRow[]>("/api/admin/usage/summary"),
 
   importToLibrary: (file: File, projectId?: string) => {
@@ -452,6 +481,9 @@ export const api = {
     return request<ImportJobItem>(`/api/library/import${qs}`, { method: "POST", body: form });
   },
   getImportJob: (id: string) => request<ImportJobItem>(`/api/library/jobs/${id}`),
+  // DEL 3: the founder's recent/active import jobs, newest first — lets the upload queue
+  // (frontend/lib/uploadQueue.tsx) recover real server state after a reload or fresh login.
+  listImportJobs: () => request<ImportJobItem[]>("/api/library/jobs"),
   listLibrary: (filters: LibraryListFilters = {}) => {
     const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => !!v) as [string, string][]).toString();
     return request<KnowledgeSourceItem[]>(`/api/library${qs ? `?${qs}` : ""}`);
@@ -476,6 +508,7 @@ export const api = {
     } as Record<string, string>).toString();
     return request<LibrarySearchHit[]>(`/api/library/search/hybrid?${qs}`);
   },
+  getLibraryOpsStatus: () => request<LibraryOpsStatus>("/api/library/ops/status"),
 
   analyzeWorkbench: (question: string, projectId?: string, documentId?: string) =>
     request<WorkbenchAnalysis>("/api/workbench/analyze", {
