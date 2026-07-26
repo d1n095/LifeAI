@@ -119,6 +119,19 @@ async def chat_with_fallback(db: Session, messages: list[Message], **kwargs) -> 
             logger.warning("Chat provider %s failed: %s", provider.name, exc)
             last_error = exc
 
+    # Deferred import: app/providers/verification.py imports resolve_active from this module,
+    # so importing it at module load time would be a circular import. classify_provider_exception
+    # turns last_error into a safe (category, message) pair — never str(exc) directly, since an
+    # httpx-originated exception can carry the full request URL, and
+    # app/providers/gemini_provider.py puts the API key in that URL's query string. Every caller
+    # of chat_with_fallback (chat.py, workbench.py, agent_orchestration.py) gets this safety for
+    # free rather than each needing its own classification.
+    from app.providers.verification import classify_provider_exception
+
+    outcome = classify_provider_exception(last_error) if last_error is not None else None
+    category = outcome.result.value if outcome else "unreachable"
+    safe_detail = outcome.message if outcome else "Okänt fel inträffade."
     raise ProviderError(
-        f"Alla konfigurerade leverantörer misslyckades ({', '.join(attempted)}). Senaste fel: {last_error}"
+        f"Alla konfigurerade leverantörer misslyckades ({', '.join(attempted)}). {safe_detail}",
+        category=category,
     )

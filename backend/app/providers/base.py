@@ -37,4 +37,13 @@ class LLMProvider(ABC):
 
 
 class ProviderError(RuntimeError):
-    pass
+    """`category` is an optional, already-safe classification (see
+    app/providers/verification.py's classify_provider_exception — the same VerificationResult
+    values: "unreachable", "rate_limited", "invalid_key", "unsupported", "not_configured") a
+    caller can expose to a client without risking leaking request details (e.g. an API key
+    embedded in a provider's URL, see that module's docstring). None when the raiser hasn't
+    classified the failure — callers must treat that as "unknown", never assume a category."""
+
+    def __init__(self, message: str, *, category: str | None = None):
+        super().__init__(message)
+        self.category = category
