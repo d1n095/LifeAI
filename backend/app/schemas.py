@@ -492,7 +492,7 @@ class WorkbenchSaveIn(BaseModel):
         return v
 
 
-_NOTE_KINDS = ("fact", "decision", "blocker", "next_step", "uncertainty")
+_NOTE_KINDS = ("fact", "decision", "blocker", "next_step", "uncertainty", "idea")
 _SIDE_ISSUE_CLASSIFICATIONS = ("blocking", "directly_resolvable", "registered_for_later", "needs_founder_decision")
 
 
@@ -641,3 +641,64 @@ class ProjectBranchPRStatusOut(BaseModel):
 class ProjectConflictsOut(BaseModel):
     duplicate_work_candidates: list[dict]
     data_integrity_issues: list[dict]
+
+
+# --- MainAI Core: retrieval + system map + agent orchestration (2026-07-26) ------------------
+
+
+class RetrieveContextIn(BaseModel):
+    query: str = ""
+    limit_per_category: int = 5
+
+
+class AgentTaskCreateIn(BaseModel):
+    title: str
+    description: str
+    acceptance_criteria: str
+    target_files: list[str] = []
+    constraints: str | None = None
+    required_tests: str | None = None
+    source_note_id: uuid.UUID | None = None
+
+
+class AgentTaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    description: str
+    target_files: list[str]
+    constraints: str | None = None
+    acceptance_criteria: str
+    required_tests: str | None = None
+    status: str
+    source_note_id: uuid.UUID | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentTaskEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    task_id: uuid.UUID
+    event_type: str
+    role: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    payload: dict
+    created_by: str
+    created_at: datetime
+
+
+class AgentTaskDetailOut(AgentTaskOut):
+    events: list[AgentTaskEventOut]
+
+
+class RecordTestResultsIn(BaseModel):
+    passed: bool
+    output: str
+
+
+class PrepareGithubPrIn(BaseModel):
+    branch_name: str
+    base_branch: str

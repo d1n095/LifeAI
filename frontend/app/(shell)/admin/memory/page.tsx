@@ -21,6 +21,7 @@ const KIND_LABELS: Record<ProjectNoteKind, string> = {
   blocker: "Blockerare",
   next_step: "Nästa steg",
   uncertainty: "Osäkerhet",
+  idea: "Idé (ej beslutad)",
 };
 
 export default function ProjectMemoryPage() {

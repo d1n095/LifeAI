@@ -392,7 +392,7 @@ export type MessageResponse = { detail: string };
 // MainAI Project Memory & Coordination Loop (see backend/app/project_memory.py) — the
 // project's own durable memory of its state, not per-user data, hence founder-only like
 // the rest of /api/admin/*.
-export type ProjectNoteKind = "fact" | "decision" | "blocker" | "next_step" | "uncertainty";
+export type ProjectNoteKind = "fact" | "decision" | "blocker" | "next_step" | "uncertainty" | "idea";
 export type SideIssueClassification =
   | "blocking"
   | "directly_resolvable"
@@ -450,6 +450,48 @@ export type ProjectConflicts = {
   duplicate_work_candidates: Record<string, unknown>[];
   data_integrity_issues: Record<string, unknown>[];
 };
+
+// MainAI Core: agent orchestration (see backend/app/agent_orchestration.py) — one scoped
+// work order MainAI created for a code/review agent, and its append-only event history.
+export type AgentTaskStatus =
+  | "created"
+  | "dispatched"
+  | "result_recorded"
+  | "reviewed_approved"
+  | "reviewed_needs_correction"
+  | "reviewed_rejected"
+  | "pr_prepared"
+  | "pr_opened"
+  | "ready_for_human";
+
+export type AgentTask = {
+  id: string;
+  title: string;
+  description: string;
+  target_files: string[];
+  constraints: string | null;
+  acceptance_criteria: string;
+  required_tests: string | null;
+  status: AgentTaskStatus;
+  source_note_id: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentTaskEvent = {
+  id: string;
+  task_id: string;
+  event_type: string;
+  role: "code" | "review" | null;
+  provider: string | null;
+  model: string | null;
+  payload: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+};
+
+export type AgentTaskDetail = AgentTask & { events: AgentTaskEvent[] };
 
 export const api = {
   login: (email: string, password: string) =>
@@ -598,4 +640,25 @@ export const api = {
   memoryNotes: (status: "open" | "all" = "open") => request<ProjectNote[]>(`/api/admin/memory/notes?status=${status}`),
   memoryBranchPrStatus: () => request<ProjectBranchPRStatus[]>("/api/admin/memory/branch-pr-status"),
   memoryConflicts: () => request<ProjectConflicts>("/api/admin/memory/conflicts"),
+
+  // MainAI Core: agent orchestration (see backend/app/agent_orchestration.py).
+  agentTasks: () => request<AgentTask[]>("/api/admin/agents/tasks"),
+  agentTaskDetail: (id: string) => request<AgentTaskDetail>(`/api/admin/agents/tasks/${id}`),
+  agentCreateTask: (payload: {
+    title: string;
+    description: string;
+    acceptance_criteria: string;
+    target_files?: string[];
+    constraints?: string | null;
+    required_tests?: string | null;
+    source_note_id?: string | null;
+  }) => request<AgentTask>("/api/admin/agents/tasks", { method: "POST", body: JSON.stringify(payload) }),
+  agentDispatchTask: (id: string) => request<AgentTaskEvent>(`/api/admin/agents/tasks/${id}/dispatch`, { method: "POST" }),
+  agentRecordTestResults: (id: string, payload: { passed: boolean; output: string }) =>
+    request<AgentTaskEvent>(`/api/admin/agents/tasks/${id}/test-results`, { method: "POST", body: JSON.stringify(payload) }),
+  agentReviewTask: (id: string) => request<AgentTaskEvent>(`/api/admin/agents/tasks/${id}/review`, { method: "POST" }),
+  agentPreparePr: (id: string, payload: { branch_name: string; base_branch: string }) =>
+    request<Record<string, unknown>>(`/api/admin/agents/tasks/${id}/prepare-pr`, { method: "POST", body: JSON.stringify(payload) }),
+  agentAttemptMerge: (id: string) =>
+    request<{ merged: boolean; reason: string; conditions: string[] }>(`/api/admin/agents/tasks/${id}/attempt-merge`, { method: "POST" }),
 };

@@ -14,6 +14,7 @@ const NAV = [
   { href: "/projects", label: "Projekt" },
   { href: "/admin", label: "Admin" },
   { href: "/admin/memory", label: "Projektminne" },
+  { href: "/admin/agents", label: "Agentuppdrag" },
   { href: "/account", label: "Konto" },
 ];
 
