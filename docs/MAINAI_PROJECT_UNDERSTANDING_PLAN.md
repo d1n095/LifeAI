@@ -566,3 +566,356 @@ granskningsmönstret redan är byggt och beprövat på lägre-risk-lager (P4) f�
    du tillbaka i samma situation som den här sessionens felsökning: en ogiltig nyckel syns bara
    som ett odifferentierat `failed` istället för en tydlig, återupptagningsbar
    providerblockering. Det här hänger ihop med P1 (samma paket, samma `provider_verification_checks`-tabell).
+
+---
+
+## 10. P2 — ZIP-hårdning för massimport: exakt implementationsplan
+
+**Status:** designförslag, grundat i faktisk läsning av koden på commit `5690aa21c9c799a06deca3c5994878a5c93a6bcd`
+(P1, godkänd och levererad som PR #7, draft). Ingen kod skriven, ingen migration körd, ingen
+merge, ingen deploy. Nästa paket i byggordningen (§8) efter P1 — det andra av de två paket som
+blockerar en säker första massuppladdning av dina riktiga arkiv.
+
+### 10.1 Fasens exakta mål
+
+Tre konkreta, var för sig testbara mål — inget annat:
+
+1. **Nästlad ZIP hanteras säkert**, inte tyst hoppas över. En zip inuti en zip (upp till ett
+   bestämt djuptak) packas upp och dess innehåll importeras precis som toppnivåfiler, med en
+   **delad** total byte-budget över alla nivåer — aldrig en ny, oberoende 200 MB-budget per
+   nästlad nivå (det vore en konkret zip-bomb-lucka: ett arkiv som är säkert på varje enskild
+   nivå men exploderar i total datamängd när nivåerna summeras).
+2. **Lösenordsskyddade/krypterade arkiv eller filer flaggas explicit och tydligt** — en egen,
+   namngiven status, aldrig en generisk "kunde inte läsa filen"-rad. Ingen lösenordsprompt,
+   ingen gissning, inget brute-force-försök — bara en ärlig, specifik flagga.
+3. **`MAX_FILES` omprövas mot en riktigt uppmätt kapacitetsgräns**, inte en gissning. Antingen
+   höjs den till ett nytt, uppmätt-säkert värde, eller så bekräftas 500 vara rätt gräns — i
+   båda fallen med ett riktigt kapacitetstest som bevis, samma disciplin som durable-workerns
+   egen resursmätning (PR #6).
+
+### 10.2 Vad som redan finns (bekräftat genom läsning av `app/rag/zip_import.py`,
+`app/routers/library.py`, `docs/KNOWLEDGE_IMPORT_SECURITY.md`)
+
+- **Path traversal/Zip Slip-skydd** (`_is_safe_member_name`, segmentkontroll via
+  `PurePosixPath.parts`) — orört av P2, gäller identiskt på varje nästlingsnivå.
+- **Tvålagers zip-bomb-skydd**: ett metadata-baserat komprimeringskvotfilter
+  (`MAX_COMPRESSION_RATIO=100`) som körs FÖRE någon dekomprimering, plus `_read_with_hard_cap()`
+  som strömmar och avbryter direkt om verklig data överskrider gränsen — litar aldrig på
+  zip-arkivets egna storleksuppgifter. Båda lagren återanvänds oförändrade per nästlingsnivå.
+- **`MAX_FILES=500`**, **`MAX_TOTAL_UNCOMPRESSED_BYTES=200 MB`**,
+  **`MAX_SINGLE_FILE_UNCOMPRESSED_BYTES=25 MB`** — dagens, oprövade konstanter.
+- **`MAX_UPLOAD_BYTES=60 MB`** i `app/routers/library.py` — ett separat tak på själva
+  HTTP-uppladdningens rådata (den komprimerade storleken), innan zip-motorn ens öppnar filen.
+  **Rörs inte av P2** (se §10.9) om inte kapacitetstestet visar ett konkret behov.
+- **`EXECUTABLE_EXTENSIONS`-blockering** och **magic-byte-verifiering** (PDF/DOCX) — gäller
+  identiskt på varje nästlingsnivå, ingen ändring.
+- **`ZipEntryResult`** (`status: str` — redan en fri sträng, inte en databas-enum) — dagens
+  värden `"ok"`/`"skipped"`/`"rejected"`. Eftersom fältet redan är en vanlig sträng, inte en
+  Postgres-enum, kan nya statusvärden läggas till utan migration (se §10.4).
+- **Redan durabelt lagrat**: det YTTRE zip-arkivets råa bytes (`ImportJob.source_storage_key`,
+  PR #6) — grunden P2:s proveniens för nästlade nivåer bygger vidare på (se §10.6).
+- **Flexibla JSON-fält utan schemaändring**: `ImportJob.manifest`/`file_results` och
+  `KnowledgeVersion.raw_metadata` — redan tillräckligt fria för att bära den nya
+  nästlingsmetadatan utan migration (se §10.4).
+- **`docs/KNOWLEDGE_IMPORT_SECURITY.md`** — befintlig hotmodell, rad "Resursuttömning via
+  filantal/total storlek" pekar redan på exakt de konstanter P2 omprövar.
+
+### 10.3 Vad som saknas
+
+- **Ingen nästlad ZIP-hantering alls.** `.zip` finns inte i `ALLOWED_EXTENSIONS` — en zip
+  inuti en zip blir idag `status="skipped", reason="Filtypen .zip stöds inte."`, exakt som
+  vilken annan otillåten filtyp som helst. Inget djuptak, ingen delad budget, eftersom inget
+  av detta någonsin triggas.
+- **Ingen explicit kryptering/lösenordsdetektion.** `zipfile` kastar ett `RuntimeError`
+  ("... is encrypted, password required for extraction") när `zf.open(info)` anropas på en
+  krypterad post — det fångas idag av det generella `except Exception` i
+  `validate_and_extract_zip()`, blir `status="rejected", reason=f"Kunde inte läsa filen:
+  {exc}"`. Ordet "encrypted" råkar synas i den råa undantagstexten, men det finns ingen
+  strukturerad, namngiven status en founder eller ett UI kan lita på — exakt det generiska
+  beteende du bad om att få bort.
+- **Inget uppmätt kapacitetstak.** 500 filer/200 MB är rimliga, försiktiga gissningar från
+  FKS-v1, aldrig belastningstestade mot den riktiga workerns faktiska genomströmning (en
+  sekventiell worker, `worker_concurrency=1`, ett `db.commit()` per fil).
+- **Ingen provenienskedja för nästlingsnivåer.** `KnowledgeVersion.raw_metadata` innehåller
+  idag bara `{"original_filename", "size_bytes", "media_type"}` för toppnivåfiler — ingenting
+  som säger "den här filen låg i `sub/inner.zip`, som i sin tur låg i det yttre arkivet."
+
+### 10.4 Datamodeller och migrationer
+
+**Ingen ny migration.** Detta är en medveten, verifierad slutsats, inte en utelämnelse:
+
+- `ZipEntryResult.status` är redan en fri Python-sträng (aldrig en Postgres-enum) — ett nytt
+  värde `"encrypted"` kräver ingen `ALTER TYPE`.
+- `ImportJob.file_results` (redan `JSON`) kan bära ett nytt, valfritt fält per post,
+  `"archive_path": [...]`, utan schemaändring.
+- `KnowledgeVersion.raw_metadata` (redan `JSON`) kan på samma sätt bära en ny nyckel,
+  `"zip_chain"` (se §10.6) — samma mönster som `extraction_version`/`original_filename`
+  redan använder.
+- Nästlade zip-arkiv får **ingen egen rad i `provider_verification_checks`-stil eller egen
+  `storage_key`** — de lagras aldrig separat. Se §10.6 för varför det är en medveten
+  arkitekturprincip, inte en genväg: det yttre arkivets bytes är redan den enda källan som
+  behövs för att deterministiskt återskapa exakt samma nästlade arkiv och exakt samma filer,
+  varje gång — att lagra dem igen vore att duplicera något som redan är fullt återhärledbart,
+  precis som `app/storage/`s innehållsadressering redan vägrar duplicera identiskt innehåll.
+
+Om kapacitetstestet (§10.7) visar att `MAX_FILES` bör höjas är det en ren konstantändring i
+`app/rag/zip_import.py` — ingen migration, eftersom gränsen aldrig var en databaskolumn.
+
+### 10.5 API- och worker-flöden
+
+**`app/rag/zip_import.py` — den enda modulen som ändras strukturellt:**
+
+```
+validate_and_extract_zip(raw, *, max_files=..., max_total_bytes=..., max_file_bytes=...,
+                          max_nesting_depth=3)
+    -> anropar en ny intern _extract_recursive(zf, *, depth, archive_path, budget) som:
+       - för varje post: samma path-traversal/exekverbar-/magic-byte-kontroll som idag,
+         OFÖRÄNDRAT, oavsett djup
+       - suffix == ".zip": FÖRSÖK öppna som nästlat arkiv (inte "skippa som okänd typ"):
+           - depth >= max_nesting_depth -> status="rejected",
+             reason="Nästlingsdjupet överskrider gränsen (max {max_nesting_depth} nivåer)."
+           - annars: läs posten med SAMMA _read_with_hard_cap (samma delade `budget`-räknare,
+             inte en ny), försök zipfile.ZipFile(io.BytesIO(nested_bytes)), rekursera med
+             depth+1 och archive_path + [{"filename": name, "checksum": sha256(nested_bytes)}]
+           - ogiltigt nästlat arkiv (BadZipFile) -> status="rejected",
+             reason="Nästlat arkiv kunde inte läsas (skadat eller inte en riktig ZIP)."
+             — precis som idag för toppnivån, avbryter INTE hela importen
+       - zf.open(info) kastar RuntimeError/NotImplementedError vid kryptering -> NY,
+         EXPLICIT except-gren (inte det generella `except Exception`):
+             status="encrypted",
+             reason="Filen/arkivet är lösenordsskyddat — kan inte läsas automatiskt."
+       - annars: exakt samma flöde som idag (magic bytes, checksum, content)
+       - varje ZipEntryResult får två nya, valfria fält (se §10.6 för det exakta formatet):
+           archive_path: str | None    -- människoläsbar sökväg, t.ex.
+                                           "backup.zip!/users/docs.zip!/contracts/lease.pdf"
+           archive_chain: list[dict] | None  -- samma kedja, maskinverifierbar (checksum per nivå)
+         (båda None för toppnivåfiler — bakåtkompatibelt, oförändrat för icke-nästlade paket)
+```
+
+**Den avgörande regeln, uttryckt konkret:** `budget` (den ackumulerade
+`total_uncompressed`-räknaren) skickas **som samma objekt/referens** in i varje rekursivt
+anrop — en nästlad nivås byte-räkning LÄGGS TILL den redan ackumulerade summan, den startar
+aldrig om från noll. Ett arkiv där varje enskild nivå ser ut att vara under 200 MB, men vars
+SAMMANLAGDA uppackade data över alla nivåer överskrider 200 MB, avvisas — det är den konkreta,
+testbara definitionen av "delad, inte per-nivå" (redan skriven in i riskmatrisen i §7).
+
+**`app/rag/library_import.py` — ingen strukturell ändring.** `_run_once()`s loop över
+`zip_result.entries` är redan flat (en lista `ZipEntryResult`, oavsett hur många nästlingsnivåer
+som producerade dem — rekursionen händer helt inuti `zip_import.py`, `library_import.py` ser
+bara den färdiga, platta listan). Den enda ändringen: `_manifest_entry_for()`/
+`_import_one_file()`-anropet skickar med `entry.archive_path` in i `KnowledgeVersion`s
+`raw_metadata` (se §10.6) — en enda ny nyckel i en dict som redan byggs.
+
+**`app/worker.py` — ingen ändring alls.** Nästlad uppackning är ren, synkron Python-logik utan
+någon AI-provider inblandad — påverkar varken pre-flight-verifieringen (P1) eller
+återköningsmekanismen.
+
+**Ny status i `FileOutcome`/`ImportJob.file_results`:** `"encrypted"` läggs till som ett giltigt
+värde, bredvid `"indexed"/"duplicate"/"failed"/"skipped"/"cancelled"/"blocked"`. **Inte
+återupptagningsbar** i P1:s mening — ett lösenordsskyddat arkiv väntar inte på att något ska
+"bli klart", det kräver en mänsklig åtgärd (en ny export utan lösenord) som varken workern
+eller en framtida nyckelrättning kan lösa automatiskt. Räknas därför som `skipped`/`rejected`
+i jobbnivåns `succeeded`/`failed`/`blocked`-summering (§4.7s modell rörs inte) — bara
+diagnostiktexten blir tydligare.
+
+### 10.6 Provenienskrav
+
+#### 10.6.1 `archive_path` — exakt format
+
+Varje fil som kommer från ett nästlat arkiv får en stabil, människoläsbar sökväg som visar
+HELA kedjan av innesluta arkiv, till exempel:
+
+```
+backup.zip!/users/docs.zip!/contracts/lease.pdf
+```
+
+**Konstruktion, deterministisk, ren funktion av indata:**
+
+```
+archive_path = "!/".join(segment for segment in [outer_filename, *inner_paths, final_path])
+```
+
+där varje `segment`:
+
+- är den **normaliserade** posten (`name.replace("\\", "/")`, ALDRIG rå Windows-backslash i
+  slutresultatet — samma normalisering `_is_safe_member_name()` redan gör internt, bara nu
+  även använd för att BYGGA strängen, inte bara validera den),
+- redan har passerat `_is_safe_member_name()` OFÖRÄNDRAT — path traversal (`..`), absoluta
+  sökvägar och enhetsbokstäver är alltså strukturellt omöjliga i `archive_path`, inte bara
+  "osannolika": om en post inte klarar den kontrollen avbryts hela importen (`ZipSecurityError`,
+  oförändrat beteende) INNAN någon `archive_path` ens byggs för den,
+- separeras med **`!/`** mellan varje arkivgräns (aldrig bara `/`, som inte skulle gå att
+  skilja från en vanlig undermapp) — samma konvention som JAR-URL:er redan använder för
+  nästlade arkiv, valt för att vara otvetydigt och plattformsoberoende, inte en egen
+  uppfinning.
+
+**Determinism, konkret:** samma yttre arkiv-bytes + samma interna sökväg ger ALLTID samma
+`archive_path`-sträng — konstruktionen använder bara postens namn (redan en fast egenskap av
+arkivets bytes, inte något som beror på bearbetningsordning, tidsstämplar eller
+dict-iterationsordning i Python). Två OLIKA uppladdningar av identiskt innehåll under olika
+filnamn ger olika `archive_path`-strängar (den är beskrivande för DEN HÄR importen, inte en
+innehålls-identitet) — det är `archive_chain`s checksummor och `Document.checksum` som redan
+ger den strikta, innehållsbaserade identiteten, oförändrat.
+
+#### 10.6.2 Den fullständiga kedjan
+
+```
+Document.storage_key (den extraherade filens EGEN durabla blob, oförändrat från idag)
+  -> Document.import_job_id
+  -> ImportJob.source_storage_key (det YTTRE arkivets EGEN durabla blob — den enda som lagras)
+  -> KnowledgeVersion.raw_metadata["archive_path"] = "backup.zip!/users/docs.zip!/contracts/lease.pdf"
+  -> KnowledgeVersion.raw_metadata["archive_chain"] = [
+       {"filename": "backup.zip", "checksum": "<= ImportJob.source_checksum>"},
+       {"filename": "users/docs.zip", "checksum": "<sha256 av det nästlade arkivets bytes>"},
+       {"filename": "contracts/lease.pdf", "checksum": "<sha256 av den extraherade filen, = Document.checksum>"}
+     ]
+```
+
+`archive_path` (sträng) är den människoläsbara, visningsbara varianten. `archive_chain`
+(strukturerad lista) är samma kedja fast maskinverifierbar — varje nivås checksumma, inklusive
+den yttersta som redan är identisk med `ImportJob.source_checksum`. Båda beräknas en gång, vid
+import, och sparas — de räknas aldrig om i efterhand, så en framtida källhänvisning (chatt,
+Workbench) kan visa "från `backup.zip!/users/docs.zip!/contracts/lease.pdf`" direkt från redan
+lagrad metadata utan att öppna arkivet igen. **Att faktiskt koppla in `archive_path` i en
+körande källhänvisning (`SourceRef`, `chat.py`) är INTE en del av P2** (se §10.9) — P2:s jobb
+är bara att fältet finns, är korrekt ifyllt och aldrig behöver räknas om senare.
+
+**Varför nästlade arkiv inte behöver sin egen `storage_key`:** determinism. Samma yttre
+zip-bytes producerar, varje gång de packas upp igen, exakt samma nästlade arkiv och exakt
+samma extraherade filer (zip-formatet har inget icke-deterministiskt inslag som skulle ändra
+det). Att lagra en nästlad zip separat vore att spara en andra kopia av data som redan är
+100 % återhärledbar från den första — samma princip som redan gäller för identiskt filinnehåll
+i `app/storage/local_fs.py`s innehållsadressering. Om du (grundaren) senare vill se exakt vilket
+nästlat arkiv en fil kom ifrån räcker `archive_chain`-metadatan + en omkörning av
+`validate_and_extract_zip()` mot det redan lagrade yttre arkivet — ingen extra lagring krävs
+för att kunna svara på den frågan.
+
+#### 10.6.3 Var `archive_path`/`archive_chain` sparas — inga nya kolumner
+
+- **`ImportJob.file_results`** (redan `JSON`): varje post får de två nya, valfria nycklarna
+  `"archive_path"`/`"archive_chain"` — samma dict som redan byggs av `FileOutcome.__dict__`
+  i `_run_once()`, bara två nya fält på `FileOutcome`-dataclassen (`archive_path: str | None`,
+  `archive_chain: list[dict] | None`, båda default `None`).
+- **`KnowledgeVersion.raw_metadata`** (redan `JSON`): samma två nycklar, satta av
+  `_import_one_file()`/`_resume_blocked_document()` när `KnowledgeVersion`-raden skapas — exakt
+  samma mönster som `original_filename`/`size_bytes`/`media_type` redan sparas där idag.
+- **Ingen ny kolumn på `Document`.** `Document.checksum` är redan den extraherade filens egen
+  checksumma (= sista posten i `archive_chain`) — ingen dubblering.
+- **Bekräftat: ingen migration krävs** för `archive_path`/`archive_chain` — samma slutsats som
+  §10.4 redan drog för nästlingsstödet i stort, nu även uttryckligen för proveniensfälten.
+
+### 10.7 Kapacitetstest (kravet, inte bara en idé)
+
+Ett nytt, dedikerat testscenario (inte en del av de vanliga enhetstesterna, körs separat och
+rapporteras med siffror, samma stil som PR #6:s resursmätning):
+
+1. Bygg ett syntetiskt ZIP-paket med **minst 2 000–5 000 små textfiler** (realistisk storlek
+   för "flera tusen filer", inte en extrapolering från 500).
+2. Kör det genom **hela, riktiga pipelinen** — HTTP-intag → `app/worker.py` →
+   `validate_and_extract_zip` → `_import_one_file` per fil → embedding (mockad leverantör,
+   ingen riktig kostnad) → `indexed` — inte bara `zip_import.py` isolerat.
+3. Mät verklig tid (worker är `worker_concurrency=1`, sekventiell, ett `db.commit()` per fil
+   — den dominerande kostnaden är sannolikt antalet databas-round trips, inte
+   uppackningen i sig) och peak-minnesanvändning.
+4. **Beslut baserat på siffrorna, inte en gissning:** antingen bekräftas `MAX_FILES=500` vara
+   en rimlig gräns (med den uppmätta tiden/minnet som motivering i kommentaren i
+   `zip_import.py`), eller höjs den till ett nytt, uppmätt-säkert värde. Om ett paket med
+   flera tusen filer visar sig ta orimligt lång tid (t.ex. tiotals minuter) dokumenteras det
+   explicit som en känd begränsning snarare än att gränsen höjs blint.
+
+#### 10.7.1 Resultat (kört, inte gissat)
+
+`tests/backend/test_zip_import_capacity.py::test_capacity_2500_files_through_the_real_import_pipeline`
+(körs explicit via `RUN_CAPACITY_TEST=1`, inte del av standardsviten — se filens egen
+docstring för varför):
+
+- **Paket:** 2 500 filer, 2 nästlingsnivåer (region.zip → shard.zip → textfiler), 48 210 bytes
+  totalt (realistiskt för textdokument, inte en byte-tung stress-test).
+- **Väg:** den riktiga `run_import_job()` — riktig Postgres (inkl. RLS), riktig
+  lagringsbackend, mockad men strukturellt realistisk embedding-/chattleverantör (samma mock
+  som resten av `test_library_import.py` använder) — inte `zip_import.py` isolerat.
+- **Mätt tid:** 447,7 s totalt, 179,1 ms/fil.
+- **Mätt minne:** 11,3 MB Python-heap-topp (tracemalloc), 175,0 MB processens RSS-vattenmärke
+  (oförändrat före/efter — ingen minnesläcka över 2 500 filer).
+- **Beslut: `MAX_FILES=500` behålls oförändrad**, medvetet INTE höjd. Motivering: den uppmätta
+  kostnaden per fil är dominerad av databas-rundresor (ett `db.commit()` per fil, sekventiell
+  worker), exakt som förväntat — men mätningen mockar leverantörsanropen och fångar därför
+  INTE den riktiga nätverkslatensen mot en verklig embedding-/chattleverantör, som i
+  produktion sannolikt dominerar över DB-kostnaden. Att höja gränsen på enbart den här siffran
+  vore precis den gissning kravet i §10.7 uttryckligen förbjuder. Vid 500 filer ger den
+  uppmätta takten en bästa-scenario-tid på ~90 s — en rimlig, konservativ gräns. Se
+  kommentaren ovanför `MAX_FILES` i `app/rag/zip_import.py` för samma motivering i koden.
+- **Känd begränsning:** ingen mätning finns ännu mot en riktig (icke-mockad) AI-leverantör —
+  om `MAX_FILES` ska omprövas igen bör det ske med ett motsvarande test mot en verklig
+  leverantör, inte en extrapolering av den här mätningen.
+
+### 10.8 Tester
+
+- `test_nested_zip_one_level_extracts_and_indexes_normally`
+- `test_nested_zip_at_max_depth_boundary_still_extracts` (exakt `max_nesting_depth`-nivåer)
+- `test_nested_zip_exceeding_max_depth_is_rejected_not_the_whole_import`
+- `test_nested_zip_shared_budget_rejects_a_bomb_that_looks_small_per_level` — **den
+  viktigaste säkerhetstesten i hela paketet**: konstruerar ett arkiv där varje enskild nivå
+  ligger klart under `MAX_TOTAL_UNCOMPRESSED_BYTES`, men den ackumulerade summan över alla
+  nivåer överskrider den — bevisar konkret att budgeten delas, inte återställs per nivå.
+- `test_corrupt_nested_archive_is_rejected_as_one_entry_not_the_whole_batch`
+- `test_encrypted_top_level_entry_gets_a_distinct_encrypted_status_not_generic_rejected`
+- `test_encrypted_entry_inside_a_nested_archive_is_still_correctly_classified`
+- `test_encrypted_status_is_never_treated_as_resumable_by_the_worker` — bevisar att
+  `"encrypted"` INTE hamnar i `ImportJobStatus.blocked` eller återköas av
+  `_requeue_blocked_jobs` (skiljer den tydligt från P1:s `awaiting_provider`/`blocked_provider`).
+- `test_archive_chain_provenance_is_recorded_correctly_for_a_nested_file` — verifierar att
+  `KnowledgeVersion.raw_metadata["archive_chain"]` innehåller rätt filnamn och checksummor för
+  en fil två nivåer ner, inklusive att den yttersta postens checksumma matchar
+  `ImportJob.source_checksum`.
+- `test_archive_path_matches_the_documented_format_exactly` — bevisar konkret
+  `"backup.zip!/users/docs.zip!/contracts/lease.pdf"`-formatet (rätt separator `!/` mellan
+  varje arkivgräns, inte bara mellan mappar inuti samma arkiv).
+- `test_archive_path_is_deterministic_across_repeated_imports_of_identical_bytes` —
+  packar upp samma arkiv två gånger (t.ex. via en riktig re-upload), verifierar att
+  `archive_path` blir en identisk sträng båda gångerna.
+- `test_archive_path_never_contains_raw_backslashes_or_traversal_segments` — matar in ett
+  konstgjort postnamn med `\`-separatorer (vanligt i Windows-skapade zip-filer) och bevisar att
+  den resulterande `archive_path`-strängen bara innehåller `/`, aldrig `\`, och att en post som
+  inte klarar `_is_safe_member_name()` aldrig når fram till att få ett `archive_path` alls
+  (hela importen avbryts innan, oförändrat beteende).
+- `test_top_level_files_have_no_archive_path_unchanged_from_before_p2` — regressionsskydd:
+  ett icke-nästlat paket beter sig exakt som idag (`archive_path`/`archive_chain` båda `None`).
+- `test_existing_500_file_and_200mb_limits_still_enforced_at_top_level` — regressionsskydd
+  för dagens redan testade gränser.
+- Kapacitetstestet (§10.7) som ett eget, tydligt namngivet test/skript med rapporterade
+  siffror i testoutputet eller en kort separat rapport — inte bara ett tyst pass/fail.
+- `docs/KNOWLEDGE_IMPORT_SECURITY.md` uppdateras med två nya rader i attackyta 1-tabellen
+  (nästlad zip-bomb via delad budget, explicit kryptering-detektion) — granskad som en del av
+  leveransen, inte bara koden.
+
+### 10.9 Vad som uttryckligen INTE ingår i P2
+
+- **Inget lösenordsstöd.** Ingen UI för att ange ett lösenord, inget försök att öppna ett
+  krypterat arkiv med ett gissat/vanligt lösenord, ingen brute-force. Ett krypterat arkiv
+  flaggas — punkt. (Redan ett hårt krav från din allra första begäran i den här sessionen.)
+  Om lösenordsstöd någonsin blir aktuellt är det ett eget, separat, explicit beslut senare.
+- **Ingen ändring av `MAX_SINGLE_FILE_UNCOMPRESSED_BYTES` (25 MB) eller `MAX_UPLOAD_BYTES`
+  (60 MB, HTTP-intagets råa gräns).** P2 rör filANTAL och nästling, inte enskild filstorlek
+  eller den yttre uppladdningens byte-tak — om inte kapacitetstestet (§10.7) konkret visar att
+  någon av dem också behöver omprövas, i så fall som ett explicit, separat beslut.
+- **Ingen malware-/antivirusskanning** — redan uttryckligen utanför scope i
+  `docs/KNOWLEDGE_IMPORT_SECURITY.md`, oförändrat.
+- **Ingen frontend-förändring garanterad.** Library-UI:ts uppladdningskö (`lib/uploadQueue.tsx`,
+  `app/(shell)/library/page.tsx`) visar idag bara jobbnivåns `failure_reason` — INTE per-fil
+  `file_results[].reason` alls. Utan en separat, uttrycklig frontend-uppgift kommer det nya
+  `"encrypted"`-värdet och `zip_chain`-provenienstexten synas i API-svaret
+  (`GET /api/library/jobs/{id}`) och i tester, men INTE automatiskt bli synligt för dig i
+  Library-gränssnittet. Flaggat här explicit, inte tyst antaget löst — säg till om du vill att
+  det inkluderas som en liten, avgränsad frontend-uppgift i samma paket eller som en egen,
+  senare uppföljning.
+- **Ingen P3–P7-funktionalitet** — ingen claim-typning, ingen relationsupptäckt, ingen
+  governance, inget grundarminne. P2 är uteslutande `app/rag/zip_import.py` och den smala
+  provenienstillägget i `library_import.py`.
+- **Ingen ändring av P1:s provider-verifieringslogik** — nästlad uppackning är ren,
+  AI-fri Python-logik, rör aldrig `ensure_verified()`/`_requeue_blocked_jobs()`.
+- **`archive_path`/`archive_chain` kopplas INTE in i `SourceRef`/chat-källhänvisningar i P2.**
+  Fälten sparas fullständigt och korrekt vid import (§10.6), men att faktiskt VISA
+  "från backup.zip!/users/docs.zip!/..." i ett chattsvar eller i Workbench är en separat,
+  senare uppgift (`app/schemas.py`s `SourceRef`, `chat.py`) — precis som §6.9 i den övergripande
+  planen redan säger att bounded-retrieval-frågor hör till P4:s frågelager, inte P2.
