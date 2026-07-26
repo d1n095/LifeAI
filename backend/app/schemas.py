@@ -490,3 +490,59 @@ class WorkbenchSaveIn(BaseModel):
         if v not in allowed:
             raise ValueError(f"Ogiltig etikett. Måste vara en av: {', '.join(sorted(allowed))}.")
         return v
+
+
+class ProjectNoteIn(BaseModel):
+    kind: str  # "decision" | "blocker" | "next_step"
+    content: str
+    source_type: str
+    source_ref: str
+
+    @field_validator("kind")
+    @classmethod
+    def valid_kind(cls, v: str) -> str:
+        if v not in ("decision", "blocker", "next_step"):
+            raise ValueError("kind måste vara 'decision', 'blocker' eller 'next_step'.")
+        return v
+
+
+class ProjectNoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    kind: str
+    status: str
+    content: str
+    source_type: str
+    source_ref: str
+    created_by: str
+    created_at: datetime
+    resolved_at: datetime | None = None
+    resolved_by: str | None = None
+    resolution_note: str | None = None
+
+
+class ProjectNoteResolveIn(BaseModel):
+    resolution_note: str
+    superseded: bool = False
+
+
+class ProjectCheckpointIn(BaseModel):
+    summary: str
+    branch_name: str
+    open_pr_refs: list[str] = []
+
+
+class ProjectCheckpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    summary: str
+    branch_name: str
+    open_pr_refs: str
+    brief_storage_key: str
+    brief_sha256: str
+    created_by: str
+    created_at: datetime
+
+
+class ProjectCheckpointDetailOut(ProjectCheckpointOut):
+    brief: str

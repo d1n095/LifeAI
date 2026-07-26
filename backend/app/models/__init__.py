@@ -11,6 +11,7 @@ from app.models.knowledge_version import KnowledgeVersion
 from app.models.media_url_import import MediaUrlImport
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
+from app.models.project_memory import ProjectCheckpoint, ProjectCheckpointNote, ProjectNote
 from app.models.provider_config import ProviderConfig
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
@@ -35,6 +36,9 @@ __all__ = [
     "PasswordResetToken",
     "Project",
     "Task",
+    "ProjectCheckpoint",
+    "ProjectCheckpointNote",
+    "ProjectNote",
     "ProviderConfig",
     "ProviderVerificationCheck",
     "RefreshToken",
