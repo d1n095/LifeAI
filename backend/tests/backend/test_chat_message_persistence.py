@@ -1,0 +1,201 @@
+"""MainAI chat — message persistence / failure-boundary fix (see app/routers/chat.py's module
+docstring and docs/BRANCH_REGISTRY.md's 2026-07-26 LLM Coupling & Failure-Boundary Audit,
+finding #1: the founder's own chat message used to be lost whenever the AI provider failed,
+because it was only ever committed in the same transaction as a successful reply).
+
+Covers exactly the required scenarios:
+  A. provider succeeds — normal contract, assistant_status="succeeded".
+  B. provider fails before producing output (e.g. missing key) — user message still saved,
+     assistant_status="failed", safe (non-leaking) error_category.
+  C. provider times out — same shape, classified "unreachable", retryable=True.
+  D. retry does not duplicate the user message.
+  E. reload (a fresh GET /api/conversations/{id}) confirms the user message remains after a
+     provider failure.
+  F. idempotent retry: retrying an already-succeeded reply returns it as-is, without a second
+     provider call or a duplicate assistant row.
+"""
+
+import httpx
+import pytest
+
+from app.config import get_settings
+from app.models.conversation import Message as MessageModel, MessageRole, MessageStatus
+from app.providers.base import ChatResult, ProviderError
+from app.providers.openai_provider import OpenAIProvider
+
+FOUNDER_EMAIL = "founder@lifeos.local"
+FOUNDER_PASSWORD = "TestFounderPassword123!"
+DIM = get_settings().embedding_dim
+
+
+@pytest.fixture(autouse=True)
+def _fake_embed(monkeypatch):
+    """Every /api/chat call runs retrieve_context() first, which embeds the query — fake it
+    everywhere in this file so tests never make a real network call just to reach the part of
+    chat() this file actually exercises (the persistence/failure-boundary behavior)."""
+
+    async def _embed(self, texts, model, **kwargs):
+        return [[0.1] * DIM for _ in texts]
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+
+
+def _login(client) -> str:
+    res = client.post("/api/auth/login", json={"email": FOUNDER_EMAIL, "password": FOUNDER_PASSWORD})
+    assert res.status_code == 200
+    return res.json()["csrf_token"]
+
+
+def _fake_chat_ok(content: str = "Testsvar."):
+    async def _chat(self, messages, model, **kwargs):
+        return ChatResult(content=content, provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
+
+    return _chat
+
+
+async def _fake_chat_missing_key(self, messages, model, **kwargs):
+    raise ProviderError("OpenAI API-nyckel saknas.")
+
+
+async def _fake_chat_timeout(self, messages, model, **kwargs):
+    raise httpx.TimeoutException("timed out")
+
+
+# --- A/B/C: the response contract ------------------------------------------------------------
+
+
+def test_provider_succeeds_returns_full_contract(client, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Hej!"))
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Hej"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_status"] == "succeeded"
+    assert body["user_message_saved"] is True
+    assert body["reply"] == "Hej!"
+    assert body["error_category"] is None
+    assert body["retryable"] is False
+    assert body["assistant_message_id"] is not None
+
+
+def test_provider_fails_before_producing_output_saves_user_message(client, db_session, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_missing_key)
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Ett meddelande som inte får försvinna."}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text  # never a misleading generic failure — the user message DID succeed
+    body = res.json()
+    assert body["user_message_saved"] is True
+    assert body["assistant_status"] == "failed"
+    assert body["reply"] is None
+    # classify_provider_exception() (app/providers/verification.py) can't distinguish "missing
+    # key" from any other ProviderError text without risking echoing raw provider details, so
+    # a plain ProviderError classifies as "unreachable" — safe by construction, not a leak.
+    assert body["error_category"] == "unreachable"
+    assert body["retryable"] is True
+    # The safe, classified message — never the raw "OpenAI API-nyckel saknas." exception text.
+    assert body["error_message"] is not None
+    assert "nyckel" not in body["error_message"].lower()
+
+    # The actual fix: the user's message is genuinely in the database, not just in the
+    # response body of this one request.
+    saved = db_session.query(MessageModel).filter_by(role=MessageRole.user).order_by(MessageModel.created_at.desc()).first()
+    assert saved is not None
+    assert saved.content == "Ett meddelande som inte får försvinna."
+    assert saved.status == MessageStatus.succeeded  # the USER message itself always succeeded
+
+
+def test_provider_timeout_is_retryable(client, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_timeout)
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "hej"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_status"] == "failed"
+    assert body["error_category"] == "unreachable"
+    assert body["retryable"] is True
+
+
+# --- D/E: persistence survives a failure, and reload proves it -------------------------------
+
+
+def test_reload_confirms_user_message_remains_after_provider_failure(client, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_missing_key)
+    csrf = _login(client)
+    sent = client.post("/api/chat", json={"message": "Detta meddelande ska överleva ett AI-fel."}, headers={"X-CSRF-Token": csrf})
+    assert sent.status_code == 200, sent.text
+    conversation_id = sent.json()["conversation_id"]
+
+    # A genuinely fresh read — the same thing a page reload would do.
+    reloaded = client.get(f"/api/conversations/{conversation_id}")
+    assert reloaded.status_code == 200, reloaded.text
+    messages = reloaded.json()["messages"]
+    user_messages = [m for m in messages if m["role"] == "user"]
+    assert len(user_messages) == 1
+    assert user_messages[0]["content"] == "Detta meddelande ska överleva ett AI-fel."
+
+
+# --- D/F: retry never duplicates, and is idempotent once succeeded ---------------------------
+
+
+def test_retry_does_not_duplicate_the_user_message_and_can_eventually_succeed(client, db_session, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_missing_key)
+    csrf = _login(client)
+    sent = client.post("/api/chat", json={"message": "Fixa detta senare."}, headers={"X-CSRF-Token": csrf})
+    assert sent.status_code == 200, sent.text
+    body = sent.json()
+    assert body["assistant_status"] == "failed"
+    user_message_id = body["user_message_id"]
+
+    # Provider comes back online before the retry.
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Nu funkar det."))
+    retried = client.post(f"/api/chat/messages/{user_message_id}/retry", headers={"X-CSRF-Token": csrf})
+    assert retried.status_code == 200, retried.text
+    retried_body = retried.json()
+    assert retried_body["assistant_status"] == "succeeded"
+    assert retried_body["reply"] == "Nu funkar det."
+    assert retried_body["user_message_id"] == user_message_id
+
+    user_rows = db_session.query(MessageModel).filter_by(id=user_message_id).all()
+    assert len(user_rows) == 1  # never duplicated
+    assistant_rows = db_session.query(MessageModel).filter_by(in_reply_to_id=user_message_id).all()
+    assert len(assistant_rows) == 1  # updated in place, not a second row
+    assert assistant_rows[0].status == MessageStatus.succeeded
+
+
+def test_retry_is_idempotent_once_a_reply_has_succeeded(client, monkeypatch):
+    calls = {"count": 0}
+
+    async def _counting_chat(self, messages, model, **kwargs):
+        calls["count"] += 1
+        return ChatResult(content="Första svaret.", provider="openai", model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _counting_chat)
+    csrf = _login(client)
+    sent = client.post("/api/chat", json={"message": "hej"}, headers={"X-CSRF-Token": csrf})
+    assert sent.status_code == 200, sent.text
+    user_message_id = sent.json()["user_message_id"]
+    assert calls["count"] == 1
+
+    # If retry were called again with a DIFFERENT fake answer, an idempotent implementation
+    # must still return the ORIGINAL succeeded reply rather than generating a new one.
+    async def _different_chat(self, messages, model, **kwargs):
+        calls["count"] += 1
+        return ChatResult(content="Ett helt annat svar.", provider="openai", model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _different_chat)
+    retried = client.post(f"/api/chat/messages/{user_message_id}/retry", headers={"X-CSRF-Token": csrf})
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["reply"] == "Första svaret."
+    assert calls["count"] == 1  # no second provider call was made
+
+
+def test_retry_requires_founder_auth(client):
+    res = client.post("/api/chat/messages/00000000-0000-0000-0000-000000000000/retry")
+    assert res.status_code == 401
+
+
+@pytest.mark.parametrize("bad_id", ["00000000-0000-0000-0000-000000000000"])
+def test_retry_404s_for_unknown_message(client, bad_id, monkeypatch):
+    csrf = _login(client)
+    res = client.post(f"/api/chat/messages/{bad_id}/retry", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 404
