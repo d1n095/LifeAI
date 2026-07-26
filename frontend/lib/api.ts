@@ -320,6 +320,16 @@ export type LibrarySearchHit = {
   text_match: boolean;
 };
 
+// Search failure boundary: semantic_search_available=false means the embedding provider
+// was unreachable and `results` came from the text-match (ILIKE) channel alone — the UI
+// must show this as a degraded search, not silently render it as "semantic search found
+// nothing" (see backend/app/schemas.py's LibrarySearchResponseOut).
+export type LibrarySearchResponse = {
+  results: LibrarySearchHit[];
+  semantic_search_available: boolean;
+  degraded_reason: string | null;
+};
+
 export type LibraryListFilters = {
   project_id?: string;
   classification?: string;
@@ -584,7 +594,7 @@ export const api = {
       q: query,
       ...Object.fromEntries(Object.entries(filters).filter(([, v]) => !!v)),
     } as Record<string, string>).toString();
-    return request<LibrarySearchHit[]>(`/api/library/search/hybrid?${qs}`);
+    return request<LibrarySearchResponse>(`/api/library/search/hybrid?${qs}`);
   },
   getLibraryOpsStatus: () => request<LibraryOpsStatus>("/api/library/ops/status"),
 
