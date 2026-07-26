@@ -136,6 +136,7 @@ export default function LibraryPage() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<LibrarySearchHit[] | null>(null);
+  const [searchDegradedReason, setSearchDegradedReason] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
 
   async function refresh() {
@@ -191,6 +192,7 @@ export default function LibraryPage() {
   async function handleSearch() {
     if (!searchQuery.trim()) {
       setSearchResults(null);
+      setSearchDegradedReason(null);
       return;
     }
     setSearching(true);
@@ -201,7 +203,9 @@ export default function LibraryPage() {
         active_truth_status: truthStatus || undefined,
         project_id: projectId || undefined,
       };
-      setSearchResults(await api.searchLibrary(searchQuery.trim(), filters));
+      const response = await api.searchLibrary(searchQuery.trim(), filters);
+      setSearchResults(response.results);
+      setSearchDegradedReason(response.semantic_search_available ? null : response.degraded_reason || "Semantisk sökning är inte tillgänglig just nu.");
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -212,6 +216,7 @@ export default function LibraryPage() {
   function clearSearch() {
     setSearchQuery("");
     setSearchResults(null);
+    setSearchDegradedReason(null);
   }
 
   function handleSourceDeleted(id: string) {
@@ -398,6 +403,11 @@ export default function LibraryPage() {
 
       {searchResults !== null ? (
         <div className="space-y-3">
+          {searchDegradedReason && (
+            <div role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-200">
+              Semantisk sökning är otillgänglig just nu ({searchDegradedReason}) — visar endast exakta textträffar.
+            </div>
+          )}
           <h2 className="text-sm font-medium text-white/70">
             {searching ? "Söker…" : `${searchResults.length} träffar`}
           </h2>

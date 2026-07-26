@@ -22,6 +22,7 @@ from app.models.media_url_import import MediaUrlImport
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
+from app.providers.verification import classify_provider_exception
 from app.rag.library_import import maybe_purge_blob
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
@@ -33,7 +34,7 @@ from app.schemas import (
     KnowledgeClaimOut,
     KnowledgeSourceDetailOut,
     KnowledgeSourceOut,
-    LibrarySearchHit,
+    LibrarySearchResponseOut,
     MediaSegmentOut,
     MediaUrlImportIn,
     MediaUrlImportOut,
@@ -504,7 +505,7 @@ def create_relationship(
     return relationship
 
 
-@router.get("/search/hybrid", response_model=list[LibrarySearchHit])
+@router.get("/search/hybrid", response_model=LibrarySearchResponseOut)
 @limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 async def search_library(
     request: Request,
@@ -519,15 +520,34 @@ async def search_library(
     query = LibrarySearchQuery(
         query=q, top_k=top_k, project_id=project_id, classification=classification, active_truth_status=active_truth_status
     )
-    provider, model = resolve_active(db, role="embedding")
-    vectors = await provider.embed([query.query], model=model)
-    return hybrid_search(
+
+    # Real local fallback (not a generic 500, not a silently empty result): if the
+    # embedding provider is unreachable/unconfigured, `vector` stays None and
+    # hybrid_search() below simply skips its semantic channel — the independent
+    # text-match (ILIKE) channel still runs and returns real results. The response
+    # tells the client exactly what happened via semantic_search_available/degraded_reason
+    # rather than pretending semantic search ran and just found nothing.
+    vector: list[float] | None = None
+    degraded_reason: str | None = None
+    try:
+        provider, model = resolve_active(db, role="embedding")
+        vectors = await provider.embed([query.query], model=model)
+        vector = vectors[0]
+    except Exception as exc:  # noqa: BLE001 - every failure mode must degrade, never 500
+        degraded_reason = classify_provider_exception(exc).message
+
+    results = hybrid_search(
         db,
         user.id,
-        vectors[0],
+        vector,
         query.query,
         top_k=query.top_k,
         project_id=query.project_id,
         classification=query.classification,
         active_truth_status=query.active_truth_status,
+    )
+    return LibrarySearchResponseOut(
+        results=results,
+        semantic_search_available=vector is not None,
+        degraded_reason=degraded_reason,
     )

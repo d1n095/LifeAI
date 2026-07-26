@@ -398,6 +398,18 @@ class LibrarySearchHit(BaseModel):
     end_seconds: float | None = None
 
 
+class LibrarySearchResponseOut(BaseModel):
+    """Wraps LibrarySearchHit results with explicit degradation metadata — the search
+    failure boundary. semantic_search_available=False means the embedding provider was
+    unreachable and `results` came from the text-match (ILIKE) channel alone; the client
+    must never treat that silently as "semantic search ran and found nothing", since those
+    are different situations (see app/routers/library.py's search_library)."""
+
+    results: list[LibrarySearchHit]
+    semantic_search_available: bool = True
+    degraded_reason: str | None = None
+
+
 # --- STEG 12: secure URL-import model (intent only, never fetched — see
 # app/models/media_url_import.py) ---
 
