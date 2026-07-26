@@ -17,20 +17,56 @@ No mocks for storage or the DB — this exercises the real Postgres test databas
 LocalFilesystemStorage backend (see tests/conftest.py's STORAGE_ROOT tempdir), matching this
 repo's existing convention of testing real scenarios, not just isolated units."""
 
-from app.models.project_memory import NoteKind, NoteStatus, ProjectCheckpointNote
+import subprocess
+import uuid
+
+import pytest
+
+from app.config import get_settings
+from app.models.project_memory import NoteKind, NoteStatus, ProjectCheckpointNote, SideIssueClassification
 from app.project_memory import (
     add_note,
+    classify_note,
     create_checkpoint,
+    detect_conflicts_and_duplicates,
     generate_resumption_brief,
     get_latest_checkpoint,
+    ingest_doc,
+    ingest_git_commit,
+    ingest_github_status,
+    is_checkpoint_stale,
     list_checkpoints,
+    list_current_branch_pr_status,
     list_notes,
+    list_notes_needing_founder_decision,
+    list_sources,
     read_checkpoint_brief,
+    read_source_content,
     resolve_note,
 )
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
+
+
+def _init_fake_repo(tmp_path) -> str:
+    """Creates a real, throwaway git repo under tmp_path with a CLAUDE.md and a nested doc,
+    so ingestion tests exercise the actual `git` binary and real file reads — not mocks.
+    Returns the resulting HEAD commit SHA."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "CLAUDE.md").write_text("# Testprojekt\n\nDetta är en testrepo för ingestion.\n")
+    (tmp_path / "docs" / "BRANCH_REGISTRY.md").write_text("# Registry\n\nInga brancher än.\n")
+
+    def _git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    _git("init", "-q")
+    _git("config", "user.email", "test@example.com")
+    _git("config", "user.name", "Test")
+    _git("add", ".")
+    _git("commit", "-q", "-m", "initial")
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    return result.stdout.strip()
 
 
 def _login(client) -> str:
@@ -115,8 +151,8 @@ def test_generate_resumption_brief_cites_every_open_note_and_groups_by_kind(db_s
 
 def test_generate_resumption_brief_says_none_explicitly_when_a_category_is_empty():
     brief = generate_resumption_brief(summary="Allt klart.", branch_name="main", open_pr_refs=[], open_notes=[])
-    # 4 = "Öppna PR:er" plus the blocker/decision/next_step sections, all empty
-    assert brief.count("(inga)") == 4
+    # 5 = "Öppna PR:er" plus the blocker/decision/next_step/uncertainty sections, all empty
+    assert brief.count("(inga)") == 5
     assert "**Öppna PR:er:** (inga)" in brief
 
 
@@ -262,3 +298,333 @@ def test_memory_api_rejects_unsourced_or_invalid_kind(client):
         headers={"X-CSRF-Token": csrf},
     )
     assert res.status_code == 422
+
+
+# --- F. Fas 2: fact/uncertainty kinds, side-issue classification, Founder Decision Gate ----
+
+
+def test_fact_and_uncertainty_kinds_and_founder_decision_gate(db_session):
+    add_note(db_session, kind=NoteKind.fact, content="Bygger MainAI Project Memory Loop", source_type="doc", source_ref="CLAUDE.md", created_by="t")
+    add_note(db_session, kind=NoteKind.uncertainty, content="Oklart om P7A ska aktiveras nu", source_type="doc", source_ref="docs/BRANCH_REGISTRY.md", created_by="t")
+
+    needs_decision = add_note(
+        db_session,
+        kind=NoteKind.uncertainty,
+        content="Ska P1/P2-kedjan mergas till huvudgrenen?",
+        source_type="doc",
+        source_ref="docs/BRANCH_REGISTRY.md",
+        created_by="t",
+        classification=SideIssueClassification.needs_founder_decision,
+    )
+    add_note(
+        db_session,
+        kind=NoteKind.blocker,
+        content="En trivial lint-varning",
+        source_type="pr",
+        source_ref="#99",
+        created_by="t",
+        classification=SideIssueClassification.directly_resolvable,
+    )
+
+    gate = list_notes_needing_founder_decision(db_session)
+    assert [n.id for n in gate] == [needs_decision.id]
+
+
+def test_classify_note_updates_classification_after_the_fact(db_session):
+    note = add_note(db_session, kind=NoteKind.fact, content="X", source_type="doc", source_ref="CLAUDE.md", created_by="t")
+    assert note.classification is None
+
+    updated = classify_note(db_session, note.id, classification=SideIssueClassification.needs_founder_decision)
+    assert updated.classification == SideIssueClassification.needs_founder_decision
+
+
+def test_classify_note_raises_for_unknown_id(db_session):
+    with pytest.raises(ValueError):
+        classify_note(db_session, uuid.uuid4(), classification=SideIssueClassification.blocking)
+
+
+# --- G. Source ingestion: docs (real files) and git commits (real git binary) --------------
+
+
+def test_ingest_doc_reads_real_file_stores_durably_and_records_commit_sha(db_session, tmp_path, monkeypatch):
+    commit_sha = _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+
+    source = ingest_doc(db_session, relative_path="CLAUDE.md", ingested_by="test-agent")
+
+    assert source.source_type == "doc"
+    assert source.source_ref == "CLAUDE.md"
+    assert source.commit_sha == commit_sha
+    assert source.storage_key is not None
+
+    content = read_source_content(source)
+    assert "Testprojekt" in content
+
+
+def test_ingest_doc_supports_nested_paths(db_session, tmp_path, monkeypatch):
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+
+    source = ingest_doc(db_session, relative_path="docs/BRANCH_REGISTRY.md", ingested_by="t")
+    assert "Registry" in read_source_content(source)
+
+
+def test_ingest_doc_rejects_path_escaping_project_root(db_session, tmp_path, monkeypatch):
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+
+    with pytest.raises(ValueError):
+        ingest_doc(db_session, relative_path="../etc/passwd", ingested_by="t")
+
+
+def test_ingest_doc_raises_clearly_when_project_root_unset(db_session, monkeypatch):
+    monkeypatch.setattr(get_settings(), "project_root", "")
+    with pytest.raises(ValueError):
+        ingest_doc(db_session, relative_path="CLAUDE.md", ingested_by="t")
+
+
+def test_ingest_doc_raises_for_missing_file(db_session, tmp_path, monkeypatch):
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+    with pytest.raises(FileNotFoundError):
+        ingest_doc(db_session, relative_path="NOPE.md", ingested_by="t")
+
+
+def test_ingest_git_commit_snapshots_real_head(db_session, tmp_path, monkeypatch):
+    commit_sha = _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+
+    source = ingest_git_commit(db_session, ingested_by="t")
+    assert source.source_type == "git_commit"
+    assert source.commit_sha == commit_sha
+    assert source.raw_data["commit_sha"] == commit_sha
+    assert "subject" in source.raw_data
+
+
+def test_list_sources_filters_by_type_and_orders_newest_first(db_session, tmp_path, monkeypatch):
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+
+    ingest_doc(db_session, relative_path="CLAUDE.md", ingested_by="t")
+    git_source = ingest_git_commit(db_session, ingested_by="t")
+
+    docs = list_sources(db_session, source_type="doc")
+    assert len(docs) == 1
+
+    commits = list_sources(db_session, source_type="git_commit")
+    assert commits[0].id == git_source.id
+
+
+# --- H. Branch/PR status: agent-supplied, superseded not overwritten -----------------------
+
+
+def test_ingest_github_status_records_pr_snapshot(db_session):
+    entry = ingest_github_status(
+        db_session,
+        kind="pr",
+        ref="#8",
+        status="open",
+        title="P2: ZIP-hardening",
+        base_ref="claude/det-kommer-mer-879lcm",
+        head_ref="claude/p2-zip-hardening-plan",
+        mergeable=True,
+        ci_status="success",
+        ingested_by="t",
+    )
+    assert entry.is_current is True
+    assert entry.status == "open"
+
+    current = list_current_branch_pr_status(db_session, kind="pr")
+    assert [c.id for c in current] == [entry.id]
+
+
+def test_ingest_github_status_supersedes_prior_snapshot_for_same_ref(db_session):
+    first = ingest_github_status(db_session, kind="pr", ref="#8", status="open", ingested_by="t")
+    second = ingest_github_status(db_session, kind="pr", ref="#8", status="merged", ingested_by="t")
+
+    current = list_current_branch_pr_status(db_session, kind="pr")
+    assert [c.id for c in current] == [second.id]
+
+    db_session.refresh(first)
+    assert first.is_current is False
+    assert first.superseded_at is not None
+
+
+def test_ingest_github_status_rejects_invalid_kind(db_session):
+    with pytest.raises(ValueError):
+        ingest_github_status(db_session, kind="issue", ref="#1", status="open", ingested_by="t")
+
+
+# --- I. Conflict / duplicate-work detection (heuristic, never decides) ---------------------
+
+
+def test_detect_duplicate_work_flags_overlapping_open_notes(db_session):
+    add_note(
+        db_session,
+        kind=NoteKind.next_step,
+        content="Bygga admin-vy för project memory checkpoints",
+        source_type="doc",
+        source_ref="CLAUDE.md",
+        created_by="t",
+    )
+    add_note(
+        db_session,
+        kind=NoteKind.next_step,
+        content="Skapa admin-vy för project memory checkpoints",
+        source_type="doc",
+        source_ref="CLAUDE.md",
+        created_by="t",
+    )
+    add_note(
+        db_session,
+        kind=NoteKind.next_step,
+        content="Helt orelaterad uppgift om SMTP-konfiguration",
+        source_type="doc",
+        source_ref="CLAUDE.md",
+        created_by="t",
+    )
+
+    result = detect_conflicts_and_duplicates(db_session)
+    assert len(result["duplicate_work_candidates"]) == 1
+    pair = result["duplicate_work_candidates"][0]
+    assert "admin-vy" in pair["content_a"] or "admin-vy" in pair["content_b"]
+
+
+def test_detect_conflicts_flags_data_integrity_issue_on_double_current_row(db_session):
+    ingest_github_status(db_session, kind="branch", ref="claude/dup", status="open", ingested_by="t")
+    # Simulate a data-integrity break: a second "current" row for the same ref, bypassing
+    # ingest_github_status()'s normal supersede step (this should never happen via the real
+    # entry point — this test proves the safety-net check catches it if it ever does).
+    from app.models.project_memory import ProjectBranchPRStatus
+
+    db_session.add(ProjectBranchPRStatus(kind="branch", ref="claude/dup", status="open", is_current=True, recorded_by="t"))
+    db_session.commit()
+
+    result = detect_conflicts_and_duplicates(db_session)
+    assert {"kind": "branch", "ref": "claude/dup", "current_row_count": 2} in result["data_integrity_issues"]
+
+
+def test_detect_conflicts_empty_when_nothing_overlaps(db_session):
+    add_note(db_session, kind=NoteKind.next_step, content="Helt unik uppgift ett", source_type="doc", source_ref="CLAUDE.md", created_by="t")
+    result = detect_conflicts_and_duplicates(db_session)
+    assert result == {"duplicate_work_candidates": [], "data_integrity_issues": []}
+
+
+# --- J. Checkpoint staleness detection -------------------------------------------------------
+
+
+def test_checkpoint_is_not_stale_immediately_after_creation(db_session, tmp_path, monkeypatch):
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+    ingest_git_commit(db_session, ingested_by="t")
+
+    checkpoint = create_checkpoint(db_session, summary="S", branch_name="b", open_pr_refs=[], created_by="t")
+    stale, reasons = is_checkpoint_stale(db_session, checkpoint)
+    assert stale is False
+    assert reasons == []
+
+
+def test_checkpoint_is_stale_after_new_note(db_session):
+    checkpoint = create_checkpoint(db_session, summary="S", branch_name="b", open_pr_refs=[], created_by="t")
+    add_note(db_session, kind=NoteKind.blocker, content="Ny blockerare uppstod", source_type="pr", source_ref="#9", created_by="t")
+
+    stale, reasons = is_checkpoint_stale(db_session, checkpoint)
+    assert stale is True
+    assert any("noteringar" in r for r in reasons)
+
+
+def test_checkpoint_is_stale_after_new_branch_pr_status(db_session):
+    checkpoint = create_checkpoint(db_session, summary="S", branch_name="b", open_pr_refs=[], created_by="t")
+    ingest_github_status(db_session, kind="pr", ref="#20", status="open", ingested_by="t")
+
+    stale, reasons = is_checkpoint_stale(db_session, checkpoint)
+    assert stale is True
+    assert any("branch-/PR" in r for r in reasons)
+
+
+def test_checkpoint_is_stale_after_new_git_commit(db_session, tmp_path, monkeypatch):
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+    ingest_git_commit(db_session, ingested_by="t")
+    checkpoint = create_checkpoint(db_session, summary="S", branch_name="b", open_pr_refs=[], created_by="t")
+
+    # A new commit lands after the checkpoint.
+    (tmp_path / "new_file.txt").write_text("more work")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "more work"], cwd=tmp_path, check=True, capture_output=True)
+    ingest_git_commit(db_session, ingested_by="t")
+
+    stale, reasons = is_checkpoint_stale(db_session, checkpoint)
+    assert stale is True
+    assert any("git-commit" in r for r in reasons)
+
+
+# --- K. Router coverage for Fas 2 endpoints --------------------------------------------------
+
+
+def test_memory_api_source_and_status_and_conflicts_endpoints(client, tmp_path, monkeypatch):
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+
+    res = client.post("/api/admin/memory/sources/doc", json={"relative_path": "CLAUDE.md"}, headers=headers)
+    assert res.status_code == 200, res.text
+    source_id = res.json()["id"]
+
+    res = client.get(f"/api/admin/memory/sources/{source_id}")
+    assert res.status_code == 200
+    assert "Testprojekt" in res.json()["content"]
+
+    res = client.post("/api/admin/memory/sources/git-commit", headers=headers)
+    assert res.status_code == 200, res.text
+    assert res.json()["source_type"] == "git_commit"
+
+    res = client.post(
+        "/api/admin/memory/branch-pr-status",
+        json={"kind": "pr", "ref": "#13", "status": "draft", "ci_status": "success"},
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+
+    res = client.get("/api/admin/memory/branch-pr-status")
+    assert res.status_code == 200
+    assert any(row["ref"] == "#13" for row in res.json())
+
+    res = client.get("/api/admin/memory/conflicts")
+    assert res.status_code == 200
+    assert "duplicate_work_candidates" in res.json()
+
+
+def test_memory_api_checkpoint_stale_endpoint(client):
+    _login(client)
+    res = client.post(
+        "/api/admin/memory/checkpoints",
+        json={"summary": "S", "branch_name": "b", "open_pr_refs": []},
+        headers={"X-CSRF-Token": _login(client)},
+    )
+    assert res.status_code == 200, res.text
+    checkpoint_id = res.json()["id"]
+
+    res = client.get(f"/api/admin/memory/checkpoints/{checkpoint_id}/stale")
+    assert res.status_code == 200
+    assert res.json() == {"stale": False, "reasons": []}
+
+
+def test_memory_api_needs_founder_decision_endpoint(client):
+    csrf = _login(client)
+    client.post(
+        "/api/admin/memory/notes",
+        json={
+            "kind": "uncertainty",
+            "content": "Ska vi göra X?",
+            "source_type": "doc",
+            "source_ref": "CLAUDE.md",
+            "classification": "needs_founder_decision",
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    res = client.get("/api/admin/memory/notes/needs-founder-decision")
+    assert res.status_code == 200
+    assert len(res.json()) == 1
+    assert res.json()[0]["classification"] == "needs_founder_decision"
