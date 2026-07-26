@@ -23,6 +23,7 @@ from app.audit import record_audit
 from app.db import get_db
 from app.deps import require_founder
 from app.models.user import User
+from app.providers.base import ProviderError
 from app.schemas import (
     AgentTaskCreateIn,
     AgentTaskDetailOut,
@@ -73,6 +74,14 @@ async def dispatch_task_route(task_id: uuid.UUID, request: Request, db: Session 
         event = await dispatch_task(db, task_id, dispatched_by=user.email)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProviderError as exc:
+        # chat_with_fallback()'s aggregated failure message can embed a raw provider
+        # exception (e.g. an httpx error whose URL carries an API key, see
+        # app/providers/gemini_provider.py) — never echo str(exc) here. This is a clean
+        # failure boundary, not a local fallback: there is no local reasoning path for the
+        # code agent role yet (see app/agent_orchestration.py's module docstring, "Local-first
+        # status").
+        raise HTTPException(status_code=503, detail="Ingen AI-leverantör kunde nås just nu. Försök igen senare.") from exc
     record_audit(db, user_id=user.id, action="agent_task_dispatched", entity_type="agent_task", entity_id=str(task_id), request=request)
     return event
 

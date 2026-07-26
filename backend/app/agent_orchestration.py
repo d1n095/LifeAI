@@ -17,6 +17,23 @@ GitHub write access is real (app/integrations/github_client.py) but gated hard:
   - attempt_auto_merge() ALWAYS reports blocked in this slice: there is no merge method in
     github_client.py to call at all (see that module's docstring), independent of
     `github_auto_merge_enabled`. Never force-pushes, never deletes a branch, never deploys.
+
+Local-first status (see docs/MAINAI_ARCHITECTURE.md §1's "MainAI är systemets intelligens,
+inte en extern tjänst" grundprincip for the full principle this is measured against):
+  - **Retrieval is fully local.** `retrieve_relevant_context()`/the system map
+    (app/project_memory.py) never call an external provider — they read MainAI's own stored
+    notes/checkpoints/sources and a textual scan of the repository.
+  - **Orchestration is provider-decoupled, not yet local-first.** dispatch_task()/
+    review_task() go through the same provider-agnostic `chat_with_fallback()` chat uses —
+    no code here knows which external LLM answered, and any configured provider can be
+    swapped without touching this module. But if EVERY configured provider fails or is
+    unconfigured, there is currently no local reasoning fallback: dispatch/review simply
+    cannot produce a code/review response (see dispatch_task_route's `ProviderError` handling
+    in app/routers/agents.py, which turns that failure into a clean, non-leaking 503 instead
+    of an unhandled exception — it does not add a local alternative).
+  - **The Local MainAI Capability Layer remains planned work, not built here.** A local
+    reasoning/model fallback for the code/review agent roles is target architecture (see
+    docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §8's build order), not part of this slice.
 """
 
 import uuid

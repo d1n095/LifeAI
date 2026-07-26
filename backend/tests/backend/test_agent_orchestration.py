@@ -318,6 +318,34 @@ def test_agents_api_full_loop_create_dispatch_test_review_propose(client, monkey
     assert len(detail.json()["events"]) == 5  # dispatched, test_results, reviewed, pr_proposed, merge_blocked
 
 
+def test_dispatch_returns_clean_503_when_every_provider_fails(client, monkeypatch):
+    """LLM Coupling & Failure-Boundary Audit, PR #16: dispatch must not leak
+    chat_with_fallback()'s aggregated failure (which can embed a raw provider exception, e.g.
+    a URL with an API key) and must not surface as an unhandled 500 — a clean, fixed 503
+    instead. Only OpenAI is configured in tests (see conftest.py), so making its chat() raise
+    exhausts the whole fallback chain."""
+
+    async def _broken_chat(self, messages, model, **kwargs):
+        raise RuntimeError("connection refused to https://api.openai.com/v1/chat/completions?key=super-secret-value")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _broken_chat)
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+
+    created = client.post(
+        "/api/admin/agents/tasks",
+        json={"title": "Task", "description": "Desc", "acceptance_criteria": "Crit."},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+
+    dispatched = client.post(f"/api/admin/agents/tasks/{task_id}/dispatch", headers=headers)
+    assert dispatched.status_code == 503
+    assert "super-secret-value" not in dispatched.text
+    assert "connection refused" not in dispatched.text
+
+
 # --- G. Full vertical proof: note -> task -> code -> review -> PR proposal -> checkpoint ----
 
 
