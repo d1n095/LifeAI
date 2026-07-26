@@ -13,6 +13,7 @@ const NAV = [
   { href: "/knowledge", label: "Kunskapsdatabas" },
   { href: "/projects", label: "Projekt" },
   { href: "/admin", label: "Admin" },
+  { href: "/admin/memory", label: "Projektminne" },
   { href: "/account", label: "Konto" },
 ];
 

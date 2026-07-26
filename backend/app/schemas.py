@@ -490,3 +490,154 @@ class WorkbenchSaveIn(BaseModel):
         if v not in allowed:
             raise ValueError(f"Ogiltig etikett. Måste vara en av: {', '.join(sorted(allowed))}.")
         return v
+
+
+_NOTE_KINDS = ("fact", "decision", "blocker", "next_step", "uncertainty")
+_SIDE_ISSUE_CLASSIFICATIONS = ("blocking", "directly_resolvable", "registered_for_later", "needs_founder_decision")
+
+
+class ProjectNoteIn(BaseModel):
+    kind: str  # "fact" | "decision" | "blocker" | "next_step" | "uncertainty"
+    content: str
+    source_type: str
+    source_ref: str
+    source_id: uuid.UUID | None = None
+    classification: str | None = None  # see _SIDE_ISSUE_CLASSIFICATIONS
+
+    @field_validator("kind")
+    @classmethod
+    def valid_kind(cls, v: str) -> str:
+        if v not in _NOTE_KINDS:
+            raise ValueError(f"kind måste vara en av: {', '.join(_NOTE_KINDS)}.")
+        return v
+
+    @field_validator("classification")
+    @classmethod
+    def valid_classification(cls, v: str | None) -> str | None:
+        if v is not None and v not in _SIDE_ISSUE_CLASSIFICATIONS:
+            raise ValueError(f"classification måste vara en av: {', '.join(_SIDE_ISSUE_CLASSIFICATIONS)}.")
+        return v
+
+
+class ProjectNoteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    kind: str
+    status: str
+    content: str
+    source_type: str
+    source_ref: str
+    source_id: uuid.UUID | None = None
+    classification: str | None = None
+    created_by: str
+    created_at: datetime
+    resolved_at: datetime | None = None
+    resolved_by: str | None = None
+    resolution_note: str | None = None
+
+
+class ProjectNoteResolveIn(BaseModel):
+    resolution_note: str
+    superseded: bool = False
+
+
+class ProjectNoteClassifyIn(BaseModel):
+    classification: str
+
+    @field_validator("classification")
+    @classmethod
+    def valid_classification(cls, v: str) -> str:
+        if v not in _SIDE_ISSUE_CLASSIFICATIONS:
+            raise ValueError(f"classification måste vara en av: {', '.join(_SIDE_ISSUE_CLASSIFICATIONS)}.")
+        return v
+
+
+class ProjectCheckpointIn(BaseModel):
+    summary: str
+    branch_name: str
+    open_pr_refs: list[str] = []
+
+
+class ProjectCheckpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    summary: str
+    branch_name: str
+    open_pr_refs: str
+    brief_storage_key: str
+    brief_sha256: str
+    git_commit_sha: str | None = None
+    created_by: str
+    created_at: datetime
+
+
+class ProjectCheckpointDetailOut(ProjectCheckpointOut):
+    brief: str
+
+
+class ProjectCheckpointStaleOut(BaseModel):
+    stale: bool
+    reasons: list[str]
+
+
+class ProjectSourceIngestDocIn(BaseModel):
+    relative_path: str
+
+
+class ProjectSourceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    source_type: str
+    source_ref: str
+    content_sha256: str | None = None
+    storage_key: str | None = None
+    commit_sha: str | None = None
+    raw_data: dict | None = None
+    ingested_by: str
+    ingested_at: datetime
+
+
+class ProjectSourceDetailOut(ProjectSourceOut):
+    content: str
+
+
+class ProjectGithubStatusIn(BaseModel):
+    kind: str  # "branch" | "pr"
+    ref: str
+    status: str
+    title: str | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
+    mergeable: bool | None = None
+    ci_status: str | None = None
+    summary: str | None = None
+
+    @field_validator("kind")
+    @classmethod
+    def valid_kind(cls, v: str) -> str:
+        if v not in ("branch", "pr"):
+            raise ValueError("kind måste vara 'branch' eller 'pr'.")
+        return v
+
+
+class ProjectBranchPRStatusOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    kind: str
+    ref: str
+    title: str | None = None
+    status: str
+    base_ref: str | None = None
+    head_ref: str | None = None
+    mergeable: bool | None = None
+    ci_status: str | None = None
+    summary: str | None = None
+    is_current: bool
+    recorded_by: str
+    recorded_at: datetime
+    superseded_at: datetime | None = None
+
+
+class ProjectConflictsOut(BaseModel):
+    duplicate_work_candidates: list[dict]
+    data_integrity_issues: list[dict]

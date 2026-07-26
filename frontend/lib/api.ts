@@ -389,6 +389,68 @@ export type CurrentUser = {
 
 export type MessageResponse = { detail: string };
 
+// MainAI Project Memory & Coordination Loop (see backend/app/project_memory.py) — the
+// project's own durable memory of its state, not per-user data, hence founder-only like
+// the rest of /api/admin/*.
+export type ProjectNoteKind = "fact" | "decision" | "blocker" | "next_step" | "uncertainty";
+export type SideIssueClassification =
+  | "blocking"
+  | "directly_resolvable"
+  | "registered_for_later"
+  | "needs_founder_decision";
+
+export type ProjectNote = {
+  id: string;
+  kind: ProjectNoteKind;
+  status: "open" | "resolved" | "superseded";
+  content: string;
+  source_type: string;
+  source_ref: string;
+  source_id: string | null;
+  classification: SideIssueClassification | null;
+  created_by: string;
+  created_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolution_note: string | null;
+};
+
+export type ProjectCheckpoint = {
+  id: string;
+  summary: string;
+  branch_name: string;
+  open_pr_refs: string;
+  brief_storage_key: string;
+  brief_sha256: string;
+  git_commit_sha: string | null;
+  created_by: string;
+  created_at: string;
+};
+
+export type ProjectCheckpointDetail = ProjectCheckpoint & { brief: string };
+
+export type ProjectBranchPRStatus = {
+  id: string;
+  kind: "branch" | "pr";
+  ref: string;
+  title: string | null;
+  status: string;
+  base_ref: string | null;
+  head_ref: string | null;
+  mergeable: boolean | null;
+  ci_status: string | null;
+  summary: string | null;
+  is_current: boolean;
+  recorded_by: string;
+  recorded_at: string;
+  superseded_at: string | null;
+};
+
+export type ProjectConflicts = {
+  duplicate_work_candidates: Record<string, unknown>[];
+  data_integrity_issues: Record<string, unknown>[];
+};
+
 export const api = {
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
@@ -523,4 +585,17 @@ export const api = {
     project_id?: string | null;
     source_document_ids?: string[];
   }) => request<KnowledgeSourceItem>("/api/workbench/save", { method: "POST", body: JSON.stringify(payload) }),
+
+  // Fas 4: minimal founder-only view onto the MainAI Project Memory & Coordination Loop.
+  memoryLatestCheckpoint: () => request<ProjectCheckpointDetail>("/api/admin/memory/checkpoints/latest"),
+  memoryCreateCheckpoint: (payload: { summary: string; branch_name: string; open_pr_refs: string[] }) =>
+    request<ProjectCheckpointDetail>("/api/admin/memory/checkpoints", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  memoryCheckpointStale: (id: string) =>
+    request<{ stale: boolean; reasons: string[] }>(`/api/admin/memory/checkpoints/${id}/stale`),
+  memoryNotes: (status: "open" | "all" = "open") => request<ProjectNote[]>(`/api/admin/memory/notes?status=${status}`),
+  memoryBranchPrStatus: () => request<ProjectBranchPRStatus[]>("/api/admin/memory/branch-pr-status"),
+  memoryConflicts: () => request<ProjectConflicts>("/api/admin/memory/conflicts"),
 };

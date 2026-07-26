@@ -150,6 +150,15 @@ class Settings(BaseSettings):
     # VPS, see docker-compose.vps.yml's read_only+tmpfs config).
     storage_root: str = "/var/lib/lifeai/uploads"
 
+    # MainAI Project Memory & Coordination Loop (app/project_memory.py): filesystem root the
+    # doc-ingestion endpoint reads governing sources (CLAUDE.md, docs/BRANCH_REGISTRY.md,
+    # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md) and git state from. Empty by default —
+    # deliberately NOT the container's own working directory, since a production backend
+    # image only ever contains backend/ (see Dockerfile), not the outer repo checkout. Only
+    # meaningful in a dev/CI/agent-session context where the full repo is actually present;
+    # doc/git ingestion is a no-op (raises a clear error) when unset.
+    project_root: str = ""
+
     # Worker (app/worker.py): how often an idle worker polls for a new/reclaimable job, how
     # long a claimed job's lease lasts before another worker may reclaim it as abandoned, and
     # how many jobs one worker process handles at once. Kept low by default — this package's
