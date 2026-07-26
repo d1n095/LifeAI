@@ -60,6 +60,51 @@ finns redan i grundarkitekturen, inte som ett separat säkerhetstillägg.
    utbytbar bakom ett interface specifikt så att CI kan köra hela systemet deterministiskt
    utan externa beroenden (`backend/scripts/run_e2e_backend.py`) — produktionskoden självt
    gör aldrig antaganden om att vara i testläge.
+7. **MainAI är systemets intelligens, inte en extern tjänst.** Se nästa avsnitt — detta är
+   inte en teknisk detalj utan den princip som avgör hur alla andra avsnitt ska tolkas.
+
+### Grundprincip: MainAI är systemets intelligens, inte en extern tjänst
+
+Det som byggs här är inte "en app med AI ovanpå" — det är ett operativsystem med en egen
+AI. Skillnaden är arkitektoniskt avgörande: MainAI är en del av systemet, inte en synonym
+för ett externt API-anrop. Externa LLM:er (OpenAI, Anthropic, Gemini, DeepSeek, OpenRouter,
+m.fl.) är tillfälliga experter och lärare som MainAI kan anlita när det behövs — de är
+aldrig MainAI själv. Om samtliga externa leverantörer är otillgängliga ska MainAI inte sluta
+fungera; den ska fortsätta arbeta med lokal logik, lokalt minne, lokala verktyg och (där de
+finns) lokala modeller, och tydligt markera enbart de enskilda funktioner som faktiskt kräver
+uppkoppling som otillgängliga eller köade — inte hela systemet.
+
+Detta ger en explicit ansvarsfördelning i tre lager:
+
+| Lager | Ansvar |
+|---|---|
+| **System Core** (deterministiskt, kräver aldrig en AI-modell) | Filer, databas, projekt, chattlagring, användare, inställningar, minne, regler, checkpoints, köer. |
+| **MainAI** (systemets egen intelligens) | Planerar, minns, resonerar, föreslår, lär sig, orkestrerar — använder lokala verktyg och lokal kunskap FÖRST, innan en extern modell övervägs. |
+| **Externa modeller** (utbytbara, valfria) | Används när lokal kapacitet inte räcker till; verifierar eller kompletterar ett lokalt resonemang; kan bytas ut eller helt saknas utan att System Core eller MainAI:s kärnfunktioner slutar fungera. |
+
+Konkret, utan internet eller extern API-nyckel ska MainAI fortfarande kunna: öppna projekt,
+läsa tidigare konversationer, söka i dokument, visa roadmap, minnas beslut, skapa uppgifter,
+planera arbete, analysera redan lagrad information, och ge råd utifrån sin lokala kunskap.
+Det enda som ska påverkas är det som genuint kräver uppkoppling: fråga en extern LLM, söka på
+webben, hämta ny GitHub-data, synkronisera mot molntjänster.
+
+**Idag** är detta bara delvis sant: dagens `chat_with_fallback` (§7) växlar mellan externa
+leverantörer vid fel, men har ingen lokal modell eller lokalt resonemangslager att falla
+tillbaka på om ALLA externa leverantörer saknas eller är otillgängliga. Retrieval
+(RAG-sökningen, §6) är däremot redan helt lokal (pgvector + textmatchning, ingen extern
+modell krävs för att hämta kontext) och har fått en uttrycklig, testad lokal fallback för
+`GET /api/library/search/hybrid` när embedding-leverantören är otillgänglig
+(`app/rag/vector_store.py`s `hybrid_search(vector=None)`, se PR #18) — det första konkreta
+beviset på principen i kod, inte bara i design.
+
+**Målarkitektur** (planerad, se `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §8 för
+byggordningen P1–P7): ett "Local MainAI Capability Layer" — lokalt minne, lokal
+resonemangslogik, och där möjligt en lokal modell (t.ex. via Ollama, som redan finns som en
+`LLMProvider`-implementation idag, se §7) — som gör orkestreringen genuint local-first, inte
+bara leverantörsoberoende. Att vara leverantörsoberoende (principle 3 ovan, §7) är en
+förutsättning för detta men inte samma sak: dagens system kan redan byta extern leverantör
+fritt, men det kan ännu inte fortsätta resonera utan NÅGON extern leverantör alls. Den
+skillnaden är exakt vad detta lager stänger.
 
 ### Högnivådiagram — idag (kombinerad Render-container, se `docs/RENDER_DEPLOY.md`)
 
@@ -431,6 +476,11 @@ inte byggt, inte motiverat av nuvarande belastning.
 ---
 
 ## 7. AI orchestration
+
+**Se §1:s grundprincip ("MainAI är systemets intelligens, inte en extern tjänst") för hur
+det här avsnittet ska tolkas** — det som beskrivs nedan är leverantörsoberoende (kan byta
+mellan externa leverantörer), men ännu inte local-first (kan fortsätta resonera helt utan
+NÅGON extern leverantör). Det är en medveten, dokumenterad lucka — inte en förbisedd.
 
 **Se `docs/AI_PROVIDER_ARCHITECTURE.md` för fullständig design** — kapabilitetsbaserade
 interface (inte ett per-provider-interface), universellt request/response-schema, en

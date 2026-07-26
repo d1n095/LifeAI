@@ -78,6 +78,34 @@ grundprincip för varför de fick egna brancher/PR:er istället för att fogas i
 | `claude/life-library-durable-worker-merged` | [#14](https://github.com/d1n095/LifeAI/pull/14) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `2ddfeddc` | PR #6 (durable worker/lagring) + P1 (provider-verifiering) — landade i huvudgrenen för första gången | `claude/det-kommer-mer-879lcm` @ 5769cffa |
 | `claude/p2-zip-hardening-plan` | [#8](https://github.com/d1n095/LifeAI/pull/8) | **Mergad** i `claude/det-kommer-mer-879lcm` (ombasearad dit efter PR #14), merge-commit `89682a18` | P2: nästlad ZIP-hantering, `encrypted`-status, `archive_path`/`archive_chain` | `claude/det-kommer-mer-879lcm` @ 2ddfeddc (efter PR #14) |
 | `claude/mainai-memory-loop-v1` | [#13](https://github.com/d1n095/LifeAI/pull/13) | **Öppen, draft.** CI grönt på ursprunglig bas; ombasearad direkt mot huvudgrenens nya tip (diff oförändrat, verifierat via `git merge-base`) | MainAI Project Memory & Coordination Loop — se `CLAUDE.md`s "Målet"-avsnitt. Byggs vidare iterativt, inte redo för merge-beslut än | `claude/det-kommer-mer-879lcm` @ 89682a18 |
+| `claude/mainai-core-orchestration-v1` | [#16](https://github.com/d1n095/LifeAI/pull/16) | **Öppen, draft.** CI grönt (20 nya tester, 454/1 totalt, inga regressioner), `mergeable_state: clean`. Väntar på LLM Coupling & Failure-Boundary Audit-fixen nedan (minimal `ProviderError`-hantering i dispatch) innan draft-status kan lyftas | MainAI Core v0: kategoriserad retrieval + systemkarta, agentorkestrering (`agent_tasks`/`agent_task_events`, migration 0016), minimal GitHub-klient (läsning/branch/commit/PR, ALDRIG merge i klienten), founder-UI `/admin/agents`. Genomsökningsbaserad retrieval, inte semantisk | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+
+## LLM Coupling & Failure-Boundary Audit — pågående kedja (2026-07-26)
+
+En extern audit av grundaren identifierade två verkliga fel — inte hypotetiska — där ett
+AI-providerfel kunde få oavsiktliga konsekvenser för icke-AI-funktionalitet: (1) chatt
+tappade det redan sparade användarmeddelandet om providern misslyckades efteråt, (2)
+biblioteks-sökningen 500:ade helt om embedding-providern var otillgänglig trots att dess
+textmatchningskanal inte behöver någon provider alls. Grundaren godkände audit-splitten och
+skärpte båda kraven: PR A måste skilja explicit mellan "meddelande sparat" och "AI-svar
+misslyckades" i kontraktet (inte en slentrianmässig 200:a), och PR B måste ha en RIKTIG
+lokal fallback (inte bara fånga felet och returnera tomt). Ordning: PR A → PR B → minimal
+dispatch-fix i PR #16 → PR C. Var och en är en egen branch/PR per grundprincipen — ingen av
+dem blandas in i någon annan pågående kedja.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/chat-message-persistence-fix` | [#17](https://github.com/d1n095/LifeAI/pull/17) | **Öppen, redo för merge.** 18/18 CI grönt (inkl. E2E Playwright, E2E same-origin proxy, backend unit/integration, migrationskontroll), inga olösta review-kommentarer | PR A: användarmeddelandet persisteras och committas OBEROENDE av providerkallet; ny `MessageStatus`/`in_reply_to_id`/`error_category` på `Message`; `POST /messages/{id}/retry`; `ChatMessageOut` skiljer explicit `user_message_saved` från `assistant_status` (pending/succeeded/failed) + `retryable` + säker `error_category` (aldrig råa provider-secrets, se `classify_provider_exception`). Partial unique index gör dubbel-retry strukturellt omöjligt, inte bara logiskt undvikt. 8 nya tester (provider lyckas/misslyckas/timeout, retry dupliceras inte, reload behåller meddelandet, idempotent retry) | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+| `claude/search-embedding-failure-fallback` | [#18](https://github.com/d1n095/LifeAI/pull/18) | **Öppen, redo för merge.** 18/18 CI grönt, inga olösta review-kommentarer | PR B: `hybrid_search()` accepterar `vector: list[float] \| None` och hoppar över den semantiska kanalen (inte en fejkad nollvektor) när providern saknas — textmatchningskanalen (ILIKE) svarar alltid ändå. `search_library()` fångar embed-felet via samma `classify_provider_exception`. Ny `LibrarySearchResponseOut` med `semantic_search_available`/`degraded_reason` — aldrig en tyst påstådd semantisk sökning som bara "hittade inget". 4 nya tester (provider otillgänglig, timeout, tomt semantiskt resultat = INTE degraderat, normal hybrid-sökning) | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+| `claude/mainai-local-first-principle` | (docs-only, PR ej öppnad än) | Under arbete | Skriver ned grundarens arkitekturprincip "MainAI är systemets intelligens, inte en extern tjänst" i `docs/MAINAI_ARCHITECTURE.md` §1 (ny grundprincip 7 + System Core/MainAI/Externa modeller-ansvarstabell + explicit offline-kapacitetslista) och en korsreferens i §7. Ren dokumentation, ingen kodändring | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+
+**Kvar i kedjan (inte påbörjat):** PR #16:s minimala `ProviderError`-hantering i dispatch +
+dokumentation av att retrieval redan är helt lokal / orkestrering är leverantörsoberoende men
+INTE ännu local-first / Local MainAI Capability Layer är planerat, inte byggt (se
+`docs/MAINAI_ARCHITECTURE.md`s nya grundprincip-avsnitt ovan) — görs direkt på PR #16:s
+befintliga branch (`claude/mainai-core-orchestration-v1`), inte en ny branch, eftersom PR #16
+redan äger dispatch-koden. Därefter PR C (`ai_analysis_status` + retry för den äldre
+`/api/documents/upload`-vägen), egen ny branch.
 
 ## Merge-regeln (se `CLAUDE.md`)
 
@@ -89,10 +117,22 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 ## Rekommenderad merge-ordning (nuläge)
 
 1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~ — samtliga mergade i huvudgrenen.
-2. **PR #13** (MainAI Project Memory-loopen) — bygger vidare, iterativt, direkt mot
+2. **PR #17** (chat data-loss, PR A) → **PR #18** (search failure boundary, PR B) — i den
+   ordningen enligt grundarens explicita instruktion, men de rör olika filer (chat.py/
+   conversation.py/schemas.py respektive library.py/vector_store.py/schemas.py — endast
+   `schemas.py` delas, och de lägger till olika, icke-överlappande klasser i den filen) så
+   ordningen är en processfråga, inte en teknisk beroendekedja. Båda CI-gröna, redo för
+   grundarens merge-beslut.
+3. **PR #16:s minimala dispatch-fix** — görs EFTER att PR #17/#18 är mergade (samma
+   `classify_provider_exception`-mönster återanvänds där; ingen anledning att duplicera
+   innan de landat), på PR #16:s befintliga branch.
+4. **PR C** (upload `ai_analysis_status` + retry) — efter PR #16:s fix, egen ny branch.
+5. `claude/mainai-local-first-principle` (dokumentation) — fristående, ingen kodberoende,
+   kan mergas när som helst i kedjan ovan utan att blockera eller blockeras av någon av dem.
+6. **PR #13** (MainAI Project Memory-loopen) — bygger vidare, iterativt, direkt mot
    `claude/det-kommer-mer-879lcm`. Ingen merge-tidpunkt beslutad än — draft tills loopen är
    verifierad end-to-end.
-3. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
+7. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
    ett separat, uttryckligt beslut (branchen är fryst). Kräver DESSUTOM en egen ombasering
    mot huvudgrenens nya tip innan aktivering — dess bas (`15487e2`) är nu långt bakom både
    P2:s slutliga tip och själva huvudgrenen.
@@ -101,16 +141,21 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 - **Inget öppet PR blockerar ett annat öppet PR just nu.** P1/P2 är i huvudgrenen; PR #13 är
   fristående ovanpå den.
+- **PR #16:s dispatch-fix blockeras processmässigt** (inte tekniskt) av PR #17/#18 — se
+  Merge-ordningen ovan för varför.
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något annat öppet PR.
 
 ## Vilka brancher kan mergas oberoende
 
-**PR #13** kan i princip mergas oberoende när dess innehåll är klart — den är redan grenad
-direkt från huvudgrenen (efter ombasering) och rör bara nya filer (migration 0014,
-`app/project_memory.py`, `app/routers/memory.py`, tillhörande scheman/tester). Väntar på att
-själva Project Memory-loopen blir funktionellt klar (se separat sektion), inte på någon
-annan branch.
+**PR #17** och **PR #18** kan båda mergas oberoende av varandra rent tekniskt (ingen delar
+någon rad kod, bara samma fil i olika sektioner) — ordningen mellan dem är grundarens
+processval, inte ett tekniskt krav. **`claude/mainai-local-first-principle`** (docs-only) kan
+mergas oberoende av allt ovan. **PR #13** kan i princip mergas oberoende när dess innehåll är
+klart — den är redan grenad direkt från huvudgrenen (efter ombasering) och rör bara nya filer
+(migration 0014, `app/project_memory.py`, `app/routers/memory.py`, tillhörande scheman/
+tester). Väntar på att själva Project Memory-loopen blir funktionellt klar (se separat
+sektion), inte på någon annan branch.
 
 ## Vilka brancher väntar på ett beroende innan de bör uppdateras
 
