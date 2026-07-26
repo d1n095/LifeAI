@@ -374,7 +374,7 @@ def test_deleted_source_is_excluded_from_list_and_search(client):
     job = _import_and_wait(client, csrf, "findme.txt", b"ett unikt sokbart uttryck harinne")
     source_id = job["file_results"][0]["source_id"]
 
-    hits_before = client.get("/api/library/search/hybrid", params={"q": "unikt"}).json()
+    hits_before = client.get("/api/library/search/hybrid", params={"q": "unikt"}).json()["results"]
     assert any(h["document_id"] == source_id for h in hits_before)
 
     client.request("DELETE", f"/api/library/{source_id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf})
@@ -382,7 +382,7 @@ def test_deleted_source_is_excluded_from_list_and_search(client):
     listed = client.get("/api/library").json()
     assert all(d["id"] != source_id for d in listed)
 
-    hits_after = client.get("/api/library/search/hybrid", params={"q": "unikt"}).json()
+    hits_after = client.get("/api/library/search/hybrid", params={"q": "unikt"}).json()["results"]
     assert all(h["document_id"] != source_id for h in hits_after)
 
 
@@ -391,7 +391,10 @@ def test_hybrid_search_finds_exact_text_match(client):
     _import_and_wait(client, csrf, "searchable.txt", b"Det unika ordet zorbaflex finns bara har.")
     res = client.get("/api/library/search/hybrid", params={"q": "zorbaflex"})
     assert res.status_code == 200
-    hits = res.json()
+    body = res.json()
+    assert body["semantic_search_available"] is True
+    assert body["degraded_reason"] is None
+    hits = body["results"]
     assert len(hits) >= 1
     assert hits[0]["text_match"] is True
 

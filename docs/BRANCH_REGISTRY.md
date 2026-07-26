@@ -99,9 +99,12 @@ grundprincip för varför de fick egna brancher/PR:er istället för att fogas i
 | `claude/life-library-durable-worker-merged` | [#14](https://github.com/d1n095/LifeAI/pull/14) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `2ddfeddc` | PR #6 (durable worker/lagring) + P1 (provider-verifiering) — landade i huvudgrenen för första gången | `claude/det-kommer-mer-879lcm` @ 5769cffa |
 | `claude/p2-zip-hardening-plan` | [#8](https://github.com/d1n095/LifeAI/pull/8) | **Mergad** i `claude/det-kommer-mer-879lcm` (ombasearad dit efter PR #14), merge-commit `89682a18` | P2: nästlad ZIP-hantering, `encrypted`-status, `archive_path`/`archive_chain` | `claude/det-kommer-mer-879lcm` @ 2ddfeddc (efter PR #14) |
 | `claude/mainai-memory-loop-v1` | [#13](https://github.com/d1n095/LifeAI/pull/13) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `7afb01f`. 18/18 CI grönt. | MainAI Project Memory & Coordination Loop, Fas 1–4: `project_notes`/`project_checkpoints`/`project_sources`/`project_branch_pr_status`, resumption-brief, founder-UI `/admin/memory` | `claude/det-kommer-mer-879lcm` @ 89682a18 |
-| `claude/mainai-core-orchestration-v1` | Ingen ännu | **Öppen, ej PR ännu vid senaste verifiering.** Full lokal testsvit grön (454 tester), migrationsrundtripp verifierad, frontend build/tsc/eslint gröna, UI verifierad i riktig webbläsare. | MainAI Core: konversations-/kunskapsretrieval (`retrieve_relevant_context`), lätt systemkarta (`build_system_map`/`ingest_system_map`), ny `NoteKind.idea`, agentorkestrering (migration 0016: `agent_tasks`/`agent_task_events`, `app/agent_orchestration.py`, `app/integrations/github_client.py`), founder-UI `/admin/agents`. Se separat scope-sektion nedan. | `claude/det-kommer-mer-879lcm` @ 7afb01f (grenad EFTER PR #13:s merge) |
+| `claude/chat-message-persistence-fix` | [#17](https://github.com/d1n095/LifeAI/pull/17) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `8dcf8161`. 18/18 CI grönt före merge, `mergeable_state: clean`. | PR A (LLM Coupling & Failure-Boundary Audit): användarmeddelandet persisteras och committas OBEROENDE av providerkallet; ny `MessageStatus`/`in_reply_to_id`/`error_category` på `Message`, migration `0016_chat_message_status`; `POST /messages/{id}/retry`; `ChatMessageOut` skiljer explicit `user_message_saved` från `assistant_status`. Se sektionen nedan för fullständig audit-bakgrund. | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+| `claude/search-embedding-failure-fallback` | [#18](https://github.com/d1n095/LifeAI/pull/18) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `f250e728`. 18/18 CI grönt före merge, `mergeable_state: clean`. | PR B: `hybrid_search()` accepterar `vector: list[float] \| None`, hoppar över den semantiska kanalen (inte en fejkad nollvektor) när providern saknas. Ny `LibrarySearchResponseOut` med `semantic_search_available`/`degraded_reason`. | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+| `claude/mainai-local-first-principle` | [#19](https://github.com/d1n095/LifeAI/pull/19) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `ce432613`. CI grönt före merge, `mergeable_state: clean`. | Grundprincip "MainAI är systemets intelligens, inte en extern tjänst" i `docs/MAINAI_ARCHITECTURE.md` §1, PR C:s stängningsbeslut (se nedan). | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+| `claude/mainai-core-orchestration-v1` | [#16](https://github.com/d1n095/LifeAI/pull/16) | **Öppen, draft — under granskning.** Efter att PR #17/#18/#19 mergades blev `mergeable_state: dirty` (migration 0016 kolliderade — se nedan), åtgärdat genom att döpa om `0016_agent_orchestration.py` → `0017_agent_orchestration.py` (`down_revision` uppdaterad till PR #17:s `0016_chat_message_status`) och en `git merge` av den nya huvudgrenens tip in i branchen (`schemas.py`/`lib/api.ts` auto-mergade konfliktfritt, bara den här filen krockade). Full lokal verifiering omkörs efter mergen innan draft-status lyfts. | MainAI Core v0: kategoriserad retrieval + systemkarta, agentorkestrering (`agent_tasks`/`agent_task_events`, migration **0017** efter omnumrering), minimal GitHub-klient (läsning/branch/commit/PR, ALDRIG merge i klienten), founder-UI `/admin/agents`. Se separat scope-sektion nedan. Dispatch returnerar en säker, icke-läckande 503 om samtliga providers misslyckas. | `claude/det-kommer-mer-879lcm` @ ce432613 (efter merge av PR #17/#18/#19) |
 
-## MainAI Core: agentorkestrering (`claude/mainai-core-orchestration-v1`) — scope och verifiering
+## MainAI Core: agentorkestrering (`claude/mainai-core-orchestration-v1`, PR #16) — scope och verifiering
 
 Bygger vidare på Fas 1–4 (nu i huvudgrenen), enligt CLAUDE.md's 2026-07-26 "MainAI Core"-
 riktning: inte bara ett checkpointsystem, utan första vertikala kedjan samtal → minne →
@@ -118,13 +121,17 @@ helhetsbild → problem → agentuppdrag → kod → granskning → GitHub-PR �
   content-addressed storage som allt annat i modulen (`ProjectSource(source_type="system_map")`).
   Medvetet smal denna omgång — dupliceras inte mot redan befintlig admin-status
   (`/api/admin/library/ops`, `/api/admin/providers`).
-- Migration 0016: `agent_tasks` (ett avgränsat uppdrag — titel, filer, begränsningar,
-  acceptanskriterier, krävda tester) + `agent_task_events` (append-only historik: dispatch,
-  resultat, testresultat, granskning, GitHub-operationer).
+- Migration **0017** (omnumrerad från 0016 efter att PR #17:s `0016_chat_message_status`
+  mergades först — se raden ovan): `agent_tasks` (ett avgränsat uppdrag — titel, filer,
+  begränsningar, acceptanskriterier, krävda tester) + `agent_task_events` (append-only
+  historik: dispatch, resultat, testresultat, granskning, GitHub-operationer).
 - `app/agent_orchestration.py` — `create_agent_task`/`dispatch_task` (kodagent via befintlig
   `chat_with_fallback`)/`record_test_results`/`review_task` (granskningsagent, BLOCKERAD utan
   registrerade testresultat, kan aldrig godkänna på röda tester även om modellen säger
-  "approved")/`prepare_github_pr`/`attempt_auto_merge` (ALLTID blockerad — se nedan).
+  "approved")/`prepare_github_pr`/`attempt_auto_merge` (ALLTID blockerad — se nedan). Dispatch
+  fångar nu `ProviderError` och returnerar en fast, icke-läckande 503 istället för en ohanterad
+  500 — se modulens "Local-first status"-avsnitt för samma Idag/Målarkitektur-uppdelning som
+  `docs/MAINAI_ARCHITECTURE.md` §1:s grundprincip.
 - `app/integrations/github_client.py` — minimal REST-klient (läsning, branch, commit, PR).
   **Ingen merge-metod finns i klienten alls** — inte bara avstängd bakom en flagga, genuint
   frånvarande som kod. `github_write_enabled` (default `False`) styr om `prepare_github_pr()`
@@ -148,10 +155,70 @@ helhetsbild → problem → agentuppdrag → kod → granskning → GitHub-PR �
 
 **Verifiering:** 15 nya tester i `test_agent_orchestration.py` (inkl. ett fullständigt
 vertikalt bevis: note → task → dispatch → test → review → PR-förslag → checkpoint → kall
-läsning), 5 nya i `test_project_memory.py` (retrieval + systemkarta). Full befintlig svit
-omkörd: 454 gröna, 1 medvetet skippad, inga regressioner. Migrationsrundtripp (0013→0016→
-nedgradering×2→uppgradering) verifierad fristående. Frontend: `tsc`/`eslint`/`next build`
-gröna, UI verifierad i riktig webbläsare mot riktig backend+Postgres.
+läsning, samt en test för den icke-läckande 503:an på total providerkollaps), 5 nya i
+`test_project_memory.py` (retrieval + systemkarta). Full befintlig svit senast omkörd (före
+denna merge): 455 gröna, 1 medvetet skippad, inga regressioner — omkörs igen efter mergen och
+migrationsomnumreringen innan draft-status lyfts. Migrationsrundtripp verifieras på nytt mot
+den förlängda kedjan (…→0016→0017→nedgradering×2→uppgradering). Frontend: `tsc`/`eslint`/
+`next build` gröna, UI verifierad i riktig webbläsare mot riktig backend+Postgres.
+
+## LLM Coupling & Failure-Boundary Audit — genomförd (2026-07-26)
+
+En extern audit av grundaren identifierade två verkliga fel — inte hypotetiska — där ett
+AI-providerfel kunde få oavsiktliga konsekvenser för icke-AI-funktionalitet: (1) chatt
+tappade det redan sparade användarmeddelandet om providern misslyckades efteråt, (2)
+biblioteks-sökningen 500:ade helt om embedding-providern var otillgänglig trots att dess
+textmatchningskanal inte behöver någon provider alls. Grundaren godkände audit-splitten och
+skärpte båda kraven: PR A måste skilja explicit mellan "meddelande sparat" och "AI-svar
+misslyckades" i kontraktet (inte en slentrianmässig 200:a), och PR B måste ha en RIKTIG
+lokal fallback (inte bara fånga felet och returnera tomt). PR A (#17), PR B (#18) och
+principdokumentationen (#19) är nu alla mergade i huvudgrenen. Minimal dispatch-fix i PR #16
+är byggd och pushad (se sektionen ovan) — kvar är att slutföra PR #16:s granskning och merga
+den.
+
+**PR C stängd, inte byggd — verifierat inte längre relevant.** Grundaren godkände "Skip PR C"
+med ett uttryckligt tilläggskrav: verifiera först att `/api/documents/upload` verkligen saknar
+kvarvarande konsumenter innan något stängs eller städas. Verifiering genomförd:
+
+- `POST /api/documents/upload` har INGEN frontend-anropare kvar. `frontend/lib/api.ts`s
+  `uploadDocument()`-funktion existerar men anropas ingenstans — `app/(shell)/documents/page.tsx`
+  gör bara `router.replace("/library")` sedan commit `0d9f487` ("Life Library: single upload
+  hub...", 2026-07-22). All riktig uppladdning går via `/api/library`s importpipeline, som
+  redan har full `ImportJob`-baserad status, säker felklassificering och en riktig retry-
+  åtgärd (byggt i P1/P2/STEG-arbetet, långt mer robust än vad PR C skulle byggt).
+- Backend-sidans felhantering som PR C skulle lagt till **finns redan** för `/documents/upload`-
+  vägen: `app/rag/ingest.py`s `index_document()` sätter redan distinkta `IndexStatus`-värden
+  (`extraction_failed`/`awaiting_provider`/`blocked_provider`/`indexing_failed`/`failed`) och
+  använder redan `classify_provider_exception()` — aldrig rå `str(exc)` — för varje
+  felläge, inklusive embedding-providerfel EFTER en godkänd pre-flight-kontroll. Detta byggdes
+  redan under P1, innan den här auditen. En `reindex_document_id()`-retry-funktion finns redan
+  skriven men anropas ingenstans (orphaned).
+- Enda verkliga luckan (`DocumentOut` exponerar inte `status`/`error_message`, ingen
+  `/retry`-rutt) gäller alltså en väg utan någon aktiv UI-konsument — att bygga den skulle
+  vara arbete för en död kodväg, inte en verklig felyta en grundare kan träffa på.
+- `frontend/e2e/shell-pages.spec.ts`s "documents: empty state..."-test refererar fortfarande
+  den gamla `/documents`-sidans UI-text/knappar (från commit `a46dc7a`, FÖRE
+  konsolideringen) och skulle idag fela mot verklig kod — men det upptäcks aldrig, eftersom
+  `.github/workflows/ci.yml`s "E2E — Playwright (full stack)"-jobb explicit bara kör
+  `e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts`. Filen är alltså redan
+  exkluderad ur CI, inte bara föråldrad.
+
+**Ny uppföljningsuppgift (inte byggd nu, se grundarens explicita instruktion att inte utöka
+en död kodväg):** en separat städ-branch/PR som tar bort `POST /api/documents/upload` och dess
+bakgrundsindexering (`_index_in_background`, den orphanade `reindex_document_id()`), tar bort
+eller uppdaterar det föråldrade `frontend/e2e/shell-pages.spec.ts`, och rättar
+`docs/MAINAI_ARCHITECTURE.md` rad 303 (§5, som fortfarande beskriver `/api/documents/upload`
+som det aktiva uppladdningsflödet) — `GET /api/documents` och `DELETE /api/documents/{id}`
+ska sannolikt vara kvar (fortsatt bakåtkompatibel läsning/borttagning av samma delade
+`documents`-tabell, se `test_a_source_deleted_via_library_disappears_from_the_older_documents_router_too`).
+Detta är EN ny, ren "ta bort död kod"-uppgift — inte en utökning av PR C:s ursprungliga scope.
+
+## Stängda utan merge (subsumerade, inte relevanta att slå ihop)
+
+| PR | Branch | Status | Anledning |
+|---|---|---|---|
+| [#4](https://github.com/d1n095/LifeAI/pull/4) | `claude/founder-knowledge-studio-v1` | **Stängd** (inte mergad) | `git merge-base --is-ancestor 909a5f1 origin/claude/det-kommer-mer-879lcm` = sant — hela innehållet landade redan via PR #14. Stale bas (`claude/night-shift-mainai-web`). |
+| [#6](https://github.com/d1n095/LifeAI/pull/6) | `claude/life-library-durable-worker` | **Stängd** (inte mergad) | `git merge-base --is-ancestor a6d16b5 origin/claude/det-kommer-mer-879lcm` = sant — hela innehållet landade redan via PR #14. Stale bas (`claude/life-library-upload-queue`). |
 
 ## Merge-regeln (se `CLAUDE.md`)
 
@@ -162,29 +229,33 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Rekommenderad merge-ordning (nuläge)
 
-1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~ — samtliga mergade i
-   huvudgrenen.
-2. **`claude/mainai-core-orchestration-v1`** (MainAI Core: retrieval, systemkarta,
-   agentorkestrering, GitHub-integration) — öppen mot `claude/det-kommer-mer-879lcm`, redo
-   för PR/granskning. Ingen merge-tidpunkt beslutad än.
-3. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
+1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#17~~, ~~#18~~, ~~#19~~
+   — samtliga mergade i huvudgrenen. ~~PR #4~~, ~~PR #6~~ stängda utan merge (subsumerade,
+   se ovan).
+2. **PR #16** (MainAI Core: retrieval, systemkarta, agentorkestrering, GitHub-integration) —
+   uppdaterad mot den nya huvudgrenstippen (migration omnumrerad 0016→0017), under
+   grundarens granskning. Nästa steg: full verifiering omkörd, sedan lyft draft-status och
+   merga om grönt.
+3. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
+   för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
+4. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
    ett separat, uttryckligt beslut (branchen är fryst). Kräver DESSUTOM en egen ombasering
    mot huvudgrenens nya tip innan aktivering — dess bas (`15487e2`) är nu långt bakom både
    P2:s slutliga tip och själva huvudgrenen.
 
 ## Vilka brancher blockerar andra
 
-- **Inget öppet PR blockerar ett annat öppet PR just nu.** P1/P2/PR #13 är i huvudgrenen;
-  `claude/mainai-core-orchestration-v1` är fristående ovanpå den.
+- **Inget öppet PR blockerar ett annat öppet PR just nu.** P1/P2/PR #13/#17/#18/#19 är alla i
+  huvudgrenen; PR #16 är den enda öppna branchen kvar, fristående ovanpå den.
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något annat öppet PR.
 
 ## Vilka brancher kan mergas oberoende
 
-**`claude/mainai-core-orchestration-v1`** kan i princip mergas oberoende när den granskats —
-den är grenad direkt från huvudgrenens nya tip (EFTER PR #13:s merge) och rör bara nya filer
-plus additiva utökningar av redan mergad Fas 1–4-kod (ny migration 0016, ny `NoteKind.idea`,
-nya routers/moduler). Väntar inte på någon annan öppen branch.
+**PR #16** kan mergas oberoende av allt annat öppet just nu (det finns inget annat öppet PR)
+när grundarens granskning är klar och verifieringen efter mergen/migrationsomnumreringen är
+grön igen — den är grenad direkt från huvudgrenens nya tip och rör bara nya filer plus
+additiva utökningar av redan mergad Fas 1–4-kod.
 
 ## Vilka brancher väntar på ett beroende innan de bör uppdateras
 
@@ -196,9 +267,22 @@ förväg:
 
 ## Konflikter
 
-Inga kända filkonflikter. Samtliga integrationssteg (branch-synk, PR #14, PR #8:s
-ombasering, PR #13:s ombasering) verifierades konfliktfria via `git merge-base` innan de
-utfördes — se "Mergekedjan"-sektionen ovan för detaljer per steg.
+**Löst 2026-07-26: migrationsnummer-krock mellan PR #16 och PR #17.** Båda branchades från
+samma tip (`7afb01f`) och skapade oberoende av varandra en `0016_*.py`-migration —
+`0016_agent_orchestration.py` (PR #16) och `0016_chat_message_status.py` (PR #17), båda med
+`down_revision = "0015"`. Väntat och redan flaggat i förväg (se tidigare passets anteckning
+om att detta skulle lösas "när PR #16 rebasas efter PR A/B merge, inte i förväg"). När PR #17
+mergades blev PR #16:s `mergeable_state: dirty`. Löst genom att döpa om PR #16:s fil till
+`0017_agent_orchestration.py` och sätta `revision = "0017"`, `down_revision = "0016"` (pekar
+nu på PR #17:s migration), plus en vanlig `git merge` av huvudgrenens nya tip in i PR #16:s
+branch (`schemas.py`/`frontend/lib/api.ts` auto-mergade konfliktfritt eftersom PR #16/#17/#18
+lägger till olika, icke-överlappande klasser i samma filer; bara den här filen — som båda
+sidor redigerat samtidigt — krockade textuellt). Migrationsrundtripp och full testsvit
+verifieras på nytt efter denna ändring innan PR #16 mergas.
+
+Utöver detta: inga andra kända filkonflikter. Samtliga integrationssteg (branch-synk, PR #14,
+PR #8:s ombasering, PR #13:s ombasering) verifierades konfliktfria via `git merge-base` innan
+de utfördes — se "Mergekedjan"-sektionen ovan för detaljer per steg.
 
 Om en verklig filkonflikt upptäcks i framtiden ska den listas här explicit — vilka brancher,
 vilka filer, och vilken lösning som föreslås — inte bara upptäckas i förbigående när en merge

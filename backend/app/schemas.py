@@ -115,17 +115,35 @@ class SourceRef(BaseModel):
 
 
 class ChatMessageOut(BaseModel):
+    """The explicit user-message-vs-assistant-response contract (see app/routers/chat.py's
+    module docstring): `user_message_saved` is always true if this response exists at all —
+    the user's message was committed to the database before the provider was ever called, so
+    a client must never infer "my message is gone" from a non-200 or from `assistant_status`
+    being "failed". `reply`/`provider`/`model`/`sources`/`confidence*` are only meaningful
+    when `assistant_status == "succeeded"` — they are None on failure, never a fake/empty
+    placeholder pretending a reply exists."""
+
     conversation_id: uuid.UUID
-    reply: str
-    provider: str
-    model: str
+    user_message_id: uuid.UUID
+    user_message_saved: bool = True
+    assistant_status: str  # "succeeded" | "failed" — see MessageStatus
+    assistant_message_id: uuid.UUID | None = None
+    reply: str | None = None
+    provider: str | None = None
+    model: str | None = None
     sources: list[SourceRef] = []
-    confidence: str  # "high" | "medium" | "low" | "none"
-    confidence_score: float
+    confidence: str | None = None  # "high" | "medium" | "low" | "none" — set only on success
+    confidence_score: float | None = None
     providers_attempted: list[str] = []  # >1 entry means fallback engaged
     conflicts_detected: bool = False
     context_intent: str | None = None  # see app/context/resolver.py — observational only tonight
     context_confidence: str | None = None
+    # Only set when assistant_status == "failed". error_category is one of
+    # VerificationResult's values (app/models/provider_verification.py) — never a raw
+    # exception string, so it's always safe to show a founder without leaking a key/URL.
+    error_category: str | None = None
+    error_message: str | None = None
+    retryable: bool = False
 
 
 class MessageOut(BaseModel):
@@ -396,6 +414,18 @@ class LibrarySearchHit(BaseModel):
     text_match: bool = False
     start_seconds: float | None = None
     end_seconds: float | None = None
+
+
+class LibrarySearchResponseOut(BaseModel):
+    """Wraps LibrarySearchHit results with explicit degradation metadata — the search
+    failure boundary. semantic_search_available=False means the embedding provider was
+    unreachable and `results` came from the text-match (ILIKE) channel alone; the client
+    must never treat that silently as "semantic search ran and found nothing", since those
+    are different situations (see app/routers/library.py's search_library)."""
+
+    results: list[LibrarySearchHit]
+    semantic_search_available: bool = True
+    degraded_reason: str | None = None
 
 
 # --- STEG 12: secure URL-import model (intent only, never fetched — see

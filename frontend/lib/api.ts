@@ -142,18 +142,32 @@ export type ChatSource = {
 
 export type Confidence = "high" | "medium" | "low" | "none";
 
+export type AssistantStatus = "succeeded" | "failed";
+
+// The user's message and the assistant's reply are two independently durable steps — see
+// backend/app/routers/chat.py's module docstring. `user_message_saved` is always true if this
+// response exists at all; `reply`/`provider`/`model`/`sources`/`confidence*` are only present
+// when assistant_status is "succeeded". Never infer "my message is gone" from a failed
+// assistant_status — it never was, and never will be, lost because of a provider error.
 export type ChatResponse = {
   conversation_id: string;
-  reply: string;
-  provider: string;
-  model: string;
+  user_message_id: string;
+  user_message_saved: boolean;
+  assistant_status: AssistantStatus;
+  assistant_message_id: string | null;
+  reply: string | null;
+  provider: string | null;
+  model: string | null;
   sources: ChatSource[];
-  confidence: Confidence;
-  confidence_score: number;
+  confidence: Confidence | null;
+  confidence_score: number | null;
   providers_attempted: string[];
   conflicts_detected?: boolean;
   context_intent?: string | null;
   context_confidence?: string | null;
+  error_category: string | null;
+  error_message: string | null;
+  retryable: boolean;
 };
 
 export type ConversationItem = {
@@ -304,6 +318,16 @@ export type LibrarySearchHit = {
   active_truth_status: ActiveTruthStatus;
   media_type: string | null;
   text_match: boolean;
+};
+
+// Search failure boundary: semantic_search_available=false means the embedding provider
+// was unreachable and `results` came from the text-match (ILIKE) channel alone — the UI
+// must show this as a degraded search, not silently render it as "semantic search found
+// nothing" (see backend/app/schemas.py's LibrarySearchResponseOut).
+export type LibrarySearchResponse = {
+  results: LibrarySearchHit[];
+  semantic_search_available: boolean;
+  degraded_reason: string | null;
 };
 
 export type LibraryListFilters = {
@@ -532,6 +556,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message, conversation_id: conversationId }),
     }),
+  retryChatMessage: (userMessageId: string) =>
+    request<ChatResponse>(`/api/chat/messages/${userMessageId}/retry`, { method: "POST" }),
 
   listConversations: () => request<ConversationItem[]>("/api/conversations"),
   getConversation: (id: string) => request<ConversationDetail>(`/api/conversations/${id}`),
@@ -610,7 +636,7 @@ export const api = {
       q: query,
       ...Object.fromEntries(Object.entries(filters).filter(([, v]) => !!v)),
     } as Record<string, string>).toString();
-    return request<LibrarySearchHit[]>(`/api/library/search/hybrid?${qs}`);
+    return request<LibrarySearchResponse>(`/api/library/search/hybrid?${qs}`);
   },
   getLibraryOpsStatus: () => request<LibraryOpsStatus>("/api/library/ops/status"),
 

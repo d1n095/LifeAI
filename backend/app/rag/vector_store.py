@@ -107,7 +107,7 @@ def search(
 def hybrid_search(
     db: Session,
     owner_id: uuid.UUID,
-    vector: list[float],
+    vector: list[float] | None,
     query_text: str,
     top_k: int = 10,
     *,
@@ -123,6 +123,11 @@ def hybrid_search(
     heavily); a pure-text search misses paraphrases — this is why both run, not either
     alone. Filters (project/classification/active_truth_status) apply to both channels
     identically, and deleted sources are excluded the same way search() excludes them.
+
+    `vector=None` skips the semantic channel entirely (real local fallback when no embedding
+    provider is available — see app/routers/library.py's search_library) rather than faking a
+    zero vector, which would return meaningless cosine-distance "matches". The text-match
+    channel needs no embedding at all, so it keeps returning real results either way.
     """
     base_filters = [DocumentChunk.owner_id == owner_id, Document.deleted_at.is_(None)]
     if project_id is not None:
@@ -132,15 +137,17 @@ def hybrid_search(
     if active_truth_status is not None:
         base_filters.append(Document.active_truth_status == active_truth_status)
 
-    distance = DocumentChunk.embedding.cosine_distance(vector)
-    semantic_stmt = (
-        select(DocumentChunk, distance.label("distance"))
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .where(*base_filters)
-        .order_by(distance)
-        .limit(top_k)
-    )
-    semantic_rows = db.execute(semantic_stmt).all()
+    semantic_rows = []
+    if vector is not None:
+        distance = DocumentChunk.embedding.cosine_distance(vector)
+        semantic_stmt = (
+            select(DocumentChunk, distance.label("distance"))
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(*base_filters)
+            .order_by(distance)
+            .limit(top_k)
+        )
+        semantic_rows = db.execute(semantic_stmt).all()
 
     like_pattern = f"%{query_text}%"
     text_stmt = (
