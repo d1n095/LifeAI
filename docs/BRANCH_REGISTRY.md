@@ -78,7 +78,7 @@ grundprincip för varför de fick egna brancher/PR:er istället för att fogas i
 | `claude/life-library-durable-worker-merged` | [#14](https://github.com/d1n095/LifeAI/pull/14) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `2ddfeddc` | PR #6 (durable worker/lagring) + P1 (provider-verifiering) — landade i huvudgrenen för första gången | `claude/det-kommer-mer-879lcm` @ 5769cffa |
 | `claude/p2-zip-hardening-plan` | [#8](https://github.com/d1n095/LifeAI/pull/8) | **Mergad** i `claude/det-kommer-mer-879lcm` (ombasearad dit efter PR #14), merge-commit `89682a18` | P2: nästlad ZIP-hantering, `encrypted`-status, `archive_path`/`archive_chain` | `claude/det-kommer-mer-879lcm` @ 2ddfeddc (efter PR #14) |
 | `claude/mainai-memory-loop-v1` | [#13](https://github.com/d1n095/LifeAI/pull/13) | **Öppen, draft.** CI grönt på ursprunglig bas; ombasearad direkt mot huvudgrenens nya tip (diff oförändrat, verifierat via `git merge-base`) | MainAI Project Memory & Coordination Loop — se `CLAUDE.md`s "Målet"-avsnitt. Byggs vidare iterativt, inte redo för merge-beslut än | `claude/det-kommer-mer-879lcm` @ 89682a18 |
-| `claude/mainai-core-orchestration-v1` | [#16](https://github.com/d1n095/LifeAI/pull/16) | **Öppen, draft.** CI grönt (20 nya tester, 454/1 totalt, inga regressioner), `mergeable_state: clean`. Väntar på LLM Coupling & Failure-Boundary Audit-fixen nedan (minimal `ProviderError`-hantering i dispatch) innan draft-status kan lyftas | MainAI Core v0: kategoriserad retrieval + systemkarta, agentorkestrering (`agent_tasks`/`agent_task_events`, migration 0016), minimal GitHub-klient (läsning/branch/commit/PR, ALDRIG merge i klienten), founder-UI `/admin/agents`. Genomsökningsbaserad retrieval, inte semantisk | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+| `claude/mainai-core-orchestration-v1` | [#16](https://github.com/d1n095/LifeAI/pull/16) | **Öppen, draft.** LLM Coupling & Failure-Boundary Audit-fixen pushad (minimal `ProviderError`-hantering i dispatch, se nedan) — 18/18 CI grönt, `mergeable_state: clean`. Fortsatt draft tills grundaren granskat, se PR:ns egen "Draft"-sektion | MainAI Core v0: kategoriserad retrieval + systemkarta, agentorkestrering (`agent_tasks`/`agent_task_events`, migration 0016), minimal GitHub-klient (läsning/branch/commit/PR, ALDRIG merge i klienten), founder-UI `/admin/agents`. Genomsökningsbaserad retrieval, inte semantisk. Dispatch returnerar nu en säker, icke-läckande 503 om samtliga providers misslyckas, istället för en ohanterad 500 — se `app/agent_orchestration.py`s "Local-first status"-avsnitt för samma Idag/Målarkitektur-uppdelning som §1:s grundprincip | `claude/det-kommer-mer-879lcm` @ 7afb01f |
 
 ## LLM Coupling & Failure-Boundary Audit — pågående kedja (2026-07-26)
 
@@ -97,15 +97,44 @@ dem blandas in i någon annan pågående kedja.
 |---|---|---|---|---|
 | `claude/chat-message-persistence-fix` | [#17](https://github.com/d1n095/LifeAI/pull/17) | **Öppen, redo för merge.** 18/18 CI grönt (inkl. E2E Playwright, E2E same-origin proxy, backend unit/integration, migrationskontroll), inga olösta review-kommentarer | PR A: användarmeddelandet persisteras och committas OBEROENDE av providerkallet; ny `MessageStatus`/`in_reply_to_id`/`error_category` på `Message`; `POST /messages/{id}/retry`; `ChatMessageOut` skiljer explicit `user_message_saved` från `assistant_status` (pending/succeeded/failed) + `retryable` + säker `error_category` (aldrig råa provider-secrets, se `classify_provider_exception`). Partial unique index gör dubbel-retry strukturellt omöjligt, inte bara logiskt undvikt. 8 nya tester (provider lyckas/misslyckas/timeout, retry dupliceras inte, reload behåller meddelandet, idempotent retry) | `claude/det-kommer-mer-879lcm` @ 7afb01f |
 | `claude/search-embedding-failure-fallback` | [#18](https://github.com/d1n095/LifeAI/pull/18) | **Öppen, redo för merge.** 18/18 CI grönt, inga olösta review-kommentarer | PR B: `hybrid_search()` accepterar `vector: list[float] \| None` och hoppar över den semantiska kanalen (inte en fejkad nollvektor) när providern saknas — textmatchningskanalen (ILIKE) svarar alltid ändå. `search_library()` fångar embed-felet via samma `classify_provider_exception`. Ny `LibrarySearchResponseOut` med `semantic_search_available`/`degraded_reason` — aldrig en tyst påstådd semantisk sökning som bara "hittade inget". 4 nya tester (provider otillgänglig, timeout, tomt semantiskt resultat = INTE degraderat, normal hybrid-sökning) | `claude/det-kommer-mer-879lcm` @ 7afb01f |
-| `claude/mainai-local-first-principle` | (docs-only, PR ej öppnad än) | Under arbete | Skriver ned grundarens arkitekturprincip "MainAI är systemets intelligens, inte en extern tjänst" i `docs/MAINAI_ARCHITECTURE.md` §1 (ny grundprincip 7 + System Core/MainAI/Externa modeller-ansvarstabell + explicit offline-kapacitetslista) och en korsreferens i §7. Ren dokumentation, ingen kodändring | `claude/det-kommer-mer-879lcm` @ 7afb01f |
+| `claude/mainai-local-first-principle` | [#19](https://github.com/d1n095/LifeAI/pull/19) | **Öppen, redo för merge.** CI grönt, inga olösta review-kommentarer | Skriver ned grundarens arkitekturprincip "MainAI är systemets intelligens, inte en extern tjänst" i `docs/MAINAI_ARCHITECTURE.md` §1 (ny grundprincip 7 + System Core/MainAI/Externa modeller-ansvarstabell + explicit offline-kapacitetslista) och en korsreferens i §7. Ren dokumentation, ingen kodändring. Denna commit (uppdatering av samma PR, inte en ny) lägger till PR C:s stängningsbeslut nedan | `claude/det-kommer-mer-879lcm` @ 7afb01f |
 
-**Kvar i kedjan (inte påbörjat):** PR #16:s minimala `ProviderError`-hantering i dispatch +
-dokumentation av att retrieval redan är helt lokal / orkestrering är leverantörsoberoende men
-INTE ännu local-first / Local MainAI Capability Layer är planerat, inte byggt (se
-`docs/MAINAI_ARCHITECTURE.md`s nya grundprincip-avsnitt ovan) — görs direkt på PR #16:s
-befintliga branch (`claude/mainai-core-orchestration-v1`), inte en ny branch, eftersom PR #16
-redan äger dispatch-koden. Därefter PR C (`ai_analysis_status` + retry för den äldre
-`/api/documents/upload`-vägen), egen ny branch.
+**PR C stängd, inte byggd — verifierat inte längre relevant.** Grundaren godkände "Skip PR C"
+med ett uttryckligt tilläggskrav: verifiera först att `/api/documents/upload` verkligen saknar
+kvarvarande konsumenter innan något stängs eller städas. Verifiering genomförd:
+
+- `POST /api/documents/upload` har INGEN frontend-anropare kvar. `frontend/lib/api.ts`s
+  `uploadDocument()`-funktion existerar men anropas ingenstans — `app/(shell)/documents/page.tsx`
+  gör bara `router.replace("/library")` sedan commit `0d9f487` ("Life Library: single upload
+  hub...", 2026-07-22). All riktig uppladdning går via `/api/library`s importpipeline, som
+  redan har full `ImportJob`-baserad status, säker felklassificering och en riktig retry-
+  åtgärd (byggt i P1/P2/STEG-arbetet, långt mer robust än vad PR C skulle byggt).
+- Backend-sidans felhantering som PR C skulle lagt till **finns redan** för `/documents/upload`-
+  vägen: `app/rag/ingest.py`s `index_document()` sätter redan distinkta `IndexStatus`-värden
+  (`extraction_failed`/`awaiting_provider`/`blocked_provider`/`indexing_failed`/`failed`) och
+  använder redan `classify_provider_exception()` — aldrig rå `str(exc)` — för varje
+  felläge, inklusive embedding-providerfel EFTER en godkänd pre-flight-kontroll. Detta byggdes
+  redan under P1, innan den här auditen. En `reindex_document_id()`-retry-funktion finns redan
+  skriven men anropas ingenstans (orphaned).
+- Enda verkliga luckan (`DocumentOut` exponerar inte `status`/`error_message`, ingen
+  `/retry`-rutt) gäller alltså en väg utan någon aktiv UI-konsument — att bygga den skulle
+  vara arbete för en död kodväg, inte en verklig felyta en grundare kan träffa på.
+- `frontend/e2e/shell-pages.spec.ts`s "documents: empty state..."-test refererar fortfarande
+  den gamla `/documents`-sidans UI-text/knappar (från commit `a46dc7a`, FÖRE
+  konsolideringen) och skulle idag fela mot verklig kod — men det upptäcks aldrig, eftersom
+  `.github/workflows/ci.yml`s "E2E — Playwright (full stack)"-jobb explicit bara kör
+  `e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts`. Filen är alltså redan
+  exkluderad ur CI, inte bara föråldrad.
+
+**Ny uppföljningsuppgift (inte byggd nu, se grundarens explicita instruktion att inte utöka
+en död kodväg):** en separat städ-branch/PR som tar bort `POST /api/documents/upload` och dess
+bakgrundsindexering (`_index_in_background`, den orphanade `reindex_document_id()`), tar bort
+eller uppdaterar det föråldrade `frontend/e2e/shell-pages.spec.ts`, och rättar
+`docs/MAINAI_ARCHITECTURE.md` rad 303 (§5, som fortfarande beskriver `/api/documents/upload`
+som det aktiva uppladdningsflödet) — `GET /api/documents` och `DELETE /api/documents/{id}`
+ska sannolikt vara kvar (fortsatt bakåtkompatibel läsning/borttagning av samma delade
+`documents`-tabell, se `test_a_source_deleted_via_library_disappears_from_the_older_documents_router_too`).
+Detta är EN ny, ren "ta bort död kod"-uppgift — inte en utökning av PR C:s ursprungliga scope.
 
 ## Merge-regeln (se `CLAUDE.md`)
 
@@ -126,7 +155,8 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 3. **PR #16:s minimala dispatch-fix** — görs EFTER att PR #17/#18 är mergade (samma
    `classify_provider_exception`-mönster återanvänds där; ingen anledning att duplicera
    innan de landat), på PR #16:s befintliga branch.
-4. **PR C** (upload `ai_analysis_status` + retry) — efter PR #16:s fix, egen ny branch.
+4. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
+   för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
 5. `claude/mainai-local-first-principle` (dokumentation) — fristående, ingen kodberoende,
    kan mergas när som helst i kedjan ovan utan att blockera eller blockeras av någon av dem.
 6. **PR #13** (MainAI Project Memory-loopen) — bygger vidare, iterativt, direkt mot

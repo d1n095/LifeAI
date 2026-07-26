@@ -344,6 +344,15 @@ dokumentet gäller fortfarande: inte påbörjad.
 
 **B. Dokumentinhämtning (synkront upload + asynkron indexering)**
 
+`POST /api/documents/upload` (nedan) är numera en INAKTIV väg — sedan commit `0d9f487`
+("Life Library: single upload hub...", 2026-07-22) redirectar `/documents`-sidan direkt till
+`/library`, och ingen frontend anropar längre denna endpoint (verifierat vid LLM Coupling &
+Failure-Boundary Audit-genomgången, se `docs/BRANCH_REGISTRY.md`s PR C-avsnitt). Riktig
+uppladdning idag går via `/api/library`s importpipeline (samma mönster som nedan, men med
+`ImportJob`-baserad status/retry). Flödet nedan beskrivs ändå — koden finns kvar och
+`GET`/`DELETE` på samma router är fortfarande aktiva bakåtkompatibla vägar in i samma
+`documents`-tabell.
+
 ```
 1. Browser → POST /api/documents/upload → Document-rad skapas (status: pending)
 2. FastAPI schemalägger BackgroundTasks._index_in_background() → svar returneras direkt
