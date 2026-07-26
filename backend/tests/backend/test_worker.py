@@ -162,7 +162,7 @@ async def test_worker_run_once_claims_and_processes_a_real_job_end_to_end(db_ses
     from app.storage import get_storage
     from app.worker import Worker
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [[0.02] * get_settings().embedding_dim for _ in texts]
 
     async def _fake_chat(self, messages, model, **kwargs):

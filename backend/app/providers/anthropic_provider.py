@@ -22,7 +22,7 @@ class AnthropicProvider(LLMProvider):
             "anthropic-version": ANTHROPIC_VERSION,
         }
 
-    async def chat(self, messages: list[Message], model: str, **kwargs) -> ChatResult:
+    async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
         if not self.is_configured():
             raise ProviderError("Anthropic API-nyckel saknas.")
         system = "\n".join(m.content for m in messages if m.role == "system") or None
@@ -34,7 +34,7 @@ class AnthropicProvider(LLMProvider):
         }
         if system:
             payload["system"] = system
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=timeout or 60) as client:
             resp = await client.post(f"{BASE_URL}/messages", headers=self._headers(), json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -48,5 +48,5 @@ class AnthropicProvider(LLMProvider):
         }
         return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
-    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+    async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
         raise ProviderError("Anthropic erbjuder inget embedding-API — använd OpenAI/Gemini/lokal modell för embeddings.")

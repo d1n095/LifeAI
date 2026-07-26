@@ -38,7 +38,7 @@ def _fake_embedding_provider(monkeypatch):
     from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
 
-    async def _fake_embed(self, texts, model):
+    async def _fake_embed(self, texts, model, **kwargs):
         return [[0.01 * (i + 1)] * EMBEDDING_DIM for i, _ in enumerate(texts)]
 
     async def _fake_chat(self, messages, model, **kwargs):

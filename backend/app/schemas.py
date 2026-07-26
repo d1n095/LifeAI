@@ -213,11 +213,37 @@ class ProviderConfigOut(ProviderConfigIn):
     is_active: bool
 
 
+class ProviderVerificationOut(BaseModel):
+    """P1: the latest real verification result for one (provider, role) pair — never just
+    whether a key string is present. `None` (the field is omitted on the Python side, not
+    this model) means "never verified yet", surfaced by the frontend as a neutral, not red,
+    state."""
+
+    result: str  # ok | invalid_key | unreachable | rate_limited | unsupported | not_configured
+    message: str
+    checked_by: str  # "system" | "founder"
+    checked_at: datetime
+
+
 class ProviderStatus(BaseModel):
     name: str
     configured: bool
     active_chat: bool
     active_embedding: bool
+    chat_verification: ProviderVerificationOut | None = None
+    embedding_verification: ProviderVerificationOut | None = None
+
+
+class ProviderVerifyIn(BaseModel):
+    provider: str
+    role: str  # "chat" | "embedding"
+
+    @field_validator("role")
+    @classmethod
+    def valid_role(cls, v: str) -> str:
+        if v not in ("chat", "embedding"):
+            raise ValueError("role måste vara 'chat' eller 'embedding'.")
+        return v
 
 
 class UsageSummaryRow(BaseModel):

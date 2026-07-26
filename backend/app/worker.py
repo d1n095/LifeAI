@@ -30,6 +30,7 @@ import socket
 import uuid
 from datetime import datetime
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -37,6 +38,8 @@ from app.db import SessionLocal, migration_engine
 from app.jobs.lease import claim_next_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.provider_verification import VerificationResult
+from app.providers.verification import ensure_verified
 from app.rag.library_import import run_import_job
 from app.rag.zip_import import ZipSecurityError
 
@@ -113,12 +116,33 @@ class Worker:
         # signal allows for (see claim_next_job's reclaim-on-expired-lease behavior).
         self._shutdown.set()
 
+    async def _requeue_blocked_jobs(self, db: Session) -> None:
+        """P1: the mechanism that lets an ImportJob paused on ImportJobStatus.blocked
+        (every file in it waiting on the embedding provider) resume automatically, with no
+        re-upload, once a founder fixes whatever was wrong. Re-verifies the CURRENTLY ACTIVE
+        embedding provider using the same cached ensure_verified() the per-file pre-flight
+        check in app/rag/ingest.py uses, so this does NOT make a fresh real API call on every
+        single poll cycle (default every worker_poll_interval_seconds) — only once the cache
+        (PROVIDER_VERIFICATION_CACHE_SECONDS) is stale. Once it verifies ok, every `blocked`
+        job is flipped back to `pending` in one cheap bulk update — no per-job loop needed,
+        since they're all waiting on the exact same thing — where claim_next_job (app/jobs/
+        lease.py, unchanged) picks each one up exactly like any other reclaimable job. Runs
+        on the superuser claim session (same reasoning as claim_next_job itself: this must
+        see and update blocked jobs across ALL owners, which no single owner's RLS context
+        could satisfy)."""
+        outcome = await ensure_verified(db, role="embedding")
+        if outcome.result != VerificationResult.ok:
+            return
+        db.execute(text("UPDATE knowledge_import_jobs SET status = 'pending' WHERE status = 'blocked'"))
+        db.commit()
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
         two different sessions/connections — see _ClaimSession's module-level comment."""
         claim_db = _ClaimSession()
         try:
+            await self._requeue_blocked_jobs(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
             claim_db.close()

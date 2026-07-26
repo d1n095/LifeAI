@@ -70,7 +70,7 @@ class JobCancelled(Exception):
 @dataclass
 class FileOutcome:
     filename: str
-    status: str  # "indexed" | "duplicate" | "failed" | "skipped" | "cancelled"
+    status: str  # "indexed" | "duplicate" | "failed" | "skipped" | "cancelled" | "blocked"
     reason: str | None = None
     source_id: str | None = None
 
@@ -157,6 +157,58 @@ def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | No
         return DeletionStatus.failed
 
 
+async def _resume_blocked_document(
+    db: Session, document: Document, owner_id: uuid.UUID, filename: str, content: bytes
+) -> FileOutcome:
+    """P1: re-attempts embedding for a Document already paused on `awaiting_provider`/
+    `blocked_provider` — reuses the SAME row and its existing KnowledgeVersion rather than
+    creating a duplicate. Reached whenever a file with a matching checksum is seen again,
+    whether because the founder genuinely re-uploaded it or because app/worker.py's
+    automatic requeue (_requeue_blocked_jobs) replayed the same ImportJob after the provider
+    verified ok — both are the exact same code path. Neither needs the ORIGINAL http upload
+    again: `content` here always comes from re-reading the job's own durably stored original
+    (ImportJob.source_storage_key, see run_import_job/_run_once), never a fresh upload.
+    Re-extraction is cheap and local (no AI involved); the original bytes are never
+    re-stored — the document is already `original_stored`, and app/storage/'s
+    content-addressing would just no-op a re-write anyway."""
+    version = (
+        db.query(KnowledgeVersion)
+        .filter(KnowledgeVersion.source_id == document.id)
+        .order_by(KnowledgeVersion.version_number.desc())
+        .first()
+    )
+
+    document.status = IndexStatus.extracting
+    db.add(document)
+    db.commit()
+    try:
+        text_content = extract_text(filename, content)
+    except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
+        document.status = IndexStatus.extraction_failed
+        document.error_message = f"Kunde inte extrahera text: {exc}"
+        db.add(document)
+        db.commit()
+        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+    document.status = IndexStatus.extracted
+    db.add(document)
+    db.commit()
+
+    await index_document(db, document, text_content)
+
+    if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
+        return FileOutcome(filename=filename, status="blocked", reason=document.error_message, source_id=str(document.id))
+    if document.status != IndexStatus.indexed:
+        return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
+
+    if version is not None:
+        try:
+            await extract_claims_for_document(db, document, owner_id, version.id)
+        except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
+            pass
+
+    return FileOutcome(filename=filename, status="indexed", source_id=str(document.id))
+
+
 async def _import_one_file(
     db: Session,
     storage: StorageBackend,
@@ -180,6 +232,12 @@ async def _import_one_file(
         .first()
     )
     if existing is not None:
+        # P1: a row already paused on the provider is NOT a duplicate — resume it in place
+        # instead of creating a second Document/KnowledgeVersion (see
+        # _resume_blocked_document's docstring). Every other existing status (indexed, or any
+        # of the terminal *_failed statuses) is still a real duplicate, unchanged from before P1.
+        if existing.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
+            return await _resume_blocked_document(db, existing, owner_id, filename, content)
         return FileOutcome(filename=filename, status="duplicate", reason="Identiskt innehåll finns redan.", source_id=str(existing.id))
 
     suffix = PurePosixPath(filename).suffix.lower()
@@ -252,7 +310,11 @@ async def _import_one_file(
     try:
         blob = _store_bytes(storage, content, max_bytes=max_upload_bytes)
     except StorageError as exc:
-        document.status = IndexStatus.failed
+        # P1: reclassified from the old undifferentiated `failed` — the original never made
+        # it into durable storage at all, so unlike awaiting_provider/blocked_provider this
+        # is terminal: there is nothing safely stored to resume from, a fresh upload is
+        # required (see docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7).
+        document.status = IndexStatus.storage_failed
         document.error_message = f"Kunde inte lagra originalfilen: {exc}"
         db.add(document)
         db.commit()
@@ -278,7 +340,10 @@ async def _import_one_file(
         try:
             text_content = extract_text(filename, content)
         except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
-            document.status = IndexStatus.failed
+            # P1: reclassified from the old undifferentiated `failed` — the file's CONTENT is
+            # the problem here, not the provider or storage, so this is terminal too (see
+            # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7).
+            document.status = IndexStatus.extraction_failed
             document.error_message = f"Kunde inte extrahera text: {exc}"
             db.add(document)
             db.commit()
@@ -297,13 +362,25 @@ async def _import_one_file(
             media_import.validate_media_bytes(filename, content, media_kind)
         except media_import.MediaImportError as exc:
             document.status = IndexStatus.failed
+            # MediaImportError is raised only by our own app/rag/media_import.py validation
+            # code with a deliberate, pre-written message — never wraps an httpx/provider
+            # exception, so str(exc) here can never contain a URL, header or API key (unlike
+            # the embedding call site in app/rag/ingest.py — see
+            # app/providers/verification.py's classify_provider_exception docstring).
             document.error_message = str(exc)
             db.add(document)
             db.commit()
             return FileOutcome(filename=filename, status="failed", reason=str(exc), source_id=str(document.id))
         await media_import.index_media_document(db, document, content, filename, media_kind)
 
-    if document.status == IndexStatus.failed:
+    # P1: awaiting_provider/blocked_provider is a PAUSE, not a failure — the file is safely
+    # stored and extracted, just waiting on the AI provider, and app/worker.py's automatic
+    # requeue will retry it with no re-upload. Every other non-`indexed` status here
+    # (storage_failed/extraction_failed/indexing_failed, or the legacy generic `failed`) is a
+    # genuine, terminal per-file failure.
+    if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
+        return FileOutcome(filename=filename, status="blocked", reason=document.error_message, source_id=str(document.id))
+    if document.status != IndexStatus.indexed:
         return FileOutcome(filename=filename, status="failed", reason=document.error_message, source_id=str(document.id))
 
     # Claim extraction (STEG 10, app/rag/claims.py) runs after indexing succeeds, on the
@@ -488,20 +565,33 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
     failed = sum(1 for o in outcomes if o.status == "failed")
     skipped = sum(1 for o in outcomes if o.status == "skipped")
     cancelled = sum(1 for o in outcomes if o.status == "cancelled")
+    # P1: files paused on awaiting_provider/blocked_provider — nothing genuinely failed here,
+    # the job is just waiting for the AI provider (see IndexStatus's docstring).
+    blocked = sum(1 for o in outcomes if o.status == "blocked")
 
     job.succeeded_count = succeeded
     job.failed_count = failed
     job.skipped_count = skipped + duplicates
+    job.blocked_count = blocked
 
     if cancelled and not succeeded:
         job.status = ImportJobStatus.cancelled
-    elif failed and (succeeded or duplicates or skipped):
+        job.completed_at = datetime.utcnow()
+    elif blocked and not (succeeded or failed):
+        # P1: every non-duplicate/non-skipped file is paused on the provider — this is NOT a
+        # terminal outcome. app/worker.py's _requeue_blocked_jobs flips this back to `pending`
+        # automatically once the active provider verifies ok, so `completed_at` is
+        # deliberately left unset — the job isn't done, it's waiting.
+        job.status = ImportJobStatus.blocked
+    elif failed and (succeeded or duplicates or skipped or blocked):
         job.status = ImportJobStatus.partial
-    elif failed and not (succeeded or duplicates or skipped):
+        job.completed_at = datetime.utcnow()
+    elif failed and not (succeeded or duplicates or skipped or blocked):
         job.status = ImportJobStatus.failed
         job.failure_reason = "Alla filer i paketet misslyckades."
+        job.completed_at = datetime.utcnow()
     else:
         job.status = ImportJobStatus.completed
-    job.completed_at = datetime.utcnow()
+        job.completed_at = datetime.utcnow()
     db.add(job)
     db.commit()

@@ -20,6 +20,15 @@ class ImportJobStatus(str, enum.Enum):
     # still pending/running — see app/routers/library.py's delete_source and
     # app/worker.py's cancellation checks between pipeline steps.
     cancelled = "cancelled"
+    # P1 (provider pre-flight verification): every non-duplicate, non-skipped file in this
+    # job paused on `awaiting_provider`/`blocked_provider` — nothing genuinely failed, the
+    # job is just waiting. app/worker.py's _requeue_blocked_jobs flips it back to `pending`
+    # automatically once the active provider verifies ok, and run_import_job reprocesses it
+    # exactly like any other reclaimed job — no re-upload, see app/rag/library_import.py's
+    # _import_one_file existing-document handling. Like `cancelled`, this needs no migration:
+    # `knowledge_import_jobs.status` is a plain varchar(16), not a native Postgres enum (see
+    # migration 0006's docstring).
+    blocked = "blocked"
 
 
 class ImportJob(Base):
@@ -49,6 +58,10 @@ class ImportJob(Base):
     succeeded_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
     skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    # P1: files paused on awaiting_provider/blocked_provider — not genuinely failed, just
+    # waiting. Kept separate from failed_count so the Library UI can tell "something is
+    # actually broken" from "nothing is broken, we're waiting on the AI provider" at a glance.
+    blocked_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Per-file outcome: [{"filename": ..., "status": "indexed"|"failed"|"skipped", "reason": ..., "source_id": ...}]

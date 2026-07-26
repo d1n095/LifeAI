@@ -164,6 +164,16 @@ class Settings(BaseSettings):
     # can tell which container to look at.
     worker_id: str | None = None
 
+    # P1 (provider pre-flight verification, app/providers/verification.py): how long a
+    # verification result (ok or a failure) is trusted before a new real call is made —
+    # keeps a large batch/worker poll loop from hammering a provider that's genuinely down
+    # once per file. Short on purpose: an operator fixing a key shouldn't have to wait long
+    # for the worker to notice. Separate, much shorter timeout for the verification call
+    # itself than production chat/embed calls (60-120s) — a pre-flight check must fail fast,
+    # never hang an import waiting to find out a provider is unreachable.
+    provider_verification_cache_seconds: int = 300
+    provider_verification_timeout_seconds: float = 10.0
+
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
