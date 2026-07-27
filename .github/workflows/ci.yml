@@ -1396,6 +1396,16 @@ jobs:
           SMTP_USERNAME=ci
           SMTP_PASSWORD=ci
           SMTP_FROM_EMAIL=no-reply@lifeos.local
+          # 2026-07-27: neither var existed in ANY VPS env example or CI fixture before this —
+          # a production instance that only ever set GOOGLE_API_KEY for chat had embedding
+          # silently resolve to the openai/text-embedding-3-small class defaults with no
+          # OPENAI_API_KEY configured, failing every retrieval as "unreachable". DEFAULT_
+          # EMBEDDING_PROVIDER=ollama here points backend AND worker at the network-isolated
+          # stub (docker-compose.vps.ci.yml's `ollama` service) instead of a real provider —
+          # OLLAMA_BASE_URL needs no override, its class default (http://ollama:11434) already
+          # resolves to that service by Docker DNS.
+          DEFAULT_EMBEDDING_PROVIDER=ollama
+          DEFAULT_EMBEDDING_MODEL=ci-stub-embed
           EOF
           # REDIS_PASSWORD is deliberately NOT in this file: it's a Compose top-level
           # interpolation variable (like BACKEND_IMAGE/DOMAIN above), set as a job-level env
@@ -1422,10 +1432,14 @@ jobs:
 
       - name: Verify exactly the expected services are running, including redis and worker
         run: |
+          # `ollama` is docker-compose.vps.ci.yml's CI-only fake embedding provider (see that
+          # file's own comment) — NOT a 6th production service. docker-compose.vps.yml itself
+          # (the file actually deployed to the real VPS) still defines exactly these five:
+          # caddy, backend, frontend, redis, worker.
           got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps --services | sort | tr '\n' ' ')
-          expected="backend caddy frontend redis worker "
+          expected="backend caddy frontend ollama redis worker "
           [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
-          echo "Confirmed: exactly caddy, backend, frontend, redis, worker — no more, no fewer."
+          echo "Confirmed: exactly caddy, backend, frontend, redis, worker (production topology) plus the CI-only ollama stub — no more, no fewer."
 
       - name: Verify the durable-worker package's worker is actually alive and polling, not restart-looping
         run: |
@@ -1729,11 +1743,64 @@ jobs:
           echo "$HEADERS" | grep -qi "^server:" && (echo "::error::Server header leaked despite -Server" && exit 1)
           echo "Confirmed: hardening response headers present, Server header suppressed."
 
+      - name: Round trip — upload -> pending -> worker pickup -> extraction -> chunks -> indexed -> retrieval
+        # 2026-07-27 production incident: every prior check in this job proves the worker
+        # CONTAINER starts and stays healthy — none of them prove it ever picks up and
+        # finishes a real job. That gap is exactly how a stale VPS checkout (missing this
+        # service entirely) AND a working-but-misconfigured embedding provider both went
+        # unnoticed until a real founder upload sat at 'pending' forever. This drives the
+        # actual /api/library/import -> real worker -> real GET endpoints path end to end,
+        # against the network-isolated `ollama` stub (never a real provider or key).
+        run: |
+          set -e
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+          [ -n "$CSRF" ] || (echo "::error::login did not return a csrf_token: $LOGIN" && exit 1)
+
+          MARKER="vpsroundtrip$(date +%s)kringelbjorn"
+          echo "Det ovanliga ordet $MARKER finns bara har, i det har CI-testet." > /tmp/roundtrip.txt
+
+          UPLOAD=$(curl -sS -b "$COOKIES" -X POST http://localhost:80/api/library/import \
+            -H "X-CSRF-Token: $CSRF" \
+            -F "file=@/tmp/roundtrip.txt")
+          JOB_ID=$(echo "$UPLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          [ -n "$JOB_ID" ] || (echo "::error::upload did not return a job id: $UPLOAD" && exit 1)
+          echo "Uploaded, job id: $JOB_ID"
+
+          STATUS="pending"
+          for i in $(seq 1 60); do
+            JOB=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/jobs/$JOB_ID")
+            STATUS=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            [ "$STATUS" = "completed" ] && break
+            [ "$STATUS" = "failed" ] && (echo "::error::import job failed: $JOB" && exit 1)
+            sleep 1
+          done
+          [ "$STATUS" = "completed" ] || (echo "::error::import job never reached 'completed', stuck at '$STATUS' — the worker never finished processing a real pending job" && exit 1)
+          echo "Confirmed: job reached 'completed' — the real worker entrypoint picked up the pending job and called the (network-isolated) embedding provider."
+
+          SOURCE_ID=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['file_results'][0]['source_id'])")
+          DOC=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/$SOURCE_ID")
+          DOC_STATUS=$(echo "$DOC" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+          CHUNK_COUNT=$(echo "$DOC" | python3 -c "import sys,json; print(json.load(sys.stdin)['chunk_count'])")
+          [ "$DOC_STATUS" = "indexed" ] || (echo "::error::document status is '$DOC_STATUS', expected 'indexed': $DOC" && exit 1)
+          [ "$CHUNK_COUNT" -gt 0 ] || (echo "::error::document is 'indexed' but has 0 chunks" && exit 1)
+          echo "Confirmed: document is 'indexed' with $CHUNK_COUNT chunk(s)."
+
+          SEARCH=$(curl -sS -b "$COOKIES" --get "http://localhost:80/api/library/search/hybrid" --data-urlencode "q=$MARKER")
+          FOUND=$(echo "$SEARCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(any('$MARKER' in r['text'] for r in d['results']))")
+          [ "$FOUND" = "True" ] || (echo "::error::the uploaded content is not retrievable via the real search API: $SEARCH" && exit 1)
+          echo "Confirmed: the exact marker text from the uploaded file is retrievable through the real search API — the worker read and correctly extracted the SAME file backend wrote to the shared uploads volume, all the way through chunking, embedding, and indexing."
+
+          rm -f /tmp/roundtrip.txt "$COOKIES"
+
       - name: Dump logs on failure
         if: failure()
         run: |
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
-          for name in backend frontend caddy redis worker; do
+          for name in backend frontend caddy redis worker ollama; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
             if [ -n "$cid" ]; then
               echo "--- $name health ---"

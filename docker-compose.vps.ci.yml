@@ -18,6 +18,15 @@
 # duplicate mappings for no benefit. DOMAIN is set to ":80" via the job's own environment
 # (see Caddyfile) so no real domain or ACME is needed; port 443 stays published but unused
 # since a ":80"-only site block never triggers Caddy's automatic HTTPS.
+#
+#   - ollama: a network-isolated fake embedding provider (scripts/vps/ci_embedding_stub.py),
+#     named `ollama` specifically so it resolves at app/config.py's OLLAMA_BASE_URL default
+#     (http://ollama:11434) with no extra env var needed — the job's ci-secrets.env only sets
+#     DEFAULT_EMBEDDING_PROVIDER=ollama. Exists so the round-trip upload->indexed->retrieval
+#     test proves the REAL worker entrypoint against a REAL (if fake) HTTP provider call,
+#     without any real network egress, real API key, or dependency on OpenAI/Gemini being
+#     reachable from a GitHub-hosted runner. Never referenced by docker-compose.vps.yml itself
+#     — production's actual embedding provider (OpenAI) is untouched by this.
 services:
   backend:
     extra_hosts:
@@ -25,3 +34,12 @@ services:
   worker:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+  ollama:
+    image: python:3.11-alpine
+    command: ["python", "/stub/ci_embedding_stub.py"]
+    volumes:
+      - ./scripts/vps/ci_embedding_stub.py:/stub/ci_embedding_stub.py:ro
+    networks:
+      - lifeai_internal
+    # Deliberately no `ports:` — only worker (same network) ever needs to reach this, never
+    # the host, matching every other internal-only service in this topology.
