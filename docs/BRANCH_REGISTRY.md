@@ -6,10 +6,12 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, mot GitHubs Actions-API direkt
-(`mcp__github__actions_list`/`actions_get`, inte memorerat) under Pass 6:s pågående arbete.
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, mot GitHubs Actions-API och
+PR-API direkt (`mcp__github__actions_list`/`actions_get`/`pull_request_read`, inte memorerat)
+efter att Pass 6:s PR öppnades och PR #26 stängdes.
 
-## Pass 6 (2026-07-27, pågående): MainAI Core Loop v1 — engångsundantag från per-funktion-branch-regeln
+## Pass 6 (2026-07-27): MainAI Core Loop v1 — engångsundantag från per-funktion-branch-regeln,
+PR #28 öppen
 
 **Grundaren har explicit auktoriserat ett medvetet, engångsundantag** från `CLAUDE.md`s
 "en funktion = en branch/PR"-grundprincip för den här uppgiften specifikt (se uppdragets egen
@@ -20,28 +22,30 @@ deploy/rollback-verifiering) är bevisligen fungerande end-to-end.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/mainai-core-loop-v1` | (öppnas när kontraktet är verifierat) | **Pågående** | MainAI Core Loop v1 — hela den vertikala kedjan upload→chatt-med-citat, verifierad med RIKTIG körning av `docker-compose.vps.yml`+`docker-compose.vps.ci.yml`-topologin via `.github/workflows/ci.yml`s `vps-compose-verify`-jobb (körs på riktiga GitHub Actions-runners — lokal `docker build` av de riktiga bilderna är blockerad i den här sessionens sandlåda, se commit `4d47820`s meddelande för detaljer). Innehåller PR #26:s tidigare öppna innehåll (docs + rundtripstest), cherry-pickat och utökat med chatt-med-citat/omstartsöverlevnad/providernedgradering-steg i samma CI-jobb istället för ett nytt. PR #26 stängs med hänvisning till den nya PR:n när den öppnas. | `claude/det-kommer-mer-879lcm` @ `13a9677` (inkluderar PR #27) |
+| `claude/mainai-core-loop-v1` | [#28](https://github.com/d1n095/LifeAI/pull/28) | **Öppen, väntar på grundarens granskning** — INTE mergad av den här sessionen (mänsklig granskningsgrind krävs, samma regel som alla tidigare PR:er). | MainAI Core Loop v1 — hela den vertikala kedjan upload→lagring→worker→indexering→sökning→chatt-med-citat→omstartsöverlevnad→providernedgradering→CI→deploy/rollback, verifierad med RIKTIG körning av `docker-compose.vps.yml`+`docker-compose.vps.ci.yml`-topologin på riktiga GitHub Actions-runners (körning [30304755138](https://github.com/d1n095/LifeAI/actions/runs/30304755138), attempt 2, helt grön — se PR #28:s beskrivning för fullständig punkt-för-punkt-verifiering). Lokal `docker build` av de riktiga bilderna är blockerad i den här sessionens sandlåda (nätverkspolicyn tillåter inte apt-get mot deb.debian.org), se `docs/CORE_LOOP_V1_BACKLOG.md`. Innehåller PR #26:s tidigare öppna innehåll (docs + rundtripstest), cherry-pickat och utökat med chatt-med-citat/omstartsöverlevnad/providernedgradering-steg i samma CI-jobb istället för ett nytt. PR #26 stängd med kommentar som pekar hit (ingen merge, allt innehåll bevarat). | `claude/det-kommer-mer-879lcm` @ `13a9677` (inkluderar PR #27) |
 
-**Verifierat hittills (Pass 6, löpande):** Full lokal backend-testsvit (532 passade, 1 medvetet
-skippad) körd mot riktig Postgres+Redis i denna sessions sandlåda. `vps-compose-verify`s
-utökade jobb kördes verkligen på GitHub Actions (inte bara lokalt) — första körningen
-(`30303993791`) blev grön genom upload→indexed→sökning→chatt-med-citat och avslöjade en RIKTIG
-bugg i omstartstestet (dockerds `restart: unless-stopped` hann inte starta om en SIGKILLad
-worker inom CI:ns 30s-fönster) — fixat genom att explicit köra `docker compose ... start
-worker` istället för att lita på dockerds egen timing, se commit `4d47820`.
+**Verifierat (Pass 6, klart):** Full lokal backend-testsvit (532 passade, 1 medvetet skippad)
+körd mot riktig Postgres+Redis i denna sessions sandlåda. `vps-compose-verify`s utökade jobb
+och `vps-deploy-rollback-test` kördes verkligen på GitHub Actions (inte bara lokalt) — sista
+körningen (`30304755138`, attempt 2) helt grön: alla jobb success eller medvetet skippade.
+Attempt 1 hade en infrastrukturflimmer (Docker Hub-timeout vid `pgvector/pgvector:pg16`-pull i
+`Backend — unit/integration tests`, orelaterat till den här branchens ändringar — varje annat
+jobb som pullar samma image lyckades) — löst med `rerun_failed_jobs`, grönt på omkörning. Under
+arbetet avslöjades en RIKTIG bugg i omstartstestet (dockerds `restart: unless-stopped` hann
+inte starta om en SIGKILLad worker inom CI:ns 30s-fönster) — fixat genom att explicit köra
+`docker compose ... start worker` istället för att lita på dockerds egen timing, se commit
+`4d47820`.
 
 ## Pass 5 (2026-07-27): PR #27 mergad, PR #26 väntar, storfilsimport-plan i stället för en Caddy-punktfix
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
 | `claude/fix-uploads-volume-permission` | [#27](https://github.com/d1n095/LifeAI/pull/27) | **Mergad**, merge-commit `a3194981e4adf94bb4807660003cbb7a4200e50e` | Akut produktionsbugg: `lifeai_uploads`-volymen var root-ägd, backend/worker kör som UID 10001 — varje riktig uppladdning fick 500 (`PermissionError`). Ny `uploads-init`-engångstjänst (root ENDAST för `chown -R 10001:10001`, `cap_drop: ALL`+`cap_add: [CHOWN]`, `restart: "no"`) som `backend`/`worker` nu väntar på (`depends_on: service_completed_successfully`). Upptäckt av PR #26:s nya CI-rundtripstest, löst i en egen PR per grundarens explicita val (alternativ 2) i stället för att blandas in i #26. | `claude/det-kommer-mer-879lcm` @ cd334d1 |
-| `claude/vps-embedding-worker-docs-ci` | [#26](https://github.com/d1n095/LifeAI/pull/26) | **Öppen, håller på att suppersederas** av Pass 6:s `claude/mainai-core-loop-v1` (se ovan) — dess innehåll är cherry-pickat dit och utökat, snarare än rebasat på plats. Stängs med hänvisning till den nya PR:n när `claude/mainai-core-loop-v1`s PR öppnas — inte innan (så länken finns att peka på). | Docs (`.env.vps.example`, `docs/STRATO_VPS_DEPLOY.md`) + ny CI-rundtripstest (verklig worker, nätverksisolerad Ollama-stub) som bevisar embedding-provider-konfigurationen fungerar end-to-end. Blev CI-rött på exakt den `PermissionError` #27 sedan fixade. | `claude/det-kommer-mer-879lcm` @ cd334d1 (föråldrad — #27 mergad sedan dess) |
+| `claude/vps-embedding-worker-docs-ci` | [#26](https://github.com/d1n095/LifeAI/pull/26) | **Stängd (inte mergad)**, suppersederad av [#28](https://github.com/d1n095/LifeAI/pull/28) (Pass 6:s `claude/mainai-core-loop-v1`, se ovan) — dess innehåll är cherry-pickat dit och utökat med chatt-med-citat/omstart/providernedgradering i samma CI-jobb. Stängd med en kommentar som pekar till #28 — inget innehåll förlorat. | Docs (`.env.vps.example`, `docs/STRATO_VPS_DEPLOY.md`) + ny CI-rundtripstest (verklig worker, nätverksisolerad Ollama-stub) som bevisar embedding-provider-konfigurationen fungerar end-to-end. Blev CI-rött på exakt den `PermissionError` #27 sedan fixade. | `claude/det-kommer-mer-879lcm` @ cd334d1 (föråldrad — #27 mergad sedan dess) |
 | `claude/fix-caddy-upload-body-limit` | — (öppnades aldrig) | **Övergiven, aldrig committad/pushad** — inga commits fanns när branchen togs bort lokalt | Skulle bara höjt Caddys `request_body max_size` 30→65-70 MB för att synka med backendens 60 MB-gräns. Stoppad av grundaren INNAN PR öppnades: de verkliga produktionsfilerna är ~1,3 GB, så 60 MB är inte det arkitektoniska målet — en punktfix hade bara flyttat felet till workern, som läser hela originalfilet till minnet (`library_import.py:574-575`, `raw = f.read()`) i en container med `mem_limit: 384m`. Ersatt av `docs/LARGE_FILE_UPLOAD_PLAN.md` — en fullständig scoped plan för säker storfilsimport (mål ≥2 GB), som måste granskas och brytas ned i PR:er (se dokumentets §3) INNAN någon gräns höjs. **2026-07-27, korrigeringsrunda:** planens första version hade sex tekniska fel (ZIP påstods strömma men buffrar fortfarande varje entry som `bytes` via `_read_with_hard_cap()`s `chunks: list[bytes]`; PR-ordningen exponerade en obegränsad uppladdningsväg före workerns minnesfix; Caddy antogs behöva höjas utan grund; svag concurrency-design för del-mottagning; otillräcklig teststrategi med sparse-nollfiler; för starkt påstående om minnesoberoende) — samtliga korrigerade i dokumentets §0. Ingen kod ändrad i korrigeringen, bara dokumentet. | `claude/det-kommer-mer-879lcm` @ a319498 (aldrig pushad) |
 
-**Uppdaterad rekommenderad ordning:** #26 kan rebasas/uppdateras och färdigställas oberoende
-av storfilsimport-planen (olika problem, ingen fillkonflikt förväntad) — men väntar på
-grundarens explicita go-ahead innan arbetet återupptas (mönstret hela den här sessionen: ett
-uttryckligt godkännande mellan varje arbetsblock). Storfilsimport-planens PR-kedja (A–G, se
+**Uppdaterad rekommenderad ordning (efter Pass 6):** #26 är nu stängd, suppersederad av #28 —
+se Pass 6-avsnittet ovan för fullständig status. Storfilsimport-planens PR-kedja (A–G, se
 `docs/LARGE_FILE_UPLOAD_PLAN.md`) är ett helt separat, större spår och ska INTE byggas före
 en genomgång/godkännande av planen själv.
 
@@ -289,11 +293,12 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 ## Rekommenderad merge-ordning (nuläge)
 
 1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#16~~, ~~#17~~, ~~#18~~,
-   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~ — samtliga mergade i huvudgrenen (se Pass 4-avsnittet
-   ovan för #22–#24). ~~PR #4~~, ~~PR #6~~ stängda utan merge (subsumerade, se ovan).
-2. **PR #25** (chat context-status awareness) — öppen, grenad direkt från huvudgrenens tip
-   efter PR #24 (`b0481c1`). Full lokal svit grön (532 passed/1 skipped) innan push; väntar på
-   CI + grundarens granskning.
+   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~ — samtliga mergade i huvudgrenen (se
+   Pass 4/5-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~ stängda utan merge (#4/#6
+   subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
+2. **PR #28** (MainAI Core Loop v1) — öppen, grenad från huvudgrenens tip (`13a9677`, inkl.
+   PR #27). Fullständigt grön på GitHub Actions (körning `30304755138`, attempt 2) inkl.
+   `vps-compose-verify` och `vps-deploy-rollback-test`; väntar på grundarens granskning.
 3. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
    för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
 4. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
@@ -303,20 +308,20 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Vilka brancher blockerar andra
 
-- **Inget öppet PR blockerar ett annat öppet PR just nu.** PR #25 är den enda öppna branchen,
-  fristående ovanpå huvudgrenen.
+- **Inget öppet PR blockerar ett annat öppet PR just nu.** PR #28 är den enda öppna branchen,
+  fristående ovanpå huvudgrenen (PR #25 mergad, se Pass 4/5; PR #26 stängd, suppersederad av
+  #28).
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något annat öppet PR.
-- **Kopiera-knapp/meddelandeåtgärder** (nästa planerade PR efter #25) väntar medvetet på att
-  #25 mergas först — inte för att den beror på #25:s kod, utan för att blanda in den hade
-  gjort #25:s diff större och riskerat att dölja kärnfelet, se grundarens uttryckliga
-  instruktion i PR #25:s uppdrag.
 
 ## Vilka brancher kan mergas oberoende
 
-**PR #25** kan mergas oberoende av allt annat öppet just nu (det finns inget annat öppet PR) —
-den är grenad direkt från huvudgrenens nya tip och rör bara `app/rag/context_status.py` (ny
-fil), `chat.py`/`schemas.py` (additiva fält), och motsvarande frontend-typer/rendering.
+**PR #28** kan mergas oberoende av allt annat öppet just nu (det finns inget annat öppet PR) —
+den är grenad direkt från huvudgrenens tip och rör bara `.github/workflows/ci.yml`,
+`docker-compose.vps.ci.yml`, `.env.vps.example`, `docs/STRATO_VPS_DEPLOY.md`,
+`docs/BRANCH_REGISTRY.md`, `docs/CORE_LOOP_V1_BACKLOG.md` (ny fil) och
+`scripts/vps/ci_provider_stub.py` (ny fil, döpt om från `ci_embedding_stub.py`) — ingen
+ändring i applikationskoden (`backend/app`, `frontend/`) alls, bara CI/docs/scripts.
 
 ## Vilka brancher väntar på ett beroende innan de bör uppdateras
 
