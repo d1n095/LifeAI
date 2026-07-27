@@ -6,9 +6,24 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, efter att PR #25 öppnades.
-Pass 3-avsnittet nedan (2026-07-26) beskriver fortfarande läget vid PR #13/#16 — de rader som
-följer här lägger till vad som hänt SEDAN dess utan att skriva om det avsnittet i efterhand.
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, mot GitHubs PR-lista direkt
+(`mcp__github__list_pull_requests`, inte memorerat) efter att Pass 4:s uppföljningsarbete
+(PR #26/#27) och en avbruten Caddy-gränsplan (se Pass 5) genomförts.
+
+## Pass 5 (2026-07-27): PR #27 mergad, PR #26 väntar, storfilsimport-plan i stället för en Caddy-punktfix
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/fix-uploads-volume-permission` | [#27](https://github.com/d1n095/LifeAI/pull/27) | **Mergad**, merge-commit `a3194981e4adf94bb4807660003cbb7a4200e50e` | Akut produktionsbugg: `lifeai_uploads`-volymen var root-ägd, backend/worker kör som UID 10001 — varje riktig uppladdning fick 500 (`PermissionError`). Ny `uploads-init`-engångstjänst (root ENDAST för `chown -R 10001:10001`, `cap_drop: ALL`+`cap_add: [CHOWN]`, `restart: "no"`) som `backend`/`worker` nu väntar på (`depends_on: service_completed_successfully`). Upptäckt av PR #26:s nya CI-rundtripstest, löst i en egen PR per grundarens explicita val (alternativ 2) i stället för att blandas in i #26. | `claude/det-kommer-mer-879lcm` @ cd334d1 |
+| `claude/vps-embedding-worker-docs-ci` | [#26](https://github.com/d1n095/LifeAI/pull/26) | **Öppen, väntar** — blockerades explicit av grundaren tills #27 var mergad ("Do not modify PR #26 until PR #27 is merged"); nu upplåst men INTE ännu återupptagen | Docs (`.env.vps.example`, `docs/STRATO_VPS_DEPLOY.md`) + ny CI-rundtripstest (verklig worker, nätverksisolerad Ollama-stub) som bevisar embedding-provider-konfigurationen fungerar end-to-end. Blev CI-rött på exakt den `PermissionError` #27 sedan fixade — behöver rebasas/uppdateras mot en bas som inkluderar #27 innan dess rundtripstest kan bli grönt på riktigt. | `claude/det-kommer-mer-879lcm` @ cd334d1 (föråldrad — #27 mergad sedan dess) |
+| `claude/fix-caddy-upload-body-limit` | — (öppnades aldrig) | **Övergiven, aldrig committad/pushad** — inga commits fanns när branchen togs bort lokalt | Skulle bara höjt Caddys `request_body max_size` 30→65-70 MB för att synka med backendens 60 MB-gräns. Stoppad av grundaren INNAN PR öppnades: de verkliga produktionsfilerna är ~1,3 GB, så 60 MB är inte det arkitektoniska målet — en punktfix hade bara flyttat felet till workern, som läser hela originalfilet till minnet (`library_import.py:574-575`, `raw = f.read()`) i en container med `mem_limit: 384m`. Ersatt av `docs/LARGE_FILE_UPLOAD_PLAN.md` — en fullständig scoped plan för säker storfilsimport (mål ≥2 GB), som måste granskas och brytas ned i PR:er (se dokumentets §3) INNAN någon gräns höjs. | `claude/det-kommer-mer-879lcm` @ a319498 (aldrig pushad) |
+
+**Uppdaterad rekommenderad ordning:** #26 kan rebasas/uppdateras och färdigställas oberoende
+av storfilsimport-planen (olika problem, ingen fillkonflikt förväntad) — men väntar på
+grundarens explicita go-ahead innan arbetet återupptas (mönstret hela den här sessionen: ett
+uttryckligt godkännande mellan varje arbetsblock). Storfilsimport-planens PR-kedja (A–G, se
+`docs/LARGE_FILE_UPLOAD_PLAN.md`) är ett helt separat, större spår och ska INTE byggas före
+en genomgång/godkännande av planen själv.
 
 ## Pass 4 (2026-07-27): säkerhetsincidenter + chat context-status awareness
 
@@ -21,7 +36,7 @@ produktionsincidenter, var och en löst i en egen branch/PR från huvudgrenens d
 | `claude/reject-placeholder-secrets` | [#22](https://github.com/d1n095/LifeAI/pull/22) | **Mergad**, merge-commit `33c316b` | Säkerhetsincident: läckta SMTP/Redis-hemligheter + Gemini-platshållarbugg. `looks_like_placeholder_secret()` i alla 5 providrars `is_configured()`, `check_no_duplicate_env_keys()` i `deploy.sh`/CI, rotationsrunbook i `docs/VPS_OPERATIONS_RUNBOOK.md` | `claude/det-kommer-mer-879lcm` @ 502b082 |
 | `claude/gemini-header-auth-security-fix` | [#23](https://github.com/d1n095/LifeAI/pull/23) | **Mergad**, merge-commit `5ab6e81` | Säkerhetsincident: Gemini-nyckeln skickades som `?key=...` URL-query och läckte via `httpx.HTTPStatusError` in i Docker-loggar. Flyttad till `x-goog-api-key`-header; `chat_with_fallback()` loggar nu alltid via `classify_provider_exception()` | `claude/det-kommer-mer-879lcm` @ 33c316b |
 | `claude/gemini-diagnostic-logging` | [#24](https://github.com/d1n095/LifeAI/pull/24) | **Mergad**, merge-commit `b0481c1` | Fortsatt 404-utredning efter header-fixen: `_normalize_model()` (Compose stripper inte citattecken), enhetlig URL-byggare, Googles egna saniterade felmeddelande ytligt via `ProviderError.category`, `classify_provider_exception()` litar nu på ett redan satt `category` | `claude/det-kommer-mer-879lcm` @ 5ab6e81 |
-| `claude/chat-context-status-awareness` | [#25](https://github.com/d1n095/LifeAI/pull/25) | **Öppen**, CI ej ännu verifierad | Bekräftad produktionsincident: chat kollapsade varje nollträff-tillstånd (worker nere, filer under bearbetning, saknad embedding-leverantör, indexeringsfel, sökfel just den frågan, genuint ingen träff, inga uppladdade filer) till samma fasta sträng "Ingen relevant kunskap hittades." Ny `app/rag/context_status.py` klassificerar den verkliga orsaken från redan existerande signaler (IndexStatus, worker-heartbeat, `classify_provider_exception`) — strukturerad `context_status` på `ChatMessageOut`, renderad i chat-UI:t. 7 nya regressionstester. Se PR-beskrivningen för fullständig svarsform. Kopiera-knapp/meddelandeåtgärder medvetet UTANFÖR scope — egen, separat uppföljande PR. | `claude/det-kommer-mer-879lcm` @ b0481c1 |
+| `claude/chat-context-status-awareness` | [#25](https://github.com/d1n095/LifeAI/pull/25) | **Mergad**, merge-commit `cd334d105012a4f26f3b9a81fa9beb20fe471e00`, driftsatt och verifierad i produktion | Bekräftad produktionsincident: chat kollapsade varje nollträff-tillstånd (worker nere, filer under bearbetning, saknad embedding-leverantör, indexeringsfel, sökfel just den frågan, genuint ingen träff, inga uppladdade filer) till samma fasta sträng "Ingen relevant kunskap hittades." Ny `app/rag/context_status.py` klassificerar den verkliga orsaken från redan existerande signaler (IndexStatus, worker-heartbeat, `classify_provider_exception`) — strukturerad `context_status` på `ChatMessageOut`, renderad i chat-UI:t. 7 nya regressionstester. Se PR-beskrivningen för fullständig svarsform. Kopiera-knapp/meddelandeåtgärder medvetet UTANFÖR scope — egen, separat uppföljande PR. | `claude/det-kommer-mer-879lcm` @ b0481c1 |
 
 Även upptäckt och åtgärdat under samma pass, inte en egen branch (för litet för en egen PR,
 men värt att notera här så det inte glöms): `chat.py`s embedding-provider-catch fångade bara
