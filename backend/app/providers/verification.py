@@ -59,6 +59,19 @@ def classify_provider_exception(exc: Exception) -> Outcome:
     if isinstance(exc, httpx.HTTPError):
         return Outcome(VerificationResult.unreachable, "Leverantören kunde inte nås (nätverksfel).")
     if isinstance(exc, ProviderError):
+        # A ProviderError a provider module raises ITSELF (as opposed to a raw httpx exception
+        # bubbling up unhandled) is safe to surface as-is, str(exc) included — unlike a raw
+        # httpx exception, its message is entirely provider-controlled and never built from
+        # the request URL/headers (see app/providers/gemini_provider.py's _safe_error_detail(),
+        # 2026-07-27: this is specifically what makes Google's own sanitized error body — e.g.
+        # "models/gemini-2.5-flash is not found" — visible again instead of a bare "HTTP 404"
+        # with no way to diagnose it). If the raiser already classified its own category (see
+        # ProviderError.category), trust that over guessing from message text.
+        if exc.category is not None:
+            try:
+                return Outcome(VerificationResult(exc.category), str(exc))
+            except ValueError:
+                pass  # not a recognized category value — fall through to text-based handling
         text = str(exc)
         if "erbjuder inget embedding" in text or "fokuserar på chattmodeller" in text:
             return Outcome(VerificationResult.unsupported, "Leverantören stödjer inte den här rollen.")

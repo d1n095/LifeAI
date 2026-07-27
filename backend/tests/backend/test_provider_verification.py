@@ -194,6 +194,33 @@ async def test_5xx_classifies_as_unreachable_not_invalid_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_provider_error_with_a_preset_category_is_trusted_message_and_all(monkeypatch):
+    """2026-07-27: app/providers/gemini_provider.py now raises a ProviderError it builds
+    itself (carrying Google's own sanitized error body — see that module's
+    _safe_error_detail()) instead of letting a raw httpx.HTTPStatusError bubble up. That
+    exception's message is safe by construction (never built from the request URL/headers),
+    so classify_provider_exception() must trust its pre-set .category AND surface its
+    message as-is — unlike a raw httpx exception, or a plain, uncategorized ProviderError
+    (see the "unsupported" tests above/below), which are still never echoed directly."""
+    from app.providers.base import ProviderError
+
+    async def _raise_rich_error(self, messages, model, *, timeout=None, **kwargs):
+        raise ProviderError(
+            "Gemini svarade med HTTP 404 för modell 'gemini-2.5-flash': NOT_FOUND: models/gemini-2.5-flash is not found",
+            category="unreachable",
+        )
+
+    monkeypatch.setattr(GeminiProvider, "chat", _raise_rich_error)
+    monkeypatch.setattr(get_settings(), "google_api_key", "some-key")
+
+    outcome = await verify_provider(GeminiProvider(), "gemini-2.5-flash", "chat", timeout=5.0)
+
+    assert outcome.result == VerificationResult.unreachable
+    assert "NOT_FOUND" in outcome.message
+    assert "gemini-2.5-flash" in outcome.message
+
+
+@pytest.mark.asyncio
 async def test_missing_key_short_circuits_to_not_configured_without_any_network_call(monkeypatch):
     async def _fail_if_called(self, messages, model, *, timeout=None, **kwargs):
         raise AssertionError("chat() must never be called when no key is configured")
