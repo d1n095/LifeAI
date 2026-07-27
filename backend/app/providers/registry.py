@@ -99,6 +99,18 @@ async def chat_with_fallback(db: Session, messages: list[Message], **kwargs) -> 
     (including the one that succeeded), so callers can log/audit exactly what happened
     instead of it being invisible.
     """
+    # Deferred import: app/providers/verification.py imports resolve_active from this module,
+    # so importing it at module load time would be a circular import. classify_provider_exception
+    # turns an exception into a safe (category, message) pair — used for EVERY log line below,
+    # never str(exc)/%s-on-the-exception directly, since an httpx-originated exception embeds
+    # the full request URL in its default message, and a provider can put its API key directly
+    # in that URL (historically app/providers/gemini_provider.py's query-string auth — see its
+    # own module docstring for why it no longer does that; this logging fix stands regardless
+    # of which provider's URL shape changes in the future). Real incident, 2026-07-26: this
+    # exact line logged a raw httpx.HTTPStatusError straight to the Docker log, and it happened
+    # to contain a live Gemini key.
+    from app.providers.verification import classify_provider_exception
+
     chain = resolve_chat_chain(db)
     attempted: list[str] = []
     last_error: Exception | None = None
@@ -116,17 +128,9 @@ async def chat_with_fallback(db: Session, messages: list[Message], **kwargs) -> 
                 )
             return result, attempted
         except Exception as exc:  # noqa: BLE001 - any provider failure should trigger fallback, not just ProviderError
-            logger.warning("Chat provider %s failed: %s", provider.name, exc)
+            safe = classify_provider_exception(exc)
+            logger.warning("Chat provider %s failed (%s): %s", provider.name, safe.result.value, safe.message)
             last_error = exc
-
-    # Deferred import: app/providers/verification.py imports resolve_active from this module,
-    # so importing it at module load time would be a circular import. classify_provider_exception
-    # turns last_error into a safe (category, message) pair — never str(exc) directly, since an
-    # httpx-originated exception can carry the full request URL, and
-    # app/providers/gemini_provider.py puts the API key in that URL's query string. Every caller
-    # of chat_with_fallback (chat.py, workbench.py, agent_orchestration.py) gets this safety for
-    # free rather than each needing its own classification.
-    from app.providers.verification import classify_provider_exception
 
     outcome = classify_provider_exception(last_error) if last_error is not None else None
     category = outcome.result.value if outcome else "unreachable"

@@ -7,6 +7,16 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 
 class GeminiProvider(LLMProvider):
+    """Security incident, 2026-07-26: the key used to be sent as a `?key=...` URL query
+    parameter. An httpx.HTTPStatusError's default message embeds the full request URL, and
+    app/providers/registry.py's chat_with_fallback() used to log that raw exception straight
+    to the application log on every provider failure — so a Gemini failure leaked the live key
+    into Docker logs. Google's current documented contract for this API also accepts (and
+    Google now recommends) the credential as the `x-goog-api-key` request header instead —
+    switching to it removes the key from the URL entirely, which is what actually keeps it out
+    of any exception message built from `request.url` (headers are never included in httpx's
+    HTTPStatusError default message). Never revert to the query-string form."""
+
     name = "gemini"
 
     def __init__(self):
@@ -14,6 +24,9 @@ class GeminiProvider(LLMProvider):
 
     def is_configured(self) -> bool:
         return bool(self.settings.google_api_key) and not looks_like_placeholder_secret(self.settings.google_api_key)
+
+    def _headers(self) -> dict:
+        return {"x-goog-api-key": self.settings.google_api_key}
 
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
         if not self.is_configured():
@@ -27,9 +40,9 @@ class GeminiProvider(LLMProvider):
         payload: dict = {"contents": contents}
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
-        url = f"{BASE_URL}/models/{model}:generateContent?key={self.settings.google_api_key}"
+        url = f"{BASE_URL}/models/{model}:generateContent"
         async with httpx.AsyncClient(timeout=timeout or 60) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, headers=self._headers(), json=payload)
             resp.raise_for_status()
             data = resp.json()
         content = data["candidates"][0]["content"]["parts"][0]["text"]
@@ -46,10 +59,10 @@ class GeminiProvider(LLMProvider):
         if not self.is_configured():
             raise ProviderError("Google API-nyckel saknas.")
         vectors = []
-        url = f"{BASE_URL}/models/{model}:embedContent?key={self.settings.google_api_key}"
+        url = f"{BASE_URL}/models/{model}:embedContent"
         async with httpx.AsyncClient(timeout=timeout or 60) as client:
             for text in texts:
-                resp = await client.post(url, json={"content": {"parts": [{"text": text}]}})
+                resp = await client.post(url, headers=self._headers(), json={"content": {"parts": [{"text": text}]}})
                 resp.raise_for_status()
                 vectors.append(resp.json()["embedding"]["values"])
         return vectors

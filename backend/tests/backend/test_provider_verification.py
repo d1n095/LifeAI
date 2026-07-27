@@ -217,18 +217,25 @@ async def test_embedding_role_against_a_chat_only_provider_classifies_as_unsuppo
 
 
 @pytest.mark.asyncio
-async def test_gemini_api_key_in_url_never_leaks_into_verification_message(monkeypatch):
-    """The concrete regression this package closes: app/providers/gemini_provider.py builds
-    its request URL as `.../generateContent?key={google_api_key}` — httpx.HTTPStatusError's
-    default str() includes the full request URL, which WOULD contain the raw key if
-    classify_provider_exception ever did `str(exc)` instead of a fixed, templated message."""
-    secret_key = "sk-super-secret-gemini-key-must-never-leak-anywhere"
+async def test_gemini_sends_key_only_in_header_never_in_url(monkeypatch):
+    """Security incident, 2026-07-26: app/providers/gemini_provider.py used to build its
+    request URL as `.../generateContent?key={google_api_key}` — httpx.HTTPStatusError's
+    default str() includes the full request URL, and app/providers/registry.py's
+    chat_with_fallback() used to log that raw exception on every provider failure, so a
+    Gemini failure leaked a live key straight into the Docker log. Fixed by moving the key to
+    the `x-goog-api-key` header (Google's own documented contract), which structurally keeps
+    it out of the URL — this test proves that placement, not just that the message stays
+    safe (see the sibling test below for that layer, kept as defense in depth regardless of
+    where any future provider decides to put its credential)."""
+    secret_key = "AQ.Ab8RN6-super-secret-gemini-auth-key-must-never-leak-anywhere"
     monkeypatch.setattr(get_settings(), "google_api_key", secret_key)
 
     captured_urls = []
+    captured_headers = []
 
     async def _raise_with_key_in_url(self, url, **kwargs):
         captured_urls.append(url)
+        captured_headers.append(kwargs.get("headers", {}))
         request = httpx.Request("POST", url)
         response = httpx.Response(401, request=request)
         raise httpx.HTTPStatusError("401", request=request, response=response)
@@ -237,9 +244,8 @@ async def test_gemini_api_key_in_url_never_leaks_into_verification_message(monke
 
     outcome = await verify_provider(GeminiProvider(), "gemini-2.5-flash", "chat", timeout=5.0)
 
-    # Sanity check: confirm the real code path DOES put the key in the URL (otherwise this
-    # test would trivially pass without proving anything).
-    assert captured_urls and secret_key in captured_urls[0]
+    assert captured_urls and secret_key not in captured_urls[0]
+    assert captured_headers and captured_headers[0].get("x-goog-api-key") == secret_key
 
     assert outcome.result == VerificationResult.invalid_key
     assert secret_key not in outcome.message

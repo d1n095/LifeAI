@@ -36,13 +36,17 @@ class Outcome:
 def classify_provider_exception(exc: Exception) -> Outcome:
     """Turns an exception raised by provider.chat()/provider.embed() into a safe, fixed
     (result, message) pair. NEVER returns str(exc) for an httpx-originated exception — that
-    can contain the full request URL, and app/providers/gemini_provider.py puts the API key
-    directly in that URL's query string (`?key=...`). Only an explicit 401/403 is classified
-    `invalid_key`; every other failure (timeout, connection error, 5xx, 429, an unrecognized
-    exception type) is `unreachable`/`rate_limited` — a transient problem must never be
-    reported as a definitively bad key. Shared by verify_provider() (the real pre-flight
-    check) and app/rag/ingest.py's post-preflight embedding catch-all (a call that passed
-    verification but still failed for some new reason)."""
+    can contain the full request URL, and a provider's auth could in principle put a secret
+    there (app/providers/gemini_provider.py used to — a real 2026-07-26 incident leaked a live
+    key into the Docker log this way before it moved to header-based auth; kept safe here as
+    defense in depth regardless of which provider's URL shape changes in the future). Only an
+    explicit 401/403 is classified `invalid_key`; every other failure (timeout, connection
+    error, 5xx, 429, an unrecognized exception type) is `unreachable`/`rate_limited` — a
+    transient problem must never be reported as a definitively bad key. Shared by
+    verify_provider() (the real pre-flight check), app/providers/registry.py's
+    chat_with_fallback() (every per-attempt log line, not just the final raised error), and
+    app/rag/ingest.py's post-preflight embedding catch-all (a call that passed verification
+    but still failed for some new reason)."""
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status in (401, 403):
