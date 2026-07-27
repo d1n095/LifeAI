@@ -1333,7 +1333,12 @@ jobs:
   vps-compose-verify:
     name: Strato VPS compose topology — build, run, verify
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    # claude/vps-embedding-worker-docs-ci added temporarily so THIS PR's new round-trip test
+    # (upload -> pending -> worker pickup -> indexed -> retrieval) actually runs and can be
+    # verified green before merge, rather than only discovering a break in it after merging
+    # into det-kommer-mer-879lcm. Safe to remove once merged — det-kommer-mer-879lcm is
+    # already in this list.
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/vps-embedding-worker-docs-ci'
     services:
       postgres:
         image: pgvector/pgvector:pg16
