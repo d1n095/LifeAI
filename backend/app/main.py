@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -8,10 +10,12 @@ from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
+from app.providers.base import looks_like_placeholder_secret
 from app.rls import apply_rls
 from app.routers import account, admin, agents, auth, chat, conversations, documents, health, knowledge, library, memory, projects, workbench
 from app.scheduler import start_scheduler, stop_scheduler
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 app = FastAPI(title="LifeOS / MainAI API", version="0.1.0")
@@ -71,6 +75,7 @@ def on_startup():
     call_with_db_retry(lambda: apply_rls(migration_engine))
 
     _check_smtp_mode()
+    _warn_placeholder_provider_keys()
 
     if settings.environment == "production":
         _check_smtp_configured()
@@ -183,6 +188,34 @@ def _check_redis_reachable() -> None:
         ) from exc
     finally:
         client.close()
+
+
+def _warn_placeholder_provider_keys() -> None:
+    """A provider API key that's non-empty but obviously a leftover template placeholder
+    (see app/providers/base.py's looks_like_placeholder_secret — real incident, 2026-07-26: a
+    duplicated env-var line left one active) is silently treated as "not configured" by every
+    provider's is_configured(), so it can never crash a request — but that silence means a
+    founder who thinks they configured a provider gets no signal that they didn't. Runs in
+    every environment (unlike _check_no_placeholder_secrets, which only runs in production
+    and hard-fails): a placeholder AI provider key is never a startup-blocking problem — chat
+    already degrades cleanly with zero providers configured at all — so this only warns,
+    loudly, in the log, never raises. Never logs the value itself, only which field."""
+    placeholder_fields = {
+        "OPENAI_API_KEY": settings.openai_api_key,
+        "ANTHROPIC_API_KEY": settings.anthropic_api_key,
+        "GOOGLE_API_KEY": settings.google_api_key,
+        "DEEPSEEK_API_KEY": settings.deepseek_api_key,
+        "OPENROUTER_API_KEY": settings.openrouter_api_key,
+    }
+    for name, value in placeholder_fields.items():
+        if looks_like_placeholder_secret(value):
+            logger.warning(
+                "%s is set to what looks like a leftover template placeholder value, not a "
+                "real credential — treated as not configured (this provider will be skipped, "
+                "never attempted with a bad key). Set a real key or remove the variable "
+                "entirely.",
+                name,
+            )
 
 
 def _check_no_placeholder_secrets() -> None:

@@ -93,7 +93,8 @@ log_info "== Step 1/11: validating required local files =="
 export LIFEAI_ENV_FILE="$ENV_FILE"
 log_info "OK."
 
-log_info "== Step 2/11: validating required secret NAMES are present (values never printed) =="
+log_info "== Step 2/11: validating secret NAMES are present, unique (values never printed) =="
+check_no_duplicate_env_keys "$ENV_FILE"
 MISSING_VARS=""
 for var in $LIFEAI_REQUIRED_ENV_VARS; do
     if ! grep -qE "^${var}=" "$ENV_FILE"; then
