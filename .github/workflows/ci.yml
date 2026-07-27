@@ -1333,7 +1333,10 @@ jobs:
   vps-compose-verify:
     name: Strato VPS compose topology — build, run, verify
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    # claude/fix-uploads-volume-permission added temporarily so THIS PR's new uploads-init
+    # verification actually runs and can be confirmed green before merge. Safe to remove once
+    # merged — det-kommer-mer-879lcm is already in this list.
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/fix-uploads-volume-permission'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1422,10 +1425,111 @@ jobs:
 
       - name: Verify exactly the expected services are running, including redis and worker
         run: |
-          got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps --services | sort | tr '\n' ' ')
-          expected="backend caddy frontend redis worker "
+          # -a is required here (unlike the plain `ps --services` this check used before
+          # uploads-init existed): a one-shot init container has already exited by this point
+          # in the job, and `ps --services` without -a only lists currently-running services —
+          # it would silently (and wrongly) exclude a service that's supposed to have exited.
+          got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a --services | sort | tr '\n' ' ')
+          expected="backend caddy frontend redis uploads-init worker "
           [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
-          echo "Confirmed: exactly caddy, backend, frontend, redis, worker — no more, no fewer."
+          echo "Confirmed: exactly caddy, backend, frontend, redis, uploads-init, worker — no more, no fewer."
+
+      - name: Verify uploads-init exited successfully, did not restart, and ran as root only for the chown
+        run: |
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq uploads-init)
+          [ -n "$cid" ] || (echo "::error::uploads-init container not found" && exit 1)
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Status}}' "$cid")
+            [ "$status" = "exited" ] && break
+            sleep 1
+          done
+          status=$(docker inspect -f '{{.State.Status}}' "$cid")
+          [ "$status" = "exited" ] || (echo "::error::uploads-init never exited (status: $status)" && docker logs "$cid" && exit 1)
+          exitcode=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
+          [ "$exitcode" = "0" ] || (echo "::error::uploads-init exited non-zero ($exitcode)" && docker logs "$cid" && exit 1)
+          restarts=$(docker inspect -f '{{.RestartCount}}' "$cid")
+          [ "$restarts" = "0" ] || (echo "::error::uploads-init restarted $restarts time(s) — it must run exactly once" && exit 1)
+          user=$(docker inspect -f '{{.Config.User}}' "$cid")
+          [ "$user" = "0:0" ] || (echo "::error::uploads-init did not run as 0:0 (got: $user)" && exit 1)
+          echo "Confirmed: uploads-init ran once as root (0:0), chowned the volume, exited 0, and never restarted."
+
+      - name: Verify backend and worker still run as non-root UID 10001 despite uploads-init running as root
+        run: |
+          for name in backend worker; do
+            cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
+            uid=$(docker exec "$cid" id -u)
+            [ "$uid" = "10001" ] || (echo "::error::$name is not running as UID 10001 (got: $uid)" && exit 1)
+          done
+          echo "Confirmed: backend and worker are still non-root (UID 10001) — uploads-init running as root did not weaken their hardening."
+
+      - name: Verify a real upload now succeeds (no PermissionError) and the worker reads the SAME file
+        # 2026-07-27 production incident: before uploads-init existed, this exact call 500'd
+        # with PermissionError: [Errno 13] 'var/lib/lifeai/uploads/tmp' — the shared named
+        # volume was root-owned while backend/worker run as UID 10001. No embedding provider
+        # is configured in this job (deliberately — this test proves the STORAGE/permission
+        # fix, not embeddings, which is out of scope here per the founder's explicit
+        # instruction not to fold embedding-provider changes into this PR) — the worker
+        # correctly pausing on "no provider configured" (never a storage/permission error)
+        # is itself the proof that it could read the exact file backend wrote.
+        run: |
+          set -e
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+          [ -n "$CSRF" ] || (echo "::error::login did not return a csrf_token: $LOGIN" && exit 1)
+
+          echo "Uploads-init round-trip test content." > /tmp/uploads-init-test.txt
+          UPLOAD=$(curl -sS -w "\n%{http_code}" -b "$COOKIES" -X POST http://localhost:80/api/library/import \
+            -H "X-CSRF-Token: $CSRF" \
+            -F "file=@/tmp/uploads-init-test.txt")
+          HTTP_CODE=$(echo "$UPLOAD" | tail -n1)
+          BODY=$(echo "$UPLOAD" | sed '$d')
+          [ "$HTTP_CODE" = "200" ] || (echo "::error::upload returned $HTTP_CODE, expected 200 (the exact permission bug this PR fixes): $BODY" && exit 1)
+          JOB_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          [ -n "$JOB_ID" ] || (echo "::error::upload did not return a job id: $BODY" && exit 1)
+          echo "Confirmed: upload succeeded with HTTP 200 — backend wrote the file to the shared volume with no PermissionError."
+
+          STATUS="pending"
+          for i in $(seq 1 60); do
+            JOB=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/jobs/$JOB_ID")
+            STATUS=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            [ "$STATUS" = "blocked" ] && break
+            [ "$STATUS" = "failed" ] && (echo "::error::import job failed (should have paused as 'blocked' on no provider configured, not failed): $JOB" && exit 1)
+            sleep 1
+          done
+          [ "$STATUS" = "blocked" ] || (echo "::error::import job never reached 'blocked', stuck at '$STATUS'" && exit 1)
+          REASON=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['file_results'][0]['reason'])")
+          case "$REASON" in
+            *"API-nyckel"*) ;;
+            *) echo "::error::expected the honest 'no API key configured' pause reason, got: $REASON" && exit 1 ;;
+          esac
+          echo "Confirmed: the worker read the SAME file from the shared volume, extracted it, and paused cleanly on 'no embedding provider configured' — never a storage/permission error. Reason: $REASON"
+
+          rm -f /tmp/uploads-init-test.txt "$COOKIES"
+
+      - name: Verify a second deploy (uploads-init re-run) does not damage the already-uploaded file
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci up -d --no-deps uploads-init
+          cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq uploads-init)
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Status}}' "$cid")
+            [ "$status" = "exited" ] && break
+            sleep 1
+          done
+          exitcode=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
+          [ "$exitcode" = "0" ] || (echo "::error::re-run of uploads-init did not exit 0 ($exitcode)" && docker logs "$cid" && exit 1)
+
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          RESULTS=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library")
+          COUNT=$(echo "$RESULTS" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          [ "$COUNT" -gt 0 ] || (echo "::error::the file uploaded before the re-run is no longer visible after it: $RESULTS" && exit 1)
+          rm -f "$COOKIES"
+          echo "Confirmed: re-running uploads-init (idempotent chown) after a real upload left the existing file/record intact — a redeploy is safe."
 
       - name: Verify the durable-worker package's worker is actually alive and polling, not restart-looping
         run: |
@@ -1733,7 +1837,7 @@ jobs:
         if: failure()
         run: |
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
-          for name in backend frontend caddy redis worker; do
+          for name in backend frontend caddy redis worker uploads-init; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
             if [ -n "$cid" ]; then
               echo "--- $name health ---"
