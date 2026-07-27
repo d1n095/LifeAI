@@ -13,6 +13,10 @@ Covers exactly the required scenarios:
      provider failure.
   F. idempotent retry: retrying an already-succeeded reply returns it as-is, without a second
      provider call or a duplicate assistant row.
+  G. the EMBEDDING provider (retrieve_context(), called before the chat provider — see
+     app/routers/chat.py's 2026-07-26 incident note) failing must never crash the request with
+     an unhandled 500, whether the chat provider then succeeds (degrades to an ungrounded
+     answer) or also fails (still the normal, clean failed-contract response).
 """
 
 import httpx
@@ -187,6 +191,50 @@ def test_retry_is_idempotent_once_a_reply_has_succeeded(client, monkeypatch):
     assert retried.status_code == 200, retried.text
     assert retried.json()["reply"] == "Första svaret."
     assert calls["count"] == 1  # no second provider call was made
+
+
+# --- G: the embedding provider (retrieval) failing must not crash the request ----------------
+
+
+async def _failing_embed(self, texts, model, **kwargs):
+    raise ProviderError("OpenAI API-nyckel saknas.")
+
+
+def test_embedding_failure_degrades_to_ungrounded_reply_when_chat_still_works(client, monkeypatch):
+    # Overrides this file's autouse _fake_embed fixture for just this test — the scenario is a
+    # founder with a working chat provider but no embedding provider (or an embedding provider
+    # that's down): retrieval must degrade to "no context found" rather than raising, so the
+    # chat call below still gets a real answer instead of never being reached at all.
+    monkeypatch.setattr(OpenAIProvider, "embed", _failing_embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Svar utan källor."))
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "hej"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_status"] == "succeeded"
+    assert body["reply"] == "Svar utan källor."
+    assert body["sources"] == []
+
+
+def test_embedding_failure_with_no_provider_at_all_returns_clean_failed_contract(client, db_session, monkeypatch):
+    # The exact incident: no provider configured (or none reachable) for EITHER role. Before
+    # the fix, retrieve_context()'s ProviderError propagated out of _attempt_assistant_reply()
+    # unhandled, past chat_with_fallback()'s own try/except (never reached), producing a raw
+    # 500 instead of this response.
+    monkeypatch.setattr(OpenAIProvider, "embed", _failing_embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_missing_key)
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Fungerar du utan nyckel?"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text  # never a 500
+    body = res.json()
+    assert body["user_message_saved"] is True
+    assert body["assistant_status"] == "failed"
+    assert body["error_category"] == "unreachable"
+    assert body["retryable"] is True
+
+    saved = db_session.query(MessageModel).filter_by(role=MessageRole.user).order_by(MessageModel.created_at.desc()).first()
+    assert saved is not None
+    assert saved.content == "Fungerar du utan nyckel?"
 
 
 def test_retry_requires_founder_auth(client):

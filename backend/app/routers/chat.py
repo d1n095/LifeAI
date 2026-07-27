@@ -52,7 +52,21 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     """Generates the assistant's reply for `user_message` (already committed). Used by both
     the initial send and the retry endpoint — a retry runs this exact same path, not a
     parallel one, so its behavior can never drift from the first attempt's."""
-    hits = await retrieve_context(db, user.id, user_message.content, top_k=5)
+    # Incident 2026-07-26: retrieve_context() calls the EMBEDDING provider, a separate call
+    # from chat_with_fallback()'s CHAT provider below — an unconfigured/failing embedding
+    # provider previously crashed the whole request with an unhandled 500 before the chat
+    # call (and its own, already-correct ProviderError handling) was ever reached. A founder
+    # with no provider key configured at all, or a working chat provider but no embedding
+    # provider, must still get a real (ungrounded, not RAG-cited) answer or a clean failure —
+    # never a raw 500. Degrading to "no context found" here reuses the exact same fallback
+    # text already used when a real search genuinely finds nothing (see context_block below),
+    # so this introduces no new UI state — only an existing one becomes reachable in a new
+    # situation. If the chat provider is ALSO unavailable, chat_with_fallback's existing
+    # try/except below still produces the correct assistant_status="failed" response.
+    try:
+        hits = await retrieve_context(db, user.id, user_message.content, top_k=5)
+    except ProviderError:
+        hits = []
     # Deleted sources can never appear here at all — app/rag/vector_store.py's search()
     # excludes Document.deleted_at IS NOT NULL at the query level, not just in the UI.
     conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
