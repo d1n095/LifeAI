@@ -2148,7 +2148,11 @@ jobs:
   vps-deploy-rollback-test:
     name: VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    # claude/mainai-core-loop-v1 added temporarily so acceptance-contract item 10
+    # (deploy/rollback verified against the real compose topology) actually runs and is
+    # confirmed green on this branch before its PR — same pattern as vps-compose-verify
+    # above. Safe to remove once merged — det-kommer-mer-879lcm is already in this list.
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1'
     services:
       postgres:
         image: pgvector/pgvector:pg16
