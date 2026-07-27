@@ -152,3 +152,22 @@ validate_redis_password() {
             ;;
     esac
 }
+
+# A repeated `KEY=` line in an env file is silently resolved by both `docker compose
+# --env-file` and shell sourcing as "last line wins" — but this script's own earlier reads of
+# BACKEND_IMAGE/FRONTEND_IMAGE/DOMAIN/REDIS_PASSWORD above used `grep | head -n1` (FIRST
+# match), meaning a duplicated key could make deploy.sh validate and log a completely
+# different value than the one Compose actually starts the containers with. Found via a real
+# incident: a duplicated GOOGLE_API_KEY line left an unused placeholder value silently active
+# in production because nothing ever surfaced the duplication. Refusing to deploy at all on
+# any duplicate is safer than guessing which occurrence is "the real one" — the fix is for a
+# human to clean up the file, not for this script to pick a side. Never prints values, only
+# the duplicated key NAMES.
+check_no_duplicate_env_keys() {
+    local env_file="$1"
+    local dupes
+    dupes=$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$env_file" | sed 's/=$//' | sort | uniq -d)
+    if [ -n "$dupes" ]; then
+        die "Duplicate variable name(s) in $env_file (names only, not values): $(echo "$dupes" | tr '\n' ' ')— each key must appear exactly once. Remove the stale/duplicate line(s) before deploying; 'last line wins' semantics make it easy to silently deploy the wrong value otherwise."
+    fi
+}

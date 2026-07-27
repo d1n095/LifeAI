@@ -1,7 +1,7 @@
 import httpx
 
 from app.config import get_settings
-from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, looks_like_placeholder_secret
 
 BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -14,7 +14,7 @@ class AnthropicProvider(LLMProvider):
         self.settings = get_settings()
 
     def is_configured(self) -> bool:
-        return bool(self.settings.anthropic_api_key)
+        return bool(self.settings.anthropic_api_key) and not looks_like_placeholder_secret(self.settings.anthropic_api_key)
 
     def _headers(self) -> dict:
         return {

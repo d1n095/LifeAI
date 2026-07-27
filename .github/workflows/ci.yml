@@ -1262,6 +1262,46 @@ jobs:
           expect_reject "mutable tag without digest" "ghcr.io/example/backend:latest"
           expect_accept "valid complete digest-pinned reference" "ghcr.io/example/backend@sha256:$(printf 'a%.0s' {1..64})"
 
+      - name: Unit-test check_no_duplicate_env_keys() (lib.sh)
+        # Real incident: a duplicated GOOGLE_API_KEY line in production's lifeai.env left an
+        # unused placeholder value silently active, because deploy.sh's own earlier reads
+        # used `grep | head -n1` (first match) while docker-compose actually resolves
+        # duplicate keys as "last line wins" — the two could silently disagree. This is the
+        # fix: refuse to deploy at all if any key is duplicated.
+        working-directory: scripts/vps
+        run: |
+          source ./lib.sh
+
+          clean_env=$(mktemp)
+          cat > "$clean_env" <<'EOF'
+          FOO=bar
+          BAZ=qux
+          EOF
+          if ! (check_no_duplicate_env_keys "$clean_env"); then
+            echo "FAIL: expected acceptance for a file with no duplicate keys but it was rejected"
+            exit 1
+          fi
+          echo "OK (accepted as expected): no duplicate keys"
+
+          dupe_env=$(mktemp)
+          cat > "$dupe_env" <<'EOF'
+          GOOGLE_API_KEY=
+          FOO=bar
+          GOOGLE_API_KEY=DIN_RIKTIGA_NYCKEL
+          EOF
+          if (check_no_duplicate_env_keys "$dupe_env") 2>/tmp/dupe-check-err.txt; then
+            echo "FAIL: expected rejection for a file with a duplicated key but it passed"
+            exit 1
+          fi
+          echo "OK (rejected as expected): duplicated key"
+          # The die() message must name the duplicated key so a human can find it, but must
+          # never echo either value.
+          grep -q "GOOGLE_API_KEY" /tmp/dupe-check-err.txt
+          if grep -q "DIN_RIKTIGA_NYCKEL" /tmp/dupe-check-err.txt; then
+            echo "FAIL: duplicate-key error message leaked a value"
+            exit 1
+          fi
+
       - name: Run 00_preflight.sh for real (read-only, safe)
         working-directory: scripts/vps
         run: sudo ./00_preflight.sh --min-disk-gb 1 --min-mem-mb 100

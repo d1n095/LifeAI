@@ -1,7 +1,7 @@
 import httpx
 
 from app.config import get_settings
-from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, looks_like_placeholder_secret
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -13,7 +13,7 @@ class GeminiProvider(LLMProvider):
         self.settings = get_settings()
 
     def is_configured(self) -> bool:
-        return bool(self.settings.google_api_key)
+        return bool(self.settings.google_api_key) and not looks_like_placeholder_secret(self.settings.google_api_key)
 
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
         if not self.is_configured():

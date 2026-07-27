@@ -126,6 +126,59 @@ sudo docker compose --env-file /etc/lifeai/lifeai.env -f /opt/lifeai/docker-comp
    ogiltigförklarar ALLA befintliga sessioner — se `docs/AUTH_THREAT_MODEL.md`) och kör
    `deploy.sh` igen för att ladda om den.
 
+### Läckta produktionshemligheter (SMTP-lösenord, REDIS_PASSWORD, provider-nycklar, ...)
+
+Verklig incident, 2026-07-26: SMTP- och Redis-lösenorden syntes i klartext när `/etc/lifeai/lifeai.env` visades i sin helhet under felsökning (samtidigt upptäcktes en dubblerad `GOOGLE_API_KEY`-rad — se `app/providers/base.py`s `looks_like_placeholder_secret()` och `scripts/vps/lib.sh`s `check_no_duplicate_env_keys()` för den koddelen av fixen). Behandla varje hemlighet som synts i en chatt, skärmdump, terminalinspelning eller loggfil som permanent komprometterad — rotera den, försök aldrig bedöma "syntes den *verkligen*" i efterhand.
+
+**Aldrig igen:** visa aldrig `/etc/lifeai/lifeai.env` i sin helhet (`cat`, `nano` på skärm som delas, skärmdump) till någon utanför dig själv, mänsklig eller AI. För att kontrollera ett enskilt fält utan att exponera resten:
+```bash
+grep -c '^GOOGLE_API_KEY=' /etc/lifeai/lifeai.env   # antal förekomster (ska vara 1)
+grep '^GOOGLE_API_KEY=' /etc/lifeai/lifeai.env | sed 's/=.*/=<dold>/'   # namn utan värde
+```
+`deploy.sh` följer redan samma princip (Steg 2: "validating ... values never printed") — samma disciplin gäller manuell felsökning.
+
+**Rotationsordning — en hemlighet i taget, verifiera innan nästa:**
+
+1. **SMTP-lösenord** (lägst risk att rotera fel — påverkar bara utgående e-post):
+   - Byt lösenordet hos leverantören (Strato-webbpanelen), inte bara lokalt.
+   - `sudo nano /etc/lifeai/lifeai.env` — uppdatera `SMTP_PASSWORD` till det nya värdet, rör
+     ingen annan rad.
+   - `grep -c '^SMTP_PASSWORD=' /etc/lifeai/lifeai.env` — bekräfta exakt 1 (se ovan).
+   - `sudo ./scripts/vps/backup.sh && sudo ./scripts/vps/deploy.sh --confirm`.
+   - Validera: registrera en testanvändare eller kör "Skicka bekräftelsemail igen" och
+     bekräfta att brevet faktiskt anländer (inte bara att `deploy.sh`s hälsokontroll blev
+     grön — den kontrollerar inte SMTP-leverans).
+2. **REDIS_PASSWORD** (Redis är rent driftrelaterat — rate limiting/korta joblås, ingen
+   användardata, se `docs/VPS_ARCHITECTURE.md`s "Redis vs Valkey" — men fortfarande måste
+   bytas eftersom lösenordet exponerades):
+   - Generera ett nytt: `openssl rand -hex 32` (redan ren hex, uppfyller
+     `validate_redis_password()`s teckenkrav).
+   - `sudo nano /etc/lifeai/lifeai.env` — uppdatera `REDIS_PASSWORD` (ALDRIG `REDIS_URL`
+     direkt — den byggs automatiskt av Compose, se `.env.vps.example`).
+   - `sudo ./scripts/vps/deploy.sh --confirm` — detta startar om `redis`-tjänsten med det nya
+     lösenordet OCH backend/worker med den nya `REDIS_URL:en` i samma steg, så det finns
+     ingen mellanperiod där de är osynkade.
+   - Validera: `sudo docker compose --env-file /etc/lifeai/lifeai.env -f
+     /opt/lifeai/docker-compose.vps.yml ps redis` → `running (healthy)`; skicka några snabba
+     chattmeddelanden i rad och bekräfta att rate limiting fortfarande triggar (bevisar att
+     backend faktiskt pratar med det NYA lösenordet, inte bara att containern startade).
+3. **AI-providernycklar** (om en nyckel faktiskt exponerades, inte bara en tom platshållare):
+   generera en ny nyckel hos leverantören, återkalla/rotera den gamla i leverantörens egen
+   dashboard, uppdatera fältet, deploya om, verifiera med en riktig chatt (se
+   `docs/STRATO_VPS_DEPLOY.md`s acceptanstest).
+
+**Rollback-hänsyn:** en hemlighetsrotation är INTE en kodändring — `rollback.sh` går tillbaka
+till en tidigare IMAGE-digest, inte till ett tidigare `lifeai.env`-innehåll (den filen
+backas medvetet aldrig upp, se `docs/VPS_BACKUP_RESTORE.md`). Om en rotation orsakar ett
+driftsproblem är fixen att rätta fältet i `lifeai.env` och köra `deploy.sh` igen — en
+`rollback.sh` löser INTE ett felaktigt/oformaterat hemlighetsvärde.
+
+**Radera inte gamla loggar** innan de granskats för om ytterligare känsligt innehåll råkat
+hamna där (t.ex. om en hemlighet av misstag skrevs ut av en tredjepartsberoende, inte av den
+här kodbasen — appens egen kod loggar aldrig hemlighetsvärden, se `_redact_url_credentials()`
+i `app/main.py` och den här filens `deploy.sh`-princip ovan) — men dela inte fler fullständiga
+loggfiler eller terminalskärmdumpar utanför denna felsökning heller.
+
 ### Disken tar slut
 
 ```bash

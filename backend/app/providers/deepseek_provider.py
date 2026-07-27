@@ -1,7 +1,7 @@
 import httpx
 
 from app.config import get_settings
-from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, looks_like_placeholder_secret
 
 BASE_URL = "https://api.deepseek.com/v1"
 
@@ -15,7 +15,7 @@ class DeepSeekProvider(LLMProvider):
         self.settings = get_settings()
 
     def is_configured(self) -> bool:
-        return bool(self.settings.deepseek_api_key)
+        return bool(self.settings.deepseek_api_key) and not looks_like_placeholder_secret(self.settings.deepseek_api_key)
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.settings.deepseek_api_key}"}
