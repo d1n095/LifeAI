@@ -114,12 +114,37 @@ eller en lista över vad som fortfarande saknas.
 
 ```bash
 cd /opt/lifeai
-git clone --depth 1 --branch main --filter=blob:none --sparse https://github.com/d1n095/LifeAI.git .
+git clone --depth 1 --branch claude/det-kommer-mer-879lcm --filter=blob:none --sparse https://github.com/d1n095/LifeAI.git .
 git sparse-checkout set docker-compose.vps.yml Caddyfile
 ```
 
 Ingen `backend/` eller `frontend/` källkod hämtas hit — VPS:en bygger aldrig produktion
 lokalt, den pullar bara färdiga images (se "Varför" i inledningen).
+
+**Två helt separata saker måste hållas i synk, inte bara en:** `BACKEND_IMAGE`/`FRONTEND_IMAGE`
+(vad containrarna faktiskt KÖR — uppdateras via `.github/workflows/build-images.yml`, ett
+digest per deploy) och den här gles-checkoutade `docker-compose.vps.yml`/`Caddyfile` (HUR de
+körs — topologin, tjänsterna, nätverken). Att digest-pinna en ny image gör INTE att den här
+katalogens filer uppdateras automatiskt — det är en separat `git`-operation i `/opt/lifeai`,
+lätt att glömma eftersom en vanlig deploy (`deploy.sh --confirm`) aldrig rör den. En verklig
+2026-07-27-incident: en `worker`-tjänst lades till i `docker-compose.vps.yml` (commit
+`ecd0679`) men VPS:ens egen checkout i `/opt/lifeai` hade aldrig synkats sedan dess — nya
+uppladdade filer fastnade permanent i `pending` eftersom ingen worker-container någonsin
+startade, trots att koden och bilderna var helt korrekta. Synka INNAN `deploy.sh --confirm`,
+inte efteråt, närhelst `docker-compose.vps.yml`/`Caddyfile` kan ha ändrats sedan senaste
+gången:
+
+```bash
+cd /opt/lifeai
+git status                                    # inga lokala ändringar innan du rör något
+git branch --show-current                     # eller: git rev-parse HEAD, om detached
+git fetch origin claude/det-kommer-mer-879lcm
+# Redan på rätt branch och inga lokala ändringar: git pull räcker.
+# Fel branch, detached HEAD, eller osäker: peka om explicit i stället för att gissa.
+git checkout -B claude/det-kommer-mer-879lcm origin/claude/det-kommer-mer-879lcm
+sudo docker compose --env-file /etc/lifeai/lifeai.env -f docker-compose.vps.yml config --services
+# Förväntat: redis backend worker frontend caddy — alla fem, se "Verifiering efter deploy" nedan.
+```
 
 ### Steg 2 — Hemligheter (`/etc/lifeai/lifeai.env`)
 
@@ -287,8 +312,11 @@ fullständig felsökning om även rollback misslyckas.
 
 1. `https://<din-domän>/api/health` → `{"status":"ok"}` (går genom hela kedjan: Caddy →
    frontend → backend → Supabase (Postgres) / lokal redis-container).
-2. `sudo docker compose -f /opt/lifeai/docker-compose.vps.yml ps` → alla fyra tjänster
-   `running (healthy)`.
+2. `sudo docker compose -f /opt/lifeai/docker-compose.vps.yml ps` → alla fem tjänster
+   `running (healthy)` — `caddy`, `backend`, `frontend`, `redis`, och `worker` (worker har
+   ingen healthcheck eftersom den inte serverar HTTP, se dess egen kommentar i
+   `docker-compose.vps.yml`; kontrollera den istället med `docker compose ... ps worker` →
+   status `running`, eller `GET /api/library/ops/status` → `worker_reachable: true`).
 3. `sudo docker port <backend-container>` och `sudo docker port <frontend-container>` → tomt
    (ingen host-publicering) — samma kontroll som `vps-compose-verify`-CI-jobbet gör
    automatiskt mot samma `docker-compose.vps.yml`, se `.github/workflows/ci.yml`.
@@ -315,8 +343,8 @@ behöver ingen sådan overlay-rad alls — se den filens kommentarer) och verifi
 - Backend-containerns egen `REDIS_URL` har rätt form (`redis://:<lösenord>@redis:6379/0`) —
   själva anslutningen är redan bevisad av att `_check_redis_reachable()` i
   `backend/app/main.py` skulle ha stoppat hela uppstarten annars.
-- `restart: unless-stopped` och begränsad `json-file`-loggning är faktiskt satt på alla fyra
-  containrar, inte bara skrivet i YAML utan att verkligen tillämpas.
+- `restart: unless-stopped` och begränsad `json-file`-loggning är faktiskt satt på alla fem
+  containrar (inklusive `worker`), inte bara skrivet i YAML utan att verkligen tillämpas.
 - Redis kör som root (ingen icke-root-användare i basavbilden, precis som Caddy) men med
   ALLA capabilities borttagna och INGA återlagda — striktare än Caddy, som behöver en enda
   (`NET_BIND_SERVICE`) för att kunna binda port 80/443.
