@@ -1425,7 +1425,11 @@ jobs:
 
       - name: Verify exactly the expected services are running, including redis and worker
         run: |
-          got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps --services | sort | tr '\n' ' ')
+          # -a is required here (unlike the plain `ps --services` this check used before
+          # uploads-init existed): a one-shot init container has already exited by this point
+          # in the job, and `ps --services` without -a only lists currently-running services —
+          # it would silently (and wrongly) exclude a service that's supposed to have exited.
+          got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a --services | sort | tr '\n' ' ')
           expected="backend caddy frontend redis uploads-init worker "
           [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
           echo "Confirmed: exactly caddy, backend, frontend, redis, uploads-init, worker — no more, no fewer."
