@@ -6,10 +6,34 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-26 (tredje passet samma dag),
-efter att PR #13 (MainAI Project Memory & Coordination Loop, Fas 1–4) mergades och arbetet
-utökades till MainAI Core-orkestrering på grundarens uttryckliga mandat (commit-SHA:er och
-PR-nummer nedan hämtade direkt via `git`/`mcp__github__pull_request_read`, inte memorerade).
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, efter att PR #25 öppnades.
+Pass 3-avsnittet nedan (2026-07-26) beskriver fortfarande läget vid PR #13/#16 — de rader som
+följer här lägger till vad som hänt SEDAN dess utan att skriva om det avsnittet i efterhand.
+
+## Pass 4 (2026-07-27): säkerhetsincidenter + chat context-status awareness
+
+Samma dag som Pass 3 slutade (PR #16 mergad som `502b082`), en snabb sekvens av verifierade
+produktionsincidenter, var och en löst i en egen branch/PR från huvudgrenens då-aktuella tip
+(inte i förväg, se Merge-regeln):
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/reject-placeholder-secrets` | [#22](https://github.com/d1n095/LifeAI/pull/22) | **Mergad**, merge-commit `33c316b` | Säkerhetsincident: läckta SMTP/Redis-hemligheter + Gemini-platshållarbugg. `looks_like_placeholder_secret()` i alla 5 providrars `is_configured()`, `check_no_duplicate_env_keys()` i `deploy.sh`/CI, rotationsrunbook i `docs/VPS_OPERATIONS_RUNBOOK.md` | `claude/det-kommer-mer-879lcm` @ 502b082 |
+| `claude/gemini-header-auth-security-fix` | [#23](https://github.com/d1n095/LifeAI/pull/23) | **Mergad**, merge-commit `5ab6e81` | Säkerhetsincident: Gemini-nyckeln skickades som `?key=...` URL-query och läckte via `httpx.HTTPStatusError` in i Docker-loggar. Flyttad till `x-goog-api-key`-header; `chat_with_fallback()` loggar nu alltid via `classify_provider_exception()` | `claude/det-kommer-mer-879lcm` @ 33c316b |
+| `claude/gemini-diagnostic-logging` | [#24](https://github.com/d1n095/LifeAI/pull/24) | **Mergad**, merge-commit `b0481c1` | Fortsatt 404-utredning efter header-fixen: `_normalize_model()` (Compose stripper inte citattecken), enhetlig URL-byggare, Googles egna saniterade felmeddelande ytligt via `ProviderError.category`, `classify_provider_exception()` litar nu på ett redan satt `category` | `claude/det-kommer-mer-879lcm` @ 5ab6e81 |
+| `claude/chat-context-status-awareness` | [#25](https://github.com/d1n095/LifeAI/pull/25) | **Öppen**, CI ej ännu verifierad | Bekräftad produktionsincident: chat kollapsade varje nollträff-tillstånd (worker nere, filer under bearbetning, saknad embedding-leverantör, indexeringsfel, sökfel just den frågan, genuint ingen träff, inga uppladdade filer) till samma fasta sträng "Ingen relevant kunskap hittades." Ny `app/rag/context_status.py` klassificerar den verkliga orsaken från redan existerande signaler (IndexStatus, worker-heartbeat, `classify_provider_exception`) — strukturerad `context_status` på `ChatMessageOut`, renderad i chat-UI:t. 7 nya regressionstester. Se PR-beskrivningen för fullständig svarsform. Kopiera-knapp/meddelandeåtgärder medvetet UTANFÖR scope — egen, separat uppföljande PR. | `claude/det-kommer-mer-879lcm` @ b0481c1 |
+
+Även upptäckt och åtgärdat under samma pass, inte en egen branch (för litet för en egen PR,
+men värt att notera här så det inte glöms): `chat.py`s embedding-provider-catch fångade bara
+`ProviderError`, inte ett rått `httpx.HTTPError` — en konfigurerad-men-ogiltig nyckel kunde ge
+en ohanterad 500. Fixat som en del av PR #25 (samma commit, samma test), inte en separat PR,
+eftersom det är samma kodrad som ändå ändrades för context-status-syftet.
+
+**GitHub-nyckelrotation:** grundaren skapade en ny Gemini-nyckel (även den `AQ.`-prefixad, som
+är normalt) men installerar den avsiktligt inte förrän PR #24:s bild är driftsatt — se PR
+#24:s incidentbeskrivning. SMTP/Redis-hemligheterna som exponerades innan PR #22 kräver
+fortfarande rotation på grundarens faktiska produktions-VPS (operativt, inte kod — runbook
+finns i `docs/VPS_OPERATIONS_RUNBOOK.md`).
 
 ## Pass 3 (2026-07-26): PR #13 mergad, MainAI Core-orkestrering påbörjad
 
@@ -229,13 +253,12 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Rekommenderad merge-ordning (nuläge)
 
-1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#17~~, ~~#18~~, ~~#19~~
-   — samtliga mergade i huvudgrenen. ~~PR #4~~, ~~PR #6~~ stängda utan merge (subsumerade,
-   se ovan).
-2. **PR #16** (MainAI Core: retrieval, systemkarta, agentorkestrering, GitHub-integration) —
-   uppdaterad mot den nya huvudgrenstippen (migration omnumrerad 0016→0017), under
-   grundarens granskning. Nästa steg: full verifiering omkörd, sedan lyft draft-status och
-   merga om grönt.
+1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#16~~, ~~#17~~, ~~#18~~,
+   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~ — samtliga mergade i huvudgrenen (se Pass 4-avsnittet
+   ovan för #22–#24). ~~PR #4~~, ~~PR #6~~ stängda utan merge (subsumerade, se ovan).
+2. **PR #25** (chat context-status awareness) — öppen, grenad direkt från huvudgrenens tip
+   efter PR #24 (`b0481c1`). Full lokal svit grön (532 passed/1 skipped) innan push; väntar på
+   CI + grundarens granskning.
 3. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
    för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
 4. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
@@ -245,17 +268,20 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Vilka brancher blockerar andra
 
-- **Inget öppet PR blockerar ett annat öppet PR just nu.** P1/P2/PR #13/#17/#18/#19 är alla i
-  huvudgrenen; PR #16 är den enda öppna branchen kvar, fristående ovanpå den.
+- **Inget öppet PR blockerar ett annat öppet PR just nu.** PR #25 är den enda öppna branchen,
+  fristående ovanpå huvudgrenen.
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något annat öppet PR.
+- **Kopiera-knapp/meddelandeåtgärder** (nästa planerade PR efter #25) väntar medvetet på att
+  #25 mergas först — inte för att den beror på #25:s kod, utan för att blanda in den hade
+  gjort #25:s diff större och riskerat att dölja kärnfelet, se grundarens uttryckliga
+  instruktion i PR #25:s uppdrag.
 
 ## Vilka brancher kan mergas oberoende
 
-**PR #16** kan mergas oberoende av allt annat öppet just nu (det finns inget annat öppet PR)
-när grundarens granskning är klar och verifieringen efter mergen/migrationsomnumreringen är
-grön igen — den är grenad direkt från huvudgrenens nya tip och rör bara nya filer plus
-additiva utökningar av redan mergad Fas 1–4-kod.
+**PR #25** kan mergas oberoende av allt annat öppet just nu (det finns inget annat öppet PR) —
+den är grenad direkt från huvudgrenens nya tip och rör bara `app/rag/context_status.py` (ny
+fil), `chat.py`/`schemas.py` (additiva fält), och motsvarande frontend-typer/rendering.
 
 ## Vilka brancher väntar på ett beroende innan de bör uppdateras
 
