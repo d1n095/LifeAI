@@ -6,16 +6,36 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, mot GitHubs PR-lista direkt
-(`mcp__github__list_pull_requests`, inte memorerat) efter att Pass 4:s uppföljningsarbete
-(PR #26/#27) och en avbruten Caddy-gränsplan (se Pass 5) genomförts.
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, mot GitHubs Actions-API direkt
+(`mcp__github__actions_list`/`actions_get`, inte memorerat) under Pass 6:s pågående arbete.
+
+## Pass 6 (2026-07-27, pågående): MainAI Core Loop v1 — engångsundantag från per-funktion-branch-regeln
+
+**Grundaren har explicit auktoriserat ett medvetet, engångsundantag** från `CLAUDE.md`s
+"en funktion = en branch/PR"-grundprincip för den här uppgiften specifikt (se uppdragets egen
+text) — arbete sker kontinuerligt på EN integrationsbranch med många små, logiskt separerade
+commits, och EN enda PR öppnas när hela den vertikala kedjan (upload → lagring → worker →
+indexering → sökning → chatt med citat → omstartsöverlevnad → providernedgradering → CI →
+deploy/rollback-verifiering) är bevisligen fungerande end-to-end.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/mainai-core-loop-v1` | (öppnas när kontraktet är verifierat) | **Pågående** | MainAI Core Loop v1 — hela den vertikala kedjan upload→chatt-med-citat, verifierad med RIKTIG körning av `docker-compose.vps.yml`+`docker-compose.vps.ci.yml`-topologin via `.github/workflows/ci.yml`s `vps-compose-verify`-jobb (körs på riktiga GitHub Actions-runners — lokal `docker build` av de riktiga bilderna är blockerad i den här sessionens sandlåda, se commit `4d47820`s meddelande för detaljer). Innehåller PR #26:s tidigare öppna innehåll (docs + rundtripstest), cherry-pickat och utökat med chatt-med-citat/omstartsöverlevnad/providernedgradering-steg i samma CI-jobb istället för ett nytt. PR #26 stängs med hänvisning till den nya PR:n när den öppnas. | `claude/det-kommer-mer-879lcm` @ `13a9677` (inkluderar PR #27) |
+
+**Verifierat hittills (Pass 6, löpande):** Full lokal backend-testsvit (532 passade, 1 medvetet
+skippad) körd mot riktig Postgres+Redis i denna sessions sandlåda. `vps-compose-verify`s
+utökade jobb kördes verkligen på GitHub Actions (inte bara lokalt) — första körningen
+(`30303993791`) blev grön genom upload→indexed→sökning→chatt-med-citat och avslöjade en RIKTIG
+bugg i omstartstestet (dockerds `restart: unless-stopped` hann inte starta om en SIGKILLad
+worker inom CI:ns 30s-fönster) — fixat genom att explicit köra `docker compose ... start
+worker` istället för att lita på dockerds egen timing, se commit `4d47820`.
 
 ## Pass 5 (2026-07-27): PR #27 mergad, PR #26 väntar, storfilsimport-plan i stället för en Caddy-punktfix
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
 | `claude/fix-uploads-volume-permission` | [#27](https://github.com/d1n095/LifeAI/pull/27) | **Mergad**, merge-commit `a3194981e4adf94bb4807660003cbb7a4200e50e` | Akut produktionsbugg: `lifeai_uploads`-volymen var root-ägd, backend/worker kör som UID 10001 — varje riktig uppladdning fick 500 (`PermissionError`). Ny `uploads-init`-engångstjänst (root ENDAST för `chown -R 10001:10001`, `cap_drop: ALL`+`cap_add: [CHOWN]`, `restart: "no"`) som `backend`/`worker` nu väntar på (`depends_on: service_completed_successfully`). Upptäckt av PR #26:s nya CI-rundtripstest, löst i en egen PR per grundarens explicita val (alternativ 2) i stället för att blandas in i #26. | `claude/det-kommer-mer-879lcm` @ cd334d1 |
-| `claude/vps-embedding-worker-docs-ci` | [#26](https://github.com/d1n095/LifeAI/pull/26) | **Öppen, väntar** — blockerades explicit av grundaren tills #27 var mergad ("Do not modify PR #26 until PR #27 is merged"); nu upplåst men INTE ännu återupptagen | Docs (`.env.vps.example`, `docs/STRATO_VPS_DEPLOY.md`) + ny CI-rundtripstest (verklig worker, nätverksisolerad Ollama-stub) som bevisar embedding-provider-konfigurationen fungerar end-to-end. Blev CI-rött på exakt den `PermissionError` #27 sedan fixade — behöver rebasas/uppdateras mot en bas som inkluderar #27 innan dess rundtripstest kan bli grönt på riktigt. | `claude/det-kommer-mer-879lcm` @ cd334d1 (föråldrad — #27 mergad sedan dess) |
+| `claude/vps-embedding-worker-docs-ci` | [#26](https://github.com/d1n095/LifeAI/pull/26) | **Öppen, håller på att suppersederas** av Pass 6:s `claude/mainai-core-loop-v1` (se ovan) — dess innehåll är cherry-pickat dit och utökat, snarare än rebasat på plats. Stängs med hänvisning till den nya PR:n när `claude/mainai-core-loop-v1`s PR öppnas — inte innan (så länken finns att peka på). | Docs (`.env.vps.example`, `docs/STRATO_VPS_DEPLOY.md`) + ny CI-rundtripstest (verklig worker, nätverksisolerad Ollama-stub) som bevisar embedding-provider-konfigurationen fungerar end-to-end. Blev CI-rött på exakt den `PermissionError` #27 sedan fixade. | `claude/det-kommer-mer-879lcm` @ cd334d1 (föråldrad — #27 mergad sedan dess) |
 | `claude/fix-caddy-upload-body-limit` | — (öppnades aldrig) | **Övergiven, aldrig committad/pushad** — inga commits fanns när branchen togs bort lokalt | Skulle bara höjt Caddys `request_body max_size` 30→65-70 MB för att synka med backendens 60 MB-gräns. Stoppad av grundaren INNAN PR öppnades: de verkliga produktionsfilerna är ~1,3 GB, så 60 MB är inte det arkitektoniska målet — en punktfix hade bara flyttat felet till workern, som läser hela originalfilet till minnet (`library_import.py:574-575`, `raw = f.read()`) i en container med `mem_limit: 384m`. Ersatt av `docs/LARGE_FILE_UPLOAD_PLAN.md` — en fullständig scoped plan för säker storfilsimport (mål ≥2 GB), som måste granskas och brytas ned i PR:er (se dokumentets §3) INNAN någon gräns höjs. **2026-07-27, korrigeringsrunda:** planens första version hade sex tekniska fel (ZIP påstods strömma men buffrar fortfarande varje entry som `bytes` via `_read_with_hard_cap()`s `chunks: list[bytes]`; PR-ordningen exponerade en obegränsad uppladdningsväg före workerns minnesfix; Caddy antogs behöva höjas utan grund; svag concurrency-design för del-mottagning; otillräcklig teststrategi med sparse-nollfiler; för starkt påstående om minnesoberoende) — samtliga korrigerade i dokumentets §0. Ingen kod ändrad i korrigeringen, bara dokumentet. | `claude/det-kommer-mer-879lcm` @ a319498 (aldrig pushad) |
 
 **Uppdaterad rekommenderad ordning:** #26 kan rebasas/uppdateras och färdigställas oberoende
