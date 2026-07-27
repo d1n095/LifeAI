@@ -79,6 +79,55 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  uploads-init:
+    # 2026-07-27 production incident: `lifeai_uploads` (below) is a fresh Docker named volume
+    # the first time it's created — Docker owns that mount point root:root by default, since
+    # nothing in backend/Dockerfile pre-populates /var/lib/lifeai/uploads (it isn't baked into
+    # the image at all, only ever mounted at container-start). backend/worker run as the
+    # non-root `appuser` (UID 10001, see backend/Dockerfile) with `read_only: true` — the
+    # first time either tried to create a subdirectory inside that root-owned volume
+    # (app/storage/local_fs.py's atomic-write tmp/ dir), it failed with a real, deterministic
+    # PermissionError. Every real upload in production would 500 on this until fixed.
+    #
+    # This is a one-shot init container, same image as backend (no new build/push needed) —
+    # it exists ONLY to chown the shared volume to the exact UID/GID backend and worker
+    # actually run as, then exit. `user: "0:0"` is the ONLY place root runs anywhere in this
+    # topology, and only for the single `chown` below — backend and worker themselves stay
+    # non-root, unchanged. `cap_drop: ALL` plus `cap_add: [CHOWN]` grants exactly the one
+    # capability `chown` needs, nothing else a root process could otherwise do. No `chmod`
+    # anywhere (never 777 — ownership alone is what backend/worker's own default umask needs
+    # to write); `chown -R` is naturally idempotent — re-running it against an
+    # already-correctly-owned tree on a later deploy is a no-op, never touches file content.
+    image: ${BACKEND_IMAGE:?sätt BACKEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-backend@sha256:...}
+    user: "0:0"
+    entrypoint: []
+    command: ["chown", "-R", "10001:10001", "/var/lib/lifeai/uploads"]
+    restart: "no"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    read_only: true
+    volumes:
+      - lifeai_uploads:/var/lib/lifeai/uploads
+    pids_limit: 20
+    mem_limit: 64m
+    cpus: "0.25"
+    # No env_file, no DATABASE_URL/secrets of any kind — this container never touches the
+    # app's own configuration, only the one volume's ownership metadata.
+    network_mode: "none"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Deliberately no `ports:` and no networks (network_mode: none, not just an omitted
+    # `networks:` key — Compose would otherwise still attach an unused implicit default
+    # network) — this container never talks to anything, it exits within a second of
+    # starting.
+
   backend:
     # Digest-pinned, e.g. ghcr.io/d1n095/lifeai-backend@sha256:... — never a mutable tag like
     # :latest. See docs/STRATO_VPS_DEPLOY.md's "Första manuella deploy" section for why the
@@ -123,6 +172,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      uploads-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/api/health"]
       interval: 10s
@@ -179,6 +230,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      uploads-init:
+        condition: service_completed_successfully
       backend:
         # Not a functional dependency (the worker talks to Postgres/Redis/storage directly,
         # never to the backend container) — ordered after backend purely so the one
