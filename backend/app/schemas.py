@@ -114,6 +114,24 @@ class SourceRef(BaseModel):
     end_seconds: float | None = None
 
 
+class ContextStatusOut(BaseModel):
+    """Structured, frontend-renderable reason for why chat retrieval found nothing — see
+    app/rag/context_status.py. Deliberately NOT relying on the assistant's own reply wording:
+    a founder (or the UI) must be able to see the verified reason even if the model paraphrases
+    or ignores it. `message` is always a safe, pre-built sentence — never a raw exception
+    string, never a URL/key/header (see classify_provider_exception's own guarantee for the
+    `search_provider_unavailable` case)."""
+
+    reason: str  # one of app/rag/context_status.py's ContextStatusReason values
+    message: str
+    pending_count: int = 0
+    awaiting_provider_count: int = 0
+    failed_count: int = 0
+    indexed_count: int = 0
+    total_document_count: int = 0
+    worker_reachable: bool | None = None
+
+
 class ChatMessageOut(BaseModel):
     """The explicit user-message-vs-assistant-response contract (see app/routers/chat.py's
     module docstring): `user_message_saved` is always true if this response exists at all —
@@ -138,6 +156,10 @@ class ChatMessageOut(BaseModel):
     conflicts_detected: bool = False
     context_intent: str | None = None  # see app/context/resolver.py — observational only tonight
     context_confidence: str | None = None
+    # Set whenever retrieval found zero hits (success or failure path) — see
+    # app/rag/context_status.py. None when hits were actually found; there is nothing to
+    # explain in that case.
+    context_status: ContextStatusOut | None = None
     # Only set when assistant_status == "failed". error_category is one of
     # VerificationResult's values (app/models/provider_verification.py) — never a raw
     # exception string, so it's always safe to show a founder without leaking a key/URL.

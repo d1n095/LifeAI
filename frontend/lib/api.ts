@@ -144,6 +144,30 @@ export type Confidence = "high" | "medium" | "low" | "none";
 
 export type AssistantStatus = "succeeded" | "failed";
 
+// See backend/app/rag/context_status.py — the verified reason retrieval found nothing (or
+// couldn't run), classified from real IndexStatus/worker-heartbeat/provider signals, never
+// invented. Present only when retrieval returned zero hits; absent when real sources were
+// found (nothing to explain).
+export type ContextStatusReason =
+  | "worker_unavailable"
+  | "files_processing"
+  | "awaiting_provider"
+  | "search_provider_unavailable"
+  | "indexing_failed"
+  | "no_relevant_match"
+  | "no_documents";
+
+export type ContextStatus = {
+  reason: ContextStatusReason;
+  message: string;
+  pending_count: number;
+  awaiting_provider_count: number;
+  failed_count: number;
+  indexed_count: number;
+  total_document_count: number;
+  worker_reachable: boolean | null;
+};
+
 // The user's message and the assistant's reply are two independently durable steps — see
 // backend/app/routers/chat.py's module docstring. `user_message_saved` is always true if this
 // response exists at all; `reply`/`provider`/`model`/`sources`/`confidence*` are only present
@@ -165,6 +189,7 @@ export type ChatResponse = {
   conflicts_detected?: boolean;
   context_intent?: string | null;
   context_confidence?: string | null;
+  context_status?: ContextStatus | null;
   error_category: string | null;
   error_message: string | null;
   retryable: boolean;

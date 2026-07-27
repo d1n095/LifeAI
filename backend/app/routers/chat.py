@@ -10,6 +10,7 @@ one assistant `MessageModel` row (enforced by migration 0016's partial unique in
 import uuid
 from datetime import datetime
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -24,9 +25,11 @@ from app.models.user import User
 from app.providers.base import Message, ProviderError
 from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback
+from app.providers.verification import classify_provider_exception
+from app.rag.context_status import build_context_status
 from app.rag.retrieve import retrieve_context
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_claim_conflicts, detect_conflicts
-from app.schemas import ChatMessageIn, ChatMessageOut, SourceRef
+from app.schemas import ChatMessageIn, ChatMessageOut, ContextStatusOut, SourceRef
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(require_founder)])
 
@@ -55,18 +58,19 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # Incident 2026-07-26: retrieve_context() calls the EMBEDDING provider, a separate call
     # from chat_with_fallback()'s CHAT provider below — an unconfigured/failing embedding
     # provider previously crashed the whole request with an unhandled 500 before the chat
-    # call (and its own, already-correct ProviderError handling) was ever reached. A founder
-    # with no provider key configured at all, or a working chat provider but no embedding
-    # provider, must still get a real (ungrounded, not RAG-cited) answer or a clean failure —
-    # never a raw 500. Degrading to "no context found" here reuses the exact same fallback
-    # text already used when a real search genuinely finds nothing (see context_block below),
-    # so this introduces no new UI state — only an existing one becomes reachable in a new
-    # situation. If the chat provider is ALSO unavailable, chat_with_fallback's existing
-    # try/except below still produces the correct assistant_status="failed" response.
+    # call (and its own, already-correct ProviderError handling) was ever reached. Widened
+    # 2026-07-27 to also catch a raw httpx.HTTPError: a configured-but-invalid key raises an
+    # UNWRAPPED httpx.HTTPStatusError from provider.embed() (only a missing key raises the
+    # provider's own ProviderError) — that distinct case previously reached this function as
+    # an unhandled exception. classify_provider_exception() turns either into a safe, sanitized
+    # message (never a raw URL/key — see that function's own guarantee), fed into
+    # build_context_status() below instead of collapsing straight to a fixed string.
+    retrieval_degraded_reason: str | None = None
     try:
         hits = await retrieve_context(db, user.id, user_message.content, top_k=5)
-    except ProviderError:
+    except (ProviderError, httpx.HTTPError) as exc:
         hits = []
+        retrieval_degraded_reason = classify_provider_exception(exc).message
     # Deleted sources can never appear here at all — app/rag/vector_store.py's search()
     # excludes Document.deleted_at IS NOT NULL at the query level, not just in the UI.
     conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
@@ -81,7 +85,33 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         status = h.get("active_truth_status")
         return f"[{h['title']}] (status: {status})" if status and status != "active" else f"[{h['title']}]"
 
-    context_block = "\n\n".join(f"{_label(h)}\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
+    # 2026-07-27 incident (see docs/BRANCH_REGISTRY.md's file-ingestion audit): a zero-hit
+    # retrieval used to always inject the identical fixed string here, whether the real cause
+    # was a stalled worker, a file mid-pipeline, a missing embedding provider, an indexing
+    # failure, this specific search call failing, or genuinely no matching/no uploaded content.
+    # The model then had no real reason to give and improvised one. build_context_status()
+    # classifies the ACTUAL cause from existing signals (IndexStatus, worker heartbeat,
+    # classify_provider_exception) — reused as both the injected context (so the model's own
+    # reply reflects the real reason) and structured API metadata (context_status below) the
+    # frontend can render without depending on the model having said it correctly.
+    context_status = build_context_status(db, user.id, hit_count=len(hits), retrieval_degraded_reason=retrieval_degraded_reason)
+    context_block = "\n\n".join(f"{_label(h)}\n{h['text']}" for h in hits) or (
+        context_status.message if context_status is not None else "Ingen relevant kunskap hittades."
+    )
+    context_status_out = (
+        ContextStatusOut(
+            reason=context_status.reason.value,
+            message=context_status.message,
+            pending_count=context_status.pending_count,
+            awaiting_provider_count=context_status.awaiting_provider_count,
+            failed_count=context_status.failed_count,
+            indexed_count=context_status.indexed_count,
+            total_document_count=context_status.total_document_count,
+            worker_reachable=context_status.worker_reachable,
+        )
+        if context_status is not None
+        else None
+    )
 
     history = (
         db.query(MessageModel)
@@ -143,6 +173,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             error_category=category,
             error_message=str(exc),
             retryable=category in _RETRYABLE_ERROR_CATEGORIES,
+            context_status=context_status_out,
         )
 
     usage = result.raw_usage or {}
@@ -206,6 +237,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         conflicts_detected=trust.conflicts_detected,
         context_intent=context_resolution.intent,
         context_confidence=context_resolution.confidence,
+        context_status=context_status_out,
     )
 
 

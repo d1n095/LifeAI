@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, ChatResponse, ChatSource, Confidence, ConversationItem } from "@/lib/api";
+import { api, ChatResponse, ChatSource, Confidence, ContextStatus, ConversationItem } from "@/lib/api";
 import { useVoice } from "@/lib/useVoice";
 import Orb, { OrbState } from "@/components/Orb";
 import ConfidenceBadge from "@/components/ConfidenceBadge";
@@ -24,6 +24,11 @@ type ChatEntry = {
   confidenceScore?: number;
   providersAttempted?: string[];
   conflictsDetected?: boolean;
+  // Set whenever the backend's retrieval found zero hits — see
+  // backend/app/rag/context_status.py. Shown next to the reply so the founder can see the
+  // VERIFIED reason (worker down, files still processing, no provider, genuinely no match...)
+  // without depending on the model having said it correctly in its own reply text.
+  contextStatus?: ContextStatus | null;
 };
 
 function buildAssistantEntry(res: ChatResponse): ChatEntry {
@@ -35,6 +40,7 @@ function buildAssistantEntry(res: ChatResponse): ChatEntry {
       errorMessage: res.error_message ?? "AI-svaret kunde inte genereras.",
       retryable: res.retryable,
       userMessageId: res.user_message_id,
+      contextStatus: res.context_status,
     };
   }
   return {
@@ -47,8 +53,21 @@ function buildAssistantEntry(res: ChatResponse): ChatEntry {
     confidenceScore: res.confidence_score ?? undefined,
     providersAttempted: res.providers_attempted,
     conflictsDetected: res.conflicts_detected,
+    contextStatus: res.context_status,
   };
 }
+
+// Short, founder-facing label for the badge — the full verified sentence (entry.contextStatus
+// .message) is already shown below it, this is just what a founder scans for at a glance.
+const CONTEXT_STATUS_LABELS: Record<ContextStatus["reason"], string> = {
+  worker_unavailable: "Worker otillgänglig",
+  files_processing: "Filer bearbetas",
+  awaiting_provider: "Väntar på leverantör",
+  search_provider_unavailable: "Sökning otillgänglig",
+  indexing_failed: "Indexering misslyckades",
+  no_relevant_match: "Ingen relevant träff",
+  no_documents: "Inga filer uppladdade",
+};
 
 export default function ChatPage() {
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
@@ -310,6 +329,15 @@ export default function ChatPage() {
                   }`}
                 >
                   {entry.content}
+                </div>
+              )}
+              {entry.contextStatus && (
+                <div
+                  className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+                  title="Verifierad orsak från biblioteket/workern — inte en gissning från AI-svaret."
+                >
+                  <span className="font-medium">{CONTEXT_STATUS_LABELS[entry.contextStatus.reason]}:</span>{" "}
+                  {entry.contextStatus.message}
                 </div>
               )}
               {entry.confidence && (
