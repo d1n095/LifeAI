@@ -320,79 +320,156 @@ och väntar på en giltig provider-nyckel", med en knapp för att trigga om work
 
 ---
 
-### 4.8 Universell proveniens — `MemorySourceUnit` (2026-07-28, tre granskningsrundor)
+### 4.8 Universell proveniens — `MemorySourceUnit` (2026-07-28, FYRA granskningsrundor)
 
 **Problemet detta löser:** `KnowledgeClaim.source_id` pekar idag hårt på `documents.id`. En
 konversation har ingen `Document`-rad att peka på, och framtida källor (GitHub, webb, e-post,
 media) skulle annars vardera kräva sin egen nullable `source_X_id`-kolumn på `KnowledgeClaim`
-— exakt den datamodellssprawl `docs/BRANCH_REGISTRY.md`s grundprincip varnar för. Ett enda
-polymorft `(source_type, source_id)`-par löser sprawl men ger upp riktig FK-integritet. Lösningen
-nedan ger varken sprawl eller förlorad integritet.
+— exakt den datamodellssprawl `docs/BRANCH_REGISTRY.md`s grundprincip varnar för. Lösningen
+nedan (efter fyra granskningsrundor) ger varken sprawl, förlorad FK-integritet, eller en
+källnod som ser giltig ut men saknar en verifierbar innebörd.
 
 ```
 memory_source_units
   id, owner_id
-  source_kind        -- document | message | media_segment | github_snapshot | web_capture | ...
-  source_role        -- founder | assistant | external — VEM som producerade DENNA atomära enhet
-  project_id          -- nullable, känt i förväg eller satt senare av P4
-  occurred_at          -- när materialet faktiskt skapades/sades, inte när det ingesterades
-  content_hash         -- sha256, ENDAST integritetskontroll/teknisk dedup — se hård regel nedan
+  source_kind         -- document_chunk | document_version | document_tombstone |
+                       -- message | media_segment | github_snapshot | web_capture | ...
+                       -- (se "Dokumentgranularitet" nedan för varför "document" ensamt inte räcker)
+  source_role          -- founder | assistant | external | system | unknown
+                       -- (se "source_role" nedan — uppladdare ≠ författare)
+  project_id            -- nullable, känt i förväg eller satt senare av P4
+  occurred_at            -- när materialet faktiskt skapades/sades, timestamp WITH time zone
+  content_hash           -- sha256, ENDAST integritetskontroll/teknisk dedup, se hård regel
+  content_text            -- oföränderlig textsnapshot, se "Oföränderlig källa" nedan (nullable
+                          -- bara för source_kind som ännu inte har textinnehåll, t.ex. en
+                          -- framtida ren binär media_segment innan transkribering)
+  lifecycle_status         -- active | revoked | purged, se "Livscykel" nedan
+  revoked_at, revocation_reason
   created_at
 
-document_source_units              message_source_units
-  memory_source_id (PK, FK)          memory_source_id (PK, FK)
-  document_id                        conversation_id
-  version_id (nullable)              message_id
-  chunk_id (nullable)                sequence_number
+document_source_units                    message_source_units
+  memory_source_id (PK, FK)                memory_source_id (PK, FK)
+  owner_id                                  owner_id
+  document_id (nullable, SET NULL)          conversation_id (nullable, SET NULL)
+  version_id (nullable, SET NULL)           message_id (nullable, SET NULL)
+  chunk_id (nullable, SET NULL)             sequence_number
+  UNIQUE (memory_source_id, owner_id)       UNIQUE (memory_source_id, owner_id)
+  FK (memory_source_id, owner_id)           FK (memory_source_id, owner_id)
+    REFERENCES memory_source_units            REFERENCES memory_source_units
+    (id, owner_id)                             (id, owner_id)
 ```
 
 **Atomär enhet, inte analysfönster:** en `memory_source_units`-rad är den MINSTA odelbara
 källan — ETT `DocumentChunk`, ETT `Message`, framtida ETT `MediaSegment`/EN GitHub-snapshotdel.
-Ett `ConversationSegment` (nedan) är ett analysfönster som GRUPPERAR flera redan-existerande
+Ett `ConversationSegment` (§4.9) är ett analysfönster som GRUPPERAR flera redan-existerande
 `memory_source_units`-rader i ordning — det är aldrig självt en källa och har ingen egen
-`source_role`. `source_role` sitter uteslutande på den atomära enheten (vilket exakt
-`Message`/`DocumentChunk` det var), aldrig på segmentet — annars kan promotion (§6.10) inte
-skilja "grundaren sa exakt detta" från "MainAI föreslog detta", vilket är precis den
-attribueringsbugg tre granskningsrundor hittade i tidigare utkast av den här modellen.
+`source_role`. `source_role` sitter uteslutande på den atomära enheten, aldrig på segmentet —
+annars kan promotion (§6.10) inte skilja "grundaren sa exakt detta" från "MainAI föreslog
+detta".
 
-**`KnowledgeClaim.memory_source_id`** blir claimens PRIMÄRA, exakta källa (ett enda
-`Message` eller `DocumentChunk` — aldrig ett helt segment). Kontextberoende svar ("exakt",
-"gör så", "det där blev fel") löses INTE genom att göra primärkällan mindre exakt, utan genom
-en separat bevistabell:
+**`source_role` — fem värden, inte tre, och uppladdare ≠ författare.** `founder | assistant |
+external | system | unknown`. Att GRUNDAREN laddade upp ett dokument betyder INTE att
+grundaren skrev det, att det är externt material, eller att allt innehåll i det har samma
+författare — ett importerat ChatGPT-utdrag kan t.ex. innehålla både grundarens och en AI:s
+egna ord i samma fil. `founder`/`external` får därför BARA sättas när författarskapet är
+explicit attribuerat (t.ex. ett `Message` har alltid ett känt `role`, så `source_role` för en
+`message_source_unit` är alltid säkert `founder` eller `assistant`) — aldrig gissat från VEM
+som laddade upp filen. **Backfillen för alla befintliga dokumentclaims (P3, redan byggd)
+sätter `source_role=unknown`**, inte `external` — författarskapet för redan importerat
+material är helt enkelt inte känt idag, och att låtsas annat vore precis den sortens gissning
+som får konsekvenser för promotion (§6.10) längre fram. `system` reserverat för framtida
+MainAI-genererade sammanfattningar/index som inte är ett svar i en konversation.
 
-```
-knowledge_claim_evidence
-  claim_id, memory_source_id
-  evidence_role        -- direct | context | supports | contradicts
-```
+**`KnowledgeClaim.memory_source_id`** blir claimens PRIMÄRA, exakta källa (ett enda `Message`
+eller `DocumentChunk` — aldrig ett helt segment). Kontextberoende svar ("exakt", "gör så",
+"det där blev fel") löses INTE genom att göra primärkällan mindre exakt, utan genom en separat
+bevistabell — se §6.10/§6.11 för `knowledge_claim_evidence`s reviderade roller (`direct` är
+BORTTAGET: `memory_source_id` är redan den direkta källan, en fjärde tabellroll som säger
+samma sak vore en duplicerad sanning).
 
-Exempel: Assistant föreslår alternativ B → grundaren svarar "Exakt, vi kör på det." → claimen
-"beslut: kör på alternativ B" har `memory_source_id` = grundarens "Exakt"-meddelande (primär,
-`source_role=founder`) och en `knowledge_claim_evidence`-rad med `evidence_role=context` som
-pekar på assistant-meddelandet där B beskrevs. Beslutet attribueras korrekt till grundaren —
-assistant-meddelandet är bevis på VARFÖR, inte VEM som bestämde.
+**Livscykel — lifecycle_status, inte bara `ON DELETE SET NULL` (2026-07-28-korrigering).**
+Nulägesbilden i tidigare utkast var fel: Librarys nuvarande radering (`app/routers/library.py`s
+`delete_source`) är INTE en hårdradering av `Document` — den sätter `Document.deleted_at`,
+tar bort `DocumentChunk`-rader (och därmed embeddings), men BEHÅLLER `Document`-raden och dess
+`KnowledgeVersion`-historik. Claims kan alltså redan idag överleva den vanliga
+raderingsprocessen samtidigt som materialet blir osökbart — ett rent `ON DELETE SET NULL`
+skulle skapa `memory_source_units`-rader som ser giltiga ut men saknar en verifierbar källa.
+Två tydligt separata operationer, inte en:
+
+- **Ta bort från aktivt minne** (motsvarar dagens `delete_source`): sätter
+  `lifecycle_status=revoked`, `revoked_at`, `revocation_reason`. En `revoked`
+  `memory_source_units`-rad är OMEDELBART utesluten ur retrieval, promotion och nya
+  tolkningsförslag (P4:s frågor filtrerar alltid `lifecycle_status=active`) — men
+  `content_text`/`content_hash`/kopplade `KnowledgeClaim`/`knowledge_claim_evidence`-rader
+  finns kvar som historik/proveniens, exakt som `Document.deleted_at` fungerar idag.
+- **Radera permanent**: en explicit, separat, loggad (`record_audit`) åtgärd som sätter
+  `lifecycle_status=purged` och faktiskt tar bort `content_text` och annan härledd personlig
+  data — motsvarar en framtida "radera permanent"-knapp bortom dagens mjuka radering, inte
+  något som händer automatiskt via en FK-cascade.
+
+**Oföränderlig källa — `content_hash` räcker inte (2026-07-28-korrigering).** En bevarad
+`memory_source_units`-rad med bara en hash kan bara säga "det fanns en text med den här
+hashen", aldrig VAD källan faktiskt sa — `KnowledgeVersion` lagrar idag bara checksumma,
+extraktionsversion och metadata (inte den extraherade texten), och `DocumentChunk` raderas vid
+vanlig Library-radering. Den atomära proveniensnoden behöver därför en egen, oföränderlig
+`content_text`-kolumn (för textkällor — chunk-text respektive meddelandetext, skriven en gång
+vid skapande, aldrig uppdaterad) omfattad av EXAKT samma revoke/purge-regler som ovan. En
+framtida stor binärkälla (ljud/video innan transkribering) kan istället använda en hållbar
+`content_storage_key`+offset-variant av samma rad — inte specat i detalj här, men samma
+lifecycle-regler gäller oavsett lagringsform.
+
+**Hård regel om `content_hash` (oförändrad):** identisk text vid olika tillfällen är olika
+episodiska händelser ("Ja" sagt tre gånger om tre olika projekt). `message_id` är
+meddelandets identitet; `chunk_id`+`version_id` är dokumentsegmentets identitet. `content_hash`
+verifierar bara att innehållet inte korrumperats och används för begränsad TEKNISK
+deduplicering — den får ALDRIG slå ihop två olika `memory_source_units`-rader bara för att
+texten råkar matcha.
+
+**Dokumentgranularitet — `source_kind` får inte vara ett odifferentierat `document`.** En
+källenhet med ett levande `chunk_id` är `document_chunk` (den vanliga, fullt spårbara
+vägen). En äldre claim vars `chunk_id` redan är `NULL` (chunken purgad, se
+`KnowledgeClaim`s egen docstring om varför claimen ändå överlever) backfillas som
+`document_version` om `version_id` fortfarande går att slå upp, annars som
+`document_tombstone` (varken chunk eller version kvar — bara `document_id`/`source_id` känt,
+en uttryckligen DEGRADERAD proveniens, inte gömd bakom samma etikett som en fullt spårbar
+källa).
+
+**Exclusive arc — databasupprätthållen, inte bara "en primärnyckel per subtyp"
+(2026-07-28-korrigering).** Att varje subtyp har `memory_source_id` som primärnyckel hindrar
+TVÅ `document_source_units`-rader för samma källa, men hindrar INTE att samma
+`memory_source_id` finns i BÅDE `document_source_units` OCH `message_source_units` samtidigt.
+Riktig ömsesidig uteslutning kräver en `DEFERRABLE INITIALLY DEFERRED` constraint-trigger som
+vid commit verifierar: (a) exakt en subtypsrad finns för varje `memory_source_units.id`, och
+(b) subtypen matchar `source_kind` (t.ex. en rad i `document_source_units` måste ha
+`source_kind IN ('document_chunk','document_version','document_tombstone')`). Detta är en
+riktig databasinvariant, inte bara applikationsdisciplin.
+
+**Ägarintegritet — komposit-FK, inte bara dupliceat `owner_id` (2026-07-28-korrigering).**
+Att `owner_id` finns på både `memory_source_units` och dess subtyp garanterar INTE att värdena
+matchar. `UNIQUE (id, owner_id)` på `memory_source_units` plus
+`FOREIGN KEY (memory_source_id, owner_id) REFERENCES memory_source_units (id, owner_id)` på
+varje subtyp gör en avvikande `owner_id` till ett FK-brott, inte en tyst inkonsekvens. För
+`message_source_units` krävs DESSUTOM en verifiering att `message_id` faktiskt tillhör
+`conversation_id`, och att `conversation_id` faktiskt tillhör samma `owner_id` — ingen ren
+FK-deklaration uttrycker "denna rad tillhör denna konversation OCH denna ägare" över tre
+tabeller, så det blir ytterligare en constraint-trigger, inte bara en kolumn. RLS är
+nödvändigt men inte tillräckligt för det här — RLS skyddar VEM som kan LÄSA/SKRIVA en rad,
+inte att relationerna INOM raden är strukturellt korrekta.
 
 **Fasad migrationsplan för `KnowledgeClaim.source_id`/`version_id`/`chunk_id` (inga
 destruktiva ändringar nu):**
 1. Lägg till `memory_source_units`/`document_source_units`/`message_source_units`/
    `knowledge_claim_evidence` samt `KnowledgeClaim.memory_source_id` (nullable) — rent additivt.
-2. Backfilla: skapa en `memory_source_units`+`document_source_units`-rad för varje BEFINTLIG
-   `KnowledgeClaim`-rad, sätt dess `memory_source_id`.
+2. Backfilla: en `memory_source_units`+`document_source_units`-rad per DISTINKT
+   `document_chunk`/`document_version`/`document_tombstone`-källa bland befintliga claims
+   (ALDRIG en per claim — flera claims från samma chunk delar en enhet), `source_role=unknown`.
 3. Dual-write: `extract_claims_for_document` sätter BÅDE de gamla kolumnerna OCH
-   `memory_source_id` för varje ny claim.
-4. `memory_source_id` blir kanonisk källa för allt nytt kodbaserat (P4:s frågor,
-   `knowledge_claim_evidence`, konversationsclaims) — de gamla kolumnerna läses inte längre av
-   ny kod, men finns kvar.
+   `memory_source_id` för varje ny claim, med korrekt attribuerad `source_role`.
+4. `memory_source_id` blir kanonisk källa för allt nytt kodbaserat — de gamla kolumnerna läses
+   inte längre av ny kod, men finns kvar.
 5. En uttrycklig, separat, granskad migration slutar läsa/skriva de gamla kolumnerna helt.
-6. En uttrycklig, separat, ANNU senare migration tar bort dem. De gamla kolumnerna får ALDRIG
+6. En uttrycklig, separat, ÄNNU senare migration tar bort dem. De gamla kolumnerna får ALDRIG
    bli en permanent parallell sanningskälla — steg 5/6 är inte valfria, bara medvetet senarelagda.
-
-**Hård regel om `content_hash`:** identisk text vid olika tillfällen är olika episodiska
-händelser ("Ja" sagt tre gånger om tre olika projekt). `message_id` är meddelandets identitet;
-`chunk_id`+`version_id` är dokumentsegmentets identitet. `content_hash` verifierar bara att
-innehållet inte korrumperats och används för begränsad TEKNISK deduplicering (t.ex. att inte
-skapa två `document_source_units` för exakt samma chunk-write) — den får ALDRIG slå ihop två
-olika `memory_source_units`-rader bara för att texten råkar matcha.
 
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
@@ -407,7 +484,7 @@ conversation_segments
   roles_present            -- METADATA för visning ("founder+assistant") — styr ALDRIG promotion,
                             -- se §6.10
   project_id               -- nullable
-  created_at
+  created_at                -- timestamp WITH time zone (se "Tid och ordning" nedan)
 
 conversation_segment_members
   segment_id, memory_source_id, ordinal
@@ -419,6 +496,17 @@ härleds i första hand från `app/context/resolver.py`s redan existerande, test
 (`new_topic`-klassificering, `LONG_GAP`=30 min) — ingen ny segmenteringsheuristik uppfinns
 från grunden — utökat med projektbyte, explicit återgång till en tidigare tråd, och
 reply/reference-länkar till ett äldre meddelande.
+
+**Meddelandeordning — riktig ordinal, inte bara `created_at` (2026-07-28-korrigering).**
+`Message` har idag bara `created_at`, ingen sekvenskolumn — två meddelanden med identisk
+tidsstämpel (samma millisekund, eller en klocka som inte är monotont säker) kan inte
+ordnas entydigt. Lägg till `Message.sequence_number` med `UNIQUE (conversation_id,
+sequence_number)`: nya meddelanden får sin sekvens tilldelad vid sparande (nästa lediga
+heltal för den konversationen), historiska meddelanden backfillas deterministiskt genom att
+sortera på `(created_at, id)` och numrera i den ordningen. Alla NYA minnes-/segmenttabeller
+(`memory_source_units.occurred_at`/`created_at`, `conversation_segments`, m.fl.) använder
+`timestamp WITH time zone` — det framtida minnet måste kunna skilja lokal tid, UTC, och när
+materialet faktiskt skapades, vilket en tidszonslös `timestamp` inte kan uttrycka entydigt.
 
 ## 5. Import- och minnesflöde: ZIP → långtidsminne
 
@@ -618,6 +706,28 @@ för ett helt segment. Konkret:
   samtidigt, korrekt attribuerade var för sig — segmentets egen "mixed"-status styr aldrig
   någon enskild claims promotion.
 
+**2026-07-28-korrigering: kontextbevis och grounding får inte blandas ihop.** Om claimens
+primärkälla är grundarens "Exakt" och kontextkällan är assistant-meddelandet som beskrev
+alternativ B, blir dagens ordöverlappsbaserade `grounding_score` (§4.1, `app/rag/claims.py`)
+mycket lågt mätt mot BARA primärkällan — "Exakt" delar nästan inga ord med "alternativ B".
+Claim-extraktionen får därför INTE själv hoppa till en fullt upplöst text som "Beslut: kör på
+alternativ B" — det vore att låta råtextraktionen göra ett tolkningssteg den inte har
+underlag för. Rätt lager för det tolkningssteget är P4, inte extraktionen:
+- Claimlagret (P3-extraktion) stannar vid den bokstavligt grundade texten: "Grundaren
+  godkänner föregående förslag", med assistant-meddelandet kopplat som `context`-bevis (se
+  §4.8/nedan för `knowledge_claim_evidence`s reviderade roller).
+- P4:s tolkningssteg (inte rå extraktion) löser referensen till det konkreta tidigare
+  förslaget och FÖRESLÅR den fullt upplösta `project_entities`-raden ("Beslut: alternativ B")
+  — som ett `interpretation_proposals`-förslag, granskningsbart precis som alla andra.
+- `knowledge_claim_evidence.evidence_role` blir `context | supports | contradicts |
+  corroborates` — INTE `direct`, eftersom `KnowledgeClaim.memory_source_id` redan ÄR den
+  direkta primärkällan; en fjärde "direct"-bevisroll vore en duplicerad sanning.
+- Två separata mätvärden, inte ett: `primary_grounding_score` (ordöverlapp mot primärkällans
+  egen text, dagens `grounding_score` omdöpt för tydlighet) och `context_resolution_score`
+  (hur väl P4:s föreslagna tolkning faktiskt stöds av kontextbevisen tillsammans) — att blanda
+  "ordagrant stödd av primärkällan" med "semantiskt upplöst genom samtalskontext" till EN
+  siffra skulle dölja precis den skillnad det här hela avsnittet handlar om.
+
 ### 6.11 Konversationer som förstklassig minneskälla (P3/P4/P6 tillsammans, inte ett fjärde system)
 `Conversation`/`Message` är redan episodiskt originalminne (lager 2, §2) — varje meddelande
 bevaras rått och oförändrat, ingen filtrering vid ingestion. Det som saknas är att koppla dem
@@ -627,9 +737,10 @@ till ett nytt:
 - **P3** (§6.3): samma `claim_type`-taxonomi, samma `_parse_claims`/prompt-mönster, applicerad
   på ett `conversation_segments`-fönster istället för en dokument-chunk — `extract_claims_for_
   conversation_segment` blir `extract_claims_for_document`s syskon, inte en konkurrent.
-- **P4** (§6.4): läser claims oavsett ursprung (`memory_source_units.source_kind=document`
-  ELLER `message`) — `interpretation_proposals`/`project_entities` skiljer inte på källtyp,
-  bara på innehåll och `source_role`-baserad promotion (§6.10).
+- **P4** (§6.4): läser claims oavsett ursprung (`memory_source_units.source_kind` ∈
+  `{document_chunk, document_version, document_tombstone}` ELLER `message`) —
+  `interpretation_proposals`/`project_entities` skiljer inte på källtyp, bara på innehåll och
+  `source_role`-baserad promotion (§6.10).
 - **P6** (§6.6): Context Resolver (`app/context/resolver.py`) blir en PRIORITETSSIGNAL, inte
   den enda porten — en `INTENT_EXPLICIT_MEMORY`/`INTENT_IDEA_WORTH_SAVING`-klassad tur
   fast-trackas direkt (hög prioritet, låg latens till `founder_memory_notes`), medan den
