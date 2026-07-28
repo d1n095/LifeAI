@@ -13,7 +13,7 @@ from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipTy
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
-from app.rag.claims import EXTRACTION_VERSION, extract_claims_for_document, grounding_score
+from app.rag.claims import EXTRACTION_VERSION, backfill_claim_types, extract_claims_for_document, grounding_score
 from app.rag.trust import assess_claim_confidence
 from app.request_context import current_user_id as current_user_id_var
 
@@ -41,14 +41,24 @@ def _make_chunk(session, owner_id, document_id, text_value="Bolaget grundades 20
     return chunk
 
 
-def _make_claim(session, owner_id, source_id, *, confidence=ClaimConfidence.likely, claim_text="Bolaget grundades 2019.") -> KnowledgeClaim:
+def _make_claim(
+    session,
+    owner_id,
+    source_id,
+    *,
+    confidence=ClaimConfidence.likely,
+    claim_text="Bolaget grundades 2019.",
+    claim_type=ClaimType.uncategorized,
+    extraction_version=EXTRACTION_VERSION,
+) -> KnowledgeClaim:
     _set_rls_user(session, owner_id)
     claim = KnowledgeClaim(
         owner_id=owner_id,
         source_id=source_id,
         claim_text=claim_text,
         confidence=confidence,
-        extraction_version=EXTRACTION_VERSION,
+        claim_type=claim_type,
+        extraction_version=extraction_version,
     )
     session.add(claim)
     session.commit()
@@ -328,6 +338,230 @@ def test_claim_type_defaults_to_uncategorized_when_constructed_without_one(db_se
     doc = _make_source(db_session, user.id)
     claim = _make_claim(db_session, user.id, doc.id)
     assert claim.claim_type == ClaimType.uncategorized
+
+
+# --- P3 backfill: retroactive claim_type for pre-existing rows -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_backfill_types_legacy_uncategorized_claims(db_session, make_verified_user, monkeypatch):
+    import json as json_module
+
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _fake_backfill_chat(self, messages, model, **kwargs):
+        texts = json_module.loads(messages[-1].content)
+        return ChatResult(
+            content=json_module.dumps(["decision" for _ in texts]), provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3}
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_backfill_chat)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    claim_a = _make_claim(db_session, user.id, doc.id, extraction_version="claims-v1")
+    claim_b = _make_claim(db_session, user.id, doc.id, claim_text="Ett annat gammalt pastaende.", extraction_version="claims-v1")
+
+    before_count = db_session.query(KnowledgeClaim).count()
+    result = await backfill_claim_types(db_session, user.id)
+
+    assert result.candidates_total == 2
+    assert result.typed == 2
+    assert result.still_uncategorized == 0
+    assert result.failed == 0
+    assert db_session.query(KnowledgeClaim).count() == before_count  # no new rows
+
+    db_session.expire_all()
+    assert db_session.get(KnowledgeClaim, claim_a.id).claim_type == ClaimType.decision
+    assert db_session.get(KnowledgeClaim, claim_b.id).claim_type == ClaimType.decision
+
+
+@pytest.mark.asyncio
+async def test_backfill_preserves_existing_ids_and_provenance(db_session, make_verified_user, monkeypatch):
+    import json as json_module
+
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _fake_backfill_chat(self, messages, model, **kwargs):
+        texts = json_module.loads(messages[-1].content)
+        return ChatResult(content=json_module.dumps(["idea" for _ in texts]), provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_backfill_chat)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    chunk = _make_chunk(db_session, user.id, doc.id)
+    _set_rls_user(db_session, user.id)
+    claim = KnowledgeClaim(
+        owner_id=user.id,
+        source_id=doc.id,
+        chunk_id=chunk.id,
+        claim_text="Ett spårbart pastaende.",
+        status=ClaimStatus.active,
+        confidence=ClaimConfidence.likely,
+        grounding_score=0.42,
+        extraction_version="claims-v1",
+    )
+    db_session.add(claim)
+    db_session.commit()
+    claim_id, source_id, chunk_id = claim.id, claim.source_id, claim.chunk_id
+
+    await backfill_claim_types(db_session, user.id)
+
+    db_session.expire_all()
+    refreshed = db_session.get(KnowledgeClaim, claim_id)
+    assert refreshed.id == claim_id
+    assert refreshed.source_id == source_id
+    assert refreshed.chunk_id == chunk_id
+    assert refreshed.status == ClaimStatus.active
+    assert refreshed.confidence == ClaimConfidence.likely
+    assert refreshed.grounding_score == 0.42
+    assert refreshed.claim_type == ClaimType.idea  # only claim_type (and extraction_version) changed
+
+
+@pytest.mark.asyncio
+async def test_backfill_second_run_is_a_no_op(db_session, make_verified_user, monkeypatch):
+    import json as json_module
+
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    call_count = {"n": 0}
+
+    async def _fake_backfill_chat(self, messages, model, **kwargs):
+        call_count["n"] += 1
+        texts = json_module.loads(messages[-1].content)
+        return ChatResult(content=json_module.dumps(["technical" for _ in texts]), provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_backfill_chat)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    _make_claim(db_session, user.id, doc.id, extraction_version="claims-v1")
+
+    first = await backfill_claim_types(db_session, user.id)
+    assert first.candidates_total == 1
+    assert call_count["n"] == 1
+
+    second = await backfill_claim_types(db_session, user.id)
+    assert second.candidates_total == 0  # nothing left to classify
+    assert call_count["n"] == 1  # no second provider call made
+
+
+@pytest.mark.asyncio
+async def test_backfill_never_overwrites_an_already_typed_claim(db_session, make_verified_user, monkeypatch):
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _fail_if_called(self, messages, model, **kwargs):
+        raise AssertionError("an already-typed claim must never trigger a backfill provider call")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fail_if_called)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    # Already typed by the real extraction pipeline (current EXTRACTION_VERSION) — not a
+    # backfill candidate even though claim_type happens to be a real, non-uncategorized value.
+    claim = _make_claim(db_session, user.id, doc.id, claim_type=ClaimType.vision, extraction_version=EXTRACTION_VERSION)
+
+    result = await backfill_claim_types(db_session, user.id)
+
+    assert result.candidates_total == 0
+    db_session.expire_all()
+    assert db_session.get(KnowledgeClaim, claim.id).claim_type == ClaimType.vision
+
+
+@pytest.mark.asyncio
+async def test_backfill_provider_error_leaves_claim_uncategorized_and_retryable(db_session, make_verified_user, monkeypatch):
+    from app.providers.base import ProviderError
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _always_fails(self, messages, model, **kwargs):
+        raise ProviderError("simulerat leverantorsfel")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _always_fails)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    claim = _make_claim(db_session, user.id, doc.id, extraction_version="claims-v1")
+
+    result = await backfill_claim_types(db_session, user.id)
+
+    assert result.candidates_total == 1
+    assert result.failed == 1
+    assert result.typed == 0
+    db_session.expire_all()
+    refreshed = db_session.get(KnowledgeClaim, claim.id)
+    assert refreshed.claim_type == ClaimType.uncategorized
+    assert refreshed.extraction_version == "claims-v1"  # untouched — still a candidate next run
+
+
+@pytest.mark.asyncio
+async def test_backfill_length_mismatch_response_leaves_claims_retryable(db_session, make_verified_user, monkeypatch):
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _mismatched_length_chat(self, messages, model, **kwargs):
+        # Two claims are being classified but the provider only answers for one — must never
+        # be trusted to line up positionally.
+        return ChatResult(content='["decision"]', provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _mismatched_length_chat)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    claim_a = _make_claim(db_session, user.id, doc.id, extraction_version="claims-v1")
+    claim_b = _make_claim(db_session, user.id, doc.id, claim_text="Nagot annat.", extraction_version="claims-v1")
+
+    result = await backfill_claim_types(db_session, user.id)
+
+    assert result.failed == 2
+    assert result.typed == 0
+    db_session.expire_all()
+    assert db_session.get(KnowledgeClaim, claim_a.id).claim_type == ClaimType.uncategorized
+    assert db_session.get(KnowledgeClaim, claim_b.id).claim_type == ClaimType.uncategorized
+
+
+@pytest.mark.asyncio
+async def test_backfill_genuinely_uncategorized_result_settles_and_is_not_retried(db_session, make_verified_user, monkeypatch):
+    """A model honestly answering "uncategorized" for an ambiguous claim must not be
+    re-queried forever — it settles (extraction_version bumped) exactly like a real type
+    would, distinguishing it from a provider FAILURE (which stays retryable, see the sibling
+    test above)."""
+    import json as json_module
+
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    call_count = {"n": 0}
+
+    async def _fake_backfill_chat(self, messages, model, **kwargs):
+        call_count["n"] += 1
+        texts = json_module.loads(messages[-1].content)
+        return ChatResult(
+            content=json_module.dumps(["uncategorized" for _ in texts]), provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3}
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_backfill_chat)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    claim = _make_claim(db_session, user.id, doc.id, extraction_version="claims-v1")
+
+    first = await backfill_claim_types(db_session, user.id)
+    assert first.still_uncategorized == 1
+    assert first.typed == 0
+
+    db_session.expire_all()
+    refreshed = db_session.get(KnowledgeClaim, claim.id)
+    assert refreshed.claim_type == ClaimType.uncategorized
+    assert refreshed.extraction_version == EXTRACTION_VERSION  # settled, not a candidate anymore
+
+    second = await backfill_claim_types(db_session, user.id)
+    assert second.candidates_total == 0
+    assert call_count["n"] == 1  # no second provider call
 
 
 # --- assess_claim_confidence ---

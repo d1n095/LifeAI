@@ -12,6 +12,7 @@ from app.models.usage import UsageLog
 from app.models.user import User
 from app.providers.registry import get_provider, provider_names
 from app.providers.verification import latest_check, verify_now
+from app.rag.claims import backfill_claim_types
 from app.schemas import (
     ProviderConfigIn,
     ProviderConfigOut,
@@ -182,3 +183,28 @@ def trigger_cleanup(request: Request, db: Session = Depends(get_db), user: User 
     if counts is None:
         return {"status": "skipped", "reason": "another cleanup run holds the lock"}
     return {"status": "completed", "purged": counts}
+
+
+@router.post("/claims/backfill-types")
+async def trigger_claim_type_backfill(request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """P3 gap fix (2026-07-28): migration 0018 left every pre-existing knowledge_claims row
+    at claim_type=uncategorized, and the normal import path never re-classifies an
+    already-`indexed` document's claims (see app/rag/claims.py's backfill_claim_types
+    docstring for the full rationale). Manual trigger, same pattern as /cleanup above — safe
+    to call repeatedly (idempotent, see that docstring), and safe to interrupt (each batch
+    commits before the next one starts, so a partial run just leaves fewer candidates for the
+    next call, never a duplicate or a half-written row)."""
+    result = await backfill_claim_types(db, user.id)
+    record_audit(
+        db,
+        user_id=user.id,
+        action="claim_type_backfill_triggered",
+        detail=str(result.__dict__),
+        request=request,
+    )
+    return {
+        "candidates_total": result.candidates_total,
+        "typed": result.typed,
+        "still_uncategorized": result.still_uncategorized,
+        "failed": result.failed,
+    }

@@ -6,9 +6,43 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, lokalt git-läge (branch
-`claude/p3-claim-typing` skapad från huvudgrenens tip `dace6c8`) — PR ännu inte öppnad, se
-Pass 8 nedan.
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`, inte memorerat) — PR #29 öppen, inte mergad, `mergeable_state:
+clean`, CI grönt (18/18 checkar, "All required checks passed") på head-SHA verifierad två
+gånger. Se Pass 9 för den senaste rundan (retroaktiv backfill + arkitekturkorrigering).
+
+## Pass 9 (2026-07-28): PR #29 — retroaktiv claim_type-backfill + arkitekturkorrigering (konversationer som minneskälla)
+
+Grundaren granskade PR #29 och hittade en verklig, blockerande lucka: migration 0018 satte
+alla BEFINTLIGA `knowledge_claims`-rader till `claim_type=uncategorized`, och
+`_import_one_file`s dublett-kontroll kör aldrig om `extract_claims_for_document` för ett
+redan-`indexed` dokument — så material importerat före P3 skulle aldrig få riktiga
+`claim_type`-värden organiskt. Löst med `backfill_claim_types()` (`app/rag/claims.py`):
+idempotent, omstartssäker, uppdaterar `claim_type`/`extraction_version` in place på
+BEFINTLIGA rader, skapar aldrig nya — se den fullständiga kandidat-/avgränsningslogiken i
+funktionens docstring. Manuellt triggerbar via `POST /api/admin/claims/backfill-types`.
+
+**Egen bugg hittad och fixad under implementationen** (inte grundarens fynd): den första
+versionen av backfill-loopen requeryade samma misslyckade batch om och om igen inom samma
+anrop (ingen exkludering av redan-försökta rader vid providerfel/längdmissmatch,
+`max_batches=None` som standard) — en verklig oändlig loop, bekräftad genom att testprocessen
+körde 10+ minuter med växande minnesförbrukning innan den dödades manuellt och buggen
+identifierades. Fixad med en `failed_ids`-uteslutning per anrop; om testet hade fått köra
+längre hade det aldrig terminerat. Kvarstående lärdom: kör alltid nya loopar med en hård
+timeout lokalt, aldrig obegränsat, innan de committas.
+
+Samtidigt en större, ännu INTE implementerad arkitekturkorrigering: grundaren pekade ut att
+konversationer/meddelanden (`Conversation`/`Message`) ska vara en förstklassig källa till
+SAMMA minneskärna som filer — inte bara turer som Context Resolver flaggar som explicit
+minne/idé (dagens P6-plan), utan hela historiken, analyserad asynkront i bakgrunden.
+Grundaren beordrade uttryckligen: **skriv ingen P4/P6-migration förrän en delad,
+additiv proveniensmodell (Document ELLER Message som källa, utan polymorfa FK:er) är låst** —
+se konversationen för den fullständiga arkitekturanalysen (exklusiv-arc-mönster via
+`num_nonnulls()`-CHECK-constraint, `extract_claims_for_message` som syskonfunktion till
+`extract_claims_for_document`, ny bakgrundsworker för konversationsklassificering eftersom
+chat.py:s svarsväg är synkron och inte kan bära extra AI-anrop per tur, säkerhetsregler för
+att aldrig behandla assistent-genererad text som grundarfakta). **P4/P6-migrationer är därför
+INTE påbörjade** — väntar på grundarens bekräftelse av den föreslagna proveniensmodellen.
 
 ## Pass 8 (2026-07-28): MainAI Memory Core — P3 (claim-typning), första skivan
 
@@ -32,11 +66,12 @@ senare PR.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/p3-claim-typing` | — (ej öppnad än) | **Lokalt klar, lokalt verifierad, väntar på push+PR** | P3: `KnowledgeClaim.claim_type` (migration 0018, additiv), utökat STEG 10-extraktionsanrop (samma AI-anrop klassificerar nu VAD ett påstående är, inte bara texten), `KnowledgeClaimOut`-schema + Library-UI-badge. 10 nya tester (`test_claims.py`) + full lokal svit 555 passed/1 skipped. | `claude/det-kommer-mer-879lcm` @ `dace6c8` (efter PR #28) |
+| `claude/p3-claim-typing` | [#29](https://github.com/d1n095/LifeAI/pull/29) | **Öppen, inte mergad, `mergeable_state: clean`, CI grönt (verifierat)** — väntar på grundarens slutgranskning | P3: `KnowledgeClaim.claim_type` (migration 0018, additiv), utökat STEG 10-extraktionsanrop, `KnowledgeClaimOut`-schema + Library-UI-badge, PLUS (Pass 9) `backfill_claim_types()` för retroaktiv klassificering av befintliga claims + `POST /api/admin/claims/backfill-types`. 18 tester totalt i `test_claims.py` + full lokal svit 562 passed/1 skipped. | `claude/det-kommer-mer-879lcm` @ `dace6c8` (efter PR #28) |
 
-**Verifierat lokalt (Pass 8, klart):** Full backend-svit mot riktig Postgres+Redis: 555 passed,
-1 medvetet skippad (P2-kapacitetstestet), 0 regressioner. `tsc --noEmit`/`eslint`: rena. CI på
-GitHub ej körd än — pushas och verifieras i nästa steg.
+**Verifierat lokalt (Pass 9, klart):** Full backend-svit mot riktig Postgres+Redis: 562 passed,
+1 medvetet skippad (P2-kapacitetstestet), 0 regressioner. `tsc --noEmit`/`eslint`: rena.
+GitHub Actions-CI verifierad grön direkt mot PR #29:s head-SHA via `pull_request_read` (18/18
+checkar, "All required checks passed" = success) — inte bara Vercel.
 
 Grundaren granskade PR #28 kod-för-kod (inte bara CI-status) i två separata rundor efter att
 Pass 6:s ursprungliga vertikala kedja redan var grön, och hittade båda gångerna en verklig,
