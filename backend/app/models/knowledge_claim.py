@@ -22,6 +22,23 @@ class ClaimStatus(str, enum.Enum):
     disputed = "disputed"
 
 
+class ClaimType(str, enum.Enum):
+    """P3 (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.1): a coarse classification of WHAT a
+    claim actually is, extracted in the same AI call as the claim text itself (see
+    app/rag/claims.py) — the input P4's later interpretation queue reads to decide whether a
+    claim should become a project_entities row (idea/decision/task_reference) or stay a plain
+    fact. Never computed retroactively by a separate pass; a wrong/uncertain classification is
+    `uncategorized`, not a guess dressed up as one of the other six values."""
+
+    idea = "idea"
+    decision = "decision"
+    task_reference = "task_reference"
+    vision = "vision"
+    technical = "technical"
+    historical = "historical"
+    uncategorized = "uncategorized"
+
+
 class ClaimConfidence(str, enum.Enum):
     """The UI-facing confidence bucket DEL 8 asks for: certain, likely, uncertain, conflict,
     no basis. Computed by app/rag/trust.py's assess_claim_confidence() from the claim's
@@ -71,6 +88,7 @@ class KnowledgeClaim(Base):
     )
     project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True, index=True)
     claim_text: Mapped[str] = mapped_column(Text)
+    claim_type: Mapped[ClaimType] = mapped_column(Enum(ClaimType), default=ClaimType.uncategorized)
     status: Mapped[ClaimStatus] = mapped_column(Enum(ClaimStatus), default=ClaimStatus.proposed)
     confidence: Mapped[ClaimConfidence] = mapped_column(Enum(ClaimConfidence), default=ClaimConfidence.uncertain)
     grounding_score: Mapped[float] = mapped_column(Float, default=0.0)

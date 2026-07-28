@@ -6,11 +6,37 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, mot GitHubs Actions-API och
-PR-API direkt (`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat) efter att
-PR #28 mergades in i huvudgrenen som `c32c339`.
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, lokalt git-läge (branch
+`claude/p3-claim-typing` skapad från huvudgrenens tip `dace6c8`) — PR ännu inte öppnad, se
+Pass 8 nedan.
 
-## Pass 7 (2026-07-28): PR #28 mergad efter två granskningsrundor med riktiga fynd
+## Pass 8 (2026-07-28): MainAI Memory Core — P3 (claim-typning), första skivan
+
+Grundaren korrigerade en felaktig uppdelning: "Connected Memory & Project Context v1" (ett
+tidigare, för brett formulerat uppdrag) ska INTE byggas som ett separat minnessystem parallellt
+med Life Library/Founder Knowledge Studio. Repots egen `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`
+specificerar redan EN gemensam minneskärna (§4): Kunskap/Projekt/Idéer/Beslut/Uppgifter/
+Grundarminne/Konstitution är typer, relationer och vyer ovanpå SAMMA underliggande kedja
+(`ImportJob → Document → KnowledgeVersion → DocumentChunk → KnowledgeClaim`), inte separata
+lagringsplatser. Se konversationen för den fullständiga arkitekturgenomgången (befintliga
+tabeller som återanvänds, additiva tabeller/kolumner per P3/P4/P6/P7, och en uttrycklig
+varning om att INTE förväxla den nya `project_entities`-familjen (P4) med det redan
+existerande `app/models/project_memory.py` — ett annat, orelaterat system för LifeAI-repots
+EGEN utvecklingsstatus, inte grundarens liv/affärsprojekt).
+
+Byggordning låst till repots egen §8: **P3 (denna branch) → P6 (parallellt, ingen ny PR än) →
+P4 (kräver P3) → P5 (kräver P4) → P7B (sist, kräver P4:s godkännandeinfrastruktur)**. Ingen
+`MainAICoreContext`, ingen ny retrieval-ordning, ingen systemprompt-ändring i denna PR — de
+kräver P4:s `project_entities`-tabell för att ha något att läsa, och byggs i en separat,
+senare PR.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/p3-claim-typing` | — (ej öppnad än) | **Lokalt klar, lokalt verifierad, väntar på push+PR** | P3: `KnowledgeClaim.claim_type` (migration 0018, additiv), utökat STEG 10-extraktionsanrop (samma AI-anrop klassificerar nu VAD ett påstående är, inte bara texten), `KnowledgeClaimOut`-schema + Library-UI-badge. 10 nya tester (`test_claims.py`) + full lokal svit 555 passed/1 skipped. | `claude/det-kommer-mer-879lcm` @ `dace6c8` (efter PR #28) |
+
+**Verifierat lokalt (Pass 8, klart):** Full backend-svit mot riktig Postgres+Redis: 555 passed,
+1 medvetet skippad (P2-kapacitetstestet), 0 regressioner. `tsc --noEmit`/`eslint`: rena. CI på
+GitHub ej körd än — pushas och verifieras i nästa steg.
 
 Grundaren granskade PR #28 kod-för-kod (inte bara CI-status) i två separata rundor efter att
 Pass 6:s ursprungliga vertikala kedja redan var grön, och hittade båda gångerna en verklig,

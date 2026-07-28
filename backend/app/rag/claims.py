@@ -16,22 +16,32 @@ from sqlalchemy.orm import Session
 
 from app.models.document import ActiveTruthStatus, Document
 from app.models.document_chunk import DocumentChunk
-from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, KnowledgeClaim
+from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 
-EXTRACTION_VERSION = "claims-v1"
+EXTRACTION_VERSION = "claims-v2"
 MAX_CLAIMS_PER_CHUNK = 8
 # Cost bound (DEL 14): one provider call per chunk, capped per document rather than
 # unbounded — a document with more chunks than this simply gets claims for its first N
 # chunks (a documented trade-off), not an aborted import and not an unbounded-cost call.
 MAX_CHUNKS_PER_DOCUMENT = 20
 
+# P3 (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.1): the exact seven values the plan
+# specifies — anything else a provider returns collapses to "uncategorized" (see
+# _coerce_claim_type below), never silently dropped and never guessed into one of the other
+# six just because the model said so.
+_VALID_CLAIM_TYPES = {t.value for t in ClaimType}
+
 CLAIM_EXTRACTION_SYSTEM_PROMPT = (
     "Du extraherar diskreta, testbara sakpåståenden ur en text. Svara ENDAST med en JSON-lista "
-    "av strängar, ett påstående per sträng — inget annat, ingen förklaring runt omkring. Ta "
-    "bara med påståenden som uttryckligen stöds av texten. Hitta inte på något som inte står "
-    "där. Om texten inte innehåller några tydliga sakpåståenden, svara med en tom lista []."
+    "av objekt, ett per påstående, på formen "
+    '{"text": "<påståendet>", "claim_type": "<typ>"} — inget annat, ingen förklaring runt '
+    "omkring. <typ> måste vara EXAKT ett av: idea, decision, task_reference, vision, "
+    "technical, historical, uncategorized — använd uncategorized om du är osäker, gissa "
+    "aldrig. Ta bara med påståenden som uttryckligen stöds av texten. Hitta inte på något som "
+    "inte står där. Om texten inte innehåller några tydliga sakpåståenden, svara med en tom "
+    "lista []."
 )
 
 # Document.ActiveTruthStatus has one more value (`superseded`) than ClaimStatus does — a
@@ -82,11 +92,26 @@ def _confidence_for_score(score: float) -> ClaimConfidence:
     return ClaimConfidence.no_basis
 
 
-def _parse_claims(raw: str) -> list[str]:
+def _coerce_claim_type(value: object) -> ClaimType:
+    """Never trusts the provider's own string verbatim — anything not exactly one of P3's
+    seven values (a typo, a made-up category, a wrong type entirely) collapses to
+    `uncategorized` rather than being guessed into one of the other six or raising."""
+    if isinstance(value, str) and value in _VALID_CLAIM_TYPES:
+        return ClaimType(value)
+    return ClaimType.uncategorized
+
+
+def _parse_claims(raw: str) -> list[tuple[str, ClaimType]]:
     """Providers occasionally wrap JSON in prose or a code fence despite the system prompt's
     instruction — pulls out the first well-formed JSON array found rather than requiring an
     exact match. Returns [] (never raises) on anything unparseable: a malformed extraction
-    response must not crash the import it's attached to."""
+    response must not crash the import it's attached to.
+
+    P3: the system prompt now asks for `{"text": ..., "claim_type": ...}` objects, but a
+    provider ignoring instructions and returning plain strings (the pre-P3 contract) is
+    handled the same defensive way — treated as claim_type=uncategorized rather than
+    discarded, so a claim already worth extracting is never silently dropped just because
+    its type couldn't be determined."""
     match = re.search(r"\[.*\]", raw, re.DOTALL)
     if not match:
         return []
@@ -96,7 +121,18 @@ def _parse_claims(raw: str) -> list[str]:
         return []
     if not isinstance(parsed, list):
         return []
-    return [str(item).strip() for item in parsed if str(item).strip()]
+
+    results: list[tuple[str, ClaimType]] = []
+    for item in parsed:
+        if isinstance(item, dict):
+            text = str(item.get("text", "")).strip()
+            claim_type = _coerce_claim_type(item.get("claim_type"))
+        else:
+            text = str(item).strip()
+            claim_type = ClaimType.uncategorized
+        if text:
+            results.append((text, claim_type))
+    return results
 
 
 async def extract_claims_for_document(
@@ -136,7 +172,7 @@ async def extract_claims_for_document(
         except ProviderError:
             continue
 
-        for claim_text in _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]:
+        for claim_text, claim_type in _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]:
             score = grounding_score(claim_text, chunk.text)
             claim = KnowledgeClaim(
                 owner_id=owner_id,
@@ -145,6 +181,7 @@ async def extract_claims_for_document(
                 chunk_id=chunk.id,
                 project_id=document.project_id,
                 claim_text=claim_text,
+                claim_type=claim_type,
                 status=claim_status,
                 confidence=_confidence_for_score(score),
                 grounding_score=score,

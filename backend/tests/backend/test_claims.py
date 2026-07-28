@@ -12,7 +12,7 @@ from app.config import get_settings
 from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipType
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
-from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, KnowledgeClaim
+from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
 from app.rag.claims import EXTRACTION_VERSION, extract_claims_for_document, grounding_score
 from app.rag.trust import assess_claim_confidence
 from app.request_context import current_user_id as current_user_id_var
@@ -84,12 +84,12 @@ def _fake_claim_provider(monkeypatch):
         chunk_text = messages[-1].content
         calls.append(chunk_text)
         if "grundades" in chunk_text:
-            content = '["Bolaget grundades 2019 i Stockholm."]'
+            content = '[{"text": "Bolaget grundades 2019 i Stockholm.", "claim_type": "historical"}]'
         elif "hallucinera" in chunk_text:
             # Deliberately unrelated to the chunk text — simulates a hallucinated claim so
             # the grounding-score-based no_basis path can be tested against a real (if
             # fake) provider response, not just the pure function in isolation.
-            content = '["Katten har sju liv och bor pa manen."]'
+            content = '[{"text": "Katten har sju liv och bor pa manen.", "claim_type": "uncategorized"}]'
         else:
             content = "[]"
         return ChatResult(content=content, provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
@@ -111,6 +111,7 @@ async def test_extract_claims_binds_source_version_and_chunk(db_session, make_ve
     assert claim.source_id == document.id
     assert claim.chunk_id == chunk.id
     assert claim.claim_text == "Bolaget grundades 2019 i Stockholm."
+    assert claim.claim_type == ClaimType.historical
     assert claim.extraction_version == EXTRACTION_VERSION
 
 
@@ -233,6 +234,100 @@ def test_claims_isolated_between_owners(db_session, superuser_db, make_verified_
 
     _set_rls_user(db_session, user_a.id)
     assert db_session.query(KnowledgeClaim).count() == 1
+
+
+# --- P3: claim_type extraction ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_type",
+    ["idea", "decision", "task_reference", "vision", "technical", "historical", "uncategorized"],
+)
+async def test_each_valid_claim_type_round_trips(db_session, make_verified_user, monkeypatch, provider_type):
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _typed_chat(self, messages, model, **kwargs):
+        return ChatResult(
+            content=f'[{{"text": "Ett pastaende.", "claim_type": "{provider_type}"}}]',
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 5, "completion_tokens": 3},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _typed_chat)
+
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _make_chunk(db_session, user.id, document.id, "Ett pastaende i sitt sammanhang.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+    assert claims[0].claim_type == ClaimType(provider_type)
+
+
+@pytest.mark.asyncio
+async def test_unknown_claim_type_from_provider_defaults_to_uncategorized(db_session, make_verified_user, monkeypatch):
+    """A provider returning something outside P3's seven allowed values (a typo, a made-up
+    category) must never be trusted verbatim and must never be guessed into one of the other
+    six real values — it collapses to uncategorized, the claim itself is still kept."""
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _bogus_type_chat(self, messages, model, **kwargs):
+        return ChatResult(
+            content='[{"text": "Ett pastaende.", "claim_type": "not_a_real_type"}]',
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 5, "completion_tokens": 3},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _bogus_type_chat)
+
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _make_chunk(db_session, user.id, document.id, "Ett pastaende i sitt sammanhang.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+    assert len(claims) == 1
+    assert claims[0].claim_type == ClaimType.uncategorized
+
+
+@pytest.mark.asyncio
+async def test_legacy_plain_string_response_still_extracts_with_uncategorized_type(db_session, make_verified_user, monkeypatch):
+    """A provider ignoring the updated system prompt and returning the pre-P3 plain-string
+    contract (`["text", ...]`) must not have its claims silently dropped — the claim text is
+    still extracted, just with claim_type=uncategorized rather than crashing or discarding
+    it. Defense in depth against a provider not following instructions, not an expected
+    steady-state response shape."""
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _legacy_chat(self, messages, model, **kwargs):
+        return ChatResult(
+            content='["Ett pastaende i gammalt format."]', provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3}
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _legacy_chat)
+
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _make_chunk(db_session, user.id, document.id, "Ett pastaende i gammalt format har hant.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+    assert len(claims) == 1
+    assert claims[0].claim_text == "Ett pastaende i gammalt format."
+    assert claims[0].claim_type == ClaimType.uncategorized
+
+
+def test_claim_type_defaults_to_uncategorized_when_constructed_without_one(db_session, make_verified_user):
+    """The model-level default (not just the extraction pipeline's parsing) — a KnowledgeClaim
+    row created any other way (e.g. a future migration/backfill path) never ends up with a
+    NULL or missing claim_type."""
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    claim = _make_claim(db_session, user.id, doc.id)
+    assert claim.claim_type == ClaimType.uncategorized
 
 
 # --- assess_claim_confidence ---
