@@ -131,10 +131,45 @@ class GeminiProvider(LLMProvider):
         return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
+        """2026-07-28 incident: this call used to send only `content`, with no
+        `outputDimensionality` — Gemini's newer embedding models (e.g. gemini-embedding-001)
+        support Matryoshka Representation Learning and default to a MUCH larger vector (3072)
+        than app/models/document_chunk.py's fixed `vector(settings.embedding_dim)` column
+        (1536) when that field is omitted. The mismatch never surfaced here: this method
+        happily returned a 3072-length list, and the failure only appeared much later, deep
+        inside a raw pgvector INSERT error in app/rag/vector_store.py's upsert_chunks() —
+        exactly the kind of "duplicated assumption" (the schema's dimension and the actual
+        API response size silently expected to agree, never checked) settings.embedding_dim
+        exists to be the single source of truth for. Both fixes below make this provider
+        itself responsible for that contract instead of trusting the caller/schema to notice.
+        """
         if not self.is_configured():
             raise ProviderError("Google API-nyckel saknas.")
+        settings = get_settings()
         vectors = []
         for text in texts:
-            data = await self._post("embedContent", model, {"content": {"parts": [{"text": text}]}}, timeout)
-            vectors.append(data["embedding"]["values"])
+            data = await self._post(
+                "embedContent",
+                model,
+                {
+                    "content": {"parts": [{"text": text}]},
+                    "outputDimensionality": settings.embedding_dim,
+                },
+                timeout,
+            )
+            vector = data["embedding"]["values"]
+            if len(vector) != settings.embedding_dim:
+                # Fails loudly, HERE, at the provider boundary — before this vector can ever
+                # reach upsert_chunks()'s pgvector INSERT and surface as an opaque database
+                # error far from its actual cause. A model that ignores outputDimensionality
+                # entirely (or a future model with a different default) is caught by name,
+                # not by a generic "something about the insert failed".
+                raise ProviderError(
+                    f"Gemini-modellen {model!r} returnerade en embedding med {len(vector)} "
+                    f"dimensioner, men schemat kräver exakt {settings.embedding_dim} "
+                    "(settings.embedding_dim). Kontrollera att modellen stödjer "
+                    "outputDimensionality, eller byt till en modell/konfiguration som matchar "
+                    "kolumnens deklarerade dimension."
+                )
+            vectors.append(vector)
         return vectors

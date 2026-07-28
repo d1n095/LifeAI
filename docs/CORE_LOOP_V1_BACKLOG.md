@@ -23,6 +23,15 @@ mirrors so sandboxed sessions can build locally too — but that's a Dockerfile 
 tooling convenience, not a product need, and should get its own small PR with its own
 justification if someone wants it.
 
+**Correction (2026-07-28):** the actual backend *test suite* (`pytest tests/`) does NOT need
+Docker at all, and runs fine in this sandbox once given a real Postgres+Redis — only building
+the application's own Docker *images* is blocked. `pg_ctlcluster 16 main start` (a local
+Postgres already installed in this sandbox, just not running by default) plus
+`redis-server --daemonize yes` gets `DATABASE_URL`/`APP_DATABASE_URL`/`REDIS_URL` a real target
+without touching Docker — the full suite (535 passed, 1 intentionally skipped) ran this way
+while fixing the Gemini embedding-dimension bug below. Worth remembering before assuming "no
+Docker" means "no real test run."
+
 ## `restart: unless-stopped` did not visibly restart a SIGKILLed container within 30s in GitHub's Docker-in-Docker runner
 
 Found while building the restart-survival CI step (`.github/workflows/ci.yml`'s
