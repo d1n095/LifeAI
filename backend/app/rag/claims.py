@@ -11,27 +11,38 @@ tests/backend/test_claims.py's deterministic fake chat provider).
 import json
 import re
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
 from app.models.document import ActiveTruthStatus, Document
 from app.models.document_chunk import DocumentChunk
-from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, KnowledgeClaim
+from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 
-EXTRACTION_VERSION = "claims-v1"
+EXTRACTION_VERSION = "claims-v2"
 MAX_CLAIMS_PER_CHUNK = 8
 # Cost bound (DEL 14): one provider call per chunk, capped per document rather than
 # unbounded — a document with more chunks than this simply gets claims for its first N
 # chunks (a documented trade-off), not an aborted import and not an unbounded-cost call.
 MAX_CHUNKS_PER_DOCUMENT = 20
 
+# P3 (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.1): the exact seven values the plan
+# specifies — anything else a provider returns collapses to "uncategorized" (see
+# _coerce_claim_type below), never silently dropped and never guessed into one of the other
+# six just because the model said so.
+_VALID_CLAIM_TYPES = {t.value for t in ClaimType}
+
 CLAIM_EXTRACTION_SYSTEM_PROMPT = (
     "Du extraherar diskreta, testbara sakpåståenden ur en text. Svara ENDAST med en JSON-lista "
-    "av strängar, ett påstående per sträng — inget annat, ingen förklaring runt omkring. Ta "
-    "bara med påståenden som uttryckligen stöds av texten. Hitta inte på något som inte står "
-    "där. Om texten inte innehåller några tydliga sakpåståenden, svara med en tom lista []."
+    "av objekt, ett per påstående, på formen "
+    '{"text": "<påståendet>", "claim_type": "<typ>"} — inget annat, ingen förklaring runt '
+    "omkring. <typ> måste vara EXAKT ett av: idea, decision, task_reference, vision, "
+    "technical, historical, uncategorized — använd uncategorized om du är osäker, gissa "
+    "aldrig. Ta bara med påståenden som uttryckligen stöds av texten. Hitta inte på något som "
+    "inte står där. Om texten inte innehåller några tydliga sakpåståenden, svara med en tom "
+    "lista []."
 )
 
 # Document.ActiveTruthStatus has one more value (`superseded`) than ClaimStatus does — a
@@ -82,11 +93,26 @@ def _confidence_for_score(score: float) -> ClaimConfidence:
     return ClaimConfidence.no_basis
 
 
-def _parse_claims(raw: str) -> list[str]:
+def _coerce_claim_type(value: object) -> ClaimType:
+    """Never trusts the provider's own string verbatim — anything not exactly one of P3's
+    seven values (a typo, a made-up category, a wrong type entirely) collapses to
+    `uncategorized` rather than being guessed into one of the other six or raising."""
+    if isinstance(value, str) and value in _VALID_CLAIM_TYPES:
+        return ClaimType(value)
+    return ClaimType.uncategorized
+
+
+def _parse_claims(raw: str) -> list[tuple[str, ClaimType]]:
     """Providers occasionally wrap JSON in prose or a code fence despite the system prompt's
     instruction — pulls out the first well-formed JSON array found rather than requiring an
     exact match. Returns [] (never raises) on anything unparseable: a malformed extraction
-    response must not crash the import it's attached to."""
+    response must not crash the import it's attached to.
+
+    P3: the system prompt now asks for `{"text": ..., "claim_type": ...}` objects, but a
+    provider ignoring instructions and returning plain strings (the pre-P3 contract) is
+    handled the same defensive way — treated as claim_type=uncategorized rather than
+    discarded, so a claim already worth extracting is never silently dropped just because
+    its type couldn't be determined."""
     match = re.search(r"\[.*\]", raw, re.DOTALL)
     if not match:
         return []
@@ -96,7 +122,18 @@ def _parse_claims(raw: str) -> list[str]:
         return []
     if not isinstance(parsed, list):
         return []
-    return [str(item).strip() for item in parsed if str(item).strip()]
+
+    results: list[tuple[str, ClaimType]] = []
+    for item in parsed:
+        if isinstance(item, dict):
+            text = str(item.get("text", "")).strip()
+            claim_type = _coerce_claim_type(item.get("claim_type"))
+        else:
+            text = str(item).strip()
+            claim_type = ClaimType.uncategorized
+        if text:
+            results.append((text, claim_type))
+    return results
 
 
 async def extract_claims_for_document(
@@ -136,7 +173,7 @@ async def extract_claims_for_document(
         except ProviderError:
             continue
 
-        for claim_text in _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]:
+        for claim_text, claim_type in _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]:
             score = grounding_score(claim_text, chunk.text)
             claim = KnowledgeClaim(
                 owner_id=owner_id,
@@ -145,6 +182,7 @@ async def extract_claims_for_document(
                 chunk_id=chunk.id,
                 project_id=document.project_id,
                 claim_text=claim_text,
+                claim_type=claim_type,
                 status=claim_status,
                 confidence=_confidence_for_score(score),
                 grounding_score=score,
@@ -156,3 +194,137 @@ async def extract_claims_for_document(
     if created:
         db.commit()
     return created
+
+
+# --- P3 backfill: retroactive claim_type for pre-existing rows -----------------------------
+#
+# 2026-07-28 gap found in review: migration 0018 left every EXISTING knowledge_claims row at
+# claim_type=uncategorized, and _import_one_file's checksum-idempotency check reports an
+# already-`indexed` document as "duplicate" without ever calling extract_claims_for_document
+# again (see app/rag/library_import.py) — so a document imported before this PR would never
+# organically get typed claims. Re-running extract_claims_for_document is NOT the fix: it
+# creates NEW KnowledgeClaim rows, which would duplicate every already-extracted claim. This
+# backfill instead UPDATES claim_type in place on existing rows — same id, same source_id/
+# version_id/chunk_id/project_id/status/confidence/grounding_score, same relationships,
+# nothing else touched.
+
+BACKFILL_BATCH_SIZE = 20
+
+CLAIM_TYPE_BACKFILL_SYSTEM_PROMPT = (
+    "Du klassificerar redan extraherade sakpåståenden. Du får en JSON-lista av strängar, ett "
+    "påstående per sträng. Svara ENDAST med en JSON-lista av EXAKT SAMMA LÄNGD, i SAMMA "
+    "ORDNING — en klassificering per påstående, på formen en sträng ur: idea, decision, "
+    "task_reference, vision, technical, historical, uncategorized. Använd uncategorized om du "
+    "är osäker, gissa aldrig. Inget annat i svaret, ingen förklaring."
+)
+
+
+@dataclass
+class ClaimTypeBackfillResult:
+    candidates_total: int = 0
+    typed: int = 0
+    still_uncategorized: int = 0
+    failed: int = 0
+
+
+def _parse_backfill_types(raw: str, expected_count: int) -> list[ClaimType] | None:
+    """Returns None (never raises) when the response can't be trusted to line up 1:1 with
+    the batch it was asked to classify — a length mismatch is exactly as unusable as
+    unparseable JSON here, since a caller has no reliable way to know WHICH claim a given
+    entry in a shorter/longer list was meant for. The whole batch is then left untouched and
+    retried on the next backfill run (see backfill_claim_types), never partially guessed."""
+    match = re.search(r"\[.*\]", raw, re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, list) or len(parsed) != expected_count:
+        return None
+    return [_coerce_claim_type(item) for item in parsed]
+
+
+async def backfill_claim_types(
+    db: Session,
+    owner_id: uuid.UUID,
+    *,
+    batch_size: int = BACKFILL_BATCH_SIZE,
+    max_batches: int | None = None,
+) -> ClaimTypeBackfillResult:
+    """Idempotent, resumable retroactive classification for KnowledgeClaim rows created
+    before P3 (or by any provider that ignored the typed contract): reclassifies claim_type
+    IN PLACE, never creates a row, never touches claim_text/source_id/version_id/chunk_id/
+    project_id/status/confidence/grounding_score or any claim_relationships row.
+
+    Candidate filter is deliberately narrow: `claim_type == uncategorized AND
+    extraction_version != EXTRACTION_VERSION`. A row already classified as uncategorized BY
+    THIS backfill (or by the current typed extraction pipeline) has its extraction_version
+    bumped to EXTRACTION_VERSION regardless of the resulting type — that's what makes a
+    genuinely-ambiguous claim (the model's honest "uncategorized" answer) settle instead of
+    being re-queried forever, and is exactly why re-running this twice in a row is a no-op:
+    nothing left matches the filter. A row left untouched by a provider failure keeps its OLD
+    extraction_version, so it's still a candidate next run — safely retryable, not silently
+    abandoned.
+
+    The caller's session must already have app.current_user_id set to owner_id (same
+    precondition as extract_claims_for_document) — this only ever runs within one owner's RLS
+    scope, one owner at a time, matching how every admin-triggered maintenance job in this
+    codebase already works (see app/routers/admin.py's cleanup endpoint).
+
+    A failed batch (provider error, or a response that can't be trusted to line up 1:1 — see
+    _parse_backfill_types) is deliberately excluded from the candidate query for the REST OF
+    THIS CALL (via failed_ids below) — a failed row keeps its old extraction_version so it's
+    still a real candidate on the NEXT separate backfill_claim_types call, but without this
+    exclusion the very same still-uncategorized, still-old-version rows would be re-queried
+    and re-fail every single loop iteration, forever, since nothing about them ever changes
+    within one run. max_batches=None (the default) means "process every real candidate," not
+    "retry the same failing batch unboundedly." """
+    result = ClaimTypeBackfillResult()
+    batches_done = 0
+    failed_ids: set[uuid.UUID] = set()
+
+    while max_batches is None or batches_done < max_batches:
+        query = db.query(KnowledgeClaim).filter(
+            KnowledgeClaim.owner_id == owner_id,
+            KnowledgeClaim.claim_type == ClaimType.uncategorized,
+            KnowledgeClaim.extraction_version != EXTRACTION_VERSION,
+        )
+        if failed_ids:
+            query = query.filter(KnowledgeClaim.id.notin_(failed_ids))
+        candidates = query.order_by(KnowledgeClaim.created_at.asc()).limit(batch_size).all()
+        if not candidates:
+            break
+
+        result.candidates_total += len(candidates)
+        messages = [
+            Message(role="system", content=CLAIM_TYPE_BACKFILL_SYSTEM_PROMPT),
+            Message(role="user", content=json.dumps([c.claim_text for c in candidates])),
+        ]
+        try:
+            chat_result, _ = await chat_with_fallback(db, messages)
+        except ProviderError:
+            result.failed += len(candidates)
+            failed_ids.update(c.id for c in candidates)
+            batches_done += 1
+            continue
+
+        types = _parse_backfill_types(chat_result.content, len(candidates))
+        if types is None:
+            result.failed += len(candidates)
+            failed_ids.update(c.id for c in candidates)
+            batches_done += 1
+            continue
+
+        for claim, claim_type in zip(candidates, types):
+            claim.claim_type = claim_type
+            claim.extraction_version = EXTRACTION_VERSION
+            db.add(claim)
+            if claim_type == ClaimType.uncategorized:
+                result.still_uncategorized += 1
+            else:
+                result.typed += 1
+        db.commit()
+        batches_done += 1
+
+    return result

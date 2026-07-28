@@ -12,6 +12,7 @@ from app.models.usage import UsageLog
 from app.models.user import User
 from app.providers.registry import get_provider, provider_names
 from app.providers.verification import latest_check, verify_now
+from app.rag.claims import backfill_claim_types
 from app.schemas import (
     ProviderConfigIn,
     ProviderConfigOut,
@@ -182,3 +183,48 @@ def trigger_cleanup(request: Request, db: Session = Depends(get_db), user: User 
     if counts is None:
         return {"status": "skipped", "reason": "another cleanup run holds the lock"}
     return {"status": "completed", "purged": counts}
+
+
+MAX_BACKFILL_BATCHES_PER_REQUEST = 10
+
+
+@router.post("/claims/backfill-types")
+async def trigger_claim_type_backfill(
+    request: Request,
+    max_batches: int = MAX_BACKFILL_BATCHES_PER_REQUEST,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """P3 gap fix (2026-07-28): migration 0018 left every pre-existing knowledge_claims row
+    at claim_type=uncategorized, and the normal import path never re-classifies an
+    already-`indexed` document's claims (see app/rag/claims.py's backfill_claim_types
+    docstring for the full rationale). Manual trigger, same pattern as /cleanup above — safe
+    to call repeatedly (idempotent, see that docstring), and safe to interrupt (each batch
+    commits before the next one starts, so a partial run just leaves fewer candidates for the
+    next call, never a duplicate or a half-written row).
+
+    2026-07-28 correction: bounded to a capped number of batches per HTTP call rather than
+    running unbounded inside one request — a large library would otherwise hold the
+    connection open indefinitely with no job row, no progress visible to any other request,
+    and no lease if the request itself dies mid-run. A caller with more candidates than one
+    call covers simply calls this again (idempotent — already-typed claims are skipped, see
+    backfill_claim_types), until `candidates_total` comes back 0. The real fix — running this
+    as a durable memory_processing_jobs job with its own status/lease/retry, the same
+    worker-container pattern app/worker.py already uses for imports — is tracked as the next
+    step before this is exposed for a library at real scale; this cap is the interim safety
+    net, not the final design."""
+    max_batches = max(1, min(max_batches, MAX_BACKFILL_BATCHES_PER_REQUEST))
+    result = await backfill_claim_types(db, user.id, max_batches=max_batches)
+    record_audit(
+        db,
+        user_id=user.id,
+        action="claim_type_backfill_triggered",
+        detail=str(result.__dict__),
+        request=request,
+    )
+    return {
+        "candidates_total": result.candidates_total,
+        "typed": result.typed,
+        "still_uncategorized": result.still_uncategorized,
+        "failed": result.failed,
+    }

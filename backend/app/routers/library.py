@@ -310,6 +310,7 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
         KnowledgeClaimOut(
             id=c.id,
             claim_text=c.claim_text,
+            claim_type=c.claim_type.value,
             status=c.status.value,
             confidence=assess_claim_confidence(db, c).value,
             grounding_score=c.grounding_score,

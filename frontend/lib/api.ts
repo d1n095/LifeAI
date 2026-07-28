@@ -280,10 +280,14 @@ export type SourceRelationshipItem = {
 
 export type ClaimConfidence = "certain" | "likely" | "uncertain" | "conflict" | "no_basis";
 export type ClaimStatus = "active" | "historical" | "proposed" | "disputed";
+// P3 (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.1): what the claim actually IS, distinct
+// from ClaimStatus (whether it's currently settled) and ClaimConfidence (how well-supported).
+export type ClaimType = "idea" | "decision" | "task_reference" | "vision" | "technical" | "historical" | "uncategorized";
 
 export type KnowledgeClaimItem = {
   id: string;
   claim_text: string;
+  claim_type: ClaimType;
   status: ClaimStatus;
   confidence: ClaimConfidence;
   grounding_score: number;

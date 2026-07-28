@@ -360,6 +360,7 @@ class KnowledgeClaimOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     claim_text: str
+    claim_type: str  # P3: idea | decision | task_reference | vision | technical | historical | uncategorized
     status: str
     confidence: str  # computed via app/rag/trust.py's assess_claim_confidence(), not the stored extraction-time value
     grounding_score: float

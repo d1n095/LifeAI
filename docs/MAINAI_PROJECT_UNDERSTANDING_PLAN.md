@@ -110,7 +110,7 @@ lagrat.** Det paketet löste "filen försvinner aldrig" — det löste inte "Mai
 |---|---|---|---|
 | 1 | **Originalminne** | ✅ Byggt (PR #6) | — |
 | 2 | **Källminne** | ✅ Byggt | — |
-| 3 | **Fakta-/påståendeminne** | 🟡 Delvis | `claim_type` (idé/beslut/uppgift/vision/teknisk/historisk) saknas — bara status/confidence finns idag, inte VILKEN SORTS påstående det är |
+| 3 | **Fakta-/påståendeminne (dokument)** | ✅ Byggt (P3, 2026-07-28) | `claim_type` (idea/decision/task_reference/vision/technical/historical/uncategorized) extraheras nu i samma AI-anrop som påståendetexten (`app/rag/claims.py`) för NYA claims, och `backfill_claim_types()` (samma fil) klassificerar retroaktivt alla claims som skapades före P3 — idempotent, omstartssäker, uppdaterar bara `claim_type` in place, skapar aldrig nya rader. Manuellt triggerbar via `POST /api/admin/claims/backfill-types`. Se P4 för nästa steg: sortering till `project_entities`. **Konversationer/meddelanden är INTE en källa till fakta-/påståendeminnet ännu** — se den öppna arkitekturfrågan om `Conversation`/`Message` som förstklassig minneskälla (kräver en additiv, delad proveniensmodell innan P4/P6 kan byggas för den kedjan). |
 | 4 | **Projektminne** | 🟡 Delvis | `Project`/`Task` finns men är INTE länkade till de källor/påståenden som gav upphov till dem — inget `derived_from` mellan en uppgift och det dokument som föreslog den |
 | 5 | **Idéminne** | 🔴 Saknas i stort | Workbench kan spara en analys märkt "idea", men ingen struktur för alternativa lösningar, varför idén uppstod, eller kopplingar mellan idéer |
 | 6 | **Beslutsminne** | 🟡 Delvis | `active`+`decisions`+`supersedes` ger grunden, men "vem/när/varför" utöver `created_at` finns bara som fri text i en relations `note` |

@@ -48,6 +48,16 @@ const CLAIM_CONFIDENCE_COLORS: Record<string, string> = {
   no_basis: "bg-white/10 text-white/50",
 };
 
+const CLAIM_TYPE_LABELS: Record<string, string> = {
+  idea: "Idé",
+  decision: "Beslut",
+  task_reference: "Uppgift",
+  vision: "Vision",
+  technical: "Tekniskt",
+  historical: "Historik",
+  uncategorized: "Okategoriserat",
+};
+
 // useSearchParams() requires a Suspense boundary above it (Next.js App Router) so the page
 // can still be statically prerendered — same pattern as app/reset-password/page.tsx.
 export default function LibrarySourceDetailPage() {
@@ -314,7 +324,8 @@ function LibrarySourceDetailInner() {
                 </span>
               </div>
               <div className="mt-1 text-[11px] text-white/30">
-                {STATUS_LABELS[c.status] || c.status} · underlag {(c.grounding_score * 100).toFixed(0)}%
+                {CLAIM_TYPE_LABELS[c.claim_type] || c.claim_type} · {STATUS_LABELS[c.status] || c.status} · underlag{" "}
+                {(c.grounding_score * 100).toFixed(0)}%
               </div>
             </li>
           ))}

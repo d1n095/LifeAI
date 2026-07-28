@@ -22,6 +22,32 @@ class ClaimStatus(str, enum.Enum):
     disputed = "disputed"
 
 
+class ClaimType(str, enum.Enum):
+    """P3 (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.1): a coarse classification of WHAT a
+    claim actually is, extracted in the same AI call as the claim text itself for every NEW
+    claim (see app/rag/claims.py) — the input P4's later interpretation queue reads to decide
+    whether a claim should become a project_entities row (idea/decision/task_reference) or
+    stay a plain fact. A wrong/uncertain classification is `uncategorized`, never a guess
+    dressed up as one of the other six values.
+
+    A claim created before P3 existed (or by any extraction pass that predates this column)
+    starts at `uncategorized` too, but that is NOT its permanent state: app/rag/claims.py's
+    backfill_claim_types() retroactively classifies exactly these rows in place, in bounded
+    batches, without ever creating a new KnowledgeClaim — see that function's docstring for
+    the idempotency/retry contract. `uncategorized` therefore means one of two things
+    depending on `extraction_version`: "not yet classified, still a backfill candidate" (an
+    old extraction_version) or "classified and genuinely ambiguous, settled" (the current
+    extraction_version) — never confuse the two without checking extraction_version too."""
+
+    idea = "idea"
+    decision = "decision"
+    task_reference = "task_reference"
+    vision = "vision"
+    technical = "technical"
+    historical = "historical"
+    uncategorized = "uncategorized"
+
+
 class ClaimConfidence(str, enum.Enum):
     """The UI-facing confidence bucket DEL 8 asks for: certain, likely, uncertain, conflict,
     no basis. Computed by app/rag/trust.py's assess_claim_confidence() from the claim's
@@ -71,6 +97,7 @@ class KnowledgeClaim(Base):
     )
     project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True, index=True)
     claim_text: Mapped[str] = mapped_column(Text)
+    claim_type: Mapped[ClaimType] = mapped_column(Enum(ClaimType), default=ClaimType.uncategorized)
     status: Mapped[ClaimStatus] = mapped_column(Enum(ClaimStatus), default=ClaimStatus.proposed)
     confidence: Mapped[ClaimConfidence] = mapped_column(Enum(ClaimConfidence), default=ClaimConfidence.uncertain)
     grounding_score: Mapped[float] = mapped_column(Float, default=0.0)
