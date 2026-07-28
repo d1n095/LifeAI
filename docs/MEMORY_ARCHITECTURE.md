@@ -282,6 +282,30 @@ base" abstractly — it points at the exact `MemoryRecord` ids its content was a
 generated from, so "show me the source for this specific sentence" is a direct lookup, not a
 re-run of retrieval hoping to reproduce the same result.
 
+**2026-07-28: near-term concrete mapping.** This section's `Provenance.origin_type`/
+`origin_ref` describe the TARGET shape; `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.8/§4.9
+is the concrete, additive schema actually being built toward it (S1–S3, §8's build order),
+under the name `MemorySourceUnit` rather than `Provenance` — same idea, different phase of
+concreteness:
+- `origin_type="upload"`/`"conversation_extract"` map onto `memory_source_units.source_kind
+  ∈ {document, message}`, with `document_source_units`/`message_source_units` as the real,
+  FK-checked subtype tables (an exclusive-arc pattern via table existence, not a nullable-FK
+  CHECK) rather than this section's single generic `origin_ref: str`.
+  `KnowledgeClaim.memory_source_id` is the near-term equivalent of a `MemoryRecord`'s own id
+  being its own provenance anchor.
+- `derived_from` (this section) maps onto the near-term `knowledge_claim_evidence` table
+  (`claim_id`, `memory_source_id`, `evidence_role: direct|context|supports|contradicts`) —
+  the near-term model additionally distinguishes a claim's ONE primary source from its
+  supporting/contradicting evidence, which this section's flat `derived_from: list[UUID]`
+  doesn't yet.
+- This section's `checksum` field maps onto `memory_source_units.content_hash` — but see the
+  near-term plan's explicit hard rule: content hash is integrity/technical-dedup ONLY, never
+  a merge key for two episodically-distinct events with identical text (e.g. "Ja" said three
+  times about three different projects on three different days).
+- Scopes (§5) and trust/aging/conflict-resolution (§6/§9/§10) remain future phases (this
+  section's own §15 migration path already says so) — nothing in the near-term plan
+  contradicts them, it just hasn't reached that phase yet.
+
 ---
 
 ## 8. Version history

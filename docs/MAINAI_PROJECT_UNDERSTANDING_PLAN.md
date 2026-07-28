@@ -114,7 +114,7 @@ lagrat.** Det paketet löste "filen försvinner aldrig" — det löste inte "Mai
 | 4 | **Projektminne** | 🟡 Delvis | `Project`/`Task` finns men är INTE länkade till de källor/påståenden som gav upphov till dem — inget `derived_from` mellan en uppgift och det dokument som föreslog den |
 | 5 | **Idéminne** | 🔴 Saknas i stort | Workbench kan spara en analys märkt "idea", men ingen struktur för alternativa lösningar, varför idén uppstod, eller kopplingar mellan idéer |
 | 6 | **Beslutsminne** | 🟡 Delvis | `active`+`decisions`+`supersedes` ger grunden, men "vem/när/varför" utöver `created_at` finns bara som fri text i en relations `note` |
-| 7 | **Grundarminne** | 🔴 Saknas helt | `app/context/resolver.py` klassificerar konversationsturer (idé värd att spara, explicit minneskommando, etc.) men sparar INGENTING beständigt — rent observationellt, ingen tabell |
+| 7 | **Grundarminne** | 🔴 Saknas helt | `app/context/resolver.py` klassificerar konversationsturer (idé värd att spara, explicit minneskommando, etc.) men sparar INGENTING beständigt — rent observationellt, ingen tabell. **2026-07-28-revidering (§6.11):** P6 begränsas INTE längre till bara resolver-flaggade turer — resolvern blir en prioritetssignal (snabbspår), medan en generell bakgrundspipeline (S5, §8) analyserar all konversationshistoria via samma `memory_source_units`/`KnowledgeClaim`-kedja som dokument. Kräver S1–S3 (§8) byggda först. |
 | 8 | **MainAI:s konstitution** | 🔴 Saknas helt (delas i **P7A** tidig ingestion + **P7B** sen aktivering, se §6.7) | P7A: ingen mekanism idag för att importera/identifiera/versionera möjliga styrdokument. P7B: ingen mekanism för att ett GODKÄNT sådant faktiskt ska påverka beteendet — `app/routers/chat.py`s systemprompt är en hårdkodad konstant |
 
 Utöver de åtta lagren, tre till konkreta luckor:
@@ -320,6 +320,106 @@ och väntar på en giltig provider-nyckel", med en knapp för att trigga om work
 
 ---
 
+### 4.8 Universell proveniens — `MemorySourceUnit` (2026-07-28, tre granskningsrundor)
+
+**Problemet detta löser:** `KnowledgeClaim.source_id` pekar idag hårt på `documents.id`. En
+konversation har ingen `Document`-rad att peka på, och framtida källor (GitHub, webb, e-post,
+media) skulle annars vardera kräva sin egen nullable `source_X_id`-kolumn på `KnowledgeClaim`
+— exakt den datamodellssprawl `docs/BRANCH_REGISTRY.md`s grundprincip varnar för. Ett enda
+polymorft `(source_type, source_id)`-par löser sprawl men ger upp riktig FK-integritet. Lösningen
+nedan ger varken sprawl eller förlorad integritet.
+
+```
+memory_source_units
+  id, owner_id
+  source_kind        -- document | message | media_segment | github_snapshot | web_capture | ...
+  source_role        -- founder | assistant | external — VEM som producerade DENNA atomära enhet
+  project_id          -- nullable, känt i förväg eller satt senare av P4
+  occurred_at          -- när materialet faktiskt skapades/sades, inte när det ingesterades
+  content_hash         -- sha256, ENDAST integritetskontroll/teknisk dedup — se hård regel nedan
+  created_at
+
+document_source_units              message_source_units
+  memory_source_id (PK, FK)          memory_source_id (PK, FK)
+  document_id                        conversation_id
+  version_id (nullable)              message_id
+  chunk_id (nullable)                sequence_number
+```
+
+**Atomär enhet, inte analysfönster:** en `memory_source_units`-rad är den MINSTA odelbara
+källan — ETT `DocumentChunk`, ETT `Message`, framtida ETT `MediaSegment`/EN GitHub-snapshotdel.
+Ett `ConversationSegment` (nedan) är ett analysfönster som GRUPPERAR flera redan-existerande
+`memory_source_units`-rader i ordning — det är aldrig självt en källa och har ingen egen
+`source_role`. `source_role` sitter uteslutande på den atomära enheten (vilket exakt
+`Message`/`DocumentChunk` det var), aldrig på segmentet — annars kan promotion (§6.10) inte
+skilja "grundaren sa exakt detta" från "MainAI föreslog detta", vilket är precis den
+attribueringsbugg tre granskningsrundor hittade i tidigare utkast av den här modellen.
+
+**`KnowledgeClaim.memory_source_id`** blir claimens PRIMÄRA, exakta källa (ett enda
+`Message` eller `DocumentChunk` — aldrig ett helt segment). Kontextberoende svar ("exakt",
+"gör så", "det där blev fel") löses INTE genom att göra primärkällan mindre exakt, utan genom
+en separat bevistabell:
+
+```
+knowledge_claim_evidence
+  claim_id, memory_source_id
+  evidence_role        -- direct | context | supports | contradicts
+```
+
+Exempel: Assistant föreslår alternativ B → grundaren svarar "Exakt, vi kör på det." → claimen
+"beslut: kör på alternativ B" har `memory_source_id` = grundarens "Exakt"-meddelande (primär,
+`source_role=founder`) och en `knowledge_claim_evidence`-rad med `evidence_role=context` som
+pekar på assistant-meddelandet där B beskrevs. Beslutet attribueras korrekt till grundaren —
+assistant-meddelandet är bevis på VARFÖR, inte VEM som bestämde.
+
+**Fasad migrationsplan för `KnowledgeClaim.source_id`/`version_id`/`chunk_id` (inga
+destruktiva ändringar nu):**
+1. Lägg till `memory_source_units`/`document_source_units`/`message_source_units`/
+   `knowledge_claim_evidence` samt `KnowledgeClaim.memory_source_id` (nullable) — rent additivt.
+2. Backfilla: skapa en `memory_source_units`+`document_source_units`-rad för varje BEFINTLIG
+   `KnowledgeClaim`-rad, sätt dess `memory_source_id`.
+3. Dual-write: `extract_claims_for_document` sätter BÅDE de gamla kolumnerna OCH
+   `memory_source_id` för varje ny claim.
+4. `memory_source_id` blir kanonisk källa för allt nytt kodbaserat (P4:s frågor,
+   `knowledge_claim_evidence`, konversationsclaims) — de gamla kolumnerna läses inte längre av
+   ny kod, men finns kvar.
+5. En uttrycklig, separat, granskad migration slutar läsa/skriva de gamla kolumnerna helt.
+6. En uttrycklig, separat, ANNU senare migration tar bort dem. De gamla kolumnerna får ALDRIG
+   bli en permanent parallell sanningskälla — steg 5/6 är inte valfria, bara medvetet senarelagda.
+
+**Hård regel om `content_hash`:** identisk text vid olika tillfällen är olika episodiska
+händelser ("Ja" sagt tre gånger om tre olika projekt). `message_id` är meddelandets identitet;
+`chunk_id`+`version_id` är dokumentsegmentets identitet. `content_hash` verifierar bara att
+innehållet inte korrumperats och används för begränsad TEKNISK deduplicering (t.ex. att inte
+skapa två `document_source_units` för exakt samma chunk-write) — den får ALDRIG slå ihop två
+olika `memory_source_units`-rader bara för att texten råkar matcha.
+
+### 4.9 `ConversationSegment` — analysfönster, versionshanterat
+
+```
+conversation_segments
+  id, owner_id, conversation_id
+  segmentation_version   -- vilken segmenteringsalgoritm som skapade detta segment
+  boundary_reason         -- new_conversation | long_gap | new_topic | project_change |
+                            -- explicit_return_to_thread | reply_reference
+  created_by              -- vilken process/version som stängde segmentet
+  start_message_id, end_message_id
+  roles_present            -- METADATA för visning ("founder+assistant") — styr ALDRIG promotion,
+                            -- se §6.10
+  project_id               -- nullable
+  created_at
+
+conversation_segment_members
+  segment_id, memory_source_id, ordinal
+```
+
+Segment är OFÖRÄNDERLIGA när stängda. En förbättrad segmenteringsalgoritm skapar en NY
+`segmentation_version` och nya segment-rader — aldrig en tyst omskrivning av gamla. Gränser
+härleds i första hand från `app/context/resolver.py`s redan existerande, testade signaler
+(`new_topic`-klassificering, `LONG_GAP`=30 min) — ingen ny segmenteringsheuristik uppfinns
+från grunden — utökat med projektbyte, explicit återgång till en tidigare tråd, och
+reply/reference-länkar till ett äldre meddelande.
+
 ## 5. Import- och minnesflöde: ZIP → långtidsminne
 
 ```
@@ -499,6 +599,83 @@ och `derived_from` gör skillnaden "det här är vad MainAI drog för slutsats" 
 vad källan faktiskt sa" till en strukturell, frågbar egenskap — inte bara en konvention i
 UI-texten.
 
+**2026-07-28: samma princip, uttryckligt för konversationer.** Promotion (en claim/ett förslag
+som når `interpretation_proposals.status=approved` och därigenom `project_entities`/
+`founder_memory_notes`) avgörs av `memory_source_units.source_role` på claimens PRIMÄRA
+källenhet (§4.8) — aldrig av `conversation_segments.roles_present`, som bara är visningsmetadata
+för ett helt segment. Konkret:
+- `source_role=founder` (claimens primära källa är grundarens eget meddelande): kan nå
+  `pending` fritt via automatisk extraktion, precis som dokumentclaims idag — samma
+  godkännandeflöde, ingen genväg.
+- `source_role=assistant` (claimens primära källa är MainAI:s eget meddelande): lagras och
+  analyseras — förslag, planer, kod, alternativ, felaktiga slutsatser som senare korrigerades
+  är värdefull historik — men får ALDRIG ensamt nå `status=active`/en beslutsentitet.
+  Promotion kräver ETT av: samma sakuppgift finns oberoende i en `founder`-sourcad claim,
+  en explicit grundargodkännande på just det förslaget, eller ett senare `founder`-sourcat
+  meddelande som uttryckligen bekräftar/ersätter det (en `project_entity_relationships`-rad
+  med `relationship_type=derived_from` eller `supersedes` tillbaka till assistant-claimen).
+- Ett segment med `roles_present={founder,assistant}` innehåller alltså BÅDA sorters claims
+  samtidigt, korrekt attribuerade var för sig — segmentets egen "mixed"-status styr aldrig
+  någon enskild claims promotion.
+
+### 6.11 Konversationer som förstklassig minneskälla (P3/P4/P6 tillsammans, inte ett fjärde system)
+`Conversation`/`Message` är redan episodiskt originalminne (lager 2, §2) — varje meddelande
+bevaras rått och oförändrat, ingen filtrering vid ingestion. Det som saknas är att koppla dem
+in i SAMMA `KnowledgeClaim`/`interpretation_proposals`/`project_entities`-kedja som dokument,
+inte ett separat "chat memory". Konkret, utökar redan beskrivna paket snarare än att lägga
+till ett nytt:
+- **P3** (§6.3): samma `claim_type`-taxonomi, samma `_parse_claims`/prompt-mönster, applicerad
+  på ett `conversation_segments`-fönster istället för en dokument-chunk — `extract_claims_for_
+  conversation_segment` blir `extract_claims_for_document`s syskon, inte en konkurrent.
+- **P4** (§6.4): läser claims oavsett ursprung (`memory_source_units.source_kind=document`
+  ELLER `message`) — `interpretation_proposals`/`project_entities` skiljer inte på källtyp,
+  bara på innehåll och `source_role`-baserad promotion (§6.10).
+- **P6** (§6.6): Context Resolver (`app/context/resolver.py`) blir en PRIORITETSSIGNAL, inte
+  den enda porten — en `INTENT_EXPLICIT_MEMORY`/`INTENT_IDEA_WORTH_SAVING`-klassad tur
+  fast-trackas direkt (hög prioritet, låg latens till `founder_memory_notes`), medan den
+  allmänna bakgrundspipelinen (segment-för-segment, §4.9) analyserar ALL konversationshistorik
+  asynkront, inte bara de turer resolvern flaggar. Det löser den tidigare för snäva
+  begränsningen ("bara explicit minne eller idé sparas") utan att göra resolverns redan
+  testade, snabba signal överflödig.
+- **Två separata backfills krävs**, inte en:
+  1. Dokumentclaim-backfill: `claim_type`-omtypning av BEFINTLIGA claims (§4.1, byggd — se
+     `app/rag/claims.py`s `backfill_claim_types`) OCH en separat extraktions-backfill för
+     `indexed`-dokument som saknar claims helt (misslyckad/aldrig körd/noll-träff extraktion)
+     — läser redan lagrade `DocumentChunk`-rader, ingen omindexering, deduplicerar på
+     `(memory_source_id, normaliserad claim_text)`.
+  2. Konversationsbackfill: historiska segment som aldrig analyserats — samma extraktion, bakåt
+     i tiden, samma dedupnyckel.
+  Båda körs som `memory_processing_jobs`-jobb (nedan), inte som obegränsade HTTP-anrop.
+
+### 6.12 `memory_processing_jobs` — generell arbetskö för minnesbearbetning, inte `knowledge_import_jobs`
+`knowledge_import_jobs` är uttryckligen fil-/ZIP-specifik (`source_filename`, `source_checksum`,
+`source_storage_key`, `file_results` per fil) — att lägga en `job_kind=conversation_backfill`
+där hade gett en massa irrelevanta nullable filfält i varje konversationsjobb. Istället, en ny,
+generell tabell som återanvänder EXAKT samma beprövade mönster (samma worker-container, samma
+`app/jobs/lease.py`-principer):
+
+```
+memory_processing_jobs
+  id, owner_id
+  job_kind             -- claim_type_backfill | claim_extraction_backfill |
+                        -- conversation_backfill | conversation_segment_extraction | ...
+  payload               -- JSON, job_kind-specifikt (t.ex. batch-gräns, datumintervall)
+  status                -- pending | running | completed | partial | failed | blocked
+  progress_current, progress_total
+  succeeded_count, failed_count, blocked_count
+  attempt_count, max_attempts
+  locked_by, lease_expires_at, last_heartbeat_at
+  failure_reason
+  created_at, started_at, completed_at
+```
+
+`app/worker.py`s pollloop utökas att claima BÅDE `knowledge_import_jobs` och
+`memory_processing_jobs` (två separata `claim_next_job`-varianter, samma
+`FOR UPDATE SKIP LOCKED`-mönster, samma lease/heartbeat/retry-kod) och dispatchar på
+`job_kind`. `POST /api/admin/claims/backfill-types` (den befintliga, batch-begränsade
+endpointen) blir en tunn kompatibilitetsväg som skapar ett `memory_processing_jobs`-jobb
+istället för att köra arbetet inline, en gång den här tabellen finns.
+
 ---
 
 ## 7. Säkerhets- och integritetsrisker
@@ -520,27 +697,52 @@ UI-texten.
 
 ## 8. Rekommenderad byggordning
 
+**Reviderad 2026-07-28** efter tre granskningsrundor av den universella proveniensmodellen
+(§4.8/§4.9/§6.11/§6.12). P3 (claim-typning för dokument, §6.3) är byggd och mergad
+(PR #29) — allt nedan är vad som ÅTERSTÅR, i ordning:
+
 ```
-P1   Provider-förhandsverifiering        ← FÖRST, blockerar riktig användning idag
-P2   ZIP-hårdning för massimport         ← krävs innan dina riktiga arkiv är säkra att ladda upp
-P7A  Tidig governance-ingestion          ← FLYTTAD TIDIGARE (denna revidering): kan börja så
-                                            fort P1/P2 är klara — inga beroenden till P3–P6,
-                                            ingen beteendepåverkan än (§6.7a)
-P3   Claim-typning                        ← litet, bygger direkt på STEG 10
-P6   Grundarminne + korrigeringsloop     ← kan byggas parallellt med P4, ingen hård beroendekedja
-P4   Tolkningskö + relationer + karta    ← det stora paketet, kräver P3
-P5   Första förståelserapporten          ← kräver P4 (är en vy ovanpå dess förslag)
-P7B  Governance enforcement              ← FORTFARANDE SIST, medvetet, egen granskning innan
-      (aktivering av konstitutionen)        start — kräver P4:s godkännandeinfrastruktur bevisad
+P1   Provider-förhandsverifiering        ← KLAR, mergad
+P2   ZIP-hårdning för massimport         ← KLAR, mergad
+P7A  Tidig governance-ingestion          ← kan börja när som helst efter P1/P2 — fryst,
+                                            inget separat beslut taget än (docs/BRANCH_REGISTRY.md)
+P3   Claim-typning (dokument)            ← KLAR, mergad (PR #29), inkl. retroaktiv backfill
+                                            för BEFINTLIGA claims (backfill_claim_types)
+
+--- återstår, ny ordning efter proveniens-granskningen ---
+
+S1   memory_source_units + document_source_units + message_source_units +
+     knowledge_claim_evidence + KnowledgeClaim.memory_source_id (nullable)
+                                          ← additiv migration, egen PR. Backfillar
+                                            memory_source_id för VARJE befintlig
+                                            dokumentclaim (fas 1–2 av §4.8:s cutover-plan)
+S2   conversation_segments + conversation_segment_members + segmenteringspass
+                                          ← återanvänder app/context/resolver.py:s
+                                            new_topic/LONG_GAP-signaler (§4.9), egen PR
+S3   memory_processing_jobs + worker-dispatch på job_kind
+                                          ← egen PR, ingen ny beteendepåverkan än — bara
+                                            infrastrukturen §6.12 beskriver
+S4   Dokumentclaim-extraktionsbackfill (saknade claims på indexed dokument, §6.11 punkt 1)
+                                          ← körs som ett memory_processing_jobs-jobb (S3)
+S5   extract_claims_for_conversation_segment (dual-write memory_source_id från start, §4.8
+     fas 3) + konversationsbackfill (historiska segment, §6.11 punkt 2)
+                                          ← ny källa in i SAMMA KnowledgeClaim-tabell
+P6   Grundarminne + korrigeringsloop     ← kan byggas parallellt med P4 (ingen hård
+                                            beroendekedja), men läser nu BÅDE resolverns
+                                            snabbspår OCH S5:s bakgrundspipeline (§6.11)
+P4   Tolkningskö + relationer + karta    ← det stora paketet, kräver P3 (klar) — sorterar
+                                            claims oavsett källa (dokument eller konversation)
+P5   Första förståelserapporten          ← kräver P4
+P7B  Governance enforcement              ← FORTFARANDE SIST, kräver P4:s
+      (aktivering av konstitutionen)        godkännandeinfrastruktur bevisad
 ```
 
-P1 och P2 är de enda som blockerar en riktig första massuppladdning. **P7A är flyttad tidigare
-i den här revideringen** — den kan starta direkt efter P1/P2, parallellt med P3, eftersom
-import/identifiering/versionering/jämförelse av möjliga styrdokument varken kräver eller
-påverkar P3–P6. P4/P5/P7B är det som gör MainAI till en aktiv projektledningspartner snarare än
-ett lagringsskåp — värdefullt, men inte blockerande för att börja mata in material säkert. P7B
-förblir sist eftersom AKTIVERING (till skillnad från ingestion) kräver att dubbelspärr- och
-granskningsmönstret redan är byggt och beprövat på lägre-risk-lager (P4) först.
+P1/P2/P3 blockerar inte längre något (klara). P7A kan fortfarande börja när som helst,
+oberoende av S1–S5/P4/P6. S1–S3 är ren infrastruktur (ingen ny data skapas, inget nytt
+beteende) och bör granskas/mergas FÖRE S4/S5 så att dokument- och konversationsbackfillen
+byggs direkt mot rätt tabellform istället för att behöva göras om. P7B förblir sist eftersom
+AKTIVERING (till skillnad från ingestion) kräver att dubbelspärr- och granskningsmönstret
+redan är byggt och beprövat på lägre-risk-lager (P4) först.
 
 ---
 
