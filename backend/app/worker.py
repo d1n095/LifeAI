@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
+from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.models.import_job import ImportJob, ImportJobStatus
@@ -133,7 +134,23 @@ class Worker:
         outcome = await ensure_verified(db, role="embedding")
         if outcome.result != VerificationResult.ok:
             return
-        db.execute(text("UPDATE knowledge_import_jobs SET status = 'pending' WHERE status = 'blocked'"))
+        # 2026-07-28 incident: a ZIP job where SOME files genuinely failed and OTHERS paused
+        # on awaiting_provider/blocked_provider rolls up to ImportJobStatus.partial, not
+        # `blocked` (see library_import.py's `elif failed and (succeeded or ... or blocked or
+        # ...)` branch) — the `blocked_count` column is still > 0 on that row, but the old
+        # `WHERE status = 'blocked'` here never matched it, so its stuck files sat forever
+        # even once the provider verified ok again. `_import_one_file`'s existing-document
+        # branch already re-reports a still-failed file as `failed` again (not silently
+        # reclassified as `duplicate`) on a resumed pass, so re-running a `partial` job here
+        # is safe: previously-succeeded files correctly no-op as duplicates, previously-failed
+        # files correctly stay counted as failed, and only the actually-blocked files are
+        # really re-attempted.
+        db.execute(
+            text(
+                "UPDATE knowledge_import_jobs SET status = 'pending' "
+                "WHERE status = 'blocked' OR (status = 'partial' AND blocked_count > 0)"
+            )
+        )
         db.commit()
 
     async def run_once(self) -> bool:
@@ -166,6 +183,12 @@ class Worker:
             self.settings.worker_concurrency,
         )
         while not self._shutdown.is_set():
+            # 2026-07-28: written on EVERY iteration, not just when a job is claimed — see
+            # app/jobs/heartbeat.py's module docstring for why ImportJob.last_heartbeat_at
+            # alone made an idle-but-healthy worker indistinguishable from a dead one. TTL is
+            # a generous multiple of the poll interval so a couple of slow cycles never flap
+            # the signal, while a genuinely crashed process still goes stale quickly.
+            record_worker_heartbeat(self.worker_id, ttl_seconds=max(60, self.settings.worker_poll_interval_seconds * 5))
             try:
                 worked = await self.run_once()
             except Exception:  # noqa: BLE001 - a poll-loop-level bug must never kill the whole worker process

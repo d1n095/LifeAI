@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from app.config import get_settings
+from app.jobs.heartbeat import record_worker_heartbeat
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
@@ -110,6 +111,31 @@ def test_worker_offline_with_pending_document(client, superuser_db, _fake_chat_o
     assert status["worker_reachable"] is False
     assert status["pending_count"] == 1
     assert "Worker" in status["message"] or "worker" in status["message"].lower()
+
+
+# --- 1b. Worker idle but healthy — no ImportJob has ever heartbeated, but the process-level
+# Redis heartbeat has (2026-07-28 incident) --------------------------------------------------
+
+
+def test_worker_idle_but_healthy_is_reachable_via_process_heartbeat_even_with_no_job_heartbeat(client, superuser_db, _fake_chat_ok):
+    """Before this fix, a worker that simply had nothing to claim yet (no ImportJob ever
+    renewed a lease) was indistinguishable from a genuinely dead one — _worker_reachable()
+    only had ImportJob.last_heartbeat_at to go on. record_worker_heartbeat() (written by
+    app/worker.py's poll loop on EVERY cycle, not just when a job is claimed) now makes this
+    case correctly report reachable=True."""
+    founder_id = _founder_id(superuser_db)
+    job = _make_import_job(superuser_db, founder_id, status=ImportJobStatus.pending, heartbeat=None)
+    _make_document(superuser_db, founder_id, "Vantande fil", status=IndexStatus.received, import_job_id=job.id)
+    record_worker_heartbeat("test-worker", ttl_seconds=60)
+    csrf = _login(client)
+
+    res = _chat(client, csrf)
+    assert res.status_code == 200, res.text
+    status = res.json()["context_status"]
+    # Still "files_processing" (a pending document with a reachable worker), NOT
+    # "worker_unavailable" — the whole point of this test.
+    assert status["reason"] == "files_processing"
+    assert status["worker_reachable"] is True
 
 
 # --- 2. Document awaiting provider (worker itself IS reachable) -------------------------------

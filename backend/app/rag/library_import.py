@@ -60,6 +60,16 @@ MEDIA_TYPES: dict[str, str] = {
 VALID_CLASSIFICATIONS = {c.value for c in KnowledgeClassification}
 VALID_TRUTH_STATUSES = {s.value for s in ActiveTruthStatus}
 
+# 2026-07-28: mirrors app/rag/context_status.py's _FAILED_STATUSES — a Document already in
+# one of these when _import_one_file sees it again (e.g. a resumed `partial` job) is a real,
+# still-unresolved failure, not a duplicate. See _import_one_file's existing-document branch.
+_FAILED_INDEX_STATUSES = (
+    IndexStatus.failed,
+    IndexStatus.storage_failed,
+    IndexStatus.extraction_failed,
+    IndexStatus.indexing_failed,
+)
+
 
 class JobCancelled(Exception):
     """Raised internally to unwind out of per-file processing the instant a cancellation is
@@ -276,12 +286,31 @@ async def _import_one_file(
     if existing is not None:
         # P1: a row already paused on the provider is NOT a duplicate — resume it in place
         # instead of creating a second Document/KnowledgeVersion (see
-        # _resume_blocked_document's docstring). Every other existing status (indexed, or any
-        # of the terminal *_failed statuses) is still a real duplicate, unchanged from before P1.
+        # _resume_blocked_document's docstring).
         if existing.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
             return await _resume_blocked_document(
                 db, existing, owner_id, filename, content, archive_path=archive_path, archive_chain=archive_chain
             )
+        # 2026-07-28 incident: a real, still-unresolved failure must keep reporting as
+        # "failed" on a resumed pass (e.g. app/worker.py's _requeue_blocked_jobs reprocessing
+        # a `partial` job to unstick its blocked files) — falling through to the generic
+        # "duplicate" outcome below would silently erase it from THIS pass's failed_count,
+        # since _run_once's summary (see that module) recomputes every count from scratch on
+        # each attempt rather than merging across attempts. A job with real failures could
+        # then flip straight to `completed` once its blocked files finally succeed, with the
+        # original failures never surfaced again anywhere. This never re-attempts
+        # extraction/embedding — the failure is already durably recorded on the Document row
+        # — it only reports it honestly again instead of masking it as a duplicate.
+        if existing.status in _FAILED_INDEX_STATUSES:
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=existing.error_message,
+                source_id=str(existing.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
+        # Every other existing status (indexed) is a real duplicate, unchanged from before P1.
         return FileOutcome(
             filename=filename,
             status="duplicate",

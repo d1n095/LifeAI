@@ -18,7 +18,9 @@ No real network call is ever made — every provider call in this file is monkey
 provider-method or httpx.AsyncClient level, exactly like the rest of the suite (see
 test_library_import.py's module docstring)."""
 
+import io
 import uuid
+import zipfile
 
 import httpx
 import pytest
@@ -62,6 +64,14 @@ def _read_chunk_for(data: bytes, size: int = 1 << 16):
 
 def _store(raw: bytes):
     return get_storage().write_stream(_read_chunk_for(raw), max_bytes=max(len(raw), 1))
+
+
+def _make_zip(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
 
 
 def _make_job(db_session, owner_id, raw: bytes, filename: str) -> ImportJob:
@@ -585,6 +595,88 @@ async def test_worker_requeues_blocked_jobs_once_provider_verifies_ok_and_reache
     # (7) no duplicate.
     assert db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="e2e.txt").count() == 1
     assert db_session.query(KnowledgeVersion).filter_by(source_id=first_doc_id).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_requeues_a_partial_job_and_never_loses_the_real_failure(db_session, superuser_db, make_verified_user, monkeypatch):
+    """2026-07-28 incident: a ZIP job with ONE file that genuinely fails (a manifest checksum
+    mismatch — real, permanent, nothing to do with the provider) and ANOTHER file that pauses
+    on an invalid embedding key rolls up to `ImportJobStatus.partial`, not `blocked` — the old
+    `_requeue_blocked_jobs` only matched `status = 'blocked'`, so this job's stuck file sat
+    forever even once the key was fixed. Proves both halves of the fix together: (1) the
+    requeue now picks up a `partial` job with `blocked_count > 0`, and (2) the genuinely
+    failed file is still reported as failed on the second pass — not silently reclassified as
+    `duplicate`, which would have erased it from the job's own count and let the job flip
+    straight to `completed` with the original failure never surfaced again."""
+    from app.worker import Worker
+
+    async def _raise_401(self, texts, model, *, timeout=None, **kwargs):
+        raise _status_error(401)
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _raise_401)
+    monkeypatch.setattr(get_settings(), "openai_api_key", "invalid-key")
+    monkeypatch.setattr(get_settings(), "provider_verification_cache_seconds", 0)
+
+    user, _ = make_verified_user()
+    manifest = b'{"documents": [{"file": "bad-checksum.txt", "checksum": "' + b"0" * 64 + b'"}]}'
+    raw = _make_zip(
+        {
+            "manifest.json": manifest,
+            "bad-checksum.txt": b"Den har filen har fel deklarerad checksumma i manifestet.",
+            "blocked-by-key.txt": b"Den har filen pausar forst pa en ogiltig leverantorsnyckel.",
+        }
+    )
+    job = _make_job(db_session, user.id, raw, "partial.zip")
+
+    # First cycle: one real failure (checksum mismatch, nothing to do with the provider), one
+    # provider-blocked file -> job rolls up to `partial`, not `blocked`.
+    worked = await Worker().run_once()
+    assert worked is True
+
+    superuser_db.expire_all()
+    job_row = superuser_db.get(ImportJob, job.id)
+    assert job_row.status == ImportJobStatus.partial
+    assert job_row.failed_count == 1
+    assert job_row.blocked_count == 1
+    assert job_row.succeeded_count == 0
+
+    blocked_doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="blocked-by-key.txt").first()
+    assert blocked_doc.status == IndexStatus.blocked_provider
+    blocked_doc_id = blocked_doc.id
+
+    # The founder fixes the key.
+    async def _fake_chat_ok(self, messages, model, *, timeout=None, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 1, "completion_tokens": 1})
+
+    async def _fake_embed_ok(self, texts, model, *, timeout=None, **kwargs):
+        return [[0.03] * get_settings().embedding_dim for _ in texts]
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok)
+    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed_ok)
+
+    # Second cycle: _requeue_blocked_jobs must now match this `partial` job (blocked_count >
+    # 0), not just ones already at `blocked`.
+    worked_again = await Worker().run_once()
+    assert worked_again is True
+
+    superuser_db.expire_all()
+    job_row2 = superuser_db.get(ImportJob, job.id)
+    # Still `partial` — one file really did fail and that must never disappear — but now with
+    # the previously-blocked file counted as succeeded, not as blocked or, worse, silently as
+    # a duplicate that erases the original failure from this pass's tally.
+    assert job_row2.status == ImportJobStatus.partial
+    assert job_row2.succeeded_count == 1
+    assert job_row2.blocked_count == 0
+    assert job_row2.failed_count == 1  # the real failure is still counted, not lost
+
+    db_session.expire_all()
+    resumed_doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="blocked-by-key.txt").first()
+    assert resumed_doc.status == IndexStatus.indexed
+    assert resumed_doc.id == blocked_doc_id  # same row, no duplicate
+
+    # The genuinely-failed file was never touched by the resume — no Document row was ever
+    # created for it in the first place (the checksum mismatch is rejected before that point).
+    assert db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="bad-checksum.txt").count() == 0
 
 
 # --- F. Migration safety -------------------------------------------------------------------

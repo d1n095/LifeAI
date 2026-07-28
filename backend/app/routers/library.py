@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
+from app.jobs.heartbeat import worker_process_alive
 from app.limiter import limiter
 from app.models.document import ActiveTruthStatus, Document, IndexStatus, KnowledgeClassification
 from app.models.document_chunk import DocumentChunk
@@ -446,13 +447,19 @@ def ops_status(db: Session = Depends(get_db), user: User = Depends(require_found
         .first()
     )
     last_heartbeat_at = last_heartbeat_row[0] if last_heartbeat_row else None
-    # "Reachable" = some worker renewed a lease recently enough that it can't have silently
-    # died without anyone noticing yet — a generous multiple of the lease itself (not the
-    # poll interval), since a worker with nothing to do simply never heartbeats at all
-    # between jobs; this only flags a worker that claimed a job and then went quiet mid-work.
-    worker_reachable = last_heartbeat_at is not None and (now - last_heartbeat_at) < timedelta(
-        seconds=settings.worker_lease_seconds * 3
-    )
+    # 2026-07-28: this ImportJob-based check only ever proves a worker claimed a job
+    # recently — a worker with nothing currently claimable never touches
+    # last_heartbeat_at at all, so on its own this under-reports a healthy-but-idle worker
+    # as unreachable. app/jobs/heartbeat.py's process-level Redis signal (written every poll
+    # cycle regardless of whether a job was claimed) is checked first when available; this
+    # older check remains the fallback for when that signal itself is unavailable.
+    worker_alive = worker_process_alive()
+    if worker_alive is not None:
+        worker_reachable = worker_alive
+    else:
+        worker_reachable = last_heartbeat_at is not None and (now - last_heartbeat_at) < timedelta(
+            seconds=settings.worker_lease_seconds * 3
+        )
 
     storage_writable = os.access(settings.storage_root, os.W_OK) if os.path.isdir(settings.storage_root) else False
     try:

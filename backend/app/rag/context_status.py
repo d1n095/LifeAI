@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.jobs.heartbeat import worker_process_alive
 from app.models.document import Document, IndexStatus
 from app.models.import_job import ImportJob
 
@@ -74,10 +75,18 @@ class ContextStatus:
 
 
 def _worker_reachable(db: Session, owner_id: uuid.UUID) -> bool:
-    """Identical freshness check to `app/routers/library.py`'s `ops_status()` — a worker that
-    claimed a job and renewed its lease recently enough that it can't have silently died.
-    Reads the same `ImportJob.last_heartbeat_at` column directly rather than importing from
-    the router, since routers stay a thin HTTP layer per `docs/MAINAI_ARCHITECTURE.md` §3."""
+    """2026-07-28: checks the process-level Redis heartbeat (app/jobs/heartbeat.py) FIRST —
+    written on every poll cycle regardless of whether a job was claimed, so a worker that's
+    simply idle (nothing currently in the queue) is correctly reported as reachable. Falls
+    back to the older `ImportJob.last_heartbeat_at`-based check (identical to
+    `app/routers/library.py`'s `ops_status()`) only when the heartbeat signal itself is
+    unavailable (Redis unreachable/not configured) — that older check only ever proves a
+    worker claimed a job recently, so on its own it under-reports a healthy-but-idle worker
+    as unavailable."""
+    alive = worker_process_alive()
+    if alive is not None:
+        return alive
+
     settings = get_settings()
     row = (
         db.query(ImportJob.last_heartbeat_at)
