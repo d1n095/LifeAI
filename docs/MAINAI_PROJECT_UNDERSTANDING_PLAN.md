@@ -471,6 +471,81 @@ destruktiva ändringar nu):**
 6. En uttrycklig, separat, ÄNNU senare migration tar bort dem. De gamla kolumnerna får ALDRIG
    bli en permanent parallell sanningskälla — steg 5/6 är inte valfria, bara medvetet senarelagda.
 
+**2026-07-28, FEMTE granskningsrundan — S1 delas i S1A/S1B/S1C, tio ytterligare korrigeringar
+innan någon Alembic-fil skrivs.** Ett `expand/backfill/contract`-mönster (inte en enda
+migration) och flera skarpa databuggar hittades i det tidigare DDL-utkastet:
+
+1. **`messages.sequence_number` kan INTE bli `NOT NULL` i samma migration som lägger till
+   den** — applikationsbackfillen hinner inte köra medan Alembic-migrationen fortfarande
+   exekverar; `SET NOT NULL` skulle misslyckas direkt mot befintliga meddelanden. Delas i
+   expand (nullable kolumn) → deploy (concurrency-säker dual-write för nya meddelanden) →
+   durable backfill av historik (`created_at, id`) → verifiera noll NULL/dubbletter →
+   contract (separat migration: `NOT NULL` + `UNIQUE(conversation_id, sequence_number)`).
+   Detta är nu **S1B**, inte en del av S1A.
+2. **Exclusive-arc-triggern hade fel vid UPDATE och vid parent-CASCADE-delete.** En UPDATE som
+   ändrar `memory_source_id` måste kontrollera BÅDE den gamla och den nya föräldern (annars
+   kan den gamla föräldern lämnas utan subtyp). En DELETE via parent-CASCADE raderar barnet
+   EFTER att föräldern redan är borta ur transaktionens synvinkel — kontrollfunktionen måste
+   då returnera utan fel istället för att leta efter en förälder som medvetet raderas. `INSERT`/
+   `UPDATE`/`DELETE` hanteras nu separat i triggerfunktionen (`TG_OP`), inte via ett generellt
+   `COALESCE(NEW, OLD)`.
+3. **Immutability är inte garanterad av att kolumnerna bara finns** — inget hindrade tidigare
+   en vanlig `UPDATE` från att ändra `content_text`/`content_hash`/`source_kind`/`source_role`/
+   `occurred_at` i efterhand. En BEFORE UPDATE-trigger blockerar nu ändring av dessa fält
+   uttryckligen; bara livscykelfält (`lifecycle_status`/`revoked_at`/`revocation_reason`) och
+   kontrollerade länkningsfält (`project_id`) får ändras genom vanlig `UPDATE`.
+4. **Gamla claims utan `chunk_id` kan inte få en sanningsenlig snapshot** — `KnowledgeVersion`
+   saknar den fullständiga källtexten. Ny `snapshot_status: exact | degraded | missing` på
+   `memory_source_units`. `content_text` FÅR ALDRIG fabriceras från `claim_text` för att
+   fylla en lucka — en `document_version`/`document_tombstone`-backfillad rad har
+   `content_text=NULL` och `snapshot_status` satt ärligt till `degraded`/`missing`.
+   `primary_grounding_score` beräknas bara som vanligt när `snapshot_status=exact`.
+5. **Ägarintegritet saknades på fler relationer än bara subtyp-mot-förälder** —
+   `knowledge_claim_evidence` behöver komposit-FK `(claim_id, owner_id) →
+   knowledge_claims(id, owner_id)` (kräver en ny `UNIQUE(id, owner_id)` på `knowledge_claims`)
+   OCH `(memory_source_id, owner_id) → memory_source_units(id, owner_id)`. Motsvarande gäller
+   `document_source_units`: en trigger verifierar att `chunk_id` faktiskt tillhör
+   `document_id`+samma `owner_id`, att `version_id` faktiskt tillhör `document_id`+samma
+   `owner_id`, och att `document_id` faktiskt tillhör angivet `owner_id` — RLS skyddar VEM som
+   får läsa/skriva, inte att en lagrad korskoppling är strukturellt korrekt.
+6. **`source_kind` måste faktiskt styra vilka fält som krävs**, inte bara vara en etikett: en
+   trigger validerar nu att `document_chunk` kräver `document_id`+`version_id`+`chunk_id` alla
+   satta, `document_version` kräver `document_id`+`version_id` men `chunk_id IS NULL`, och
+   `document_tombstone` kräver båda `NULL` OCH `snapshot_status != 'exact'`.
+7. **"Radera permanent" är INTE bara `content_text=NULL` + `lifecycle_status=purged`** — det
+   lämnar claims, evidence, metadata och hash kvar, alltså ingen verklig permanent radering.
+   Två tydligt separerade flöden: **revoke** (behåll snapshot/historik, uteslut ur
+   retrieval/tolkning/promotion, logga orsak+tid) kontra **permanent purge** (radera/anonymisera
+   snapshot+identifierande metadata/hash, radera eller ompröva claims/evidence/entities som
+   ENBART bygger på källan, behåll högst en innehållslös audit-tombstone om tillåtet enligt
+   den slutliga radera-konto-designen). `knowledge_claims.memory_source_id`s FK blir
+   `ON DELETE RESTRICT`, inte `SET NULL` — en bar `DELETE` kan då aldrig tyst lämna en
+   föräldralös claim; den kontrollerade purge-koden måste EXPLICIT hantera kopplade
+   claims/evidence först.
+8. **CHECK-constraints saknades** för alla varchar-uppräkningar (`source_kind`, `source_role`,
+   `lifecycle_status`, `snapshot_status`, `evidence_role`) samt koherens mellan
+   `lifecycle_status`/`revoked_at`/`content_text` (`active`→`revoked_at IS NULL`,
+   `revoked`→`revoked_at IS NOT NULL`, `purged`→`content_text IS NULL`).
+9. **`context_resolution_score` tas bort ur S1 helt.** Hur värdet beräknas, vad det mäter, vem
+   som skriver det, och hur det versionshanteras är inte fastslaget — det hör till P4, när
+   själva kontextupplösningslogiken faktiskt byggs, inte till proveniensskiktet.
+10. **Downgrade är inte säkert efter verklig användning.** En gång konversationskällor/nya
+    claims börjat använda `memory_source_id` skulle en `downgrade()` radera den enda
+    proveniensen för dem. Migrationens `downgrade()` vägrar nu explicit (raiser) om någon
+    `knowledge_claims`-rad redan har `memory_source_id IS NOT NULL` — reversibel bara FÖRE
+    cutover, roll-forward-only därefter, aldrig en tyst dataförstörande operation.
+
+**S1 delas i tre migrationer, inte en:**
+- **S1A** (nästa steg, se nedan för exakt DDL): `memory_source_units`/`document_source_units`/
+  `knowledge_claim_evidence`, nullable `KnowledgeClaim.memory_source_id`, snapshot/lifecycle/
+  immutability, deterministisk backfill av befintliga dokumentclaims, dual-write för nya.
+  INGA meddelandetabeller alls i S1A.
+- **S1B**: `messages.sequence_number` — expand (nullable) → dual-write-kod → durable historisk
+  backfill → verifiering → contract (separat migration: `NOT NULL`+`UNIQUE`).
+- **S1C**: `message_source_units` + ägar-/konversationsintegritet + backfill av
+  Message→MemorySourceUnit. Fortfarande ingen claim-extraktion från konversationer — det
+  kommer efter S1C, i sitt eget steg.
+
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
 ```
@@ -723,10 +798,15 @@ underlag för. Rätt lager för det tolkningssteget är P4, inte extraktionen:
   corroborates` — INTE `direct`, eftersom `KnowledgeClaim.memory_source_id` redan ÄR den
   direkta primärkällan; en fjärde "direct"-bevisroll vore en duplicerad sanning.
 - Två separata mätvärden, inte ett: `primary_grounding_score` (ordöverlapp mot primärkällans
-  egen text, dagens `grounding_score` omdöpt för tydlighet) och `context_resolution_score`
-  (hur väl P4:s föreslagna tolkning faktiskt stöds av kontextbevisen tillsammans) — att blanda
-  "ordagrant stödd av primärkällan" med "semantiskt upplöst genom samtalskontext" till EN
-  siffra skulle dölja precis den skillnad det här hela avsnittet handlar om.
+  egen text — dagens `grounding_score`, samma kolumn, bara begreppsmässigt förtydligad, ingen
+  destruktiv omdöpning i S1) och ett SENARE `context_resolution_score` (hur väl P4:s föreslagna
+  tolkning faktiskt stöds av kontextbevisen tillsammans) — att blanda "ordagrant stödd av
+  primärkällan" med "semantiskt upplöst genom samtalskontext" till EN siffra skulle dölja
+  precis den skillnad det här avsnittet handlar om. **2026-07-28-korrigering: `context_
+  resolution_score` läggs INTE till i S1** — beräkningssätt, betydelse, skrivare och
+  versionshantering är inte fastslaget förrän P4:s kontextupplösningslogik faktiskt byggs;
+  att lägga till ett halvdefinierat fält i proveniensskiktet vore att låsa fast ett kontrakt
+  ingen ännu vet formen på.
 
 ### 6.11 Konversationer som förstklassig minneskälla (P3/P4/P6 tillsammans, inte ett fjärde system)
 `Conversation`/`Message` är redan episodiskt originalminne (lager 2, §2) — varje meddelande
@@ -808,8 +888,8 @@ istället för att köra arbetet inline, en gång den här tabellen finns.
 
 ## 8. Rekommenderad byggordning
 
-**Reviderad 2026-07-28** efter tre granskningsrundor av den universella proveniensmodellen
-(§4.8/§4.9/§6.11/§6.12). P3 (claim-typning för dokument, §6.3) är byggd och mergad
+**Reviderad 2026-07-28** efter FEM granskningsrundor av den universella proveniensmodellen
+(§4.8/§4.9/§6.10/§6.11/§6.12). P3 (claim-typning för dokument, §6.3) är byggd och mergad
 (PR #29) — allt nedan är vad som ÅTERSTÅR, i ordning:
 
 ```
@@ -820,24 +900,30 @@ P7A  Tidig governance-ingestion          ← kan börja när som helst efter P1/
 P3   Claim-typning (dokument)            ← KLAR, mergad (PR #29), inkl. retroaktiv backfill
                                             för BEFINTLIGA claims (backfill_claim_types)
 
---- återstår, ny ordning efter proveniens-granskningen ---
+--- återstår, ny ordning efter proveniens-granskningen (S1 delat i S1A/S1B/S1C, §4.8) ---
 
-S1   memory_source_units + document_source_units + message_source_units +
-     knowledge_claim_evidence + KnowledgeClaim.memory_source_id (nullable)
-                                          ← additiv migration, egen PR. Backfillar
-                                            memory_source_id för VARJE befintlig
-                                            dokumentclaim (fas 1–2 av §4.8:s cutover-plan)
+S1A  memory_source_units + document_source_units + knowledge_claim_evidence +
+     KnowledgeClaim.memory_source_id (nullable) + snapshot/lifecycle/immutability +
+     deterministisk dokumentclaim-backfill + dual-write för nya dokumentclaims
+                                          ← additiv migration, egen PR. INGA meddelandetabeller.
+                                            Nästa konkreta steg — se §4.8:s exakta DDL-utkast.
+S1B  messages.sequence_number: expand (nullable) → dual-write-kod → durable historisk
+     backfill → verifiering → contract (separat migration: NOT NULL + UNIQUE)
+                                          ← egen PR, kräver S1A inte alls (oberoende spår)
+S1C  message_source_units + ägar-/konversationsintegritet + backfill Message→MemorySourceUnit
+                                          ← kräver S1B:s sequence_number klart, egen PR.
+                                            Fortfarande ingen claim-extraktion från konversationer.
 S2   conversation_segments + conversation_segment_members + segmenteringspass
-                                          ← återanvänder app/context/resolver.py:s
+                                          ← kräver S1C, återanvänder app/context/resolver.py:s
                                             new_topic/LONG_GAP-signaler (§4.9), egen PR
 S3   memory_processing_jobs + worker-dispatch på job_kind
-                                          ← egen PR, ingen ny beteendepåverkan än — bara
-                                            infrastrukturen §6.12 beskriver
+                                          ← egen PR, oberoende av S1A–S2, ingen ny
+                                            beteendepåverkan än — bara infrastrukturen §6.12 beskriver
 S4   Dokumentclaim-extraktionsbackfill (saknade claims på indexed dokument, §6.11 punkt 1)
-                                          ← körs som ett memory_processing_jobs-jobb (S3)
-S5   extract_claims_for_conversation_segment (dual-write memory_source_id från start, §4.8
-     fas 3) + konversationsbackfill (historiska segment, §6.11 punkt 2)
-                                          ← ny källa in i SAMMA KnowledgeClaim-tabell
+                                          ← kräver S1A+S3, körs som ett memory_processing_jobs-jobb
+S5   extract_claims_for_conversation_segment (dual-write memory_source_id från start) +
+     konversationsbackfill (historiska segment, §6.11 punkt 2)
+                                          ← kräver S2+S3, ny källa in i SAMMA KnowledgeClaim-tabell
 P6   Grundarminne + korrigeringsloop     ← kan byggas parallellt med P4 (ingen hård
                                             beroendekedja), men läser nu BÅDE resolverns
                                             snabbspår OCH S5:s bakgrundspipeline (§6.11)
