@@ -7,11 +7,29 @@ varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en kon
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`, inte memorerat) — PR #29 öppen, inte mergad, `mergeable_state:
-clean`, CI grönt (18/18 checkar, "All required checks passed") på head-SHA verifierad två
-gånger. Se Pass 9 för den senaste rundan (retroaktiv backfill + arkitekturkorrigering).
+(`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat) — **PR #29 mergad**
+som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8` innan merge, inte en
+äldre commit. **PR #30** (`claude/memory-source-unit-design`, minneskärnans proveniensmodell)
+öppen, inte mergad, ännu inget migrationsförslag godkänt — fjärde granskningsrundan pågår,
+se Pass 10.
 
-## Pass 9 (2026-07-28): PR #29 — retroaktiv claim_type-backfill + arkitekturkorrigering (konversationer som minneskälla)
+## Pass 10 (2026-07-28): PR #30 — fjärde granskningsrundan av MemorySourceUnit-modellen
+
+Ytterligare åtta korrigeringar innan någon S1-migration skrivs (source_role utökad med
+`system`/`unknown`, backfill defaultar till `unknown` inte `external`; `lifecycle_status`
+(`active|revoked|purged`) på `memory_source_units` istället för att förlita sig på
+`ON DELETE SET NULL` som enda livscykelmodell — nulägesbilden av Library-radering (soft
+delete: `Document` behålls, `deleted_at` sätts, chunks raderas) korrigerad; oföränderlig
+`content_text`-snapshot krävs eftersom varken `KnowledgeVersion` eller `DocumentChunk`
+garanterat bevarar källtexten; deferrable constraint-triggers för en verkligt
+databasupprätthållen exclusive arc; komposit-FK `(memory_source_id, owner_id)` för
+ägarintegritet; `Message.sequence_number` för deterministisk ordning; `document_chunk`
+kontra `document_version`/`document_tombstone` som explicit granularitet istället för ett
+odifferentierat `source_kind=document`; `knowledge_claim_evidence`s roller ändrade till
+`context|supports|contradicts|corroborates`, `direct` borttaget eftersom
+`KnowledgeClaim.memory_source_id` redan ÄR den direkta primärkällan). Reviderad DDL
+presenterad i konversationen, ännu inte skriven som Alembic-fil. Se PR #30 för den
+uppdaterade designdokumentationen.
 
 Grundaren granskade PR #29 och hittade en verklig, blockerande lucka: migration 0018 satte
 alla BEFINTLIGA `knowledge_claims`-rader till `claim_type=uncategorized`, och
