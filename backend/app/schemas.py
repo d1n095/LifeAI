@@ -398,6 +398,11 @@ class ImportJobOut(BaseModel):
     succeeded_count: int
     failed_count: int
     skipped_count: int
+    # 2026-07-28: was already tracked on the model (app/models/import_job.py) but never
+    # exposed here — the Library UI had no way to tell "13 files failed, 191 are still
+    # waiting on the provider" from a `partial` job without it, so a partial success looked
+    # identical to a plain "some failed" job.
+    blocked_count: int
     failure_reason: str | None
     manifest: dict | None
     file_results: list | None
