@@ -13,7 +13,7 @@ from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipTy
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
-from app.rag.claims import EXTRACTION_VERSION, backfill_claim_types, extract_claims_for_document, grounding_score
+from app.rag.claims import BACKFILL_BATCH_SIZE, EXTRACTION_VERSION, backfill_claim_types, extract_claims_for_document, grounding_score
 from app.rag.trust import assess_claim_confidence
 from app.request_context import current_user_id as current_user_id_var
 
@@ -562,6 +562,40 @@ async def test_backfill_genuinely_uncategorized_result_settles_and_is_not_retrie
     second = await backfill_claim_types(db_session, user.id)
     assert second.candidates_total == 0
     assert call_count["n"] == 1  # no second provider call
+
+
+@pytest.mark.asyncio
+async def test_backfill_respects_max_batches_per_call(db_session, make_verified_user, monkeypatch):
+    """2026-07-28 correction: the admin endpoint bounds max_batches so a large library can't
+    hold one HTTP request open indefinitely — this is the underlying mechanism that bound
+    relies on. More candidates than one batch covers, capped to max_batches=1, must leave the
+    rest untouched (still valid candidates) for a follow-up call."""
+    import json as json_module
+
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _fake_backfill_chat(self, messages, model, **kwargs):
+        texts = json_module.loads(messages[-1].content)
+        return ChatResult(content=json_module.dumps(["technical" for _ in texts]), provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_backfill_chat)
+
+    user, _ = make_verified_user()
+    doc = _make_source(db_session, user.id)
+    total_claims = BACKFILL_BATCH_SIZE + 5
+    for i in range(total_claims):
+        _make_claim(db_session, user.id, doc.id, claim_text=f"Gammalt pastaende nummer {i}.", extraction_version="claims-v1")
+
+    result = await backfill_claim_types(db_session, user.id, max_batches=1)
+
+    assert result.candidates_total == BACKFILL_BATCH_SIZE  # only the first batch was processed
+    remaining = (
+        db_session.query(KnowledgeClaim)
+        .filter(KnowledgeClaim.claim_type == ClaimType.uncategorized, KnowledgeClaim.extraction_version == "claims-v1")
+        .count()
+    )
+    assert remaining == 5  # the rest are still valid candidates for a follow-up call
 
 
 # --- assess_claim_confidence ---
