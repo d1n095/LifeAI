@@ -6,9 +6,44 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-27, mot GitHubs Actions-API och
-PR-API direkt (`mcp__github__actions_list`/`actions_get`/`pull_request_read`, inte memorerat)
-efter att Pass 6:s PR öppnades och PR #26 stängdes.
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, mot GitHubs Actions-API och
+PR-API direkt (`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat) efter att
+PR #28 mergades in i huvudgrenen som `c32c339`.
+
+## Pass 7 (2026-07-28): PR #28 mergad efter två granskningsrundor med riktiga fynd
+
+Grundaren granskade PR #28 kod-för-kod (inte bara CI-status) i två separata rundor efter att
+Pass 6:s ursprungliga vertikala kedja redan var grön, och hittade båda gångerna en verklig,
+kvarvarande bugg i krasch/återupptagnings-logiken — se `MAINAI_CONTEXT_BUNDLE.md`s produktions-
+incident (dokumentet fastnade permanent i `embedding`-status trots att dess ImportJob visade
+"Klar"):
+
+- **Runda 1** (commit `5bbc979`): `_import_one_file` behandlade ETT befintligt dokument i
+  `RESUMABLE_INDEX_STATUSES` (t.ex. `embedding`, `extracting`) som en vanlig "duplicate" istället
+  för att återuppta det — bara `awaiting_provider`/`blocked_provider` återupptogs innan detta.
+  Ny `RESUMABLE_INDEX_STATUSES`-konstant (`app/models/document.py`), utökad
+  `_resume_incomplete_document` (omdöpt från `_resume_blocked_document`), ny
+  `_run_once`-spärr mot att markera ett jobb `completed`/`partial`/`failed` medan ett kopplat
+  dokument fortfarande sitter fast, samt ny `app/worker.py`s `_reconcile_orphaned_documents` som
+  reparerar ett REDAN terminalt jobb (den mekanism som faktiskt löser det befintliga
+  `MAINAI_CONTEXT_BUNDLE.md`-fallet).
+- **Runda 2** (commit `8d61f96`): samma återupptagningsfunktion anropade ovillkorligt
+  textpipelinen (`extract_text`/`index_document`) — en MP3/MP4 som kraschat i
+  `extracting`/`embedding` hade blivit felaktigt skickad dit istället för mediepipelinen
+  (`media_import.validate_media_bytes`/`index_media_document`), med risk att bli
+  `extraction_failed`. Fixat med dispatch på `media_import.media_kind_for(filename)`. Samtidigt
+  fixades att `_requeue_blocked_jobs` lämnade `completed_at`/`failure_reason` kvar vid
+  `partial → pending`-återställning (dataintegritetsfel, inte en funktionell bugg).
+
+Båda rundorna fullt lokalt testade (545 passerade, 1 medvetet skippad), `tsc`/`eslint` rena, och
+verifierade grönt på riktig GitHub Actions-CI (18/18 kontroller, "All required checks passed")
+INNAN merge — se PR #28:s commit-historik för fullständiga detaljer per runda.
+
+**Mergad av grundaren efter explicit, villkorat godkännande** ("När CI faktiskt visar grönt är
+beslutet: merga") — sessionen verifierade villkoret (CI grönt på huvud-SHA `8d61f966...`) och
+utförde själva merget via GitHub API (`merge_pull_request`, merge-commit `c32c339`), i linje med
+grundarens uttryckliga instruktion i det ögonblicket. Ingen deploy utförd av sessionen — se
+"Kvarstår efter merge" nedan.
 
 ## Pass 6 (2026-07-27): MainAI Core Loop v1 — engångsundantag från per-funktion-branch-regeln,
 PR #28 öppen
@@ -22,7 +57,7 @@ deploy/rollback-verifiering) är bevisligen fungerande end-to-end.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/mainai-core-loop-v1` | [#28](https://github.com/d1n095/LifeAI/pull/28) | **Öppen, väntar på grundarens granskning** — INTE mergad av den här sessionen (mänsklig granskningsgrind krävs, samma regel som alla tidigare PR:er). | MainAI Core Loop v1 — hela den vertikala kedjan upload→lagring→worker→indexering→sökning→chatt-med-citat→omstartsöverlevnad→providernedgradering→CI→deploy/rollback, verifierad med RIKTIG körning av `docker-compose.vps.yml`+`docker-compose.vps.ci.yml`-topologin på riktiga GitHub Actions-runners (körning [30304755138](https://github.com/d1n095/LifeAI/actions/runs/30304755138), attempt 2, helt grön — se PR #28:s beskrivning för fullständig punkt-för-punkt-verifiering). Lokal `docker build` av de riktiga bilderna är blockerad i den här sessionens sandlåda (nätverkspolicyn tillåter inte apt-get mot deb.debian.org), se `docs/CORE_LOOP_V1_BACKLOG.md`. Innehåller PR #26:s tidigare öppna innehåll (docs + rundtripstest), cherry-pickat och utökat med chatt-med-citat/omstartsöverlevnad/providernedgradering-steg i samma CI-jobb istället för ett nytt. PR #26 stängd med kommentar som pekar hit (ingen merge, allt innehåll bevarat). | `claude/det-kommer-mer-879lcm` @ `13a9677` (inkluderar PR #27) |
+| `claude/mainai-core-loop-v1` | [#28](https://github.com/d1n095/LifeAI/pull/28) | **Mergad** (Pass 7, 2026-07-28), merge-commit `c32c339f9710648604c537c24205e686c083f811`, efter grundarens explicita granskning och två ytterligare fix-rundor (`5bbc979`, `8d61f96`) — se Pass 7-avsnittet ovan. | MainAI Core Loop v1 — hela den vertikala kedjan upload→lagring→worker→indexering→sökning→chatt-med-citat→omstartsöverlevnad→providernedgradering→CI→deploy/rollback, verifierad med RIKTIG körning av `docker-compose.vps.yml`+`docker-compose.vps.ci.yml`-topologin på riktiga GitHub Actions-runners (körning [30304755138](https://github.com/d1n095/LifeAI/actions/runs/30304755138), attempt 2, helt grön — se PR #28:s beskrivning för fullständig punkt-för-punkt-verifiering). Lokal `docker build` av de riktiga bilderna är blockerad i den här sessionens sandlåda (nätverkspolicyn tillåter inte apt-get mot deb.debian.org), se `docs/CORE_LOOP_V1_BACKLOG.md`. Innehåller PR #26:s tidigare öppna innehåll (docs + rundtripstest), cherry-pickat och utökat med chatt-med-citat/omstartsöverlevnad/providernedgradering-steg i samma CI-jobb istället för ett nytt. PR #26 stängd med kommentar som pekar hit (ingen merge, allt innehåll bevarat). | `claude/det-kommer-mer-879lcm` @ `13a9677` (inkluderar PR #27) |
 
 **Verifierat (Pass 6, klart):** Full lokal backend-testsvit (532 passade, 1 medvetet skippad)
 körd mot riktig Postgres+Redis i denna sessions sandlåda. `vps-compose-verify`s utökade jobb
@@ -293,35 +328,38 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 ## Rekommenderad merge-ordning (nuläge)
 
 1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#16~~, ~~#17~~, ~~#18~~,
-   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~ — samtliga mergade i huvudgrenen (se
-   Pass 4/5-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~ stängda utan merge (#4/#6
-   subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
-2. **PR #28** (MainAI Core Loop v1) — öppen, grenad från huvudgrenens tip (`13a9677`, inkl.
-   PR #27). Fullständigt grön på GitHub Actions (körning `30304755138`, attempt 2) inkl.
-   `vps-compose-verify` och `vps-deploy-rollback-test`; väntar på grundarens granskning.
-3. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
+   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~, ~~#28~~ — samtliga mergade i
+   huvudgrenen (se Pass 4/5/7-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~ stängda utan
+   merge (#4/#6 subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
+2. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
    för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
-4. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
+3. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
    ett separat, uttryckligt beslut (branchen är fryst). Kräver DESSUTOM en egen ombasering
-   mot huvudgrenens nya tip innan aktivering — dess bas (`15487e2`) är nu långt bakom både
-   P2:s slutliga tip och själva huvudgrenen.
+   mot huvudgrenens nya tip (nu `c32c339`, efter PR #28) innan aktivering — dess bas
+   (`15487e2`) är nu långt bakom både P2:s slutliga tip och själva huvudgrenen.
 
 ## Vilka brancher blockerar andra
 
-- **Inget öppet PR blockerar ett annat öppet PR just nu.** PR #28 är den enda öppna branchen,
-  fristående ovanpå huvudgrenen (PR #25 mergad, se Pass 4/5; PR #26 stängd, suppersederad av
-  #28).
+- **Inget öppet PR finns just nu.** PR #28 mergades (Pass 7); inget annat PR är öppet ovanpå
+  huvudgrenen.
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något annat öppet PR.
 
-## Vilka brancher kan mergas oberoende
+## Kvarstår efter PR #28:s merge (2026-07-28)
 
-**PR #28** kan mergas oberoende av allt annat öppet just nu (det finns inget annat öppet PR) —
-den är grenad direkt från huvudgrenens tip och rör bara `.github/workflows/ci.yml`,
-`docker-compose.vps.ci.yml`, `.env.vps.example`, `docs/STRATO_VPS_DEPLOY.md`,
-`docs/BRANCH_REGISTRY.md`, `docs/CORE_LOOP_V1_BACKLOG.md` (ny fil) och
-`scripts/vps/ci_provider_stub.py` (ny fil, döpt om från `ci_embedding_stub.py`) — ingen
-ändring i applikationskoden (`backend/app`, `frontend/`) alls, bara CI/docs/scripts.
+- **Deploy till produktions-VPS:n är INTE utförd av den här sessionen.** Grundarens sista
+  instruktion bad om merge OCH deploy "med den befintliga verifierings- och
+  rollback-processen", men den här sessionen har varken SSH-nycklar till produktions-VPS:en
+  eller tillåtelse att köra en verklig deploy autonomt (se `CLAUDE.md`s standing regler och
+  denna sessions upprepade SSH-avslag). VPS Phase 5+6 gjorde deploy explicit manuellt grindad
+  (`docs/VPS_OPERATIONS_RUNBOOK.md`) — grundaren behöver köra det faktiska deploy-steget
+  (`scripts/vps/deploy.sh`) själv, eller uttryckligen förse sessionen med en riktig, aktuell
+  SSH-nyckel och en förnyad bekräftelse i det ögonblicket deployet ska köras.
+- Efter en lyckad deploy: `_reconcile_orphaned_documents` (ny i denna PR) kör automatiskt vid
+  nästa worker-pollcykel och ska reparera det redan fastnade `MAINAI_CONTEXT_BUNDLE.md`-
+  dokumentet (och alla andra dokument i samma läge) utan manuellt ingrepp — se Pass 7 ovan.
+  Detta bör verifieras mot produktions-`GET /api/library/{id}`-statusen efter deploy, inte bara
+  antas.
 
 ## Vilka brancher väntar på ett beroende innan de bör uppdateras
 
