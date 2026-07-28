@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.jobs.heartbeat import worker_process_alive
-from app.models.document import Document, IndexStatus
+from app.models.document import Document, IndexStatus, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob
 
 
@@ -45,19 +45,12 @@ class ContextStatusReason(str, enum.Enum):
 
 
 # See IndexStatus's own docstring for the full pipeline — these groupings only classify
-# existing values, they don't add new ones.
-_PROCESSING_STATUSES = {
-    IndexStatus.pending,  # legacy value, kept only for old rows — still "in flight"
-    IndexStatus.received,
-    IndexStatus.original_storing,
-    IndexStatus.original_stored,
-    IndexStatus.extracting,
-    IndexStatus.extracted,
-    IndexStatus.awaiting_classification,
-    IndexStatus.classifying,
-    IndexStatus.embedding,
-    IndexStatus.indexing,  # legacy value, kept only for old rows
-}
+# existing values, they don't add new ones. 2026-07-28: _PROCESSING_STATUSES now IS
+# RESUMABLE_INDEX_STATUSES (app/models/document.py) — a single shared definition, since this
+# is the exact same "stuck mid-pipeline after a worker crash" set app/worker.py's
+# _reconcile_orphaned_documents and app/rag/library_import.py's _resume_incomplete_document
+# now actively recover from, not just report on.
+_PROCESSING_STATUSES = RESUMABLE_INDEX_STATUSES
 _AWAITING_PROVIDER_STATUSES = {IndexStatus.awaiting_provider, IndexStatus.blocked_provider}
 _FAILED_STATUSES = {IndexStatus.failed, IndexStatus.storage_failed, IndexStatus.extraction_failed, IndexStatus.indexing_failed}
 

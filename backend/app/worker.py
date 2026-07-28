@@ -38,6 +38,7 @@ from app.db import SessionLocal, migration_engine
 from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
+from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.provider_verification import VerificationResult
 from app.providers.verification import ensure_verified
@@ -153,6 +154,53 @@ class Worker:
         )
         db.commit()
 
+    def _reconcile_orphaned_documents(self, db: Session) -> None:
+        """2026-07-28, permanent fix for a confirmed production incident:
+        MAINAI_CONTEXT_BUNDLE.md's Document row was stuck at `embedding` while its ImportJob
+        had already reached `completed` ("Klar") — the worker process died mid-step with no
+        exception for Python to catch, so nothing ever set a terminal status on the Document,
+        and once its job was terminal, no further poll cycle would ever revisit it (see
+        library_import.py's `_run_once`, which now guards this same case for a job still IN
+        that function — this is the equivalent guard for a job that's already terminal by the
+        time the gap is noticed, e.g. one written before this fix existed).
+
+        Finds every job already at `completed`/`partial`/`failed` that still has at least one
+        linked, non-deleted Document sitting in RESUMABLE_INDEX_STATUSES, and resets ONLY that
+        job's status back to `pending` (clearing completed_at/failure_reason) — never touches
+        the Document row directly. claim_next_job then picks it up like any other pending job,
+        and `_import_one_file`'s existing-document branch resumes the stuck Document in place
+        via `_resume_incomplete_document` (same row, same durably-stored original, no
+        duplicate). Idempotent and safe to run every poll cycle: a job with nothing stuck
+        never matches the filter, and a job already reset to `pending` no longer matches
+        either. Runs on the superuser claim session — see `_ClaimSession`'s module-level
+        comment for why this must see documents/jobs across ALL owners, not just one RLS
+        scope."""
+        stuck_job_ids = [
+            row[0]
+            for row in db.query(ImportJob.id)
+            .join(Document, Document.import_job_id == ImportJob.id)
+            .filter(
+                ImportJob.status.in_([ImportJobStatus.completed, ImportJobStatus.partial, ImportJobStatus.failed]),
+                Document.deleted_at.is_(None),
+                Document.status.in_(RESUMABLE_INDEX_STATUSES),
+            )
+            .distinct()
+            .all()
+        ]
+        if not stuck_job_ids:
+            return
+        db.query(ImportJob).filter(ImportJob.id.in_(stuck_job_ids)).update(
+            {"status": ImportJobStatus.pending, "completed_at": None, "failure_reason": None},
+            synchronize_session=False,
+        )
+        db.commit()
+        logger.warning(
+            "Worker %s: återställde %d jobb till pending — ett kopplat dokument var fortfarande "
+            "fast mitt i pipelinen trots att jobbet redan var terminalt.",
+            self.worker_id,
+            len(stuck_job_ids),
+        )
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -160,6 +208,7 @@ class Worker:
         claim_db = _ClaimSession()
         try:
             await self._requeue_blocked_jobs(claim_db)
+            self._reconcile_orphaned_documents(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
             claim_db.close()
