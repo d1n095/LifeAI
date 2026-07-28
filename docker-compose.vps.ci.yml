@@ -18,6 +18,28 @@
 # duplicate mappings for no benefit. DOMAIN is set to ":80" via the job's own environment
 # (see Caddyfile) so no real domain or ACME is needed; port 443 stays published but unused
 # since a ":80"-only site block never triggers Caddy's automatic HTTPS.
+#
+#   - worker: WORKER_LEASE_SECONDS/WORKER_POLL_INTERVAL_SECONDS are lowered ONLY here (never
+#     in docker-compose.vps.yml, which sets neither — app/config.py's production defaults of
+#     120s/2.0s stand untouched) so the MainAI Core Loop v1 restart-survival CI step doesn't
+#     have to wait two real minutes for an expired lease to be reclaimed after a simulated
+#     worker crash (SIGKILL). A short lease is a CI-speed concern only, not a correctness
+#     change — claim_next_job's SKIP LOCKED + lease-expiry reclaim logic (app/jobs/lease.py)
+#     is exactly what's being exercised, just on a faster clock.
+#
+#   - ollama: a network-isolated fake embedding+chat provider (scripts/vps/
+#     ci_provider_stub.py), named `ollama` specifically so it resolves at app/config.py's
+#     OLLAMA_BASE_URL default (http://ollama:11434) with no extra env var needed. Exists so
+#     the round-trip upload->indexed->retrieval->chat-with-citations test proves the REAL
+#     worker entrypoint AND the REAL chat endpoint against a REAL (if fake) HTTP provider
+#     call, without any real network egress, real API key, or dependency on OpenAI/Gemini
+#     being reachable from a GitHub-hosted runner. Never referenced by docker-compose.vps.yml
+#     itself — production's actual provider choice (Gemini chat / OpenAI embeddings) is
+#     untouched by this. Deliberately NOT activated via env vars at container start (unlike
+#     an earlier draft of this file) — the CI test activates it mid-job via the same
+#     `PUT /api/admin/providers/config` call a founder would use, AFTER first proving the
+#     no-provider-configured path degrades cleanly (see ci.yml's "no PermissionError" step,
+#     which depends on embedding being UNconfigured at that point).
 services:
   backend:
     extra_hosts:
@@ -25,3 +47,15 @@ services:
   worker:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      WORKER_LEASE_SECONDS: "6"
+      WORKER_POLL_INTERVAL_SECONDS: "1"
+  ollama:
+    image: python:3.11-alpine
+    command: ["python", "/stub/ci_provider_stub.py"]
+    volumes:
+      - ./scripts/vps/ci_provider_stub.py:/stub/ci_provider_stub.py:ro
+    networks:
+      - lifeai_internal
+    # Deliberately no `ports:` — only worker/backend (same network) ever need to reach this,
+    # never the host, matching every other internal-only service in this topology.

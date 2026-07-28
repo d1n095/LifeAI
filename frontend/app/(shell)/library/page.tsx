@@ -31,9 +31,24 @@ const QUEUE_STATUS_LABELS: Record<UploadQueueItem["status"], string> = {
   received: "Mottagen…",
   processing: "Bearbetar…",
   completed: "Klar",
+  // 2026-07-28: static fallback only, used when this item's job details haven't loaded yet
+  // — the real render site below prefers queueItemStatusLabel()'s count-based text
+  // ("Delvis klar: 13 misslyckade, 191 väntar") the moment job data is available, so a
+  // partial success is never shown as indistinguishable from a fully completed import.
+  partial: "Delvis klar",
   failed: "Misslyckades",
   cancelled: "Avbruten",
 };
+
+function queueItemStatusLabel(item: UploadQueueItem): string {
+  if (item.status === "partial" && item.job) {
+    const parts: string[] = [];
+    if (item.job.failed_count > 0) parts.push(`${item.job.failed_count} misslyckade`);
+    if (item.job.blocked_count > 0) parts.push(`${item.job.blocked_count} väntar`);
+    return parts.length > 0 ? `Delvis klar: ${parts.join(", ")}` : QUEUE_STATUS_LABELS.partial;
+  }
+  return QUEUE_STATUS_LABELS[item.status];
+}
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return "okänt";
@@ -164,12 +179,14 @@ export default function LibraryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [classification, truthStatus, projectId]);
 
-  // A queue item reaching "completed" means a real server job finished — refresh the source
-  // list so the newly indexed document shows up without the founder having to reload.
+  // A queue item reaching "completed" OR "partial" means a real server job finished — refresh
+  // the source list so any newly indexed document shows up without the founder having to
+  // reload. "partial" is included here (2026-07-28): a job with some failed/blocked files can
+  // still have produced real, successfully indexed documents worth showing immediately.
   // Tracked per queue-item id so the same completion doesn't trigger a refetch repeatedly.
   useEffect(() => {
     for (const item of queueItems) {
-      if (item.status === "completed" && !refreshedForRef.current.has(item.id)) {
+      if ((item.status === "completed" || item.status === "partial") && !refreshedForRef.current.has(item.id)) {
         refreshedForRef.current.add(item.id);
         refresh();
       }
@@ -277,7 +294,7 @@ export default function LibraryPage() {
               <li key={item.id} className="rounded-lg border border-border bg-panel px-3 py-2 text-xs">
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-white/80">{item.filename}</span>
-                  <span className="shrink-0 text-white/50">{QUEUE_STATUS_LABELS[item.status]}</span>
+                  <span className="shrink-0 text-white/50">{queueItemStatusLabel(item)}</span>
                 </div>
                 {item.status === "failed" && (
                   <div className="mt-1 flex items-center justify-between gap-2">
@@ -306,7 +323,7 @@ export default function LibraryPage() {
                     </button>
                   </div>
                 )}
-                {(item.status === "completed" || item.status === "cancelled") && (
+                {(item.status === "completed" || item.status === "partial" || item.status === "cancelled") && (
                   <div className="mt-1 flex justify-end">
                     <button
                       type="button"

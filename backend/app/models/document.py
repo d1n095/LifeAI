@@ -69,6 +69,34 @@ class IndexStatus(str, enum.Enum):
     indexing_failed = "indexing_failed"
 
 
+# 2026-07-28 incident: every status a Document can sit in mid-pipeline, EXCLUDING
+# awaiting_provider/blocked_provider (which already have their own dedicated resume path —
+# see app/worker.py's _requeue_blocked_jobs) and every terminal status (indexed, and the
+# five *_failed/cancelled outcomes). A document left at one of THESE statuses got there
+# because the worker PROCESS itself died mid-step (hard kill, OOM, container restart) — no
+# exception was ever raised for Python to catch, so nothing set a terminal status. Before
+# this constant existed, app/rag/library_import.py's _import_one_file treated a document at
+# any of these statuses as an ordinary "duplicate" on a re-run — silently leaving it stuck
+# here forever while the job itself could still reach `completed`. See
+# app/rag/library_import.py's _resume_incomplete_document and app/worker.py's
+# _reconcile_orphaned_documents, the two places this now drives real recovery instead of a
+# false "duplicate".
+RESUMABLE_INDEX_STATUSES = frozenset(
+    {
+        IndexStatus.pending,
+        IndexStatus.received,
+        IndexStatus.original_storing,
+        IndexStatus.original_stored,
+        IndexStatus.extracting,
+        IndexStatus.extracted,
+        IndexStatus.awaiting_classification,
+        IndexStatus.classifying,
+        IndexStatus.embedding,
+        IndexStatus.indexing,
+    }
+)
+
+
 class ActiveTruthStatus(str, enum.Enum):
     """Founder Knowledge Studio's epistemic status — deliberately separate from IndexStatus
     (which is purely technical: has this been chunked/embedded yet). A document can be fully

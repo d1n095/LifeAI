@@ -1333,10 +1333,12 @@ jobs:
   vps-compose-verify:
     name: Strato VPS compose topology — build, run, verify
     runs-on: ubuntu-latest
-    # claude/fix-uploads-volume-permission added temporarily so THIS PR's new uploads-init
-    # verification actually runs and can be confirmed green before merge. Safe to remove once
-    # merged — det-kommer-mer-879lcm is already in this list.
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/fix-uploads-volume-permission'
+    # claude/fix-uploads-volume-permission (PR #27) is merged — det-kommer-mer-879lcm already
+    # covers it, so that temporary allowlist entry is removed here. claude/mainai-core-loop-v1
+    # added temporarily so THIS branch's new round-trip/chat-citations/restart-survival/
+    # provider-degradation steps actually run and can be confirmed green before merge — same
+    # pattern as every prior branch in this list. Safe to remove once merged.
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1400,6 +1402,15 @@ jobs:
           SMTP_PASSWORD=ci
           SMTP_FROM_EMAIL=no-reply@lifeos.local
           EOF
+          # Deliberately NO DEFAULT_EMBEDDING_PROVIDER/DEFAULT_LLM_PROVIDER env vars here
+          # (an earlier draft baked DEFAULT_EMBEDDING_PROVIDER=ollama in at this point) — the
+          # job's later "no PermissionError" step depends on embedding being genuinely
+          # UNconfigured at container start, to prove uploads-init's fix is a storage/
+          # permission fix, not something that only looks fine because a provider happens to
+          # be configured. The `ollama` stub (docker-compose.vps.ci.yml) is instead activated
+          # mid-job, after that step, via PUT /api/admin/providers/config — the exact same
+          # write path a founder uses in production, see the "Activate the CI provider stub"
+          # step below.
           # REDIS_PASSWORD is deliberately NOT in this file: it's a Compose top-level
           # interpolation variable (like BACKEND_IMAGE/DOMAIN above), set as a job-level env
           # var instead — see this job's `env:` block. This file only supplies what backend/
@@ -1429,10 +1440,14 @@ jobs:
           # uploads-init existed): a one-shot init container has already exited by this point
           # in the job, and `ps --services` without -a only lists currently-running services —
           # it would silently (and wrongly) exclude a service that's supposed to have exited.
+          # `ollama` is docker-compose.vps.ci.yml's CI-only fake embedding provider (see that
+          # file's own comment) — NOT a 6th production service. docker-compose.vps.yml itself
+          # (the file actually deployed to the real VPS) still defines exactly these five:
+          # caddy, backend, frontend, redis, worker.
           got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a --services | sort | tr '\n' ' ')
-          expected="backend caddy frontend redis uploads-init worker "
+          expected="backend caddy frontend ollama redis uploads-init worker "
           [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
-          echo "Confirmed: exactly caddy, backend, frontend, redis, uploads-init, worker — no more, no fewer."
+          echo "Confirmed: exactly caddy, backend, frontend, redis, uploads-init, worker (production topology) plus the CI-only ollama stub — no more, no fewer."
 
       - name: Verify uploads-init exited successfully, did not restart, and ran as root only for the chown
         run: |
@@ -1833,11 +1848,269 @@ jobs:
           echo "$HEADERS" | grep -qi "^server:" && (echo "::error::Server header leaked despite -Server" && exit 1)
           echo "Confirmed: hardening response headers present, Server header suppressed."
 
+      - name: Activate the CI provider stub (ollama) for chat + embedding roles
+        # Deliberately done via the SAME write path a founder uses in production
+        # (PUT /api/admin/providers/config), not an env var baked in at container start — see
+        # docker-compose.vps.ci.yml's `ollama` service comment for why. Runs AFTER the
+        # no-PermissionError/'blocked on no provider' steps above, which depend on embedding
+        # being genuinely unconfigured at that point.
+        run: |
+          set -e
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+          [ -n "$CSRF" ] || (echo "::error::login did not return a csrf_token: $LOGIN" && exit 1)
+
+          for ROLE_PAYLOAD in '{"role":"embedding","provider":"ollama","model":"ci-stub-embed"}' '{"role":"chat","provider":"ollama","model":"ci-stub-chat"}'; do
+            RESP=$(curl -sS -w "\n%{http_code}" -b "$COOKIES" -X PUT http://localhost:80/api/admin/providers/config \
+              -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" -d "$ROLE_PAYLOAD")
+            CODE=$(echo "$RESP" | tail -n1)
+            [ "$CODE" = "200" ] || (echo "::error::PUT /api/admin/providers/config failed ($CODE) for $ROLE_PAYLOAD: $RESP" && exit 1)
+          done
+
+          curl -sS -b "$COOKIES" http://localhost:80/api/admin/providers/status | python3 -c "
+          import sys, json
+          rows = json.load(sys.stdin)
+          ollama = next(r for r in rows if r['name'] == 'ollama')
+          assert ollama['active_chat'] is True, f'ollama not active for chat: {ollama}'
+          assert ollama['active_embedding'] is True, f'ollama not active for embedding: {ollama}'
+          print('Confirmed: ollama stub is the active provider for both chat and embedding roles.')
+          "
+          rm -f "$COOKIES"
+
+      - name: Round trip — upload -> pending -> worker pickup -> extraction -> chunks -> indexed -> retrieval -> chat with citations
+        # 2026-07-27 production incident: every prior check in this job proves the worker
+        # CONTAINER starts and stays healthy — none of them prove it ever picks up and
+        # finishes a real job. That gap is exactly how a stale VPS checkout (missing this
+        # service entirely) AND a working-but-misconfigured embedding provider both went
+        # unnoticed until a real founder upload sat at 'pending' forever. This drives the
+        # actual /api/library/import -> real worker -> real GET endpoints -> POST /api/chat
+        # path end to end, against the network-isolated `ollama` stub (never a real provider
+        # or key). Extended (MainAI Core Loop v1) to also prove chat cites the ingested
+        # content, not just that search finds it — see ci_provider_stub.py's _chat() for how
+        # the marker is threaded through the real retrieval -> prompt -> provider call ->
+        # persisted reply path.
+        run: |
+          set -e
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+          [ -n "$CSRF" ] || (echo "::error::login did not return a csrf_token: $LOGIN" && exit 1)
+
+          MARKER="vpsroundtrip$(date +%s)kringelbjorn"
+          echo "Det ovanliga ordet $MARKER finns bara har, i det har CI-testet." > /tmp/roundtrip.txt
+
+          UPLOAD=$(curl -sS -b "$COOKIES" -X POST http://localhost:80/api/library/import \
+            -H "X-CSRF-Token: $CSRF" \
+            -F "file=@/tmp/roundtrip.txt")
+          JOB_ID=$(echo "$UPLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          [ -n "$JOB_ID" ] || (echo "::error::upload did not return a job id: $UPLOAD" && exit 1)
+          echo "Uploaded, job id: $JOB_ID"
+
+          STATUS="pending"
+          for i in $(seq 1 60); do
+            JOB=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/jobs/$JOB_ID")
+            STATUS=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            [ "$STATUS" = "completed" ] && break
+            [ "$STATUS" = "failed" ] && (echo "::error::import job failed: $JOB" && exit 1)
+            sleep 1
+          done
+          [ "$STATUS" = "completed" ] || (echo "::error::import job never reached 'completed', stuck at '$STATUS' — the worker never finished processing a real pending job" && exit 1)
+          echo "Confirmed: job reached 'completed' — the real worker entrypoint picked up the pending job and called the (network-isolated) embedding provider."
+
+          SOURCE_ID=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['file_results'][0]['source_id'])")
+          DOC=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/$SOURCE_ID")
+          DOC_STATUS=$(echo "$DOC" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+          CHUNK_COUNT=$(echo "$DOC" | python3 -c "import sys,json; print(json.load(sys.stdin)['chunk_count'])")
+          [ "$DOC_STATUS" = "indexed" ] || (echo "::error::document status is '$DOC_STATUS', expected 'indexed': $DOC" && exit 1)
+          [ "$CHUNK_COUNT" -gt 0 ] || (echo "::error::document is 'indexed' but has 0 chunks" && exit 1)
+          echo "Confirmed: document is 'indexed' with $CHUNK_COUNT chunk(s)."
+
+          SEARCH=$(curl -sS -b "$COOKIES" --get "http://localhost:80/api/library/search/hybrid" --data-urlencode "q=$MARKER")
+          FOUND=$(echo "$SEARCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(any('$MARKER' in r['text'] for r in d['results']))")
+          [ "$FOUND" = "True" ] || (echo "::error::the uploaded content is not retrievable via the real search API: $SEARCH" && exit 1)
+          SEM_AVAILABLE=$(echo "$SEARCH" | python3 -c "import sys,json; print(json.load(sys.stdin)['semantic_search_available'])")
+          [ "$SEM_AVAILABLE" = "True" ] || (echo "::error::semantic_search_available should be True once the ollama stub is the active embedding provider: $SEARCH" && exit 1)
+          echo "Confirmed: the exact marker text from the uploaded file is retrievable through the real search API (semantic channel active) — the worker read and correctly extracted the SAME file backend wrote to the shared uploads volume, all the way through chunking, embedding, and indexing."
+
+          CHAT=$(curl -sS -b "$COOKIES" -X POST http://localhost:80/api/chat \
+            -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+            -d "{\"message\": \"Vad star det om $MARKER?\"}")
+          echo "$CHAT" > /tmp/chat-response.json
+          SOURCE_ID_EXPECTED="$SOURCE_ID" MARKER_EXPECTED="$MARKER" python3 -c "
+          import json, os
+          expected_source_id = os.environ['SOURCE_ID_EXPECTED']
+          expected_marker = os.environ['MARKER_EXPECTED']
+          d = json.load(open('/tmp/chat-response.json'))
+          assert d['user_message_saved'] is True, f'user_message_saved should always be True: {d}'
+          assert d['assistant_status'] == 'succeeded', f'expected assistant_status succeeded, got: {d}'
+          sources = d.get('sources') or []
+          assert sources, f'expected at least one cited source, got none: {d}'
+          assert any(s['document_id'] == expected_source_id for s in sources), f'no source cites the uploaded document {expected_source_id}: {sources}'
+          assert any(expected_marker in s['snippet'] for s in sources), f'no source snippet contains the marker: {sources}'
+          assert expected_marker in (d.get('reply') or ''), f'reply does not contain the marker (context was not actually threaded through to the provider call): {d.get(\"reply\")}'
+          print('Confirmed: POST /api/chat answered with assistant_status=succeeded, cited the uploaded document with a matching snippet, and the reply itself reflects the retrieved content.')
+          "
+          echo "JOB_ID=$JOB_ID" >> "$GITHUB_ENV"
+          echo "SOURCE_ID=$SOURCE_ID" >> "$GITHUB_ENV"
+          echo "ROUNDTRIP_MARKER=$MARKER" >> "$GITHUB_ENV"
+          rm -f /tmp/roundtrip.txt /tmp/chat-response.json "$COOKIES"
+
+      - name: Restart survival — kill the worker mid-job (SIGKILL), confirm the lease is reclaimed and the job still completes with no data loss
+        # Acceptance contract item 7: "the complete flow survives a backend/worker restart".
+        # docker-compose.vps.ci.yml lowers WORKER_LEASE_SECONDS/WORKER_POLL_INTERVAL_SECONDS
+        # for this job only, so a killed worker's lease expires and gets reclaimed
+        # (app/jobs/lease.py's claim_next_job — SKIP LOCKED + lease_expires_at check) within
+        # a CI-realistic time budget instead of the real 120s production default.
+        run: |
+          set -e
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+
+          RESTART_MARKER="restartsurvival$(date +%s)flyktigkanin"
+          echo "Andra ordet $RESTART_MARKER finns bara har." > /tmp/restart-test.txt
+          UPLOAD=$(curl -sS -b "$COOKIES" -X POST http://localhost:80/api/library/import \
+            -H "X-CSRF-Token: $CSRF" -F "file=@/tmp/restart-test.txt")
+          JOB_ID2=$(echo "$UPLOAD" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          [ -n "$JOB_ID2" ] || (echo "::error::second upload did not return a job id: $UPLOAD" && exit 1)
+
+          # Give the worker a moment to actually claim the job (status flips pending->running)
+          # before killing it — killing it while still 'pending' would prove nothing about
+          # lease reclaim, only about the job surviving in the queue untouched.
+          CLAIMED="false"
+          for i in $(seq 1 20); do
+            JOB2=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/jobs/$JOB_ID2")
+            JOB2_STATUS=$(echo "$JOB2" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            if [ "$JOB2_STATUS" = "running" ]; then CLAIMED="true"; break; fi
+            [ "$JOB2_STATUS" = "completed" ] && break  # too fast to catch mid-flight — still fine, see below
+            sleep 0.3
+          done
+
+          WORKER_CID=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          docker kill -s SIGKILL "$WORKER_CID"
+          echo "Killed worker container $WORKER_CID (claimed job before kill: $CLAIMED)."
+          # Real finding (first run of this step in CI): `restart: unless-stopped` did NOT
+          # bring the container back up within 30s in GitHub's Docker-in-Docker runner —
+          # docker inspect kept showing 'exited (137)' the whole window (dockerd's own
+          # restart-policy backoff/timing proved too slow/unreliable to assert on directly
+          # in a CI-speed test). The acceptance contract's own wording is "kill AND restart
+          # the containers" — so this now does the restart explicitly, exactly like an
+          # operator (or a process supervisor) bringing a crashed container back up on a
+          # real VPS, rather than asserting on dockerd's internal restart-policy timing.
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci start worker
+          for i in $(seq 1 30); do
+            NEW_STATUS=$(docker inspect -f '{{.State.Status}}' "$WORKER_CID" 2>/dev/null || echo "gone")
+            [ "$NEW_STATUS" = "running" ] && break
+            sleep 1
+          done
+          NEW_STATUS=$(docker inspect -f '{{.State.Status}}' "$WORKER_CID" 2>/dev/null || echo "gone")
+          [ "$NEW_STATUS" = "running" ] || (echo "::error::worker container did not come back up after SIGKILL + explicit restart (status: $NEW_STATUS)" && exit 1)
+          echo "Confirmed: the SIGKILLed worker container is running again after an explicit restart."
+
+          STATUS2="unknown"
+          for i in $(seq 1 60); do
+            JOB2=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/jobs/$JOB_ID2")
+            STATUS2=$(echo "$JOB2" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            [ "$STATUS2" = "completed" ] && break
+            [ "$STATUS2" = "failed" ] && (echo "::error::job failed after worker restart instead of resuming: $JOB2" && exit 1)
+            sleep 1
+          done
+          [ "$STATUS2" = "completed" ] || (echo "::error::job never reached 'completed' after the worker crash+restart, stuck at '$STATUS2' — the lease was never reclaimed" && exit 1)
+          echo "Confirmed: the job that was in flight when the worker was SIGKILLed still reached 'completed' after the crash+restart — no stuck/lost job."
+
+          SEARCH2=$(curl -sS -b "$COOKIES" --get "http://localhost:80/api/library/search/hybrid" --data-urlencode "q=$RESTART_MARKER")
+          FOUND2=$(echo "$SEARCH2" | python3 -c "import sys,json; d=json.load(sys.stdin); print(any('$RESTART_MARKER' in r['text'] for r in d['results']))")
+          [ "$FOUND2" = "True" ] || (echo "::error::content from the pre-crash upload is not retrievable after worker restart: $SEARCH2" && exit 1)
+          echo "Confirmed: the file's content is correctly indexed and retrievable after the worker crash+restart — no data loss."
+
+          # Now restart backend too (not killed — a graceful restart, the normal deploy path)
+          # and confirm everything ingested so far (both uploads, the chat reply) is still
+          # readable — proving state lives in Postgres/the shared volume, never in backend's
+          # own process memory.
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci restart backend
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:80/api/health && break
+            sleep 2
+          done
+          curl -sS http://localhost:80/api/health
+
+          COOKIES2=$(mktemp)
+          curl -sS -c "$COOKIES2" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}' > /dev/null
+          LIB=$(curl -sS -b "$COOKIES2" http://localhost:80/api/library)
+          LIB_COUNT=$(echo "$LIB" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          [ "$LIB_COUNT" -ge 2 ] || (echo "::error::expected at least 2 library documents to survive the backend restart, got $LIB_COUNT: $LIB" && exit 1)
+          SEARCH3=$(curl -sS -b "$COOKIES2" --get "http://localhost:80/api/library/search/hybrid" --data-urlencode "q=$ROUNDTRIP_MARKER")
+          FOUND3=$(echo "$SEARCH3" | python3 -c "import sys,json; d=json.load(sys.stdin); print(any('$ROUNDTRIP_MARKER' in r['text'] for r in d['results']))")
+          [ "$FOUND3" = "True" ] || (echo "::error::content from before the backend restart is no longer retrievable: $SEARCH3" && exit 1)
+          echo "Confirmed: after a graceful backend restart, both previously-ingested documents and their content are still intact and retrievable — nothing lives only in backend's process memory."
+
+          rm -f /tmp/restart-test.txt "$COOKIES" "$COOKIES2"
+
+      - name: Provider degradation — chat and search degrade cleanly when the AI provider becomes unreachable, no crash, no lost messages
+        # Acceptance contract item 8. Stops the `ollama` stub container (not just misconfigures
+        # it) to prove a genuinely UNREACHABLE, previously-working provider degrades cleanly —
+        # distinct from the earlier 'no provider configured at all' step. Restarts it
+        # afterwards so teardown/log-dump steps see the topology in its normal state.
+        run: |
+          set -e
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci stop ollama
+
+          CHAT_RESP=$(curl -sS -w "\n%{http_code}" -b "$COOKIES" -X POST http://localhost:80/api/chat \
+            -H "Content-Type: application/json" -H "X-CSRF-Token: $CSRF" \
+            -d '{"message": "Fungerar det har aven om providern ar nere?"}')
+          CHAT_CODE=$(echo "$CHAT_RESP" | tail -n1)
+          CHAT_BODY=$(echo "$CHAT_RESP" | sed '$d')
+          [ "$CHAT_CODE" = "200" ] || (echo "::error::chat returned $CHAT_CODE with the provider down — must degrade to a clean failed status, never a raw 500: $CHAT_BODY" && exit 1)
+          echo "$CHAT_BODY" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert d['user_message_saved'] is True, f'user message must still be saved even when the provider is unreachable: {d}'
+          assert d['assistant_status'] == 'failed', f'expected assistant_status failed with the provider down, got: {d}'
+          assert d.get('error_category'), f'expected a non-empty error_category, got: {d}'
+          assert d.get('reply') is None, f'reply must be None on failure, never a fake placeholder: {d}'
+          print(f\"Confirmed: chat degraded cleanly (HTTP 200, assistant_status=failed, error_category={d['error_category']!r}) — the user's message was still saved.\")
+          "
+          SEARCH_RESP=$(curl -sS -w "\n%{http_code}" -b "$COOKIES" --get http://localhost:80/api/library/search/hybrid --data-urlencode "q=$ROUNDTRIP_MARKER")
+          SEARCH_CODE=$(echo "$SEARCH_RESP" | tail -n1)
+          SEARCH_BODY=$(echo "$SEARCH_RESP" | sed '$d')
+          [ "$SEARCH_CODE" = "200" ] || (echo "::error::search returned $SEARCH_CODE with the embedding provider down — must degrade, never 500: $SEARCH_BODY" && exit 1)
+          echo "$SEARCH_BODY" | MARKER_EXPECTED="$ROUNDTRIP_MARKER" python3 -c "
+          import sys, json, os
+          expected_marker = os.environ['MARKER_EXPECTED']
+          d = json.load(sys.stdin)
+          assert d['semantic_search_available'] is False, f'expected semantic_search_available False with the provider unreachable: {d}'
+          assert d.get('degraded_reason'), f'expected a non-empty degraded_reason: {d}'
+          found = any(expected_marker in r['text'] for r in d['results'])
+          assert found, f'text-match channel should still find the marker with no embedding provider: {d}'
+          print(f\"Confirmed: search degraded to text-only (semantic_search_available=False, degraded_reason={d['degraded_reason']!r}) and still found the content via the independent text-match channel.\")
+          "
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci start ollama
+          for i in $(seq 1 30); do
+            docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci exec -T worker python3 -c "import socket; socket.create_connection(('ollama', 11434), timeout=1)" 2>/dev/null && break
+            sleep 1
+          done
+          rm -f "$COOKIES"
+
       - name: Dump logs on failure
         if: failure()
         run: |
           docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a
-          for name in backend frontend caddy redis worker uploads-init; do
+          for name in backend frontend caddy redis worker uploads-init ollama; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -aq "$name" || true)
             if [ -n "$cid" ]; then
               echo "--- $name health ---"
@@ -1875,7 +2148,11 @@ jobs:
   vps-deploy-rollback-test:
     name: VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    # claude/mainai-core-loop-v1 added temporarily so acceptance-contract item 10
+    # (deploy/rollback verified against the real compose topology) actually runs and is
+    # confirmed green on this branch before its PR — same pattern as vps-compose-verify
+    # above. Safe to remove once merged — det-kommer-mer-879lcm is already in this list.
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1'
     services:
       postgres:
         image: pgvector/pgvector:pg16

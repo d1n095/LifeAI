@@ -323,6 +323,7 @@ export type ImportJobItem = {
   succeeded_count: number;
   failed_count: number;
   skipped_count: number;
+  blocked_count: number;
   failure_reason: string | null;
   manifest: Record<string, unknown> | null;
   file_results: FileOutcome[] | null;

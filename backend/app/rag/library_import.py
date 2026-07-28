@@ -25,7 +25,15 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.jobs.lease import renew_lease
 from app.jobs.lock import JobLock, JobLockUnavailable
-from app.models.document import ActiveTruthStatus, DeletionStatus, Document, DocumentSource, IndexStatus, KnowledgeClassification
+from app.models.document import (
+    ActiveTruthStatus,
+    DeletionStatus,
+    Document,
+    DocumentSource,
+    IndexStatus,
+    KnowledgeClassification,
+    RESUMABLE_INDEX_STATUSES,
+)
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
@@ -59,6 +67,16 @@ MEDIA_TYPES: dict[str, str] = {
 
 VALID_CLASSIFICATIONS = {c.value for c in KnowledgeClassification}
 VALID_TRUTH_STATUSES = {s.value for s in ActiveTruthStatus}
+
+# 2026-07-28: mirrors app/rag/context_status.py's _FAILED_STATUSES — a Document already in
+# one of these when _import_one_file sees it again (e.g. a resumed `partial` job) is a real,
+# still-unresolved failure, not a duplicate. See _import_one_file's existing-document branch.
+_FAILED_INDEX_STATUSES = (
+    IndexStatus.failed,
+    IndexStatus.storage_failed,
+    IndexStatus.extraction_failed,
+    IndexStatus.indexing_failed,
+)
 
 
 class JobCancelled(Exception):
@@ -163,7 +181,7 @@ def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | No
         return DeletionStatus.failed
 
 
-async def _resume_blocked_document(
+async def _resume_incomplete_document(
     db: Session,
     document: Document,
     owner_id: uuid.UUID,
@@ -173,17 +191,37 @@ async def _resume_blocked_document(
     archive_path: str | None = None,
     archive_chain: list[dict] | None = None,
 ) -> FileOutcome:
-    """P1: re-attempts embedding for a Document already paused on `awaiting_provider`/
-    `blocked_provider` — reuses the SAME row and its existing KnowledgeVersion rather than
-    creating a duplicate. Reached whenever a file with a matching checksum is seen again,
-    whether because the founder genuinely re-uploaded it or because app/worker.py's
-    automatic requeue (_requeue_blocked_jobs) replayed the same ImportJob after the provider
-    verified ok — both are the exact same code path. Neither needs the ORIGINAL http upload
-    again: `content` here always comes from re-reading the job's own durably stored original
-    (ImportJob.source_storage_key, see run_import_job/_run_once), never a fresh upload.
-    Re-extraction is cheap and local (no AI involved); the original bytes are never
-    re-stored — the document is already `original_stored`, and app/storage/'s
-    content-addressing would just no-op a re-write anyway."""
+    """P1, widened 2026-07-28: re-attempts extraction+embedding for a Document that is NOT
+    in a terminal state — reuses the SAME row and its existing KnowledgeVersion rather than
+    creating a duplicate. Two distinct ways to land here, both driving the exact same code:
+      - `awaiting_provider`/`blocked_provider` (the original P1 case): a real pause, resumed
+        once app/worker.py's _requeue_blocked_jobs sees the provider verify ok again.
+      - Any status in app/models/document.py's RESUMABLE_INDEX_STATUSES (extracting,
+        embedding, etc.): the worker PROCESS itself died mid-step with no exception for
+        Python to catch, leaving the row stuck there — reached either when its ImportJob's
+        lease expires and gets reclaimed, or via app/worker.py's _reconcile_orphaned_documents
+        for a job that had already (wrongly) reached a terminal status. Restarting the whole
+        extraction+embedding pipeline from scratch is deliberately simple and safe here: we
+        don't know which exact sub-step the crash interrupted, and re-extraction is cheap and
+        local (no AI involved) regardless.
+    Reached whenever a file with a matching checksum is seen again — never needs the ORIGINAL
+    http upload again: `content` here always comes from re-reading the job's own durably
+    stored original (ImportJob.source_storage_key, see run_import_job/_run_once). The
+    original bytes are never re-stored — the document is already `original_stored` (or
+    further along), and app/storage/'s content-addressing would just no-op a re-write
+    anyway.
+
+    2026-07-28, second correction: RESUMABLE_INDEX_STATUSES applies to every Document
+    regardless of type — an audio/video file (media_import.py's pipeline) can crash while
+    stuck at `extracting`/`embedding` exactly like a text document can, but it does NOT go
+    through extract_text()/index_document() on a first import (see _import_one_file's own
+    `if media_kind is None: ... else: ...` split) — it goes through
+    media_import.validate_media_bytes() + media_import.index_media_document() instead, which
+    transcribes and builds timestamped chunks rather than extracting/embedding plain text.
+    Resuming a crash-stuck MP3/MP4 through the text pipeline would misclassify it as
+    extraction_failed (extract_text() cannot parse binary media). This function now mirrors
+    _import_one_file's own dispatch on media_import.media_kind_for(filename) so a resumed
+    media document goes through the SAME pipeline a first import would have."""
     version = (
         db.query(KnowledgeVersion)
         .filter(KnowledgeVersion.source_id == document.id)
@@ -191,29 +229,47 @@ async def _resume_blocked_document(
         .first()
     )
 
-    document.status = IndexStatus.extracting
-    db.add(document)
-    db.commit()
-    try:
-        text_content = extract_text(filename, content)
-    except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
-        document.status = IndexStatus.extraction_failed
-        document.error_message = f"Kunde inte extrahera text: {exc}"
+    media_kind = media_import.media_kind_for(filename)
+    if media_kind is None:
+        document.status = IndexStatus.extracting
         db.add(document)
         db.commit()
-        return FileOutcome(
-            filename=filename,
-            status="failed",
-            reason=document.error_message,
-            source_id=str(document.id),
-            archive_path=archive_path,
-            archive_chain=archive_chain,
-        )
-    document.status = IndexStatus.extracted
-    db.add(document)
-    db.commit()
-
-    await index_document(db, document, text_content)
+        try:
+            text_content = extract_text(filename, content)
+        except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
+            document.status = IndexStatus.extraction_failed
+            document.error_message = f"Kunde inte extrahera text: {exc}"
+            db.add(document)
+            db.commit()
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=document.error_message,
+                source_id=str(document.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
+        document.status = IndexStatus.extracted
+        db.add(document)
+        db.commit()
+        await index_document(db, document, text_content)
+    else:
+        try:
+            media_import.validate_media_bytes(filename, content, media_kind)
+        except media_import.MediaImportError as exc:
+            document.status = IndexStatus.failed
+            document.error_message = str(exc)
+            db.add(document)
+            db.commit()
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=str(exc),
+                source_id=str(document.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
+        await media_import.index_media_document(db, document, content, filename, media_kind)
 
     if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
         return FileOutcome(
@@ -276,12 +332,45 @@ async def _import_one_file(
     if existing is not None:
         # P1: a row already paused on the provider is NOT a duplicate — resume it in place
         # instead of creating a second Document/KnowledgeVersion (see
-        # _resume_blocked_document's docstring). Every other existing status (indexed, or any
-        # of the terminal *_failed statuses) is still a real duplicate, unchanged from before P1.
+        # _resume_incomplete_document's docstring).
         if existing.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
-            return await _resume_blocked_document(
+            return await _resume_incomplete_document(
                 db, existing, owner_id, filename, content, archive_path=archive_path, archive_chain=archive_chain
             )
+        # 2026-07-28, second incident: a document left at any OTHER non-terminal status
+        # (embedding, extracting, original_stored, ...) got there because the worker PROCESS
+        # itself died mid-step — no exception was ever raised, so nothing set a terminal
+        # status. Falling through to "duplicate" below would leave it stuck at that status
+        # forever even though the job it belongs to can still reach `completed` — the exact
+        # confirmed production incident (MAINAI_CONTEXT_BUNDLE.md stuck at `embedding`, job
+        # showing "Klar", queue empty, nothing left to ever revisit it). Resuming re-attempts
+        # the whole extraction+embedding pipeline on the SAME row from the durably stored
+        # original — see _resume_incomplete_document's docstring for why restarting from
+        # scratch is safe here regardless of which exact step the crash interrupted.
+        if existing.status in RESUMABLE_INDEX_STATUSES:
+            return await _resume_incomplete_document(
+                db, existing, owner_id, filename, content, archive_path=archive_path, archive_chain=archive_chain
+            )
+        # 2026-07-28 incident: a real, still-unresolved failure must keep reporting as
+        # "failed" on a resumed pass (e.g. app/worker.py's _requeue_blocked_jobs reprocessing
+        # a `partial` job to unstick its blocked files) — falling through to the generic
+        # "duplicate" outcome below would silently erase it from THIS pass's failed_count,
+        # since _run_once's summary (see that module) recomputes every count from scratch on
+        # each attempt rather than merging across attempts. A job with real failures could
+        # then flip straight to `completed` once its blocked files finally succeed, with the
+        # original failures never surfaced again anywhere. This never re-attempts
+        # extraction/embedding — the failure is already durably recorded on the Document row
+        # — it only reports it honestly again instead of masking it as a duplicate.
+        if existing.status in _FAILED_INDEX_STATUSES:
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=existing.error_message,
+                source_id=str(existing.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
+        # Every other existing status (indexed) is a real duplicate, unchanged from before P1.
         return FileOutcome(
             filename=filename,
             status="duplicate",
@@ -744,5 +833,33 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
     else:
         job.status = ImportJobStatus.completed
         job.completed_at = datetime.utcnow()
+
+    # 2026-07-28, permanent fix (production incident: MAINAI_CONTEXT_BUNDLE.md stuck at
+    # `embedding` while its job showed "Klar"): a job must never report completed/partial/
+    # failed while a linked, live Document is still stuck mid-pipeline. This is a safety net
+    # independent of THIS pass's own outcomes list — it re-checks the actual, current Document
+    # rows rather than trusting the counts above alone, since not every stuck row is
+    # necessarily represented in `outcomes` (e.g. a prior attempt's crash left it behind before
+    # this pass ever reached it). Overrides back to `pending` (no completed_at/failure_reason)
+    # so the very next poll cycle reclaims and resumes it via claim_next_job — see
+    # _import_one_file's RESUMABLE_INDEX_STATUSES branch above, and app/worker.py's
+    # _reconcile_orphaned_documents for the equivalent guard when a job is discovered to
+    # already be terminal (no poll cycle left to naturally reach this function again).
+    if job.status in (ImportJobStatus.completed, ImportJobStatus.partial, ImportJobStatus.failed):
+        still_stuck = (
+            db.query(Document.id)
+            .filter(
+                Document.import_job_id == job.id,
+                Document.deleted_at.is_(None),
+                Document.status.in_(RESUMABLE_INDEX_STATUSES),
+            )
+            .first()
+            is not None
+        )
+        if still_stuck:
+            job.status = ImportJobStatus.pending
+            job.completed_at = None
+            job.failure_reason = None
+
     db.add(job)
     db.commit()

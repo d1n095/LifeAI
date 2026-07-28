@@ -29,7 +29,8 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models.document import Document, IndexStatus
+from app.jobs.heartbeat import worker_process_alive
+from app.models.document import Document, IndexStatus, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob
 
 
@@ -44,19 +45,12 @@ class ContextStatusReason(str, enum.Enum):
 
 
 # See IndexStatus's own docstring for the full pipeline — these groupings only classify
-# existing values, they don't add new ones.
-_PROCESSING_STATUSES = {
-    IndexStatus.pending,  # legacy value, kept only for old rows — still "in flight"
-    IndexStatus.received,
-    IndexStatus.original_storing,
-    IndexStatus.original_stored,
-    IndexStatus.extracting,
-    IndexStatus.extracted,
-    IndexStatus.awaiting_classification,
-    IndexStatus.classifying,
-    IndexStatus.embedding,
-    IndexStatus.indexing,  # legacy value, kept only for old rows
-}
+# existing values, they don't add new ones. 2026-07-28: _PROCESSING_STATUSES now IS
+# RESUMABLE_INDEX_STATUSES (app/models/document.py) — a single shared definition, since this
+# is the exact same "stuck mid-pipeline after a worker crash" set app/worker.py's
+# _reconcile_orphaned_documents and app/rag/library_import.py's _resume_incomplete_document
+# now actively recover from, not just report on.
+_PROCESSING_STATUSES = RESUMABLE_INDEX_STATUSES
 _AWAITING_PROVIDER_STATUSES = {IndexStatus.awaiting_provider, IndexStatus.blocked_provider}
 _FAILED_STATUSES = {IndexStatus.failed, IndexStatus.storage_failed, IndexStatus.extraction_failed, IndexStatus.indexing_failed}
 
@@ -74,10 +68,18 @@ class ContextStatus:
 
 
 def _worker_reachable(db: Session, owner_id: uuid.UUID) -> bool:
-    """Identical freshness check to `app/routers/library.py`'s `ops_status()` — a worker that
-    claimed a job and renewed its lease recently enough that it can't have silently died.
-    Reads the same `ImportJob.last_heartbeat_at` column directly rather than importing from
-    the router, since routers stay a thin HTTP layer per `docs/MAINAI_ARCHITECTURE.md` §3."""
+    """2026-07-28: checks the process-level Redis heartbeat (app/jobs/heartbeat.py) FIRST —
+    written on every poll cycle regardless of whether a job was claimed, so a worker that's
+    simply idle (nothing currently in the queue) is correctly reported as reachable. Falls
+    back to the older `ImportJob.last_heartbeat_at`-based check (identical to
+    `app/routers/library.py`'s `ops_status()`) only when the heartbeat signal itself is
+    unavailable (Redis unreachable/not configured) — that older check only ever proves a
+    worker claimed a job recently, so on its own it under-reports a healthy-but-idle worker
+    as unavailable."""
+    alive = worker_process_alive()
+    if alive is not None:
+        return alive
+
     settings = get_settings()
     row = (
         db.query(ImportJob.last_heartbeat_at)

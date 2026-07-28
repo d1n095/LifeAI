@@ -35,8 +35,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
+from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
+from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.provider_verification import VerificationResult
 from app.providers.verification import ensure_verified
@@ -133,8 +135,78 @@ class Worker:
         outcome = await ensure_verified(db, role="embedding")
         if outcome.result != VerificationResult.ok:
             return
-        db.execute(text("UPDATE knowledge_import_jobs SET status = 'pending' WHERE status = 'blocked'"))
+        # 2026-07-28 incident: a ZIP job where SOME files genuinely failed and OTHERS paused
+        # on awaiting_provider/blocked_provider rolls up to ImportJobStatus.partial, not
+        # `blocked` (see library_import.py's `elif failed and (succeeded or ... or blocked or
+        # ...)` branch) — the `blocked_count` column is still > 0 on that row, but the old
+        # `WHERE status = 'blocked'` here never matched it, so its stuck files sat forever
+        # even once the provider verified ok again. `_import_one_file`'s existing-document
+        # branch already re-reports a still-failed file as `failed` again (not silently
+        # reclassified as `duplicate`) on a resumed pass, so re-running a `partial` job here
+        # is safe: previously-succeeded files correctly no-op as duplicates, previously-failed
+        # files correctly stay counted as failed, and only the actually-blocked files are
+        # really re-attempted.
+        #
+        # 2026-07-28 correction: a `partial` job already has `completed_at` set (see
+        # library_import.py's _run_once rollup) — resetting only `status` back to `pending`
+        # left a row that looked simultaneously "not yet done" (status) and "already finished"
+        # (completed_at), a real data-integrity inconsistency. Clearing completed_at and any
+        # stale failure_reason here keeps a pending/running row honestly looking unfinished,
+        # exactly like _reconcile_orphaned_documents already does for its own pending reset.
+        db.execute(
+            text(
+                "UPDATE knowledge_import_jobs SET status = 'pending', completed_at = NULL, failure_reason = NULL "
+                "WHERE status = 'blocked' OR (status = 'partial' AND blocked_count > 0)"
+            )
+        )
         db.commit()
+
+    def _reconcile_orphaned_documents(self, db: Session) -> None:
+        """2026-07-28, permanent fix for a confirmed production incident:
+        MAINAI_CONTEXT_BUNDLE.md's Document row was stuck at `embedding` while its ImportJob
+        had already reached `completed` ("Klar") — the worker process died mid-step with no
+        exception for Python to catch, so nothing ever set a terminal status on the Document,
+        and once its job was terminal, no further poll cycle would ever revisit it (see
+        library_import.py's `_run_once`, which now guards this same case for a job still IN
+        that function — this is the equivalent guard for a job that's already terminal by the
+        time the gap is noticed, e.g. one written before this fix existed).
+
+        Finds every job already at `completed`/`partial`/`failed` that still has at least one
+        linked, non-deleted Document sitting in RESUMABLE_INDEX_STATUSES, and resets ONLY that
+        job's status back to `pending` (clearing completed_at/failure_reason) — never touches
+        the Document row directly. claim_next_job then picks it up like any other pending job,
+        and `_import_one_file`'s existing-document branch resumes the stuck Document in place
+        via `_resume_incomplete_document` (same row, same durably-stored original, no
+        duplicate). Idempotent and safe to run every poll cycle: a job with nothing stuck
+        never matches the filter, and a job already reset to `pending` no longer matches
+        either. Runs on the superuser claim session — see `_ClaimSession`'s module-level
+        comment for why this must see documents/jobs across ALL owners, not just one RLS
+        scope."""
+        stuck_job_ids = [
+            row[0]
+            for row in db.query(ImportJob.id)
+            .join(Document, Document.import_job_id == ImportJob.id)
+            .filter(
+                ImportJob.status.in_([ImportJobStatus.completed, ImportJobStatus.partial, ImportJobStatus.failed]),
+                Document.deleted_at.is_(None),
+                Document.status.in_(RESUMABLE_INDEX_STATUSES),
+            )
+            .distinct()
+            .all()
+        ]
+        if not stuck_job_ids:
+            return
+        db.query(ImportJob).filter(ImportJob.id.in_(stuck_job_ids)).update(
+            {"status": ImportJobStatus.pending, "completed_at": None, "failure_reason": None},
+            synchronize_session=False,
+        )
+        db.commit()
+        logger.warning(
+            "Worker %s: återställde %d jobb till pending — ett kopplat dokument var fortfarande "
+            "fast mitt i pipelinen trots att jobbet redan var terminalt.",
+            self.worker_id,
+            len(stuck_job_ids),
+        )
 
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
@@ -143,6 +215,7 @@ class Worker:
         claim_db = _ClaimSession()
         try:
             await self._requeue_blocked_jobs(claim_db)
+            self._reconcile_orphaned_documents(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
             claim_db.close()
@@ -166,6 +239,12 @@ class Worker:
             self.settings.worker_concurrency,
         )
         while not self._shutdown.is_set():
+            # 2026-07-28: written on EVERY iteration, not just when a job is claimed — see
+            # app/jobs/heartbeat.py's module docstring for why ImportJob.last_heartbeat_at
+            # alone made an idle-but-healthy worker indistinguishable from a dead one. TTL is
+            # a generous multiple of the poll interval so a couple of slow cycles never flap
+            # the signal, while a genuinely crashed process still goes stale quickly.
+            record_worker_heartbeat(self.worker_id, ttl_seconds=max(60, self.settings.worker_poll_interval_seconds * 5))
             try:
                 worked = await self.run_once()
             except Exception:  # noqa: BLE001 - a poll-loop-level bug must never kill the whole worker process

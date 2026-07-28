@@ -23,7 +23,11 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { api, ImportJobItem } from "./api";
 
-export type QueueItemStatus = "queued" | "uploading" | "received" | "processing" | "completed" | "failed" | "cancelled";
+// 2026-07-28: "partial" used to be silently collapsed into "completed" below — a ZIP job
+// where some files genuinely failed, or are still stuck awaiting the embedding provider,
+// showed the exact same "Klar" label as a fully successful import. Kept as its own status so
+// the UI can tell the two apart and show real counts instead.
+export type QueueItemStatus = "queued" | "uploading" | "received" | "processing" | "completed" | "partial" | "failed" | "cancelled";
 
 export interface UploadQueueItem {
   id: string;
@@ -117,8 +121,16 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
         try {
           const job = await api.getImportJob(jobId);
           patch(id, { job });
-          if (job.status === "completed" || job.status === "partial") {
+          if (job.status === "completed") {
             patch(id, { status: "completed" });
+            finish();
+            return;
+          }
+          if (job.status === "partial") {
+            // 2026-07-28: must NOT collapse into "completed" — some files in this job
+            // genuinely failed or are still stuck awaiting the embedding provider (see
+            // job.blocked_count/failed_count, rendered by QUEUE_STATUS_LABELS's partial case).
+            patch(id, { status: "partial" });
             finish();
             return;
           }
@@ -175,8 +187,13 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
       // already-completed job synchronously for byte-identical content) — start polling only
       // when there's actually something to wait for, instead of an unconditional extra round
       // trip to GET .../jobs/{id} for a status that's already final.
-      if (job.status === "completed" || job.status === "partial") {
+      if (job.status === "completed") {
         patch(id, { status: "completed" });
+        finishItem();
+        return;
+      }
+      if (job.status === "partial") {
+        patch(id, { status: "partial" });
         finishItem();
         return;
       }

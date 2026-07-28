@@ -18,7 +18,10 @@ No real network call is ever made — every provider call in this file is monkey
 provider-method or httpx.AsyncClient level, exactly like the rest of the suite (see
 test_library_import.py's module docstring)."""
 
+import io
 import uuid
+import zipfile
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -35,7 +38,7 @@ from app.providers.gemini_provider import GeminiProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.verification import classify_provider_exception, ensure_verified, verify_now, verify_provider
 from app.rag.ingest import index_document
-from app.rag.library_import import _resume_blocked_document, run_import_job
+from app.rag.library_import import _resume_incomplete_document, run_import_job
 from app.storage import get_storage
 
 FOUNDER_EMAIL = "founder@lifeos.local"
@@ -62,6 +65,14 @@ def _read_chunk_for(data: bytes, size: int = 1 << 16):
 
 def _store(raw: bytes):
     return get_storage().write_stream(_read_chunk_for(raw), max_bytes=max(len(raw), 1))
+
+
+def _make_zip(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
 
 
 def _make_job(db_session, owner_id, raw: bytes, filename: str) -> ImportJob:
@@ -505,7 +516,7 @@ async def test_resuming_a_blocked_provider_document_reuses_the_same_row_no_dupli
     monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed_ok)
     monkeypatch.setattr(get_settings(), "provider_verification_cache_seconds", 0)
 
-    outcome = await _resume_blocked_document(db_session, doc, user.id, "resume.txt", b"Text som forst blockeras pa providern.")
+    outcome = await _resume_incomplete_document(db_session, doc, user.id, "resume.txt", b"Text som forst blockeras pa providern.")
 
     assert outcome.status == "indexed"
     assert outcome.source_id == str(first_doc_id)
@@ -587,6 +598,88 @@ async def test_worker_requeues_blocked_jobs_once_provider_verifies_ok_and_reache
     assert db_session.query(KnowledgeVersion).filter_by(source_id=first_doc_id).count() == 1
 
 
+@pytest.mark.asyncio
+async def test_worker_requeues_a_partial_job_and_never_loses_the_real_failure(db_session, superuser_db, make_verified_user, monkeypatch):
+    """2026-07-28 incident: a ZIP job with ONE file that genuinely fails (a manifest checksum
+    mismatch — real, permanent, nothing to do with the provider) and ANOTHER file that pauses
+    on an invalid embedding key rolls up to `ImportJobStatus.partial`, not `blocked` — the old
+    `_requeue_blocked_jobs` only matched `status = 'blocked'`, so this job's stuck file sat
+    forever even once the key was fixed. Proves both halves of the fix together: (1) the
+    requeue now picks up a `partial` job with `blocked_count > 0`, and (2) the genuinely
+    failed file is still reported as failed on the second pass — not silently reclassified as
+    `duplicate`, which would have erased it from the job's own count and let the job flip
+    straight to `completed` with the original failure never surfaced again."""
+    from app.worker import Worker
+
+    async def _raise_401(self, texts, model, *, timeout=None, **kwargs):
+        raise _status_error(401)
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _raise_401)
+    monkeypatch.setattr(get_settings(), "openai_api_key", "invalid-key")
+    monkeypatch.setattr(get_settings(), "provider_verification_cache_seconds", 0)
+
+    user, _ = make_verified_user()
+    manifest = b'{"documents": [{"file": "bad-checksum.txt", "checksum": "' + b"0" * 64 + b'"}]}'
+    raw = _make_zip(
+        {
+            "manifest.json": manifest,
+            "bad-checksum.txt": b"Den har filen har fel deklarerad checksumma i manifestet.",
+            "blocked-by-key.txt": b"Den har filen pausar forst pa en ogiltig leverantorsnyckel.",
+        }
+    )
+    job = _make_job(db_session, user.id, raw, "partial.zip")
+
+    # First cycle: one real failure (checksum mismatch, nothing to do with the provider), one
+    # provider-blocked file -> job rolls up to `partial`, not `blocked`.
+    worked = await Worker().run_once()
+    assert worked is True
+
+    superuser_db.expire_all()
+    job_row = superuser_db.get(ImportJob, job.id)
+    assert job_row.status == ImportJobStatus.partial
+    assert job_row.failed_count == 1
+    assert job_row.blocked_count == 1
+    assert job_row.succeeded_count == 0
+
+    blocked_doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="blocked-by-key.txt").first()
+    assert blocked_doc.status == IndexStatus.blocked_provider
+    blocked_doc_id = blocked_doc.id
+
+    # The founder fixes the key.
+    async def _fake_chat_ok(self, messages, model, *, timeout=None, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 1, "completion_tokens": 1})
+
+    async def _fake_embed_ok(self, texts, model, *, timeout=None, **kwargs):
+        return [[0.03] * get_settings().embedding_dim for _ in texts]
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok)
+    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed_ok)
+
+    # Second cycle: _requeue_blocked_jobs must now match this `partial` job (blocked_count >
+    # 0), not just ones already at `blocked`.
+    worked_again = await Worker().run_once()
+    assert worked_again is True
+
+    superuser_db.expire_all()
+    job_row2 = superuser_db.get(ImportJob, job.id)
+    # Still `partial` — one file really did fail and that must never disappear — but now with
+    # the previously-blocked file counted as succeeded, not as blocked or, worse, silently as
+    # a duplicate that erases the original failure from this pass's tally.
+    assert job_row2.status == ImportJobStatus.partial
+    assert job_row2.succeeded_count == 1
+    assert job_row2.blocked_count == 0
+    assert job_row2.failed_count == 1  # the real failure is still counted, not lost
+
+    db_session.expire_all()
+    resumed_doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="blocked-by-key.txt").first()
+    assert resumed_doc.status == IndexStatus.indexed
+    assert resumed_doc.id == blocked_doc_id  # same row, no duplicate
+
+    # The genuinely-failed file was never touched by the resume — no Document row was ever
+    # created for it in the first place (the checksum mismatch is rejected before that point).
+    assert db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="bad-checksum.txt").count() == 0
+
+
 # --- F. Migration safety -------------------------------------------------------------------
 
 
@@ -657,3 +750,152 @@ def test_admin_verify_endpoint_triggers_a_real_uncached_check_and_persists_it(cl
     status_res = client.get("/api/admin/providers/status")
     openai_row = next(p for p in status_res.json() if p["name"] == "openai")
     assert openai_row["chat_verification"]["checked_by"] == "founder"
+
+
+# --- H. Crash/resume recovery (2026-07-28 permanent fix) -----------------------------------
+#
+# Confirmed production incident: MAINAI_CONTEXT_BUNDLE.md's Document row was left at
+# `embedding` forever because the worker PROCESS itself died mid-step (no exception for Python
+# to catch), while its ImportJob had already reached `completed` ("Klar") with an empty queue
+# — nothing left to ever naturally revisit it. See app/models/document.py's
+# RESUMABLE_INDEX_STATUSES, app/rag/library_import.py's _import_one_file/_resume_incomplete_
+# document/_run_once, and app/worker.py's _reconcile_orphaned_documents.
+
+
+@pytest.mark.asyncio
+async def test_worker_crash_mid_embedding_is_resumed_to_indexed_before_job_completes(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """Founder's point 6: simulates a REAL worker process crash, not a caught exception — the
+    embed() call raises a BaseException that is deliberately NOT an Exception subclass, so it
+    is caught by nothing (not app/rag/ingest.py's `except Exception`, not app/worker.py's
+    process_claimed_job's `except Exception`), exactly like a real SIGKILL/OOM would leave
+    nothing to run past the point the Document row's `embedding` status was last committed.
+    Proves the full recovery chain end to end: the reclaimed job resumes the SAME Document row
+    (never a duplicate), reaches `indexed` with real chunks, and the job's own status only
+    becomes `completed` once that has actually happened — never before."""
+    from app.providers.verification import VERIFICATION_PROBE_TEXT
+    from app.worker import Worker
+
+    class _SimulatedProcessKill(BaseException):
+        """Deliberately NOT an Exception subclass — see this test's docstring."""
+
+    async def _crash_mid_embed(self, texts, model, **kwargs):
+        # The pre-flight verification probe (both app/worker.py's _requeue_blocked_jobs,
+        # called BEFORE a job is even claimed, and app/rag/ingest.py's per-document pre-flight
+        # gate) must keep succeeding — only the REAL chunk-embedding call simulates the crash,
+        # exactly like test_a_genuine_post_preflight_embed_failure_gets_indexing_failed above
+        # distinguishes the two.
+        if texts == [VERIFICATION_PROBE_TEXT]:
+            return [[0.01] * get_settings().embedding_dim]
+        raise _SimulatedProcessKill("simulated hard process kill mid-embed()")
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _crash_mid_embed)
+
+    user, _ = make_verified_user()
+    raw = b"Innehall som krashar workern mitt i embedding-steget."
+    job = _make_job(db_session, user.id, raw, "crash-mid-embedding.txt")
+
+    with pytest.raises(_SimulatedProcessKill):
+        await Worker().run_once()
+
+    superuser_db.expire_all()
+    job_row = superuser_db.get(ImportJob, job.id)
+    # Nothing downstream of the crash ever ran to finalize the job row — it is left exactly
+    # where claim_next_job put it before processing began.
+    assert job_row.status == ImportJobStatus.running
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="crash-mid-embedding.txt").first()
+    assert doc is not None
+    assert doc.status == IndexStatus.embedding  # exactly where the crash left it
+    stuck_doc_id = doc.id
+
+    # Simulate the abandoned lease expiring, exactly like test_worker.py's reclaim test —
+    # a real restart/second worker eventually notices this the same way.
+    job_row.lease_expires_at = datetime.utcnow() - timedelta(seconds=5)
+    superuser_db.add(job_row)
+    superuser_db.commit()
+
+    async def _fake_chat_ok(self, messages, model, *, timeout=None, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 1, "completion_tokens": 1})
+
+    async def _fake_embed_ok(self, texts, model, *, timeout=None, **kwargs):
+        return [[0.04] * get_settings().embedding_dim for _ in texts]
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok)
+    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed_ok)
+
+    worked = await Worker().run_once()
+    assert worked is True
+
+    superuser_db.expire_all()
+    job_row2 = superuser_db.get(ImportJob, job.id)
+    assert job_row2.status == ImportJobStatus.completed  # only AFTER the document actually resolved
+    assert job_row2.succeeded_count == 1
+
+    db_session.expire_all()
+    doc2 = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="crash-mid-embedding.txt").first()
+    assert doc2.id == stuck_doc_id  # same row, never duplicated
+    assert doc2.status == IndexStatus.indexed
+    assert doc2.chunk_count > 0
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_repairs_a_terminal_job_with_a_document_still_stuck_in_embedding(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """Founder's point 7: regression test for the exact confirmed production incident,
+    reproduced directly rather than via the crash mechanics of the test above — a job already
+    at `completed`, a linked live Document already stuck at `embedding`, and an otherwise empty
+    queue (nothing else pending to ever naturally trigger a revisit). Proves
+    app/worker.py's _reconcile_orphaned_documents repairs it automatically on the very next
+    poll cycle, with no manual intervention."""
+    from app.rag.zip_import import sha256_bytes
+    from app.worker import Worker
+
+    user, _ = make_verified_user()
+    raw = b"Innehall som redan hann bli rapporterat klart i produktion."
+    job = _make_job(db_session, user.id, raw, "already-completed.txt")
+
+    doc = Document(
+        uploaded_by=user.id,
+        title="already-completed.txt",
+        original_filename="already-completed.txt",
+        checksum=sha256_bytes(raw),  # must match what _import_one_file recomputes on resume
+        status=IndexStatus.embedding,
+        import_job_id=job.id,
+    )
+    db_session.add(doc)
+    db_session.commit()
+    stuck_doc_id = doc.id
+
+    # The exact reported production shape: job already terminal ("Klar"), queue otherwise empty.
+    job_row = superuser_db.get(ImportJob, job.id)
+    job_row.status = ImportJobStatus.completed
+    job_row.succeeded_count = 1
+    job_row.completed_at = datetime.utcnow()
+    superuser_db.add(job_row)
+    superuser_db.commit()
+
+    async def _fake_chat_ok(self, messages, model, *, timeout=None, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 1, "completion_tokens": 1})
+
+    async def _fake_embed_ok(self, texts, model, *, timeout=None, **kwargs):
+        return [[0.05] * get_settings().embedding_dim for _ in texts]
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok)
+    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed_ok)
+
+    worked = await Worker().run_once()
+    assert worked is True  # _reconcile_orphaned_documents reset the job to pending, then it was claimed
+
+    superuser_db.expire_all()
+    job_row2 = superuser_db.get(ImportJob, job.id)
+    assert job_row2.status == ImportJobStatus.completed
+    assert job_row2.succeeded_count == 1
+
+    db_session.expire_all()
+    doc2 = db_session.get(Document, stuck_doc_id)
+    assert doc2.id == stuck_doc_id  # same row, never duplicated
+    assert doc2.status == IndexStatus.indexed
+    assert doc2.chunk_count > 0
