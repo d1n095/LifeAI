@@ -146,9 +146,16 @@ class Worker:
         # is safe: previously-succeeded files correctly no-op as duplicates, previously-failed
         # files correctly stay counted as failed, and only the actually-blocked files are
         # really re-attempted.
+        #
+        # 2026-07-28 correction: a `partial` job already has `completed_at` set (see
+        # library_import.py's _run_once rollup) — resetting only `status` back to `pending`
+        # left a row that looked simultaneously "not yet done" (status) and "already finished"
+        # (completed_at), a real data-integrity inconsistency. Clearing completed_at and any
+        # stale failure_reason here keeps a pending/running row honestly looking unfinished,
+        # exactly like _reconcile_orphaned_documents already does for its own pending reset.
         db.execute(
             text(
-                "UPDATE knowledge_import_jobs SET status = 'pending' "
+                "UPDATE knowledge_import_jobs SET status = 'pending', completed_at = NULL, failure_reason = NULL "
                 "WHERE status = 'blocked' OR (status = 'partial' AND blocked_count > 0)"
             )
         )

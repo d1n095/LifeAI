@@ -320,6 +320,171 @@ async def test_media_import_never_makes_the_placeholder_transcript_look_like_rea
     assert "inte tillgänglig" in chunk.text
 
 
+# --- Crash/resume recovery for media documents (2026-07-28 permanent fix) ------------------
+#
+# app/models/document.py's RESUMABLE_INDEX_STATUSES applies to every Document regardless of
+# type, including MP3/MP4 stuck at `extracting`/`embedding` after a worker crash — but a media
+# document never went through extract_text()/index_document() on its first import (see
+# app/rag/library_import.py's _import_one_file `if media_kind is None: ... else: ...` split).
+# app/rag/library_import.py's _resume_incomplete_document now dispatches on
+# media_import.media_kind_for(filename) so a resumed media document goes through the SAME
+# media_import.validate_media_bytes()/index_media_document() pipeline a first import uses,
+# instead of being misrouted into text extraction (which would misclassify it as
+# extraction_failed — binary media isn't parseable text).
+
+
+@pytest.mark.asyncio
+async def test_worker_crash_mid_media_embedding_is_resumed_to_indexed_before_job_completes(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """Mirrors test_provider_verification.py's equivalent text-pipeline test: a REAL worker
+    process crash (a BaseException that is deliberately NOT an Exception subclass, caught by
+    nothing) mid the real chunk-embedding call for an MP3. Proves the reclaimed job resumes the
+    SAME Document row through the MEDIA pipeline (not text extraction), reaches `indexed` with
+    real, timestamped chunks, and the job only completes once that has actually happened."""
+    from datetime import datetime, timedelta
+
+    from app.models.import_job import ImportJob, ImportJobStatus
+    from app.providers.openai_provider import OpenAIProvider
+    from app.providers.verification import VERIFICATION_PROBE_TEXT
+    from app.worker import Worker
+
+    class _SimulatedProcessKill(BaseException):
+        """Deliberately NOT an Exception subclass — a real SIGKILL is caught by nothing,
+        including index_media_document's own `except Exception` and app/worker.py's
+        process_claimed_job's `except Exception`."""
+
+    async def _fake_transcribe(self, raw, filename, media_kind):
+        return TranscriptResult(
+            segments=[TranscriptSegment(0.0, 5.0, "Grundaren spelar in en anteckning.")],
+            duration_seconds=5.0,
+            provider="mock",
+            model="placeholder-v1",
+        )
+
+    async def _crash_mid_embed(self, texts, model, **kwargs):
+        # The pre-flight verification probe (app/worker.py's _requeue_blocked_jobs, called
+        # BEFORE a job is even claimed) must keep succeeding — only the REAL chunk-embedding
+        # call inside index_media_document simulates the crash.
+        if texts == [VERIFICATION_PROBE_TEXT]:
+            return [[0.01] * EMBEDDING_DIM]
+        raise _SimulatedProcessKill("simulated hard process kill mid-embed()")
+
+    monkeypatch.setattr(MockTranscriptionProvider, "transcribe", _fake_transcribe)
+    monkeypatch.setattr(OpenAIProvider, "embed", _crash_mid_embed)
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, VALID_MP3, "crash-mid-embedding.mp3")
+
+    with pytest.raises(_SimulatedProcessKill):
+        await Worker().run_once()
+
+    superuser_db.expire_all()
+    job_row = superuser_db.get(ImportJob, job.id)
+    assert job_row.status == ImportJobStatus.running  # nothing ever finalized the job row
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="crash-mid-embedding.mp3").first()
+    assert doc is not None
+    assert doc.status == IndexStatus.embedding  # exactly where the crash left it
+    stuck_doc_id = doc.id
+
+    # Simulate the abandoned lease expiring, exactly like test_worker.py's reclaim test.
+    job_row.lease_expires_at = datetime.utcnow() - timedelta(seconds=5)
+    superuser_db.add(job_row)
+    superuser_db.commit()
+
+    async def _fake_embed_ok(self, texts, model, **kwargs):
+        return [[0.03] * EMBEDDING_DIM for _ in texts]
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed_ok)
+
+    worked = await Worker().run_once()
+    assert worked is True
+
+    superuser_db.expire_all()
+    job_row2 = superuser_db.get(ImportJob, job.id)
+    assert job_row2.status == ImportJobStatus.completed  # only AFTER the document actually resolved
+    assert job_row2.succeeded_count == 1
+
+    db_session.expire_all()
+    doc2 = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="crash-mid-embedding.mp3").first()
+    assert doc2.id == stuck_doc_id  # same row, never duplicated
+    assert doc2.status == IndexStatus.indexed
+    assert doc2.chunk_count > 0
+
+    chunk = db_session.query(DocumentChunk).filter_by(document_id=stuck_doc_id).one()
+    assert chunk.start_seconds == 0.0
+    assert chunk.end_seconds == 5.0  # a real timestamped media chunk, not plain text
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_repairs_a_terminal_job_with_a_media_document_stuck_in_embedding(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """Regression test for the confirmed production incident shape, reproduced for a MEDIA
+    document: a job already `completed`, a linked live MP3 Document already stuck at
+    `embedding`, otherwise empty queue. Proves app/worker.py's _reconcile_orphaned_documents
+    together with _resume_incomplete_document's media dispatch repair it automatically, with
+    no manual intervention and no misrouting into text extraction."""
+    from datetime import datetime
+
+    from app.models.import_job import ImportJob, ImportJobStatus
+    from app.rag.zip_import import sha256_bytes
+    from app.worker import Worker
+
+    async def _fake_transcribe(self, raw, filename, media_kind):
+        return TranscriptResult(
+            segments=[TranscriptSegment(0.0, 8.0, "En kort ljudanteckning som redan sades vara klar.")],
+            duration_seconds=8.0,
+            provider="mock",
+            model="placeholder-v1",
+        )
+
+    monkeypatch.setattr(MockTranscriptionProvider, "transcribe", _fake_transcribe)
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, VALID_MP3, "already-completed.mp3")
+
+    doc = Document(
+        uploaded_by=user.id,
+        title="already-completed.mp3",
+        original_filename="already-completed.mp3",
+        media_type="audio/mpeg",
+        checksum=sha256_bytes(VALID_MP3),  # must match what _import_one_file recomputes on resume
+        status=IndexStatus.embedding,
+        import_job_id=job.id,
+    )
+    db_session.add(doc)
+    db_session.commit()
+    stuck_doc_id = doc.id
+
+    # The exact reported production shape: job already terminal ("Klar"), queue otherwise empty.
+    job_row = superuser_db.get(ImportJob, job.id)
+    job_row.status = ImportJobStatus.completed
+    job_row.succeeded_count = 1
+    job_row.completed_at = datetime.utcnow()
+    superuser_db.add(job_row)
+    superuser_db.commit()
+
+    worked = await Worker().run_once()
+    assert worked is True  # _reconcile_orphaned_documents reset the job to pending, then it was claimed
+
+    superuser_db.expire_all()
+    job_row2 = superuser_db.get(ImportJob, job.id)
+    assert job_row2.status == ImportJobStatus.completed
+    assert job_row2.succeeded_count == 1
+
+    db_session.expire_all()
+    doc2 = db_session.get(Document, stuck_doc_id)
+    assert doc2.id == stuck_doc_id  # same row, never duplicated
+    assert doc2.status == IndexStatus.indexed
+    assert doc2.chunk_count > 0
+
+    chunk = db_session.query(DocumentChunk).filter_by(document_id=stuck_doc_id).one()
+    assert chunk.start_seconds == 0.0
+    assert chunk.end_seconds == 8.0  # resumed through the media pipeline, not text extraction
+
+
 # --- MediaUrlImport RLS isolation ---
 
 

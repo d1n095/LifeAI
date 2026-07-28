@@ -209,7 +209,19 @@ async def _resume_incomplete_document(
     stored original (ImportJob.source_storage_key, see run_import_job/_run_once). The
     original bytes are never re-stored — the document is already `original_stored` (or
     further along), and app/storage/'s content-addressing would just no-op a re-write
-    anyway."""
+    anyway.
+
+    2026-07-28, second correction: RESUMABLE_INDEX_STATUSES applies to every Document
+    regardless of type — an audio/video file (media_import.py's pipeline) can crash while
+    stuck at `extracting`/`embedding` exactly like a text document can, but it does NOT go
+    through extract_text()/index_document() on a first import (see _import_one_file's own
+    `if media_kind is None: ... else: ...` split) — it goes through
+    media_import.validate_media_bytes() + media_import.index_media_document() instead, which
+    transcribes and builds timestamped chunks rather than extracting/embedding plain text.
+    Resuming a crash-stuck MP3/MP4 through the text pipeline would misclassify it as
+    extraction_failed (extract_text() cannot parse binary media). This function now mirrors
+    _import_one_file's own dispatch on media_import.media_kind_for(filename) so a resumed
+    media document goes through the SAME pipeline a first import would have."""
     version = (
         db.query(KnowledgeVersion)
         .filter(KnowledgeVersion.source_id == document.id)
@@ -217,29 +229,47 @@ async def _resume_incomplete_document(
         .first()
     )
 
-    document.status = IndexStatus.extracting
-    db.add(document)
-    db.commit()
-    try:
-        text_content = extract_text(filename, content)
-    except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
-        document.status = IndexStatus.extraction_failed
-        document.error_message = f"Kunde inte extrahera text: {exc}"
+    media_kind = media_import.media_kind_for(filename)
+    if media_kind is None:
+        document.status = IndexStatus.extracting
         db.add(document)
         db.commit()
-        return FileOutcome(
-            filename=filename,
-            status="failed",
-            reason=document.error_message,
-            source_id=str(document.id),
-            archive_path=archive_path,
-            archive_chain=archive_chain,
-        )
-    document.status = IndexStatus.extracted
-    db.add(document)
-    db.commit()
-
-    await index_document(db, document, text_content)
+        try:
+            text_content = extract_text(filename, content)
+        except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
+            document.status = IndexStatus.extraction_failed
+            document.error_message = f"Kunde inte extrahera text: {exc}"
+            db.add(document)
+            db.commit()
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=document.error_message,
+                source_id=str(document.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
+        document.status = IndexStatus.extracted
+        db.add(document)
+        db.commit()
+        await index_document(db, document, text_content)
+    else:
+        try:
+            media_import.validate_media_bytes(filename, content, media_kind)
+        except media_import.MediaImportError as exc:
+            document.status = IndexStatus.failed
+            document.error_message = str(exc)
+            db.add(document)
+            db.commit()
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=str(exc),
+                source_id=str(document.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
+        await media_import.index_media_document(db, document, content, filename, media_kind)
 
     if document.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
         return FileOutcome(
