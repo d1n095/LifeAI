@@ -546,6 +546,110 @@ migration) och flera skarpa databuggar hittades i det tidigare DDL-utkastet:
   Message→MemorySourceUnit. Fortfarande ingen claim-extraktion från konversationer — det
   kommer efter S1C, i sitt eget steg.
 
+**2026-07-28, SJÄTTE granskningsrundan — S1A verifierad mot verklig kodbas, 14 rättningar.**
+Föregående DDL-utkast antog kolumnnamn och beteenden som inte stämmer mot den faktiska
+modellen. Verifierat direkt mot `backend/app/models/*.py`, `backend/app/rls.py` och
+`backend/app/routers/library.py`:
+
+1. **Kolumnnamnsfel rättade.** `documents.uploaded_by` (inte `owner_id`; nullable i modellen,
+   men migration 0006:s RLS-policy och `app/rag/ingest.py` garanterar att en riktig upload
+   alltid har den satt — en NULL-rad är redan osynlig för alla via RLS, så den kan aldrig ha
+   claims kopplade till sig i praktiken). `knowledge_versions.source_id` (inte `document_id`)
+   pekar på dokumentet; `knowledge_versions.owner_id` finns och är `NOT NULL`.
+   `document_chunks` har både `document_id` och `owner_id`, båda `NOT NULL`. DSU-triggern
+   validerar nu de VERKLIGA fälten, inte de tidigare felaktigt antagna.
+2. **RLS återinförd.** `memory_source_units`, `document_source_units` och
+   `knowledge_claim_evidence` innehåller ägarspecifikt/potentiellt känsligt innehåll
+   (`content_text` är en kopia av chunk-/versionstext) och får `ENABLE ROW LEVEL SECURITY` +
+   `FORCE ROW LEVEL SECURITY` + en `owner_id = current_setting('app.current_user_id')`-policy,
+   exakt samma mönster som `app/rls.py`:s övriga tabeller. Migrationen lägger till dem i
+   `RLS_STATEMENTS`/`POLICY_DEFINITIONS` i samma commit som skapar tabellerna — en tabell med
+   ägarspecifikt innehåll får aldrig existera ens tillfälligt utan RLS.
+3. **`document_tombstone` tas bort ur S1A.** `document_source_units.document_id` är `NOT
+   NULL`, och `KnowledgeClaim.source_id` är obligatorisk med `ON DELETE CASCADE` mot
+   `documents.id` — en claim kan strukturellt inte överleva att dess `Document`-rad
+   verkligen hårdraderas (då försvinner claimen med samma CASCADE). Dagens `delete_source`
+   (se `library.py`) gör dessutom bara soft delete av `Document` (behåller raden,
+   `deleted_at` sätts) + hård radering av `DocumentChunk`-raderna. Det finns alltså inget
+   verkligt scenario i S1A där `document_id` skulle sakna en rad att peka på. `source_kind`
+   blir istället: `document_chunk | document_version | document_record` — `document_record`
+   används när dokumentraden finns men varken chunk eller version kan styrkas (t.ex. redan
+   `deleted_at`-markerat). En äkta tombstone för en framtida, avsiktlig hård-raderingsväg
+   hör till det separata purge-paketet, inte S1A.
+4. **`version_id` låses INTE till obligatorisk för `document_chunk`.** Jag har INTE
+   databasåtkomst till produktions- eller stagingdata från den här sessionen (ingen
+   `DATABASE_URL`, ingen körande Postgres/Docker) och kan därför inte köra den efterfrågade
+   dataprofilen. Frågan är specificerad exakt (se DDL-svaret) och måste köras av
+   grundaren/en session med DB-åtkomst innan S1A mergas — men skiktet är redan konstruerat
+   för att inte behöva vänta på svaret: `document_chunk` kräver bara `document_id`+`chunk_id`;
+   `version_id` är nullable även för `document_chunk`, eftersom `KnowledgeClaim.version_id`
+   redan är nullable i produktion och en chunk ensam räcker för en sanningsenlig
+   `snapshot_status='exact'`-snapshot.
+5. **Backfillen görs atomisk och race-säker.** Varje distinkt grupp
+   (`memory_source_units`-rad + `document_source_units`-rad + `UPDATE` av alla dess claims)
+   skapas i EN transaktion. Partiella unika index (`UNIQUE (owner_id, chunk_id) WHERE
+   chunk_id IS NOT NULL` respektive `UNIQUE (owner_id, document_id, version_id) WHERE
+   chunk_id IS NULL AND version_id IS NOT NULL`) på `document_source_units`, kombinerat med
+   `INSERT ... ON CONFLICT DO NOTHING` + en efterföljande `SELECT` av den vinnande raden, gör
+   att en krasch mitt i eller två parallella workers aldrig kan skapa två source units för
+   samma underliggande chunk/version.
+6. **Direkta child-deletes förbjuds helt i S1A**, istället för en deferred-trigger som
+   försöker skilja kaskad från direkt radering. `memory_source_units` och
+   `document_source_units` har ingen legitim raderingsväg i S1A överhuvudtaget — purge
+   nollar innehåll i befintlig rad (se punkt 7), den raderar aldrig raden. En ovillkorlig
+   `BEFORE DELETE`-trigger på båda tabellerna reser undantag alltid. Om ett verkligt behov av
+   radrensning (t.ex. GDPR-utplåning av hela raden) uppstår senare blir det en egen,
+   medvetet granskad framtida migration — inte något S1A förbereder en bakväg för nu.
+7. **Purge-flaggan ersätts av en självvaliderande övergång, ingen extern GUC.** Samma
+   `BEFORE UPDATE`-trigger som skyddar immutability känner nu igen den EXAKTA purge-övergången
+   strukturellt (gammal `lifecycle_status IN ('active','revoked')`, ny `lifecycle_status =
+   'purged'`, `content_text`/`content_hash` → `NULL`, alla andra immutable fält oförändrade)
+   och tillåter DEN, samt de andra legitima livscykelövergångarna i punkt 8 — och inget annat.
+   Ingen session kan längre "låsa upp" fri redigering genom att sätta en sessionsvariabel.
+8. **Riktig livscykel-state machine.** `active → revoked` (kräver `revocation_reason`
+   `NOT NULL`, sätter `revoked_at`), `revoked → active` (explicit restore, kräver att
+   anropande applikationskod skriver en `AuditLog`-rad via befintliga `app/audit.py`s
+   `record_audit` — samma mönster som redan används i `admin.py`), `active/revoked →
+   purged` (sätter `purged_at`+`purge_reason`, nollar content), `purged` är terminalt — varje
+   `UPDATE` som försöker lämna `purged` avvisas av triggern.
+9. **Tidsfält korrigerade.** `occurred_at` (tidigare beskrivet som "när innehållet skapades")
+   ersätts av `observed_at NOT NULL` (när systemet skapade/tog emot source unit — det
+   `created_at` faktiskt mäter idag) + `occurred_at NULLABLE` (när originalinnehållet
+   verkligen uppstod, om känt) + `occurred_at_basis` (`explicit | source_metadata | inferred
+   | unknown`). Backfillen sätter `observed_at` = chunkens/versionens `created_at`,
+   `occurred_at = NULL`, `occurred_at_basis = 'unknown'` — importdatum får aldrig låtsas vara
+   ett exakt ursprungsdatum.
+10. **`source_role` förblir immutable i S1A; attribution-korrigering skjuts upp.** En
+    separat, versionshanterad `source_attributions`-tabell för granskad omattribuering
+    (t.ex. ett dokument som senare bekräftas vara grundarens eget) är en egen framtida
+    utökning, inte en tyst `UPDATE` av `source_role`. Tills den byggs förblir varje
+    dokumentbackfillad rad `unknown`, permanent, vilket redan är den säkra defaulten.
+11. **`project_id` behandlas inte som ägar-FK.** `Project.created_by` är nullable och
+    projekt är fortsatt delad företagskunskap (ingen RLS på `projects`, se `app/rls.py`s
+    docstring). `memory_source_units.project_id` förblir en vanlig FK mot `projects.id` utan
+    någon owner-verifieringstrigger — ingen dold Project-ägarskaps-/RLS-ändring smygs in i
+    proveniensmigrationen.
+12. **`knowledge_claim_evidence` färdigspecificerad**: `ON DELETE CASCADE` mot
+    `knowledge_claims` (bevis försvinner naturligt med sin claim), `ON DELETE RESTRICT` mot
+    `memory_source_units` (tills purge uttryckligen hanterat beroenden), full RLS, komposit-FK
+    mot båda föräldrarna för ägarintegritet, namngivna constraints.
+13. **`downgrade()` utökad.** Kontrollerar nu användning i ALLA fyra: `memory_source_units`,
+    `document_source_units`, `knowledge_claim_evidence`, `knowledge_claims.memory_source_id`
+    — inte bara den sistnämnda — och tar bort triggers/funktioner/RLS-policyer/namngivna
+    constraints/index/kolumn/tabeller i korrekt beroendeordning.
+14. **Library-delete måste kopplas till S1A:s revoke-flöde.** `delete_source` (se
+    `library.py`) gör idag hård radering av `DocumentChunk`-raderna direkt (inte soft
+    delete) — vilket betyder att om S1A:s `content_text` inte samtidigt revoke:as skulle en
+    fullständig textkopia bli kvar aktiv i minneslagret efter att grundaren trott att källan
+    togs bort. S1A:s DDL i sig kan inte tvinga fram detta (det är applikationslogik i
+    `delete_source`), men S1A:s PR MÅSTE innehålla ändringen: `delete_source` sätter
+    `lifecycle_status='revoked'` (med `revocation_reason='source_deleted'`) på alla
+    `memory_source_units`-rader vars `document_source_units.document_id = source_id`, i
+    SAMMA transaktion som chunk-raderingen — inte som ett separat, senare steg.
+
+Se chattsvaret för den fullständiga, reviderade S1A-DDL:n som implementerar alla 14 punkter.
+Fortfarande ingen Alembic-migration skriven — väntar på godkännande.
+
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
 ```
