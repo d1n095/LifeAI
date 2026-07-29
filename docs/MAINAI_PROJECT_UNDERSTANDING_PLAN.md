@@ -114,7 +114,7 @@ lagrat.** Det paketet löste "filen försvinner aldrig" — det löste inte "Mai
 | 4 | **Projektminne** | 🟡 Delvis | `Project`/`Task` finns men är INTE länkade till de källor/påståenden som gav upphov till dem — inget `derived_from` mellan en uppgift och det dokument som föreslog den |
 | 5 | **Idéminne** | 🔴 Saknas i stort | Workbench kan spara en analys märkt "idea", men ingen struktur för alternativa lösningar, varför idén uppstod, eller kopplingar mellan idéer |
 | 6 | **Beslutsminne** | 🟡 Delvis | `active`+`decisions`+`supersedes` ger grunden, men "vem/när/varför" utöver `created_at` finns bara som fri text i en relations `note` |
-| 7 | **Grundarminne** | 🔴 Saknas helt | `app/context/resolver.py` klassificerar konversationsturer (idé värd att spara, explicit minneskommando, etc.) men sparar INGENTING beständigt — rent observationellt, ingen tabell |
+| 7 | **Grundarminne** | 🔴 Saknas helt | `app/context/resolver.py` klassificerar konversationsturer (idé värd att spara, explicit minneskommando, etc.) men sparar INGENTING beständigt — rent observationellt, ingen tabell. **2026-07-28-revidering (§6.11):** P6 begränsas INTE längre till bara resolver-flaggade turer — resolvern blir en prioritetssignal (snabbspår), medan en generell bakgrundspipeline (S5, §8) analyserar all konversationshistoria via samma `memory_source_units`/`KnowledgeClaim`-kedja som dokument. Kräver S1–S3 (§8) byggda först. |
 | 8 | **MainAI:s konstitution** | 🔴 Saknas helt (delas i **P7A** tidig ingestion + **P7B** sen aktivering, se §6.7) | P7A: ingen mekanism idag för att importera/identifiera/versionera möjliga styrdokument. P7B: ingen mekanism för att ett GODKÄNT sådant faktiskt ska påverka beteendet — `app/routers/chat.py`s systemprompt är en hårdkodad konstant |
 
 Utöver de åtta lagren, tre till konkreta luckor:
@@ -320,6 +320,568 @@ och väntar på en giltig provider-nyckel", med en knapp för att trigga om work
 
 ---
 
+### 4.8 Universell proveniens — `MemorySourceUnit` (S1A, konsoliderad slutdesign)
+
+Denna sektion är den enda kanoniska källan för `MemorySourceUnit`-designen. Tidigare
+granskningsrundors punktlistor är borttagna härifrån (de finns kvar i PR #30:s commit-historik
+för den som vill se hur beslutet vandrade) — det som står nedan är det som gäller. Ingen
+Alembic-migration är skriven ännu; S1A väntar fortfarande på godkännande, och det som
+återstår innan den kan godkännas listas explicit i slutet av avsnittet.
+
+**Problemet detta löser:** `KnowledgeClaim.source_id` pekar idag hårt på `documents.id`. En
+konversation har ingen `Document`-rad att peka på, och framtida källor (GitHub, webb, e-post,
+media) skulle annars vardera kräva sin egen nullable `source_X_id`-kolumn på `KnowledgeClaim`
+— exakt den datamodellssprawl `docs/BRANCH_REGISTRY.md`s grundprincip varnar för.
+
+#### Schema (S1A-omfattning)
+
+```
+memory_source_units
+  id, owner_id
+  source_kind           -- 'document_chunk' | 'document_version' | 'document_record'
+  source_identity_key    -- oföränderlig: 'document_chunk:<chunk_id>' |
+                         -- 'document_version:<version_id>' | 'document_record:<document_id>'
+  source_role             -- 'founder' | 'assistant' | 'external' | 'system' | 'unknown'
+  observed_at              -- NOT NULL, när DETTA system skapade/tog emot enheten
+  occurred_at               -- nullable, när originalinnehållet faktiskt uppstod, om känt
+  occurred_at_basis          -- 'explicit' | 'source_metadata' | 'inferred' | 'unknown'
+  content_text                -- oföränderlig textsnapshot, NULL om inte snapshot_status='exact'
+  content_hash                 -- sha256, ENDAST teknisk dedup/integritet, se hård regel nedan
+  snapshot_status                -- 'exact' | 'degraded' | 'missing'
+  lifecycle_status                 -- 'active' | 'revoked' | 'purged'
+  revoked_at, revocation_reason, purged_at, purge_reason
+  project_id                        -- nullable, vanlig FK mot projects.id (se "Ägarintegritet")
+  created_at
+  UNIQUE (id, owner_id)
+  UNIQUE (id, owner_id, source_kind)      -- bär typen till subtypens komposit-FK
+  UNIQUE (owner_id, source_identity_key)  -- möjliggör säker find-or-create
+
+document_source_units
+  memory_source_id (PK, FK -> memory_source_units.id)
+  owner_id, source_kind                    -- speglar föräldern, verifierad av komposit-FK
+  document_id                              -- NOT NULL, REFERENCES documents(id)
+  version_id                               -- nullable, REFERENCES knowledge_versions(id)
+  chunk_id                                 -- nullable, REFERENCES document_chunks(id) ON DELETE SET NULL
+  FOREIGN KEY (memory_source_id, owner_id, source_kind)
+    REFERENCES memory_source_units (id, owner_id, source_kind)
+  -- typstyrda partiella unika index, se "Dokumentgranularitet"
+
+memory_source_lifecycle_events   -- append-only revisionslogg, se "Livscykel"
+  id, owner_id, memory_source_id
+  from_status, to_status, reason, actor_type, actor_id, created_at
+  FOREIGN KEY (memory_source_id, owner_id) REFERENCES memory_source_units (id, owner_id)
+
+knowledge_claims.memory_source_id  -- nullable, REFERENCES memory_source_units(id) ON DELETE RESTRICT
+```
+
+`knowledge_claim_evidence` och alla meddelandetabeller (`message_source_units`,
+`messages.sequence_number`) ligger UTANFÖR S1A — se "S1A/S1B/S1C" nedan för var de hör hemma.
+
+#### Atomär enhet, inte analysfönster
+
+En `memory_source_units`-rad är den MINSTA odelbara källan — i S1A ett `DocumentChunk` eller
+en hel `KnowledgeVersion`/`Document`-post när chunken saknas. Framtida källtyper (`Message`,
+`MediaSegment`, GitHub-snapshots) blir egna subtyptabeller efter samma mönster, aldrig nya
+nullable kolumner på `KnowledgeClaim`. Ett `ConversationSegment` (§4.9) är ett analysfönster
+som GRUPPERAR flera redan-existerande `memory_source_units`-rader — det är aldrig självt en
+källa och har ingen egen `source_role`.
+
+#### `source_role` — uppladdare ≠ författare
+
+Fem värden: `founder | assistant | external | system | unknown`. Att grundaren laddade upp ett
+dokument betyder inte att grundaren skrev det. `founder`/`external` sätts BARA när
+författarskapet är explicit attribuerat. **Alla dokumentbackfillade rader i S1A får
+`source_role=unknown`**, permanent — författarskapet för redan importerat material är inte
+känt, och att gissa vore precis den sortens antagande som senare får konsekvenser för
+promotion (§6.10). En framtida, versionshanterad `source_attributions`-tabell för granskad
+omattribuering (t.ex. ett dokument som senare bekräftas vara grundarens eget) är en egen
+utökning utanför S1A — `source_role` är strukturellt immutable på raden själv (se
+"Immutability" nedan), aldrig en tyst `UPDATE`.
+
+#### `content_hash` — hård regel
+
+Identisk text vid olika tillfällen är olika episodiska händelser. `content_hash` verifierar
+bara att innehållet inte korrumperats och används för begränsad TEKNISK deduplicering — den
+får ALDRIG slå ihop två olika `memory_source_units`-rader bara för att texten råkar matcha.
+`source_identity_key` (nedan) är den enda deduplicerings-/identitetsnyckeln.
+
+#### Dokumentgranularitet — `source_kind` styr fälten strukturellt
+
+`document_chunk` (chunk fortfarande spårbar), `document_version` (chunk purgad, version
+kvar), `document_record` (varken chunk eller version kvar — bara `document_id` känt, en
+uttryckligen degraderad proveniens). En trigger validerar att varje `source_kind` har exakt
+de fält den kräver (`document_chunk`: `document_id`+`chunk_id` om `lifecycle_status='active'`,
+`chunk_id` nullable annars; `document_version`: `document_id`+`version_id`, `chunk_id` alltid
+NULL; `document_record`: bara `document_id`, `snapshot_status <> 'exact'`).
+
+`source_kind` ligger dessutom på `document_source_units` självt (inte bara på föräldern) och
+är strukturellt låst till förälderns värde via komposit-FK `(memory_source_id, owner_id,
+source_kind) → memory_source_units(id, owner_id, source_kind)`. Detta löser ett konkret
+databasfel som annars uppstår vid chunk-purge: om typen bara levde på `chunk_id IS NOT NULL`
+skulle TIO purgade chunks från samma dokumentversion (alla får `chunk_id=NULL`) plötsligt
+alla matcha samma typstyrda unika index som `document_version`/`document_record`-rader och
+kollidera. Med `source_kind` som en egen, immutable, komposit-FK-buren kolumn förblir en
+purgad `document_chunk`-rad `document_chunk` för alltid — den byter aldrig semantisk typ bara
+för att sin locator nollas. De typstyrda partiella unika indexen blir därför:
+
+```sql
+CREATE UNIQUE INDEX uq_dsu_chunk ON document_source_units (owner_id, chunk_id)
+    WHERE source_kind = 'document_chunk' AND chunk_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_dsu_version ON document_source_units (owner_id, document_id, version_id)
+    WHERE source_kind = 'document_version';
+CREATE UNIQUE INDEX uq_dsu_record ON document_source_units (owner_id, document_id)
+    WHERE source_kind = 'document_record';
+```
+
+#### Källidentitet och säker find-or-create
+
+`source_identity_key` (`document_chunk:<chunk_id>` / `document_version:<version_id>` /
+`document_record:<document_id>`) är den stabila, immutable nyckeln backfill och dual-write
+använder för att hitta-eller-skapa en källenhet utan att kunna skapa dubbletter eller
+föräldralösa rader. En `DEFERRABLE INITIALLY DEFERRED` constraint-trigger verifierar vid
+INSERT att `source_identity_key` faktiskt stämmer strukturellt med `document_source_units`s
+locator (`document_chunk:<chunk_id>` måste motsvara den faktiska `chunk_id`, osv.) — nyckeln
+kan alltså inte peka på fel rad.
+
+Applikationskoden hittar-eller-skapar via ett SAVEPOINT-mönster (INSERT parent+subtyp
+tillsammans, fånga `IntegrityError` vid nyckelkonflikt, rulla tillbaka bara savepointen,
+`SELECT` den existerande raden) — standardmönstret för säker Postgres-upsert. Vid konflikt
+verifierar koden EXPLICIT att den funna raden verkligen är rätt källa innan den återanvänds:
+`source_kind` matchar, `document_id`/`version_id`/`chunk_id` matchar (`chunk_id` får vara
+`NULL` om raden purgats sedan den skapades — annat mismatch är ett fel), och
+`snapshot_status` matchar det förväntade materialet om raden fortfarande är `active`. En
+nyckelkonflikt med avvikande innehåll avbryter jobbet med ett tydligt fel istället för att
+tyst koppla en claim till fel källa.
+
+#### Ägarintegritet — komposit-FK, inte bara dupliceat `owner_id`
+
+`UNIQUE (id, owner_id)` på `memory_source_units` plus
+`FOREIGN KEY (memory_source_id, owner_id) REFERENCES memory_source_units (id, owner_id)` på
+subtypen gör en avvikande `owner_id` till ett FK-brott. En egen trigger verifierar dessutom att
+`document_id` faktiskt tillhör `owner_id` (`documents.uploaded_by = owner_id`), att `version_id`
+tillhör `document_id`+`owner_id` (`knowledge_versions.source_id`/`owner_id`), och att `chunk_id`
+tillhör `document_id`+`owner_id` (`document_chunks.document_id`/`owner_id`) — RLS skyddar VEM
+som kan läsa/skriva en rad, inte att relationerna INOM raden är strukturellt korrekta.
+`project_id` behandlas INTE som en ägar-FK: `Project.created_by` är nullable och projekt är
+fortsatt delad, icke-RLS-skyddad företagskunskap (`app/rls.py`) — `memory_source_units.
+project_id` förblir en vanlig FK utan owner-verifiering.
+
+#### Exclusive arc
+
+En `DEFERRABLE INITIALLY DEFERRED` constraint-trigger på `memory_source_units` verifierar vid
+commit att exakt en `document_source_units`-rad finns för varje `memory_source_units.id`.
+Direkt radering av rader i endera tabellen är förbjuden i S1A (se "Immutability" nedan) — det
+finns alltså ingen legitim väg att lämna en förälder utan subtyp EFTER att den en gång fått
+en, men triggerns commit-tidskontroll skyddar mot att en förälder någonsin skapas UTAN subtyp
+i första läget (bugg, ofullständig applikationskod, direkt SQL som kringgår
+find-or-create-mönstret).
+
+#### Immutability
+
+En `BEFORE UPDATE`-trigger på `memory_source_units` fryser `source_kind`, `source_role`,
+`source_identity_key`, `observed_at`, `occurred_at`, `occurred_at_basis` och `owner_id`
+permanent, alltid, oavsett vem som skriver — den kontrollen är inte databasbehörighets-
+modellens jobb (nedan), utan en oberoende andra spärr. En separat `BEFORE UPDATE`-trigger på
+`document_source_units` fryser `memory_source_id`/`owner_id`/`document_id`/`version_id`/
+`source_kind` permanent, och tillåter `chunk_id` att gå från satt till `NULL` ENDAST när
+förälderns `lifecycle_status` redan är `revoked`/`purged` (den kontrollerade
+FK-`SET NULL`-övergången när en chunk hårdraderas).
+
+#### Databasbehörighetsmodell — riktig spärr, inte en GUC vem som helst kan sätta
+
+En tidigare version av den här designen försökte skydda livscykelfält och radering med en
+transaktionslokal markör (`SET LOCAL memory.transition_active/erasure_in_progress = 'on'`)
+som bara den avsedda funktionen "skulle" sätta. Det är INTE en verklig spärr — vilken kod som
+helst på samma databasanslutning kan sätta samma markör själv, så påståendet att bara en viss
+funktion kan skriva vore strukturellt falskt.
+
+Repot har redan den riktiga lösningen på plats, inte som en ny mekanism S1A måste uppfinna:
+`backend/scripts/ensure_app_role.py`/`backend/db-init/01-app-role.sh` visar att applikationen
+ALDRIG kör runtime-frågor som samma roll som äger tabellerna. Migrationer körs som
+admin/superuser-rollen (`settings.database_url`, `migration_engine` i `app/db.py`) — den
+rollen äger tabellerna. All runtime-trafik (allt `app/routers/*.py` gör) körs istället som den
+separata, icke-superuser-rollen `mainai_app` (`settings.app_database_url`, `engine` i
+`app/db.py`), som bara är BEVILJAD privilegier via `GRANT`, inte ägare. Eftersom `mainai_app`
+inte äger tabellerna fungerar en vanlig `REVOKE` på den fullt ut (till skillnad från RLS, där
+FORCE-flaggan behövs specifikt för att en TABELLÄGARE annars förbigår RLS — ett problem
+`mainai_app` inte har, eftersom den inte är ägaren).
+
+*(Sidoanmärkning, inte en del av S1A: `app/rls.py`s docstring säger idag "the app connects as
+the table owner", vilket enligt `app/db.py`/`ensure_app_role.py` är inaktuellt/felaktigt —
+värt en egen, separat rättning senare enligt isoleringsprincipen, inte något som blandas in
+i den här migrationen.)*
+
+S1A:s migration använder den befintliga rolluppdelningen konkret:
+
+```sql
+-- mainai_app får läsa och skapa nya rader (backfill, dual-write, find-or-create),
+-- men aldrig UPDATE eller DELETE dessa tre tabeller direkt.
+REVOKE UPDATE, DELETE ON memory_source_units, document_source_units,
+    memory_source_lifecycle_events FROM mainai_app;
+-- INSERT på memory_source_lifecycle_events sker ENDAST via de kontrollerade funktionerna.
+REVOKE INSERT ON memory_source_lifecycle_events FROM mainai_app;
+
+CREATE FUNCTION transition_own_memory_source(
+    p_source_id UUID, p_target_status VARCHAR(16), p_reason TEXT, p_actor_kind VARCHAR(16)
+) RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog  -- INGET schema i sökvägen, se "search_path" nedan
+AS $$ ... $$;  -- kropp: se "Livscykel" nedan för den fullständiga owner-kontrollen
+
+CREATE FUNCTION transition_memory_source_admin(
+    p_source_id UUID, p_target_status VARCHAR(16), p_reason TEXT,
+    p_actor_type VARCHAR(16), p_actor_id UUID
+) RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+AS $$ ... $$;
+
+REVOKE ALL ON FUNCTION transition_own_memory_source(...) FROM PUBLIC;
+REVOKE ALL ON FUNCTION transition_memory_source_admin(...) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION transition_own_memory_source(...) TO mainai_app;
+-- transition_memory_source_admin får ALDRIG EXECUTE för mainai_app — bara admin-/
+-- migrationsrollen kan anropa den, och den anropas aldrig från normal request-hantering.
+-- samma tvådelade mönster för erase_owner_memory(...)/erase_owner_memory_admin(...)
+```
+
+`SECURITY DEFINER` gör att funktionen kör med DESS ÄGARES rättigheter (admin-rollen, som äger
+tabellen och alltså får `UPDATE`/`DELETE`) när `mainai_app` anropar den — inte anroparens egna,
+nu avsiktligt begränsade rättigheter. `mainai_app` kan därför bokstavligen inte köra `UPDATE
+memory_source_units ...` direkt; Postgres avvisar det med ett behörighetsfel, oavsett vilka
+sessionsvariabler den anslutningen sätter. Det här är kontrollerat av Postgres själv vid varje
+sats, inte av en flagga i applikationslogiken. `BEFORE UPDATE`/`BEFORE DELETE`-triggrarna på
+tabellerna finns KVAR som ett oberoende andra lager (skyddar även admin-rollens egen direkta
+`psql`-åtkomst mot ett misstag), men det är GRANT/REVOKE-modellen — inte en trigger som litar
+på en sessionsflagga — som faktiskt gör påståendet "bara denna funktion kan skriva" sant.
+
+**`SECURITY DEFINER` kräver EN funktion till, inte bara EN spärr.** Att en funktion kör med
+admin-rollens rättigheter betyder att den, om den själv inte är noggrann, kan kringgå precis
+den ägarisolering RLS annars ger — `mainai_app` skulle annars i princip kunna anropa
+`transition_own_memory_source(<någon_annans_source_id>, 'purged', ..., ...)` och få det
+utfört, eftersom funktionen kör som admin-rollen och alltså inte själv stoppas av
+`memory_source_units_isolation`-policyn (RLS gäller per-anslutning, inte per `SECURITY
+DEFINER`-anrop). Två separata skydd, inte ett:
+
+1. **Ägarkontroll INUTI funktionen, inte bara RLS.** `transition_own_memory_source` verifierar
+   FÖRST, som sin egen explicita `WHERE`/`IF`-kontroll (inte genom att lita på RLS, som den
+   som `SECURITY DEFINER` ändå kringgår):
+   ```sql
+   SELECT owner_id INTO v_owner FROM memory_source_units WHERE id = p_source_id FOR UPDATE;
+   IF v_owner IS DISTINCT FROM NULLIF(current_setting('app.current_user_id', true), '')::uuid THEN
+       RAISE EXCEPTION 'transition_own_memory_source: source % does not belong to caller', p_source_id;
+   END IF;
+   ```
+   `p_actor_kind` accepteras BARA som `'founder'` eller `'system'` (funktionen reser ett
+   undantag för något annat värde) — aldrig `'admin'`/`'migration'`. `actor_id` skrivs ALDRIG
+   från ett parametervärde; funktionen sätter det internt till
+   `NULLIF(current_setting('app.current_user_id', true), '')::uuid`, samma värde den redan
+   verifierat äger källan — anropande kod kan alltså inte påstå att en annan användare/roll
+   utförde övergången, oavsett vad den skickar in. `p_actor_kind='system'` används av
+   `delete_source`s purge-anrop (en systemdriven följd av grundarens egen raderingsåtgärd,
+   fortfarande inom SAMMA autentiserade request/`app.current_user_id`) — `'founder'` av en
+   framtida direkt UI-åtgärd (t.ex. en "återställ"-knapp). Ingen av dem kan någonsin peka på
+   en annan ägares rad, eftersom ägarkontrollen ovan körs FÖRST, oavsett `p_actor_kind`.
+2. **`transition_memory_source_admin`** har full flexibilitet (godtycklig `source_id`, fritt
+   `actor_type` inklusive `'admin'`/`'migration'`, fritt `actor_id`) men `EXECUTE` beviljas
+   ALDRIG till `mainai_app` — bara till admin-/migrationsrollen, för genuint
+   administrativa/migrationsdrivna underhållsflöden som körs UTANFÖR normal
+   request-hantering. Normal apptrafik kan alltså strukturellt aldrig nå den flexibla
+   varianten, oavsett vad en enskild request skickar in.
+
+`erase_owner_memory(p_owner_id)` hade redan motsvarande självägarskapskontroll
+(`p_owner_id = current_setting('app.current_user_id')`) — den principen bekräftas här som
+det generella mönstret för VARJE `SECURITY DEFINER`-funktion `mainai_app` får `EXECUTE` på,
+inte ett engångsundantag.
+
+**`search_path` — inget schema i sökvägen, inte bara `pg_catalog` FÖRE `public`.** Ett fixerat
+`SET search_path = pg_catalog, public` skyddar mot att en malikös roll lurar funktionen att
+anropa en likadant namngiven funktion i ETT ANNAT schema tidigt i sökvägen — men skyddar INTE
+mot att någon (om `PUBLIC` någonsin har `CREATE` på schemat `public`) skapar en skuggande
+TABELL eller FUNKTION direkt i `public` självt, som sedan matchas av ett okvalificerat namn
+inuti funktionskroppen. Säkrare: `SET search_path = pg_catalog` (inget `public` alls) och
+fullt kvalificerade objektnamn inuti funktionerna (`public.memory_source_units`,
+`public.memory_source_lifecycle_events`, osv.) — då spelar det ingen roll vem som kan skapa
+vad i `public`, eftersom funktionen aldrig litar på ett okvalificerat namn för att hitta rätt
+objekt. `apply_runtime_privileges` (nedan) verifierar ÄVEN att `PUBLIC` och `mainai_app`
+saknar `CREATE` på schemat `public`, som ett andra, oberoende lager utöver
+schema-kvalificeringen — inte antingen/eller.
+
+**Privilegierna måste härdas om vid VARJE boot, inte bara i migrationen — verifierat mot
+`backend/docker-entrypoint.sh`.** Bootordningen idag är: `ensure_app_role.py` (om
+`MAINAI_APP_PASSWORD` satt) → `alembic upgrade head` → `exec` (starta appen).
+`ensure_app_role.py` kör OVILLKORLIGT, på VARJE boot — inte bara vid rollskapande —
+`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainai_app` samt motsvarande
+`ALTER DEFAULT PRIVILEGES`. Samma sak gör `backend/db-init/01-app-role.sh` för lokal Docker
+Compose. Det betyder att en `REVOKE UPDATE, DELETE` inskriven bara i S1A:s migration skulle
+fungera vid FÖRSTA deployen, men bli tyst återställd vid nästa vanliga omstart: `ensure_app_
+role.py` beviljar tillbaka `ALL PRIVILEGES` INNAN Alembic ens körs, och Alembic har då inget
+nytt att köra (migrationen ligger redan på head) — `REVOKE` körs alltså aldrig om.
+
+Rätt boot-ordning, tillagd som ett fjärde steg i `docker-entrypoint.sh` (och motsvarande i
+den lokala Docker-init-vägen så miljöerna inte divergerar):
+
+```
+ensure_app_role  →  alembic upgrade head  →  apply_runtime_privileges  →  starta backend
+```
+
+`apply_runtime_privileges` körs VARJE boot, EFTER Alembic, och är själv idempotent (kör om
+den redan är korrekt, ändrar inget om så). Den:
+- `REVOKE UPDATE, DELETE` på de skyddade proveniens-tabellerna från `mainai_app` (samma lista
+  triggrarna/RLS-policyerna redan känner till — en enda källa, inte en andra lista som kan
+  glömmas bort när en ny tabell läggs till).
+- `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC` för BÅDA varianterna
+  (`transition_own_memory_source`/`transition_memory_source_admin`, motsvarande för
+  `erase_owner_memory`), `GRANT EXECUTE` till `mainai_app` ENDAST på de icke-admin-varianterna.
+- `REVOKE CREATE ON SCHEMA public FROM PUBLIC, mainai_app` — oberoende av
+  schema-kvalificeringen inuti funktionerna (se "search_path" ovan), ett andra lager.
+- Verifierar resultatet med riktiga behörighetsfrågor, inte bara antar att `REVOKE`/`GRANT`
+  lyckades:
+  - `has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')` måste vara `false`.
+  - `has_function_privilege('mainai_app', 'transition_own_memory_source(...)', 'EXECUTE')`
+    måste vara `true`.
+  - `has_function_privilege('mainai_app', 'transition_memory_source_admin(...)', 'EXECUTE')`
+    måste vara `false` — `mainai_app` får ALDRIG kunna anropa adminvarianten.
+  - `has_function_privilege('public', 'transition_own_memory_source(...)', 'EXECUTE')` (dvs.
+    `PUBLIC`) måste vara `false` för BÅDA varianterna.
+  - `has_schema_privilege('mainai_app', 'public', 'CREATE')` måste vara `false`.
+  - tabellernas/funktionernas ägare (`pg_tables.tableowner`/`pg_proc`s ägare) får aldrig vara
+    `mainai_app`.
+- Om NÅGON av dessa verifieringar misslyckas: avslutar med ett fel som får hela
+  `docker-entrypoint.sh` att stoppa (`set -e`, samma disciplin som redan gäller `alembic
+  upgrade head` — appen startar hellre inte alls än startar med fel behörighetsläge).
+
+Det här skrivs in i den kanoniska designen HÄR, men implementeras (det faktiska scriptet,
+kopplingen i `docker-entrypoint.sh`, motsvarigheten i `db-init/`) i S1A:s
+implementations-PR tillsammans med migrationen — inte i det här design-only-PR:et.
+
+#### Livscykel — `transition_own_memory_source()`, den enda skrivvägen för `mainai_app`
+
+```
+transition_own_memory_source(source_id, target_status, reason, actor_kind)
+```
+
+Funktionen (se "Databasbehörighetsmodell" ovan för den fullständiga ägar-/sökvägshärdningen)
+verifierar FÖRST att `memory_source_units.owner_id` för `source_id` matchar den autentiserade
+anroparens egen `app.current_user_id` — annars ett undantag, oavsett `target_status`. Sedan
+verifierar den atomiskt att övergången är laglig (`active → revoked`, `revoked → active`
+["restore", kräver ett EGET `reason`, INTE det gamla `revocation_reason`], `active/revoked →
+purged`; `purged` är terminalt), uppdaterar `memory_source_units`, och skriver en rad i
+`memory_source_lifecycle_events`. `actor_kind` accepteras BARA som `'founder'` (en direkt
+UI-åtgärd, framtida) eller `'system'` (en systemdriven följd av grundarens egen åtgärd, t.ex.
+`delete_source`s purge nedan — fortfarande inom samma autentiserade request) — funktionen
+själv sätter `actor_id` internt till samma redan-verifierade `app.current_user_id`, ALDRIG
+från ett parametervärde, så anropande kod kan inte påstå att någon annan utförde övergången.
+Genuint administrativa/migrationsdrivna övergångar (godtycklig `source_id`, `actor_type
+IN ('admin','migration')`, fritt `actor_id`) går genom den separata `transition_memory_
+source_admin()`, som `mainai_app` strukturellt aldrig kan anropa (`EXECUTE` aldrig beviljat,
+se ovan) — inte samma funktion med en bredare parameteruppsättning.
+`memory_source_lifecycle_events` är append-only (`mainai_app` saknar `UPDATE`/`DELETE`/direkt
+`INSERT` på den, se ovan) och skrivs bara inifrån dessa funktioner — en rad i händelseloggen
+är därför en pålitlig revisionslogg, inte något godtycklig applikationskod kan förfalska.
+
+**Två operationer, tydligt separerade och mappade till verklig kod:**
+- **Revoke** ("ta bort ur aktivt minne", en FRAMTIDA UI-åtgärd, inte byggd ännu): utesluter
+  omedelbart ur retrieval/promotion/tolkningsförslag, men behåller `content_text` och alla
+  claims — reversibelt via restore.
+- **Purge — permanent radering, definierad fullständigt, inte bara `MemorySourceUnit`s kopia.**
+  Motsvarar dagens `delete_source` (Library) OCH `DELETE /api/documents/{id}` (den äldre
+  `app/routers/documents.py`-rutten) — se "En gemensam purge-tjänst" nedan för varför båda
+  måste anropa SAMMA implementation. En verklig permanent radering måste hantera VARJE
+  innehållsbärande kopia, inte bara `memory_source_units`:
+  - `memory_source_units.content_text`/`content_hash` → `NULL` (via `transition_own_memory_
+    source(..., 'purged', ..., 'system')` — `purge_source()` kör inom samma autentiserade
+    request som utlöste raderingen, så ägarkontrollen i funktionen håller normalt).
+  - `knowledge_claims WHERE source_id = <dokumentet> AND owner_id = <ägaren>` → raderas
+    (`claim_relationships` cascadar bort automatiskt, migration 0007). En claim är härledd,
+    potentiellt känslig text i sig själv.
+  - `Document.content_preview` → nollas (ett rått textutdrag av originalet, inte bara en
+    referens till det).
+  - `Document.media_blob` → nollas (STEG 13:s in-databas-kopia av media-bytes, om satt).
+  - Blobben på disk (`Document.storage_key`) → `maybe_purge_blob()` (redan existerande,
+    content-addresserad, referensräknande radering — oförändrad, men måste faktiskt anropas
+    av BÅDA raderingsvägarna, se nedan).
+  - `Document.file_path` → samma hantering som `storage_key` om den fortfarande pekar på
+    kvarvarande bytes (legacy-fält från innan `storage_key`/blob-lagret fanns).
+  - `Document.title`/`original_filename`/`category`/`source_url` → BEHÅLLS som neutral
+    metadata (ett filnamn eller en URL är i sig sällan känsligt innehåll, och att radera dem
+    skulle göra även den soft-deletade `Document`-raden meningslös för framtida revisionsspår)
+    — men om `source_url`/`title` i ett enskilt fall FAKTISKT innehåller identifierande
+    personligt innehåll är det en separat, medveten framtida utökning (per-fält-purge), inte
+    något S1A löser generellt. UI:t för "radera källa" måste vara ärligt om exakt detta: vad
+    som raderas (text, claims, media) kontra vad som stannar kvar som metadata (titel,
+    filnamn, URL, tidsstämplar).
+  - Ordning: (1) `transition_own_memory_source(..., 'purged', 'source_deleted', 'system')`
+    per matchande `memory_source_units`-rad, (2) radera matchande `knowledge_claims`, (3)
+    nolla `Document.content_preview`/`media_blob`, (4) radera `DocumentChunk`-raderna (FK:ns
+    `SET NULL` mot redan-purgade `document_source_units` passerar nu immutability-triggerns
+    lifecycle-medvetna kontroll), (5) `maybe_purge_blob()` för `storage_key`/`file_path`, (6)
+    fortsätt som idag (`Document.deleted_at` osv). Skrivs med SQLAlchemy Core `UPDATE`/`DELETE`
+    mot en subquery, inte en joined ORM `Query.update()`.
+
+**En gemensam purge-tjänst — inte två raderingsimplementationer.** Utöver Librarys
+`delete_source` finns en äldre, fortfarande LIVE rutt: `DELETE /api/documents/{document_id}`
+(`app/routers/documents.py`, kopplad i `main.py`, anropad från `frontend/lib/api.ts`s
+`deleteDocument`) — den hårdraderar `DocumentChunk`-rader och sedan `Document`-raden direkt,
+en helt separat implementation utan `deleted_at`, utan blob-purge, och (dess egen docstring
+medger det) med en känd olöst multi-uploader-brist. Med S1A:s FK:er (`document_source_units.
+document_id` utan `ON DELETE`-åtgärd) skulle den rutten dessutom blockeras rakt av (FK-brott).
+S1A:s PR extraherar purge-logiken ovan till en delad funktion (t.ex.
+`app/rag/source_purge.py::purge_source(db, document_id, owner_id, request)`), och BÅDA
+rutterna anropar den — `documents.py`s `delete_document` blir en tunn wrapper, inte en egen
+parallell implementation. Det här är en avsiktlig beteendeförändring för den äldre rutten
+(den får nu samma soft-delete+blob-purge+minnespurge som Library redan har, inte bara en
+chunk+dokument-radering) — inte en bugg.
+
+#### Kontoradering — måste uppdateras i S1A:s PR, inte bara i DDL:n
+
+Dagens `delete_account` (`app/routers/account.py`) hårdraderar `DocumentChunk` →
+`KnowledgeVersion` → `SourceRelationship` → `Document` (i den ordningen) plus
+`ImportJob`/`Conversation`/`Message`, och nollar attribution på `Project`/`Task`/`UsageLog`/
+`AuditLog`. S1A:s nya FK:er skulle annars BLOCKERA den raderingen (FK-brott → transaktionen
+rullas tillbaka → HTTP 500) eftersom `document_source_units`/`memory_source_units`-rader
+fortfarande skulle peka på dokument/ägaren som håller på att raderas — och `mainai_app` saknar
+(se ovan) direkt `DELETE`-rättighet på dem. Lösningen är samma modell som "Livscykel": EN
+`SECURITY DEFINER`-funktion, `erase_owner_memory(p_owner_id)`, ägd av admin-rollen,
+`EXECUTE` beviljad ENDAST till `mainai_app`. Funktionen verifierar FÖRST att `p_owner_id =
+current_setting('app.current_user_id')::uuid` — kan alltså strukturellt aldrig radera någon
+ANNAN än den redan autentiserade, lösenords-bekräftade anroparen själv — och raderar sedan,
+med de rättigheter DESS ägare (admin-rollen) har, i denna ordning:
+
+1. `knowledge_claims WHERE owner_id = p_owner_id` (även detta personlig/härledd data — se
+   samma resonemang som Purge ovan; tar bort RESTRICT-blockeraren mot `memory_source_units`).
+2. `document_source_units WHERE owner_id = p_owner_id`.
+3. `memory_source_units WHERE owner_id = p_owner_id` (`memory_source_lifecycle_events`
+   cascadar bort automatiskt — `ON DELETE CASCADE`, till skillnad från den vanliga RESTRICT-
+   hållningen, eftersom en händelselogg för en källa som inte längre finns saknar syfte).
+
+`actor_id`/`owner_id` som pekar på användaren blockerar INTE detta: kontots egna rader
+raderas i just den ordningen ovan innan `delete_account`s befintliga steg (som redan idag
+raderar `User`-raden sist) fortsätter oförändrat — det finns ingen kvarvarande referens från
+`memory_source_lifecycle_events` när `User` väl raderas, eftersom dess FK mot
+`memory_source_units` redan cascadat bort i steg 3. `delete_account` anropar
+`erase_owner_memory(user_id)` FÖRE sin befintliga `DocumentChunk`/`KnowledgeVersion`/
+`Document`-radering, i SAMMA databastransaktion — om något steg senare i `delete_account`
+misslyckas rullas hela transaktionen (inklusive `erase_owner_memory`s del) tillbaka
+automatiskt, exakt som `delete_account`s befintliga try/except/rollback-mönster redan
+garanterar. `/api/account/export` måste samtidigt utökas med `knowledge_claims` (dess
+docstring säger idag felaktigt att claims "has no backing table yet" — redan fel sedan
+PR #29, dubbelt fel efter S1A) och en sammanfattning av `memory_source_units`/
+`memory_source_lifecycle_events` (innehåll där inte purgat, annars en tydlig
+livscykelmarkör) — annars exporterar kontot inte längre allt personligt/härlett material det
+faktiskt håller.
+
+#### Fasad migrationsplan för `KnowledgeClaim.source_id`/`version_id`/`chunk_id`
+
+1. Lägg till `memory_source_units`/`document_source_units` samt `KnowledgeClaim.memory_source_id`
+   (nullable) — rent additivt.
+2. Backfilla: en `memory_source_units`+`document_source_units`-rad per DISTINKT
+   `document_chunk`/`document_version`/`document_record`-källa bland befintliga claims (ALDRIG
+   en per claim), `source_role=unknown`, via find-or-create-mönstret ovan.
+3. Dual-write: `extract_claims_for_document` sätter BÅDE de gamla kolumnerna OCH
+   `memory_source_id` för varje ny claim.
+4. `memory_source_id` blir kanonisk källa för allt nytt kodbaserat.
+5. En separat, granskad migration slutar läsa/skriva de gamla kolumnerna.
+6. En separat, ÄNNU senare migration tar bort dem.
+
+#### S1A/S1B/S1C — S1 delas i tre migrationer
+
+- **S1A** (nästa steg): `memory_source_units`/`document_source_units`/
+  `memory_source_lifecycle_events`, `transition_own_memory_source()`/`transition_memory_
+  source_admin()`, nullable
+  `KnowledgeClaim.memory_source_id`, deterministisk backfill, dual-write, kontoradering/export-
+  integration. INGA meddelandetabeller, INGEN `knowledge_claim_evidence` (ingen aktiv writer
+  förrän S1C/P4).
+- **S1B**: `messages.sequence_number` — expand (nullable) → dual-write → durable historisk
+  backfill → verifiering → contract (separat migration: `NOT NULL`+`UNIQUE`). `SET NOT NULL`
+  kan inte ske i samma migration som lägger till kolumnen (backfillen hinner inte köra under
+  migrationen). Helt oberoende av S1A.
+- **S1C**: `message_source_units` + `knowledge_claim_evidence` + ägar-/konversationsintegritet
+  + backfill Message→MemorySourceUnit. Kräver S1B. Ingen claim-extraktion från konversationer
+  än — det kommer efter S1C.
+
+#### Status: PR #30 (design) kontra S1A-implementations-PR:n (senare, separat)
+
+PR #30 är design-only och innehåller ingen kod — det den här sektionen (§4.8) beskriver är
+VAD som ska byggas, inte byggkoden själv. Två separata godkännande-trösklar, inte en:
+
+**Krävs för att PR #30 (arkitekturbeslutet) ska kunna mergas:** att designen är intern
+konsekvent, verifierad mot verklig kod (kolumnnamn, RLS-policyer, boot-ordning, rolluppdelning
+— allt ovan är det), och inte innehåller några kvarstående motsägelser. Det är uppfyllt i den
+här versionen. Produktionsdataprofilen krävs INTE för att merga PR #30 — den är ett villkor
+för S1A-IMPLEMENTATIONEN, se nedan.
+
+**Krävs innan en separat S1A-implementations-PR (migration + kod) kan MERGAS** (inte innan
+den öppnas — migrationen, `purge_source()`, RLS-kod, export/kontoradering, boot-härdning och
+testmatrisen ska byggas OCH granskas i den PR:en):
+
+1. **Produktionsdataprofilen.** Den här sessionen har ingen databasåtkomst (ingen
+   `DATABASE_URL`, ingen körande Postgres/Docker) och kan alltså inte köra den:
+   ```sql
+   SELECT
+     count(*) FILTER (WHERE chunk_id IS NOT NULL AND version_id IS NULL) AS chunk_only,
+     count(*) FILTER (WHERE chunk_id IS NULL AND version_id IS NOT NULL) AS version_only,
+     count(*) FILTER (WHERE chunk_id IS NULL AND version_id IS NULL) AS neither
+   FROM knowledge_claims;
+   ```
+   Schemat är konstruerat för att fungera oavsett resultat (`version_id` nullable även för
+   `document_chunk`), men resultatet ska ändå bekräftas innan den PR:en mergas.
+2. Migrationsfilen: tabeller, triggers, CHECK-constraints, `REVOKE`/`SECURITY DEFINER`/
+   `GRANT EXECUTE`-satserna för `mainai_app` (se "Databasbehörighetsmodell").
+3. `apply_runtime_privileges`-steget i `docker-entrypoint.sh` (efter Alembic, före appstart)
+   och motsvarande i den lokala Docker-init-vägen — se boot-härdningen ovan.
+4. `app/rls.py`-uppdateringen för de tre nya tabellerna.
+5. Den delade `purge_source()`-tjänsten och `delete_source`/`documents.py`s `delete_document`s
+   omskrivning till att anropa den.
+6. `delete_account`/`export_account`-ändringarna (kontoradering/export).
+7. Testmatrisen, inklusive regressionstester för boot-härdningen och
+   ägar-/behörighetsuppdelningen specifikt: (a) första provisionering+migration ger korrekta
+   grants, (b) en ANDRA, vanlig boot får INTE tillbaka `UPDATE`/`DELETE` på de skyddade
+   tabellerna, (c) `mainai_app` kan inte köra en direkt lifecycle-`UPDATE`/`DELETE`, (d)
+   `mainai_app` KAN anropa `transition_own_memory_source`/`erase_owner_memory` på EGNA rader,
+   (e) `mainai_app` kan INTE anropa `transition_own_memory_source` på en ANNAN ägares
+   `source_id` (funktionen reser undantag), (f) `mainai_app` kan INTE anropa
+   `transition_memory_source_admin` överhuvudtaget (`EXECUTE` saknas), (g) `PUBLIC` kan inte
+   anropa någon av dem, (h) `mainai_app` saknar `CREATE` på schemat `public`.
+
+### 4.9 `ConversationSegment` — analysfönster, versionshanterat
+
+```
+conversation_segments
+  id, owner_id, conversation_id
+  segmentation_version   -- vilken segmenteringsalgoritm som skapade detta segment
+  boundary_reason         -- new_conversation | long_gap | new_topic | project_change |
+                            -- explicit_return_to_thread | reply_reference
+  created_by              -- vilken process/version som stängde segmentet
+  start_message_id, end_message_id
+  roles_present            -- METADATA för visning ("founder+assistant") — styr ALDRIG promotion,
+                            -- se §6.10
+  project_id               -- nullable
+  created_at                -- timestamp WITH time zone (se "Tid och ordning" nedan)
+
+conversation_segment_members
+  segment_id, memory_source_id, ordinal
+```
+
+Segment är OFÖRÄNDERLIGA när stängda. En förbättrad segmenteringsalgoritm skapar en NY
+`segmentation_version` och nya segment-rader — aldrig en tyst omskrivning av gamla. Gränser
+härleds i första hand från `app/context/resolver.py`s redan existerande, testade signaler
+(`new_topic`-klassificering, `LONG_GAP`=30 min) — ingen ny segmenteringsheuristik uppfinns
+från grunden — utökat med projektbyte, explicit återgång till en tidigare tråd, och
+reply/reference-länkar till ett äldre meddelande.
+
+**Meddelandeordning — riktig ordinal, inte bara `created_at` (2026-07-28-korrigering).**
+`Message` har idag bara `created_at`, ingen sekvenskolumn — två meddelanden med identisk
+tidsstämpel (samma millisekund, eller en klocka som inte är monotont säker) kan inte
+ordnas entydigt. Lägg till `Message.sequence_number` med `UNIQUE (conversation_id,
+sequence_number)`: nya meddelanden får sin sekvens tilldelad vid sparande (nästa lediga
+heltal för den konversationen), historiska meddelanden backfillas deterministiskt genom att
+sortera på `(created_at, id)` och numrera i den ordningen. Alla NYA minnes-/segmenttabeller
+(`memory_source_units.occurred_at`/`created_at`, `conversation_segments`, m.fl.) använder
+`timestamp WITH time zone` — det framtida minnet måste kunna skilja lokal tid, UTC, och när
+materialet faktiskt skapades, vilket en tidszonslös `timestamp` inte kan uttrycka entydigt.
+
 ## 5. Import- och minnesflöde: ZIP → långtidsminne
 
 ```
@@ -499,6 +1061,111 @@ och `derived_from` gör skillnaden "det här är vad MainAI drog för slutsats" 
 vad källan faktiskt sa" till en strukturell, frågbar egenskap — inte bara en konvention i
 UI-texten.
 
+**2026-07-28: samma princip, uttryckligt för konversationer.** Promotion (en claim/ett förslag
+som når `interpretation_proposals.status=approved` och därigenom `project_entities`/
+`founder_memory_notes`) avgörs av `memory_source_units.source_role` på claimens PRIMÄRA
+källenhet (§4.8) — aldrig av `conversation_segments.roles_present`, som bara är visningsmetadata
+för ett helt segment. Konkret:
+- `source_role=founder` (claimens primära källa är grundarens eget meddelande): kan nå
+  `pending` fritt via automatisk extraktion, precis som dokumentclaims idag — samma
+  godkännandeflöde, ingen genväg.
+- `source_role=assistant` (claimens primära källa är MainAI:s eget meddelande): lagras och
+  analyseras — förslag, planer, kod, alternativ, felaktiga slutsatser som senare korrigerades
+  är värdefull historik — men får ALDRIG ensamt nå `status=active`/en beslutsentitet.
+  Promotion kräver ETT av: samma sakuppgift finns oberoende i en `founder`-sourcad claim,
+  en explicit grundargodkännande på just det förslaget, eller ett senare `founder`-sourcat
+  meddelande som uttryckligen bekräftar/ersätter det (en `project_entity_relationships`-rad
+  med `relationship_type=derived_from` eller `supersedes` tillbaka till assistant-claimen).
+- Ett segment med `roles_present={founder,assistant}` innehåller alltså BÅDA sorters claims
+  samtidigt, korrekt attribuerade var för sig — segmentets egen "mixed"-status styr aldrig
+  någon enskild claims promotion.
+
+**2026-07-28-korrigering: kontextbevis och grounding får inte blandas ihop.** Om claimens
+primärkälla är grundarens "Exakt" och kontextkällan är assistant-meddelandet som beskrev
+alternativ B, blir dagens ordöverlappsbaserade `grounding_score` (§4.1, `app/rag/claims.py`)
+mycket lågt mätt mot BARA primärkällan — "Exakt" delar nästan inga ord med "alternativ B".
+Claim-extraktionen får därför INTE själv hoppa till en fullt upplöst text som "Beslut: kör på
+alternativ B" — det vore att låta råtextraktionen göra ett tolkningssteg den inte har
+underlag för. Rätt lager för det tolkningssteget är P4, inte extraktionen:
+- Claimlagret (P3-extraktion) stannar vid den bokstavligt grundade texten: "Grundaren
+  godkänner föregående förslag", med assistant-meddelandet kopplat som `context`-bevis (se
+  §4.8/nedan för `knowledge_claim_evidence`s reviderade roller).
+- P4:s tolkningssteg (inte rå extraktion) löser referensen till det konkreta tidigare
+  förslaget och FÖRESLÅR den fullt upplösta `project_entities`-raden ("Beslut: alternativ B")
+  — som ett `interpretation_proposals`-förslag, granskningsbart precis som alla andra.
+- `knowledge_claim_evidence.evidence_role` blir `context | supports | contradicts |
+  corroborates` — INTE `direct`, eftersom `KnowledgeClaim.memory_source_id` redan ÄR den
+  direkta primärkällan; en fjärde "direct"-bevisroll vore en duplicerad sanning.
+- Två separata mätvärden, inte ett: `primary_grounding_score` (ordöverlapp mot primärkällans
+  egen text — dagens `grounding_score`, samma kolumn, bara begreppsmässigt förtydligad, ingen
+  destruktiv omdöpning i S1) och ett SENARE `context_resolution_score` (hur väl P4:s föreslagna
+  tolkning faktiskt stöds av kontextbevisen tillsammans) — att blanda "ordagrant stödd av
+  primärkällan" med "semantiskt upplöst genom samtalskontext" till EN siffra skulle dölja
+  precis den skillnad det här avsnittet handlar om. **2026-07-28-korrigering: `context_
+  resolution_score` läggs INTE till i S1** — beräkningssätt, betydelse, skrivare och
+  versionshantering är inte fastslaget förrän P4:s kontextupplösningslogik faktiskt byggs;
+  att lägga till ett halvdefinierat fält i proveniensskiktet vore att låsa fast ett kontrakt
+  ingen ännu vet formen på.
+
+### 6.11 Konversationer som förstklassig minneskälla (P3/P4/P6 tillsammans, inte ett fjärde system)
+`Conversation`/`Message` är redan episodiskt originalminne (lager 2, §2) — varje meddelande
+bevaras rått och oförändrat, ingen filtrering vid ingestion. Det som saknas är att koppla dem
+in i SAMMA `KnowledgeClaim`/`interpretation_proposals`/`project_entities`-kedja som dokument,
+inte ett separat "chat memory". Konkret, utökar redan beskrivna paket snarare än att lägga
+till ett nytt:
+- **P3** (§6.3): samma `claim_type`-taxonomi, samma `_parse_claims`/prompt-mönster, applicerad
+  på ett `conversation_segments`-fönster istället för en dokument-chunk — `extract_claims_for_
+  conversation_segment` blir `extract_claims_for_document`s syskon, inte en konkurrent.
+- **P4** (§6.4): läser claims oavsett ursprung (`memory_source_units.source_kind` ∈
+  `{document_chunk, document_version, document_record}` ELLER `message`) —
+  `interpretation_proposals`/`project_entities` skiljer inte på källtyp, bara på innehåll och
+  `source_role`-baserad promotion (§6.10).
+- **P6** (§6.6): Context Resolver (`app/context/resolver.py`) blir en PRIORITETSSIGNAL, inte
+  den enda porten — en `INTENT_EXPLICIT_MEMORY`/`INTENT_IDEA_WORTH_SAVING`-klassad tur
+  fast-trackas direkt (hög prioritet, låg latens till `founder_memory_notes`), medan den
+  allmänna bakgrundspipelinen (segment-för-segment, §4.9) analyserar ALL konversationshistorik
+  asynkront, inte bara de turer resolvern flaggar. Det löser den tidigare för snäva
+  begränsningen ("bara explicit minne eller idé sparas") utan att göra resolverns redan
+  testade, snabba signal överflödig.
+- **Två separata backfills krävs**, inte en:
+  1. Dokumentclaim-backfill: `claim_type`-omtypning av BEFINTLIGA claims (§4.1, byggd — se
+     `app/rag/claims.py`s `backfill_claim_types`) OCH en separat extraktions-backfill för
+     `indexed`-dokument som saknar claims helt (misslyckad/aldrig körd/noll-träff extraktion)
+     — läser redan lagrade `DocumentChunk`-rader, ingen omindexering, deduplicerar på
+     `(memory_source_id, normaliserad claim_text)`.
+  2. Konversationsbackfill: historiska segment som aldrig analyserats — samma extraktion, bakåt
+     i tiden, samma dedupnyckel.
+  Båda körs som `memory_processing_jobs`-jobb (nedan), inte som obegränsade HTTP-anrop.
+
+### 6.12 `memory_processing_jobs` — generell arbetskö för minnesbearbetning, inte `knowledge_import_jobs`
+`knowledge_import_jobs` är uttryckligen fil-/ZIP-specifik (`source_filename`, `source_checksum`,
+`source_storage_key`, `file_results` per fil) — att lägga en `job_kind=conversation_backfill`
+där hade gett en massa irrelevanta nullable filfält i varje konversationsjobb. Istället, en ny,
+generell tabell som återanvänder EXAKT samma beprövade mönster (samma worker-container, samma
+`app/jobs/lease.py`-principer):
+
+```
+memory_processing_jobs
+  id, owner_id
+  job_kind             -- claim_type_backfill | claim_extraction_backfill |
+                        -- conversation_backfill | conversation_segment_extraction | ...
+  payload               -- JSON, job_kind-specifikt (t.ex. batch-gräns, datumintervall)
+  status                -- pending | running | completed | partial | failed | blocked
+  progress_current, progress_total
+  succeeded_count, failed_count, blocked_count
+  attempt_count, max_attempts
+  locked_by, lease_expires_at, last_heartbeat_at
+  failure_reason
+  created_at, started_at, completed_at
+```
+
+`app/worker.py`s pollloop utökas att claima BÅDE `knowledge_import_jobs` och
+`memory_processing_jobs` (två separata `claim_next_job`-varianter, samma
+`FOR UPDATE SKIP LOCKED`-mönster, samma lease/heartbeat/retry-kod) och dispatchar på
+`job_kind`. `POST /api/admin/claims/backfill-types` (den befintliga, batch-begränsade
+endpointen) blir en tunn kompatibilitetsväg som skapar ett `memory_processing_jobs`-jobb
+istället för att köra arbetet inline, en gång den här tabellen finns.
+
 ---
 
 ## 7. Säkerhets- och integritetsrisker
@@ -520,27 +1187,62 @@ UI-texten.
 
 ## 8. Rekommenderad byggordning
 
+**Reviderad 2026-07-28** efter grundlig granskning av den universella proveniensmodellen
+(§4.8/§4.9/§6.10/§6.11/§6.12 — §4.8 är den konsoliderade slutdesignen, inte en punktlista över
+granskningsrundor). P3 (claim-typning för dokument, §6.3) är byggd och mergad (PR #29) — allt
+nedan är vad som ÅTERSTÅR, i ordning:
+
 ```
-P1   Provider-förhandsverifiering        ← FÖRST, blockerar riktig användning idag
-P2   ZIP-hårdning för massimport         ← krävs innan dina riktiga arkiv är säkra att ladda upp
-P7A  Tidig governance-ingestion          ← FLYTTAD TIDIGARE (denna revidering): kan börja så
-                                            fort P1/P2 är klara — inga beroenden till P3–P6,
-                                            ingen beteendepåverkan än (§6.7a)
-P3   Claim-typning                        ← litet, bygger direkt på STEG 10
-P6   Grundarminne + korrigeringsloop     ← kan byggas parallellt med P4, ingen hård beroendekedja
-P4   Tolkningskö + relationer + karta    ← det stora paketet, kräver P3
-P5   Första förståelserapporten          ← kräver P4 (är en vy ovanpå dess förslag)
-P7B  Governance enforcement              ← FORTFARANDE SIST, medvetet, egen granskning innan
-      (aktivering av konstitutionen)        start — kräver P4:s godkännandeinfrastruktur bevisad
+P1   Provider-förhandsverifiering        ← KLAR, mergad
+P2   ZIP-hårdning för massimport         ← KLAR, mergad
+P7A  Tidig governance-ingestion          ← kan börja när som helst efter P1/P2 — fryst,
+                                            inget separat beslut taget än (docs/BRANCH_REGISTRY.md)
+P3   Claim-typning (dokument)            ← KLAR, mergad (PR #29), inkl. retroaktiv backfill
+                                            för BEFINTLIGA claims (backfill_claim_types)
+
+--- återstår, ny ordning efter proveniens-granskningen (S1 delat i S1A/S1B/S1C, §4.8) ---
+
+S1A  memory_source_units + document_source_units + KnowledgeClaim.memory_source_id
+     (nullable) + snapshot/lifecycle/immutability + memory_source_lifecycle_events +
+     deterministisk dokumentclaim-backfill + dual-write + delete_source-purge-integration
+                                          ← additiv migration, egen PR. INGA meddelandetabeller,
+                                            INGEN knowledge_claim_evidence (flyttad till S1C/P4
+                                            — ingen aktiv writer i S1A). Nästa konkreta steg —
+                                            se §4.8:s "Status: PR #30 kontra S1A-implementations-PR:n".
+S1B  messages.sequence_number: expand (nullable) → dual-write-kod → durable historisk
+     backfill → verifiering → contract (separat migration: NOT NULL + UNIQUE)
+                                          ← egen PR, kräver S1A inte alls (oberoende spår)
+S1C  message_source_units + knowledge_claim_evidence + ägar-/konversationsintegritet +
+     backfill Message→MemorySourceUnit
+                                          ← kräver S1B:s sequence_number klart, egen PR.
+                                            Fortfarande ingen claim-extraktion från konversationer.
+S2   conversation_segments + conversation_segment_members + segmenteringspass
+                                          ← kräver S1C, återanvänder app/context/resolver.py:s
+                                            new_topic/LONG_GAP-signaler (§4.9), egen PR
+S3   memory_processing_jobs + worker-dispatch på job_kind
+                                          ← egen PR, oberoende av S1A–S2, ingen ny
+                                            beteendepåverkan än — bara infrastrukturen §6.12 beskriver
+S4   Dokumentclaim-extraktionsbackfill (saknade claims på indexed dokument, §6.11 punkt 1)
+                                          ← kräver S1A+S3, körs som ett memory_processing_jobs-jobb
+S5   extract_claims_for_conversation_segment (dual-write memory_source_id från start) +
+     konversationsbackfill (historiska segment, §6.11 punkt 2)
+                                          ← kräver S2+S3, ny källa in i SAMMA KnowledgeClaim-tabell
+P6   Grundarminne + korrigeringsloop     ← kan byggas parallellt med P4 (ingen hård
+                                            beroendekedja), men läser nu BÅDE resolverns
+                                            snabbspår OCH S5:s bakgrundspipeline (§6.11)
+P4   Tolkningskö + relationer + karta    ← det stora paketet, kräver P3 (klar) — sorterar
+                                            claims oavsett källa (dokument eller konversation)
+P5   Första förståelserapporten          ← kräver P4
+P7B  Governance enforcement              ← FORTFARANDE SIST, kräver P4:s
+      (aktivering av konstitutionen)        godkännandeinfrastruktur bevisad
 ```
 
-P1 och P2 är de enda som blockerar en riktig första massuppladdning. **P7A är flyttad tidigare
-i den här revideringen** — den kan starta direkt efter P1/P2, parallellt med P3, eftersom
-import/identifiering/versionering/jämförelse av möjliga styrdokument varken kräver eller
-påverkar P3–P6. P4/P5/P7B är det som gör MainAI till en aktiv projektledningspartner snarare än
-ett lagringsskåp — värdefullt, men inte blockerande för att börja mata in material säkert. P7B
-förblir sist eftersom AKTIVERING (till skillnad från ingestion) kräver att dubbelspärr- och
-granskningsmönstret redan är byggt och beprövat på lägre-risk-lager (P4) först.
+P1/P2/P3 blockerar inte längre något (klara). P7A kan fortfarande börja när som helst,
+oberoende av S1–S5/P4/P6. S1–S3 är ren infrastruktur (ingen ny data skapas, inget nytt
+beteende) och bör granskas/mergas FÖRE S4/S5 så att dokument- och konversationsbackfillen
+byggs direkt mot rätt tabellform istället för att behöva göras om. P7B förblir sist eftersom
+AKTIVERING (till skillnad från ingestion) kräver att dubbelspärr- och granskningsmönstret
+redan är byggt och beprövat på lägre-risk-lager (P4) först.
 
 ---
 

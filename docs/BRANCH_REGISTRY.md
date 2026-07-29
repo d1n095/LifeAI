@@ -6,12 +6,94 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat) — **PR #29 mergad**
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-29, mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`/`update_pull_request`, inte memorerat) — **PR #29 mergad**
 som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8` innan merge, inte en
 äldre commit. **PR #30** (`claude/memory-source-unit-design`, minneskärnans proveniensmodell)
-öppen, inte mergad, ännu inget migrationsförslag godkänt — fjärde granskningsrundan pågår,
-se Pass 10.
+öppen, inte mergad, ingen Alembic-migration skriven än. Exakt head-SHA anges medvetet INTE
+här — en commit som uppdaterar det här registret skapar per definition en ny SHA på samma
+branch, så en nedskriven SHA för en fortfarande AKTIV branch blir föråldrad av sin egen
+uppdatering; verifiera alltid mot GitHub API (`mcp__github__pull_request_read`) för den
+faktiska, aktuella head-SHA:n. (En SHA för en redan MERGAD/stängd PR, som PR #29:s ovan, har
+inte det problemet — den branchen får inga fler commits.) `docs/
+MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 är nu EN konsoliderad kanonisk design (ingen
+ny "granskningsrunda"-sektion läggs till längre — historiken finns i PR #30:s commit-log för
+den som vill se den, inte i den löpande arkitekturtexten). Se Pass 11 för vad som fortfarande
+blockerar innan en separat S1A-implementations-PR (migration + kod) får öppnas.
+
+## Pass 13 (2026-07-29): PR #30 — SECURITY DEFINER-funktionen fick eget ägarskydd
+
+Grundaren hittade att `transition_memory_source()` (SECURITY DEFINER, kör med admin-rollens
+rättigheter) inte själv verifierade att källan den skulle övergå faktiskt tillhör
+anroparen — RLS gäller inte inuti en `SECURITY DEFINER`-funktion, så `mainai_app` kunde i
+princip ha övergått en ANNAN ägares `memory_source_units`-rad, och `actor_type`/`actor_id`
+var fria parametrar som kunde sättas till `'admin'`/en godtycklig användare. Löst genom att
+dela funktionen i två: `transition_own_memory_source()` (beviljad `mainai_app`, verifierar
+`owner_id = current_user_id` FÖRST, `actor_kind` begränsad till `'founder'|'system'`,
+`actor_id` härlett internt — aldrig ett parametervärde) och `transition_memory_source_admin()`
+(full flexibilitet, `EXECUTE` ALDRIG beviljad `mainai_app`). `search_path` skärpt till enbart
+`pg_catalog` + schema-kvalificerade objektnamn istället för `pg_catalog, public`.
+`apply_runtime_privileges` utökad att verifiera hela uppdelningen (inte bara UPDATE/DELETE).
+CI verifierad grön direkt via GitHub API på PR #30:s exakta head vid varje steg i den här
+granskningen, inte antagen från en tidigare commit.
+
+## Pass 12 (2026-07-29): PR #30 — reboot-persistent privilegiehärdning, CI verifierad grön
+
+Grundaren hittade ett verkligt driftfel i privilegieplanen (Pass 11): `backend/docker-
+entrypoint.sh` kör `ensure_app_role.py` (som ovillkorligt beviljar `ALL PRIVILEGES` till
+`mainai_app` på VARJE boot, inte bara vid rollskapande) FÖRE `alembic upgrade head`. En
+`REVOKE UPDATE, DELETE` inskriven bara i S1A:s migration skulle alltså fungera vid första
+deployen men bli tyst återställd vid nästa vanliga omstart, eftersom Alembic då inte har
+något nytt att köra och `REVOKE` aldrig körs om. Löst i §4.8 genom att lägga till ett fjärde
+boot-steg, `apply_runtime_privileges` (idempotent, körs EFTER Alembic, FÖRE appstart, på
+VARJE boot — verifierar med `has_table_privilege`/`has_function_privilege` istället för att
+anta att `REVOKE`/`GRANT` lyckades, stoppar uppstarten vid avvikelse). Skrivs in i designen
+nu, implementeras i S1A-implementations-PR:n tillsammans med migrationen.
+
+Även löst: "Vad som återstår"-listan delad i två explicita trösklar (vad som krävs för att
+merga PR #30 självt, kontra vad som krävs för att merga den separata, senare
+S1A-implementations-PR:n — produktionsdataprofilen blockerar den senare, inte PR #30).
+
+**CI-status verifierad direkt mot GitHub API** (`pull_request_read` med `get_check_runs`/
+`get_status`) på PR #30:s exakta head vid tidpunkten (`a4f4591...`): "All required checks
+passed" = success, 18/18 checks completed (VPS-specifika jobb `skipped` som väntat för en
+docs-only-PR, resten `success`). Grundarens observation om avsaknad av synlig Actions-körning
+var alltså en timing-fråga (körningen hann inte synas/slutföras än) — inte ett kvarstående
+CI-problem.
+
+## Pass 11 (2026-07-29): PR #30 — konsoliderad kanonisk design, tre kvarstående blockerare
+
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 skrevs om från en punktlista över fem
+sekventiella granskningsrundor (delvis motsägande — äldre `document_tombstone`/subtyp-regler
+levde kvar bredvid sina ersättningar) till EN sammanhängande, aktuell design. PR #30:s
+beskrivning uppdaterad på GitHub för att matcha (tog bort "Third correction round"-språk och
+felaktig `knowledge_claim_evidence`-i-S1A-referens).
+
+Under konsolideringen hittades och löstes tre ytterligare verkliga fel: (1) `document_source_
+units` saknade en egen, komposit-FK-buren `source_kind`, vilket skulle fått flera purgade
+`document_chunk`-rader från samma dokumentversion att kollidera i `document_version`s
+partiella unika index när deras `chunk_id` nollas; (2) en `SET LOCAL`-sessionsflagga
+(`memory.transition_active`/`erasure_in_progress`) hävdades vara den enda skrivvägen till
+livscykelfält/radering, vilket är strukturellt falskt — vilken kod som helst på samma
+DB-anslutning kan sätta samma flagga. Löst med repots REDAN EXISTERANDE rolluppdelning
+(`mainai_app`, en icke-ägande runtime-roll, skild från migrationsrollen som äger tabellerna —
+se `ensure_app_role.py`): `REVOKE UPDATE, DELETE` från `mainai_app` på proveniens-tabellerna,
+`SECURITY DEFINER`-funktioner (`transition_memory_source`/`erase_owner_memory`) med fixerad
+`search_path` och `EXECUTE` beviljad enbart till `mainai_app` — en gräns Postgres själv
+upprätthåller, inte en flagga en session kan sätta. (3) Purge var ofullständig
+(`MemorySourceUnit.content_text` nollades, men `KnowledgeClaim.claim_text`/`Document.
+content_preview`/`media_blob`/diskblobben kunde fortfarande innehålla samma material) och det
+finns en andra, fortfarande LIVE dokumentraderingsväg (`DELETE /api/documents/{id}`,
+`app/routers/documents.py`, anropad från `frontend/lib/api.ts`) som skulle blockeras rakt av
+S1A:s nya FK:er — båda måste konsolideras till EN delad `purge_source()`-tjänst.
+
+**Kvarstår innan en S1A-implementations-PR (migration + kod) får öppnas:**
+1. Produktionsdataprofilen (`chunk_id`/`version_id`-nullkombinationer på `knowledge_claims`)
+   är fortfarande inte körd — ingen databasåtkomst från den här sessionen.
+2. Den delade `purge_source()`-tjänsten, `app/rls.py`-uppdateringen, och `delete_account`/
+   `export_account`-ändringarna är beskrivna i §4.8 men inte implementerade.
+3. Testmatrisen (migration/dual-write/delete/kontoradering/RLS/behörighet/konkurrens) är
+   specificerad men inte skriven som kod.
 
 ## Pass 10 (2026-07-28): PR #30 — fjärde granskningsrundan av MemorySourceUnit-modellen
 
