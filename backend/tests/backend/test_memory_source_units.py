@@ -85,8 +85,8 @@ def _set_rls_user(session, owner_id) -> None:
     session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
 
 
-def _make_user(session, email="owner@example.com") -> User:
-    user = User(email=email, password_hash=hash_password("Sup3rS3cret!"), role=UserRole.founder, email_verified=True)
+def _make_user(session, email="owner@example.com", *, role=UserRole.founder) -> User:
+    user = User(email=email, password_hash=hash_password("Sup3rS3cret!"), role=role, email_verified=True)
     session.add(user)
     session.commit()
     return user
@@ -389,6 +389,50 @@ def test_document_chunk_exact_snapshot_with_correct_chunk_text_accepted():
         msu = session.get(MemorySourceUnit, msu_id)
         assert msu.content_text == "The real chunk text."
         assert msu.content_hash == hashlib.sha256(b"The real chunk text.").hexdigest()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_document_chunk_exact_snapshot_with_wrong_but_formatvalid_hash_rejected_at_commit():
+    """The correct chunk_id and the correct, matching content_text alone are not enough --
+    mainai_app has direct INSERT on memory_source_units, so nothing but the DB itself stops
+    a raw insert from declaring an arbitrary, format-valid-looking content_hash (64 lowercase
+    hex characters that just aren't sha256 of the real text). This must be caught by the DB
+    computing and comparing the real hash itself (via Postgres's built-in sha256(bytea)), not
+    by trusting whatever the caller/Python helper submitted."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id, text_value="The real chunk text.")
+        _set_rls_user(session, owner.id)
+
+        wrong_hash = "0" * 64  # formally valid (64 lowercase hex), but not sha256 of the text
+        assert wrong_hash != hashlib.sha256(b"The real chunk text.").hexdigest()
+
+        msu = MemorySourceUnit(
+            owner_id=owner.id,
+            source_kind=SourceKind.document_chunk,
+            source_identity_key=f"document_chunk:{chunk.id}",
+            source_role=SourceRole.unknown,
+            observed_at=datetime.now(timezone.utc),
+            occurred_at_basis=OccurredAtBasis.unknown,
+            content_text="The real chunk text.",  # correct, matches the real chunk
+            content_hash=wrong_hash,
+            content_hash_version="sha256-utf8-v1",
+            snapshot_status=SnapshotStatus.exact,
+        )
+        session.add(msu)
+        session.flush()
+        session.add(
+            DocumentSourceUnit(
+                memory_source_id=msu.id, owner_id=owner.id, source_kind=SourceKind.document_chunk,
+                document_id=document.id, version_id=None, chunk_id=chunk.id,
+            )
+        )
+        with pytest.raises((IntegrityError, DBAPIError), match="content_hash does not match"):
+            session.commit()
     finally:
         session.rollback()
         session.close()
@@ -942,6 +986,31 @@ def test_transition_own_memory_source_always_logs_founder_never_caller_chosen():
             session.execute(
                 sa_text("SELECT transition_own_memory_source(:id, 'active', 'x', 'system')"),
                 {"id": str(msu_id)},
+            )
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_transition_own_memory_source_rejects_non_founder_owner():
+    """The audit trail always logs actor_type='founder', so the function must actually
+    verify the caller IS a founder, not merely that they own the row -- users.role also has
+    'admin'/'member' (currently unreachable via the app's own registration flow, but present
+    in the schema for the future UserAI phase). A member who legitimately owns a source must
+    still be rejected here rather than mislabeled as founder-authored."""
+    session = SessionLocal()
+    try:
+        member = _make_user(session, email="member@example.com", role=UserRole.member)
+        document = _make_document(session, member.id)
+        chunk = _make_chunk(session, member.id, document.id)
+        _set_rls_user(session, member.id)
+        msu_id = get_or_create_memory_source_unit(session, _chunk_locator(member.id, document.id, chunk.id))
+        session.commit()
+
+        with pytest.raises((IntegrityError, DBAPIError), match="caller is not a founder"):
+            session.execute(
+                sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'x')"), {"id": str(msu_id)}
             )
             session.commit()
     finally:
