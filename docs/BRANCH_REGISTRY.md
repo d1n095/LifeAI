@@ -24,12 +24,12 @@ triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
 `erase_owner_memory`/`erase_owner_memory_admin`), SQLAlchemy-modeller,
 `app/rag/memory_source.py`s race-säkra find-or-create, den delade `backend/scripts/
 s1a_privilege_policy.py` (använd atomiskt av både `ensure_app_role.py` och
-`apply_runtime_privileges.py`), samt 44 tester i `tests/backend/test_memory_source_units.py`
+`apply_runtime_privileges.py`), samt 39 tester i `tests/backend/test_memory_source_units.py`
 och 9 i `tests/backend/test_ensure_app_role.py` — allt verifierat mot en riktig lokal
-Postgres 16+pgvector-instans. Två granskningsrundor genomförda och åtgärdade (Pass 14 och
-Pass 15 nedan): 598/599 gröna (1 avsiktligt överhoppad kapacitetstest) i hela
+Postgres 16+pgvector-instans. FYRA granskningsrundor genomförda och åtgärdade (Pass 14–17
+nedan): 603/604 gröna (1 avsiktligt överhoppad kapacitetstest) i hela
 backend-/security-/account-sviten, plus grön CI (18/18, "All required checks passed") på
-exakt head-SHA `637576c` — verifierat direkt mot GitHubs check-runs-API, inte antaget.
+exakt head-SHA `32a2c65` — verifierat direkt mot GitHubs check-runs-API, inte antaget.
 PR-beskrivningen på GitHub är uppdaterad till att matcha (den gamla texten nämnde felaktigt
 `row_security=off` och föråldrade testsiffror).
 
@@ -39,9 +39,69 @@ befintliga dokumentclaims, dual-write i `app/rag/claims.py`, delad `purge_source
 (används av både `library.py`s `delete_source` och den fortfarande LIVE `DELETE /api/
 documents/{id}`), konto-export/erasure-integration, och produktionsdataprofilen (krävs före
 MERGE, inte före draft). Nästa kontrollpunkt enligt grundarens instruktion: vänta på
-FÄRSK granskning av Pass 15:s ändringar innan arbetet fortsätter längre — grundaren var
+FÄRSK granskning av Pass 17:s ändringar innan arbetet fortsätter längre — grundaren var
 explicit att detta INTE är ett godkännande att gå vidare till backfill/dual-write/purge/
 konto-integration/merge/deploy.
+
+## Pass 17 (2026-07-29): PR #31 — fjärde granskningsrundan hittade 2 kvarstående problem, alla åtgärdade
+
+Grundaren bekräftade Pass 16:s tre fixar (source_role='unknown', document_version aldrig
+exact, document_chunk exact bunden till verklig chunktext, actor_kind borttaget) som korrekta,
+men granskade en gång till och hittade 2 sista problem — samma explicita instruktion att
+INTE fortsätta till backfill/dual-write:
+
+1. **Hashen var fortfarande självdeklarerad vid rå DB-insert**: triggern verifierade att
+   `content_text` matchade `document_chunks.text`, men läste aldrig `content_hash` och
+   räknade aldrig ut SHA-256 själv — en rå insert (mainai_app har direkt `INSERT`) kunde
+   alltså använda korrekt chunktext men lagra t.ex. 64 nollor som hash, vilket format-/
+   versions-CHECK:arna fortfarande accepterade. Åtgärdat: `trg_dsu_validate_fields` beräknar
+   nu själv `encode(sha256(convert_to(<verklig chunktext>, 'UTF8')), 'hex')` med Postgres
+   egen inbyggda `sha256(bytea)` (pg_catalog, PG16+, inget pgcrypto-beroende) och kräver att
+   `content_hash` matchar exakt, samt att `content_hash_version = 'sha256-utf8-v1'`. Ny test
+   bevisar att korrekt chunk_id + korrekt text + en felaktig men formatgiltig 64-hex-hash
+   avvisas vid commit.
+2. **Actor-loggningen saknade en verklig founder-kontroll**: `transition_own_memory_source`
+   loggade alltid `actor_type='founder'`, men verifierade bara att anroparen ÄGER raden —
+   `users`-tabellen har även `admin`/`member` (för närvarande oåtkomliga via appens
+   registreringsflöde, men kvar i schemat för den framtida UserAI-fasen). Åtgärdat:
+   funktionen slår nu upp `users.role` för anroparen och NEKAR anropet om det inte är exakt
+   `'founder'`, istället för att felmärka en member/admins handling som founder-utförd. Ny
+   test bevisar att en `member` som äger en source ändå nekas.
+
+Omverifiering: migrations-round-trip mot en färsk `postgres`-superuser-databas UTAN
+`mainai_app`-roll; 603/604 gröna i hela backend-/security-/account-sviten (1 avsiktligt
+överhoppad kapacitetstest); grön CI (18/18, "All required checks passed") på exakt head-SHA
+`32a2c65`, verifierat direkt mot GitHubs check-runs-API. Två separata, avgränsade commits.
+PR-beskrivningen på GitHub uppdaterad med "Review Round 3/4" och aktuella testsiffror.
+
+## Pass 16 (2026-07-29): PR #31 — tredje granskningsrundan hittade 3 provenance-problem, alla åtgärdade
+
+Grundaren bekräftade Pass 15:s fem fixar som korrekta, men granskade en gång till (medan
+migrationen fortfarande är odriftsatt) och hittade 3 nya problem:
+
+1. **En `exact`-snapshot var inte bunden till verklig källtext**: Python-hjälparen beräknade
+   SHA-256 av caller-supplied `content_text`, vilket bara bevisar att hashen matchar den
+   inskickade texten — inte att texten faktiskt kommer från den länkade `chunk_id`.
+   Dessutom tillät DSU-triggern `document_version + exact` trots att `KnowledgeVersion`
+   saknar en kanonisk textkolumn (bara checksum/metadata). Åtgärdat: `trg_dsu_validate_fields`
+   verifierar nu, för `document_chunk + exact`, att förälderns `content_text` matchar
+   `document_chunks.text` för den länkade chunk_id:n. `document_version` får aldrig längre
+   vara `exact` — begränsad till `degraded`/`missing`, precis som `document_record` redan var.
+2. **`content_hash_version` var fri och oskyddad av update-guarden**: ny CHECK
+   `ck_msu_content_hash_version_matches_hash` (NULL endast tillsammans med `content_hash`,
+   annars exakt `'sha256-utf8-v1'`), och fältet ingår nu i `trg_msu_guard_update`s
+   immutabilitetsjämförelse.
+3. **Owner-funktionen kunde märka användaråtgärder som `system`**: `transition_own_memory_
+   source` tog emot ett fritt `p_actor_kind`. Åtgärdat: parametern helt borttagen — funktionen
+   loggar nu ovillkorligt `actor_type='founder'` (härlett från att den enda vägen in är den
+   egna ägarkontrollen). `downgrade()`s `DROP FUNCTION`-signatur uppdaterad i samma commit.
+
+Omverifiering: migrations-round-trip; 601/602 gröna i hela backend-/security-/account-sviten;
+grön CI (18/18) på exakt head-SHA `6b3820a`. Under körningen upptäcktes och fixades även en
+riktig bugg i en BEFINTLIG test (`test_get_or_create_memory_source_unit_rejects_mismatched_
+locator`) som det nya content_text-kravet avslöjade: testet skapade en chunk med text "Text A"
+men byggde sin locator med hjälpfunktionens orelaterade default-text, så de aldrig matchade —
+harmlöst innan denna runda (inget kontrollerade det), ett riktigt fel nu.
 
 ## Pass 15 (2026-07-29): PR #31 — andra granskningsrundan hittade 5 kvarstående problem, alla åtgärdade
 
