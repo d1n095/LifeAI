@@ -480,75 +480,152 @@ find-or-create-mönstret).
 
 En `BEFORE UPDATE`-trigger på `memory_source_units` fryser `source_kind`, `source_role`,
 `source_identity_key`, `observed_at`, `occurred_at`, `occurred_at_basis` och `owner_id`
-permanent. Livscykelfälten (`lifecycle_status`/`revoked_at`/`revocation_reason`/`purged_at`/
-`purge_reason`/`content_text`/`content_hash`/`snapshot_status`) får ENDAST ändras när en
-transaktionslokal markör (`memory.transition_active`) är satt — och den markören sätts bara
-av `transition_memory_source()` (se "Livscykel" nedan), aldrig av godtycklig kod. En separat
-`BEFORE UPDATE`-trigger på `document_source_units` fryser `memory_source_id`/`owner_id`/
-`document_id`/`version_id`/`source_kind` permanent, och tillåter `chunk_id` att gå från satt
-till `NULL` ENDAST när förälderns `lifecycle_status` redan är `revoked`/`purged` (den
-kontrollerade FK-`SET NULL`-övergången när en chunk hårdraderas). Direkt `DELETE` på
-`memory_source_units`/`document_source_units` är ovillkorligt förbjudet i normal drift — det
-enda undantaget är den smalt avgränsade kontoraderingsvägen, se "Kontoradering" nedan.
+permanent, alltid, oavsett vem som skriver — den kontrollen är inte databasbehörighets-
+modellens jobb (nedan), utan en oberoende andra spärr. En separat `BEFORE UPDATE`-trigger på
+`document_source_units` fryser `memory_source_id`/`owner_id`/`document_id`/`version_id`/
+`source_kind` permanent, och tillåter `chunk_id` att gå från satt till `NULL` ENDAST när
+förälderns `lifecycle_status` redan är `revoked`/`purged` (den kontrollerade
+FK-`SET NULL`-övergången när en chunk hårdraderas).
 
-#### Livscykel — `transition_memory_source()`, inte fri `UPDATE`
+#### Databasbehörighetsmodell — riktig spärr, inte en GUC vem som helst kan sätta
 
-Alla legitima statusövergångar går genom EN kontrollerad SQL-funktion:
+En tidigare version av den här designen försökte skydda livscykelfält och radering med en
+transaktionslokal markör (`SET LOCAL memory.transition_active/erasure_in_progress = 'on'`)
+som bara den avsedda funktionen "skulle" sätta. Det är INTE en verklig spärr — vilken kod som
+helst på samma databasanslutning kan sätta samma markör själv, så påståendet att bara en viss
+funktion kan skriva vore strukturellt falskt.
+
+Repot har redan den riktiga lösningen på plats, inte som en ny mekanism S1A måste uppfinna:
+`backend/scripts/ensure_app_role.py`/`backend/db-init/01-app-role.sh` visar att applikationen
+ALDRIG kör runtime-frågor som samma roll som äger tabellerna. Migrationer körs som
+admin/superuser-rollen (`settings.database_url`, `migration_engine` i `app/db.py`) — den
+rollen äger tabellerna. All runtime-trafik (allt `app/routers/*.py` gör) körs istället som den
+separata, icke-superuser-rollen `mainai_app` (`settings.app_database_url`, `engine` i
+`app/db.py`), som bara är BEVILJAD privilegier via `GRANT`, inte ägare. Eftersom `mainai_app`
+inte äger tabellerna fungerar en vanlig `REVOKE` på den fullt ut (till skillnad från RLS, där
+FORCE-flaggan behövs specifikt för att en TABELLÄGARE annars förbigår RLS — ett problem
+`mainai_app` inte har, eftersom den inte är ägaren).
+
+*(Sidoanmärkning, inte en del av S1A: `app/rls.py`s docstring säger idag "the app connects as
+the table owner", vilket enligt `app/db.py`/`ensure_app_role.py` är inaktuellt/felaktigt —
+värt en egen, separat rättning senare enligt isoleringsprincipen, inte något som blandas in
+i den här migrationen.)*
+
+S1A:s migration använder den befintliga rolluppdelningen konkret:
+
+```sql
+-- mainai_app får läsa och skapa nya rader (backfill, dual-write, find-or-create),
+-- men aldrig UPDATE eller DELETE dessa tre tabeller direkt.
+REVOKE UPDATE, DELETE ON memory_source_units, document_source_units,
+    memory_source_lifecycle_events FROM mainai_app;
+-- INSERT på memory_source_lifecycle_events sker ENDAST via transition_memory_source().
+REVOKE INSERT ON memory_source_lifecycle_events FROM mainai_app;
+
+CREATE FUNCTION transition_memory_source(...) RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public  -- fixerad, mot search_path-hijacking
+AS $$ ... $$;
+
+REVOKE ALL ON FUNCTION transition_memory_source(...) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION transition_memory_source(...) TO mainai_app;
+-- samma mönster för erase_owner_memory(...)
+```
+
+`SECURITY DEFINER` gör att funktionen kör med DESS ÄGARES rättigheter (admin-rollen, som äger
+tabellen och alltså får `UPDATE`/`DELETE`) när `mainai_app` anropar den — inte anroparens egna,
+nu avsiktligt begränsade rättigheter. `mainai_app` kan därför bokstavligen inte köra `UPDATE
+memory_source_units ...` direkt; Postgres avvisar det med ett behörighetsfel, oavsett vilka
+sessionsvariabler den anslutningen sätter. Det här är kontrollerat av Postgres själv vid varje
+sats, inte av en flagga i applikationslogiken. `BEFORE UPDATE`/`BEFORE DELETE`-triggrarna på
+tabellerna finns KVAR som ett oberoende andra lager (skyddar även admin-rollens egen direkta
+`psql`-åtkomst mot ett misstag), men det är GRANT/REVOKE-modellen — inte en trigger som litar
+på en sessionsflagga — som faktiskt gör påståendet "bara denna funktion kan skriva" sant.
+
+#### Livscykel — `transition_memory_source()`, den enda skrivvägen
 
 ```
 transition_memory_source(source_id, target_status, reason, actor_type, actor_id)
 ```
 
-som atomiskt (a) verifierar att övergången är laglig (`active → revoked`, `revoked → active`
-["restore", kräver ett eget `reason`, INTE det gamla `revocation_reason`], `active/revoked →
-purged`; `purged` är terminalt), (b) uppdaterar `memory_source_units` (sätter markören
-`memory.transition_active` runt just den UPDATE-satsen, så en efterföljande rå `UPDATE` senare
-i samma transaktion fortfarande avvisas av immutability-triggern), och (c) skriver en rad i
+`actor_type` är `founder | assistant_system | admin | migration` (INTE bara `system` — en
+tydlig lista över VEM/VAD som kan initiera en övergång). Funktionen verifierar atomiskt att
+övergången är laglig (`active → revoked`, `revoked → active` ["restore", kräver ett EGET
+`reason`, INTE det gamla `revocation_reason`], `active/revoked → purged`; `purged` är
+terminalt), uppdaterar `memory_source_units`, och skriver en rad i
 `memory_source_lifecycle_events` med `actor_type`/`actor_id` som EXPLICITA parametrar från
-anropande kod — INTE härledda automatiskt från `current_setting('app.current_user_id')`, eftersom
-en systemdriven åtgärd (t.ex. `delete_source`s purge) annars felaktigt skulle se ut som att
-grundaren personligen utförde den. `memory_source_lifecycle_events` är append-only (egna
-`BEFORE UPDATE`/`BEFORE DELETE`-triggers som ovillkorligt reser undantag) — den enda skrivvägen
-in är `transition_memory_source()` själv, så en rad i händelseloggen är faktiskt en pålitlig
-revisionslogg, inte något godtycklig applikationskod kan förfalska.
+anropande kod — INTE härledda automatiskt från `current_setting('app.current_user_id')`,
+eftersom en systemdriven åtgärd (t.ex. purge, se nedan) annars felaktigt skulle se ut som att
+grundaren personligen utförde den. `memory_source_lifecycle_events` är append-only
+(`mainai_app` saknar `UPDATE`/`DELETE`/direkt `INSERT` på den, se ovan) och skrivs bara inifrån
+`transition_memory_source()` — en rad i händelseloggen är därför en pålitlig revisionslogg,
+inte något godtycklig applikationskod kan förfalska.
 
 **Två operationer, tydligt separerade och mappade till verklig kod:**
 - **Revoke** ("ta bort ur aktivt minne", en FRAMTIDA UI-åtgärd, inte byggd ännu): utesluter
   omedelbart ur retrieval/promotion/tolkningsförslag, men behåller `content_text` och alla
   claims — reversibelt via restore.
-- **Purge** (motsvarar dagens `delete_source`, som redan hårdraderar `DocumentChunk`-rader och
-  försöker fysiskt purga originalblobben — det är redan närmare permanent radering än en enkel
-  "dölj"-åtgärd): nollar `content_text`/`content_hash` på matchande `memory_source_units`,
-  OCH raderar samtliga `knowledge_claims WHERE source_id = <dokumentet> AND owner_id =
-  <ägaren>` i SAMMA transaktion (`claim_relationships` cascadar bort automatiskt, migration
-  0007). En claim är härledd, potentiellt känslig text i sig själv — att bara nolla
-  källenhetens kopia och lämna `claim_text` orörd vore INTE en verklig radering. UI/API-texten
-  för `delete_source` måste vara ärlig om att det här är permanent radering av innehåll (källa
-  + härledda claims), inte en mjuk "dölj"-åtgärd. Ordning i `delete_source`: (1)
-  `transition_memory_source(..., 'purged', 'source_deleted', 'system', NULL)` för varje
-  matchande `memory_source_units`-rad, (2) radera matchande `knowledge_claims`, (3) radera
-  `DocumentChunk`-raderna som idag (FK:ns `SET NULL` mot redan-purgade `document_source_units`
-  passerar nu immutability-triggerns lifecycle-medvetna kontroll), (4) fortsätt som idag
-  (`Document.deleted_at` osv). Skrivs med SQLAlchemy Core `UPDATE`/`DELETE` mot en subquery,
-  inte en joined ORM `Query.update()`.
+- **Purge — permanent radering, definierad fullständigt, inte bara `MemorySourceUnit`s kopia.**
+  Motsvarar dagens `delete_source` (Library) OCH `DELETE /api/documents/{id}` (den äldre
+  `app/routers/documents.py`-rutten) — se "En gemensam purge-tjänst" nedan för varför båda
+  måste anropa SAMMA implementation. En verklig permanent radering måste hantera VARJE
+  innehållsbärande kopia, inte bara `memory_source_units`:
+  - `memory_source_units.content_text`/`content_hash` → `NULL` (via `transition_memory_source`).
+  - `knowledge_claims WHERE source_id = <dokumentet> AND owner_id = <ägaren>` → raderas
+    (`claim_relationships` cascadar bort automatiskt, migration 0007). En claim är härledd,
+    potentiellt känslig text i sig själv.
+  - `Document.content_preview` → nollas (ett rått textutdrag av originalet, inte bara en
+    referens till det).
+  - `Document.media_blob` → nollas (STEG 13:s in-databas-kopia av media-bytes, om satt).
+  - Blobben på disk (`Document.storage_key`) → `maybe_purge_blob()` (redan existerande,
+    content-addresserad, referensräknande radering — oförändrad, men måste faktiskt anropas
+    av BÅDA raderingsvägarna, se nedan).
+  - `Document.file_path` → samma hantering som `storage_key` om den fortfarande pekar på
+    kvarvarande bytes (legacy-fält från innan `storage_key`/blob-lagret fanns).
+  - `Document.title`/`original_filename`/`category`/`source_url` → BEHÅLLS som neutral
+    metadata (ett filnamn eller en URL är i sig sällan känsligt innehåll, och att radera dem
+    skulle göra även den soft-deletade `Document`-raden meningslös för framtida revisionsspår)
+    — men om `source_url`/`title` i ett enskilt fall FAKTISKT innehåller identifierande
+    personligt innehåll är det en separat, medveten framtida utökning (per-fält-purge), inte
+    något S1A löser generellt. UI:t för "radera källa" måste vara ärligt om exakt detta: vad
+    som raderas (text, claims, media) kontra vad som stannar kvar som metadata (titel,
+    filnamn, URL, tidsstämplar).
+  - Ordning: (1) `transition_memory_source(..., 'purged', 'source_deleted', 'system', NULL)`
+    per matchande `memory_source_units`-rad, (2) radera matchande `knowledge_claims`, (3)
+    nolla `Document.content_preview`/`media_blob`, (4) radera `DocumentChunk`-raderna (FK:ns
+    `SET NULL` mot redan-purgade `document_source_units` passerar nu immutability-triggerns
+    lifecycle-medvetna kontroll), (5) `maybe_purge_blob()` för `storage_key`/`file_path`, (6)
+    fortsätt som idag (`Document.deleted_at` osv). Skrivs med SQLAlchemy Core `UPDATE`/`DELETE`
+    mot en subquery, inte en joined ORM `Query.update()`.
+
+**En gemensam purge-tjänst — inte två raderingsimplementationer.** Utöver Librarys
+`delete_source` finns en äldre, fortfarande LIVE rutt: `DELETE /api/documents/{document_id}`
+(`app/routers/documents.py`, kopplad i `main.py`, anropad från `frontend/lib/api.ts`s
+`deleteDocument`) — den hårdraderar `DocumentChunk`-rader och sedan `Document`-raden direkt,
+en helt separat implementation utan `deleted_at`, utan blob-purge, och (dess egen docstring
+medger det) med en känd olöst multi-uploader-brist. Med S1A:s FK:er (`document_source_units.
+document_id` utan `ON DELETE`-åtgärd) skulle den rutten dessutom blockeras rakt av (FK-brott).
+S1A:s PR extraherar purge-logiken ovan till en delad funktion (t.ex.
+`app/rag/source_purge.py::purge_source(db, document_id, owner_id, request)`), och BÅDA
+rutterna anropar den — `documents.py`s `delete_document` blir en tunn wrapper, inte en egen
+parallell implementation. Det här är en avsiktlig beteendeförändring för den äldre rutten
+(den får nu samma soft-delete+blob-purge+minnespurge som Library redan har, inte bara en
+chunk+dokument-radering) — inte en bugg.
 
 #### Kontoradering — måste uppdateras i S1A:s PR, inte bara i DDL:n
 
 Dagens `delete_account` (`app/routers/account.py`) hårdraderar `DocumentChunk` →
 `KnowledgeVersion` → `SourceRelationship` → `Document` (i den ordningen) plus
 `ImportJob`/`Conversation`/`Message`, och nollar attribution på `Project`/`Task`/`UsageLog`/
-`AuditLog`. S1A:s nya FK:er (`document_source_units.document_id` utan `ON DELETE`-åtgärd,
-`memory_source_units.owner_id` utan `ON DELETE`-åtgärd) skulle annars BLOCKERA den raderingen
-(FK-brott → transaktionen rullas tillbaka → HTTP 500) eftersom `document_source_units`/
-`memory_source_units`-rader fortfarande skulle peka på dokument/ägaren som håller på att
-raderas. Radering av dessa rader är samtidigt förbjuden i normal drift (se "Immutability").
-Lösningen är EN smalt avgränsad, självbegränsad raderingsfunktion — inte en fri
-`SET LOCAL`-flagga som vilken kod som helst kan missbruka (den typen av bypass avvisades
-redan för content-immutability, se ovan): `erase_owner_memory(p_owner_id)` verifierar FÖRST
-att `p_owner_id = current_setting('app.current_user_id')::uuid` (dvs. kan aldrig radera någon
-ANNAN än den redan autentiserade, lösenords-bekräftade anroparen själv — begränsar
-attackytan strukturellt jämfört med en helt fri flagga), sätter en transaktionslokal markör
-`memory.erasure_in_progress` bara runt sina egna `DELETE`-satser, och raderar i denna ordning:
+`AuditLog`. S1A:s nya FK:er skulle annars BLOCKERA den raderingen (FK-brott → transaktionen
+rullas tillbaka → HTTP 500) eftersom `document_source_units`/`memory_source_units`-rader
+fortfarande skulle peka på dokument/ägaren som håller på att raderas — och `mainai_app` saknar
+(se ovan) direkt `DELETE`-rättighet på dem. Lösningen är samma modell som "Livscykel": EN
+`SECURITY DEFINER`-funktion, `erase_owner_memory(p_owner_id)`, ägd av admin-rollen,
+`EXECUTE` beviljad ENDAST till `mainai_app`. Funktionen verifierar FÖRST att `p_owner_id =
+current_setting('app.current_user_id')::uuid` — kan alltså strukturellt aldrig radera någon
+ANNAN än den redan autentiserade, lösenords-bekräftade anroparen själv — och raderar sedan,
+med de rättigheter DESS ägare (admin-rollen) har, i denna ordning:
 
 1. `knowledge_claims WHERE owner_id = p_owner_id` (även detta personlig/härledd data — se
    samma resonemang som Purge ovan; tar bort RESTRICT-blockeraren mot `memory_source_units`).
@@ -557,14 +634,21 @@ attackytan strukturellt jämfört med en helt fri flagga), sätter en transaktio
    cascadar bort automatiskt — `ON DELETE CASCADE`, till skillnad från den vanliga RESTRICT-
    hållningen, eftersom en händelselogg för en källa som inte längre finns saknar syfte).
 
-`delete_account` anropar `erase_owner_memory(user_id)` FÖRE sin befintliga
-`DocumentChunk`/`KnowledgeVersion`/`Document`-radering (som fortsätter oförändrad efteråt) —
-S1A:s PR måste innehålla den ändringen, inte bara de nya tabellerna. `/api/account/export`
-måste samtidigt utökas med `knowledge_claims` (dess docstring säger idag felaktigt att claims
-"has no backing table yet" — redan fel sedan PR #29, dubbelt fel efter S1A) och en sammanfattning
-av `memory_source_units`/`memory_source_lifecycle_events` (innehåll där inte purgat, annars en
-tydlig livscykelmarkör) — annars exporterar kontot inte längre allt personligt/härlett material
-det faktiskt håller.
+`actor_id`/`owner_id` som pekar på användaren blockerar INTE detta: kontots egna rader
+raderas i just den ordningen ovan innan `delete_account`s befintliga steg (som redan idag
+raderar `User`-raden sist) fortsätter oförändrat — det finns ingen kvarvarande referens från
+`memory_source_lifecycle_events` när `User` väl raderas, eftersom dess FK mot
+`memory_source_units` redan cascadat bort i steg 3. `delete_account` anropar
+`erase_owner_memory(user_id)` FÖRE sin befintliga `DocumentChunk`/`KnowledgeVersion`/
+`Document`-radering, i SAMMA databastransaktion — om något steg senare i `delete_account`
+misslyckas rullas hela transaktionen (inklusive `erase_owner_memory`s del) tillbaka
+automatiskt, exakt som `delete_account`s befintliga try/except/rollback-mönster redan
+garanterar. `/api/account/export` måste samtidigt utökas med `knowledge_claims` (dess
+docstring säger idag felaktigt att claims "has no backing table yet" — redan fel sedan
+PR #29, dubbelt fel efter S1A) och en sammanfattning av `memory_source_units`/
+`memory_source_lifecycle_events` (innehåll där inte purgat, annars en tydlig
+livscykelmarkör) — annars exporterar kontot inte längre allt personligt/härlett material det
+faktiskt håller.
 
 #### Fasad migrationsplan för `KnowledgeClaim.source_id`/`version_id`/`chunk_id`
 
@@ -608,12 +692,14 @@ det faktiskt håller.
    ```
    Schemat ovan är konstruerat för att fungera oavsett resultat (`version_id` nullable även
    för `document_chunk`), men resultatet bör ändå bekräftas innan merge.
-2. Den faktiska Alembic-migrationsfilen är inte skriven.
+2. Den faktiska Alembic-migrationsfilen är inte skriven — inklusive `REVOKE`/`SECURITY
+   DEFINER`/`GRANT EXECUTE`-satserna för `mainai_app` (se "Databasbehörighetsmodell").
 3. `app/rls.py` är inte uppdaterad än (beskrivet ovan, inte implementerat).
-4. `delete_source`/`delete_account`/`export_account`-ändringarna är beskrivna men inte
-   implementerade.
-5. Testmatrisen (migration/dual-write/delete/kontoradering/RLS/konkurrens) är specificerad i
-   chattsvaret men inte skriven som kod.
+4. Den delade `purge_source()`-tjänsten, `delete_source`/`documents.py`s `delete_document`s
+   omskrivning till att anropa den, `delete_account`/`export_account`-ändringarna är
+   beskrivna men inte implementerade.
+5. Testmatrisen (migration/dual-write/delete/kontoradering/RLS/konkurrens/behörighet) är
+   specificerad i chattsvaret men inte skriven som kod.
 
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
