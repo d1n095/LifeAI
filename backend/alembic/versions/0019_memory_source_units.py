@@ -120,25 +120,34 @@ Key design decisions this migration encodes (see §4.8 for the full reasoning):
   content_hash_version, which could otherwise be changed independently without tripping the
   lifecycle guard).
 
-- An `exact` snapshot is bound to the REAL source text, not merely to whatever text a caller
-  submitted — mainai_app has direct INSERT on both memory_source_units and
+- An `exact` snapshot is bound to the REAL source text AND its real hash, not merely to
+  whatever a caller submitted — mainai_app has direct INSERT on both memory_source_units and
   document_source_units, so nothing previously stopped a caller from hashing arbitrary text
-  and declaring it `exact`. `trg_dsu_validate_fields` now verifies, for `document_chunk` +
-  `exact`, that the parent's content_text equals `document_chunks.text` for the linked
-  chunk_id (checked while chunk_id is still linked; once purged there's nothing left to
-  verify against, but the earlier check plus content_text's immutability already covers
-  that). `document_version` can never be `exact`: `KnowledgeVersion` has no canonical text
-  column (checksum/metadata only), so an exact claim there would necessarily be
-  unverifiable — it's restricted to `degraded`/`missing`, same as `document_record` already
-  was.
+  and declaring it `exact`, or (even with matching text) simply declaring an arbitrary,
+  format-valid-looking content_hash (e.g. 64 zeros) that the format/version CHECKs alone
+  can't catch. `trg_dsu_validate_fields` now verifies, for `document_chunk` + `exact`, that
+  the parent's content_text equals `document_chunks.text` for the linked chunk_id AND that
+  content_hash equals `encode(sha256(convert_to(<that text>, 'UTF8')), 'hex')` — computed
+  with Postgres's own built-in `sha256(bytea)` (pg_catalog, PG16+, no pgcrypto dependency),
+  never by trusting the caller's or the Python helper's own computed value. Checked while
+  chunk_id is still linked; once purged there's nothing left to verify against, but the
+  earlier check plus content_text/content_hash's immutability already covers that.
+  `document_version` can never be `exact`: `KnowledgeVersion` has no canonical text column
+  (checksum/metadata only), so an exact claim there would necessarily be unverifiable — it's
+  restricted to `degraded`/`missing`, same as `document_record` already was.
 
 - `transition_own_memory_source()` no longer accepts an `actor_kind` parameter. It always
-  logs `actor_type='founder'`, since the only way to reach this function at all is the
-  in-function ownership check (the caller IS the row's owner) — mainai_app (the same role
-  that serves every ordinary request) could otherwise self-label an actual user action as
-  `'system'`, making it look automated in the audit trail. A genuinely system-initiated
-  transition must go through `transition_memory_source_admin`, which mainai_app is never
-  granted EXECUTE on.
+  logs `actor_type='founder'`, but that label is only trustworthy if the function actually
+  verifies the caller IS a founder — `users.role` also has `admin`/`member` (currently
+  unreachable in founder-only mode, but present in the schema and not removable without
+  breaking the future UserAI phase — see app/models/user.py). The function looks up
+  `users.role` for the caller and REJECTS the call outright if it isn't exactly `'founder'`,
+  rather than mislabeling a member/admin's action as founder-authored. A future UserAI phase
+  that gives non-founder roles their own memory needs a distinct `actor_type='user'` (or an
+  equivalent separate owner-scoped function), not a relaxation of this check. mainai_app (the
+  same role that serves every ordinary request) could otherwise self-label an actual user
+  action as `'system'` too — a genuinely system-initiated transition must go through
+  `transition_memory_source_admin`, which mainai_app is never granted EXECUTE on.
 
 Revision ID: 0019
 Revises: 0018
@@ -434,14 +443,17 @@ def upgrade() -> None:
         SET search_path = pg_catalog
         AS $$
         DECLARE
-            v_snap        varchar(16);
-            v_identity    text;
-            v_role        varchar(16);
-            v_content     text;
-            v_chunk_text  text;
+            v_snap          varchar(16);
+            v_identity      text;
+            v_role          varchar(16);
+            v_content       text;
+            v_content_hash  varchar(64);
+            v_hash_version  varchar(32);
+            v_chunk_text    text;
         BEGIN
-            SELECT snapshot_status, source_identity_key, source_role, content_text
-            INTO v_snap, v_identity, v_role, v_content
+            SELECT snapshot_status, source_identity_key, source_role, content_text,
+                   content_hash, content_hash_version
+            INTO v_snap, v_identity, v_role, v_content, v_content_hash, v_hash_version
             FROM public.memory_source_units WHERE id = NEW.memory_source_id;
 
             -- Documents are never directly attributable to founder/assistant/external/system
@@ -469,10 +481,25 @@ def upgrade() -> None:
                 -- nothing left to verify against, but content_text was already verified once
                 -- at creation and is immutable thereafter (trg_msu_guard_update), so that
                 -- earlier check still stands.
+                --
+                -- content_hash is independently verified too, not just content_text: a raw
+                -- INSERT (mainai_app has direct INSERT on memory_source_units) could
+                -- otherwise use the correct chunk text but declare an arbitrary,
+                -- formally-valid-looking hash (e.g. 64 zeros) -- the format/version CHECKs
+                -- alone don't catch that. Computed with Postgres's own built-in sha256(bytea)
+                -- (pg_catalog, available since PG 16 -- no pgcrypto dependency, and this
+                -- function's own search_path is already pinned to pg_catalog), never by
+                -- trusting the caller's/Python helper's own computed value.
                 IF v_snap = 'exact' AND NEW.chunk_id IS NOT NULL THEN
                     SELECT text INTO v_chunk_text FROM public.document_chunks WHERE id = NEW.chunk_id;
                     IF v_chunk_text IS DISTINCT FROM v_content THEN
                         RAISE EXCEPTION 'document_chunk exact snapshot content_text does not match document_chunks.text (id=%)', NEW.memory_source_id;
+                    END IF;
+                    IF v_content_hash IS DISTINCT FROM encode(sha256(convert_to(v_chunk_text, 'UTF8')), 'hex') THEN
+                        RAISE EXCEPTION 'document_chunk exact snapshot content_hash does not match sha256(document_chunks.text) (id=%)', NEW.memory_source_id;
+                    END IF;
+                    IF v_hash_version IS DISTINCT FROM 'sha256-utf8-v1' THEN
+                        RAISE EXCEPTION 'document_chunk exact snapshot content_hash_version must be sha256-utf8-v1 (id=%)', NEW.memory_source_id;
                     END IF;
                 END IF;
             ELSIF NEW.source_kind = 'document_version' THEN
@@ -626,10 +653,24 @@ def upgrade() -> None:
             v_owner      uuid;
             v_old_status varchar(16);
             v_caller     uuid;
+            v_caller_role varchar(16);
         BEGIN
             v_caller := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
             IF v_caller IS NULL THEN
                 RAISE EXCEPTION 'transition_own_memory_source: no authenticated user context';
+            END IF;
+
+            -- The audit trail always logs actor_type='founder' below, so this function must
+            -- actually verify the caller IS a founder, not merely that they own the row --
+            -- users.role also has 'admin'/'member' (currently unreachable in founder-only
+            -- mode, but present in the schema; see app/models/user.py). Without this check,
+            -- a future UserAI-phase member/admin account would get mislabeled as 'founder'
+            -- in every lifecycle event it creates. Future UserAI phases that give non-founder
+            -- roles their own memory need a distinct actor_type='user' (or an equivalent
+            -- separate owner-scoped function) here, not a relaxation of this check.
+            SELECT role::text INTO v_caller_role FROM public.users WHERE id = v_caller;
+            IF v_caller_role IS DISTINCT FROM 'founder' THEN
+                RAISE EXCEPTION 'transition_own_memory_source: caller is not a founder (role=%)', v_caller_role;
             END IF;
 
             IF p_reason IS NULL OR btrim(p_reason) = '' THEN
