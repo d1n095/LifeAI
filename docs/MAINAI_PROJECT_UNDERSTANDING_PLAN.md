@@ -542,6 +542,44 @@ tabellerna finns KVAR som ett oberoende andra lager (skyddar även admin-rollens
 `psql`-åtkomst mot ett misstag), men det är GRANT/REVOKE-modellen — inte en trigger som litar
 på en sessionsflagga — som faktiskt gör påståendet "bara denna funktion kan skriva" sant.
 
+**Privilegierna måste härdas om vid VARJE boot, inte bara i migrationen — verifierat mot
+`backend/docker-entrypoint.sh`.** Bootordningen idag är: `ensure_app_role.py` (om
+`MAINAI_APP_PASSWORD` satt) → `alembic upgrade head` → `exec` (starta appen).
+`ensure_app_role.py` kör OVILLKORLIGT, på VARJE boot — inte bara vid rollskapande —
+`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainai_app` samt motsvarande
+`ALTER DEFAULT PRIVILEGES`. Samma sak gör `backend/db-init/01-app-role.sh` för lokal Docker
+Compose. Det betyder att en `REVOKE UPDATE, DELETE` inskriven bara i S1A:s migration skulle
+fungera vid FÖRSTA deployen, men bli tyst återställd vid nästa vanliga omstart: `ensure_app_
+role.py` beviljar tillbaka `ALL PRIVILEGES` INNAN Alembic ens körs, och Alembic har då inget
+nytt att köra (migrationen ligger redan på head) — `REVOKE` körs alltså aldrig om.
+
+Rätt boot-ordning, tillagd som ett fjärde steg i `docker-entrypoint.sh` (och motsvarande i
+den lokala Docker-init-vägen så miljöerna inte divergerar):
+
+```
+ensure_app_role  →  alembic upgrade head  →  apply_runtime_privileges  →  starta backend
+```
+
+`apply_runtime_privileges` körs VARJE boot, EFTER Alembic, och är själv idempotent (kör om
+den redan är korrekt, ändrar inget om så). Den:
+- `REVOKE UPDATE, DELETE` på de skyddade proveniens-tabellerna från `mainai_app` (samma lista
+  triggrarna/RLS-policyerna redan känner till — en enda källa, inte en andra lista som kan
+  glömmas bort när en ny tabell läggs till).
+- `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC` för `transition_memory_source`/
+  `erase_owner_memory`, `GRANT EXECUTE ... TO mainai_app`.
+- Verifierar resultatet med riktiga behörighetsfrågor, inte bara antar att `REVOKE`/`GRANT`
+  lyckades: `has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')` måste vara
+  `false`, `has_function_privilege('mainai_app', 'transition_memory_source(...)', 'EXECUTE')`
+  måste vara `true`, och tabellernas ägare (`pg_tables.tableowner`) får aldrig vara
+  `mainai_app`.
+- Om NÅGON av dessa verifieringar misslyckas: avslutar med ett fel som får hela
+  `docker-entrypoint.sh` att stoppa (`set -e`, samma disciplin som redan gäller `alembic
+  upgrade head` — appen startar hellre inte alls än startar med fel behörighetsläge).
+
+Det här skrivs in i den kanoniska designen HÄR, men implementeras (det faktiska scriptet,
+kopplingen i `docker-entrypoint.sh`, motsvarigheten i `db-init/`) i S1A:s
+implementations-PR tillsammans med migrationen — inte i det här design-only-PR:et.
+
 #### Livscykel — `transition_memory_source()`, den enda skrivvägen
 
 ```
@@ -678,11 +716,23 @@ faktiskt håller.
   + backfill Message→MemorySourceUnit. Kräver S1B. Ingen claim-extraktion från konversationer
   än — det kommer efter S1C.
 
-#### Vad som återstår innan S1A kan godkännas
+#### Status: PR #30 (design) kontra S1A-implementations-PR:n (senare, separat)
 
-1. **Produktionsdataprofilen är fortfarande inte körd.** Den här sessionen har ingen
-   databasåtkomst (ingen `DATABASE_URL`, ingen körande Postgres/Docker). Frågan är exakt
-   specificerad och måste köras separat innan migrationen mergas:
+PR #30 är design-only och innehåller ingen kod — det den här sektionen (§4.8) beskriver är
+VAD som ska byggas, inte byggkoden själv. Två separata godkännande-trösklar, inte en:
+
+**Krävs för att PR #30 (arkitekturbeslutet) ska kunna mergas:** att designen är intern
+konsekvent, verifierad mot verklig kod (kolumnnamn, RLS-policyer, boot-ordning, rolluppdelning
+— allt ovan är det), och inte innehåller några kvarstående motsägelser. Det är uppfyllt i den
+här versionen. Produktionsdataprofilen krävs INTE för att merga PR #30 — den är ett villkor
+för S1A-IMPLEMENTATIONEN, se nedan.
+
+**Krävs innan en separat S1A-implementations-PR (migration + kod) kan MERGAS** (inte innan
+den öppnas — migrationen, `purge_source()`, RLS-kod, export/kontoradering, boot-härdning och
+testmatrisen ska byggas OCH granskas i den PR:en):
+
+1. **Produktionsdataprofilen.** Den här sessionen har ingen databasåtkomst (ingen
+   `DATABASE_URL`, ingen körande Postgres/Docker) och kan alltså inte köra den:
    ```sql
    SELECT
      count(*) FILTER (WHERE chunk_id IS NOT NULL AND version_id IS NULL) AS chunk_only,
@@ -690,16 +740,21 @@ faktiskt håller.
      count(*) FILTER (WHERE chunk_id IS NULL AND version_id IS NULL) AS neither
    FROM knowledge_claims;
    ```
-   Schemat ovan är konstruerat för att fungera oavsett resultat (`version_id` nullable även
-   för `document_chunk`), men resultatet bör ändå bekräftas innan merge.
-2. Den faktiska Alembic-migrationsfilen är inte skriven — inklusive `REVOKE`/`SECURITY
-   DEFINER`/`GRANT EXECUTE`-satserna för `mainai_app` (se "Databasbehörighetsmodell").
-3. `app/rls.py` är inte uppdaterad än (beskrivet ovan, inte implementerat).
-4. Den delade `purge_source()`-tjänsten, `delete_source`/`documents.py`s `delete_document`s
-   omskrivning till att anropa den, `delete_account`/`export_account`-ändringarna är
-   beskrivna men inte implementerade.
-5. Testmatrisen (migration/dual-write/delete/kontoradering/RLS/konkurrens/behörighet) är
-   specificerad i chattsvaret men inte skriven som kod.
+   Schemat är konstruerat för att fungera oavsett resultat (`version_id` nullable även för
+   `document_chunk`), men resultatet ska ändå bekräftas innan den PR:en mergas.
+2. Migrationsfilen: tabeller, triggers, CHECK-constraints, `REVOKE`/`SECURITY DEFINER`/
+   `GRANT EXECUTE`-satserna för `mainai_app` (se "Databasbehörighetsmodell").
+3. `apply_runtime_privileges`-steget i `docker-entrypoint.sh` (efter Alembic, före appstart)
+   och motsvarande i den lokala Docker-init-vägen — se boot-härdningen ovan.
+4. `app/rls.py`-uppdateringen för de tre nya tabellerna.
+5. Den delade `purge_source()`-tjänsten och `delete_source`/`documents.py`s `delete_document`s
+   omskrivning till att anropa den.
+6. `delete_account`/`export_account`-ändringarna (kontoradering/export).
+7. Testmatrisen, inklusive regressionstester för boot-härdningen specifikt: (a) första
+   provisionering+migration ger korrekta grants, (b) en ANDRA, vanlig boot får INTE tillbaka
+   `UPDATE`/`DELETE` på de skyddade tabellerna, (c) `mainai_app` kan inte köra en direkt
+   lifecycle-`UPDATE`/`DELETE`, (d) `mainai_app` KAN anropa `transition_memory_source`/
+   `erase_owner_memory`, (e) `PUBLIC` kan inte anropa dem.
 
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
@@ -1064,7 +1119,7 @@ S1A  memory_source_units + document_source_units + KnowledgeClaim.memory_source_
                                           ← additiv migration, egen PR. INGA meddelandetabeller,
                                             INGEN knowledge_claim_evidence (flyttad till S1C/P4
                                             — ingen aktiv writer i S1A). Nästa konkreta steg —
-                                            se §4.8:s "Vad som återstår innan S1A kan godkännas".
+                                            se §4.8:s "Status: PR #30 kontra S1A-implementations-PR:n".
 S1B  messages.sequence_number: expand (nullable) → dual-write-kod → durable historisk
      backfill → verifiering → contract (separat migration: NOT NULL + UNIQUE)
                                           ← egen PR, kräver S1A inte alls (oberoende spår)
