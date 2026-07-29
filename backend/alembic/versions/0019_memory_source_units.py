@@ -69,17 +69,51 @@ Key design decisions this migration encodes (see §4.8 for the full reasoning):
   migration check" CI job (.github/workflows/ci.yml) runs `alembic upgrade head` against a
   bare `postgres`-superuser-only database where `mainai_app` is never created — a literal
   `REVOKE ... FROM mainai_app` there fails outright with "role mainai_app does not exist"
-  and breaks that job (confirmed locally, not assumed). The actual narrowing is
-  backend/scripts/apply_runtime_privileges.py, run once right after this migration during a
-  real deploy/local boot (docker-entrypoint.sh: ensure_app_role -> alembic upgrade head ->
-  apply_runtime_privileges -> start app) and idempotently on every subsequent boot, since
-  ensure_app_role.py re-grants ALL PRIVILEGES to mainai_app on every boot (not just role
-  creation) — a REVOKE that only ran once, at migration time, would be silently undone on
-  the next ordinary restart otherwise. Between this migration applying and
-  apply_runtime_privileges running, the app itself is not yet serving requests (same
-  boot-order gap ensure_app_role.py's own password rotation already tolerates), so mainai_app
-  briefly holding broader-than-final privileges on these specific tables during that window
-  is not a live exposure.
+  and breaks that job (confirmed locally, not assumed). The actual narrowing — including the
+  schema-level `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, which also used to live here —
+  is entirely backend/scripts/s1a_privilege_policy.py, applied by both
+  backend/scripts/ensure_app_role.py (immediately, in the same transaction as its own broad
+  GRANT ALL, whenever the S1A objects already exist) and backend/scripts/
+  apply_runtime_privileges.py (right after this migration, for the deploy that creates them
+  for the first time, and idempotently on every subsequent boot). A schema-wide privilege
+  change belongs in that shared, atomic, re-verified policy — not in a migration whose own
+  `downgrade()` has no way to know whether it's safe to restore the schema's previous
+  CREATE-grant state (see downgrade() below: this migration's reversibility window is
+  deliberately narrow — see "in use" guard). Between this migration applying and the
+  privilege policy running, the app itself is not yet serving requests (same boot-order gap
+  ensure_app_role.py's own password rotation already tolerates), so mainai_app briefly
+  holding broader-than-final privileges on these specific tables during that window is not a
+  live exposure.
+
+- `source_role` on every `document_source_units` row is enforced (via a DEFERRABLE
+  constraint trigger, not just application code) to be exactly `'unknown'` on its parent
+  `memory_source_units` row. Documents are never directly attributable to `founder` or any
+  other authored role at ingest time — `mainai_app` has direct INSERT on both tables (see
+  above), so nothing in the database itself stopped a bug or a future code path from
+  inserting `source_role='founder'` for a raw document upload, which — since the field is
+  immutable once set — would have been a PERMANENT, uncorrectable false authority claim. Real
+  verified attribution is a separate, later, versioned concern (a dedicated attribution
+  model), never a side effect of a document insert.
+
+- Lifecycle coherence is enforced field-by-field, not just "the right timestamp is set": an
+  `active` row requires ALL FOUR of revoked_at/revocation_reason/purged_at/purge_reason to be
+  NULL (not just revoked_at/purged_at, which an earlier, looser version of this CHECK
+  allowed — a row could otherwise sit `active` while still carrying a stale
+  revocation_reason/purge_reason from nowhere, since neither transition function ever clears
+  those unless actually transitioning through that state). A `purged` row's revoked_at/
+  revocation_reason are allowed to be non-NULL ONLY as a pair (preserved history from an
+  earlier active->revoked->purged path) or NULL as a pair (a direct active->purged path) —
+  never one set without the other. `memory_source_lifecycle_events.reason` is NOT NULL: every
+  transition function already refuses a NULL/empty reason before it would ever reach this
+  INSERT, so the column should say so structurally, not just via application-level trust.
+
+- `content_hash`/`content_hash_version` are computed internally (SHA-256 over the exact UTF-8
+  bytes of `content_text`, version-tagged `'sha256-utf8-v1'`) by app/rag/memory_source.py,
+  never accepted as a caller-supplied value — a caller declaring an unverified hash as
+  `exact` would let the database assert a snapshot's integrity it never actually checked.
+  `ck_msu_content_hash_format` additionally enforces the DB-level shape (64 lowercase hex
+  characters) whenever a hash is present, independent of whether the caller computed it
+  correctly.
 
 Revision ID: 0019
 Revises: 0018
@@ -112,6 +146,7 @@ def upgrade() -> None:
 
             content_text text,
             content_hash varchar(64),
+            content_hash_version varchar(32),
             snapshot_status varchar(16) NOT NULL,
 
             lifecycle_status varchar(16) NOT NULL DEFAULT 'active',
@@ -146,21 +181,38 @@ def upgrade() -> None:
             ),
 
             CONSTRAINT ck_msu_content_matches_snapshot CHECK (
-                (lifecycle_status = 'purged' AND content_text IS NULL AND content_hash IS NULL)
+                (lifecycle_status = 'purged' AND content_text IS NULL AND content_hash IS NULL AND content_hash_version IS NULL)
                 OR
                 (lifecycle_status <> 'purged' AND (
-                    (snapshot_status = 'exact' AND content_text IS NOT NULL AND content_hash IS NOT NULL)
+                    (snapshot_status = 'exact' AND content_text IS NOT NULL AND content_hash IS NOT NULL AND content_hash_version IS NOT NULL)
                     OR
-                    (snapshot_status IN ('degraded', 'missing') AND content_text IS NULL AND content_hash IS NULL)
+                    (snapshot_status IN ('degraded', 'missing') AND content_text IS NULL AND content_hash IS NULL AND content_hash_version IS NULL)
                 ))
             ),
 
+            -- 64 lowercase hex characters (SHA-256) whenever a hash is present at all —
+            -- independent of whether the caller that computed it (app/rag/memory_source.py)
+            -- got the algorithm right; a malformed hash is a database-level, not just an
+            -- application-level, rejection.
+            CONSTRAINT ck_msu_content_hash_format
+                CHECK (content_hash IS NULL OR content_hash ~ '^[0-9a-f]{64}$'),
+
             CONSTRAINT ck_msu_lifecycle_coherence CHECK (
-                (lifecycle_status = 'active' AND revoked_at IS NULL AND purged_at IS NULL)
+                (lifecycle_status = 'active'
+                    AND revoked_at IS NULL AND revocation_reason IS NULL
+                    AND purged_at IS NULL AND purge_reason IS NULL)
                 OR
-                (lifecycle_status = 'revoked' AND revoked_at IS NOT NULL AND revocation_reason IS NOT NULL AND purged_at IS NULL)
+                (lifecycle_status = 'revoked'
+                    AND revoked_at IS NOT NULL AND revocation_reason IS NOT NULL
+                    AND purged_at IS NULL AND purge_reason IS NULL)
                 OR
-                (lifecycle_status = 'purged' AND purged_at IS NOT NULL AND purge_reason IS NOT NULL)
+                (lifecycle_status = 'purged'
+                    AND purged_at IS NOT NULL AND purge_reason IS NOT NULL
+                    -- revoked_at/revocation_reason are preserved as a PAIR from an earlier
+                    -- active->revoked->purged transition (transition functions never clear
+                    -- them on purge), or absent as a pair on a direct active->purged path —
+                    -- never one set without the other.
+                    AND (revoked_at IS NULL) = (revocation_reason IS NULL))
             )
         );
         CREATE INDEX ix_msu_owner_lifecycle ON memory_source_units (owner_id, lifecycle_status);
@@ -202,7 +254,10 @@ def upgrade() -> None:
             memory_source_id uuid NOT NULL,
             from_status varchar(16) NOT NULL,
             to_status varchar(16) NOT NULL,
-            reason text,
+            -- NOT NULL: every SECURITY DEFINER transition function already refuses a NULL/
+            -- empty reason before it ever reaches this INSERT (see transition_own_memory_
+            -- source/transition_memory_source_admin below) -- the column says so structurally.
+            reason text NOT NULL,
             actor_type varchar(16) NOT NULL,
             actor_id uuid,
             created_at timestamptz NOT NULL DEFAULT now(),
@@ -345,9 +400,20 @@ def upgrade() -> None:
         DECLARE
             v_snap     varchar(16);
             v_identity text;
+            v_role     varchar(16);
         BEGIN
-            SELECT snapshot_status, source_identity_key INTO v_snap, v_identity
+            SELECT snapshot_status, source_identity_key, source_role INTO v_snap, v_identity, v_role
             FROM public.memory_source_units WHERE id = NEW.memory_source_id;
+
+            -- Documents are never directly attributable to founder/assistant/external/system
+            -- at ingest time -- mainai_app has direct INSERT on both tables, so nothing else
+            -- stops a bug or a future code path from inserting a document source with
+            -- source_role='founder', which (source_role being immutable once set) would be a
+            -- PERMANENT false authority claim. Real, verified attribution is a separate,
+            -- later, versioned concern, never a side effect of a document insert.
+            IF v_role <> 'unknown' THEN
+                RAISE EXCEPTION 'document_source_units: parent source_role must be unknown for document sources (id=%, source_role=%)', NEW.memory_source_id, v_role;
+            END IF;
 
             IF NEW.source_kind = 'document_chunk' THEN
                 IF NEW.document_id IS NULL THEN
@@ -540,7 +606,7 @@ def upgrade() -> None:
             ELSIF p_target_status = 'purged' AND v_old_status IN ('active', 'revoked') THEN
                 UPDATE public.memory_source_units
                 SET lifecycle_status = 'purged', purged_at = now(), purge_reason = p_reason,
-                    content_text = NULL, content_hash = NULL
+                    content_text = NULL, content_hash = NULL, content_hash_version = NULL
                 WHERE id = p_source_id;
             ELSE
                 PERFORM set_config('memory.transition_active', 'off', true);
@@ -608,7 +674,7 @@ def upgrade() -> None:
             ELSIF p_target_status = 'purged' AND v_old_status IN ('active', 'revoked') THEN
                 UPDATE public.memory_source_units
                 SET lifecycle_status = 'purged', purged_at = now(), purge_reason = p_reason,
-                    content_text = NULL, content_hash = NULL
+                    content_text = NULL, content_hash = NULL, content_hash_version = NULL
                 WHERE id = p_source_id;
             ELSE
                 PERFORM set_config('memory.transition_active', 'off', true);
@@ -680,10 +746,12 @@ def upgrade() -> None:
     # --- Privilege narrowing for mainai_app: deliberately NOT done here ------------------
     # See the module docstring: a literal REVOKE/GRANT naming mainai_app here would break
     # the "Backend — Alembic migration check" CI job (its database never creates that role).
-    # backend/scripts/apply_runtime_privileges.py is the actual mechanism, run once right
-    # after this migration during a real deploy/local boot and on every subsequent boot —
-    # see backend/docker-entrypoint.sh.
-    op.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+    # This migration does NOT touch schema-level privileges (REVOKE CREATE ON SCHEMA public
+    # FROM PUBLIC) either, for the same reversibility reason: backend/scripts/
+    # s1a_privilege_policy.py (applied by ensure_app_role.py and apply_runtime_privileges.py,
+    # see backend/docker-entrypoint.sh) is the sole place that global, schema-wide change is
+    # made and re-verified — a migration whose downgrade() can't safely undo a global schema
+    # privilege change has no business making one in the first place.
 
 
 def downgrade() -> None:
