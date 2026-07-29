@@ -277,7 +277,9 @@ def test_get_or_create_memory_source_unit_rejects_mismatched_locator():
         chunk_2 = _make_chunk(session, owner.id, document.id, text_value="Text B")
         _set_rls_user(session, owner.id)
 
-        get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk_1.id))
+        get_or_create_memory_source_unit(
+            session, _chunk_locator(owner.id, document.id, chunk_1.id, content_text="Text A")
+        )
         session.commit()
 
         # Same identity_key impossible to construct honestly for a different chunk (the key
@@ -297,6 +299,98 @@ def test_get_or_create_memory_source_unit_rejects_mismatched_locator():
         session.commit()
         assert second_id != None  # noqa: E711
     finally:
+        session.close()
+
+
+def test_document_chunk_exact_snapshot_with_wrong_chunk_text_rejected_at_commit():
+    """An `exact` snapshot must be bound to the REAL text of the linked chunk_id, not merely
+    to whatever text the caller happened to submit -- mainai_app has direct INSERT on both
+    tables, so nothing but the DB trigger stops a caller from hashing chunk B's text while
+    linking chunk A. The DSU validation trigger is DEFERRABLE INITIALLY DEFERRED, so the
+    mismatch surfaces at commit, not at the INSERT itself."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk_a = _make_chunk(session, owner.id, document.id, text_value="Text from chunk A")
+        _make_chunk(session, owner.id, document.id, text_value="Text from chunk B")
+        _set_rls_user(session, owner.id)
+
+        # A fresh identity_key (chunk_a hasn't been used yet), but content_text belongs to a
+        # DIFFERENT chunk entirely.
+        mismatched_locator = _chunk_locator(owner.id, document.id, chunk_a.id, content_text="Text from chunk B")
+        get_or_create_memory_source_unit(session, mismatched_locator)
+        with pytest.raises((IntegrityError, DBAPIError), match="content_text does not match"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_document_version_exact_snapshot_rejected_at_commit():
+    """KnowledgeVersion has no canonical text column (checksum/metadata only), so an `exact`
+    document_version snapshot would necessarily be an unverifiable, caller-supplied claim --
+    it's restricted to degraded/missing, same as document_record already was."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        version = KnowledgeVersion(
+            source_id=document.id, owner_id=owner.id, version_number=1,
+            checksum="deadbeef" * 8, extraction_version="v1",
+        )
+        _set_rls_user(session, owner.id)
+        session.add(version)
+        session.flush()
+
+        msu = MemorySourceUnit(
+            owner_id=owner.id,
+            source_kind=SourceKind.document_version,
+            source_identity_key=f"document_version:{version.id}",
+            source_role=SourceRole.unknown,
+            observed_at=datetime.now(timezone.utc),
+            occurred_at_basis=OccurredAtBasis.unknown,
+            content_text="some claimed exact text",
+            content_hash=hashlib.sha256(b"some claimed exact text").hexdigest(),
+            content_hash_version="sha256-utf8-v1",
+            snapshot_status=SnapshotStatus.exact,
+        )
+        session.add(msu)
+        session.flush()
+        session.add(
+            DocumentSourceUnit(
+                memory_source_id=msu.id, owner_id=owner.id, source_kind=SourceKind.document_version,
+                document_id=document.id, version_id=version.id, chunk_id=None,
+            )
+        )
+        with pytest.raises((IntegrityError, DBAPIError), match="document_version may not be an exact snapshot"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_document_chunk_exact_snapshot_with_correct_chunk_text_accepted():
+    """The positive counterpart: a document_chunk exact snapshot whose content_text genuinely
+    matches the linked chunk's real text is accepted, and get_or_create_memory_source_unit()
+    uses exactly that real text (not any caller-invented content)."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id, text_value="The real chunk text.")
+        _set_rls_user(session, owner.id)
+
+        msu_id = get_or_create_memory_source_unit(
+            session, _chunk_locator(owner.id, document.id, chunk.id, content_text="The real chunk text.")
+        )
+        session.commit()
+
+        msu = session.get(MemorySourceUnit, msu_id)
+        assert msu.content_text == "The real chunk text."
+        assert msu.content_hash == hashlib.sha256(b"The real chunk text.").hexdigest()
+    finally:
+        session.rollback()
         session.close()
 
 
@@ -369,7 +463,7 @@ def test_get_or_create_memory_source_unit_refuses_to_reuse_revoked_source():
         session.commit()
 
         session.execute(
-            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke', 'founder')"),
+            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke')"),
             {"id": str(msu_id)},
         )
         session.commit()
@@ -556,7 +650,7 @@ def test_lifecycle_coherence_rejects_revoked_row_missing_reason():
         msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
         session.commit()
         session.execute(
-            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke', 'founder')"),
+            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke')"),
             {"id": str(msu_id)},
         )
         session.commit()
@@ -587,7 +681,7 @@ def test_lifecycle_coherence_rejects_purged_row_with_mismatched_revoked_pair():
         msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
         session.commit()
         session.execute(
-            sa_text("SELECT transition_own_memory_source(:id, 'purged', 'test purge', 'founder')"),
+            sa_text("SELECT transition_own_memory_source(:id, 'purged', 'test purge')"),
             {"id": str(msu_id)},
         )
         session.commit()  # direct active->purged: revoked_at/revocation_reason both NULL
@@ -746,7 +840,7 @@ def test_transition_own_memory_source_revoke_and_restore():
         session.commit()
 
         session.execute(
-            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke', 'founder')"),
+            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke')"),
             {"id": str(msu_id)},
         )
         session.commit()
@@ -757,7 +851,7 @@ def test_transition_own_memory_source_revoke_and_restore():
         assert msu.content_text is not None  # revoke preserves the snapshot
 
         session.execute(
-            sa_text("SELECT transition_own_memory_source(:id, 'active', 'restore for test', 'founder')"),
+            sa_text("SELECT transition_own_memory_source(:id, 'active', 'restore for test')"),
             {"id": str(msu_id)},
         )
         session.commit()
@@ -790,7 +884,7 @@ def test_transition_own_memory_source_purge_nulls_content():
         session.commit()
 
         session.execute(
-            sa_text("SELECT transition_own_memory_source(:id, 'purged', 'source_deleted', 'system')"),
+            sa_text("SELECT transition_own_memory_source(:id, 'purged', 'source_deleted')"),
             {"id": str(msu_id)},
         )
         session.commit()
@@ -805,7 +899,7 @@ def test_transition_own_memory_source_purge_nulls_content():
         # purged is terminal
         with pytest.raises((IntegrityError, DBAPIError)):
             session.execute(
-                sa_text("SELECT transition_own_memory_source(:id, 'active', 'undo', 'founder')"),
+                sa_text("SELECT transition_own_memory_source(:id, 'active', 'undo')"),
                 {"id": str(msu_id)},
             )
             session.commit()
@@ -814,7 +908,14 @@ def test_transition_own_memory_source_purge_nulls_content():
         session.close()
 
 
-def test_transition_own_memory_source_rejects_invalid_actor_kind():
+def test_transition_own_memory_source_always_logs_founder_never_caller_chosen():
+    """transition_own_memory_source() no longer accepts an actor_kind argument at all — the
+    only role that can ever call it (mainai_app, serving an ordinary authenticated request)
+    must not be able to self-label an action as 'system' to make it look automated. Proven
+    two ways: (1) the logged event is always actor_type='founder' regardless of the
+    transition, and (2) calling with a 4th argument (the old, removed actor_kind parameter)
+    fails outright — the parameter genuinely doesn't exist anymore, this isn't just
+    unenforced."""
     session = SessionLocal()
     try:
         owner = _make_user(session)
@@ -824,9 +925,23 @@ def test_transition_own_memory_source_rejects_invalid_actor_kind():
         msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
         session.commit()
 
+        session.execute(
+            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test')"), {"id": str(msu_id)}
+        )
+        session.commit()
+
+        event = (
+            session.query(MemorySourceLifecycleEvent)
+            .filter_by(memory_source_id=msu_id)
+            .one()
+        )
+        assert event.actor_type == "founder"
+        assert event.actor_id == owner.id
+
         with pytest.raises((IntegrityError, DBAPIError)):
             session.execute(
-                sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'x', 'admin')"), {"id": str(msu_id)}
+                sa_text("SELECT transition_own_memory_source(:id, 'active', 'x', 'system')"),
+                {"id": str(msu_id)},
             )
             session.commit()
     finally:
@@ -851,7 +966,7 @@ def test_transition_own_memory_source_rejects_cross_owner_source():
         _set_rls_user(session, owner_b.id)
         with pytest.raises((IntegrityError, DBAPIError)):
             session.execute(
-                sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'x', 'founder')"), {"id": str(msu_id)}
+                sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'x')"), {"id": str(msu_id)}
             )
             session.commit()
     finally:
