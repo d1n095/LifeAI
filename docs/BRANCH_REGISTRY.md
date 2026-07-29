@@ -21,6 +21,22 @@ ny "granskningsrunda"-sektion läggs till längre — historiken finns i PR #30:
 den som vill se den, inte i den löpande arkitekturtexten). Se Pass 11 för vad som fortfarande
 blockerar innan en separat S1A-implementations-PR (migration + kod) får öppnas.
 
+## Pass 13 (2026-07-29): PR #30 — SECURITY DEFINER-funktionen fick eget ägarskydd
+
+Grundaren hittade att `transition_memory_source()` (SECURITY DEFINER, kör med admin-rollens
+rättigheter) inte själv verifierade att källan den skulle övergå faktiskt tillhör
+anroparen — RLS gäller inte inuti en `SECURITY DEFINER`-funktion, så `mainai_app` kunde i
+princip ha övergått en ANNAN ägares `memory_source_units`-rad, och `actor_type`/`actor_id`
+var fria parametrar som kunde sättas till `'admin'`/en godtycklig användare. Löst genom att
+dela funktionen i två: `transition_own_memory_source()` (beviljad `mainai_app`, verifierar
+`owner_id = current_user_id` FÖRST, `actor_kind` begränsad till `'founder'|'system'`,
+`actor_id` härlett internt — aldrig ett parametervärde) och `transition_memory_source_admin()`
+(full flexibilitet, `EXECUTE` ALDRIG beviljad `mainai_app`). `search_path` skärpt till enbart
+`pg_catalog` + schema-kvalificerade objektnamn istället för `pg_catalog, public`.
+`apply_runtime_privileges` utökad att verifiera hela uppdelningen (inte bara UPDATE/DELETE).
+CI verifierad grön direkt via GitHub API på PR #30:s exakta head vid varje steg i den här
+granskningen, inte antagen från en tidigare commit.
+
 ## Pass 12 (2026-07-29): PR #30 — reboot-persistent privilegiehärdning, CI verifierad grön
 
 Grundaren hittade ett verkligt driftfel i privilegieplanen (Pass 11): `backend/docker-
