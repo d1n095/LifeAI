@@ -15,11 +15,29 @@ på exakt head-SHA `b2347e4` (PR-branchens sista commit) direkt innan merge, sam
 som PR #29. `claude/memory-source-unit-design` är nu mergad och kan städas bort (branchen har
 inga oavslutade delar kvar — hela dess innehåll är designdokumentation som nu lever i
 `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 på huvudgrenen). §4.8 är den kanoniska,
-GODKÄNDA arkitekturen för `MemorySourceUnit`/S1A — inget ytterligare designbeslut krävs innan
-en S1A-implementations-PR (migration + kod) öppnas — se §4.8:s "Status: PR #30 kontra
-S1A-implementations-PR:n" för den exakta listan (produktionsdataprofil, migrationsfil,
-`apply_runtime_privileges`, `app/rls.py`, delad `purge_source()`, kontoradering/export,
-testmatris) på vad som krävs för att MERGA den kommande implementations-PR:n.
+GODKÄNDA arkitekturen för `MemorySourceUnit`/S1A.
+
+**PR #31** (`claude/s1a-memory-source-implementation`, grenad från `claude/det-kommer-mer-879lcm`
+efter PR #30:s merge) — draft, öppen, INTE mergad, INGEN deploy/produktionsmigration körd.
+Implementerar §4.8:s design: migration `0019_memory_source_units` (tabeller, CHECKs,
+triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
+`erase_owner_memory`/`erase_owner_memory_admin`), SQLAlchemy-modeller,
+`app/rag/memory_source.py`s race-säkra find-or-create, `backend/scripts/
+apply_runtime_privileges.py` + `docker-entrypoint.sh`-koppling, samt 22 tester — allt
+verifierat mot en riktig lokal Postgres 16+pgvector-instans (584/584 tester gröna, inklusive
+en reproducerad och löst reboot-persistens-bugg: `ensure_app_role.py` ger tillbaka
+`mainai_app`s fulla rättigheter vid VARJE boot, vilket demonstrerades direkt i testsviten
+självt via `tests/backend/test_ensure_app_role.py`s körordning). Migrationen verifierad att
+faktiskt köra rent mot en `postgres`-superuser-bar databas UTAN `mainai_app`-roll — exakt
+"Backend — Alembic migration check"-jobbets villkor.
+
+**Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
+och §4.8:s "Status"-avsnitt för den fullständiga listan): deterministisk backfill av
+befintliga dokumentclaims, dual-write i `app/rag/claims.py`, delad `purge_source()`-tjänst
+(används av både `library.py`s `delete_source` och den fortfarande LIVE `DELETE /api/
+documents/{id}`), konto-export/erasure-integration, och produktionsdataprofilen (krävs före
+MERGE, inte före draft). Nästa kontrollpunkt enligt grundarens instruktion: vänta på
+granskning av det här läget innan arbetet fortsätter längre.
 
 ## Pass 13 (2026-07-29): PR #30 — SECURITY DEFINER-funktionen fick eget ägarskydd
 
