@@ -13,6 +13,8 @@ from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipTy
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
+from app.models.knowledge_version import KnowledgeVersion
+from app.models.memory_source_unit import DocumentSourceUnit, MemorySourceUnit, SnapshotStatus, SourceKind
 from app.rag.claims import BACKFILL_BATCH_SIZE, EXTRACTION_VERSION, backfill_claim_types, extract_claims_for_document, grounding_score
 from app.rag.trust import assess_claim_confidence
 from app.request_context import current_user_id as current_user_id_var
@@ -691,3 +693,183 @@ class TestAssessClaimConfidence:
 
         _set_rls_user(db_session, user_b.id)
         assert assess_claim_confidence(db_session, target) == ClaimConfidence.likely  # NOT certain — B's session can't see A's supports edge
+
+
+# --- S1A dual-write (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, phase 3) ---------------
+
+
+@pytest.mark.asyncio
+async def test_dual_write_single_claim_gets_memory_source_id(db_session, make_verified_user, _fake_claim_provider):
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    chunk = _make_chunk(db_session, user.id, document.id, "Bolaget grundades 2019 i Stockholm.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim.memory_source_id is not None
+    msu = db_session.get(MemorySourceUnit, claim.memory_source_id)
+    assert msu.source_kind == SourceKind.document_chunk
+    assert msu.snapshot_status == SnapshotStatus.exact
+    assert msu.content_text == chunk.text
+    dsu = db_session.get(DocumentSourceUnit, claim.memory_source_id)
+    assert dsu.document_id == document.id
+    assert dsu.chunk_id == chunk.id
+
+
+@pytest.mark.asyncio
+async def test_dual_write_multiple_claims_from_same_chunk_share_memory_source_id(db_session, make_verified_user, monkeypatch):
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _two_claims_chat(self, messages, model, **kwargs):
+        return ChatResult(
+            content=(
+                '[{"text": "Forsta pastaendet.", "claim_type": "historical"}, '
+                '{"text": "Andra pastaendet.", "claim_type": "technical"}]'
+            ),
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 5, "completion_tokens": 3},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _two_claims_chat)
+
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _make_chunk(db_session, user.id, document.id, "Nagot med tva pastaenden.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+
+    assert len(claims) == 2
+    assert claims[0].memory_source_id is not None
+    assert claims[0].memory_source_id == claims[1].memory_source_id
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_dual_write_multiple_chunks_get_distinct_memory_source_ids(db_session, make_verified_user, _fake_claim_provider):
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    db_session.add(
+        DocumentChunk(document_id=document.id, owner_id=user.id, chunk_index=0, text="Bolaget grundades 2019 i Stockholm.", embedding=[0.1] * EMBEDDING_DIM)
+    )
+    db_session.add(
+        DocumentChunk(document_id=document.id, owner_id=user.id, chunk_index=1, text="hallucinera testfall for detta scenario.", embedding=[0.1] * EMBEDDING_DIM)
+    )
+    db_session.commit()
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+
+    assert len(claims) == 2
+    memory_source_ids = {c.memory_source_id for c in claims}
+    assert None not in memory_source_ids
+    assert len(memory_source_ids) == 2  # one distinct source unit per chunk
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 2
+
+
+@pytest.mark.asyncio
+async def test_dual_write_provider_error_creates_no_orphan_source_unit(db_session, make_verified_user, monkeypatch):
+    from app.providers.base import ProviderError
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _always_fails(self, messages, model, **kwargs):
+        raise ProviderError("simulerat leverantorsfel")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _always_fails)
+
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _make_chunk(db_session, user.id, document.id, "Bolaget grundades 2019 i Stockholm.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+
+    assert claims == []
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_dual_write_empty_extraction_creates_no_source_unit(db_session, make_verified_user, _fake_claim_provider):
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _make_chunk(db_session, user.id, document.id, "inget speciellt har.")  # the fake provider returns []
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=None)
+
+    assert claims == []
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_dual_write_transaction_rollback_leaves_no_orphan_source_or_claim(db_session, make_verified_user, _fake_claim_provider, monkeypatch):
+    """A crash between the (uncommitted, SAVEPOINT-flushed) source-unit insert and the final
+    db.commit() must roll back the whole transaction — never a committed MemorySourceUnit
+    with no claim actually pointing to it, and never a committed claim missing its
+    memory_source_id."""
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _make_chunk(db_session, user.id, document.id, "Bolaget grundades 2019 i Stockholm.")
+
+    real_commit = db_session.commit
+
+    def _boom():
+        raise RuntimeError("simulated crash before commit")
+
+    monkeypatch.setattr(db_session, "commit", _boom)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await extract_claims_for_document(db_session, document, user.id, version_id=None)
+
+    monkeypatch.setattr(db_session, "commit", real_commit)
+    db_session.rollback()
+
+    assert db_session.query(KnowledgeClaim).filter_by(owner_id=user.id).count() == 0
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_dual_write_correct_owner_source_version_chunk_linkage(db_session, make_verified_user, _fake_claim_provider):
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    version = KnowledgeVersion(source_id=document.id, owner_id=user.id, version_number=1, checksum="c" * 64, extraction_version="v1")
+    db_session.add(version)
+    db_session.commit()
+    chunk = _make_chunk(db_session, user.id, document.id, "Bolaget grundades 2019 i Stockholm.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=version.id)
+
+    assert len(claims) == 1
+    claim = claims[0]
+    msu = db_session.get(MemorySourceUnit, claim.memory_source_id)
+    assert msu.owner_id == user.id
+    dsu = db_session.get(DocumentSourceUnit, claim.memory_source_id)
+    assert dsu.owner_id == user.id
+    assert dsu.document_id == document.id
+    assert dsu.chunk_id == chunk.id
+    assert dsu.version_id is None  # dual-write always creates document_chunk sources, never document_version
+
+
+@pytest.mark.asyncio
+async def test_dual_write_preserves_legacy_provenance_columns(db_session, make_verified_user, _fake_claim_provider):
+    """The old source_id/version_id/chunk_id columns must stay exactly as before —
+    memory_source_id is additive, not a replacement, during the cutover (§4.8's six-phase
+    plan)."""
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    version = KnowledgeVersion(source_id=document.id, owner_id=user.id, version_number=1, checksum="d" * 64, extraction_version="v1")
+    db_session.add(version)
+    db_session.commit()
+    chunk = _make_chunk(db_session, user.id, document.id, "Bolaget grundades 2019 i Stockholm.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=version.id)
+
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim.source_id == document.id
+    assert claim.version_id == version.id
+    assert claim.chunk_id == chunk.id
+    assert claim.memory_source_id is not None

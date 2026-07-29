@@ -12,14 +12,17 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models.document import ActiveTruthStatus, Document
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
+from app.models.memory_source_unit import SnapshotStatus
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
+from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
 
 EXTRACTION_VERSION = "claims-v2"
 MAX_CLAIMS_PER_CHUNK = 8
@@ -152,6 +155,20 @@ async def extract_claims_for_document(
     just that chunk, never aborts the document's import — matching this codebase's
     established "one file's/one chunk's error must not corrupt the whole batch" principle
     (see app/rag/library_import.py's per-file FileOutcome handling).
+
+    S1A dual-write (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, phase 3 of the cutover
+    plan): for every chunk that actually produces at least one claim, finds-or-creates exactly
+    one `document_chunk` MemorySourceUnit (app/rag/memory_source.py) using the chunk's REAL
+    `text` — never invented, never the provider's own output — and sets the same
+    `memory_source_id` on every claim extracted from that chunk. A chunk whose provider call
+    fails or whose response parses to zero claims never gets a source unit at all, so a
+    provider error or an empty extraction can never leave an orphaned MemorySourceUnit with no
+    claim pointing to it. The source unit (created via a SAVEPOINT-scoped flush, not its own
+    commit — see get_or_create_memory_source_unit) and every claim from this call share the
+    same outer transaction, committed together by the single db.commit() below — atomic, not
+    two separate writes that could diverge if the process died in between. The legacy
+    source_id/version_id/chunk_id columns are set exactly as before, unchanged, alongside the
+    new column — this is additive dual-write, not a replacement.
     """
     chunks = (
         db.query(DocumentChunk)
@@ -173,7 +190,24 @@ async def extract_claims_for_document(
         except ProviderError:
             continue
 
-        for claim_text, claim_type in _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]:
+        parsed_claims = _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]
+        if not parsed_claims:
+            continue
+
+        memory_source_id = get_or_create_memory_source_unit(
+            db,
+            DocumentSourceLocator(
+                owner_id=owner_id,
+                document_id=document.id,
+                version_id=None,
+                chunk_id=chunk.id,
+                observed_at=datetime.now(timezone.utc),
+                content_text=chunk.text,
+                snapshot_status=SnapshotStatus.exact,
+            ),
+        )
+
+        for claim_text, claim_type in parsed_claims:
             score = grounding_score(claim_text, chunk.text)
             claim = KnowledgeClaim(
                 owner_id=owner_id,
@@ -187,6 +221,7 @@ async def extract_claims_for_document(
                 confidence=_confidence_for_score(score),
                 grounding_score=score,
                 extraction_version=EXTRACTION_VERSION,
+                memory_source_id=memory_source_id,
             )
             db.add(claim)
             created.append(claim)
