@@ -22,14 +22,16 @@ efter PR #30:s merge) — draft, öppen, INTE mergad, INGEN deploy/produktionsmi
 Implementerar §4.8:s design: migration `0019_memory_source_units` (tabeller, CHECKs,
 triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
 `erase_owner_memory`/`erase_owner_memory_admin`), SQLAlchemy-modeller,
-`app/rag/memory_source.py`s race-säkra find-or-create, `backend/scripts/
-apply_runtime_privileges.py` + `docker-entrypoint.sh`-koppling, samt 34 tester i `tests/
-backend/test_memory_source_units.py` — allt verifierat mot en riktig lokal Postgres
-16+pgvector-instans. Grundarens kodgranskning av den första draften (Pass 14 nedan) hittade
-8 konkreta blockerande fel, samtliga nu åtgärdade och omverifierade: 591/592 gröna (1 avsiktligt
-överhoppad kapacitetstest) i hela backend-/security-/account-sviten, plus grön CI (17/17,
-"All required checks passed") på exakt head-SHA `7041c2c` — verifierat direkt mot GitHubs
-check-runs-API, inte antaget.
+`app/rag/memory_source.py`s race-säkra find-or-create, den delade `backend/scripts/
+s1a_privilege_policy.py` (använd atomiskt av både `ensure_app_role.py` och
+`apply_runtime_privileges.py`), samt 44 tester i `tests/backend/test_memory_source_units.py`
+och 9 i `tests/backend/test_ensure_app_role.py` — allt verifierat mot en riktig lokal
+Postgres 16+pgvector-instans. Två granskningsrundor genomförda och åtgärdade (Pass 14 och
+Pass 15 nedan): 598/599 gröna (1 avsiktligt överhoppad kapacitetstest) i hela
+backend-/security-/account-sviten, plus grön CI (18/18, "All required checks passed") på
+exakt head-SHA `637576c` — verifierat direkt mot GitHubs check-runs-API, inte antaget.
+PR-beskrivningen på GitHub är uppdaterad till att matcha (den gamla texten nämnde felaktigt
+`row_security=off` och föråldrade testsiffror).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): deterministisk backfill av
@@ -37,9 +39,55 @@ befintliga dokumentclaims, dual-write i `app/rag/claims.py`, delad `purge_source
 (används av både `library.py`s `delete_source` och den fortfarande LIVE `DELETE /api/
 documents/{id}`), konto-export/erasure-integration, och produktionsdataprofilen (krävs före
 MERGE, inte före draft). Nästa kontrollpunkt enligt grundarens instruktion: vänta på
-FÄRSK granskning av Pass 14:s ändringar innan arbetet fortsätter längre — grundaren var
+FÄRSK granskning av Pass 15:s ändringar innan arbetet fortsätter längre — grundaren var
 explicit att detta INTE är ett godkännande att gå vidare till backfill/dual-write/purge/
 konto-integration/merge/deploy.
+
+## Pass 15 (2026-07-29): PR #31 — andra granskningsrundan hittade 5 kvarstående problem, alla åtgärdade
+
+Grundaren bekräftade att Pass 14:s 8 fynd var korrekt åtgärdade, men granskade koden en gång
+till (medan migrationen fortfarande är odriftsatt och lätt att ändra) och hittade 5 nya
+problem — med samma explicita instruktion att INTE fortsätta till backfill/dual-write ännu:
+
+1. **`source_role` kunde bli en falsk auktoritetsclaim**: `mainai_app` har direkt `INSERT` på
+   både MSU och DSU, och databasen hindrade inte att ett dokument skapades med
+   `source_role='founder'` — permanent, eftersom fältet är immutable. Åtgärdat: DSU-
+   valideringstriggern kräver nu att förälderns `source_role` är exakt `'unknown'` för alla
+   `document_source_units`-rader. Ny test bevisar att `source_role='founder'` avvisas.
+2. **Downgrade lämnade kvar en global säkerhetsändring**: migrationen körde
+   `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, men `downgrade()` kunde inte återställa det
+   säkert. Åtgärdat: den raden är helt borttagen ur migrationen — den levde redan dubbelt i
+   `apply_runtime_privileges.py`, som är den enda platsen den nu körs.
+3. **Privilegiehärdningen var varken atomisk eller ägarverifierad**: skriptet använde
+   `autocommit=True` och kontrollerade bara "inte `mainai_app`", inte exakt vilken roll som
+   faktiskt ägde tabellerna/funktionerna. Åtgärdat: hela REVOKE/GRANT/verifiering extraherad
+   till en delad `backend/scripts/s1a_privilege_policy.py`, körd i EN transaktion, commit
+   endast om verifieringen är helt grön. `ensure_app_role.py` applicerar samma policy i SAMMA
+   transaktion som sin egen breda `GRANT ALL`, närhelst S1A-objekten redan finns — stänger
+   fönstret mellan `ensure_app_role` och `apply_runtime_privileges` där breda rättigheter
+   annars kunde bli det committade sluttillståndet vid en krasch. Ny test tvingar fram ett
+   fel i omsmalningen och bevisar att HELA transaktionen (inklusive den breda GRANT-satsen)
+   rullas tillbaka, inte bara det misslyckade steget.
+4. **Lifecycle-CHECK:arna var inte fullständigt koherenta**: en `active`-rad kunde t.ex. bära
+   ett kvarglömt `revocation_reason`. Åtgärdat: `ck_msu_lifecycle_coherence` skärpt så alla
+   fyra revoke/purge-fält verifieras tillsammans per status, och `purged`-rader tillåts bevara
+   `revoked_at`/`revocation_reason` bara som par (aldrig ett utan det andra).
+   `memory_source_lifecycle_events.reason` är nu `NOT NULL`.
+5. **Hash kunde deklareras av anroparen**: `content_hash` accepterades direkt från
+   `DocumentSourceLocator`, vilket lät en anropare hävda ett overifierat hash-värde för en
+   `exact`-snapshot. Åtgärdat: `content_hash`/`content_hash_version` beräknas nu internt
+   (SHA-256 över exakt UTF-8-innehåll, `app/rag/memory_source.py`s `compute_content_hash`),
+   med en ny DB-CHECK för 64 gemena hex-tecken. `created_at`-defaults bytta från naiv
+   `datetime.utcnow()` till `server_default=func.now()`.
+
+PR #31:s beskrivning på GitHub uppdaterad till att matcha den aktuella koden (tog bort det
+felaktiga `row_security=off`-påståendet och föråldrade testsiffror).
+
+Omverifiering: migrations-round-trip mot en färsk `postgres`-superuser-databas UTAN
+`mainai_app`-roll (samma villkor som "Alembic migration check"-jobbet); 598/599 gröna i hela
+backend-/security-/account-sviten (1 avsiktligt överhoppad kapacitetstest); grön CI (18/18,
+"All required checks passed") på exakt head-SHA `637576c`, verifierat direkt mot GitHubs
+check-runs-API. Fyra separata, avgränsade commits enligt `CLAUDE.md`s arbetsdisciplin.
 
 ## Pass 14 (2026-07-29): PR #31 — kodgranskning hittade 8 blockerande fel, alla åtgärdade
 
