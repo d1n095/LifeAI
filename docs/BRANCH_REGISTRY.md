@@ -10,11 +10,40 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 (`mcp__github__pull_request_read`/`update_pull_request`, inte memorerat) — **PR #29 mergad**
 som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8` innan merge, inte en
 äldre commit. **PR #30** (`claude/memory-source-unit-design`, minneskärnans proveniensmodell)
-öppen på head `a7ce199`, inte mergad, ingen Alembic-migration skriven än. `docs/
+öppen, inte mergad, ingen Alembic-migration skriven än. Exakt head-SHA anges medvetet INTE
+här — en commit som uppdaterar det här registret skapar per definition en ny SHA på samma
+branch, så en nedskriven SHA för en fortfarande AKTIV branch blir föråldrad av sin egen
+uppdatering; verifiera alltid mot GitHub API (`mcp__github__pull_request_read`) för den
+faktiska, aktuella head-SHA:n. (En SHA för en redan MERGAD/stängd PR, som PR #29:s ovan, har
+inte det problemet — den branchen får inga fler commits.) `docs/
 MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 är nu EN konsoliderad kanonisk design (ingen
 ny "granskningsrunda"-sektion läggs till längre — historiken finns i PR #30:s commit-log för
 den som vill se den, inte i den löpande arkitekturtexten). Se Pass 11 för vad som fortfarande
 blockerar innan en separat S1A-implementations-PR (migration + kod) får öppnas.
+
+## Pass 12 (2026-07-29): PR #30 — reboot-persistent privilegiehärdning, CI verifierad grön
+
+Grundaren hittade ett verkligt driftfel i privilegieplanen (Pass 11): `backend/docker-
+entrypoint.sh` kör `ensure_app_role.py` (som ovillkorligt beviljar `ALL PRIVILEGES` till
+`mainai_app` på VARJE boot, inte bara vid rollskapande) FÖRE `alembic upgrade head`. En
+`REVOKE UPDATE, DELETE` inskriven bara i S1A:s migration skulle alltså fungera vid första
+deployen men bli tyst återställd vid nästa vanliga omstart, eftersom Alembic då inte har
+något nytt att köra och `REVOKE` aldrig körs om. Löst i §4.8 genom att lägga till ett fjärde
+boot-steg, `apply_runtime_privileges` (idempotent, körs EFTER Alembic, FÖRE appstart, på
+VARJE boot — verifierar med `has_table_privilege`/`has_function_privilege` istället för att
+anta att `REVOKE`/`GRANT` lyckades, stoppar uppstarten vid avvikelse). Skrivs in i designen
+nu, implementeras i S1A-implementations-PR:n tillsammans med migrationen.
+
+Även löst: "Vad som återstår"-listan delad i två explicita trösklar (vad som krävs för att
+merga PR #30 självt, kontra vad som krävs för att merga den separata, senare
+S1A-implementations-PR:n — produktionsdataprofilen blockerar den senare, inte PR #30).
+
+**CI-status verifierad direkt mot GitHub API** (`pull_request_read` med `get_check_runs`/
+`get_status`) på PR #30:s exakta head vid tidpunkten (`a4f4591...`): "All required checks
+passed" = success, 18/18 checks completed (VPS-specifika jobb `skipped` som väntat för en
+docs-only-PR, resten `success`). Grundarens observation om avsaknad av synlig Actions-körning
+var alltså en timing-fråga (körningen hann inte synas/slutföras än) — inte ett kvarstående
+CI-problem.
 
 ## Pass 11 (2026-07-29): PR #30 — konsoliderad kanonisk design, tre kvarstående blockerare
 
