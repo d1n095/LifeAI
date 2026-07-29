@@ -5,16 +5,27 @@ pattern (RLS is exercised for real, not mocked).
 
 Not covered here (separate, later commits per the S1A/S1B/S1C plan and this PR's own
 checkpoint): the deterministic backfill job, dual-write from app/rag/claims.py, purge_source(),
-account export/erasure wiring, and apply_runtime_privileges' entrypoint integration/reboot
-regression test. This file covers the migration + models + find-or-create slice only.
+and account export/erasure wiring. This file covers the migration + models + find-or-create
+slice, plus the privilege-hardening/entrypoint/concurrency regression coverage a founder code
+review added on top of the first draft (cross-owner claim FK, exact least-privilege incl.
+TRUNCATE/REFERENCES/TRIGGER, the real docker-entrypoint.sh worker-reboot path, a genuinely
+non-superuser/non-BYPASSRLS admin-function-owner misconfiguration, and a real two-thread
+lock-wait proof of find-or-create's concurrency handling).
 """
 
 import importlib.util
+import os
+import subprocess
+import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import psycopg2
 import pytest
+from sqlalchemy import create_engine
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
@@ -160,32 +171,91 @@ def test_get_or_create_memory_source_unit_is_idempotent_no_duplicate():
         session.close()
 
 
-def test_get_or_create_memory_source_unit_two_concurrent_callers_converge():
-    """Simulates two workers racing on the same chunk: both start from a fresh session,
-    both attempt the real INSERT: exactly one commits, and the other's SAVEPOINT rollback +
-    fallback SELECT must resolve to the SAME id, not a duplicate row or an error."""
+def test_get_or_create_memory_source_unit_real_concurrent_insert_blocks_then_converges():
+    """A previous version of this test only ran session_a to completion (commit) before
+    session_b even started, which exercises the fallback-SELECT path against already-
+    committed data but proves nothing about genuine concurrency. This version holds
+    session_a's INSERT open (uncommitted) in the main thread while session_b's real INSERT
+    runs concurrently on a background thread and, verified via `pg_stat_activity` from a
+    third connection, actually enters a real lock wait — not merely "runs after" — before
+    session_a commits and unblocks it."""
     session_a = SessionLocal()
     session_b = SessionLocal()
     try:
         owner = _make_user(session_a)
         document = _make_document(session_a, owner.id)
         chunk = _make_chunk(session_a, owner.id, document.id)
-
         _set_rls_user(session_a, owner.id)
         _set_rls_user(session_b, owner.id)
-
         locator = _chunk_locator(owner.id, document.id, chunk.id)
 
-        id_a = get_or_create_memory_source_unit(session_a, locator)
+        # session_a: the same INSERT get_or_create_memory_source_unit would do, but held
+        # open (not committed) so session_b genuinely has to wait on it.
+        msu_a = MemorySourceUnit(
+            owner_id=owner.id,
+            source_kind=locator.source_kind,
+            source_identity_key=locator.identity_key,
+            source_role=SourceRole.unknown,
+            observed_at=locator.observed_at,
+            occurred_at=None,
+            occurred_at_basis=OccurredAtBasis.unknown,
+            content_text=locator.content_text,
+            content_hash=locator.content_hash,
+            snapshot_status=locator.snapshot_status,
+        )
+        session_a.add(msu_a)
+        session_a.flush()
+        session_a.add(
+            DocumentSourceUnit(
+                memory_source_id=msu_a.id, owner_id=owner.id, source_kind=locator.source_kind,
+                document_id=document.id, version_id=None, chunk_id=chunk.id,
+            )
+        )
+        session_a.flush()
+
+        result: dict = {}
+
+        def _run_session_b():
+            try:
+                result["id"] = get_or_create_memory_source_unit(session_b, locator)
+                session_b.commit()
+            except Exception as exc:  # noqa: BLE001 - captured and asserted on below
+                result["error"] = exc
+
+        thread_b = threading.Thread(target=_run_session_b)
+        thread_b.start()
+
+        probe_engine = create_engine(get_settings().database_url)
+        saw_real_lock_wait = False
+        try:
+            deadline = time.monotonic() + 5.0
+            with probe_engine.connect() as probe:
+                while time.monotonic() < deadline:
+                    waiting = probe.execute(
+                        sa_text(
+                            "SELECT count(*) FROM pg_stat_activity "
+                            "WHERE wait_event_type = 'Lock' AND query ILIKE '%memory_source_units%'"
+                        )
+                    ).scalar()
+                    if waiting and waiting > 0:
+                        saw_real_lock_wait = True
+                        break
+                    time.sleep(0.05)
+        finally:
+            probe_engine.dispose()
+
+        assert saw_real_lock_wait, (
+            "session_b never entered a real lock wait on memory_source_units — this test "
+            "isn't exercising genuine concurrency"
+        )
+
         session_a.commit()
+        thread_b.join(timeout=5)
+        assert not thread_b.is_alive(), "session_b never unblocked after session_a committed"
 
-        # session_b started its own transaction before session_a committed in a real race;
-        # here we simply exercise the fallback path directly against already-committed data,
-        # which is what session_b's IntegrityError-recovery branch must correctly resolve to.
-        id_b = get_or_create_memory_source_unit(session_b, locator)
-        session_b.commit()
+        assert "error" not in result, f"session_b raised unexpectedly: {result.get('error')!r}"
+        assert result["id"] == msu_a.id
 
-        assert id_a == id_b
         count = session_a.execute(
             sa_text("SELECT count(*) FROM memory_source_units WHERE owner_id = :oid"), {"oid": str(owner.id)}
         ).scalar()
@@ -225,6 +295,69 @@ def test_get_or_create_memory_source_unit_rejects_mismatched_locator():
         session.commit()
         assert second_id != None  # noqa: E711
     finally:
+        session.close()
+
+
+def test_get_or_create_memory_source_unit_reraises_unrelated_integrity_error():
+    """A locator pointing at a document_id that doesn't exist trips document_source_units'
+    own FK to `documents`, not `uq_msu_owner_identity` — this must propagate as-is (the
+    caller has a real bug to fix), never get misdiagnosed as "someone else already created
+    this" and silently swallowed."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        bogus_locator = _chunk_locator(owner.id, uuid.uuid4(), uuid.uuid4())
+        with pytest.raises(IntegrityError) as exc_info:
+            get_or_create_memory_source_unit(session, bogus_locator)
+        constraint_name = getattr(getattr(getattr(exc_info.value, "orig", None), "diag", None), "constraint_name", None)
+        assert constraint_name != "uq_msu_owner_identity"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_get_or_create_memory_source_unit_detects_content_hash_mismatch():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _set_rls_user(session, owner.id)
+
+        get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
+        session.commit()
+
+        different_hash_locator = _chunk_locator(owner.id, document.id, chunk.id, content_text="Bolaget grundades 2019.")
+        different_hash_locator.content_hash = "f" * 64
+        with pytest.raises(MemorySourceIdentityConflict, match="content_hash"):
+            get_or_create_memory_source_unit(session, different_hash_locator)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_get_or_create_memory_source_unit_refuses_to_reuse_revoked_source():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _set_rls_user(session, owner.id)
+
+        msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
+        session.commit()
+
+        session.execute(
+            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke', 'founder')"),
+            {"id": str(msu_id)},
+        )
+        session.commit()
+
+        with pytest.raises(MemorySourceIdentityConflict, match="revoked or purged"):
+            get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
+    finally:
+        session.rollback()
         session.close()
 
 
@@ -311,6 +444,39 @@ def test_purge_requires_null_content_check_constraint():
                 ),
                 {"id": str(msu_id)},
             )
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_knowledge_claims_composite_fk_rejects_cross_owner_memory_source():
+    """A plain single-column FK on knowledge_claims.memory_source_id would only prove the
+    referenced row EXISTS, not that it belongs to the same owner — FK checks run
+    independently of RLS. The composite FK (memory_source_id, owner_id) -> memory_source_
+    units(id, owner_id) must reject this at the database level, not merely have RLS hide it
+    afterwards."""
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="fk-a@example.com")
+        owner_b = _make_user(session, email="fk-b@example.com")
+        document_a = _make_document(session, owner_a.id)
+        chunk_a = _make_chunk(session, owner_a.id, document_a.id)
+        _set_rls_user(session, owner_a.id)
+        msu_a_id = get_or_create_memory_source_unit(session, _chunk_locator(owner_a.id, document_a.id, chunk_a.id))
+        session.commit()
+
+        _set_rls_user(session, owner_b.id)
+        document_b = _make_document(session, owner_b.id, title="Owner B doc")
+        claim = KnowledgeClaim(
+            owner_id=owner_b.id,
+            source_id=document_b.id,
+            claim_text="x",
+            extraction_version="v1",
+            memory_source_id=msu_a_id,  # belongs to owner_a, not owner_b
+        )
+        session.add(claim)
+        with pytest.raises((IntegrityError, DBAPIError)):
             session.commit()
     finally:
         session.rollback()
@@ -568,8 +734,6 @@ def test_apply_runtime_privileges_survives_a_second_boot():
     even after that broad re-grant runs again, not just once at migration time."""
     settings = get_settings()
     admin_engine_url = settings.database_url
-    from sqlalchemy import create_engine
-
     engine = create_engine(admin_engine_url)
     try:
         with engine.begin() as conn:
@@ -601,6 +765,120 @@ def test_apply_runtime_privileges_survives_a_second_boot():
         assert has_update_after is False
         assert has_delete_after is False
         assert can_call_admin_fn is False
+    finally:
+        engine.dispose()
+
+
+def test_mainai_app_privileges_are_exactly_least_privilege_no_truncate_references_trigger():
+    """UPDATE/DELETE absence alone isn't least privilege: TRUNCATE in particular is NOT
+    subject to RLS at all (it either succeeds outright or fails on privilege, with no
+    per-row filtering possible), so leaving it granted would be a real, silent bypass no
+    matter how tight the RLS policies are. REFERENCES/TRIGGER are equally unneeded.
+    lifecycle_events is SELECT-only for mainai_app — it's an append-only audit trail
+    written exclusively through the SECURITY DEFINER functions, never directly by the app
+    role."""
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    expectations = {
+        "memory_source_units": {"SELECT": True, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
+        "document_source_units": {"SELECT": True, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
+        "memory_source_lifecycle_events": {"SELECT": True, "INSERT": False, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
+    }
+    try:
+        with engine.connect() as conn:
+            errors = []
+            for table, privs in expectations.items():
+                for priv, expected in privs.items():
+                    actual = conn.execute(
+                        sa_text("SELECT has_table_privilege('mainai_app', :table, :priv)"),
+                        {"table": table, "priv": priv},
+                    ).scalar()
+                    if bool(actual) != expected:
+                        errors.append(f"{table}.{priv}: mainai_app has={actual}, expected={expected}")
+            assert not errors, "\n".join(errors)
+    finally:
+        engine.dispose()
+
+
+def test_apply_runtime_privileges_verifies_admin_function_owner_has_bypassrls():
+    """The two admin/migration SECURITY DEFINER functions have no ownership check inside
+    their own bodies by design (that's the whole point of the admin escape hatch) — they
+    rely entirely on their owning role genuinely having BYPASSRLS (or being superuser).
+    `SET row_security = off` does NOT provide this (an earlier draft incorrectly assumed
+    it did — see migration 0019's docstring), so apply_runtime_privileges.py must verify
+    the REAL role attribute and fail loud if a misconfigured deploy ever points these
+    functions at a role that lacks it. Proven here by actually reassigning ownership to a
+    fresh, deliberately non-superuser/non-BYPASSRLS role and confirming the verification
+    catches it — not assumed."""
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    weak_role = "s1a_test_weak_owner_no_bypassrls"
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa_text(f"DROP ROLE IF EXISTS {weak_role}"))
+            conn.execute(sa_text(f"CREATE ROLE {weak_role} NOSUPERUSER NOBYPASSRLS"))
+            conn.execute(sa_text(f"ALTER FUNCTION transition_memory_source_admin(uuid, varchar, text, varchar, uuid) OWNER TO {weak_role}"))
+
+        module = _load_apply_runtime_privileges()
+        with pytest.raises(SystemExit):
+            module.apply_and_verify(settings.database_url)
+    finally:
+        # Restore real ownership so later tests in this module (and this module re-run)
+        # see the correct, admin-owned function again — apply_and_verify() itself doesn't
+        # (and shouldn't) fix ownership, only report it as wrong.
+        admin_role = engine.url.username
+        with engine.begin() as conn:
+            conn.execute(sa_text(f"ALTER FUNCTION transition_memory_source_admin(uuid, varchar, text, varchar, uuid) OWNER TO {admin_role}"))
+            conn.execute(sa_text(f"DROP ROLE IF EXISTS {weak_role}"))
+        module = _load_apply_runtime_privileges()
+        module.apply_and_verify(settings.database_url)
+        engine.dispose()
+
+
+def test_worker_container_reboot_still_narrows_privileges_via_docker_entrypoint():
+    """The concrete bug this regression test targets: docker-entrypoint.sh used to run
+    apply_runtime_privileges.py only INSIDE the `RUN_MIGRATIONS=true` branch. The
+    durable-worker container sets RUN_MIGRATIONS=false (see docker-compose.vps.yml) and
+    never runs `alembic upgrade head` — but it still shares the same database, and
+    ensure_app_role.py's unconditional ALL-PRIVILEGES re-grant runs on every container's
+    boot regardless. A worker-only restart therefore used to leave mainai_app's privileges
+    wide open indefinitely. This runs the REAL shell script (not a re-implementation of its
+    logic) with RUN_MIGRATIONS=false and asserts privileges end up narrowed anyway."""
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    entrypoint = Path(__file__).resolve().parent.parent.parent / "docker-entrypoint.sh"
+    try:
+        with engine.begin() as conn:
+            # Simulates ensure_app_role.py's unconditional re-grant on an ordinary restart,
+            # exactly like test_apply_runtime_privileges_survives_a_second_boot above.
+            conn.execute(sa_text("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainai_app"))
+        with engine.connect() as conn:
+            has_update = conn.execute(
+                sa_text("SELECT has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')")
+            ).scalar()
+            assert has_update is True, "test setup: the simulated re-grant should have restored UPDATE"
+
+        env = {**os.environ, "DATABASE_URL": settings.database_url, "RUN_MIGRATIONS": "false"}
+        env.pop("MAINAI_APP_PASSWORD", None)  # skip ensure_app_role.py's block entirely
+        result = subprocess.run(
+            ["bash", str(entrypoint), "true"],
+            cwd=str(entrypoint.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, f"docker-entrypoint.sh failed:\nstdout={result.stdout}\nstderr={result.stderr}"
+        assert "apply_runtime_privileges" in result.stdout
+
+        with engine.connect() as conn:
+            has_update_after = conn.execute(
+                sa_text("SELECT has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')")
+            ).scalar()
+        assert has_update_after is False, (
+            "RUN_MIGRATIONS=false must NOT skip apply_runtime_privileges.py — a worker-only "
+            "restart left mainai_app's privileges wide open"
+        )
     finally:
         engine.dispose()
 
