@@ -25,6 +25,17 @@ fi
 if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
   echo "Kör alembic upgrade head..."
   alembic upgrade head
+  # S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8): re-applies and verifies the
+  # narrowed mainai_app privilege state on the memory-provenance tables/functions on EVERY
+  # boot, not just the first one — ensure_app_role.py above re-grants ALL PRIVILEGES to
+  # mainai_app unconditionally on every boot (not just role creation), which would silently
+  # undo a REVOKE that only ran once, at migration time. Runs in the same conditional branch
+  # as the migration itself (not unconditionally): the effect is database-global, so only
+  # the one container that just ran the migration needs to also apply it — the durable-worker
+  # container (RUN_MIGRATIONS=false) shares the same reasoning that already governs it
+  # skipping `alembic upgrade head` here.
+  echo "Kör apply_runtime_privileges..."
+  python scripts/apply_runtime_privileges.py
 else
   # The durable-worker package's worker service (docker-compose.vps.yml) runs from this
   # exact image with a different `command:`, not a different image — without this, worker
