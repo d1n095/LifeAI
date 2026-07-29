@@ -7,19 +7,19 @@ varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en kon
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-29, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`/`update_pull_request`, inte memorerat) — **PR #29 mergad**
-som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8` innan merge, inte en
-äldre commit. **PR #30** (`claude/memory-source-unit-design`, minneskärnans proveniensmodell)
-öppen, inte mergad, ingen Alembic-migration skriven än. Exakt head-SHA anges medvetet INTE
-här — en commit som uppdaterar det här registret skapar per definition en ny SHA på samma
-branch, så en nedskriven SHA för en fortfarande AKTIV branch blir föråldrad av sin egen
-uppdatering; verifiera alltid mot GitHub API (`mcp__github__pull_request_read`) för den
-faktiska, aktuella head-SHA:n. (En SHA för en redan MERGAD/stängd PR, som PR #29:s ovan, har
-inte det problemet — den branchen får inga fler commits.) `docs/
-MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 är nu EN konsoliderad kanonisk design (ingen
-ny "granskningsrunda"-sektion läggs till längre — historiken finns i PR #30:s commit-log för
-den som vill se den, inte i den löpande arkitekturtexten). Se Pass 11 för vad som fortfarande
-blockerar innan en separat S1A-implementations-PR (migration + kod) får öppnas.
+(`mcp__github__pull_request_read`/`update_pull_request`/`merge_pull_request`, inte memorerat)
+— **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8`
+innan merge, inte en äldre commit. **PR #30 mergad** som `9b15840` in i
+`claude/det-kommer-mer-879lcm` — verifierad grön (18/18 checkar, "All required checks passed")
+på exakt head-SHA `b2347e4` (PR-branchens sista commit) direkt innan merge, samma disciplin
+som PR #29. `claude/memory-source-unit-design` är nu mergad och kan städas bort (branchen har
+inga oavslutade delar kvar — hela dess innehåll är designdokumentation som nu lever i
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 på huvudgrenen). §4.8 är den kanoniska,
+GODKÄNDA arkitekturen för `MemorySourceUnit`/S1A — inget ytterligare designbeslut krävs innan
+en S1A-implementations-PR (migration + kod) öppnas — se §4.8:s "Status: PR #30 kontra
+S1A-implementations-PR:n" för den exakta listan (produktionsdataprofil, migrationsfil,
+`apply_runtime_privileges`, `app/rls.py`, delad `purge_source()`, kontoradering/export,
+testmatris) på vad som krävs för att MERGA den kommande implementations-PR:n.
 
 ## Pass 13 (2026-07-29): PR #30 — SECURITY DEFINER-funktionen fick eget ägarskydd
 
