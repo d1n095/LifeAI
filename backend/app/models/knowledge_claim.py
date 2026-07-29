@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, ForeignKeyConstraint, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -83,6 +83,21 @@ class KnowledgeClaim(Base):
     """
 
     __tablename__ = "knowledge_claims"
+    __table_args__ = (
+        # Composite, not a plain single-column FK on memory_source_id: a bare FK only proves
+        # the referenced memory_source_units row exists, it does NOT prove it belongs to the
+        # same owner — FK constraint checks run independently of RLS and would happily let a
+        # claim for owner A reference owner B's memory_source_units row. Anchoring owner_id
+        # into the FK itself (matching memory_source_units(id, owner_id), which migration
+        # 0019 gives a matching unique constraint on) makes cross-owner references a foreign
+        # key violation, not merely something RLS filters out of a SELECT afterwards.
+        ForeignKeyConstraint(
+            ["memory_source_id", "owner_id"],
+            ["memory_source_units.id", "memory_source_units.owner_id"],
+            ondelete="RESTRICT",
+            name="fk_knowledge_claims_memory_source_owner",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -112,6 +127,7 @@ class KnowledgeClaim(Base):
     # additive only. ON DELETE RESTRICT (not SET NULL): a bare DELETE on memory_source_units
     # must never silently orphan a claim — the controlled purge/erasure functions delete the
     # claim itself first instead.
-    memory_source_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("memory_source_units.id", ondelete="RESTRICT"), nullable=True, index=True
-    )
+    # No inline ForeignKey(...) here — the actual composite FK (memory_source_id, owner_id)
+    # is declared in __table_args__ above, since a single-column FK can't express the
+    # owner-anchoring that makes it structurally impossible to reference another owner's row.
+    memory_source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
