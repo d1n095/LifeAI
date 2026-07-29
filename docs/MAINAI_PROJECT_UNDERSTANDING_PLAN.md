@@ -320,412 +320,300 @@ och väntar på en giltig provider-nyckel", med en knapp för att trigga om work
 
 ---
 
-### 4.8 Universell proveniens — `MemorySourceUnit` (2026-07-28, FYRA granskningsrundor)
+### 4.8 Universell proveniens — `MemorySourceUnit` (S1A, konsoliderad slutdesign)
+
+Denna sektion är den enda kanoniska källan för `MemorySourceUnit`-designen. Tidigare
+granskningsrundors punktlistor är borttagna härifrån (de finns kvar i PR #30:s commit-historik
+för den som vill se hur beslutet vandrade) — det som står nedan är det som gäller. Ingen
+Alembic-migration är skriven ännu; S1A väntar fortfarande på godkännande, och det som
+återstår innan den kan godkännas listas explicit i slutet av avsnittet.
 
 **Problemet detta löser:** `KnowledgeClaim.source_id` pekar idag hårt på `documents.id`. En
 konversation har ingen `Document`-rad att peka på, och framtida källor (GitHub, webb, e-post,
 media) skulle annars vardera kräva sin egen nullable `source_X_id`-kolumn på `KnowledgeClaim`
-— exakt den datamodellssprawl `docs/BRANCH_REGISTRY.md`s grundprincip varnar för. Lösningen
-nedan (efter fyra granskningsrundor) ger varken sprawl, förlorad FK-integritet, eller en
-källnod som ser giltig ut men saknar en verifierbar innebörd.
+— exakt den datamodellssprawl `docs/BRANCH_REGISTRY.md`s grundprincip varnar för.
+
+#### Schema (S1A-omfattning)
 
 ```
 memory_source_units
   id, owner_id
-  source_kind         -- document_chunk | document_version | document_tombstone |
-                       -- message | media_segment | github_snapshot | web_capture | ...
-                       -- (se "Dokumentgranularitet" nedan för varför "document" ensamt inte räcker)
-  source_role          -- founder | assistant | external | system | unknown
-                       -- (se "source_role" nedan — uppladdare ≠ författare)
-  project_id            -- nullable, känt i förväg eller satt senare av P4
-  occurred_at            -- när materialet faktiskt skapades/sades, timestamp WITH time zone
-  content_hash           -- sha256, ENDAST integritetskontroll/teknisk dedup, se hård regel
-  content_text            -- oföränderlig textsnapshot, se "Oföränderlig källa" nedan (nullable
-                          -- bara för source_kind som ännu inte har textinnehåll, t.ex. en
-                          -- framtida ren binär media_segment innan transkribering)
-  lifecycle_status         -- active | revoked | purged, se "Livscykel" nedan
-  revoked_at, revocation_reason
+  source_kind           -- 'document_chunk' | 'document_version' | 'document_record'
+  source_identity_key    -- oföränderlig: 'document_chunk:<chunk_id>' |
+                         -- 'document_version:<version_id>' | 'document_record:<document_id>'
+  source_role             -- 'founder' | 'assistant' | 'external' | 'system' | 'unknown'
+  observed_at              -- NOT NULL, när DETTA system skapade/tog emot enheten
+  occurred_at               -- nullable, när originalinnehållet faktiskt uppstod, om känt
+  occurred_at_basis          -- 'explicit' | 'source_metadata' | 'inferred' | 'unknown'
+  content_text                -- oföränderlig textsnapshot, NULL om inte snapshot_status='exact'
+  content_hash                 -- sha256, ENDAST teknisk dedup/integritet, se hård regel nedan
+  snapshot_status                -- 'exact' | 'degraded' | 'missing'
+  lifecycle_status                 -- 'active' | 'revoked' | 'purged'
+  revoked_at, revocation_reason, purged_at, purge_reason
+  project_id                        -- nullable, vanlig FK mot projects.id (se "Ägarintegritet")
   created_at
+  UNIQUE (id, owner_id)
+  UNIQUE (id, owner_id, source_kind)      -- bär typen till subtypens komposit-FK
+  UNIQUE (owner_id, source_identity_key)  -- möjliggör säker find-or-create
 
-document_source_units                    message_source_units
-  memory_source_id (PK, FK)                memory_source_id (PK, FK)
-  owner_id                                  owner_id
-  document_id (nullable, SET NULL)          conversation_id (nullable, SET NULL)
-  version_id (nullable, SET NULL)           message_id (nullable, SET NULL)
-  chunk_id (nullable, SET NULL)             sequence_number
-  UNIQUE (memory_source_id, owner_id)       UNIQUE (memory_source_id, owner_id)
-  FK (memory_source_id, owner_id)           FK (memory_source_id, owner_id)
-    REFERENCES memory_source_units            REFERENCES memory_source_units
-    (id, owner_id)                             (id, owner_id)
+document_source_units
+  memory_source_id (PK, FK -> memory_source_units.id)
+  owner_id, source_kind                    -- speglar föräldern, verifierad av komposit-FK
+  document_id                              -- NOT NULL, REFERENCES documents(id)
+  version_id                               -- nullable, REFERENCES knowledge_versions(id)
+  chunk_id                                 -- nullable, REFERENCES document_chunks(id) ON DELETE SET NULL
+  FOREIGN KEY (memory_source_id, owner_id, source_kind)
+    REFERENCES memory_source_units (id, owner_id, source_kind)
+  -- typstyrda partiella unika index, se "Dokumentgranularitet"
+
+memory_source_lifecycle_events   -- append-only revisionslogg, se "Livscykel"
+  id, owner_id, memory_source_id
+  from_status, to_status, reason, actor_type, actor_id, created_at
+  FOREIGN KEY (memory_source_id, owner_id) REFERENCES memory_source_units (id, owner_id)
+
+knowledge_claims.memory_source_id  -- nullable, REFERENCES memory_source_units(id) ON DELETE RESTRICT
 ```
 
-**Atomär enhet, inte analysfönster:** en `memory_source_units`-rad är den MINSTA odelbara
-källan — ETT `DocumentChunk`, ETT `Message`, framtida ETT `MediaSegment`/EN GitHub-snapshotdel.
-Ett `ConversationSegment` (§4.9) är ett analysfönster som GRUPPERAR flera redan-existerande
-`memory_source_units`-rader i ordning — det är aldrig självt en källa och har ingen egen
-`source_role`. `source_role` sitter uteslutande på den atomära enheten, aldrig på segmentet —
-annars kan promotion (§6.10) inte skilja "grundaren sa exakt detta" från "MainAI föreslog
-detta".
+`knowledge_claim_evidence` och alla meddelandetabeller (`message_source_units`,
+`messages.sequence_number`) ligger UTANFÖR S1A — se "S1A/S1B/S1C" nedan för var de hör hemma.
 
-**`source_role` — fem värden, inte tre, och uppladdare ≠ författare.** `founder | assistant |
-external | system | unknown`. Att GRUNDAREN laddade upp ett dokument betyder INTE att
-grundaren skrev det, att det är externt material, eller att allt innehåll i det har samma
-författare — ett importerat ChatGPT-utdrag kan t.ex. innehålla både grundarens och en AI:s
-egna ord i samma fil. `founder`/`external` får därför BARA sättas när författarskapet är
-explicit attribuerat (t.ex. ett `Message` har alltid ett känt `role`, så `source_role` för en
-`message_source_unit` är alltid säkert `founder` eller `assistant`) — aldrig gissat från VEM
-som laddade upp filen. **Backfillen för alla befintliga dokumentclaims (P3, redan byggd)
-sätter `source_role=unknown`**, inte `external` — författarskapet för redan importerat
-material är helt enkelt inte känt idag, och att låtsas annat vore precis den sortens gissning
-som får konsekvenser för promotion (§6.10) längre fram. `system` reserverat för framtida
-MainAI-genererade sammanfattningar/index som inte är ett svar i en konversation.
+#### Atomär enhet, inte analysfönster
 
-**`KnowledgeClaim.memory_source_id`** blir claimens PRIMÄRA, exakta källa (ett enda `Message`
-eller `DocumentChunk` — aldrig ett helt segment). Kontextberoende svar ("exakt", "gör så",
-"det där blev fel") löses INTE genom att göra primärkällan mindre exakt, utan genom en separat
-bevistabell — se §6.10/§6.11 för `knowledge_claim_evidence`s reviderade roller (`direct` är
-BORTTAGET: `memory_source_id` är redan den direkta källan, en fjärde tabellroll som säger
-samma sak vore en duplicerad sanning).
+En `memory_source_units`-rad är den MINSTA odelbara källan — i S1A ett `DocumentChunk` eller
+en hel `KnowledgeVersion`/`Document`-post när chunken saknas. Framtida källtyper (`Message`,
+`MediaSegment`, GitHub-snapshots) blir egna subtyptabeller efter samma mönster, aldrig nya
+nullable kolumner på `KnowledgeClaim`. Ett `ConversationSegment` (§4.9) är ett analysfönster
+som GRUPPERAR flera redan-existerande `memory_source_units`-rader — det är aldrig självt en
+källa och har ingen egen `source_role`.
 
-**Livscykel — lifecycle_status, inte bara `ON DELETE SET NULL` (2026-07-28-korrigering).**
-Nulägesbilden i tidigare utkast var fel: Librarys nuvarande radering (`app/routers/library.py`s
-`delete_source`) är INTE en hårdradering av `Document` — den sätter `Document.deleted_at`,
-tar bort `DocumentChunk`-rader (och därmed embeddings), men BEHÅLLER `Document`-raden och dess
-`KnowledgeVersion`-historik. Claims kan alltså redan idag överleva den vanliga
-raderingsprocessen samtidigt som materialet blir osökbart — ett rent `ON DELETE SET NULL`
-skulle skapa `memory_source_units`-rader som ser giltiga ut men saknar en verifierbar källa.
-Två tydligt separata operationer, inte en:
+#### `source_role` — uppladdare ≠ författare
 
-- **Ta bort från aktivt minne** (motsvarar dagens `delete_source`): sätter
-  `lifecycle_status=revoked`, `revoked_at`, `revocation_reason`. En `revoked`
-  `memory_source_units`-rad är OMEDELBART utesluten ur retrieval, promotion och nya
-  tolkningsförslag (P4:s frågor filtrerar alltid `lifecycle_status=active`) — men
-  `content_text`/`content_hash`/kopplade `KnowledgeClaim`/`knowledge_claim_evidence`-rader
-  finns kvar som historik/proveniens, exakt som `Document.deleted_at` fungerar idag.
-- **Radera permanent**: en explicit, separat, loggad (`record_audit`) åtgärd som sätter
-  `lifecycle_status=purged` och faktiskt tar bort `content_text` och annan härledd personlig
-  data — motsvarar en framtida "radera permanent"-knapp bortom dagens mjuka radering, inte
-  något som händer automatiskt via en FK-cascade.
+Fem värden: `founder | assistant | external | system | unknown`. Att grundaren laddade upp ett
+dokument betyder inte att grundaren skrev det. `founder`/`external` sätts BARA när
+författarskapet är explicit attribuerat. **Alla dokumentbackfillade rader i S1A får
+`source_role=unknown`**, permanent — författarskapet för redan importerat material är inte
+känt, och att gissa vore precis den sortens antagande som senare får konsekvenser för
+promotion (§6.10). En framtida, versionshanterad `source_attributions`-tabell för granskad
+omattribuering (t.ex. ett dokument som senare bekräftas vara grundarens eget) är en egen
+utökning utanför S1A — `source_role` är strukturellt immutable på raden själv (se
+"Immutability" nedan), aldrig en tyst `UPDATE`.
 
-**Oföränderlig källa — `content_hash` räcker inte (2026-07-28-korrigering).** En bevarad
-`memory_source_units`-rad med bara en hash kan bara säga "det fanns en text med den här
-hashen", aldrig VAD källan faktiskt sa — `KnowledgeVersion` lagrar idag bara checksumma,
-extraktionsversion och metadata (inte den extraherade texten), och `DocumentChunk` raderas vid
-vanlig Library-radering. Den atomära proveniensnoden behöver därför en egen, oföränderlig
-`content_text`-kolumn (för textkällor — chunk-text respektive meddelandetext, skriven en gång
-vid skapande, aldrig uppdaterad) omfattad av EXAKT samma revoke/purge-regler som ovan. En
-framtida stor binärkälla (ljud/video innan transkribering) kan istället använda en hållbar
-`content_storage_key`+offset-variant av samma rad — inte specat i detalj här, men samma
-lifecycle-regler gäller oavsett lagringsform.
+#### `content_hash` — hård regel
 
-**Hård regel om `content_hash` (oförändrad):** identisk text vid olika tillfällen är olika
-episodiska händelser ("Ja" sagt tre gånger om tre olika projekt). `message_id` är
-meddelandets identitet; `chunk_id`+`version_id` är dokumentsegmentets identitet. `content_hash`
-verifierar bara att innehållet inte korrumperats och används för begränsad TEKNISK
-deduplicering — den får ALDRIG slå ihop två olika `memory_source_units`-rader bara för att
-texten råkar matcha.
+Identisk text vid olika tillfällen är olika episodiska händelser. `content_hash` verifierar
+bara att innehållet inte korrumperats och används för begränsad TEKNISK deduplicering — den
+får ALDRIG slå ihop två olika `memory_source_units`-rader bara för att texten råkar matcha.
+`source_identity_key` (nedan) är den enda deduplicerings-/identitetsnyckeln.
 
-**Dokumentgranularitet — `source_kind` får inte vara ett odifferentierat `document`.** En
-källenhet med ett levande `chunk_id` är `document_chunk` (den vanliga, fullt spårbara
-vägen). En äldre claim vars `chunk_id` redan är `NULL` (chunken purgad, se
-`KnowledgeClaim`s egen docstring om varför claimen ändå överlever) backfillas som
-`document_version` om `version_id` fortfarande går att slå upp, annars som
-`document_tombstone` (varken chunk eller version kvar — bara `document_id`/`source_id` känt,
-en uttryckligen DEGRADERAD proveniens, inte gömd bakom samma etikett som en fullt spårbar
-källa).
+#### Dokumentgranularitet — `source_kind` styr fälten strukturellt
 
-**Exclusive arc — databasupprätthållen, inte bara "en primärnyckel per subtyp"
-(2026-07-28-korrigering).** Att varje subtyp har `memory_source_id` som primärnyckel hindrar
-TVÅ `document_source_units`-rader för samma källa, men hindrar INTE att samma
-`memory_source_id` finns i BÅDE `document_source_units` OCH `message_source_units` samtidigt.
-Riktig ömsesidig uteslutning kräver en `DEFERRABLE INITIALLY DEFERRED` constraint-trigger som
-vid commit verifierar: (a) exakt en subtypsrad finns för varje `memory_source_units.id`, och
-(b) subtypen matchar `source_kind` (t.ex. en rad i `document_source_units` måste ha
-`source_kind IN ('document_chunk','document_version','document_tombstone')`). Detta är en
-riktig databasinvariant, inte bara applikationsdisciplin.
+`document_chunk` (chunk fortfarande spårbar), `document_version` (chunk purgad, version
+kvar), `document_record` (varken chunk eller version kvar — bara `document_id` känt, en
+uttryckligen degraderad proveniens). En trigger validerar att varje `source_kind` har exakt
+de fält den kräver (`document_chunk`: `document_id`+`chunk_id` om `lifecycle_status='active'`,
+`chunk_id` nullable annars; `document_version`: `document_id`+`version_id`, `chunk_id` alltid
+NULL; `document_record`: bara `document_id`, `snapshot_status <> 'exact'`).
 
-**Ägarintegritet — komposit-FK, inte bara dupliceat `owner_id` (2026-07-28-korrigering).**
-Att `owner_id` finns på både `memory_source_units` och dess subtyp garanterar INTE att värdena
-matchar. `UNIQUE (id, owner_id)` på `memory_source_units` plus
+`source_kind` ligger dessutom på `document_source_units` självt (inte bara på föräldern) och
+är strukturellt låst till förälderns värde via komposit-FK `(memory_source_id, owner_id,
+source_kind) → memory_source_units(id, owner_id, source_kind)`. Detta löser ett konkret
+databasfel som annars uppstår vid chunk-purge: om typen bara levde på `chunk_id IS NOT NULL`
+skulle TIO purgade chunks från samma dokumentversion (alla får `chunk_id=NULL`) plötsligt
+alla matcha samma typstyrda unika index som `document_version`/`document_record`-rader och
+kollidera. Med `source_kind` som en egen, immutable, komposit-FK-buren kolumn förblir en
+purgad `document_chunk`-rad `document_chunk` för alltid — den byter aldrig semantisk typ bara
+för att sin locator nollas. De typstyrda partiella unika indexen blir därför:
+
+```sql
+CREATE UNIQUE INDEX uq_dsu_chunk ON document_source_units (owner_id, chunk_id)
+    WHERE source_kind = 'document_chunk' AND chunk_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_dsu_version ON document_source_units (owner_id, document_id, version_id)
+    WHERE source_kind = 'document_version';
+CREATE UNIQUE INDEX uq_dsu_record ON document_source_units (owner_id, document_id)
+    WHERE source_kind = 'document_record';
+```
+
+#### Källidentitet och säker find-or-create
+
+`source_identity_key` (`document_chunk:<chunk_id>` / `document_version:<version_id>` /
+`document_record:<document_id>`) är den stabila, immutable nyckeln backfill och dual-write
+använder för att hitta-eller-skapa en källenhet utan att kunna skapa dubbletter eller
+föräldralösa rader. En `DEFERRABLE INITIALLY DEFERRED` constraint-trigger verifierar vid
+INSERT att `source_identity_key` faktiskt stämmer strukturellt med `document_source_units`s
+locator (`document_chunk:<chunk_id>` måste motsvara den faktiska `chunk_id`, osv.) — nyckeln
+kan alltså inte peka på fel rad.
+
+Applikationskoden hittar-eller-skapar via ett SAVEPOINT-mönster (INSERT parent+subtyp
+tillsammans, fånga `IntegrityError` vid nyckelkonflikt, rulla tillbaka bara savepointen,
+`SELECT` den existerande raden) — standardmönstret för säker Postgres-upsert. Vid konflikt
+verifierar koden EXPLICIT att den funna raden verkligen är rätt källa innan den återanvänds:
+`source_kind` matchar, `document_id`/`version_id`/`chunk_id` matchar (`chunk_id` får vara
+`NULL` om raden purgats sedan den skapades — annat mismatch är ett fel), och
+`snapshot_status` matchar det förväntade materialet om raden fortfarande är `active`. En
+nyckelkonflikt med avvikande innehåll avbryter jobbet med ett tydligt fel istället för att
+tyst koppla en claim till fel källa.
+
+#### Ägarintegritet — komposit-FK, inte bara dupliceat `owner_id`
+
+`UNIQUE (id, owner_id)` på `memory_source_units` plus
 `FOREIGN KEY (memory_source_id, owner_id) REFERENCES memory_source_units (id, owner_id)` på
-varje subtyp gör en avvikande `owner_id` till ett FK-brott, inte en tyst inkonsekvens. För
-`message_source_units` krävs DESSUTOM en verifiering att `message_id` faktiskt tillhör
-`conversation_id`, och att `conversation_id` faktiskt tillhör samma `owner_id` — ingen ren
-FK-deklaration uttrycker "denna rad tillhör denna konversation OCH denna ägare" över tre
-tabeller, så det blir ytterligare en constraint-trigger, inte bara en kolumn. RLS är
-nödvändigt men inte tillräckligt för det här — RLS skyddar VEM som kan LÄSA/SKRIVA en rad,
-inte att relationerna INOM raden är strukturellt korrekta.
+subtypen gör en avvikande `owner_id` till ett FK-brott. En egen trigger verifierar dessutom att
+`document_id` faktiskt tillhör `owner_id` (`documents.uploaded_by = owner_id`), att `version_id`
+tillhör `document_id`+`owner_id` (`knowledge_versions.source_id`/`owner_id`), och att `chunk_id`
+tillhör `document_id`+`owner_id` (`document_chunks.document_id`/`owner_id`) — RLS skyddar VEM
+som kan läsa/skriva en rad, inte att relationerna INOM raden är strukturellt korrekta.
+`project_id` behandlas INTE som en ägar-FK: `Project.created_by` är nullable och projekt är
+fortsatt delad, icke-RLS-skyddad företagskunskap (`app/rls.py`) — `memory_source_units.
+project_id` förblir en vanlig FK utan owner-verifiering.
 
-**Fasad migrationsplan för `KnowledgeClaim.source_id`/`version_id`/`chunk_id` (inga
-destruktiva ändringar nu):**
-1. Lägg till `memory_source_units`/`document_source_units`/`message_source_units`/
-   `knowledge_claim_evidence` samt `KnowledgeClaim.memory_source_id` (nullable) — rent additivt.
+#### Exclusive arc
+
+En `DEFERRABLE INITIALLY DEFERRED` constraint-trigger på `memory_source_units` verifierar vid
+commit att exakt en `document_source_units`-rad finns för varje `memory_source_units.id`.
+Direkt radering av rader i endera tabellen är förbjuden i S1A (se "Immutability" nedan) — det
+finns alltså ingen legitim väg att lämna en förälder utan subtyp EFTER att den en gång fått
+en, men triggerns commit-tidskontroll skyddar mot att en förälder någonsin skapas UTAN subtyp
+i första läget (bugg, ofullständig applikationskod, direkt SQL som kringgår
+find-or-create-mönstret).
+
+#### Immutability
+
+En `BEFORE UPDATE`-trigger på `memory_source_units` fryser `source_kind`, `source_role`,
+`source_identity_key`, `observed_at`, `occurred_at`, `occurred_at_basis` och `owner_id`
+permanent. Livscykelfälten (`lifecycle_status`/`revoked_at`/`revocation_reason`/`purged_at`/
+`purge_reason`/`content_text`/`content_hash`/`snapshot_status`) får ENDAST ändras när en
+transaktionslokal markör (`memory.transition_active`) är satt — och den markören sätts bara
+av `transition_memory_source()` (se "Livscykel" nedan), aldrig av godtycklig kod. En separat
+`BEFORE UPDATE`-trigger på `document_source_units` fryser `memory_source_id`/`owner_id`/
+`document_id`/`version_id`/`source_kind` permanent, och tillåter `chunk_id` att gå från satt
+till `NULL` ENDAST när förälderns `lifecycle_status` redan är `revoked`/`purged` (den
+kontrollerade FK-`SET NULL`-övergången när en chunk hårdraderas). Direkt `DELETE` på
+`memory_source_units`/`document_source_units` är ovillkorligt förbjudet i normal drift — det
+enda undantaget är den smalt avgränsade kontoraderingsvägen, se "Kontoradering" nedan.
+
+#### Livscykel — `transition_memory_source()`, inte fri `UPDATE`
+
+Alla legitima statusövergångar går genom EN kontrollerad SQL-funktion:
+
+```
+transition_memory_source(source_id, target_status, reason, actor_type, actor_id)
+```
+
+som atomiskt (a) verifierar att övergången är laglig (`active → revoked`, `revoked → active`
+["restore", kräver ett eget `reason`, INTE det gamla `revocation_reason`], `active/revoked →
+purged`; `purged` är terminalt), (b) uppdaterar `memory_source_units` (sätter markören
+`memory.transition_active` runt just den UPDATE-satsen, så en efterföljande rå `UPDATE` senare
+i samma transaktion fortfarande avvisas av immutability-triggern), och (c) skriver en rad i
+`memory_source_lifecycle_events` med `actor_type`/`actor_id` som EXPLICITA parametrar från
+anropande kod — INTE härledda automatiskt från `current_setting('app.current_user_id')`, eftersom
+en systemdriven åtgärd (t.ex. `delete_source`s purge) annars felaktigt skulle se ut som att
+grundaren personligen utförde den. `memory_source_lifecycle_events` är append-only (egna
+`BEFORE UPDATE`/`BEFORE DELETE`-triggers som ovillkorligt reser undantag) — den enda skrivvägen
+in är `transition_memory_source()` själv, så en rad i händelseloggen är faktiskt en pålitlig
+revisionslogg, inte något godtycklig applikationskod kan förfalska.
+
+**Två operationer, tydligt separerade och mappade till verklig kod:**
+- **Revoke** ("ta bort ur aktivt minne", en FRAMTIDA UI-åtgärd, inte byggd ännu): utesluter
+  omedelbart ur retrieval/promotion/tolkningsförslag, men behåller `content_text` och alla
+  claims — reversibelt via restore.
+- **Purge** (motsvarar dagens `delete_source`, som redan hårdraderar `DocumentChunk`-rader och
+  försöker fysiskt purga originalblobben — det är redan närmare permanent radering än en enkel
+  "dölj"-åtgärd): nollar `content_text`/`content_hash` på matchande `memory_source_units`,
+  OCH raderar samtliga `knowledge_claims WHERE source_id = <dokumentet> AND owner_id =
+  <ägaren>` i SAMMA transaktion (`claim_relationships` cascadar bort automatiskt, migration
+  0007). En claim är härledd, potentiellt känslig text i sig själv — att bara nolla
+  källenhetens kopia och lämna `claim_text` orörd vore INTE en verklig radering. UI/API-texten
+  för `delete_source` måste vara ärlig om att det här är permanent radering av innehåll (källa
+  + härledda claims), inte en mjuk "dölj"-åtgärd. Ordning i `delete_source`: (1)
+  `transition_memory_source(..., 'purged', 'source_deleted', 'system', NULL)` för varje
+  matchande `memory_source_units`-rad, (2) radera matchande `knowledge_claims`, (3) radera
+  `DocumentChunk`-raderna som idag (FK:ns `SET NULL` mot redan-purgade `document_source_units`
+  passerar nu immutability-triggerns lifecycle-medvetna kontroll), (4) fortsätt som idag
+  (`Document.deleted_at` osv). Skrivs med SQLAlchemy Core `UPDATE`/`DELETE` mot en subquery,
+  inte en joined ORM `Query.update()`.
+
+#### Kontoradering — måste uppdateras i S1A:s PR, inte bara i DDL:n
+
+Dagens `delete_account` (`app/routers/account.py`) hårdraderar `DocumentChunk` →
+`KnowledgeVersion` → `SourceRelationship` → `Document` (i den ordningen) plus
+`ImportJob`/`Conversation`/`Message`, och nollar attribution på `Project`/`Task`/`UsageLog`/
+`AuditLog`. S1A:s nya FK:er (`document_source_units.document_id` utan `ON DELETE`-åtgärd,
+`memory_source_units.owner_id` utan `ON DELETE`-åtgärd) skulle annars BLOCKERA den raderingen
+(FK-brott → transaktionen rullas tillbaka → HTTP 500) eftersom `document_source_units`/
+`memory_source_units`-rader fortfarande skulle peka på dokument/ägaren som håller på att
+raderas. Radering av dessa rader är samtidigt förbjuden i normal drift (se "Immutability").
+Lösningen är EN smalt avgränsad, självbegränsad raderingsfunktion — inte en fri
+`SET LOCAL`-flagga som vilken kod som helst kan missbruka (den typen av bypass avvisades
+redan för content-immutability, se ovan): `erase_owner_memory(p_owner_id)` verifierar FÖRST
+att `p_owner_id = current_setting('app.current_user_id')::uuid` (dvs. kan aldrig radera någon
+ANNAN än den redan autentiserade, lösenords-bekräftade anroparen själv — begränsar
+attackytan strukturellt jämfört med en helt fri flagga), sätter en transaktionslokal markör
+`memory.erasure_in_progress` bara runt sina egna `DELETE`-satser, och raderar i denna ordning:
+
+1. `knowledge_claims WHERE owner_id = p_owner_id` (även detta personlig/härledd data — se
+   samma resonemang som Purge ovan; tar bort RESTRICT-blockeraren mot `memory_source_units`).
+2. `document_source_units WHERE owner_id = p_owner_id`.
+3. `memory_source_units WHERE owner_id = p_owner_id` (`memory_source_lifecycle_events`
+   cascadar bort automatiskt — `ON DELETE CASCADE`, till skillnad från den vanliga RESTRICT-
+   hållningen, eftersom en händelselogg för en källa som inte längre finns saknar syfte).
+
+`delete_account` anropar `erase_owner_memory(user_id)` FÖRE sin befintliga
+`DocumentChunk`/`KnowledgeVersion`/`Document`-radering (som fortsätter oförändrad efteråt) —
+S1A:s PR måste innehålla den ändringen, inte bara de nya tabellerna. `/api/account/export`
+måste samtidigt utökas med `knowledge_claims` (dess docstring säger idag felaktigt att claims
+"has no backing table yet" — redan fel sedan PR #29, dubbelt fel efter S1A) och en sammanfattning
+av `memory_source_units`/`memory_source_lifecycle_events` (innehåll där inte purgat, annars en
+tydlig livscykelmarkör) — annars exporterar kontot inte längre allt personligt/härlett material
+det faktiskt håller.
+
+#### Fasad migrationsplan för `KnowledgeClaim.source_id`/`version_id`/`chunk_id`
+
+1. Lägg till `memory_source_units`/`document_source_units` samt `KnowledgeClaim.memory_source_id`
+   (nullable) — rent additivt.
 2. Backfilla: en `memory_source_units`+`document_source_units`-rad per DISTINKT
-   `document_chunk`/`document_version`/`document_tombstone`-källa bland befintliga claims
-   (ALDRIG en per claim — flera claims från samma chunk delar en enhet), `source_role=unknown`.
+   `document_chunk`/`document_version`/`document_record`-källa bland befintliga claims (ALDRIG
+   en per claim), `source_role=unknown`, via find-or-create-mönstret ovan.
 3. Dual-write: `extract_claims_for_document` sätter BÅDE de gamla kolumnerna OCH
-   `memory_source_id` för varje ny claim, med korrekt attribuerad `source_role`.
-4. `memory_source_id` blir kanonisk källa för allt nytt kodbaserat — de gamla kolumnerna läses
-   inte längre av ny kod, men finns kvar.
-5. En uttrycklig, separat, granskad migration slutar läsa/skriva de gamla kolumnerna helt.
-6. En uttrycklig, separat, ÄNNU senare migration tar bort dem. De gamla kolumnerna får ALDRIG
-   bli en permanent parallell sanningskälla — steg 5/6 är inte valfria, bara medvetet senarelagda.
+   `memory_source_id` för varje ny claim.
+4. `memory_source_id` blir kanonisk källa för allt nytt kodbaserat.
+5. En separat, granskad migration slutar läsa/skriva de gamla kolumnerna.
+6. En separat, ÄNNU senare migration tar bort dem.
 
-**2026-07-28, FEMTE granskningsrundan — S1 delas i S1A/S1B/S1C, tio ytterligare korrigeringar
-innan någon Alembic-fil skrivs.** Ett `expand/backfill/contract`-mönster (inte en enda
-migration) och flera skarpa databuggar hittades i det tidigare DDL-utkastet:
+#### S1A/S1B/S1C — S1 delas i tre migrationer
 
-1. **`messages.sequence_number` kan INTE bli `NOT NULL` i samma migration som lägger till
-   den** — applikationsbackfillen hinner inte köra medan Alembic-migrationen fortfarande
-   exekverar; `SET NOT NULL` skulle misslyckas direkt mot befintliga meddelanden. Delas i
-   expand (nullable kolumn) → deploy (concurrency-säker dual-write för nya meddelanden) →
-   durable backfill av historik (`created_at, id`) → verifiera noll NULL/dubbletter →
-   contract (separat migration: `NOT NULL` + `UNIQUE(conversation_id, sequence_number)`).
-   Detta är nu **S1B**, inte en del av S1A.
-2. **Exclusive-arc-triggern hade fel vid UPDATE och vid parent-CASCADE-delete.** En UPDATE som
-   ändrar `memory_source_id` måste kontrollera BÅDE den gamla och den nya föräldern (annars
-   kan den gamla föräldern lämnas utan subtyp). En DELETE via parent-CASCADE raderar barnet
-   EFTER att föräldern redan är borta ur transaktionens synvinkel — kontrollfunktionen måste
-   då returnera utan fel istället för att leta efter en förälder som medvetet raderas. `INSERT`/
-   `UPDATE`/`DELETE` hanteras nu separat i triggerfunktionen (`TG_OP`), inte via ett generellt
-   `COALESCE(NEW, OLD)`.
-3. **Immutability är inte garanterad av att kolumnerna bara finns** — inget hindrade tidigare
-   en vanlig `UPDATE` från att ändra `content_text`/`content_hash`/`source_kind`/`source_role`/
-   `occurred_at` i efterhand. En BEFORE UPDATE-trigger blockerar nu ändring av dessa fält
-   uttryckligen; bara livscykelfält (`lifecycle_status`/`revoked_at`/`revocation_reason`) och
-   kontrollerade länkningsfält (`project_id`) får ändras genom vanlig `UPDATE`.
-4. **Gamla claims utan `chunk_id` kan inte få en sanningsenlig snapshot** — `KnowledgeVersion`
-   saknar den fullständiga källtexten. Ny `snapshot_status: exact | degraded | missing` på
-   `memory_source_units`. `content_text` FÅR ALDRIG fabriceras från `claim_text` för att
-   fylla en lucka — en `document_version`/`document_tombstone`-backfillad rad har
-   `content_text=NULL` och `snapshot_status` satt ärligt till `degraded`/`missing`.
-   `primary_grounding_score` beräknas bara som vanligt när `snapshot_status=exact`.
-5. **Ägarintegritet saknades på fler relationer än bara subtyp-mot-förälder** —
-   `knowledge_claim_evidence` behöver komposit-FK `(claim_id, owner_id) →
-   knowledge_claims(id, owner_id)` (kräver en ny `UNIQUE(id, owner_id)` på `knowledge_claims`)
-   OCH `(memory_source_id, owner_id) → memory_source_units(id, owner_id)`. Motsvarande gäller
-   `document_source_units`: en trigger verifierar att `chunk_id` faktiskt tillhör
-   `document_id`+samma `owner_id`, att `version_id` faktiskt tillhör `document_id`+samma
-   `owner_id`, och att `document_id` faktiskt tillhör angivet `owner_id` — RLS skyddar VEM som
-   får läsa/skriva, inte att en lagrad korskoppling är strukturellt korrekt.
-6. **`source_kind` måste faktiskt styra vilka fält som krävs**, inte bara vara en etikett: en
-   trigger validerar nu att `document_chunk` kräver `document_id`+`version_id`+`chunk_id` alla
-   satta, `document_version` kräver `document_id`+`version_id` men `chunk_id IS NULL`, och
-   `document_tombstone` kräver båda `NULL` OCH `snapshot_status != 'exact'`.
-7. **"Radera permanent" är INTE bara `content_text=NULL` + `lifecycle_status=purged`** — det
-   lämnar claims, evidence, metadata och hash kvar, alltså ingen verklig permanent radering.
-   Två tydligt separerade flöden: **revoke** (behåll snapshot/historik, uteslut ur
-   retrieval/tolkning/promotion, logga orsak+tid) kontra **permanent purge** (radera/anonymisera
-   snapshot+identifierande metadata/hash, radera eller ompröva claims/evidence/entities som
-   ENBART bygger på källan, behåll högst en innehållslös audit-tombstone om tillåtet enligt
-   den slutliga radera-konto-designen). `knowledge_claims.memory_source_id`s FK blir
-   `ON DELETE RESTRICT`, inte `SET NULL` — en bar `DELETE` kan då aldrig tyst lämna en
-   föräldralös claim; den kontrollerade purge-koden måste EXPLICIT hantera kopplade
-   claims/evidence först.
-8. **CHECK-constraints saknades** för alla varchar-uppräkningar (`source_kind`, `source_role`,
-   `lifecycle_status`, `snapshot_status`, `evidence_role`) samt koherens mellan
-   `lifecycle_status`/`revoked_at`/`content_text` (`active`→`revoked_at IS NULL`,
-   `revoked`→`revoked_at IS NOT NULL`, `purged`→`content_text IS NULL`).
-9. **`context_resolution_score` tas bort ur S1 helt.** Hur värdet beräknas, vad det mäter, vem
-   som skriver det, och hur det versionshanteras är inte fastslaget — det hör till P4, när
-   själva kontextupplösningslogiken faktiskt byggs, inte till proveniensskiktet.
-10. **Downgrade är inte säkert efter verklig användning.** En gång konversationskällor/nya
-    claims börjat använda `memory_source_id` skulle en `downgrade()` radera den enda
-    proveniensen för dem. Migrationens `downgrade()` vägrar nu explicit (raiser) om någon
-    `knowledge_claims`-rad redan har `memory_source_id IS NOT NULL` — reversibel bara FÖRE
-    cutover, roll-forward-only därefter, aldrig en tyst dataförstörande operation.
-
-**S1 delas i tre migrationer, inte en:**
-- **S1A** (nästa steg, se nedan för exakt DDL): `memory_source_units`/`document_source_units`,
-  nullable `KnowledgeClaim.memory_source_id`, snapshot/lifecycle/immutability, deterministisk
-  backfill av befintliga dokumentclaims, dual-write för nya. INGA meddelandetabeller alls i
-  S1A. **2026-07-28-korrigering (sjunde rundan): `knowledge_claim_evidence` flyttas ut ur
-  S1A** — S1A har ingen konversationsclaim, ingen segmentering och ingen P4-kontextupplösning
-  ännu, så evidence-tabellen skulle sakna en aktiv writer i S1A. Den läggs till i S1C eller
-  P4, när den faktiskt får ett användningsfall — håller den första produktionsmigrationen
-  mindre.
-- **S1B**: `messages.sequence_number` — expand (nullable) → dual-write-kod → durable historisk
-  backfill → verifiering → contract (separat migration: `NOT NULL`+`UNIQUE`).
+- **S1A** (nästa steg): `memory_source_units`/`document_source_units`/
+  `memory_source_lifecycle_events`, `transition_memory_source()`, nullable
+  `KnowledgeClaim.memory_source_id`, deterministisk backfill, dual-write, kontoradering/export-
+  integration. INGA meddelandetabeller, INGEN `knowledge_claim_evidence` (ingen aktiv writer
+  förrän S1C/P4).
+- **S1B**: `messages.sequence_number` — expand (nullable) → dual-write → durable historisk
+  backfill → verifiering → contract (separat migration: `NOT NULL`+`UNIQUE`). `SET NOT NULL`
+  kan inte ske i samma migration som lägger till kolumnen (backfillen hinner inte köra under
+  migrationen). Helt oberoende av S1A.
 - **S1C**: `message_source_units` + `knowledge_claim_evidence` + ägar-/konversationsintegritet
-  + backfill av Message→MemorySourceUnit. Fortfarande ingen claim-extraktion från
-  konversationer — det kommer efter S1C, i sitt eget steg.
+  + backfill Message→MemorySourceUnit. Kräver S1B. Ingen claim-extraktion från konversationer
+  än — det kommer efter S1C.
 
-**2026-07-28, SJÄTTE granskningsrundan — S1A verifierad mot verklig kodbas, 14 rättningar.**
-Föregående DDL-utkast antog kolumnnamn och beteenden som inte stämmer mot den faktiska
-modellen. Verifierat direkt mot `backend/app/models/*.py`, `backend/app/rls.py` och
-`backend/app/routers/library.py`:
+#### Vad som återstår innan S1A kan godkännas
 
-1. **Kolumnnamnsfel rättade.** `documents.uploaded_by` (inte `owner_id`; nullable i modellen,
-   men migration 0006:s RLS-policy och `app/rag/ingest.py` garanterar att en riktig upload
-   alltid har den satt — en NULL-rad är redan osynlig för alla via RLS, så den kan aldrig ha
-   claims kopplade till sig i praktiken). `knowledge_versions.source_id` (inte `document_id`)
-   pekar på dokumentet; `knowledge_versions.owner_id` finns och är `NOT NULL`.
-   `document_chunks` har både `document_id` och `owner_id`, båda `NOT NULL`. DSU-triggern
-   validerar nu de VERKLIGA fälten, inte de tidigare felaktigt antagna.
-2. **RLS återinförd.** `memory_source_units`, `document_source_units` och
-   `knowledge_claim_evidence` innehåller ägarspecifikt/potentiellt känsligt innehåll
-   (`content_text` är en kopia av chunk-/versionstext) och får `ENABLE ROW LEVEL SECURITY` +
-   `FORCE ROW LEVEL SECURITY` + en `owner_id = current_setting('app.current_user_id')`-policy,
-   exakt samma mönster som `app/rls.py`:s övriga tabeller. Migrationen lägger till dem i
-   `RLS_STATEMENTS`/`POLICY_DEFINITIONS` i samma commit som skapar tabellerna — en tabell med
-   ägarspecifikt innehåll får aldrig existera ens tillfälligt utan RLS.
-3. **`document_tombstone` tas bort ur S1A.** `document_source_units.document_id` är `NOT
-   NULL`, och `KnowledgeClaim.source_id` är obligatorisk med `ON DELETE CASCADE` mot
-   `documents.id` — en claim kan strukturellt inte överleva att dess `Document`-rad
-   verkligen hårdraderas (då försvinner claimen med samma CASCADE). Dagens `delete_source`
-   (se `library.py`) gör dessutom bara soft delete av `Document` (behåller raden,
-   `deleted_at` sätts) + hård radering av `DocumentChunk`-raderna. Det finns alltså inget
-   verkligt scenario i S1A där `document_id` skulle sakna en rad att peka på. `source_kind`
-   blir istället: `document_chunk | document_version | document_record` — `document_record`
-   används när dokumentraden finns men varken chunk eller version kan styrkas (t.ex. redan
-   `deleted_at`-markerat). En äkta tombstone för en framtida, avsiktlig hård-raderingsväg
-   hör till det separata purge-paketet, inte S1A.
-4. **`version_id` låses INTE till obligatorisk för `document_chunk`.** Jag har INTE
-   databasåtkomst till produktions- eller stagingdata från den här sessionen (ingen
-   `DATABASE_URL`, ingen körande Postgres/Docker) och kan därför inte köra den efterfrågade
-   dataprofilen. Frågan är specificerad exakt (se DDL-svaret) och måste köras av
-   grundaren/en session med DB-åtkomst innan S1A mergas — men skiktet är redan konstruerat
-   för att inte behöva vänta på svaret: `document_chunk` kräver bara `document_id`+`chunk_id`;
-   `version_id` är nullable även för `document_chunk`, eftersom `KnowledgeClaim.version_id`
-   redan är nullable i produktion och en chunk ensam räcker för en sanningsenlig
-   `snapshot_status='exact'`-snapshot.
-5. **Backfillen görs atomisk och race-säker.** Varje distinkt grupp
-   (`memory_source_units`-rad + `document_source_units`-rad + `UPDATE` av alla dess claims)
-   skapas i EN transaktion. Partiella unika index (`UNIQUE (owner_id, chunk_id) WHERE
-   chunk_id IS NOT NULL` respektive `UNIQUE (owner_id, document_id, version_id) WHERE
-   chunk_id IS NULL AND version_id IS NOT NULL`) på `document_source_units`, kombinerat med
-   `INSERT ... ON CONFLICT DO NOTHING` + en efterföljande `SELECT` av den vinnande raden, gör
-   att en krasch mitt i eller två parallella workers aldrig kan skapa två source units för
-   samma underliggande chunk/version.
-6. **Direkta child-deletes förbjuds helt i S1A**, istället för en deferred-trigger som
-   försöker skilja kaskad från direkt radering. `memory_source_units` och
-   `document_source_units` har ingen legitim raderingsväg i S1A överhuvudtaget — purge
-   nollar innehåll i befintlig rad (se punkt 7), den raderar aldrig raden. En ovillkorlig
-   `BEFORE DELETE`-trigger på båda tabellerna reser undantag alltid. Om ett verkligt behov av
-   radrensning (t.ex. GDPR-utplåning av hela raden) uppstår senare blir det en egen,
-   medvetet granskad framtida migration — inte något S1A förbereder en bakväg för nu.
-7. **Purge-flaggan ersätts av en självvaliderande övergång, ingen extern GUC.** Samma
-   `BEFORE UPDATE`-trigger som skyddar immutability känner nu igen den EXAKTA purge-övergången
-   strukturellt (gammal `lifecycle_status IN ('active','revoked')`, ny `lifecycle_status =
-   'purged'`, `content_text`/`content_hash` → `NULL`, alla andra immutable fält oförändrade)
-   och tillåter DEN, samt de andra legitima livscykelövergångarna i punkt 8 — och inget annat.
-   Ingen session kan längre "låsa upp" fri redigering genom att sätta en sessionsvariabel.
-8. **Riktig livscykel-state machine.** `active → revoked` (kräver `revocation_reason`
-   `NOT NULL`, sätter `revoked_at`), `revoked → active` (explicit restore, kräver att
-   anropande applikationskod skriver en `AuditLog`-rad via befintliga `app/audit.py`s
-   `record_audit` — samma mönster som redan används i `admin.py`), `active/revoked →
-   purged` (sätter `purged_at`+`purge_reason`, nollar content), `purged` är terminalt — varje
-   `UPDATE` som försöker lämna `purged` avvisas av triggern.
-9. **Tidsfält korrigerade.** `occurred_at` (tidigare beskrivet som "när innehållet skapades")
-   ersätts av `observed_at NOT NULL` (när systemet skapade/tog emot source unit — det
-   `created_at` faktiskt mäter idag) + `occurred_at NULLABLE` (när originalinnehållet
-   verkligen uppstod, om känt) + `occurred_at_basis` (`explicit | source_metadata | inferred
-   | unknown`). Backfillen sätter `observed_at` = chunkens/versionens `created_at`,
-   `occurred_at = NULL`, `occurred_at_basis = 'unknown'` — importdatum får aldrig låtsas vara
-   ett exakt ursprungsdatum.
-10. **`source_role` förblir immutable i S1A; attribution-korrigering skjuts upp.** En
-    separat, versionshanterad `source_attributions`-tabell för granskad omattribuering
-    (t.ex. ett dokument som senare bekräftas vara grundarens eget) är en egen framtida
-    utökning, inte en tyst `UPDATE` av `source_role`. Tills den byggs förblir varje
-    dokumentbackfillad rad `unknown`, permanent, vilket redan är den säkra defaulten.
-11. **`project_id` behandlas inte som ägar-FK.** `Project.created_by` är nullable och
-    projekt är fortsatt delad företagskunskap (ingen RLS på `projects`, se `app/rls.py`s
-    docstring). `memory_source_units.project_id` förblir en vanlig FK mot `projects.id` utan
-    någon owner-verifieringstrigger — ingen dold Project-ägarskaps-/RLS-ändring smygs in i
-    proveniensmigrationen.
-12. **`knowledge_claim_evidence` färdigspecificerad**: `ON DELETE CASCADE` mot
-    `knowledge_claims` (bevis försvinner naturligt med sin claim), `ON DELETE RESTRICT` mot
-    `memory_source_units` (tills purge uttryckligen hanterat beroenden), full RLS, komposit-FK
-    mot båda föräldrarna för ägarintegritet, namngivna constraints.
-13. **`downgrade()` utökad.** Kontrollerar nu användning i ALLA fyra: `memory_source_units`,
-    `document_source_units`, `knowledge_claim_evidence`, `knowledge_claims.memory_source_id`
-    — inte bara den sistnämnda — och tar bort triggers/funktioner/RLS-policyer/namngivna
-    constraints/index/kolumn/tabeller i korrekt beroendeordning.
-14. **Library-delete måste kopplas till S1A:s revoke-flöde.** `delete_source` (se
-    `library.py`) gör idag hård radering av `DocumentChunk`-raderna direkt (inte soft
-    delete) — vilket betyder att om S1A:s `content_text` inte samtidigt revoke:as skulle en
-    fullständig textkopia bli kvar aktiv i minneslagret efter att grundaren trott att källan
-    togs bort. S1A:s DDL i sig kan inte tvinga fram detta (det är applikationslogik i
-    `delete_source`), men S1A:s PR MÅSTE innehålla ändringen: `delete_source` sätter
-    `lifecycle_status='revoked'` (med `revocation_reason='source_deleted'`) på alla
-    `memory_source_units`-rader vars `document_source_units.document_id = source_id`, i
-    SAMMA transaktion som chunk-raderingen — inte som ett separat, senare steg.
-
-Se chattsvaret för den fullständiga, reviderade S1A-DDL:n som implementerar alla 14 punkter.
-Fortfarande ingen Alembic-migration skriven — väntar på godkännande.
-
-**2026-07-28, SJUNDE granskningsrundan — 11 kvarstående blockerare, DDL v7.** Sjätte rundans
-utkast löste namn-/RLS-/tombstone-felen men innehöll fortfarande verkliga databasfel:
-
-1. **Uniqueness-modellen var fel.** `UNIQUE (owner_id, document_id, version_id)` skulle blockera
-   ALLA chunks utom den första i samma dokumentversion (alla delar samma `document_id`+
-   `version_id`). Ersatt med tre partiella unika index på `document_source_units`:
-   `(owner_id, chunk_id) WHERE chunk_id IS NOT NULL`,
-   `(owner_id, document_id, version_id) WHERE chunk_id IS NULL AND version_id IS NOT NULL`,
-   `(owner_id, document_id) WHERE chunk_id IS NULL AND version_id IS NULL`.
-2. **Backfill-CTE:n kunde skapa föräldralösa, oraderbara `memory_source_units`** (parent
-   skapas, barn-inserten träffar `ON CONFLICT DO NOTHING`, parent blir kvar utan subtyp — och
-   eftersom radering är förbjuden går den inte att städa). Löst med en stabil, immutable
-   `source_identity_key` (`document_chunk:<chunk_id>` / `document_version:<version_id>` /
-   `document_record:<document_id>`), `UNIQUE (owner_id, source_identity_key)`, och ett
-   SAVEPOINT-baserat find-or-create (INSERT parent+child i samma nästlade transaktion, fångas
-   `IntegrityError` → rulla tillbaka till savepoint → `SELECT` den redan existerande raden) —
-   standardmönstret för säker Postgres-upsert, inte en CTE med snapshot-race.
-3. **Exact-one-subtype-triggern återinförd** som en `DEFERRABLE INITIALLY DEFERRED`
-   constraint-trigger på `memory_source_units` (INSERT/UPDATE), eftersom "barn kan inte
-   raderas" bara skyddar mot ETT av två sätt att bryta invarianten — den andra är att en
-   parent skapas UTAN att en subtyp någonsin skapas (bugg, direkt SQL, ofullständig
-   applikationskod som kringgår find-or-create-mönstret).
-4. **`chunk_id`s FK blir `ON DELETE SET NULL`**, inte en vanlig FK — dagens `delete_source`
-   hårdraderar `DocumentChunk`-rader direkt, vilket annars skulle blockeras av en vanlig FK.
-   Valideringstriggern blir livscykelmedveten: `document_chunk` med `lifecycle_status='active'`
-   kräver `chunk_id NOT NULL`; en redan `revoked`/`purged` `document_chunk` FÅR ha
-   `chunk_id IS NULL` (den oföränderliga snapshoten/purge-historiken finns redan). Ordningen i
-   `delete_source` blir: purga tillhörande `memory_source_units` FÖRST (se punkt 9), sedan
-   radera `DocumentChunk`-raderna — då är `lifecycle_status` redan `purged` när FK:ns
-   `SET NULL` slår till.
-5. **Snapshot-CHECK:en gjorde purge omöjlig** (`snapshot_status='exact'` krävde
-   `content_text NOT NULL`, men purge kräver `content_text IS NULL`, oavsett tidigare
-   snapshotstatus). Gjord livscykelmedveten: `purged` kräver bara `content_text`/`content_hash
-   IS NULL`; alla andra status följer exact/degraded/missing-reglerna som förut.
-   `snapshot_status='exact'` fortsätter efter purge betyda "hade en exakt snapshot", inte
-   "har en exakt snapshot nu".
-6. **Livscykelfält kunde skrivas om tyst** när status var oförändrad (`revoked_at`,
-   `revocation_reason`, `purged_at`, `purge_reason` skyddades inte explicit av triggern).
-   Dels läggs de till i "status oförändrad"-grenens skyddade fältlista, dels läggs en
-   append-only `memory_source_lifecycle_events`-tabell till (från/till-status, orsak,
-   `actor_id` läst från `current_setting('app.current_user_id')` — inte ett fält
-   applikationskoden fyller i, för att inte förlita sig på applikationsdisciplin för
-   revisionsspårets integritet) — parent-raden håller aktuell status för snabb filtrering,
-   händelsetabellen den fullständiga historiken.
-7. **Tidscheckens riktning var enkelriktad** (tillät `occurred_at=NULL` med
-   `occurred_at_basis='explicit'`). Gjord dubbelriktad: `occurred_at IS NULL ⟺
-   occurred_at_basis='unknown'`. `observed_at` måste skrivas som tidszonsmedveten UTC
-   (`datetime.now(timezone.utc)`, inte `datetime.utcnow()`) från applikationskoden.
-8. **`document_source_units` var inte skyddad mot omskrivning.** En `BEFORE UPDATE`-trigger
-   fryser nu `memory_source_id`/`owner_id`/`document_id`/`version_id` helt, och tillåter
-   `chunk_id` att gå från satt till `NULL` ENDAST när förälderns `lifecycle_status` redan är
-   `revoked`/`purged` (dvs. exakt den kontrollerade FK-`SET NULL`-övergången från punkt 4) —
-   varje annan förändring av `chunk_id`, eller någon förändring alls medan förälderns
-   `lifecycle_status='active'`, avvisas.
-9. **Raderingssemantiken låst tydligt.** Dagens `delete_source`-rutt (hårdraderar chunks,
-   gör källan osökbar, försöker fysiskt purga originalblobben) är redan närmare permanent
-   radering än en enkel "ta bort ur aktivt minne" — den mappas därför till **purge** av
-   motsvarande `memory_source_units` (content_text/hash nollas), inte revoke. En framtida,
-   separat "ta bort ur aktivt minne men behåll historik"-åtgärd i UI/API skulle mappa till
-   **revoke** istället. De två får aldrig blandas ihop i vare sig kod eller UI-text — annars
-   tror grundaren att materialet är borttaget medan en full textkopia ligger kvar. Purge-steget
-   i `delete_source` skrivs med SQLAlchemy Core `UPDATE ... WHERE id IN (SELECT ...)`, inte ett
-   `joined Query.update()` (som inte fungerar tillförlitligt över en join i SQLAlchemy).
-10. **RLS måste in i `app/rls.py`**, inte bara som `CREATE POLICY`-satser i migrationen —
-    samma idempotenta `ENABLE`/`FORCE`/policy-skapande som repots övriga tabeller, plus
-    isolationstester (owner A kan inte läsa/skriva owner B:s rader, en rå anslutning utan
-    `app.current_user_id` får noll rader).
-11. **`knowledge_claim_evidence` flyttas ut ur S1A** (se ovanstående S1A/S1B/S1C-block) — ingen
-    aktiv writer i S1A ännu, håller den första produktionsmigrationen mindre.
-
-Se chattsvaret för DDL v7. Fortfarande ingen Alembic-migration skriven — väntar på
-godkännande.
+1. **Produktionsdataprofilen är fortfarande inte körd.** Den här sessionen har ingen
+   databasåtkomst (ingen `DATABASE_URL`, ingen körande Postgres/Docker). Frågan är exakt
+   specificerad och måste köras separat innan migrationen mergas:
+   ```sql
+   SELECT
+     count(*) FILTER (WHERE chunk_id IS NOT NULL AND version_id IS NULL) AS chunk_only,
+     count(*) FILTER (WHERE chunk_id IS NULL AND version_id IS NOT NULL) AS version_only,
+     count(*) FILTER (WHERE chunk_id IS NULL AND version_id IS NULL) AS neither
+   FROM knowledge_claims;
+   ```
+   Schemat ovan är konstruerat för att fungera oavsett resultat (`version_id` nullable även
+   för `document_chunk`), men resultatet bör ändå bekräftas innan merge.
+2. Den faktiska Alembic-migrationsfilen är inte skriven.
+3. `app/rls.py` är inte uppdaterad än (beskrivet ovan, inte implementerat).
+4. `delete_source`/`delete_account`/`export_account`-ändringarna är beskrivna men inte
+   implementerade.
+5. Testmatrisen (migration/dual-write/delete/kontoradering/RLS/konkurrens) är specificerad i
+   chattsvaret men inte skriven som kod.
 
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
@@ -999,7 +887,7 @@ till ett nytt:
   på ett `conversation_segments`-fönster istället för en dokument-chunk — `extract_claims_for_
   conversation_segment` blir `extract_claims_for_document`s syskon, inte en konkurrent.
 - **P4** (§6.4): läser claims oavsett ursprung (`memory_source_units.source_kind` ∈
-  `{document_chunk, document_version, document_tombstone}` ELLER `message`) —
+  `{document_chunk, document_version, document_record}` ELLER `message`) —
   `interpretation_proposals`/`project_entities` skiljer inte på källtyp, bara på innehåll och
   `source_role`-baserad promotion (§6.10).
 - **P6** (§6.6): Context Resolver (`app/context/resolver.py`) blir en PRIORITETSSIGNAL, inte
@@ -1069,9 +957,10 @@ istället för att köra arbetet inline, en gång den här tabellen finns.
 
 ## 8. Rekommenderad byggordning
 
-**Reviderad 2026-07-28** efter FEM granskningsrundor av den universella proveniensmodellen
-(§4.8/§4.9/§6.10/§6.11/§6.12). P3 (claim-typning för dokument, §6.3) är byggd och mergad
-(PR #29) — allt nedan är vad som ÅTERSTÅR, i ordning:
+**Reviderad 2026-07-28** efter grundlig granskning av den universella proveniensmodellen
+(§4.8/§4.9/§6.10/§6.11/§6.12 — §4.8 är den konsoliderade slutdesignen, inte en punktlista över
+granskningsrundor). P3 (claim-typning för dokument, §6.3) är byggd och mergad (PR #29) — allt
+nedan är vad som ÅTERSTÅR, i ordning:
 
 ```
 P1   Provider-förhandsverifiering        ← KLAR, mergad
@@ -1087,9 +976,9 @@ S1A  memory_source_units + document_source_units + KnowledgeClaim.memory_source_
      (nullable) + snapshot/lifecycle/immutability + memory_source_lifecycle_events +
      deterministisk dokumentclaim-backfill + dual-write + delete_source-purge-integration
                                           ← additiv migration, egen PR. INGA meddelandetabeller,
-                                            INGEN knowledge_claim_evidence (flyttad till S1C/P4,
-                                            sjunde granskningsrundan). Nästa konkreta steg —
-                                            se §4.8:s exakta DDL-utkast.
+                                            INGEN knowledge_claim_evidence (flyttad till S1C/P4
+                                            — ingen aktiv writer i S1A). Nästa konkreta steg —
+                                            se §4.8:s "Vad som återstår innan S1A kan godkännas".
 S1B  messages.sequence_number: expand (nullable) → dual-write-kod → durable historisk
      backfill → verifiering → contract (separat migration: NOT NULL + UNIQUE)
                                           ← egen PR, kräver S1A inte alls (oberoende spår)
