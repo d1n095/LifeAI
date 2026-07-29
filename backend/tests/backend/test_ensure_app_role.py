@@ -22,6 +22,30 @@ def _load_module():
     return module
 
 
+def _fetchone_dispatcher(fake_cursor, *, current_user: str, role_exists: bool):
+    """A fully-mocked cursor for these tests only ever needs to answer the two questions the
+    pre-S1A version of this script asked (SELECT current_user / role-exists), plus now a
+    `to_regclass` existence probe from `s1a_privilege_policy.s1a_objects_exist()` — run
+    unconditionally after the role-provisioning block to decide whether to also re-narrow
+    S1A privileges in the same transaction. These tests are about connection-string/pooler
+    edge cases, not S1A privilege policy, so the probe is answered as "doesn't exist" here,
+    which makes `s1a_objects_exist()` short-circuit immediately and skip the narrowing path
+    entirely — exactly like a real database that hasn't run migration 0019 yet."""
+
+    def _dispatch(*args, **kwargs):
+        executed = fake_cursor.execute.call_args
+        sql_text = str(executed.args[0]) if executed and executed.args else ""
+        if "current_user" in sql_text:
+            return (current_user,)
+        if "pg_roles" in sql_text:
+            return (1,) if role_exists else None
+        if "to_regclass" in sql_text:
+            return (False,)
+        return None
+
+    return _dispatch
+
+
 def test_default_privileges_use_current_user_not_pooler_login_identity(monkeypatch):
     """Reproduces the Supabase Session Pooler startup crash: DATABASE_URL's username under
     the pooler is a login identity of the form `postgres.<project-ref>` (needed for the
@@ -47,7 +71,7 @@ def test_default_privileges_use_current_user_not_pooler_login_identity(monkeypat
     fake_cursor.__exit__.return_value = False
     # What the pooler-mapped connection actually authenticated as — deliberately different
     # from DATABASE_URL's username, mirroring Supabase's real behavior.
-    fake_cursor.fetchone.return_value = (real_role,)
+    fake_cursor.fetchone.side_effect = _fetchone_dispatcher(fake_cursor, current_user=real_role, role_exists=True)
 
     fake_conn = MagicMock()
     fake_conn.cursor.return_value = fake_cursor
@@ -100,7 +124,7 @@ def test_app_database_url_carries_the_pooler_tenant_suffix(monkeypatch, tmp_path
     fake_cursor = MagicMock()
     fake_cursor.__enter__.return_value = fake_cursor
     fake_cursor.__exit__.return_value = False
-    fake_cursor.fetchone.return_value = ("postgres",)
+    fake_cursor.fetchone.side_effect = _fetchone_dispatcher(fake_cursor, current_user="postgres", role_exists=True)
     fake_conn = MagicMock()
     fake_conn.cursor.return_value = fake_cursor
     monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
@@ -128,7 +152,7 @@ def test_app_database_url_stays_unsuffixed_for_a_plain_non_pooled_admin_username
     fake_cursor = MagicMock()
     fake_cursor.__enter__.return_value = fake_cursor
     fake_cursor.__exit__.return_value = False
-    fake_cursor.fetchone.return_value = ("lifeos",)
+    fake_cursor.fetchone.side_effect = _fetchone_dispatcher(fake_cursor, current_user="lifeos", role_exists=True)
     fake_conn = MagicMock()
     fake_conn.cursor.return_value = fake_cursor
     monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
@@ -162,9 +186,7 @@ def test_password_is_not_rotated_on_a_normal_restart_when_the_role_already_exist
     fake_cursor = MagicMock()
     fake_cursor.__enter__.return_value = fake_cursor
     fake_cursor.__exit__.return_value = False
-    # First fetchone() is for "SELECT current_user", second is the role-exists check —
-    # (1,) is truthy/non-None, i.e. the role already exists.
-    fake_cursor.fetchone.side_effect = [("postgres",), (1,)]
+    fake_cursor.fetchone.side_effect = _fetchone_dispatcher(fake_cursor, current_user="postgres", role_exists=True)
     fake_conn = MagicMock()
     fake_conn.cursor.return_value = fake_cursor
 
@@ -211,7 +233,7 @@ def test_explicit_rotate_password_env_var_rotates_and_self_tests_the_new_credent
     fake_cursor = MagicMock()
     fake_cursor.__enter__.return_value = fake_cursor
     fake_cursor.__exit__.return_value = False
-    fake_cursor.fetchone.side_effect = [("postgres",), (1,)]
+    fake_cursor.fetchone.side_effect = _fetchone_dispatcher(fake_cursor, current_user="postgres", role_exists=True)
     fake_conn = MagicMock()
     fake_conn.cursor.return_value = fake_cursor
 
@@ -304,3 +326,59 @@ def test_full_script_run_against_real_local_postgres_is_idempotent(monkeypatch):
     # mainai_app must still be reachable with the same password afterwards.
     conn = psycopg2.connect(settings.app_database_url)
     conn.close()
+
+
+def test_s1a_renarrowing_failure_rolls_back_the_whole_transaction_not_just_itself(monkeypatch):
+    """The concrete requirement this proves: a failure partway through S1A re-narrowing must
+    never leave the broader `GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public` (which runs
+    earlier in the SAME transaction) as the committed end state. Forces
+    apply_privilege_policy() to report an error and confirms mainai_app's privileges on
+    memory_source_units are STILL narrowed afterward — proving the whole transaction,
+    GRANT ALL included, rolled back together, not just the failed narrowing step."""
+    import pytest
+    from sqlalchemy import create_engine
+    from sqlalchemy import text as sa_text
+
+    from app.config import get_settings
+
+    settings = get_settings()
+    app_password = urlparse(settings.app_database_url).password or "mainai_app_pw"
+
+    # Establish a known-good, narrowed baseline first (real apply_runtime_privileges.py run).
+    apply_runtime_privileges_path = SCRIPT_PATH.parent / "apply_runtime_privileges.py"
+    apply_spec = importlib.util.spec_from_file_location("apply_runtime_privileges", apply_runtime_privileges_path)
+    apply_module = importlib.util.module_from_spec(apply_spec)
+    apply_spec.loader.exec_module(apply_module)
+    apply_module.apply_and_verify(settings.database_url)
+
+    engine = create_engine(settings.database_url)
+    try:
+        with engine.connect() as conn:
+            has_update_before = conn.execute(
+                sa_text("SELECT has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')")
+            ).scalar()
+        assert has_update_before is False, "test setup: baseline should already be narrowed"
+
+        module = _load_module()
+        monkeypatch.setenv("DATABASE_URL", settings.database_url)
+        monkeypatch.setenv("MAINAI_APP_PASSWORD", app_password)
+        monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+        monkeypatch.setattr(
+            module, "apply_privilege_policy", lambda cur, *, expected_owner: ["forced test failure"]
+        )
+
+        with pytest.raises(RuntimeError, match="forced test failure"):
+            module.main()
+
+        with engine.connect() as conn:
+            has_update_after = conn.execute(
+                sa_text("SELECT has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')")
+            ).scalar()
+        assert has_update_after is False, (
+            "ensure_app_role's broad GRANT ALL survived a re-narrowing failure — the "
+            "transaction did not roll back atomically"
+        )
+    finally:
+        engine.dispose()
+        # Restore a clean, fully-narrowed state for any tests that run after this one.
+        apply_module.apply_and_verify(settings.database_url)

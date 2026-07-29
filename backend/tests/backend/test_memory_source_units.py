@@ -13,6 +13,7 @@ non-superuser/non-BYPASSRLS admin-function-owner misconfiguration, and a real tw
 lock-wait proof of find-or-create's concurrency handling).
 """
 
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -49,6 +50,7 @@ from app.models.user import User, UserRole
 from app.rag.memory_source import (
     DocumentSourceLocator,
     MemorySourceIdentityConflict,
+    compute_content_hash,
     get_or_create_memory_source_unit,
 )
 from app.request_context import current_user_id as current_user_id_var
@@ -114,7 +116,6 @@ def _chunk_locator(owner_id, document_id, chunk_id, *, content_text="Bolaget gru
         chunk_id=chunk_id,
         observed_at=datetime.now(timezone.utc),
         content_text=content_text,
-        content_hash="deadbeef" * 8,
         snapshot_status=SnapshotStatus.exact,
     )
 
@@ -191,6 +192,7 @@ def test_get_or_create_memory_source_unit_real_concurrent_insert_blocks_then_con
 
         # session_a: the same INSERT get_or_create_memory_source_unit would do, but held
         # open (not committed) so session_b genuinely has to wait on it.
+        content_hash, content_hash_version = compute_content_hash(locator.content_text)
         msu_a = MemorySourceUnit(
             owner_id=owner.id,
             source_kind=locator.source_kind,
@@ -200,7 +202,8 @@ def test_get_or_create_memory_source_unit_real_concurrent_insert_blocks_then_con
             occurred_at=None,
             occurred_at_basis=OccurredAtBasis.unknown,
             content_text=locator.content_text,
-            content_hash=locator.content_hash,
+            content_hash=content_hash,
+            content_hash_version=content_hash_version,
             snapshot_status=locator.snapshot_status,
         )
         session_a.add(msu_a)
@@ -287,7 +290,6 @@ def test_get_or_create_memory_source_unit_rejects_mismatched_locator():
             chunk_id=chunk_2.id,
             observed_at=datetime.now(timezone.utc),
             content_text="Text B",
-            content_hash="c" * 64,
             snapshot_status=SnapshotStatus.exact,
         )
         # sanity: this one is a *different* identity_key, so it must succeed independently.
@@ -318,6 +320,11 @@ def test_get_or_create_memory_source_unit_reraises_unrelated_integrity_error():
 
 
 def test_get_or_create_memory_source_unit_detects_content_hash_mismatch():
+    """content_hash is always computed internally from content_text (never caller-supplied —
+    see app/rag/memory_source.py's compute_content_hash), so the only realistic way to
+    provoke a mismatch on lookup is a second call for the SAME identity_key (same chunk_id)
+    with genuinely DIFFERENT content_text — e.g. the underlying chunk's text changed since
+    the source unit was first created. The two computed hashes then legitimately differ."""
     session = SessionLocal()
     try:
         owner = _make_user(session)
@@ -328,13 +335,26 @@ def test_get_or_create_memory_source_unit_detects_content_hash_mismatch():
         get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
         session.commit()
 
-        different_hash_locator = _chunk_locator(owner.id, document.id, chunk.id, content_text="Bolaget grundades 2019.")
-        different_hash_locator.content_hash = "f" * 64
+        changed_text_locator = _chunk_locator(
+            owner.id, document.id, chunk.id, content_text="Bolaget grundades 2019 (reviderad text)."
+        )
         with pytest.raises(MemorySourceIdentityConflict, match="content_hash"):
-            get_or_create_memory_source_unit(session, different_hash_locator)
+            get_or_create_memory_source_unit(session, changed_text_locator)
     finally:
         session.rollback()
         session.close()
+
+
+def test_compute_content_hash_is_a_pure_sha256_of_utf8_text():
+    from app.rag.memory_source import CONTENT_HASH_VERSION
+
+    content_hash, content_hash_version = compute_content_hash("Bolaget grundades 2019.")
+    assert content_hash == hashlib.sha256("Bolaget grundades 2019.".encode("utf-8")).hexdigest()
+    assert content_hash_version == CONTENT_HASH_VERSION
+    assert len(content_hash) == 64
+    assert content_hash == content_hash.lower()
+
+    assert compute_content_hash(None) == (None, None)
 
 
 def test_get_or_create_memory_source_unit_refuses_to_reuse_revoked_source():
@@ -381,6 +401,7 @@ def test_source_identity_key_mismatch_rejected_by_trigger():
             occurred_at_basis=OccurredAtBasis.unknown,
             content_text="x",
             content_hash="c" * 64,
+            content_hash_version="sha256-utf8-v1",
             snapshot_status=SnapshotStatus.exact,
         )
         session.add(msu)
@@ -412,6 +433,7 @@ def test_exact_one_subtype_required_at_commit():
             occurred_at_basis=OccurredAtBasis.unknown,
             content_text=None,
             content_hash=None,
+            content_hash_version=None,
             snapshot_status=SnapshotStatus.missing,
         )
         session.add(msu)
@@ -448,6 +470,168 @@ def test_purge_requires_null_content_check_constraint():
     finally:
         session.rollback()
         session.close()
+
+
+def test_document_source_with_founder_source_role_rejected_by_trigger():
+    """A document source is never directly attributable to founder/assistant/external/system
+    at ingest time — mainai_app has direct INSERT on both tables, so nothing else in the
+    database stops a bug or future code path from inserting source_role='founder' for a raw
+    document upload, which (source_role being immutable once set) would be a PERMANENT false
+    authority claim. The DSU validation trigger must reject it at commit."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _set_rls_user(session, owner.id)
+
+        msu = MemorySourceUnit(
+            owner_id=owner.id,
+            source_kind=SourceKind.document_chunk,
+            source_identity_key=f"document_chunk:{chunk.id}",
+            source_role=SourceRole.founder,  # deliberately wrong for a raw document source
+            observed_at=datetime.now(timezone.utc),
+            occurred_at_basis=OccurredAtBasis.unknown,
+            content_text="Bolaget grundades 2019.",
+            content_hash=hashlib.sha256(b"Bolaget grundades 2019.").hexdigest(),
+            content_hash_version="sha256-utf8-v1",
+            snapshot_status=SnapshotStatus.exact,
+        )
+        session.add(msu)
+        session.flush()
+        session.add(
+            DocumentSourceUnit(
+                memory_source_id=msu.id, owner_id=owner.id, source_kind=SourceKind.document_chunk,
+                document_id=document.id, version_id=None, chunk_id=chunk.id,
+            )
+        )
+        with pytest.raises((IntegrityError, DBAPIError), match="source_role"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- lifecycle CHECK coherence -----------------------------------------------------------
+
+
+def test_lifecycle_coherence_rejects_active_row_with_stale_revocation_reason():
+    """A row can't sit `active` while still carrying a stale revocation_reason/purge_reason
+    from nowhere -- an earlier, looser version of this CHECK only verified revoked_at/
+    purged_at for the 'active' branch, not revocation_reason/purge_reason. mainai_app has no
+    UPDATE at all on memory_source_units, so this (like the other two coherence tests below)
+    exercises the CHECK through the admin/migration connection, with memory.transition_active
+    set to bypass the separate immutability guard trigger -- isolating the CHECK constraint
+    itself, not a permission error or the guard trigger."""
+    session = SessionLocal()
+    admin_engine = create_engine(get_settings().database_url)
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _set_rls_user(session, owner.id)
+        msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
+        session.commit()
+
+        with admin_engine.connect() as conn, conn.begin(), pytest.raises((IntegrityError, DBAPIError)):
+            conn.execute(sa_text("SET LOCAL memory.transition_active = 'on'"))
+            conn.execute(
+                sa_text("UPDATE memory_source_units SET revocation_reason = 'stale, no revoked_at' WHERE id = :id"),
+                {"id": str(msu_id)},
+            )
+    finally:
+        session.rollback()
+        session.close()
+        admin_engine.dispose()
+
+
+def test_lifecycle_coherence_rejects_revoked_row_missing_reason():
+    session = SessionLocal()
+    admin_engine = create_engine(get_settings().database_url)
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _set_rls_user(session, owner.id)
+        msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
+        session.commit()
+        session.execute(
+            sa_text("SELECT transition_own_memory_source(:id, 'revoked', 'test revoke', 'founder')"),
+            {"id": str(msu_id)},
+        )
+        session.commit()
+
+        with admin_engine.connect() as conn, conn.begin(), pytest.raises((IntegrityError, DBAPIError)):
+            conn.execute(sa_text("SET LOCAL memory.transition_active = 'on'"))
+            conn.execute(
+                sa_text("UPDATE memory_source_units SET revocation_reason = NULL WHERE id = :id"),
+                {"id": str(msu_id)},
+            )
+    finally:
+        session.rollback()
+        session.close()
+        admin_engine.dispose()
+
+
+def test_lifecycle_coherence_rejects_purged_row_with_mismatched_revoked_pair():
+    """purged rows may PRESERVE revoked_at/revocation_reason from an earlier
+    active->revoked->purged transition, or have both NULL (direct active->purged) -- never
+    one set without the other."""
+    session = SessionLocal()
+    admin_engine = create_engine(get_settings().database_url)
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _set_rls_user(session, owner.id)
+        msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
+        session.commit()
+        session.execute(
+            sa_text("SELECT transition_own_memory_source(:id, 'purged', 'test purge', 'founder')"),
+            {"id": str(msu_id)},
+        )
+        session.commit()  # direct active->purged: revoked_at/revocation_reason both NULL
+
+        with admin_engine.connect() as conn, conn.begin(), pytest.raises((IntegrityError, DBAPIError)):
+            conn.execute(sa_text("SET LOCAL memory.transition_active = 'on'"))
+            conn.execute(
+                sa_text("UPDATE memory_source_units SET revoked_at = now() WHERE id = :id"),
+                {"id": str(msu_id)},
+            )
+    finally:
+        session.rollback()
+        session.close()
+        admin_engine.dispose()
+
+
+def test_lifecycle_events_reason_is_not_null():
+    """mainai_app has no direct INSERT on memory_source_lifecycle_events at all (SELECT-only
+    — see s1a_privilege_policy.py), so this exercises the NOT NULL constraint itself through
+    the admin/migration connection, the same one migration 0019 and the SECURITY DEFINER
+    functions run as — not a permission-denied error masquerading as a constraint failure."""
+    session = SessionLocal()
+    admin_engine = create_engine(get_settings().database_url)
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _set_rls_user(session, owner.id)
+        msu_id = get_or_create_memory_source_unit(session, _chunk_locator(owner.id, document.id, chunk.id))
+        session.commit()
+
+        with admin_engine.connect() as conn, conn.begin(), pytest.raises((IntegrityError, DBAPIError)):
+            conn.execute(
+                sa_text(
+                    "INSERT INTO memory_source_lifecycle_events "
+                    "(owner_id, memory_source_id, from_status, to_status, reason, actor_type, actor_id) "
+                    "VALUES (:owner_id, :msu_id, 'active', 'revoked', NULL, 'founder', :owner_id)"
+                ),
+                {"owner_id": str(owner.id), "msu_id": str(msu_id)},
+            )
+    finally:
+        session.rollback()
+        session.close()
+        admin_engine.dispose()
 
 
 def test_knowledge_claims_composite_fk_rejects_cross_owner_memory_source():
@@ -615,6 +799,7 @@ def test_transition_own_memory_source_purge_nulls_content():
         assert msu.lifecycle_status == LifecycleStatus.purged
         assert msu.content_text is None
         assert msu.content_hash is None
+        assert msu.content_hash_version is None
         assert msu.snapshot_status == SnapshotStatus.exact  # unchanged: "had an exact snapshot"
 
         # purged is terminal
