@@ -24,24 +24,68 @@ triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
 `erase_owner_memory`/`erase_owner_memory_admin`), SQLAlchemy-modeller,
 `app/rag/memory_source.py`s race-säkra find-or-create, den delade `backend/scripts/
 s1a_privilege_policy.py` (använd atomiskt av både `ensure_app_role.py` och
-`apply_runtime_privileges.py`), samt 39 tester i `tests/backend/test_memory_source_units.py`
-och 9 i `tests/backend/test_ensure_app_role.py` — allt verifierat mot en riktig lokal
-Postgres 16+pgvector-instans. FYRA granskningsrundor genomförda och åtgärdade (Pass 14–17
-nedan): 603/604 gröna (1 avsiktligt överhoppad kapacitetstest) i hela
-backend-/security-/account-sviten, plus grön CI (18/18, "All required checks passed") på
-exakt head-SHA `32a2c65` — verifierat direkt mot GitHubs check-runs-API, inte antaget.
-PR-beskrivningen på GitHub är uppdaterad till att matcha (den gamla texten nämnde felaktigt
-`row_security=off` och föråldrade testsiffror).
+`apply_runtime_privileges.py`), grundlagret verifierat genom FYRA granskningsrundor (Pass
+14–17). Pass 18 (nedan) lade till deterministisk backfill (`app/rag/memory_source_backfill.py`)
+och dual-write (`app/rag/claims.py`) ovanpå det godkända grundlagret. 87 tester totalt
+(`test_memory_source_units.py`: 39, `test_ensure_app_role.py`: 9, `test_memory_source_
+backfill.py`: 14, `test_claims.py`s S1A-del: 8 nya + 30 befintliga) — allt verifierat mot en
+riktig lokal Postgres 16+pgvector-instans. Hela backend-/security-/account-sviten: 625/626
+gröna (1 avsiktligt överhoppad kapacitetstest). CI-status på exakt head-SHA `7c60102`
+kontrolleras löpande (se Pass 18 för senaste kontrollerade läge).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
-och §4.8:s "Status"-avsnitt för den fullständiga listan): deterministisk backfill av
-befintliga dokumentclaims, dual-write i `app/rag/claims.py`, delad `purge_source()`-tjänst
+och §4.8:s "Status"-avsnitt för den fullständiga listan): delad `purge_source()`-tjänst
 (används av både `library.py`s `delete_source` och den fortfarande LIVE `DELETE /api/
 documents/{id}`), konto-export/erasure-integration, och produktionsdataprofilen (krävs före
-MERGE, inte före draft). Nästa kontrollpunkt enligt grundarens instruktion: vänta på
-FÄRSK granskning av Pass 17:s ändringar innan arbetet fortsätter längre — grundaren var
-explicit att detta INTE är ett godkännande att gå vidare till backfill/dual-write/purge/
+MERGE, inte före draft). Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK
+granskning av Pass 18:s ändringar (backfill + dual-write) innan arbetet fortsätter längre —
+grundaren var explicit att detta INTE är ett godkännande att gå vidare till purge_source/
 konto-integration/merge/deploy.
+
+## Pass 18 (2026-07-29): PR #31 — deterministisk backfill + dual-write, en verklig oändlig-loop-bugg hittad och fixad under egen testning
+
+Grundaren godkände Pass 17:s grundlager ("provenance-grundlagret... tillräckligt strikt för
+att gå vidare med backfill och dual-write") och beställde de två nästa S1A-slicerna:
+
+1. **`app/rag/memory_source_backfill.py`** (ny modul): owner-scopad, batchad, idempotent,
+   restart-säker backfill av `knowledge_claims.memory_source_id IS NULL`. Resolveringsordning
+   exakt enligt §4.8: giltig `chunk_id` → `document_chunk`/`exact` (text läst från
+   `DocumentChunk.text`), annars giltig `version_id` → `document_version`/`degraded`, annars
+   `document_record`/`missing`. En `chunk_id`/`version_id` som är SATT men strukturellt
+   ogiltig (fel ägare/dokument) failar closed — faller ALDRIG vidare till nästa nivå (det vore
+   precis den gissning §4.8 förbjuder). Konkurrenssäkert via `SELECT ... FOR UPDATE SKIP
+   LOCKED`, en claim i taget, committad atomiskt med sin source unit.
+2. **Dual-write i `app/rag/claims.py`s enda claim-skrivväg**: för varje chunk som producerar
+   minst en claim, en `document_chunk`-MSU med chunkens verkliga text, samma
+   `memory_source_id` på alla claims från den chunken, atomiskt med claim-inserten. En chunk
+   utan claims (providerfel eller tom extraktion) får ingen source unit — ingen orphan MSU
+   möjlig.
+
+**Verklig bugg hittad under egen testning, inte i granskning:** den första versionen av
+`_apply()`s huvudloop exkluderade aldrig en permanent misslyckad claim (fail-closed-mismatch
+eller `MemorySourceIdentityConflict`) från omval — med standardvärdet `max_batches=None`
+valde loopen om SAMMA claim för evigt. Upptäcktes konkret: en bakgrundskörning av det nya
+testet för denna exakta situation (en enda alltid-mismatchande claim, inget `max_batches`)
+gick från att verka "hänga tyst" till att efter ~2h46m visa sig faktiskt köra oändligt (CPU-
+bunden, INTE en I/O-väntan eller en förlorad process) — verifierat konkret med `ps -eo
+pid,etime,stat,cmd`, inte antaget. Rättat genom att exkludera en misslyckad claims id från
+återval för RESTEN av det anropet (samma mönster som `backfill_claim_types`s `failed_ids`) —
+claimen är fortfarande en giltig kandidat vid nästa SEPARATA anrop. Efter fixen: alla 14
+backfill-tester gröna på 8.92s, inklusive exakt den tidigare hängande situationen.
+
+**Full omverifiering (i förgrunden, inte bakgrunden, efter incidenten ovan):**
+- `test_memory_source_backfill.py`: 14/14 gröna.
+- `test_claims.py` (S1A dual-write-tester + befintliga): 47/47 gröna.
+- `test_memory_source_units.py` (ingen regression): 39/39 gröna.
+- Hela `tests/backend` + `tests/security` + `tests/account`: **625 passed, 1 avsiktligt
+  överhoppad**, 0 failed, 240.51s.
+- `alembic upgrade head` / `downgrade -1` / `upgrade head` mot en färsk `postgres`-
+  superuser-databas (migrationsfilen refererar aldrig `mainai_app` vid namn, verifierat med
+  `grep`) — rent round-trip.
+
+Två separata, avgränsade commits (`1fa7619` backfill, `7c60102` dual-write), pushade till
+`claude/s1a-memory-source-implementation`. CI-kontroll mot exakt head `7c60102` pågick vid
+tidpunkten detta pass skrevs — se PR-beskrivningen för slutstatus.
 
 ## Pass 17 (2026-07-29): PR #31 — fjärde granskningsrundan hittade 2 kvarstående problem, alla åtgärdade
 
