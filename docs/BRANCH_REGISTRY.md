@@ -23,13 +23,13 @@ Implementerar §4.8:s design: migration `0019_memory_source_units` (tabeller, CH
 triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
 `erase_owner_memory`/`erase_owner_memory_admin`), SQLAlchemy-modeller,
 `app/rag/memory_source.py`s race-säkra find-or-create, `backend/scripts/
-apply_runtime_privileges.py` + `docker-entrypoint.sh`-koppling, samt 22 tester — allt
-verifierat mot en riktig lokal Postgres 16+pgvector-instans (584/584 tester gröna, inklusive
-en reproducerad och löst reboot-persistens-bugg: `ensure_app_role.py` ger tillbaka
-`mainai_app`s fulla rättigheter vid VARJE boot, vilket demonstrerades direkt i testsviten
-självt via `tests/backend/test_ensure_app_role.py`s körordning). Migrationen verifierad att
-faktiskt köra rent mot en `postgres`-superuser-bar databas UTAN `mainai_app`-roll — exakt
-"Backend — Alembic migration check"-jobbets villkor.
+apply_runtime_privileges.py` + `docker-entrypoint.sh`-koppling, samt 34 tester i `tests/
+backend/test_memory_source_units.py` — allt verifierat mot en riktig lokal Postgres
+16+pgvector-instans. Grundarens kodgranskning av den första draften (Pass 14 nedan) hittade
+8 konkreta blockerande fel, samtliga nu åtgärdade och omverifierade: 591/592 gröna (1 avsiktligt
+överhoppad kapacitetstest) i hela backend-/security-/account-sviten, plus grön CI (17/17,
+"All required checks passed") på exakt head-SHA `7041c2c` — verifierat direkt mot GitHubs
+check-runs-API, inte antaget.
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): deterministisk backfill av
@@ -37,7 +37,69 @@ befintliga dokumentclaims, dual-write i `app/rag/claims.py`, delad `purge_source
 (används av både `library.py`s `delete_source` och den fortfarande LIVE `DELETE /api/
 documents/{id}`), konto-export/erasure-integration, och produktionsdataprofilen (krävs före
 MERGE, inte före draft). Nästa kontrollpunkt enligt grundarens instruktion: vänta på
-granskning av det här läget innan arbetet fortsätter längre.
+FÄRSK granskning av Pass 14:s ändringar innan arbetet fortsätter längre — grundaren var
+explicit att detta INTE är ett godkännande att gå vidare till backfill/dual-write/purge/
+konto-integration/merge/deploy.
+
+## Pass 14 (2026-07-29): PR #31 — kodgranskning hittade 8 blockerande fel, alla åtgärdade
+
+Grundaren granskade PR #31:s faktiska kod (inte bara design) och hittade 8 konkreta problem,
+med explicit instruktion att stanna innan backfill/dual-write fick fortsätta:
+
+1. **Cross-owner-FK-lucka**: `knowledge_claims.memory_source_id` hade en enkel-kolumn-FK, som
+   bara bevisar att raden finns — inte att den tillhör samma ägare, eftersom FK-kontroller
+   körs oberoende av RLS. Åtgärdat: sammansatt FK `(memory_source_id, owner_id)` mot
+   `memory_source_units(id, owner_id)`, både i migrationen och i SQLAlchemy-modellen
+   (`ForeignKeyConstraint` i `__table_args__`). Ny test bevisar att en cross-owner-referens nu
+   avvisas av databasen, inte bara döljs av RLS efteråt.
+2. **`mainai_app` behöll onödiga rättigheter**: `apply_runtime_privileges.py` REVOKEade bara
+   UPDATE/DELETE — TRUNCATE (som INTE alls omfattas av RLS), REFERENCES och TRIGGER lämnades
+   kvar. Åtgärdat: deny-by-default (REVOKE ALL, sedan explicit GRANT exakt SELECT+INSERT på
+   MSU/DSU, SELECT-only på lifecycle_events), verifierat mot alla sju tabellrättigheter.
+3. **Worker-omstart-bugg**: `apply_runtime_privileges.py` kördes bara inuti
+   `RUN_MIGRATIONS=true`-grenen i `docker-entrypoint.sh` — worker-containern sätter
+   `RUN_MIGRATIONS=false` men kör ändå `ensure_app_role.py`s ovillkorliga fullrättighets-
+   återgivning. Åtgärdat: körs nu ovillkorligt på varje boot. Ny test kör det RIKTIGA
+   entrypoint-skriptet via subprocess med `RUN_MIGRATIONS=false` och bevisar att rättigheterna
+   ändå smalnas av.
+4. **`row_security = off` gav ingen faktisk RLS-bypass**: enligt Postgres egen dokumentation
+   ger flaggan bara ett fel istället för tyst filtrerat resultat — den beviljar aldrig åtkomst
+   RLS annars skulle neka. Åtgärdat: borttagen från alla fyra SECURITY DEFINER-funktioner; de
+   två ägar-scopade behöver ingen bypass alls (egen explicit ägarkontroll räcker), de två
+   admin-funktionerna kräver nu explicit, EXTERNT verifierad BYPASSRLS/superuser på den ägande
+   rollen (`apply_runtime_privileges.py`). Ny test byter faktiskt ägare på
+   `transition_memory_source_admin` till en riktig `NOSUPERUSER NOBYPASSRLS`-roll och bevisar
+   att verifieringen slår larm istället för att tyst lita på det gamla antagandet.
+5. **Fel undantag fångades i find-or-create**: `get_or_create_memory_source_unit()` fångade
+   ALLA `IntegrityError` och antog att det var `uq_msu_owner_identity`-racet. Åtgärdat:
+   inspekterar `exc.orig.diag.constraint_name`, återkastar allt annat oförändrat. Utökat att
+   även jämföra `content_hash` (inte bara `snapshot_status`) och att ALDRIG tyst återanvända en
+   `revoked`/`purged` källa.
+6. **"Samtidighets"-testet var inte samtidigt**: session A committade helt innan session B ens
+   startade. Åtgärdat: nytt test håller session A:s INSERT öppet (ej committat) på huvudtråden
+   medan session B kör på en bakgrundstråd, verifierat via `pg_stat_activity` att session B
+   faktiskt går in i ett riktigt lock-wait innan session A committar och släpper den.
+7. **Trigger-funktioner använde okvalificerade tabellnamn**: sårbart för `pg_temp`-skuggning
+   eftersom Postgres alltid kollar sessionens temp-schema först, oavsett `search_path` — och
+   `mainai_app` kan skapa temp-tabeller som standard. Åtgärdat: alla triggerfunktioner
+   schema-kvalificerade (`public.<tabell>`) och `search_path` låst till enbart `pg_catalog`.
+8. **`apply_runtime_privileges.py` behövde egen härdning**: verifierar nu funktionens
+   ÄGARROLL (inte bara tabellägare), dess `rolsuper`/`rolbypassrls`, dess `search_path`/
+   `proconfig`, och FALLERAR HÖGLJUTT (istället för att tyst hoppa över) om en förväntad S1A-
+   tabell/funktion saknas vid den här punkten i bootsekvensen.
+
+Under omverifieringen upptäcktes och åtgärdades även en kvarglömd `$$ LANGUAGE plpgsql;`-rad
+från en tidigare redigeringsomgång i `trg_msu_guard_update`, som bröt migrationens rena
+körning mot en bar `postgres`-superuser-databas (exakt "Alembic migration check"-jobbets
+villkor) — fångad genom att faktiskt köra om den testen, inte anta att den fortfarande
+fungerade efter de andra ändringarna.
+
+Omverifiering: migrations-round-trip (`upgrade head` → `downgrade -1` → `upgrade head`) mot en
+färsk `postgres`-superuser-databas UTAN `mainai_app`-roll; `apply_runtime_privileges.py` kört
+mot samma databas efter att `mainai_app` skapats; 591/592 gröna i hela backend-/security-/
+account-sviten (1 avsiktligt överhoppad kapacitetstest); grön CI (17/17) på exakt head-SHA
+`7041c2c`, verifierat direkt mot GitHubs check-runs-API. Fem separata, avgränsade commits
+(en per fix-område) enligt `CLAUDE.md`s arbetsdisciplin.
 
 ## Pass 13 (2026-07-29): PR #30 — SECURITY DEFINER-funktionen fick eget ägarskydd
 
