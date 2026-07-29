@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -103,6 +103,11 @@ class MemorySourceUnit(Base):
 
     content_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which rule produced content_hash (currently always 'sha256-utf8-v1', see
+    # app/rag/memory_source.py's compute_content_hash) -- lets a future hashing-algorithm
+    # change tell old rows apart from new ones instead of silently comparing hashes computed
+    # two different ways. NULL exactly when content_hash is NULL (mirrors its nullability).
+    content_hash_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     snapshot_status: Mapped[SnapshotStatus] = mapped_column(Enum(SnapshotStatus))
 
     lifecycle_status: Mapped[LifecycleStatus] = mapped_column(Enum(LifecycleStatus), default=LifecycleStatus.active)
@@ -113,7 +118,7 @@ class MemorySourceUnit(Base):
 
     project_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id"), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class DocumentSourceUnit(Base):
@@ -160,7 +165,7 @@ class MemorySourceLifecycleEvent(Base):
     memory_source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     from_status: Mapped[LifecycleStatus] = mapped_column(Enum(LifecycleStatus))
     to_status: Mapped[LifecycleStatus] = mapped_column(Enum(LifecycleStatus))
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str] = mapped_column(Text)
     actor_type: Mapped[str] = mapped_column(Text)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

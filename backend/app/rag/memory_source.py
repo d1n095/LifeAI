@@ -13,6 +13,7 @@ pattern and has no such race: the fallback SELECT is a brand new statement that 
 snapshot after the concurrent transaction has already committed.
 """
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,6 +29,23 @@ from app.models.memory_source_unit import (
     SourceKind,
     SourceRole,
 )
+
+# Bumped only if the hashing algorithm/input encoding ever changes — an existing row's
+# content_hash_version says which rule produced it, so a future change can tell old rows
+# apart from new ones instead of silently comparing hashes computed two different ways.
+CONTENT_HASH_VERSION = "sha256-utf8-v1"
+
+
+def compute_content_hash(content_text: str | None) -> tuple[str | None, str | None]:
+    """Computes (content_hash, content_hash_version) from the exact UTF-8 bytes of
+    `content_text` — never accepted as a caller-supplied value (see migration 0019's
+    docstring): a caller declaring an unverified hash for an `exact` snapshot would let the
+    database assert an integrity guarantee it never actually checked. `content_text is None`
+    (degraded/missing snapshots) always yields (None, None), matching
+    ck_msu_content_matches_snapshot's requirement that hash and text are NULL together."""
+    if content_text is None:
+        return None, None
+    return hashlib.sha256(content_text.encode("utf-8")).hexdigest(), CONTENT_HASH_VERSION
 
 
 class MemorySourceIdentityConflict(RuntimeError):
@@ -57,8 +75,9 @@ class DocumentSourceLocator:
     chunk_id: uuid.UUID | None
     observed_at: datetime
     content_text: str | None
-    content_hash: str | None
     snapshot_status: SnapshotStatus
+    # No content_hash field: it's ALWAYS computed internally from content_text (see
+    # compute_content_hash above), never accepted from the caller.
 
     @property
     def source_kind(self) -> SourceKind:
@@ -80,6 +99,7 @@ def get_or_create_memory_source_unit(db: Session, locator: DocumentSourceLocator
     together (in one SAVEPOINT-scoped unit of work) if this is the first time this exact
     source has been seen for this owner. `source_role` is always `unknown` for document
     sources in S1A — see §4.8's "source_role": uploader is never author."""
+    content_hash, content_hash_version = compute_content_hash(locator.content_text)
     savepoint = db.begin_nested()
     try:
         msu = MemorySourceUnit(
@@ -91,7 +111,8 @@ def get_or_create_memory_source_unit(db: Session, locator: DocumentSourceLocator
             occurred_at=None,
             occurred_at_basis=OccurredAtBasis.unknown,
             content_text=locator.content_text,
-            content_hash=locator.content_hash,
+            content_hash=content_hash,
+            content_hash_version=content_hash_version,
             snapshot_status=locator.snapshot_status,
         )
         db.add(msu)
@@ -175,10 +196,10 @@ def get_or_create_memory_source_unit(db: Session, locator: DocumentSourceLocator
             f"{existing_msu.lifecycle_status.value!r}, not 'active' — refusing to silently reuse a "
             f"revoked or purged source"
         )
-    if existing_msu.snapshot_status != locator.snapshot_status or existing_msu.content_hash != locator.content_hash:
+    if existing_msu.snapshot_status != locator.snapshot_status or existing_msu.content_hash != content_hash:
         raise MemorySourceIdentityConflict(
             f"memory_source_units {existing_msu.id}: snapshot_status/content_hash mismatch on lookup "
-            f"(expected snapshot_status={locator.snapshot_status}, content_hash={locator.content_hash!r}; "
+            f"(expected snapshot_status={locator.snapshot_status}, content_hash={content_hash!r}; "
             f"found snapshot_status={existing_msu.snapshot_status}, content_hash={existing_msu.content_hash!r})"
         )
 
