@@ -1,0 +1,655 @@
+"""S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8): the universal provenance core —
+`memory_source_units` (the atomic, immutable source unit every KnowledgeClaim will eventually
+point to via memory_source_id, replacing the plan to keep adding a new nullable source_X_id
+column per future source type), its document-only subtype `document_source_units`, and an
+append-only `memory_source_lifecycle_events` audit trail. Additive only: `KnowledgeClaim.
+memory_source_id` is nullable, the old source_id/version_id/chunk_id columns are untouched
+(see §4.8's six-phase cutover plan — this migration is only phase 1).
+
+Scope is deliberately narrow (S1A only, per §4.8's S1A/S1B/S1C split): no message tables, no
+knowledge_claim_evidence (no writer until S1C/P4). Backfill of existing document claims,
+dual-write in app/rag/claims.py, the shared purge_source() service, and account export/
+erasure integration are separate commits/PRs on top of this one, not part of this file.
+
+Key design decisions this migration encodes (see §4.8 for the full reasoning):
+- source_kind lives on document_source_units itself, structurally tied to its parent via a
+  composite FK (memory_source_id, owner_id, source_kind) — otherwise purging several chunks
+  from the same document version (all getting chunk_id=NULL) would collide in a
+  locator-only unique index, since nothing would anchor a purged row to its original type.
+- source_identity_key is the stable, immutable dedup key backfill/dual-write use for a
+  race-safe find-or-create (SAVEPOINT pattern in application code, not a CTE).
+- Real database-enforced immutability/lifecycle: BEFORE UPDATE/DELETE triggers, a
+  DEFERRABLE exact-one-subtype constraint trigger, and a lifecycle state machine
+  (active -> revoked -> active (restore) -> purged, terminal) reachable only through
+  transition_own_memory_source()/transition_memory_source_admin().
+- Privilege boundary that survives a reboot, not a session flag: UPDATE/DELETE on the three
+  new tables must be revoked from mainai_app (the app's actual runtime role — see
+  backend/scripts/ensure_app_role.py; it does not own these tables, so REVOKE actually
+  holds, unlike RLS's owner-bypass problem). All lifecycle/erasure writes go through
+  SECURITY DEFINER functions owned by the admin/migration role, with a real owner check
+  inside transition_own_memory_source()/erase_owner_memory() (SECURITY DEFINER bypasses RLS,
+  so the function must check ownership itself, not rely on the RLS policy) and EXECUTE never
+  granted to mainai_app for the *_admin variants. search_path is pinned to pg_catalog only
+  (no `public`) with fully schema-qualified object names inside the function bodies, and
+  row_security is explicitly turned off for these functions (portable across hosting
+  providers where the admin role's BYPASSRLS attribute can't be assumed) since these
+  functions' own authorization is the owner-id check / EXECUTE grant, not RLS.
+
+  This migration deliberately does NOT contain literal `REVOKE ... FROM mainai_app`/`GRANT
+  ... TO mainai_app` statements, even though ALTER DEFAULT PRIVILEGES means mainai_app gets
+  broad access to these tables the instant they're created here — matching every earlier
+  migration's convention (see 0004's comment) of never naming that role directly in a
+  migration file. The reason is concrete, not just stylistic: the "Backend — Alembic
+  migration check" CI job (.github/workflows/ci.yml) runs `alembic upgrade head` against a
+  bare `postgres`-superuser-only database where `mainai_app` is never created — a literal
+  `REVOKE ... FROM mainai_app` there fails outright with "role mainai_app does not exist"
+  and breaks that job (confirmed locally, not assumed). The actual narrowing is
+  backend/scripts/apply_runtime_privileges.py, run once right after this migration during a
+  real deploy/local boot (docker-entrypoint.sh: ensure_app_role -> alembic upgrade head ->
+  apply_runtime_privileges -> start app) and idempotently on every subsequent boot, since
+  ensure_app_role.py re-grants ALL PRIVILEGES to mainai_app on every boot (not just role
+  creation) — a REVOKE that only ran once, at migration time, would be silently undone on
+  the next ordinary restart otherwise. Between this migration applying and
+  apply_runtime_privileges running, the app itself is not yet serving requests (same
+  boot-order gap ensure_app_role.py's own password rotation already tolerates), so mainai_app
+  briefly holding broader-than-final privileges on these specific tables during that window
+  is not a live exposure.
+
+Revision ID: 0019
+Revises: 0018
+Create Date: 2026-07-29
+"""
+
+from alembic import op
+import sqlalchemy as sa
+
+revision = "0019"
+down_revision = "0018"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    # --- memory_source_units ------------------------------------------------------------
+    op.execute("""
+        CREATE TABLE memory_source_units (
+            id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+            owner_id uuid NOT NULL REFERENCES users(id),
+
+            source_kind varchar(32) NOT NULL,
+            source_identity_key text NOT NULL,
+            source_role varchar(16) NOT NULL,
+
+            observed_at timestamptz NOT NULL,
+            occurred_at timestamptz,
+            occurred_at_basis varchar(16) NOT NULL DEFAULT 'unknown',
+
+            content_text text,
+            content_hash varchar(64),
+            snapshot_status varchar(16) NOT NULL,
+
+            lifecycle_status varchar(16) NOT NULL DEFAULT 'active',
+            revoked_at timestamptz,
+            revocation_reason text,
+            purged_at timestamptz,
+            purge_reason text,
+
+            project_id uuid REFERENCES projects(id),
+
+            created_at timestamptz NOT NULL DEFAULT now(),
+
+            CONSTRAINT uq_msu_id_owner UNIQUE (id, owner_id),
+            CONSTRAINT uq_msu_id_owner_kind UNIQUE (id, owner_id, source_kind),
+            CONSTRAINT uq_msu_owner_identity UNIQUE (owner_id, source_identity_key),
+
+            CONSTRAINT ck_msu_source_kind
+                CHECK (source_kind IN ('document_chunk', 'document_version', 'document_record')),
+            CONSTRAINT ck_msu_source_role
+                CHECK (source_role IN ('founder', 'assistant', 'external', 'system', 'unknown')),
+            CONSTRAINT ck_msu_snapshot_status
+                CHECK (snapshot_status IN ('exact', 'degraded', 'missing')),
+            CONSTRAINT ck_msu_lifecycle_status
+                CHECK (lifecycle_status IN ('active', 'revoked', 'purged')),
+            CONSTRAINT ck_msu_occurred_at_basis
+                CHECK (occurred_at_basis IN ('explicit', 'source_metadata', 'inferred', 'unknown')),
+
+            CONSTRAINT ck_msu_occurred_at_coherence CHECK (
+                (occurred_at IS NULL AND occurred_at_basis = 'unknown')
+                OR
+                (occurred_at IS NOT NULL AND occurred_at_basis IN ('explicit', 'source_metadata', 'inferred'))
+            ),
+
+            CONSTRAINT ck_msu_content_matches_snapshot CHECK (
+                (lifecycle_status = 'purged' AND content_text IS NULL AND content_hash IS NULL)
+                OR
+                (lifecycle_status <> 'purged' AND (
+                    (snapshot_status = 'exact' AND content_text IS NOT NULL AND content_hash IS NOT NULL)
+                    OR
+                    (snapshot_status IN ('degraded', 'missing') AND content_text IS NULL AND content_hash IS NULL)
+                ))
+            ),
+
+            CONSTRAINT ck_msu_lifecycle_coherence CHECK (
+                (lifecycle_status = 'active' AND revoked_at IS NULL AND purged_at IS NULL)
+                OR
+                (lifecycle_status = 'revoked' AND revoked_at IS NOT NULL AND revocation_reason IS NOT NULL AND purged_at IS NULL)
+                OR
+                (lifecycle_status = 'purged' AND purged_at IS NOT NULL AND purge_reason IS NOT NULL)
+            )
+        );
+        CREATE INDEX ix_msu_owner_lifecycle ON memory_source_units (owner_id, lifecycle_status);
+    """)
+
+    # --- document_source_units ------------------------------------------------------------
+    op.execute("""
+        CREATE TABLE document_source_units (
+            memory_source_id uuid NOT NULL PRIMARY KEY REFERENCES memory_source_units(id),
+            owner_id uuid NOT NULL,
+            source_kind varchar(32) NOT NULL,
+
+            document_id uuid NOT NULL REFERENCES documents(id),
+            version_id uuid REFERENCES knowledge_versions(id),
+            chunk_id uuid REFERENCES document_chunks(id) ON DELETE SET NULL,
+
+            FOREIGN KEY (memory_source_id, owner_id, source_kind)
+                REFERENCES memory_source_units (id, owner_id, source_kind)
+        );
+
+        -- Type-scoped, not locator-scoped: a purged document_chunk row (chunk_id -> NULL via
+        -- the FK's ON DELETE SET NULL) must never start colliding with document_version/
+        -- document_record rows just because its locator went away.
+        CREATE UNIQUE INDEX uq_dsu_chunk ON document_source_units (owner_id, chunk_id)
+            WHERE source_kind = 'document_chunk' AND chunk_id IS NOT NULL;
+        CREATE UNIQUE INDEX uq_dsu_version ON document_source_units (owner_id, document_id, version_id)
+            WHERE source_kind = 'document_version';
+        CREATE UNIQUE INDEX uq_dsu_record ON document_source_units (owner_id, document_id)
+            WHERE source_kind = 'document_record';
+
+        CREATE INDEX ix_dsu_document ON document_source_units (document_id);
+    """)
+
+    # --- memory_source_lifecycle_events (append-only audit trail) ------------------------
+    op.execute("""
+        CREATE TABLE memory_source_lifecycle_events (
+            id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+            owner_id uuid NOT NULL REFERENCES users(id),
+            memory_source_id uuid NOT NULL,
+            from_status varchar(16) NOT NULL,
+            to_status varchar(16) NOT NULL,
+            reason text,
+            actor_type varchar(16) NOT NULL,
+            actor_id uuid,
+            created_at timestamptz NOT NULL DEFAULT now(),
+
+            FOREIGN KEY (memory_source_id, owner_id)
+                REFERENCES memory_source_units (id, owner_id) ON DELETE CASCADE,
+
+            CONSTRAINT ck_msle_from_status CHECK (from_status IN ('active', 'revoked', 'purged')),
+            CONSTRAINT ck_msle_to_status CHECK (to_status IN ('active', 'revoked', 'purged')),
+            CONSTRAINT ck_msle_actor_type CHECK (actor_type IN ('founder', 'system', 'admin', 'migration'))
+        );
+        CREATE INDEX ix_msle_source ON memory_source_lifecycle_events (memory_source_id);
+    """)
+
+    # --- KnowledgeClaim.memory_source_id (additive, phase 1 of the six-phase cutover) ----
+    op.execute("""
+        ALTER TABLE knowledge_claims
+            ADD COLUMN memory_source_id uuid REFERENCES memory_source_units(id) ON DELETE RESTRICT;
+        CREATE INDEX ix_knowledge_claims_memory_source ON knowledge_claims (memory_source_id);
+    """)
+
+    # --- RLS ---------------------------------------------------------------------------
+    op.execute("""
+        ALTER TABLE memory_source_units ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE memory_source_units FORCE ROW LEVEL SECURITY;
+        CREATE POLICY memory_source_units_isolation ON memory_source_units
+            USING (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
+            WITH CHECK (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
+
+        ALTER TABLE document_source_units ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE document_source_units FORCE ROW LEVEL SECURITY;
+        CREATE POLICY document_source_units_isolation ON document_source_units
+            USING (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
+            WITH CHECK (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
+
+        ALTER TABLE memory_source_lifecycle_events ENABLE ROW LEVEL SECURITY;
+        ALTER TABLE memory_source_lifecycle_events FORCE ROW LEVEL SECURITY;
+        CREATE POLICY memory_source_lifecycle_events_isolation ON memory_source_lifecycle_events
+            USING (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
+            WITH CHECK (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
+    """)
+
+    # --- memory_source_units triggers ---------------------------------------------------
+    op.execute("""
+        CREATE OR REPLACE FUNCTION trg_msu_guard_update() RETURNS TRIGGER AS $$
+        BEGIN
+            IF NEW.source_kind          IS DISTINCT FROM OLD.source_kind
+            OR NEW.source_role          IS DISTINCT FROM OLD.source_role
+            OR NEW.source_identity_key  IS DISTINCT FROM OLD.source_identity_key
+            OR NEW.observed_at          IS DISTINCT FROM OLD.observed_at
+            OR NEW.occurred_at          IS DISTINCT FROM OLD.occurred_at
+            OR NEW.occurred_at_basis    IS DISTINCT FROM OLD.occurred_at_basis
+            OR NEW.owner_id             IS DISTINCT FROM OLD.owner_id
+            THEN
+                RAISE EXCEPTION 'memory_source_units: identity fields are immutable (id=%)', OLD.id;
+            END IF;
+
+            IF (NEW.lifecycle_status, NEW.revoked_at, NEW.revocation_reason, NEW.purged_at, NEW.purge_reason,
+                NEW.content_text, NEW.content_hash, NEW.snapshot_status)
+               IS DISTINCT FROM
+               (OLD.lifecycle_status, OLD.revoked_at, OLD.revocation_reason, OLD.purged_at, OLD.purge_reason,
+                OLD.content_text, OLD.content_hash, OLD.snapshot_status)
+            THEN
+                IF current_setting('memory.transition_active', true) IS DISTINCT FROM 'on' THEN
+                    RAISE EXCEPTION 'memory_source_units: lifecycle fields may only change via transition_own_memory_source()/transition_memory_source_admin() (id=%)', OLD.id;
+                END IF;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg_msu_update_guard
+            BEFORE UPDATE ON memory_source_units
+            FOR EACH ROW EXECUTE FUNCTION trg_msu_guard_update();
+
+        CREATE OR REPLACE FUNCTION trg_msu_forbid_delete() RETURNS TRIGGER AS $$
+        BEGIN
+            IF current_setting('memory.erasure_in_progress', true) IS DISTINCT FROM 'on' THEN
+                RAISE EXCEPTION 'memory_source_units: row deletion is not permitted outside account erasure (id=%)', OLD.id;
+            END IF;
+            RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg_msu_no_delete
+            BEFORE DELETE ON memory_source_units
+            FOR EACH ROW EXECUTE FUNCTION trg_msu_forbid_delete();
+
+        CREATE OR REPLACE FUNCTION trg_msu_check_subtype_exists() RETURNS TRIGGER AS $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM document_source_units WHERE memory_source_id = NEW.id) THEN
+                RAISE EXCEPTION 'memory_source_units %: no matching document_source_units row', NEW.id;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE CONSTRAINT TRIGGER trg_msu_subtype_required
+            AFTER INSERT OR UPDATE ON memory_source_units
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION trg_msu_check_subtype_exists();
+    """)
+
+    # --- document_source_units triggers -------------------------------------------------
+    op.execute("""
+        CREATE OR REPLACE FUNCTION trg_dsu_validate_fields() RETURNS TRIGGER AS $$
+        DECLARE
+            v_snap     varchar(16);
+            v_identity text;
+        BEGIN
+            SELECT snapshot_status, source_identity_key INTO v_snap, v_identity
+            FROM memory_source_units WHERE id = NEW.memory_source_id;
+
+            IF NEW.source_kind = 'document_chunk' THEN
+                IF NEW.document_id IS NULL THEN
+                    RAISE EXCEPTION 'document_chunk requires document_id (id=%)', NEW.memory_source_id;
+                END IF;
+                IF TG_OP = 'INSERT' AND NEW.chunk_id IS NULL THEN
+                    RAISE EXCEPTION 'document_chunk requires chunk_id at creation (id=%)', NEW.memory_source_id;
+                END IF;
+            ELSIF NEW.source_kind = 'document_version' THEN
+                IF NEW.document_id IS NULL OR NEW.version_id IS NULL OR NEW.chunk_id IS NOT NULL THEN
+                    RAISE EXCEPTION 'document_version requires document_id+version_id, chunk_id NULL (id=%)', NEW.memory_source_id;
+                END IF;
+            ELSIF NEW.source_kind = 'document_record' THEN
+                IF NEW.document_id IS NULL OR NEW.version_id IS NOT NULL OR NEW.chunk_id IS NOT NULL OR v_snap = 'exact' THEN
+                    RAISE EXCEPTION 'document_record requires only document_id, snapshot_status != exact (id=%)', NEW.memory_source_id;
+                END IF;
+            ELSE
+                RAISE EXCEPTION 'unexpected source_kind % for document_source_units (id=%)', NEW.source_kind, NEW.memory_source_id;
+            END IF;
+
+            IF TG_OP = 'INSERT' THEN
+                IF NEW.source_kind = 'document_chunk' AND v_identity IS DISTINCT FROM ('document_chunk:' || NEW.chunk_id::text) THEN
+                    RAISE EXCEPTION 'source_identity_key does not match chunk_id (id=%)', NEW.memory_source_id;
+                ELSIF NEW.source_kind = 'document_version' AND v_identity IS DISTINCT FROM ('document_version:' || NEW.version_id::text) THEN
+                    RAISE EXCEPTION 'source_identity_key does not match version_id (id=%)', NEW.memory_source_id;
+                ELSIF NEW.source_kind = 'document_record' AND v_identity IS DISTINCT FROM ('document_record:' || NEW.document_id::text) THEN
+                    RAISE EXCEPTION 'source_identity_key does not match document_id (id=%)', NEW.memory_source_id;
+                END IF;
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM documents WHERE id = NEW.document_id AND uploaded_by = NEW.owner_id) THEN
+                RAISE EXCEPTION 'document_id % does not belong to owner_id %', NEW.document_id, NEW.owner_id;
+            END IF;
+
+            IF NEW.version_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM knowledge_versions WHERE id = NEW.version_id AND source_id = NEW.document_id AND owner_id = NEW.owner_id
+            ) THEN
+                RAISE EXCEPTION 'version_id % does not belong to document_id %/owner_id %', NEW.version_id, NEW.document_id, NEW.owner_id;
+            END IF;
+
+            IF NEW.chunk_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM document_chunks WHERE id = NEW.chunk_id AND document_id = NEW.document_id AND owner_id = NEW.owner_id
+            ) THEN
+                RAISE EXCEPTION 'chunk_id % does not belong to document_id %/owner_id %', NEW.chunk_id, NEW.document_id, NEW.owner_id;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE CONSTRAINT TRIGGER trg_dsu_validate
+            AFTER INSERT OR UPDATE ON document_source_units
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION trg_dsu_validate_fields();
+
+        CREATE OR REPLACE FUNCTION trg_dsu_guard_update() RETURNS TRIGGER AS $$
+        DECLARE
+            v_lifecycle varchar(16);
+        BEGIN
+            IF NEW.memory_source_id IS DISTINCT FROM OLD.memory_source_id
+            OR NEW.owner_id         IS DISTINCT FROM OLD.owner_id
+            OR NEW.source_kind      IS DISTINCT FROM OLD.source_kind
+            OR NEW.document_id      IS DISTINCT FROM OLD.document_id
+            OR NEW.version_id       IS DISTINCT FROM OLD.version_id
+            THEN
+                RAISE EXCEPTION 'document_source_units: locator fields are immutable (id=%)', OLD.memory_source_id;
+            END IF;
+
+            IF NEW.chunk_id IS DISTINCT FROM OLD.chunk_id THEN
+                IF NEW.chunk_id IS NOT NULL OR OLD.chunk_id IS NULL THEN
+                    RAISE EXCEPTION 'document_source_units: chunk_id can only be cleared, never reassigned (id=%)', OLD.memory_source_id;
+                END IF;
+                SELECT lifecycle_status INTO v_lifecycle FROM memory_source_units WHERE id = OLD.memory_source_id;
+                IF v_lifecycle = 'active' THEN
+                    RAISE EXCEPTION 'document_source_units: chunk_id cannot be cleared while parent is active (id=%)', OLD.memory_source_id;
+                END IF;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg_dsu_update_guard
+            BEFORE UPDATE ON document_source_units
+            FOR EACH ROW EXECUTE FUNCTION trg_dsu_guard_update();
+
+        CREATE OR REPLACE FUNCTION trg_dsu_forbid_delete() RETURNS TRIGGER AS $$
+        BEGIN
+            IF current_setting('memory.erasure_in_progress', true) IS DISTINCT FROM 'on' THEN
+                RAISE EXCEPTION 'document_source_units: row deletion is not permitted outside account erasure (id=%)', OLD.memory_source_id;
+            END IF;
+            RETURN OLD;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg_dsu_no_delete
+            BEFORE DELETE ON document_source_units
+            FOR EACH ROW EXECUTE FUNCTION trg_dsu_forbid_delete();
+    """)
+
+    # --- memory_source_lifecycle_events: append-only ------------------------------------
+    # No BEFORE DELETE trigger here deliberately: mainai_app has DELETE revoked (below) and
+    # the only path that can ever delete a memory_source_units row (hence CASCADE into this
+    # table) is the admin-owned erase_owner_memory()/erase_owner_memory_admin() — an
+    # unconditional forbid-delete trigger here would break exactly that legitimate cascade,
+    # the same problem an unconditional trigger on memory_source_units/document_source_units
+    # would have without their erasure_in_progress carve-out.
+    op.execute("""
+        CREATE OR REPLACE FUNCTION trg_msle_forbid_update() RETURNS TRIGGER AS $$
+        BEGIN
+            RAISE EXCEPTION 'memory_source_lifecycle_events is append-only (id=%)', OLD.id;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER trg_msle_no_update
+            BEFORE UPDATE ON memory_source_lifecycle_events
+            FOR EACH ROW EXECUTE FUNCTION trg_msle_forbid_update();
+    """)
+
+    # --- SECURITY DEFINER functions ------------------------------------------------------
+    # row_security=off is deliberate: these functions' own authorization IS the owner check
+    # (transition_own_memory_source/erase_owner_memory) or the EXECUTE grant restriction
+    # (the _admin variants, never granted to mainai_app) — not RLS. Relying on the admin
+    # role happening to have BYPASSRLS would make correctness depend on a hosting-specific
+    # role attribute this migration can't verify; explicitly disabling row_security for the
+    # function's own execution is portable and makes the *_admin variants work correctly
+    # against arbitrary owners regardless of what current_setting('app.current_user_id')
+    # happens to be in the calling session (including unset, e.g. a maintenance script).
+    op.execute("""
+        CREATE OR REPLACE FUNCTION transition_own_memory_source(
+            p_source_id UUID,
+            p_target_status VARCHAR(16),
+            p_reason TEXT,
+            p_actor_kind VARCHAR(16)
+        ) RETURNS VOID
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        SET row_security = off
+        AS $$
+        DECLARE
+            v_owner      uuid;
+            v_old_status varchar(16);
+            v_caller     uuid;
+        BEGIN
+            v_caller := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+            IF v_caller IS NULL THEN
+                RAISE EXCEPTION 'transition_own_memory_source: no authenticated user context';
+            END IF;
+
+            IF p_actor_kind NOT IN ('founder', 'system') THEN
+                RAISE EXCEPTION 'transition_own_memory_source: invalid actor_kind %', p_actor_kind;
+            END IF;
+
+            IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+                RAISE EXCEPTION 'transition_own_memory_source: reason is required';
+            END IF;
+
+            SELECT owner_id, lifecycle_status INTO v_owner, v_old_status
+            FROM public.memory_source_units WHERE id = p_source_id FOR UPDATE;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'transition_own_memory_source: source % not found', p_source_id;
+            END IF;
+
+            IF v_owner IS DISTINCT FROM v_caller THEN
+                RAISE EXCEPTION 'transition_own_memory_source: source % does not belong to caller', p_source_id;
+            END IF;
+
+            PERFORM set_config('memory.transition_active', 'on', true);
+
+            IF p_target_status = 'revoked' AND v_old_status = 'active' THEN
+                UPDATE public.memory_source_units
+                SET lifecycle_status = 'revoked', revoked_at = now(), revocation_reason = p_reason
+                WHERE id = p_source_id;
+            ELSIF p_target_status = 'active' AND v_old_status = 'revoked' THEN
+                UPDATE public.memory_source_units
+                SET lifecycle_status = 'active', revoked_at = NULL, revocation_reason = NULL
+                WHERE id = p_source_id;
+            ELSIF p_target_status = 'purged' AND v_old_status IN ('active', 'revoked') THEN
+                UPDATE public.memory_source_units
+                SET lifecycle_status = 'purged', purged_at = now(), purge_reason = p_reason,
+                    content_text = NULL, content_hash = NULL
+                WHERE id = p_source_id;
+            ELSE
+                PERFORM set_config('memory.transition_active', 'off', true);
+                RAISE EXCEPTION 'transition_own_memory_source: illegal transition % -> %', v_old_status, p_target_status;
+            END IF;
+
+            PERFORM set_config('memory.transition_active', 'off', true);
+
+            INSERT INTO public.memory_source_lifecycle_events
+                (owner_id, memory_source_id, from_status, to_status, reason, actor_type, actor_id)
+            VALUES (v_owner, p_source_id, v_old_status, p_target_status, p_reason, p_actor_kind, v_caller);
+        END;
+        $$;
+
+        REVOKE ALL ON FUNCTION transition_own_memory_source(UUID, VARCHAR, TEXT, VARCHAR) FROM PUBLIC;
+
+        CREATE OR REPLACE FUNCTION transition_memory_source_admin(
+            p_source_id UUID,
+            p_target_status VARCHAR(16),
+            p_reason TEXT,
+            p_actor_type VARCHAR(16),
+            p_actor_id UUID
+        ) RETURNS VOID
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        SET row_security = off
+        AS $$
+        DECLARE
+            v_owner      uuid;
+            v_old_status varchar(16);
+        BEGIN
+            IF p_actor_type NOT IN ('founder', 'system', 'admin', 'migration') THEN
+                RAISE EXCEPTION 'transition_memory_source_admin: invalid actor_type %', p_actor_type;
+            END IF;
+
+            IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+                RAISE EXCEPTION 'transition_memory_source_admin: reason is required';
+            END IF;
+
+            SELECT owner_id, lifecycle_status INTO v_owner, v_old_status
+            FROM public.memory_source_units WHERE id = p_source_id FOR UPDATE;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'transition_memory_source_admin: source % not found', p_source_id;
+            END IF;
+
+            PERFORM set_config('memory.transition_active', 'on', true);
+
+            IF p_target_status = 'revoked' AND v_old_status = 'active' THEN
+                UPDATE public.memory_source_units
+                SET lifecycle_status = 'revoked', revoked_at = now(), revocation_reason = p_reason
+                WHERE id = p_source_id;
+            ELSIF p_target_status = 'active' AND v_old_status = 'revoked' THEN
+                UPDATE public.memory_source_units
+                SET lifecycle_status = 'active', revoked_at = NULL, revocation_reason = NULL
+                WHERE id = p_source_id;
+            ELSIF p_target_status = 'purged' AND v_old_status IN ('active', 'revoked') THEN
+                UPDATE public.memory_source_units
+                SET lifecycle_status = 'purged', purged_at = now(), purge_reason = p_reason,
+                    content_text = NULL, content_hash = NULL
+                WHERE id = p_source_id;
+            ELSE
+                PERFORM set_config('memory.transition_active', 'off', true);
+                RAISE EXCEPTION 'transition_memory_source_admin: illegal transition % -> %', v_old_status, p_target_status;
+            END IF;
+
+            PERFORM set_config('memory.transition_active', 'off', true);
+
+            INSERT INTO public.memory_source_lifecycle_events
+                (owner_id, memory_source_id, from_status, to_status, reason, actor_type, actor_id)
+            VALUES (v_owner, p_source_id, v_old_status, p_target_status, p_reason, p_actor_type, p_actor_id);
+        END;
+        $$;
+
+        REVOKE ALL ON FUNCTION transition_memory_source_admin(UUID, VARCHAR, TEXT, VARCHAR, UUID) FROM PUBLIC;
+        -- mainai_app is never granted EXECUTE here — see GRANT section below.
+
+        CREATE OR REPLACE FUNCTION erase_owner_memory(p_owner_id UUID) RETURNS VOID
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        SET row_security = off
+        AS $$
+        DECLARE
+            v_caller uuid;
+        BEGIN
+            v_caller := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+            IF v_caller IS NULL OR v_caller IS DISTINCT FROM p_owner_id THEN
+                RAISE EXCEPTION 'erase_owner_memory: caller may only erase their own memory';
+            END IF;
+
+            DELETE FROM public.knowledge_claims WHERE owner_id = p_owner_id;
+
+            PERFORM set_config('memory.erasure_in_progress', 'on', true);
+            DELETE FROM public.document_source_units WHERE owner_id = p_owner_id;
+            DELETE FROM public.memory_source_units WHERE owner_id = p_owner_id;
+            PERFORM set_config('memory.erasure_in_progress', 'off', true);
+        END;
+        $$;
+
+        REVOKE ALL ON FUNCTION erase_owner_memory(UUID) FROM PUBLIC;
+
+        CREATE OR REPLACE FUNCTION erase_owner_memory_admin(p_owner_id UUID) RETURNS VOID
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog
+        SET row_security = off
+        AS $$
+        BEGIN
+            DELETE FROM public.knowledge_claims WHERE owner_id = p_owner_id;
+
+            PERFORM set_config('memory.erasure_in_progress', 'on', true);
+            DELETE FROM public.document_source_units WHERE owner_id = p_owner_id;
+            DELETE FROM public.memory_source_units WHERE owner_id = p_owner_id;
+            PERFORM set_config('memory.erasure_in_progress', 'off', true);
+        END;
+        $$;
+
+        REVOKE ALL ON FUNCTION erase_owner_memory_admin(UUID) FROM PUBLIC;
+        -- mainai_app is never granted EXECUTE here either.
+    """)
+
+    # --- Privilege narrowing for mainai_app: deliberately NOT done here ------------------
+    # See the module docstring: a literal REVOKE/GRANT naming mainai_app here would break
+    # the "Backend — Alembic migration check" CI job (its database never creates that role).
+    # backend/scripts/apply_runtime_privileges.py is the actual mechanism, run once right
+    # after this migration during a real deploy/local boot and on every subsequent boot —
+    # see backend/docker-entrypoint.sh.
+    op.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+
+
+def downgrade() -> None:
+    conn = op.get_bind()
+    checks = [
+        ("knowledge_claims", "memory_source_id IS NOT NULL"),
+        ("memory_source_lifecycle_events", "TRUE"),
+        ("document_source_units", "TRUE"),
+        ("memory_source_units", "TRUE"),
+    ]
+    for table, cond in checks:
+        in_use = conn.execute(sa.text(f"SELECT 1 FROM {table} WHERE {cond} LIMIT 1")).first()
+        if in_use is not None:
+            raise RuntimeError(
+                f"0019 downgrade refused: {table} already has data ({cond}). "
+                "This migration is reversible only before any real cutover/backfill runs. "
+                "Roll forward instead of down."
+            )
+
+    op.execute("""
+        DROP FUNCTION IF EXISTS erase_owner_memory_admin(UUID);
+        DROP FUNCTION IF EXISTS erase_owner_memory(UUID);
+        DROP FUNCTION IF EXISTS transition_memory_source_admin(UUID, VARCHAR, TEXT, VARCHAR, UUID);
+        DROP FUNCTION IF EXISTS transition_own_memory_source(UUID, VARCHAR, TEXT, VARCHAR);
+
+        ALTER TABLE knowledge_claims DROP COLUMN IF EXISTS memory_source_id;
+
+        DROP POLICY IF EXISTS memory_source_lifecycle_events_isolation ON memory_source_lifecycle_events;
+        DROP TRIGGER IF EXISTS trg_msle_no_update ON memory_source_lifecycle_events;
+        DROP FUNCTION IF EXISTS trg_msle_forbid_update();
+        DROP TABLE IF EXISTS memory_source_lifecycle_events;
+
+        DROP POLICY IF EXISTS document_source_units_isolation ON document_source_units;
+        DROP TRIGGER IF EXISTS trg_dsu_no_delete ON document_source_units;
+        DROP TRIGGER IF EXISTS trg_dsu_update_guard ON document_source_units;
+        DROP TRIGGER IF EXISTS trg_dsu_validate ON document_source_units;
+        DROP FUNCTION IF EXISTS trg_dsu_forbid_delete();
+        DROP FUNCTION IF EXISTS trg_dsu_guard_update();
+        DROP FUNCTION IF EXISTS trg_dsu_validate_fields();
+        DROP TABLE IF EXISTS document_source_units;
+
+        DROP POLICY IF EXISTS memory_source_units_isolation ON memory_source_units;
+        DROP TRIGGER IF EXISTS trg_msu_subtype_required ON memory_source_units;
+        DROP TRIGGER IF EXISTS trg_msu_no_delete ON memory_source_units;
+        DROP TRIGGER IF EXISTS trg_msu_update_guard ON memory_source_units;
+        DROP FUNCTION IF EXISTS trg_msu_check_subtype_exists();
+        DROP FUNCTION IF EXISTS trg_msu_forbid_delete();
+        DROP FUNCTION IF EXISTS trg_msu_guard_update();
+        DROP TABLE IF EXISTS memory_source_units;
+    """)

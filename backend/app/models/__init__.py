@@ -10,6 +10,16 @@ from app.models.import_job import ImportJob
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.media_url_import import MediaUrlImport
+from app.models.memory_source_unit import (
+    DocumentSourceUnit,
+    LifecycleStatus,
+    MemorySourceLifecycleEvent,
+    MemorySourceUnit,
+    OccurredAtBasis,
+    SnapshotStatus,
+    SourceKind,
+    SourceRole,
+)
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.project_memory import ProjectBranchPRStatus, ProjectCheckpoint, ProjectCheckpointNote, ProjectNote, ProjectSource
@@ -39,6 +49,14 @@ __all__ = [
     "KnowledgeClaim",
     "KnowledgeVersion",
     "MediaUrlImport",
+    "DocumentSourceUnit",
+    "LifecycleStatus",
+    "MemorySourceLifecycleEvent",
+    "MemorySourceUnit",
+    "OccurredAtBasis",
+    "SnapshotStatus",
+    "SourceKind",
+    "SourceRole",
     "PasswordResetToken",
     "Project",
     "Task",

@@ -105,3 +105,13 @@ class KnowledgeClaim(Base):
     valid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     extraction_version: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, migration 0019): the claim's exact
+    # primary provenance unit, nullable during the cutover — phase 1 of §4.8's six-phase plan.
+    # source_id/version_id/chunk_id above stay authoritative until phase 4; this column is
+    # additive only. ON DELETE RESTRICT (not SET NULL): a bare DELETE on memory_source_units
+    # must never silently orphan a claim — the controlled purge/erasure functions delete the
+    # claim itself first instead.
+    memory_source_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_source_units.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
