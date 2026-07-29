@@ -22,18 +22,44 @@ Key design decisions this migration encodes (see §4.8 for the full reasoning):
   DEFERRABLE exact-one-subtype constraint trigger, and a lifecycle state machine
   (active -> revoked -> active (restore) -> purged, terminal) reachable only through
   transition_own_memory_source()/transition_memory_source_admin().
-- Privilege boundary that survives a reboot, not a session flag: UPDATE/DELETE on the three
-  new tables must be revoked from mainai_app (the app's actual runtime role — see
-  backend/scripts/ensure_app_role.py; it does not own these tables, so REVOKE actually
-  holds, unlike RLS's owner-bypass problem). All lifecycle/erasure writes go through
-  SECURITY DEFINER functions owned by the admin/migration role, with a real owner check
-  inside transition_own_memory_source()/erase_owner_memory() (SECURITY DEFINER bypasses RLS,
-  so the function must check ownership itself, not rely on the RLS policy) and EXECUTE never
-  granted to mainai_app for the *_admin variants. search_path is pinned to pg_catalog only
-  (no `public`) with fully schema-qualified object names inside the function bodies, and
-  row_security is explicitly turned off for these functions (portable across hosting
-  providers where the admin role's BYPASSRLS attribute can't be assumed) since these
-  functions' own authorization is the owner-id check / EXECUTE grant, not RLS.
+- Privilege boundary that survives a reboot, not a session flag: mainai_app (the app's
+  actual runtime role — see backend/scripts/ensure_app_role.py) gets exactly SELECT+INSERT
+  on memory_source_units/document_source_units and SELECT-only on
+  memory_source_lifecycle_events (least privilege, not just "no UPDATE/DELETE" — TRUNCATE,
+  REFERENCES and TRIGGER are equally unneeded and equally revoked; TRUNCATE in particular
+  is NOT subject to RLS at all, so leaving it granted would be a real bypass). mainai_app
+  does not own these tables, so REVOKE actually holds, unlike RLS's owner-bypass problem.
+  All lifecycle/erasure writes go through SECURITY DEFINER functions owned by the
+  admin/migration role, with a real owner check inside
+  transition_own_memory_source()/erase_owner_memory() — required regardless of RLS, since a
+  SECURITY DEFINER function's own queries are STILL subject to RLS if its owning role lacks
+  BYPASSRLS/superuser (contrary to an earlier draft's incorrect assumption that
+  `SET row_security = off` provided a bypass — it does not; per Postgres's own docs it only
+  turns a silent RLS-filtered result into an error, it never grants access RLS would
+  otherwise deny). EXECUTE on the *_admin variants is never granted to mainai_app.
+  search_path is pinned to pg_catalog only (no `public`, no implicit pg_temp priority) with
+  EVERY relation reference in EVERY function body — trigger functions included, not just the
+  four SECURITY DEFINER ones — fully schema-qualified as `public.<table>`. This matters
+  structurally, not just stylistically: Postgres always checks a session's temporary schema
+  first for an unqualified relation name regardless of search_path, so mainai_app (which can
+  create temp tables by default) could otherwise shadow `documents`/`knowledge_versions`/
+  `document_chunks`/etc. inside these functions with its own fake temp table and fool the
+  ownership-chain validation trigger.
+
+  The two owner-scoped functions (transition_own_memory_source, erase_owner_memory) do NOT
+  need BYPASSRLS on the admin role: they only ever touch the row(s) belonging to
+  `current_setting('app.current_user_id')`, which is already the exact value RLS's policy
+  checks — the policy naturally allows it, and the function's own explicit ownership check
+  is the real, RLS-independent enforcement regardless. The two admin-only functions
+  (transition_memory_source_admin, erase_owner_memory_admin) are different: by design they
+  must operate on an arbitrary owner's row without already knowing which owner in advance,
+  which FORCE ROW LEVEL SECURITY makes structurally impossible for a non-exempt role — these
+  two GENUINELY REQUIRE the admin/migration role to have BYPASSRLS (or be superuser).
+  backend/scripts/apply_runtime_privileges.py verifies this explicitly and refuses to boot
+  if it's missing, rather than leaving the admin functions silently broken. See
+  tests/backend/test_memory_source_units.py's dedicated non-superuser/non-BYPASSRLS-owner
+  test, which proves the owner-scoped functions work correctly without it and that its
+  absence is detected, not assumed.
 
   This migration deliberately does NOT contain literal `REVOKE ... FROM mainai_app`/`GRANT
   ... TO mainai_app` statements, even though ALTER DEFAULT PRIVILEGES means mainai_app gets
@@ -192,9 +218,21 @@ def upgrade() -> None:
     """)
 
     # --- KnowledgeClaim.memory_source_id (additive, phase 1 of the six-phase cutover) ----
+    # Composite FK, not a plain single-column one: FK constraint checks are enforced by
+    # Postgres independent of RLS (they run as the table owner internally), so a bare
+    # `memory_source_id REFERENCES memory_source_units(id)` would let a claim owned by A
+    # structurally reference a memory_source_units row owned by B the instant B's id is
+    # known/guessable — RLS never gets a chance to reject that link, since RLS governs what
+    # rows a QUERY can see/write, not what a FK constraint is allowed to reference. Tying the
+    # FK to memory_source_units' own (id, owner_id) UNIQUE constraint makes owner_id mismatch
+    # a constraint violation, not just a hidden-by-RLS row.
     op.execute("""
         ALTER TABLE knowledge_claims
-            ADD COLUMN memory_source_id uuid REFERENCES memory_source_units(id) ON DELETE RESTRICT;
+            ADD COLUMN memory_source_id uuid;
+        ALTER TABLE knowledge_claims
+            ADD CONSTRAINT fk_knowledge_claims_memory_source_owner
+            FOREIGN KEY (memory_source_id, owner_id)
+            REFERENCES memory_source_units (id, owner_id) ON DELETE RESTRICT;
         CREATE INDEX ix_knowledge_claims_memory_source ON knowledge_claims (memory_source_id);
     """)
 
@@ -220,8 +258,19 @@ def upgrade() -> None:
     """)
 
     # --- memory_source_units triggers ---------------------------------------------------
+    # Every function body below is schema-qualified (public.<table>) and pinned to
+    # SET search_path = pg_catalog — a trigger function that is NOT itself SECURITY DEFINER
+    # executes with the privileges AND search_path context of whoever fired the trigger
+    # (mainai_app, for a normal INSERT/UPDATE). Postgres always checks a session's temporary
+    # schema first for an unqualified relation name regardless of search_path, and mainai_app
+    # can create temp tables by default — an unqualified `documents`/`memory_source_units`/
+    # etc. reference here could otherwise be shadowed by a same-named temp table mainai_app
+    # creates in its own session, silently defeating the validation these triggers exist for.
     op.execute("""
-        CREATE OR REPLACE FUNCTION trg_msu_guard_update() RETURNS TRIGGER AS $$
+        CREATE OR REPLACE FUNCTION trg_msu_guard_update() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
         BEGIN
             IF NEW.source_kind          IS DISTINCT FROM OLD.source_kind
             OR NEW.source_role          IS DISTINCT FROM OLD.source_role
@@ -247,33 +296,39 @@ def upgrade() -> None:
 
             RETURN NEW;
         END;
-        $$ LANGUAGE plpgsql;
+        $$;
 
         CREATE TRIGGER trg_msu_update_guard
             BEFORE UPDATE ON memory_source_units
             FOR EACH ROW EXECUTE FUNCTION trg_msu_guard_update();
 
-        CREATE OR REPLACE FUNCTION trg_msu_forbid_delete() RETURNS TRIGGER AS $$
+        CREATE OR REPLACE FUNCTION trg_msu_forbid_delete() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
         BEGIN
             IF current_setting('memory.erasure_in_progress', true) IS DISTINCT FROM 'on' THEN
                 RAISE EXCEPTION 'memory_source_units: row deletion is not permitted outside account erasure (id=%)', OLD.id;
             END IF;
             RETURN OLD;
         END;
-        $$ LANGUAGE plpgsql;
+        $$;
 
         CREATE TRIGGER trg_msu_no_delete
             BEFORE DELETE ON memory_source_units
             FOR EACH ROW EXECUTE FUNCTION trg_msu_forbid_delete();
 
-        CREATE OR REPLACE FUNCTION trg_msu_check_subtype_exists() RETURNS TRIGGER AS $$
+        CREATE OR REPLACE FUNCTION trg_msu_check_subtype_exists() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM document_source_units WHERE memory_source_id = NEW.id) THEN
+            IF NOT EXISTS (SELECT 1 FROM public.document_source_units WHERE memory_source_id = NEW.id) THEN
                 RAISE EXCEPTION 'memory_source_units %: no matching document_source_units row', NEW.id;
             END IF;
             RETURN NEW;
         END;
-        $$ LANGUAGE plpgsql;
+        $$;
 
         CREATE CONSTRAINT TRIGGER trg_msu_subtype_required
             AFTER INSERT OR UPDATE ON memory_source_units
@@ -283,13 +338,16 @@ def upgrade() -> None:
 
     # --- document_source_units triggers -------------------------------------------------
     op.execute("""
-        CREATE OR REPLACE FUNCTION trg_dsu_validate_fields() RETURNS TRIGGER AS $$
+        CREATE OR REPLACE FUNCTION trg_dsu_validate_fields() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
         DECLARE
             v_snap     varchar(16);
             v_identity text;
         BEGIN
             SELECT snapshot_status, source_identity_key INTO v_snap, v_identity
-            FROM memory_source_units WHERE id = NEW.memory_source_id;
+            FROM public.memory_source_units WHERE id = NEW.memory_source_id;
 
             IF NEW.source_kind = 'document_chunk' THEN
                 IF NEW.document_id IS NULL THEN
@@ -320,32 +378,35 @@ def upgrade() -> None:
                 END IF;
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM documents WHERE id = NEW.document_id AND uploaded_by = NEW.owner_id) THEN
+            IF NOT EXISTS (SELECT 1 FROM public.documents WHERE id = NEW.document_id AND uploaded_by = NEW.owner_id) THEN
                 RAISE EXCEPTION 'document_id % does not belong to owner_id %', NEW.document_id, NEW.owner_id;
             END IF;
 
             IF NEW.version_id IS NOT NULL AND NOT EXISTS (
-                SELECT 1 FROM knowledge_versions WHERE id = NEW.version_id AND source_id = NEW.document_id AND owner_id = NEW.owner_id
+                SELECT 1 FROM public.knowledge_versions WHERE id = NEW.version_id AND source_id = NEW.document_id AND owner_id = NEW.owner_id
             ) THEN
                 RAISE EXCEPTION 'version_id % does not belong to document_id %/owner_id %', NEW.version_id, NEW.document_id, NEW.owner_id;
             END IF;
 
             IF NEW.chunk_id IS NOT NULL AND NOT EXISTS (
-                SELECT 1 FROM document_chunks WHERE id = NEW.chunk_id AND document_id = NEW.document_id AND owner_id = NEW.owner_id
+                SELECT 1 FROM public.document_chunks WHERE id = NEW.chunk_id AND document_id = NEW.document_id AND owner_id = NEW.owner_id
             ) THEN
                 RAISE EXCEPTION 'chunk_id % does not belong to document_id %/owner_id %', NEW.chunk_id, NEW.document_id, NEW.owner_id;
             END IF;
 
             RETURN NEW;
         END;
-        $$ LANGUAGE plpgsql;
+        $$;
 
         CREATE CONSTRAINT TRIGGER trg_dsu_validate
             AFTER INSERT OR UPDATE ON document_source_units
             DEFERRABLE INITIALLY DEFERRED
             FOR EACH ROW EXECUTE FUNCTION trg_dsu_validate_fields();
 
-        CREATE OR REPLACE FUNCTION trg_dsu_guard_update() RETURNS TRIGGER AS $$
+        CREATE OR REPLACE FUNCTION trg_dsu_guard_update() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
         DECLARE
             v_lifecycle varchar(16);
         BEGIN
@@ -362,7 +423,7 @@ def upgrade() -> None:
                 IF NEW.chunk_id IS NOT NULL OR OLD.chunk_id IS NULL THEN
                     RAISE EXCEPTION 'document_source_units: chunk_id can only be cleared, never reassigned (id=%)', OLD.memory_source_id;
                 END IF;
-                SELECT lifecycle_status INTO v_lifecycle FROM memory_source_units WHERE id = OLD.memory_source_id;
+                SELECT lifecycle_status INTO v_lifecycle FROM public.memory_source_units WHERE id = OLD.memory_source_id;
                 IF v_lifecycle = 'active' THEN
                     RAISE EXCEPTION 'document_source_units: chunk_id cannot be cleared while parent is active (id=%)', OLD.memory_source_id;
                 END IF;
@@ -370,20 +431,23 @@ def upgrade() -> None:
 
             RETURN NEW;
         END;
-        $$ LANGUAGE plpgsql;
+        $$;
 
         CREATE TRIGGER trg_dsu_update_guard
             BEFORE UPDATE ON document_source_units
             FOR EACH ROW EXECUTE FUNCTION trg_dsu_guard_update();
 
-        CREATE OR REPLACE FUNCTION trg_dsu_forbid_delete() RETURNS TRIGGER AS $$
+        CREATE OR REPLACE FUNCTION trg_dsu_forbid_delete() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
         BEGIN
             IF current_setting('memory.erasure_in_progress', true) IS DISTINCT FROM 'on' THEN
                 RAISE EXCEPTION 'document_source_units: row deletion is not permitted outside account erasure (id=%)', OLD.memory_source_id;
             END IF;
             RETURN OLD;
         END;
-        $$ LANGUAGE plpgsql;
+        $$;
 
         CREATE TRIGGER trg_dsu_no_delete
             BEFORE DELETE ON document_source_units
@@ -398,11 +462,14 @@ def upgrade() -> None:
     # the same problem an unconditional trigger on memory_source_units/document_source_units
     # would have without their erasure_in_progress carve-out.
     op.execute("""
-        CREATE OR REPLACE FUNCTION trg_msle_forbid_update() RETURNS TRIGGER AS $$
+        CREATE OR REPLACE FUNCTION trg_msle_forbid_update() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
         BEGIN
             RAISE EXCEPTION 'memory_source_lifecycle_events is append-only (id=%)', OLD.id;
         END;
-        $$ LANGUAGE plpgsql;
+        $$;
 
         CREATE TRIGGER trg_msle_no_update
             BEFORE UPDATE ON memory_source_lifecycle_events
@@ -410,14 +477,16 @@ def upgrade() -> None:
     """)
 
     # --- SECURITY DEFINER functions ------------------------------------------------------
-    # row_security=off is deliberate: these functions' own authorization IS the owner check
-    # (transition_own_memory_source/erase_owner_memory) or the EXECUTE grant restriction
-    # (the _admin variants, never granted to mainai_app) — not RLS. Relying on the admin
-    # role happening to have BYPASSRLS would make correctness depend on a hosting-specific
-    # role attribute this migration can't verify; explicitly disabling row_security for the
-    # function's own execution is portable and makes the *_admin variants work correctly
-    # against arbitrary owners regardless of what current_setting('app.current_user_id')
-    # happens to be in the calling session (including unset, e.g. a maintenance script).
+    # No `SET row_security = off` here (an earlier draft had it and was wrong): per
+    # Postgres's own docs, row_security=off does NOT bypass RLS for a non-exempt role — it
+    # only turns a would-be-filtered result into an error instead of silently returning
+    # fewer rows. It never grants access RLS would otherwise deny. The two functions below
+    # don't need any RLS bypass: they only ever touch the row(s) belonging to
+    # current_setting('app.current_user_id'), which is exactly the value RLS's own policy
+    # checks, so the policy allows it naturally — the function's explicit ownership check
+    # (not RLS) is the real, independent enforcement. See transition_memory_source_admin/
+    # erase_owner_memory_admin further below for the two functions that genuinely DO require
+    # the admin/migration role to have BYPASSRLS, and why.
     op.execute("""
         CREATE OR REPLACE FUNCTION transition_own_memory_source(
             p_source_id UUID,
@@ -428,7 +497,6 @@ def upgrade() -> None:
         LANGUAGE plpgsql
         SECURITY DEFINER
         SET search_path = pg_catalog
-        SET row_security = off
         AS $$
         DECLARE
             v_owner      uuid;
@@ -489,6 +557,14 @@ def upgrade() -> None:
 
         REVOKE ALL ON FUNCTION transition_own_memory_source(UUID, VARCHAR, TEXT, VARCHAR) FROM PUBLIC;
 
+        -- No `SET row_security = off` here either — it would not do anything a non-exempt
+        -- role couldn't already do without it. This function genuinely has no ownership
+        -- check (by design — it's the admin/migration escape hatch), so it MUST run as a
+        -- function owner that actually has BYPASSRLS (or is superuser); that is a real,
+        -- external role attribute, not a per-call SET, and apply_runtime_privileges.py
+        -- verifies it on every boot rather than assuming it. mainai_app is never granted
+        -- EXECUTE on this function (see REVOKE below and apply_runtime_privileges.py), so
+        -- the app role's own lack of BYPASSRLS is irrelevant to this function's safety.
         CREATE OR REPLACE FUNCTION transition_memory_source_admin(
             p_source_id UUID,
             p_target_status VARCHAR(16),
@@ -499,7 +575,6 @@ def upgrade() -> None:
         LANGUAGE plpgsql
         SECURITY DEFINER
         SET search_path = pg_catalog
-        SET row_security = off
         AS $$
         DECLARE
             v_owner      uuid;
@@ -551,11 +626,13 @@ def upgrade() -> None:
         REVOKE ALL ON FUNCTION transition_memory_source_admin(UUID, VARCHAR, TEXT, VARCHAR, UUID) FROM PUBLIC;
         -- mainai_app is never granted EXECUTE here — see GRANT section below.
 
+        -- Owner-scoped, same reasoning as transition_own_memory_source above: no RLS
+        -- bypass needed, the explicit v_caller = p_owner_id check is the enforcement, and
+        -- RLS's own policy permits it naturally since it's exactly the caller's own row.
         CREATE OR REPLACE FUNCTION erase_owner_memory(p_owner_id UUID) RETURNS VOID
         LANGUAGE plpgsql
         SECURITY DEFINER
         SET search_path = pg_catalog
-        SET row_security = off
         AS $$
         DECLARE
             v_caller uuid;
@@ -576,11 +653,15 @@ def upgrade() -> None:
 
         REVOKE ALL ON FUNCTION erase_owner_memory(UUID) FROM PUBLIC;
 
+        -- Admin/migration escape hatch, no ownership check by design — same requirement
+        -- as transition_memory_source_admin above: the function-owning role must
+        -- genuinely have BYPASSRLS (or be superuser), externally verified by
+        -- apply_runtime_privileges.py, not assumed via `row_security = off` (which
+        -- would not grant anything RLS itself denies).
         CREATE OR REPLACE FUNCTION erase_owner_memory_admin(p_owner_id UUID) RETURNS VOID
         LANGUAGE plpgsql
         SECURITY DEFINER
         SET search_path = pg_catalog
-        SET row_security = off
         AS $$
         BEGIN
             DELETE FROM public.knowledge_claims WHERE owner_id = p_owner_id;
