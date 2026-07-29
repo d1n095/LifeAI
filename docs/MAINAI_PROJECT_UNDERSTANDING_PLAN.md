@@ -536,15 +536,19 @@ migration) och flera skarpa databuggar hittades i det tidigare DDL-utkastet:
     cutover, roll-forward-only därefter, aldrig en tyst dataförstörande operation.
 
 **S1 delas i tre migrationer, inte en:**
-- **S1A** (nästa steg, se nedan för exakt DDL): `memory_source_units`/`document_source_units`/
-  `knowledge_claim_evidence`, nullable `KnowledgeClaim.memory_source_id`, snapshot/lifecycle/
-  immutability, deterministisk backfill av befintliga dokumentclaims, dual-write för nya.
-  INGA meddelandetabeller alls i S1A.
+- **S1A** (nästa steg, se nedan för exakt DDL): `memory_source_units`/`document_source_units`,
+  nullable `KnowledgeClaim.memory_source_id`, snapshot/lifecycle/immutability, deterministisk
+  backfill av befintliga dokumentclaims, dual-write för nya. INGA meddelandetabeller alls i
+  S1A. **2026-07-28-korrigering (sjunde rundan): `knowledge_claim_evidence` flyttas ut ur
+  S1A** — S1A har ingen konversationsclaim, ingen segmentering och ingen P4-kontextupplösning
+  ännu, så evidence-tabellen skulle sakna en aktiv writer i S1A. Den läggs till i S1C eller
+  P4, när den faktiskt får ett användningsfall — håller den första produktionsmigrationen
+  mindre.
 - **S1B**: `messages.sequence_number` — expand (nullable) → dual-write-kod → durable historisk
   backfill → verifiering → contract (separat migration: `NOT NULL`+`UNIQUE`).
-- **S1C**: `message_source_units` + ägar-/konversationsintegritet + backfill av
-  Message→MemorySourceUnit. Fortfarande ingen claim-extraktion från konversationer — det
-  kommer efter S1C, i sitt eget steg.
+- **S1C**: `message_source_units` + `knowledge_claim_evidence` + ägar-/konversationsintegritet
+  + backfill av Message→MemorySourceUnit. Fortfarande ingen claim-extraktion från
+  konversationer — det kommer efter S1C, i sitt eget steg.
 
 **2026-07-28, SJÄTTE granskningsrundan — S1A verifierad mot verklig kodbas, 14 rättningar.**
 Föregående DDL-utkast antog kolumnnamn och beteenden som inte stämmer mot den faktiska
@@ -649,6 +653,79 @@ modellen. Verifierat direkt mot `backend/app/models/*.py`, `backend/app/rls.py` 
 
 Se chattsvaret för den fullständiga, reviderade S1A-DDL:n som implementerar alla 14 punkter.
 Fortfarande ingen Alembic-migration skriven — väntar på godkännande.
+
+**2026-07-28, SJUNDE granskningsrundan — 11 kvarstående blockerare, DDL v7.** Sjätte rundans
+utkast löste namn-/RLS-/tombstone-felen men innehöll fortfarande verkliga databasfel:
+
+1. **Uniqueness-modellen var fel.** `UNIQUE (owner_id, document_id, version_id)` skulle blockera
+   ALLA chunks utom den första i samma dokumentversion (alla delar samma `document_id`+
+   `version_id`). Ersatt med tre partiella unika index på `document_source_units`:
+   `(owner_id, chunk_id) WHERE chunk_id IS NOT NULL`,
+   `(owner_id, document_id, version_id) WHERE chunk_id IS NULL AND version_id IS NOT NULL`,
+   `(owner_id, document_id) WHERE chunk_id IS NULL AND version_id IS NULL`.
+2. **Backfill-CTE:n kunde skapa föräldralösa, oraderbara `memory_source_units`** (parent
+   skapas, barn-inserten träffar `ON CONFLICT DO NOTHING`, parent blir kvar utan subtyp — och
+   eftersom radering är förbjuden går den inte att städa). Löst med en stabil, immutable
+   `source_identity_key` (`document_chunk:<chunk_id>` / `document_version:<version_id>` /
+   `document_record:<document_id>`), `UNIQUE (owner_id, source_identity_key)`, och ett
+   SAVEPOINT-baserat find-or-create (INSERT parent+child i samma nästlade transaktion, fångas
+   `IntegrityError` → rulla tillbaka till savepoint → `SELECT` den redan existerande raden) —
+   standardmönstret för säker Postgres-upsert, inte en CTE med snapshot-race.
+3. **Exact-one-subtype-triggern återinförd** som en `DEFERRABLE INITIALLY DEFERRED`
+   constraint-trigger på `memory_source_units` (INSERT/UPDATE), eftersom "barn kan inte
+   raderas" bara skyddar mot ETT av två sätt att bryta invarianten — den andra är att en
+   parent skapas UTAN att en subtyp någonsin skapas (bugg, direkt SQL, ofullständig
+   applikationskod som kringgår find-or-create-mönstret).
+4. **`chunk_id`s FK blir `ON DELETE SET NULL`**, inte en vanlig FK — dagens `delete_source`
+   hårdraderar `DocumentChunk`-rader direkt, vilket annars skulle blockeras av en vanlig FK.
+   Valideringstriggern blir livscykelmedveten: `document_chunk` med `lifecycle_status='active'`
+   kräver `chunk_id NOT NULL`; en redan `revoked`/`purged` `document_chunk` FÅR ha
+   `chunk_id IS NULL` (den oföränderliga snapshoten/purge-historiken finns redan). Ordningen i
+   `delete_source` blir: purga tillhörande `memory_source_units` FÖRST (se punkt 9), sedan
+   radera `DocumentChunk`-raderna — då är `lifecycle_status` redan `purged` när FK:ns
+   `SET NULL` slår till.
+5. **Snapshot-CHECK:en gjorde purge omöjlig** (`snapshot_status='exact'` krävde
+   `content_text NOT NULL`, men purge kräver `content_text IS NULL`, oavsett tidigare
+   snapshotstatus). Gjord livscykelmedveten: `purged` kräver bara `content_text`/`content_hash
+   IS NULL`; alla andra status följer exact/degraded/missing-reglerna som förut.
+   `snapshot_status='exact'` fortsätter efter purge betyda "hade en exakt snapshot", inte
+   "har en exakt snapshot nu".
+6. **Livscykelfält kunde skrivas om tyst** när status var oförändrad (`revoked_at`,
+   `revocation_reason`, `purged_at`, `purge_reason` skyddades inte explicit av triggern).
+   Dels läggs de till i "status oförändrad"-grenens skyddade fältlista, dels läggs en
+   append-only `memory_source_lifecycle_events`-tabell till (från/till-status, orsak,
+   `actor_id` läst från `current_setting('app.current_user_id')` — inte ett fält
+   applikationskoden fyller i, för att inte förlita sig på applikationsdisciplin för
+   revisionsspårets integritet) — parent-raden håller aktuell status för snabb filtrering,
+   händelsetabellen den fullständiga historiken.
+7. **Tidscheckens riktning var enkelriktad** (tillät `occurred_at=NULL` med
+   `occurred_at_basis='explicit'`). Gjord dubbelriktad: `occurred_at IS NULL ⟺
+   occurred_at_basis='unknown'`. `observed_at` måste skrivas som tidszonsmedveten UTC
+   (`datetime.now(timezone.utc)`, inte `datetime.utcnow()`) från applikationskoden.
+8. **`document_source_units` var inte skyddad mot omskrivning.** En `BEFORE UPDATE`-trigger
+   fryser nu `memory_source_id`/`owner_id`/`document_id`/`version_id` helt, och tillåter
+   `chunk_id` att gå från satt till `NULL` ENDAST när förälderns `lifecycle_status` redan är
+   `revoked`/`purged` (dvs. exakt den kontrollerade FK-`SET NULL`-övergången från punkt 4) —
+   varje annan förändring av `chunk_id`, eller någon förändring alls medan förälderns
+   `lifecycle_status='active'`, avvisas.
+9. **Raderingssemantiken låst tydligt.** Dagens `delete_source`-rutt (hårdraderar chunks,
+   gör källan osökbar, försöker fysiskt purga originalblobben) är redan närmare permanent
+   radering än en enkel "ta bort ur aktivt minne" — den mappas därför till **purge** av
+   motsvarande `memory_source_units` (content_text/hash nollas), inte revoke. En framtida,
+   separat "ta bort ur aktivt minne men behåll historik"-åtgärd i UI/API skulle mappa till
+   **revoke** istället. De två får aldrig blandas ihop i vare sig kod eller UI-text — annars
+   tror grundaren att materialet är borttaget medan en full textkopia ligger kvar. Purge-steget
+   i `delete_source` skrivs med SQLAlchemy Core `UPDATE ... WHERE id IN (SELECT ...)`, inte ett
+   `joined Query.update()` (som inte fungerar tillförlitligt över en join i SQLAlchemy).
+10. **RLS måste in i `app/rls.py`**, inte bara som `CREATE POLICY`-satser i migrationen —
+    samma idempotenta `ENABLE`/`FORCE`/policy-skapande som repots övriga tabeller, plus
+    isolationstester (owner A kan inte läsa/skriva owner B:s rader, en rå anslutning utan
+    `app.current_user_id` får noll rader).
+11. **`knowledge_claim_evidence` flyttas ut ur S1A** (se ovanstående S1A/S1B/S1C-block) — ingen
+    aktiv writer i S1A ännu, håller den första produktionsmigrationen mindre.
+
+Se chattsvaret för DDL v7. Fortfarande ingen Alembic-migration skriven — väntar på
+godkännande.
 
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
@@ -1006,15 +1083,18 @@ P3   Claim-typning (dokument)            ← KLAR, mergad (PR #29), inkl. retroa
 
 --- återstår, ny ordning efter proveniens-granskningen (S1 delat i S1A/S1B/S1C, §4.8) ---
 
-S1A  memory_source_units + document_source_units + knowledge_claim_evidence +
-     KnowledgeClaim.memory_source_id (nullable) + snapshot/lifecycle/immutability +
-     deterministisk dokumentclaim-backfill + dual-write för nya dokumentclaims
-                                          ← additiv migration, egen PR. INGA meddelandetabeller.
-                                            Nästa konkreta steg — se §4.8:s exakta DDL-utkast.
+S1A  memory_source_units + document_source_units + KnowledgeClaim.memory_source_id
+     (nullable) + snapshot/lifecycle/immutability + memory_source_lifecycle_events +
+     deterministisk dokumentclaim-backfill + dual-write + delete_source-purge-integration
+                                          ← additiv migration, egen PR. INGA meddelandetabeller,
+                                            INGEN knowledge_claim_evidence (flyttad till S1C/P4,
+                                            sjunde granskningsrundan). Nästa konkreta steg —
+                                            se §4.8:s exakta DDL-utkast.
 S1B  messages.sequence_number: expand (nullable) → dual-write-kod → durable historisk
      backfill → verifiering → contract (separat migration: NOT NULL + UNIQUE)
                                           ← egen PR, kräver S1A inte alls (oberoende spår)
-S1C  message_source_units + ägar-/konversationsintegritet + backfill Message→MemorySourceUnit
+S1C  message_source_units + knowledge_claim_evidence + ägar-/konversationsintegritet +
+     backfill Message→MemorySourceUnit
                                           ← kräver S1B:s sequence_number klart, egen PR.
                                             Fortfarande ingen claim-extraktion från konversationer.
 S2   conversation_segments + conversation_segment_members + segmenteringspass
