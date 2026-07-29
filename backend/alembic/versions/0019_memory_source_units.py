@@ -113,7 +113,32 @@ Key design decisions this migration encodes (see §4.8 for the full reasoning):
   `exact` would let the database assert a snapshot's integrity it never actually checked.
   `ck_msu_content_hash_format` additionally enforces the DB-level shape (64 lowercase hex
   characters) whenever a hash is present, independent of whether the caller computed it
-  correctly.
+  correctly. `ck_msu_content_hash_version_matches_hash` ties content_hash_version to
+  content_hash's own nullability and pins it to the one supported algorithm, and
+  content_hash_version is included in trg_msu_guard_update's immutability comparison (an
+  earlier version of that trigger watched content_text/content_hash/snapshot_status but not
+  content_hash_version, which could otherwise be changed independently without tripping the
+  lifecycle guard).
+
+- An `exact` snapshot is bound to the REAL source text, not merely to whatever text a caller
+  submitted — mainai_app has direct INSERT on both memory_source_units and
+  document_source_units, so nothing previously stopped a caller from hashing arbitrary text
+  and declaring it `exact`. `trg_dsu_validate_fields` now verifies, for `document_chunk` +
+  `exact`, that the parent's content_text equals `document_chunks.text` for the linked
+  chunk_id (checked while chunk_id is still linked; once purged there's nothing left to
+  verify against, but the earlier check plus content_text's immutability already covers
+  that). `document_version` can never be `exact`: `KnowledgeVersion` has no canonical text
+  column (checksum/metadata only), so an exact claim there would necessarily be
+  unverifiable — it's restricted to `degraded`/`missing`, same as `document_record` already
+  was.
+
+- `transition_own_memory_source()` no longer accepts an `actor_kind` parameter. It always
+  logs `actor_type='founder'`, since the only way to reach this function at all is the
+  in-function ownership check (the caller IS the row's owner) — mainai_app (the same role
+  that serves every ordinary request) could otherwise self-label an actual user action as
+  `'system'`, making it look automated in the audit trail. A genuinely system-initiated
+  transition must go through `transition_memory_source_admin`, which mainai_app is never
+  granted EXECUTE on.
 
 Revision ID: 0019
 Revises: 0018
@@ -196,6 +221,17 @@ def upgrade() -> None:
             -- application-level, rejection.
             CONSTRAINT ck_msu_content_hash_format
                 CHECK (content_hash IS NULL OR content_hash ~ '^[0-9a-f]{64}$'),
+
+            -- content_hash and content_hash_version are NULL together or set together, and
+            -- when set, content_hash_version must be exactly the one algorithm this schema
+            -- currently supports -- ck_msu_content_matches_snapshot already implies this
+            -- indirectly (via snapshot_status), but this is a direct, structural guarantee
+            -- independent of that CHECK's own correctness.
+            CONSTRAINT ck_msu_content_hash_version_matches_hash CHECK (
+                (content_hash IS NULL AND content_hash_version IS NULL)
+                OR
+                (content_hash IS NOT NULL AND content_hash_version = 'sha256-utf8-v1')
+            ),
 
             CONSTRAINT ck_msu_lifecycle_coherence CHECK (
                 (lifecycle_status = 'active'
@@ -339,10 +375,10 @@ def upgrade() -> None:
             END IF;
 
             IF (NEW.lifecycle_status, NEW.revoked_at, NEW.revocation_reason, NEW.purged_at, NEW.purge_reason,
-                NEW.content_text, NEW.content_hash, NEW.snapshot_status)
+                NEW.content_text, NEW.content_hash, NEW.content_hash_version, NEW.snapshot_status)
                IS DISTINCT FROM
                (OLD.lifecycle_status, OLD.revoked_at, OLD.revocation_reason, OLD.purged_at, OLD.purge_reason,
-                OLD.content_text, OLD.content_hash, OLD.snapshot_status)
+                OLD.content_text, OLD.content_hash, OLD.content_hash_version, OLD.snapshot_status)
             THEN
                 IF current_setting('memory.transition_active', true) IS DISTINCT FROM 'on' THEN
                     RAISE EXCEPTION 'memory_source_units: lifecycle fields may only change via transition_own_memory_source()/transition_memory_source_admin() (id=%)', OLD.id;
@@ -398,11 +434,14 @@ def upgrade() -> None:
         SET search_path = pg_catalog
         AS $$
         DECLARE
-            v_snap     varchar(16);
-            v_identity text;
-            v_role     varchar(16);
+            v_snap        varchar(16);
+            v_identity    text;
+            v_role        varchar(16);
+            v_content     text;
+            v_chunk_text  text;
         BEGIN
-            SELECT snapshot_status, source_identity_key, source_role INTO v_snap, v_identity, v_role
+            SELECT snapshot_status, source_identity_key, source_role, content_text
+            INTO v_snap, v_identity, v_role, v_content
             FROM public.memory_source_units WHERE id = NEW.memory_source_id;
 
             -- Documents are never directly attributable to founder/assistant/external/system
@@ -422,9 +461,29 @@ def upgrade() -> None:
                 IF TG_OP = 'INSERT' AND NEW.chunk_id IS NULL THEN
                     RAISE EXCEPTION 'document_chunk requires chunk_id at creation (id=%)', NEW.memory_source_id;
                 END IF;
+                -- An `exact` snapshot must be bound to the REAL chunk text, not merely to
+                -- whatever text a caller (mainai_app has direct INSERT on both tables)
+                -- happened to submit -- otherwise "exact" is just a caller's unverified
+                -- claim. Only checked while chunk_id is still linked: once the underlying
+                -- DocumentChunk is purged (chunk_id -> NULL via ON DELETE SET NULL), there's
+                -- nothing left to verify against, but content_text was already verified once
+                -- at creation and is immutable thereafter (trg_msu_guard_update), so that
+                -- earlier check still stands.
+                IF v_snap = 'exact' AND NEW.chunk_id IS NOT NULL THEN
+                    SELECT text INTO v_chunk_text FROM public.document_chunks WHERE id = NEW.chunk_id;
+                    IF v_chunk_text IS DISTINCT FROM v_content THEN
+                        RAISE EXCEPTION 'document_chunk exact snapshot content_text does not match document_chunks.text (id=%)', NEW.memory_source_id;
+                    END IF;
+                END IF;
             ELSIF NEW.source_kind = 'document_version' THEN
                 IF NEW.document_id IS NULL OR NEW.version_id IS NULL OR NEW.chunk_id IS NOT NULL THEN
                     RAISE EXCEPTION 'document_version requires document_id+version_id, chunk_id NULL (id=%)', NEW.memory_source_id;
+                END IF;
+                -- KnowledgeVersion has no canonical text column (checksum/metadata only) --
+                -- an `exact` snapshot here would necessarily be an unverifiable, caller-
+                -- supplied claim, exactly the gap this trigger closes for document_chunk.
+                IF v_snap = 'exact' THEN
+                    RAISE EXCEPTION 'document_version may not be an exact snapshot -- KnowledgeVersion has no canonical text column (id=%)', NEW.memory_source_id;
                 END IF;
             ELSIF NEW.source_kind = 'document_record' THEN
                 IF NEW.document_id IS NULL OR NEW.version_id IS NOT NULL OR NEW.chunk_id IS NOT NULL OR v_snap = 'exact' THEN
@@ -557,8 +616,7 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION transition_own_memory_source(
             p_source_id UUID,
             p_target_status VARCHAR(16),
-            p_reason TEXT,
-            p_actor_kind VARCHAR(16)
+            p_reason TEXT
         ) RETURNS VOID
         LANGUAGE plpgsql
         SECURITY DEFINER
@@ -572,10 +630,6 @@ def upgrade() -> None:
             v_caller := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
             IF v_caller IS NULL THEN
                 RAISE EXCEPTION 'transition_own_memory_source: no authenticated user context';
-            END IF;
-
-            IF p_actor_kind NOT IN ('founder', 'system') THEN
-                RAISE EXCEPTION 'transition_own_memory_source: invalid actor_kind %', p_actor_kind;
             END IF;
 
             IF p_reason IS NULL OR btrim(p_reason) = '' THEN
@@ -615,13 +669,20 @@ def upgrade() -> None:
 
             PERFORM set_config('memory.transition_active', 'off', true);
 
+            -- actor_type is always 'founder' here, never a caller-supplied value: this
+            -- function is only ever reached by the authenticated owner acting on their own
+            -- row (the ownership check above), so the audit trail should say so unspoofably
+            -- -- the same mainai_app role that runs ordinary user requests must not be able
+            -- to self-label an action as 'system' to make it look automated. A genuinely
+            -- system-initiated transition goes through transition_memory_source_admin
+            -- instead, which mainai_app is never granted EXECUTE on.
             INSERT INTO public.memory_source_lifecycle_events
                 (owner_id, memory_source_id, from_status, to_status, reason, actor_type, actor_id)
-            VALUES (v_owner, p_source_id, v_old_status, p_target_status, p_reason, p_actor_kind, v_caller);
+            VALUES (v_owner, p_source_id, v_old_status, p_target_status, p_reason, 'founder', v_caller);
         END;
         $$;
 
-        REVOKE ALL ON FUNCTION transition_own_memory_source(UUID, VARCHAR, TEXT, VARCHAR) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION transition_own_memory_source(UUID, VARCHAR, TEXT) FROM PUBLIC;
 
         -- No `SET row_security = off` here either — it would not do anything a non-exempt
         -- role couldn't already do without it. This function genuinely has no ownership
@@ -775,7 +836,7 @@ def downgrade() -> None:
         DROP FUNCTION IF EXISTS erase_owner_memory_admin(UUID);
         DROP FUNCTION IF EXISTS erase_owner_memory(UUID);
         DROP FUNCTION IF EXISTS transition_memory_source_admin(UUID, VARCHAR, TEXT, VARCHAR, UUID);
-        DROP FUNCTION IF EXISTS transition_own_memory_source(UUID, VARCHAR, TEXT, VARCHAR);
+        DROP FUNCTION IF EXISTS transition_own_memory_source(UUID, VARCHAR, TEXT);
 
         ALTER TABLE knowledge_claims DROP COLUMN IF EXISTS memory_source_id;
 
