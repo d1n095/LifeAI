@@ -6,12 +6,49 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-28, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat) — **PR #29 mergad**
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-29, mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`/`update_pull_request`, inte memorerat) — **PR #29 mergad**
 som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8` innan merge, inte en
 äldre commit. **PR #30** (`claude/memory-source-unit-design`, minneskärnans proveniensmodell)
-öppen, inte mergad, ännu inget migrationsförslag godkänt — fjärde granskningsrundan pågår,
-se Pass 10.
+öppen på head `a7ce199`, inte mergad, ingen Alembic-migration skriven än. `docs/
+MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 är nu EN konsoliderad kanonisk design (ingen
+ny "granskningsrunda"-sektion läggs till längre — historiken finns i PR #30:s commit-log för
+den som vill se den, inte i den löpande arkitekturtexten). Se Pass 11 för vad som fortfarande
+blockerar innan en separat S1A-implementations-PR (migration + kod) får öppnas.
+
+## Pass 11 (2026-07-29): PR #30 — konsoliderad kanonisk design, tre kvarstående blockerare
+
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 skrevs om från en punktlista över fem
+sekventiella granskningsrundor (delvis motsägande — äldre `document_tombstone`/subtyp-regler
+levde kvar bredvid sina ersättningar) till EN sammanhängande, aktuell design. PR #30:s
+beskrivning uppdaterad på GitHub för att matcha (tog bort "Third correction round"-språk och
+felaktig `knowledge_claim_evidence`-i-S1A-referens).
+
+Under konsolideringen hittades och löstes tre ytterligare verkliga fel: (1) `document_source_
+units` saknade en egen, komposit-FK-buren `source_kind`, vilket skulle fått flera purgade
+`document_chunk`-rader från samma dokumentversion att kollidera i `document_version`s
+partiella unika index när deras `chunk_id` nollas; (2) en `SET LOCAL`-sessionsflagga
+(`memory.transition_active`/`erasure_in_progress`) hävdades vara den enda skrivvägen till
+livscykelfält/radering, vilket är strukturellt falskt — vilken kod som helst på samma
+DB-anslutning kan sätta samma flagga. Löst med repots REDAN EXISTERANDE rolluppdelning
+(`mainai_app`, en icke-ägande runtime-roll, skild från migrationsrollen som äger tabellerna —
+se `ensure_app_role.py`): `REVOKE UPDATE, DELETE` från `mainai_app` på proveniens-tabellerna,
+`SECURITY DEFINER`-funktioner (`transition_memory_source`/`erase_owner_memory`) med fixerad
+`search_path` och `EXECUTE` beviljad enbart till `mainai_app` — en gräns Postgres själv
+upprätthåller, inte en flagga en session kan sätta. (3) Purge var ofullständig
+(`MemorySourceUnit.content_text` nollades, men `KnowledgeClaim.claim_text`/`Document.
+content_preview`/`media_blob`/diskblobben kunde fortfarande innehålla samma material) och det
+finns en andra, fortfarande LIVE dokumentraderingsväg (`DELETE /api/documents/{id}`,
+`app/routers/documents.py`, anropad från `frontend/lib/api.ts`) som skulle blockeras rakt av
+S1A:s nya FK:er — båda måste konsolideras till EN delad `purge_source()`-tjänst.
+
+**Kvarstår innan en S1A-implementations-PR (migration + kod) får öppnas:**
+1. Produktionsdataprofilen (`chunk_id`/`version_id`-nullkombinationer på `knowledge_claims`)
+   är fortfarande inte körd — ingen databasåtkomst från den här sessionen.
+2. Den delade `purge_source()`-tjänsten, `app/rls.py`-uppdateringen, och `delete_account`/
+   `export_account`-ändringarna är beskrivna i §4.8 men inte implementerade.
+3. Testmatrisen (migration/dual-write/delete/kontoradering/RLS/behörighet/konkurrens) är
+   specificerad men inte skriven som kod.
 
 ## Pass 10 (2026-07-28): PR #30 — fjärde granskningsrundan av MemorySourceUnit-modellen
 
