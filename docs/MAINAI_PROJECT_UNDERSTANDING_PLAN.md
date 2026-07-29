@@ -518,18 +518,32 @@ S1A:s migration använder den befintliga rolluppdelningen konkret:
 -- men aldrig UPDATE eller DELETE dessa tre tabeller direkt.
 REVOKE UPDATE, DELETE ON memory_source_units, document_source_units,
     memory_source_lifecycle_events FROM mainai_app;
--- INSERT på memory_source_lifecycle_events sker ENDAST via transition_memory_source().
+-- INSERT på memory_source_lifecycle_events sker ENDAST via de kontrollerade funktionerna.
 REVOKE INSERT ON memory_source_lifecycle_events FROM mainai_app;
 
-CREATE FUNCTION transition_memory_source(...) RETURNS VOID
+CREATE FUNCTION transition_own_memory_source(
+    p_source_id UUID, p_target_status VARCHAR(16), p_reason TEXT, p_actor_kind VARCHAR(16)
+) RETURNS VOID
     LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog, public  -- fixerad, mot search_path-hijacking
+    SET search_path = pg_catalog  -- INGET schema i sökvägen, se "search_path" nedan
+AS $$ ... $$;  -- kropp: se "Livscykel" nedan för den fullständiga owner-kontrollen
+
+CREATE FUNCTION transition_memory_source_admin(
+    p_source_id UUID, p_target_status VARCHAR(16), p_reason TEXT,
+    p_actor_type VARCHAR(16), p_actor_id UUID
+) RETURNS VOID
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
 AS $$ ... $$;
 
-REVOKE ALL ON FUNCTION transition_memory_source(...) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION transition_memory_source(...) TO mainai_app;
--- samma mönster för erase_owner_memory(...)
+REVOKE ALL ON FUNCTION transition_own_memory_source(...) FROM PUBLIC;
+REVOKE ALL ON FUNCTION transition_memory_source_admin(...) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION transition_own_memory_source(...) TO mainai_app;
+-- transition_memory_source_admin får ALDRIG EXECUTE för mainai_app — bara admin-/
+-- migrationsrollen kan anropa den, och den anropas aldrig från normal request-hantering.
+-- samma tvådelade mönster för erase_owner_memory(...)/erase_owner_memory_admin(...)
 ```
 
 `SECURITY DEFINER` gör att funktionen kör med DESS ÄGARES rättigheter (admin-rollen, som äger
@@ -541,6 +555,58 @@ sats, inte av en flagga i applikationslogiken. `BEFORE UPDATE`/`BEFORE DELETE`-t
 tabellerna finns KVAR som ett oberoende andra lager (skyddar även admin-rollens egen direkta
 `psql`-åtkomst mot ett misstag), men det är GRANT/REVOKE-modellen — inte en trigger som litar
 på en sessionsflagga — som faktiskt gör påståendet "bara denna funktion kan skriva" sant.
+
+**`SECURITY DEFINER` kräver EN funktion till, inte bara EN spärr.** Att en funktion kör med
+admin-rollens rättigheter betyder att den, om den själv inte är noggrann, kan kringgå precis
+den ägarisolering RLS annars ger — `mainai_app` skulle annars i princip kunna anropa
+`transition_own_memory_source(<någon_annans_source_id>, 'purged', ..., ...)` och få det
+utfört, eftersom funktionen kör som admin-rollen och alltså inte själv stoppas av
+`memory_source_units_isolation`-policyn (RLS gäller per-anslutning, inte per `SECURITY
+DEFINER`-anrop). Två separata skydd, inte ett:
+
+1. **Ägarkontroll INUTI funktionen, inte bara RLS.** `transition_own_memory_source` verifierar
+   FÖRST, som sin egen explicita `WHERE`/`IF`-kontroll (inte genom att lita på RLS, som den
+   som `SECURITY DEFINER` ändå kringgår):
+   ```sql
+   SELECT owner_id INTO v_owner FROM memory_source_units WHERE id = p_source_id FOR UPDATE;
+   IF v_owner IS DISTINCT FROM NULLIF(current_setting('app.current_user_id', true), '')::uuid THEN
+       RAISE EXCEPTION 'transition_own_memory_source: source % does not belong to caller', p_source_id;
+   END IF;
+   ```
+   `p_actor_kind` accepteras BARA som `'founder'` eller `'system'` (funktionen reser ett
+   undantag för något annat värde) — aldrig `'admin'`/`'migration'`. `actor_id` skrivs ALDRIG
+   från ett parametervärde; funktionen sätter det internt till
+   `NULLIF(current_setting('app.current_user_id', true), '')::uuid`, samma värde den redan
+   verifierat äger källan — anropande kod kan alltså inte påstå att en annan användare/roll
+   utförde övergången, oavsett vad den skickar in. `p_actor_kind='system'` används av
+   `delete_source`s purge-anrop (en systemdriven följd av grundarens egen raderingsåtgärd,
+   fortfarande inom SAMMA autentiserade request/`app.current_user_id`) — `'founder'` av en
+   framtida direkt UI-åtgärd (t.ex. en "återställ"-knapp). Ingen av dem kan någonsin peka på
+   en annan ägares rad, eftersom ägarkontrollen ovan körs FÖRST, oavsett `p_actor_kind`.
+2. **`transition_memory_source_admin`** har full flexibilitet (godtycklig `source_id`, fritt
+   `actor_type` inklusive `'admin'`/`'migration'`, fritt `actor_id`) men `EXECUTE` beviljas
+   ALDRIG till `mainai_app` — bara till admin-/migrationsrollen, för genuint
+   administrativa/migrationsdrivna underhållsflöden som körs UTANFÖR normal
+   request-hantering. Normal apptrafik kan alltså strukturellt aldrig nå den flexibla
+   varianten, oavsett vad en enskild request skickar in.
+
+`erase_owner_memory(p_owner_id)` hade redan motsvarande självägarskapskontroll
+(`p_owner_id = current_setting('app.current_user_id')`) — den principen bekräftas här som
+det generella mönstret för VARJE `SECURITY DEFINER`-funktion `mainai_app` får `EXECUTE` på,
+inte ett engångsundantag.
+
+**`search_path` — inget schema i sökvägen, inte bara `pg_catalog` FÖRE `public`.** Ett fixerat
+`SET search_path = pg_catalog, public` skyddar mot att en malikös roll lurar funktionen att
+anropa en likadant namngiven funktion i ETT ANNAT schema tidigt i sökvägen — men skyddar INTE
+mot att någon (om `PUBLIC` någonsin har `CREATE` på schemat `public`) skapar en skuggande
+TABELL eller FUNKTION direkt i `public` självt, som sedan matchas av ett okvalificerat namn
+inuti funktionskroppen. Säkrare: `SET search_path = pg_catalog` (inget `public` alls) och
+fullt kvalificerade objektnamn inuti funktionerna (`public.memory_source_units`,
+`public.memory_source_lifecycle_events`, osv.) — då spelar det ingen roll vem som kan skapa
+vad i `public`, eftersom funktionen aldrig litar på ett okvalificerat namn för att hitta rätt
+objekt. `apply_runtime_privileges` (nedan) verifierar ÄVEN att `PUBLIC` och `mainai_app`
+saknar `CREATE` på schemat `public`, som ett andra, oberoende lager utöver
+schema-kvalificeringen — inte antingen/eller.
 
 **Privilegierna måste härdas om vid VARJE boot, inte bara i migrationen — verifierat mot
 `backend/docker-entrypoint.sh`.** Bootordningen idag är: `ensure_app_role.py` (om
@@ -565,13 +631,23 @@ den redan är korrekt, ändrar inget om så). Den:
 - `REVOKE UPDATE, DELETE` på de skyddade proveniens-tabellerna från `mainai_app` (samma lista
   triggrarna/RLS-policyerna redan känner till — en enda källa, inte en andra lista som kan
   glömmas bort när en ny tabell läggs till).
-- `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC` för `transition_memory_source`/
-  `erase_owner_memory`, `GRANT EXECUTE ... TO mainai_app`.
+- `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC` för BÅDA varianterna
+  (`transition_own_memory_source`/`transition_memory_source_admin`, motsvarande för
+  `erase_owner_memory`), `GRANT EXECUTE` till `mainai_app` ENDAST på de icke-admin-varianterna.
+- `REVOKE CREATE ON SCHEMA public FROM PUBLIC, mainai_app` — oberoende av
+  schema-kvalificeringen inuti funktionerna (se "search_path" ovan), ett andra lager.
 - Verifierar resultatet med riktiga behörighetsfrågor, inte bara antar att `REVOKE`/`GRANT`
-  lyckades: `has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')` måste vara
-  `false`, `has_function_privilege('mainai_app', 'transition_memory_source(...)', 'EXECUTE')`
-  måste vara `true`, och tabellernas ägare (`pg_tables.tableowner`) får aldrig vara
-  `mainai_app`.
+  lyckades:
+  - `has_table_privilege('mainai_app', 'memory_source_units', 'UPDATE')` måste vara `false`.
+  - `has_function_privilege('mainai_app', 'transition_own_memory_source(...)', 'EXECUTE')`
+    måste vara `true`.
+  - `has_function_privilege('mainai_app', 'transition_memory_source_admin(...)', 'EXECUTE')`
+    måste vara `false` — `mainai_app` får ALDRIG kunna anropa adminvarianten.
+  - `has_function_privilege('public', 'transition_own_memory_source(...)', 'EXECUTE')` (dvs.
+    `PUBLIC`) måste vara `false` för BÅDA varianterna.
+  - `has_schema_privilege('mainai_app', 'public', 'CREATE')` måste vara `false`.
+  - tabellernas/funktionernas ägare (`pg_tables.tableowner`/`pg_proc`s ägare) får aldrig vara
+    `mainai_app`.
 - Om NÅGON av dessa verifieringar misslyckas: avslutar med ett fel som får hela
   `docker-entrypoint.sh` att stoppa (`set -e`, samma disciplin som redan gäller `alembic
   upgrade head` — appen startar hellre inte alls än startar med fel behörighetsläge).
@@ -580,24 +656,30 @@ Det här skrivs in i den kanoniska designen HÄR, men implementeras (det faktisk
 kopplingen i `docker-entrypoint.sh`, motsvarigheten i `db-init/`) i S1A:s
 implementations-PR tillsammans med migrationen — inte i det här design-only-PR:et.
 
-#### Livscykel — `transition_memory_source()`, den enda skrivvägen
+#### Livscykel — `transition_own_memory_source()`, den enda skrivvägen för `mainai_app`
 
 ```
-transition_memory_source(source_id, target_status, reason, actor_type, actor_id)
+transition_own_memory_source(source_id, target_status, reason, actor_kind)
 ```
 
-`actor_type` är `founder | assistant_system | admin | migration` (INTE bara `system` — en
-tydlig lista över VEM/VAD som kan initiera en övergång). Funktionen verifierar atomiskt att
-övergången är laglig (`active → revoked`, `revoked → active` ["restore", kräver ett EGET
-`reason`, INTE det gamla `revocation_reason`], `active/revoked → purged`; `purged` är
-terminalt), uppdaterar `memory_source_units`, och skriver en rad i
-`memory_source_lifecycle_events` med `actor_type`/`actor_id` som EXPLICITA parametrar från
-anropande kod — INTE härledda automatiskt från `current_setting('app.current_user_id')`,
-eftersom en systemdriven åtgärd (t.ex. purge, se nedan) annars felaktigt skulle se ut som att
-grundaren personligen utförde den. `memory_source_lifecycle_events` är append-only
-(`mainai_app` saknar `UPDATE`/`DELETE`/direkt `INSERT` på den, se ovan) och skrivs bara inifrån
-`transition_memory_source()` — en rad i händelseloggen är därför en pålitlig revisionslogg,
-inte något godtycklig applikationskod kan förfalska.
+Funktionen (se "Databasbehörighetsmodell" ovan för den fullständiga ägar-/sökvägshärdningen)
+verifierar FÖRST att `memory_source_units.owner_id` för `source_id` matchar den autentiserade
+anroparens egen `app.current_user_id` — annars ett undantag, oavsett `target_status`. Sedan
+verifierar den atomiskt att övergången är laglig (`active → revoked`, `revoked → active`
+["restore", kräver ett EGET `reason`, INTE det gamla `revocation_reason`], `active/revoked →
+purged`; `purged` är terminalt), uppdaterar `memory_source_units`, och skriver en rad i
+`memory_source_lifecycle_events`. `actor_kind` accepteras BARA som `'founder'` (en direkt
+UI-åtgärd, framtida) eller `'system'` (en systemdriven följd av grundarens egen åtgärd, t.ex.
+`delete_source`s purge nedan — fortfarande inom samma autentiserade request) — funktionen
+själv sätter `actor_id` internt till samma redan-verifierade `app.current_user_id`, ALDRIG
+från ett parametervärde, så anropande kod kan inte påstå att någon annan utförde övergången.
+Genuint administrativa/migrationsdrivna övergångar (godtycklig `source_id`, `actor_type
+IN ('admin','migration')`, fritt `actor_id`) går genom den separata `transition_memory_
+source_admin()`, som `mainai_app` strukturellt aldrig kan anropa (`EXECUTE` aldrig beviljat,
+se ovan) — inte samma funktion med en bredare parameteruppsättning.
+`memory_source_lifecycle_events` är append-only (`mainai_app` saknar `UPDATE`/`DELETE`/direkt
+`INSERT` på den, se ovan) och skrivs bara inifrån dessa funktioner — en rad i händelseloggen
+är därför en pålitlig revisionslogg, inte något godtycklig applikationskod kan förfalska.
 
 **Två operationer, tydligt separerade och mappade till verklig kod:**
 - **Revoke** ("ta bort ur aktivt minne", en FRAMTIDA UI-åtgärd, inte byggd ännu): utesluter
@@ -608,7 +690,9 @@ inte något godtycklig applikationskod kan förfalska.
   `app/routers/documents.py`-rutten) — se "En gemensam purge-tjänst" nedan för varför båda
   måste anropa SAMMA implementation. En verklig permanent radering måste hantera VARJE
   innehållsbärande kopia, inte bara `memory_source_units`:
-  - `memory_source_units.content_text`/`content_hash` → `NULL` (via `transition_memory_source`).
+  - `memory_source_units.content_text`/`content_hash` → `NULL` (via `transition_own_memory_
+    source(..., 'purged', ..., 'system')` — `purge_source()` kör inom samma autentiserade
+    request som utlöste raderingen, så ägarkontrollen i funktionen håller normalt).
   - `knowledge_claims WHERE source_id = <dokumentet> AND owner_id = <ägaren>` → raderas
     (`claim_relationships` cascadar bort automatiskt, migration 0007). En claim är härledd,
     potentiellt känslig text i sig själv.
@@ -628,7 +712,7 @@ inte något godtycklig applikationskod kan förfalska.
     något S1A löser generellt. UI:t för "radera källa" måste vara ärligt om exakt detta: vad
     som raderas (text, claims, media) kontra vad som stannar kvar som metadata (titel,
     filnamn, URL, tidsstämplar).
-  - Ordning: (1) `transition_memory_source(..., 'purged', 'source_deleted', 'system', NULL)`
+  - Ordning: (1) `transition_own_memory_source(..., 'purged', 'source_deleted', 'system')`
     per matchande `memory_source_units`-rad, (2) radera matchande `knowledge_claims`, (3)
     nolla `Document.content_preview`/`media_blob`, (4) radera `DocumentChunk`-raderna (FK:ns
     `SET NULL` mot redan-purgade `document_source_units` passerar nu immutability-triggerns
@@ -704,7 +788,8 @@ faktiskt håller.
 #### S1A/S1B/S1C — S1 delas i tre migrationer
 
 - **S1A** (nästa steg): `memory_source_units`/`document_source_units`/
-  `memory_source_lifecycle_events`, `transition_memory_source()`, nullable
+  `memory_source_lifecycle_events`, `transition_own_memory_source()`/`transition_memory_
+  source_admin()`, nullable
   `KnowledgeClaim.memory_source_id`, deterministisk backfill, dual-write, kontoradering/export-
   integration. INGA meddelandetabeller, INGEN `knowledge_claim_evidence` (ingen aktiv writer
   förrän S1C/P4).
@@ -750,11 +835,15 @@ testmatrisen ska byggas OCH granskas i den PR:en):
 5. Den delade `purge_source()`-tjänsten och `delete_source`/`documents.py`s `delete_document`s
    omskrivning till att anropa den.
 6. `delete_account`/`export_account`-ändringarna (kontoradering/export).
-7. Testmatrisen, inklusive regressionstester för boot-härdningen specifikt: (a) första
-   provisionering+migration ger korrekta grants, (b) en ANDRA, vanlig boot får INTE tillbaka
-   `UPDATE`/`DELETE` på de skyddade tabellerna, (c) `mainai_app` kan inte köra en direkt
-   lifecycle-`UPDATE`/`DELETE`, (d) `mainai_app` KAN anropa `transition_memory_source`/
-   `erase_owner_memory`, (e) `PUBLIC` kan inte anropa dem.
+7. Testmatrisen, inklusive regressionstester för boot-härdningen och
+   ägar-/behörighetsuppdelningen specifikt: (a) första provisionering+migration ger korrekta
+   grants, (b) en ANDRA, vanlig boot får INTE tillbaka `UPDATE`/`DELETE` på de skyddade
+   tabellerna, (c) `mainai_app` kan inte köra en direkt lifecycle-`UPDATE`/`DELETE`, (d)
+   `mainai_app` KAN anropa `transition_own_memory_source`/`erase_owner_memory` på EGNA rader,
+   (e) `mainai_app` kan INTE anropa `transition_own_memory_source` på en ANNAN ägares
+   `source_id` (funktionen reser undantag), (f) `mainai_app` kan INTE anropa
+   `transition_memory_source_admin` överhuvudtaget (`EXECUTE` saknas), (g) `PUBLIC` kan inte
+   anropa någon av dem, (h) `mainai_app` saknar `CREATE` på schemat `public`.
 
 ### 4.9 `ConversationSegment` — analysfönster, versionshanterat
 
