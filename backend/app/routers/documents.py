@@ -11,7 +11,7 @@ from app.models.document import Document, DocumentSource
 from app.models.user import User
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
-from app.rag.vector_store import delete_document_chunks
+from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.schemas import DocumentOut
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
@@ -86,19 +86,34 @@ def _index_in_background(document_id: uuid.UUID, text_content: str) -> None:
 
 @router.delete("/{document_id}")
 def delete_document(document_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
-    document = db.get(Document, document_id)
-    if document is None:
+    """Thin wrapper delegating to the shared app/rag/source_purge.py::purge_source() service
+    — see that module's docstring. INTENTIONAL behavior change from the old hard `db.delete
+    (document)` (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8's "En gemensam purge-tjänst"):
+    migration 0019's `document_source_units.document_id` FK (no `ON DELETE` action) would
+    otherwise RESTRICT-block a hard delete outright once any memory_source_units row exists
+    for this document, and the old implementation's own previous docstring already flagged an
+    unresolved multi-uploader chunk-deletion gap besides (the old code's `db.get(Document,
+    document_id)` never even checked `uploaded_by`). This route now gets the same soft-delete
+    + blob-purge + memory-purge behavior `/api/library` already had, including
+    `purge_source()`'s own explicit ownership check (defense in depth alongside `documents`'
+    RLS policy, not a replacement for it — see app/rls.py) — not a second, diverging
+    implementation."""
+    try:
+        result = purge_source(db, document_id, user.id)
+    except SourcePurgeNotFoundError:
         raise HTTPException(status_code=404, detail="Dokumentet hittades inte.")
-    # Deletes only the chunks THIS session's RLS context (the caller) owns — see
-    # app/models/document_chunk.py. Documents themselves are shared/not RLS-protected (by
-    # design, see app/rls.py), so a user deleting a document they didn't upload will not be
-    # able to delete another uploader's chunks for it — those become orphaned (still
-    # referencing a document_id that's about to stop existing), not silently deleted on
-    # someone else's behalf. This is a real, currently-unresolved edge case worth a
-    # deliberate decision (e.g. restricting document deletion to the uploader, or an
-    # admin-only cleanup path) rather than a silent gap — flagged, not fixed here.
-    delete_document_chunks(db, document_id)
-    db.delete(document)
-    db.commit()
-    record_audit(db, user_id=user.id, action="document_delete", entity_type="document", entity_id=str(document_id), request=request)
+
+    record_audit(
+        db,
+        user_id=user.id,
+        action="source_purged",
+        entity_type="document",
+        entity_id=str(document_id),
+        detail=(
+            f"sources_purged={result.sources_purged} sources_already_purged={result.sources_already_purged} "
+            f"chunks_deleted={result.chunks_deleted} claims_preserved={result.claims_preserved} "
+            f"legacy_without_memory_source={result.legacy_without_memory_source} deletion_status={result.deletion_status.value}"
+        ),
+        request=request,
+    )
     return {"status": "deleted"}

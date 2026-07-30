@@ -9,6 +9,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
@@ -25,6 +26,7 @@ from app.models.user import User
 from app.providers.registry import resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.library_import import maybe_purge_blob
+from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.storage import get_storage
@@ -365,53 +367,37 @@ def get_source_media(source_id: uuid.UUID, db: Session = Depends(get_db), user: 
 def delete_source(
     source_id: uuid.UUID,
     payload: DeleteConfirmIn,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ):
-    """Soft delete (Document.deleted_at) + immediate hard purge of the chunks/embeddings
-    that make the source searchable at all — see app/rag/vector_store.py's search()/
-    hybrid_search(), which both exclude deleted_at IS NOT NULL sources, and this purge,
-    which means even a direct DocumentChunk query (bypassing those functions) would find
-    nothing. KnowledgeVersion/SourceRelationship rows are kept as revision history — see
-    docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's "Export och radering" section for why."""
-    document = _visible_document_query(db, user.id).filter(Document.id == source_id).first()
-    if document is None:
-        raise HTTPException(status_code=404, detail="Källan hittades inte.")
+    """Thin wrapper: validates the request (confirmation required) and delegates all actual
+    deletion/purge logic to the shared app/rag/source_purge.py::purge_source() service — see
+    that module's docstring for the full behavior (soft delete, chunk purge, S1A memory-source
+    purge, blob release). The still-live older `DELETE /api/documents/{id}`
+    (app/routers/documents.py) calls the exact same service — never a second, diverging
+    implementation."""
     if not payload.confirm:
         raise HTTPException(status_code=400, detail="Radering kräver explicit bekräftelse (confirm: true).")
 
-    db.query(DocumentChunk).filter_by(document_id=source_id).delete(synchronize_session=False)
-    document.deleted_at = datetime.utcnow()
-    document.chunk_count = 0
-    # DEL 5's "väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd": a source
-    # can be deleted while its own indexing is still mid-pipeline (received/original_storing/
-    # extracting/extracted/embedding, or the legacy pending/indexing). Rather than leaving
-    # the row frozen at a non-terminal IndexStatus forever once it's hidden by deleted_at,
-    # give it a definitive terminal status right here — `cancelled`, not `failed`: nothing
-    # actually went wrong, the founder just chose to stop it.
-    if document.status not in (IndexStatus.indexed, IndexStatus.failed, IndexStatus.cancelled):
-        document.status = IndexStatus.cancelled
-        document.error_message = "Källan togs bort innan bearbetningen slutfördes."
+    try:
+        result = purge_source(db, source_id, user.id)
+    except SourcePurgeNotFoundError:
+        raise HTTPException(status_code=404, detail="Källan hittades inte.")
 
-    # The worker checks cancellation between pipeline steps for the general (multi-file ZIP
-    # batch) case — but the common case, a single-file import, has its own job row that's
-    # ENTIRELY about this one document, so cancel it outright rather than waiting for the
-    # worker's own next per-file check to notice. A multi-file job keeps running for its
-    # other files; only this document's own status (above) reflects the cancellation there.
-    if document.import_job_id is not None:
-        job = db.get(ImportJob, document.import_job_id)
-        if job is not None and job.status in (ImportJobStatus.pending, ImportJobStatus.running) and job.progress_total <= 1:
-            job.status = ImportJobStatus.cancelled
-            job.completed_at = datetime.utcnow()
-            db.add(job)
-
-    db.add(document)
-    db.flush()  # deleted_at must be visible to maybe_purge_blob's "still referenced?" query below
-
-    storage = get_storage()
-    document.deletion_status = maybe_purge_blob(db, storage, document.storage_key)
-    db.add(document)
-    db.commit()
+    record_audit(
+        db,
+        user_id=user.id,
+        action="source_purged",
+        entity_type="document",
+        entity_id=str(source_id),
+        detail=(
+            f"sources_purged={result.sources_purged} sources_already_purged={result.sources_already_purged} "
+            f"chunks_deleted={result.chunks_deleted} claims_preserved={result.claims_preserved} "
+            f"legacy_without_memory_source={result.legacy_without_memory_source} deletion_status={result.deletion_status.value}"
+        ),
+        request=request,
+    )
     return {"status": "deleted"}
 
 
