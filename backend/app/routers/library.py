@@ -9,7 +9,6 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
-from app.audit import record_audit
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
@@ -25,6 +24,7 @@ from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
 from app.providers.verification import classify_provider_exception
+from app.rag.blob_references import acquire_storage_key_lock
 from app.rag.library_import import maybe_purge_blob
 from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.rag.trust import assess_claim_confidence
@@ -172,6 +172,28 @@ async def import_package(
         )
         if still_has_result:
             return existing
+
+    # Pass 22: storage.write_stream() above already made this blob's bytes durable on disk,
+    # but nothing in the database references it yet — a concurrent retry_source_blob_purge()
+    # could run its own reference check in exactly this window, see nothing pointing at this
+    # key, and physically delete it before the ImportJob row below is even created. Acquiring
+    # the SAME storage_key-scoped advisory lock retry_source_blob_purge() takes closes that
+    # race: whichever side gets here first fully commits or rolls back before the other's own
+    # check can run (see app/rag/blob_references.py's module docstring). The lock is
+    # transaction-scoped — released automatically at this request's eventual commit below (or
+    # at rollback, if the HTTPException just below fires).
+    acquire_storage_key_lock(db, blob.storage_key)
+    if not storage.exists(blob.storage_key):
+        # Lost the race: a concurrent purge deleted this exact blob in the window between
+        # write_stream() finishing and this lock being acquired. There is no safe way to
+        # recreate the original bytes here — the incoming stream has already been fully read
+        # and discarded (see LocalFilesystemStorage.write_stream) — so this fails closed
+        # rather than ever committing an ImportJob whose source_storage_key points at
+        # nothing. A retried upload re-runs write_stream() and gets a fresh, real blob.
+        raise HTTPException(
+            status_code=409,
+            detail="Uppladdningen kolliderade med en samtidig radering av en identisk fil. Försök igen.",
+        )
 
     job = ImportJob(
         owner_id=user.id,
@@ -374,30 +396,20 @@ def delete_source(
     """Thin wrapper: validates the request (confirmation required) and delegates all actual
     deletion/purge logic to the shared app/rag/source_purge.py::purge_source() service — see
     that module's docstring for the full behavior (soft delete, chunk purge, S1A memory-source
-    purge, blob release). The still-live older `DELETE /api/documents/{id}`
-    (app/routers/documents.py) calls the exact same service — never a second, diverging
-    implementation."""
+    purge, blob release, source_purged audit entry — all one atomic commit as of Pass 22). The
+    still-live older `DELETE /api/documents/{id}` (app/routers/documents.py) calls the exact
+    same service — never a second, diverging implementation. The router's only job re: the
+    audit trail is extracting a neutral IP string from the request — purge_source() itself
+    never imports fastapi."""
     if not payload.confirm:
         raise HTTPException(status_code=400, detail="Radering kräver explicit bekräftelse (confirm: true).")
 
+    client_ip = request.client.host if request.client else None
     try:
-        result = purge_source(db, source_id, user.id)
+        purge_source(db, source_id, user.id, client_ip=client_ip)
     except SourcePurgeNotFoundError:
         raise HTTPException(status_code=404, detail="Källan hittades inte.")
 
-    record_audit(
-        db,
-        user_id=user.id,
-        action="source_purged",
-        entity_type="document",
-        entity_id=str(source_id),
-        detail=(
-            f"sources_purged={result.sources_purged} sources_already_purged={result.sources_already_purged} "
-            f"chunks_deleted={result.chunks_deleted} claims_preserved={result.claims_preserved} "
-            f"legacy_without_memory_source={result.legacy_without_memory_source} deletion_status={result.deletion_status.value}"
-        ),
-        request=request,
-    )
     return {"status": "deleted"}
 
 

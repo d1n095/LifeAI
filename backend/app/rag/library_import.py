@@ -37,6 +37,7 @@ from app.models.document import (
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
+from app.rag.blob_references import storage_key_still_referenced
 from app.rag.claims import extract_claims_for_document
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
@@ -158,20 +159,23 @@ def _store_bytes(storage: StorageBackend, content: bytes, *, max_bytes: int):
 
 
 def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | None) -> DeletionStatus:
-    """Life Library durable-worker package (DEL 5): physically removes a blob ONLY when no
-    live (non-deleted) Document still points at it — content-addressing (see
-    app/storage/local_fs.py) means two different documents with byte-identical content
-    already share one physical file, so this reference count is a live DB query, not a
-    maintained counter that could drift. Returns the DeletionStatus to persist on the
-    caller's Document row: `purged` (removed, or nothing to remove), `pending` (still
-    referenced elsewhere — correct to leave the file in place), `failed` (a real I/O error,
-    surfaced distinctly rather than silently retried forever)."""
+    """Life Library durable-worker package (DEL 5): physically removes a blob ONLY when
+    nothing still needs it — content-addressing (see app/storage/local_fs.py) means two
+    different documents (or a pending ImportJob's raw upload) with byte-identical content
+    already share one physical file, so the reference check is a live DB query, not a
+    maintained counter that could drift. Pass 22: the reference check itself now lives in
+    app/rag/blob_references.py::storage_key_still_referenced() — a live Document.storage_key
+    row was always checked here, but a pending/running/resumable ImportJob.source_storage_key
+    was not, which let a source purge physically delete a blob a not-yet-processed import job
+    still needed (see that module's docstring for the full incident and the fix). Returns the
+    DeletionStatus to persist on the caller's Document row: `purged` (removed, or nothing to
+    remove), `pending` (still referenced elsewhere — correct to leave the file in place),
+    `failed` (a real I/O error, surfaced distinctly rather than silently retried forever).
+    Callers with a real storage_key must hold app.rag.blob_references.acquire_storage_key_lock
+    for this call — this function itself does no locking."""
     if storage_key is None:
         return DeletionStatus.purged
-    still_referenced = (
-        db.query(Document.id).filter(Document.storage_key == storage_key, Document.deleted_at.is_(None)).first() is not None
-    )
-    if still_referenced:
+    if storage_key_still_referenced(db, storage_key):
         return DeletionStatus.pending
     try:
         storage.delete(storage_key)

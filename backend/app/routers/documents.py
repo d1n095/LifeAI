@@ -97,23 +97,13 @@ def delete_document(document_id: uuid.UUID, request: Request, db: Session = Depe
     + blob-purge + memory-purge behavior `/api/library` already had, including
     `purge_source()`'s own explicit ownership check (defense in depth alongside `documents`'
     RLS policy, not a replacement for it — see app/rls.py) — not a second, diverging
-    implementation."""
+    implementation. As of Pass 22, the source_purged audit entry is written INSIDE
+    purge_source()'s own atomic transaction, not by this router — see that module's
+    docstring."""
+    client_ip = request.client.host if request.client else None
     try:
-        result = purge_source(db, document_id, user.id)
+        purge_source(db, document_id, user.id, client_ip=client_ip)
     except SourcePurgeNotFoundError:
         raise HTTPException(status_code=404, detail="Dokumentet hittades inte.")
 
-    record_audit(
-        db,
-        user_id=user.id,
-        action="source_purged",
-        entity_type="document",
-        entity_id=str(document_id),
-        detail=(
-            f"sources_purged={result.sources_purged} sources_already_purged={result.sources_already_purged} "
-            f"chunks_deleted={result.chunks_deleted} claims_preserved={result.claims_preserved} "
-            f"legacy_without_memory_source={result.legacy_without_memory_source} deletion_status={result.deletion_status.value}"
-        ),
-        request=request,
-    )
     return {"status": "deleted"}

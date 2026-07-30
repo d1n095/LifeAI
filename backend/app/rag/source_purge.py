@@ -69,6 +69,23 @@ failure is caught, logged, and never propagated as this call's own failure and n
 phase A back. `deletion_status` staying `pending`/`failed` in the DB is precisely what makes a
 LATER, independent `retry_source_blob_purge()` call (a future ops/admin trigger — not wired to
 an HTTP route in this PR, intentionally out of scope here) able to finish the job.
+
+Pass 22, two further founder-review fixes on top of the above:
+
+1. **The blob-reference check itself was incomplete.** `maybe_purge_blob()` (still the shared
+   function both phase B here and this module call) used to check only live `Document
+   .storage_key` rows — never `ImportJob.source_storage_key`, the RAW upload a pending/running/
+   resumable import job still needs to read. See app/rag/blob_references.py's module docstring
+   for the full incident and the now-canonical `storage_key_still_referenced()` policy both
+   this module and the upload endpoint (`POST /api/library/import`, app/routers/library.py)
+   share. That module also owns `acquire_storage_key_lock()` — a transaction-scoped Postgres
+   advisory lock `retry_source_blob_purge()` now holds around its own check-then-delete
+   sequence, closing a TOCTOU race against that same upload endpoint's blob-finalization step.
+2. **The `source_purged` audit entry moved INTO phase A's own transaction.** It used to be
+   written by the ROUTER, after this function had already returned and already committed, via
+   its own separate `record_audit()` commit. A failure in that second commit meant an HTTP
+   caller could see a 500 for a purge that had, in fact, already durably succeeded. See
+   `purge_source()`'s own docstring for the detail.
 """
 
 import logging
@@ -79,11 +96,13 @@ from datetime import datetime
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.models.document import DeletionStatus, Document, IndexStatus
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.memory_source_unit import DocumentSourceUnit, LifecycleStatus, MemorySourceUnit
+from app.rag.blob_references import acquire_storage_key_lock
 from app.rag.library_import import maybe_purge_blob
 from app.storage import get_storage
 
@@ -110,15 +129,30 @@ class PurgeSourceResult:
     deletion_status: DeletionStatus = DeletionStatus.none
 
 
-def purge_source(db: Session, document_id: uuid.UUID, owner_id: uuid.UUID) -> PurgeSourceResult:
+def purge_source(
+    db: Session, document_id: uuid.UUID, owner_id: uuid.UUID, *, client_ip: str | None = None
+) -> PurgeSourceResult:
     """Phase A + a best-effort phase B attempt. Phase A (genuinely atomic, DB-only):
     soft-deletes the Document row, hard-deletes its DocumentChunk rows, purges (never
-    hard-deletes) every associated MemorySourceUnit — either the whole DB change commits, or
-    none of it does, mirroring app/routers/account.py's delete_account's explicit
-    try/except/rollback discipline rather than relying on the request-scoped session's
-    implicit teardown. KnowledgeClaim/MemorySourceUnit/lifecycle-event rows all survive, see
-    module docstring. `storage.delete()` is NEVER called before phase A's commit — see module
-    docstring for why that used to be a real bug.
+    hard-deletes) every associated MemorySourceUnit, and writes the `source_purged` audit
+    entry — either the whole DB change (including the audit row) commits, or none of it does,
+    mirroring app/routers/account.py's delete_account's explicit try/except/rollback
+    discipline rather than relying on the request-scoped session's implicit teardown.
+    KnowledgeClaim/MemorySourceUnit/lifecycle-event rows all survive, see module docstring.
+    `storage.delete()` is NEVER called before phase A's commit — see module docstring for why
+    that used to be a real bug.
+
+    Pass 22: the audit write used to happen in the ROUTER, after this function already
+    returned and its own commit had already succeeded — record_audit() did a SEPARATE commit
+    of its own. A founder review caught the resulting gap: if that second, separate commit
+    failed, the HTTP caller got a 500 even though the document was already, durably purged: a
+    retry would then 404 ("already deleted") while the founder's client still believes the
+    first attempt failed outright. Writing the audit row here, inside phase A's own
+    transaction (see the `record_audit(..., commit=False)` call below), makes "the purge
+    happened" and "the purge is audited" a single atomic fact — never one without the other.
+    `client_ip` is a plain string, not a fastapi.Request — the router extracts it (see
+    app/routers/library.py / app/routers/documents.py) so this domain-layer module never
+    imports fastapi at all.
 
     Immediately after phase A commits, this makes ONE best-effort attempt at phase B
     (`retry_source_blob_purge`) — but a phase B failure here is caught, logged, and returned
@@ -210,6 +244,24 @@ def purge_source(db: Session, document_id: uuid.UUID, owner_id: uuid.UUID) -> Pu
         db.add(document)
         result.deletion_status = document.deletion_status
 
+        # commit=False: this row joins phase A's single commit below, not a separate one — a
+        # failure writing the audit entry rolls back the entire purge along with it, see the
+        # docstring's Pass 22 note.
+        record_audit(
+            db,
+            user_id=owner_id,
+            action="source_purged",
+            entity_type="document",
+            entity_id=str(document_id),
+            detail=(
+                f"sources_purged={result.sources_purged} sources_already_purged={result.sources_already_purged} "
+                f"chunks_deleted={result.chunks_deleted} claims_preserved={result.claims_preserved} "
+                f"legacy_without_memory_source={result.legacy_without_memory_source} deletion_status={result.deletion_status.value}"
+            ),
+            ip_address=client_ip,
+            commit=False,
+        )
+
         db.commit()
     except SourcePurgeNotFoundError:
         db.rollback()
@@ -253,6 +305,12 @@ def retry_source_blob_purge(db: Session, document_id: uuid.UUID, owner_id: uuid.
     `pending` or `failed`. Raises SourcePurgeNotFoundError if document_id doesn't resolve to a
     soft-deleted document owned by owner_id (never a live, not-yet-purged one — call
     purge_source() for that).
+
+    Pass 22: acquires app.rag.blob_references.acquire_storage_key_lock() for the document's
+    storage_key BEFORE checking whether anything still references it — the same lock POST
+    /api/library/import takes around its own blob-finalization + ImportJob-commit sequence,
+    closing the TOCTOU race a founder review found (see that module's docstring for the full
+    incident this closes).
     """
     document = (
         db.query(Document)
@@ -269,6 +327,11 @@ def retry_source_blob_purge(db: Session, document_id: uuid.UUID, owner_id: uuid.
         return document.deletion_status  # idempotent no-op — nothing left to do
 
     storage = get_storage()
+    if document.storage_key is not None:
+        # Held for the rest of this transaction (released at the db.commit() below) — see
+        # this function's docstring and app/rag/blob_references.py's module docstring for the
+        # race this closes.
+        acquire_storage_key_lock(db, document.storage_key)
     document.deletion_status = maybe_purge_blob(db, storage, document.storage_key)
     db.add(document)
     db.commit()
