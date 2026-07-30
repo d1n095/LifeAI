@@ -25,22 +25,83 @@ triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
 `app/rag/memory_source.py`s race-säkra find-or-create, den delade `backend/scripts/
 s1a_privilege_policy.py` (använd atomiskt av både `ensure_app_role.py` och
 `apply_runtime_privileges.py`), grundlagret verifierat genom FYRA granskningsrundor (Pass
-14–17). Pass 18 (nedan) lade till deterministisk backfill (`app/rag/memory_source_backfill.py`)
-och dual-write (`app/rag/claims.py`) ovanpå det godkända grundlagret. 87 tester totalt
-(`test_memory_source_units.py`: 39, `test_ensure_app_role.py`: 9, `test_memory_source_
-backfill.py`: 14, `test_claims.py`s S1A-del: 8 nya + 30 befintliga) — allt verifierat mot en
-riktig lokal Postgres 16+pgvector-instans. Hela backend-/security-/account-sviten: 625/626
-gröna (1 avsiktligt överhoppad kapacitetstest). CI-status på exakt head-SHA `7c60102`
-kontrolleras löpande (se Pass 18 för senaste kontrollerade läge).
+14–17). Pass 18 lade till deterministisk backfill (`app/rag/memory_source_backfill.py`) och
+dual-write (`app/rag/claims.py`) ovanpå det godkända grundlagret. Pass 19 (nedan) åtgärdade
+fyra integrationsproblem grundaren hittade i den granskningen: `library_import.py` saknade
+`db.rollback()` på ett extraction-fel, backfillen kunde fortfarande loopa oändligt med
+`batch_size<=0`, dual-write verifierade aldrig att en given `version_id` strukturellt hörde
+till dokumentet/ägaren, och produktionsrapportering för en riktig backfill-körning fanns bara
+som design (inte byggd). 96 tester totalt (`test_memory_source_units.py`: 39,
+`test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del:
+12 nya + 30 befintliga, `test_library_import.py`: +2) — allt verifierat mot en riktig lokal
+Postgres 16+pgvector-instans. Hela backend-/security-/account-sviten: 634/635 gröna (1
+avsiktligt överhoppad kapacitetstest). CI-status på exakt ny head-SHA kontrolleras löpande (se
+Pass 19 för senaste kontrollerade läge).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): delad `purge_source()`-tjänst
 (används av både `library.py`s `delete_source` och den fortfarande LIVE `DELETE /api/
-documents/{id}`), konto-export/erasure-integration, och produktionsdataprofilen (krävs före
-MERGE, inte före draft). Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK
-granskning av Pass 18:s ändringar (backfill + dual-write) innan arbetet fortsätter längre —
-grundaren var explicit att detta INTE är ett godkännande att gå vidare till purge_source/
-konto-integration/merge/deploy.
+documents/{id}`), konto-export/erasure-integration, produktionsdataprofilen (krävs före
+MERGE, inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna
+PR:s merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte
+bygger än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av
+Pass 19:s ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE
+är ett godkännande att gå vidare till purge_source/konto-integration/merge/deploy/
+produktionsbackfill.
+
+## Pass 19 (2026-07-29): PR #31 — fyra integrationsproblem i backfill/dual-write, alla åtgärdade
+
+Grundaren bekräftade att Pass 18:s backfill-/dual-write-kärna (fail-closed-exkludering,
+atomisk commit, `FOR UPDATE SKIP LOCKED`, MSU-skapande efter första parsade claimet,
+providerfel/tom-output skapar ingen MSU) i stort sett var korrekt, men hittade tre verkliga
+integrationsproblem plus ett fjärde krav innan produktionskörning:
+
+1. **`library_import.py` svalde dual-write-fel utan rollback.** Båda anropen till
+   `extract_claims_for_document` fångade `Exception` och gjorde bara `pass` — nu när
+   extraction även flushar MSU/DSU-rader kunde ett fel efter flush men före commit lämna
+   ocommittade writes i sessionen, som ett SENARE `db.commit()` i samma worker-session kunde
+   råka committa, eller lämna sessionen i `PendingRollback`-läge. Åtgärdat: båda call sites
+   (`_import_one_file` och `_resume_incomplete_document`) kör nu `db.rollback()` + loggar
+   innan de fortsätter — indexeringen (redan committad) påverkas inte, claim-extraktion
+   förblir best-effort. Två nya integrationstester driver HELA `run_import_job`-vägen (första
+   importen respektive återupptagen import via en dokumentrad fastnad i en
+   `RESUMABLE_INDEX_STATUSES`-status) med en fejkad `extract_claims_for_document` som
+   verkligen flushar en MSU/DSU och SEDAN kraschar — bevisar att inga MSU/DSU/claims
+   committas, att indexeringen består, att sessionen kan göra en ny fråga/commit efteråt, och
+   att importen ändå rapporteras `indexed`.
+2. **Backfillen kunde fortfarande loopa oändligt.** `_apply()`s `for _ in range(batch_size)`
+   blir en tom loop om `batch_size <= 0` — `exhausted` förblir `False` för evigt och den yttre
+   `while`-loopen (med `max_batches=None`, det gamla standardvärdet) fortsätter i all
+   oändlighet. Exakt samma felklass som redan kostat timmar en gång. Åtgärdat: `batch_size`
+   och `max_batches` valideras nu explicit (`ValueError` vid `<= 0`), och standardvärdet för
+   `max_batches` är nu ett ändligt `DEFAULT_MAX_BATCHES = 10` istället för `None` — en
+   anropare som verkligen vill köra klart måste uttryckligen skicka `max_batches=None`. Nya
+   tester bevisar både valideringen och att standardkörningen faktiskt är begränsad.
+3. **Dual-write verifierade aldrig `version_id`.** `extract_claims_for_document` skrev en
+   anropar-given `version_id` direkt på varje claim utan att kontrollera att versionen
+   strukturellt hör till samma dokument/ägare — `knowledge_versions` har bara en enkel FK mot
+   `documents.id`, ingen kompositkoppling som `memory_source_units` har. Åtgärdat: en ny
+   `ClaimExtractionIntegrityError` reser sig, INNAN något providersanrop eller någon skrivning,
+   om `document.uploaded_by != owner_id` eller om en given `version_id` inte har
+   `source_id == document.id` och `owner_id == owner_id`. Fyra nya tester: version från ett
+   annat dokument, version från en annan ägare, dokument som inte ägs av den givna
+   `owner_id`, och den positiva motsvarigheten (en verkligt matchande version accepteras) —
+   alla med en providermock som reser ett `AssertionError` om den någonsin anropas.
+4. **Beständig produktionsrapportering — dokumenterad, INTE byggd.** Grundaren krävde att en
+   riktig produktionskörning ska ha ett beständigt run-ID, status, räknare och
+   claim-specifika fel/retries innan den körs — vanliga processloggar räcker inte. Detta är nu
+   skrivet som ett explicit designavsnitt i `app/rag/memory_source_backfill.py`s
+   moduldocstring, som pekar mot den redan tidigare identifierade `memory_processing_jobs`-
+   planen (`app/routers/admin.py`s `trigger_claim_type_backfill`-docstring) istället för en ny
+   fristående mekanism. Medvetet INTE byggd i den här PR:n — en egen, separat avgränsad PR
+   krävs innan någon RIKTIG produktionsbackfill-körning, per isoleringsprincipen.
+
+Omverifiering: `test_memory_source_backfill.py` 17/17, `test_claims.py` 51/51,
+`test_library_import.py`s nya tester 2/2, hela backend-/security-/account-sviten 634 passed/1
+avsiktligt överhoppad/0 failed (264.86s), bare-DB migrations-round-trip mot en färsk
+`postgres`-superuser-databas ren. Tre separata, avgränsade commits (`64b7a39` library_import-
+rollback, `a8e6f11` backfill-guards+designnot, `2bd3bcf` dual-write version-integritet),
+pushade. CI-kontroll mot exakt ny head — se PR-beskrivningen för slutstatus.
 
 ## Pass 18 (2026-07-29): PR #31 — deterministisk backfill + dual-write, en verklig oändlig-loop-bugg hittad och fixad under egen testning
 
