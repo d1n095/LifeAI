@@ -14,11 +14,14 @@ import uuid
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.models.import_job import CLAIMABLE_IMPORT_JOB_STATUSES
+
 
 def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> tuple[uuid.UUID, uuid.UUID] | None:
-    """Atomically claims the oldest eligible job — a fresh `pending` row, OR a `running` row
-    whose lease has expired (an abandoned claim from a crashed/killed worker) — and returns
-    `(job_id, owner_id)`, or None if nothing is claimable right now."""
+    """Atomically claims the oldest eligible job — a fresh `pending` row (see
+    CLAIMABLE_IMPORT_JOB_STATUSES, app/models/import_job.py), OR a `running` row whose lease
+    has expired (an abandoned claim from a crashed/killed worker) — and returns `(job_id,
+    owner_id)`, or None if nothing is claimable right now."""
     row = db.execute(
         text("""
             UPDATE knowledge_import_jobs
@@ -29,7 +32,7 @@ def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> tuple[uui
                 started_at = COALESCE(started_at, now())
             WHERE id = (
                 SELECT id FROM knowledge_import_jobs
-                WHERE status = 'pending'
+                WHERE status = ANY(:claimable_statuses)
                    OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now())
                 ORDER BY created_at ASC
                 FOR UPDATE SKIP LOCKED
@@ -37,7 +40,11 @@ def claim_next_job(db: Session, worker_id: str, lease_seconds: int) -> tuple[uui
             )
             RETURNING id, owner_id
         """),
-        {"worker_id": worker_id, "lease_seconds": lease_seconds},
+        {
+            "worker_id": worker_id,
+            "lease_seconds": lease_seconds,
+            "claimable_statuses": [s.value for s in CLAIMABLE_IMPORT_JOB_STATUSES],
+        },
     ).first()
     db.commit()
     if row is None:

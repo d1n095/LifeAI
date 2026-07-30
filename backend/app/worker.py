@@ -39,7 +39,7 @@ from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
-from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
 from app.models.provider_verification import VerificationResult
 from app.providers.verification import ensure_verified
 from app.rag.library_import import run_import_job
@@ -156,8 +156,9 @@ class Worker:
         db.execute(
             text(
                 "UPDATE knowledge_import_jobs SET status = 'pending', completed_at = NULL, failure_reason = NULL "
-                "WHERE status = 'blocked' OR (status = 'partial' AND blocked_count > 0)"
-            )
+                "WHERE status = ANY(:requeue_statuses) OR (status = 'partial' AND blocked_count > 0)"
+            ),
+            {"requeue_statuses": [s.value for s in PROVIDER_REQUEUE_STATUSES]},
         )
         db.commit()
 
