@@ -26,28 +26,90 @@ triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
 s1a_privilege_policy.py` (använd atomiskt av både `ensure_app_role.py` och
 `apply_runtime_privileges.py`), grundlagret verifierat genom FYRA granskningsrundor (Pass
 14–17). Pass 18 lade till deterministisk backfill (`app/rag/memory_source_backfill.py`) och
-dual-write (`app/rag/claims.py`) ovanpå det godkända grundlagret. Pass 19 (nedan) åtgärdade
-fyra integrationsproblem grundaren hittade i den granskningen: `library_import.py` saknade
-`db.rollback()` på ett extraction-fel, backfillen kunde fortfarande loopa oändligt med
-`batch_size<=0`, dual-write verifierade aldrig att en given `version_id` strukturellt hörde
-till dokumentet/ägaren, och produktionsrapportering för en riktig backfill-körning fanns bara
-som design (inte byggd). 96 tester totalt (`test_memory_source_units.py`: 39,
+dual-write (`app/rag/claims.py`) ovanpå det godkända grundlagret. Pass 19 åtgärdade fyra
+integrationsproblem grundaren hittade i den granskningen (`library_import.py`s saknade
+rollback, backfillens `batch_size<=0`-oändlig-loop-risk, dual-writes ouverifierade
+`version_id`, produktionsrapportering dokumenterad men inte byggd) och rättade en felaktig
+"96 tester"-siffra i PR-beskrivningen. Pass 20 (nedan) lade till den delade
+`app/rag/source_purge.py::purge_source()`-tjänsten, nu använd av BÅDA `library.py`s
+`delete_source` och den tidigare separat implementerade `DELETE /api/documents/{id}`. 94
+dedikerade S1A-tester totalt över 6 filer (`test_memory_source_units.py`: 39,
 `test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del:
-12 nya + 30 befintliga, `test_library_import.py`: +2) — allt verifierat mot en riktig lokal
-Postgres 16+pgvector-instans. Hela backend-/security-/account-sviten: 634/635 gröna (1
-avsiktligt överhoppad kapacitetstest). CI-status på exakt ny head-SHA kontrolleras löpande (se
-Pass 19 för senaste kontrollerade läge).
+12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 15) — dessa delar filer med
+39+18 befintliga, orelaterade tester som förblir gröna (ingen regression). Hela
+backend-/security-/account-sviten: 649/650 gröna (1 avsiktligt överhoppad kapacitetstest). CI-
+status på exakt ny head-SHA kontrolleras löpande (se Pass 20 för senaste kontrollerade läge).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
-och §4.8:s "Status"-avsnitt för den fullständiga listan): delad `purge_source()`-tjänst
-(används av både `library.py`s `delete_source` och den fortfarande LIVE `DELETE /api/
-documents/{id}`), konto-export/erasure-integration, produktionsdataprofilen (krävs före
-MERGE, inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna
-PR:s merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte
-bygger än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av
-Pass 19:s ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE
-är ett godkännande att gå vidare till purge_source/konto-integration/merge/deploy/
-produktionsbackfill.
+och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
+(`erase_owner_memory()` finns redan i migrationen men `delete_account`/`export_account`
+anropar den inte än — `delete_account` skulle idag blockeras av S1A:s FK:er om något
+memory_source_units-objekt existerar för kontot), produktionsdataprofilen (krävs före MERGE,
+inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna PR:s
+merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte bygger
+än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 20:s
+ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
+godkännande att gå vidare till konto-integration/merge/deploy/produktionsbackfill.
+
+## Pass 20 (2026-07-30): PR #31 — delad purge_source()-tjänst för library.py och documents.py
+
+Grundaren godkände Pass 19:s tre kodfixar (rollback, argumentvakter, version-integritet) som
+korrekta, påpekade att den fjärde punkten (produktionsrapportering) skulle beskrivas som
+DESIGNAD, inte implementerad, och att PR-beskrivningens "96 tests" inte gick ihop med sin egen
+uppräkning. Efter att PR-beskrivningen rättats (se ovan) beställde grundaren nästa isolerade
+S1A-slice: en gemensam `purge_source()`-tjänst enligt §4.8:s "En gemensam purge-tjänst",
+använd av BÅDA raderingsvägarna.
+
+**`app/rag/source_purge.py::purge_source(db, document_id, owner_id)`** — en domänservice, inte
+routerlogik:
+- Verifierar dokumentägarskap explicit (`Document.uploaded_by == owner_id`), utöver RLS —
+  stänger en tidigare odokumenterad lucka i `documents.py`s gamla implementation, som aldrig
+  kontrollerade ägarskap alls.
+- Låser `Document`-raden (`FOR UPDATE`) — den verkliga serialiseringspunkten mot samtidiga
+  raderingsförsök av samma källa.
+- För varje `document_source_units`-rad som hör till dokumentet: en `active`/`revoked`
+  `memory_source_units`-rad övergår till `purged` via `transition_own_memory_source()` (aldrig
+  en direkt `UPDATE`), en redan-`purged` rad hoppas över (idempotent no-op — ett andra
+  `purged -> purged`-anrop skulle annars få funktionen att resa "illegal transition").
+- FÖRST DÄREFTER hårdraderas `DocumentChunk`-raderna — ordningen är inte godtycklig:
+  `trg_dsu_guard_update` (migration 0019) tillåter bara att `document_source_units.chunk_id`
+  nollas (vilket `DocumentChunk`s `ON DELETE SET NULL` utlöser) när förälderns
+  `lifecycle_status` INTE längre är `active`. Ett direkt bevis på detta lades till som ett eget
+  test: att radera chunken FÖRE purge av en `active` förälder avvisas av triggern med "chunk_id
+  cannot be cleared while parent is active".
+- `KnowledgeClaim`/`memory_source_units`/`document_source_units`/
+  `memory_source_lifecycle_events`-rader raderas ALDRIG av den här funktionen — en
+  medveten, grundarbekräftad avvikelse från §4.8:s ursprungliga per-dokument-purge-steg (som
+  skulle ha raderat claims), specifikt för källradering (till skillnad från full
+  kontoradering, som förblir `erase_owner_memory()`s ansvar, orört här).
+- Ett dokument utan några `document_source_units`-rader alls (aldrig backfillat/dual-writat)
+  hanteras via `legacy_without_memory_source` i resultatet — ingen source unit fabriceras.
+- Atomisk: explicit `try/except/rollback` (samma disciplin som `account.py`s `delete_account`),
+  återanvänder befintlig `maybe_purge_blob()`/referensräkningslogik oförändrad.
+
+**Router-omskrivning**: `library.py`s `delete_source` är nu en tunn wrapper (validerar
+`confirm`, anropar tjänsten, loggar audit). `documents.py`s `delete_document` byter från ett
+hårt `db.delete(document)` till samma tjänst — en AVSIKTLIG beteendeförändring: migration
+0019:s `document_source_units.document_id`-FK (ingen `ON DELETE`-åtgärd) skulle annars
+RESTRICT-blockera den gamla hårda raderingen så fort ett memory_source_units-objekt finns för
+dokumentet. Ingen dubblerad cleanup-kod kvar i någon router.
+
+**15 nya tester** (`test_source_purge.py`) täcker exakt grundarens 15-punktslista: aktiv/
+revoked/redan-purgad källa, flera claims som delar en källa, flera chunks+en document_record-
+källa i samma dokument, claims+lifecycle-events överlever, content/hash/version nollas,
+chunk_id nollas först efter purge (plus den omvända regressionen: fel ordning avvisas av
+triggern), cross-owner nekas, dokument utan memory source (legacy), ett simulerat DB-fel som
+rullar tillbaka allt, en blob som delas mellan två dokument som INTE raderas, en
+lagringsfel-simulering som lämnar en återförsökbar `deletion_status`, och ett HTTP-nivå-test
+som bevisar att båda `/api/library`- och `/api/documents`-rutterna producerar identiska utfall
+via samma tjänst.
+
+Omverifiering: `test_source_purge.py` 15/15, ingen regression i `test_library_routes.py`
+(31/31) eller övriga S1A-filer (173/173 tillsammans), hela backend-/security-/account-sviten
+649 passed/1 avsiktligt överhoppad/0 failed (258.73s), bare-DB migrations-round-trip mot en
+färsk `postgres`-superuser-databas ren (ingen ny migration i detta pass — ren applikationskod).
+Två separata, avgränsade commits (`007a136` tjänst+routrar, `8352fcf` tester), pushade. CI-
+kontroll mot exakt ny head — se PR-beskrivningen för slutstatus.
 
 ## Pass 19 (2026-07-29): PR #31 — fyra integrationsproblem i backfill/dual-write, alla åtgärdade
 
