@@ -152,9 +152,13 @@ Omverifiering: riktat regressionssvep (`test_source_purge.py`+`test_ensure_app_r
 avsiktligt överhoppad/0 failed (210.04s, exakt +5 över Pass 23:s 677), bare-DB-migrations-
 round-trip (`upgrade head` → `downgrade -1` → `upgrade head`, genom migration 0020) mot en
 färsk `postgres`-superuser-databas (`lifeos_bare_check_p24`, ingen `mainai_app`-roll) ren.
-Två separata, avgränsade commits (privilegiepolicy/mixed-version-boot-window-fix +
-schema-kvalificering; tester), pushade som `6746da3`. CI-verifiering på exakt denna head-SHA
-pågår — se nästa uppdatering av detta register eller PR #31:s beskrivning för resultatet.
+Tre separata, avgränsade commits (privilegiepolicy/mixed-version-boot-window-fix +
+schema-kvalificering; tester; detta registerinlägg), pushade — kod-/testhead `6746da3`,
+docs-head `794aea7`. **CI verifierad grön ("All required checks passed", `conclusion:
+success`) på exakt head-SHA `794aea7` direkt via GitHubs check-runs-API** — alla obligatoriska
+jobb (backend unit/integration, konto-livscykel, RLS/session-security, E2E×2,
+migrationskontroll, frontend) `success`. PR #31:s beskrivning uppdaterad till att matcha
+(Round 11/Pass 24, korrigerade testantal 127+1=128, ny "Verified, not assumed"-sektion).
 Grundaren var explicit: INGEN konto-integration, produktionsprofil, produktionsbackfill,
 merge eller deploy förrän en fräsch granskning godkänner detta.
 
