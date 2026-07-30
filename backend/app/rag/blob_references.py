@@ -1,7 +1,8 @@
-"""Canonical blob-reference policy (Pass 22): the ONE place that decides whether a
-content-addressed storage_key is still needed by anything in the system, and the ONE place
-that serializes a check-then-act sequence against it. Shared by app/routers/library.py's
-upload-finalization path and app/rag/source_purge.py's retry_source_blob_purge() (phase B).
+"""Canonical blob-reference policy (Pass 22, cross-owner-hardened in Pass 23): the ONE place
+that decides whether a content-addressed storage_key is still needed by anything in the
+system, and the ONE place that serializes a check-then-act sequence against it. Shared by
+app/routers/library.py's upload-finalization path and app/rag/source_purge.py's
+retry_source_blob_purge() (phase B).
 
 Why this had to become a shared module rather than staying app/rag/library_import.py's
 `maybe_purge_blob()`-local inline query: that query only ever looked at live
@@ -35,6 +36,29 @@ A job that's `cancelled`, or `completed`/`partial`/`failed` with no remaining li
 a resumable status, matches none of the above -- its blob reference is correctly treated as
 expired, exactly like an already-purged Document's is.
 
+Pass 23, a blocking cross-owner gap a founder review caught: `documents` and
+`knowledge_import_jobs` both have `FORCE ROW LEVEL SECURITY` (app/rls.py) with owner-scoped
+policies. Content-addressed blob storage is GLOBAL -- two different owners' byte-identical
+uploads share the exact same storage_key. `storage_key_still_referenced()` USED to run
+ordinary ORM queries against those two tables directly, inside the calling owner's own
+RLS-scoped session -- which structurally CANNOT see a different owner's live Document or
+pending/running/blocked ImportJob referencing the same key. Owner A deleting a document could
+therefore delete a blob owner B's still-pending import job depended on, with RLS itself being
+the reason the danger was invisible to the very check meant to prevent it.
+
+The fix is NOT `SET row_security = off` in this session -- that setting does not grant a
+non-exempt role anything RLS would otherwise deny (see migration 0019's module docstring,
+which already established this for the same reason). `storage_key_still_referenced()` now
+delegates entirely to `storage_key_still_referenced_global(text) RETURNS boolean` (migration
+0020) -- a narrow, SECURITY DEFINER SQL function owned by the admin/migration role (which
+genuinely has BYPASSRLS, externally verified by apply_runtime_privileges.py, never assumed),
+`SET search_path = pg_catalog`, every relation `public.`-qualified, granted EXECUTE ONLY to
+mainai_app (never PUBLIC) via backend/scripts/s1a_privilege_policy.py. It implements the
+EXACT SAME policy described above, just able to see every owner's rows -- and returns nothing
+but a boolean: no owner id, job id, or document detail ever crosses back into the calling
+(possibly cross-owner-relative-to-that-data) request. See that migration's module docstring
+for the full incident writeup.
+
 Locking: `acquire_storage_key_lock()` is a Postgres advisory lock scoped to the CALLING
 session's current transaction (`pg_advisory_xact_lock` -- released automatically at that
 transaction's next commit or rollback, never leaked across a crash the way a Redis lease with
@@ -47,20 +71,17 @@ that exact window, see nothing pointing at the just-written key yet, and physica
 before the new ImportJob row is created -- leaving that row committed with a
 source_storage_key pointing at nothing. Both call sites take the SAME lock (same hashed key)
 before doing their own check-then-act sequence, so whichever side gets there first fully
-commits or rolls back before the other's check can even run.
+commits or rolls back before the other's check can even run. Schema-qualified
+(`pg_catalog.pg_advisory_xact_lock`/`pg_catalog.hashtextextended`) for the same reason every
+relation reference inside a `SET search_path = pg_catalog` function is -- this call itself
+runs on an ordinary mainai_app session, not inside a pinned-search_path function, but staying
+schema-qualified here keeps the convention consistent and removes any dependency on the
+calling session's own search_path ever including pg_catalog implicitly (it always does, but
+never by an assumption this code relies on).
 """
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
-
-from app.models.document import RESUMABLE_INDEX_STATUSES, Document
-from app.models.import_job import ImportJob, ImportJobStatus
-
-# Statuses where the job's OWN status already means "still runnable" -- no need to look at
-# its documents at all. `blocked` is included here (not just partial+blocked_count) because a
-# job that never had ANY successes/failures yet -- 100% blocked -- rolls up to `blocked`
-# itself, not `partial` (see library_import.py's status-rollup branch).
-_ALWAYS_RUNNABLE_STATUSES = (ImportJobStatus.pending, ImportJobStatus.running, ImportJobStatus.blocked)
 
 
 def acquire_storage_key_lock(db: Session, storage_key: str) -> None:
@@ -71,41 +92,23 @@ def acquire_storage_key_lock(db: Session, storage_key: str) -> None:
     accidental collision between two different storage_keys astronomically unlikely; even if
     one ever happened, the effect is only unnecessary serialization between two unrelated
     keys, never an incorrect result."""
-    db.execute(sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": storage_key})
+    db.execute(
+        sa_text("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:key, 0))"),
+        {"key": storage_key},
+    )
 
 
 def storage_key_still_referenced(db: Session, storage_key: str) -> bool:
-    """True if `storage_key` is still needed by ANYTHING -- a live Document.storage_key row,
-    or an ImportJob.source_storage_key the worker could still read from (see module
-    docstring). Callers must hold acquire_storage_key_lock(db, storage_key) for the duration
-    of their own check-then-act sequence around this; this function itself does no locking."""
-    if (
-        db.query(Document.id).filter(Document.storage_key == storage_key, Document.deleted_at.is_(None)).first()
-        is not None
-    ):
-        return True
-
-    jobs = db.query(ImportJob).filter(ImportJob.source_storage_key == storage_key).all()
-    for job in jobs:
-        if job.status in _ALWAYS_RUNNABLE_STATUSES:
-            return True
-        if job.status == ImportJobStatus.partial and job.blocked_count > 0:
-            return True
-        # Terminal-looking but still resurrectable: _reconcile_orphaned_documents (app/
-        # worker.py) resets THIS job back to pending if any of its OWN live documents is
-        # still stuck mid-pipeline -- checked directly against the real condition it uses,
-        # not inferred from the job's status alone.
-        stuck_document_exists = (
-            db.query(Document.id)
-            .filter(
-                Document.import_job_id == job.id,
-                Document.deleted_at.is_(None),
-                Document.status.in_(RESUMABLE_INDEX_STATUSES),
-            )
-            .first()
-            is not None
-        )
-        if stuck_document_exists:
-            return True
-
-    return False
+    """True if `storage_key` is still needed by ANYTHING, across ALL owners -- a live
+    Document.storage_key row, or an ImportJob.source_storage_key the worker could still read
+    from (see module docstring). Delegates entirely to the database's own
+    storage_key_still_referenced_global() (migration 0020, SECURITY DEFINER) rather than
+    querying documents/knowledge_import_jobs directly -- this session's own RLS scope can only
+    ever see the calling owner's rows, which is exactly the gap that function exists to close.
+    Callers must hold acquire_storage_key_lock(db, storage_key) for the duration of their own
+    check-then-act sequence around this; this function itself does no locking."""
+    result = db.execute(
+        sa_text("SELECT storage_key_still_referenced_global(:key)"),
+        {"key": storage_key},
+    ).scalar()
+    return bool(result)

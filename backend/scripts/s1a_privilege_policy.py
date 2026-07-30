@@ -39,11 +39,24 @@ _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFEREN
 # don't need BYPASSRLS; the two admin/migration functions have no such check by design and
 # MUST be owned by a role with real BYPASSRLS (or superuser), since `SET row_security = off`
 # does not grant anything RLS itself would deny.
+#
+# storage_key_still_referenced_global (migration 0020, Pass 23): the one entry in this list
+# that is BOTH granted to mainai_app AND requires BYPASSRLS — deliberately, not a mistake.
+# Unlike the two owner-scoped functions above, it has no per-caller ownership check (it must
+# see EVERY owner's live Document/ImportJob rows to correctly answer whether a
+# content-addressed, globally-shared blob is still referenced by anyone at all — see
+# app/rag/blob_references.py's module docstring for the cross-owner RLS gap this closes).
+# Unlike the two admin-only functions above, mainai_app DOES need EXECUTE on it: it's called
+# from an ordinary owner-scoped request (source purge, blob upload), not an admin-only path.
+# It stays safe to expose to mainai_app anyway because it returns nothing but a boolean —
+# no owner id, job id, or document detail ever crosses back into the calling (possibly
+# unprivileged-relative-to-that-data) request.
 _FUNCTIONS = [
     ("transition_own_memory_source", True, False),
     ("transition_memory_source_admin", False, True),
     ("erase_owner_memory", True, False),
     ("erase_owner_memory_admin", False, True),
+    ("storage_key_still_referenced_global", True, True),
 ]
 
 
