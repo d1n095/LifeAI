@@ -32,13 +32,16 @@ rollback, backfillens `batch_size<=0`-oändlig-loop-risk, dual-writes ouverifier
 `version_id`, produktionsrapportering dokumenterad men inte byggd) och rättade en felaktig
 "96 tester"-siffra i PR-beskrivningen. Pass 20 (nedan) lade till den delade
 `app/rag/source_purge.py::purge_source()`-tjänsten, nu använd av BÅDA `library.py`s
-`delete_source` och den tidigare separat implementerade `DELETE /api/documents/{id}`. 94
-dedikerade S1A-tester totalt över 6 filer (`test_memory_source_units.py`: 39,
-`test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del:
-12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 15) — dessa delar filer med
+`delete_source` och den tidigare separat implementerade `DELETE /api/documents/{id}`. Pass 21
+(nedan) rättade en verklig bugg Pass 20:s egen "atomisk"-beskrivning inte höll för: bloben
+raderades fysiskt FÖRE DB-commit, så ett commitfel efter en lyckad filradering skulle
+återuppliva ett levande dokument vars originalfil redan var permanent borta. 97 dedikerade
+S1A-tester totalt över 6 filer (`test_memory_source_units.py`: 39, `test_ensure_app_role.py`:
+9, `test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del: 12,
+`test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 18) — dessa delar filer med
 39+18 befintliga, orelaterade tester som förblir gröna (ingen regression). Hela
-backend-/security-/account-sviten: 649/650 gröna (1 avsiktligt överhoppad kapacitetstest). CI-
-status på exakt ny head-SHA kontrolleras löpande (se Pass 20 för senaste kontrollerade läge).
+backend-/security-/account-sviten: 652/653 gröna (1 avsiktligt överhoppad kapacitetstest). CI-
+status på exakt ny head-SHA kontrolleras löpande (se Pass 21 för senaste kontrollerade läge).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -47,9 +50,63 @@ anropar den inte än — `delete_account` skulle idag blockeras av S1A:s FK:er o
 memory_source_units-objekt existerar för kontot), produktionsdataprofilen (krävs före MERGE,
 inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna PR:s
 merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte bygger
-än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 20:s
+än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 21:s
 ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
 godkännande att gå vidare till konto-integration/merge/deploy/produktionsbackfill.
+
+## Pass 21 (2026-07-30): PR #31 — purge_source() delad i atomisk DB-fas + återförsökbar blob-fas
+
+Grundaren bekräftade att den gemensamma raderingsvägen och lifecycle-ordningen i Pass 20 var
+korrekt implementerad, men hittade en verklig blockerare: `purge_source()`s egen docstring
+påstod att HELA operationen (databas + filsystem) var atomisk, vilket aldrig stämde.
+`LocalFilesystemStorage.delete()` gör en riktig, omedelbar `unlink()` UTAN ångra-möjlighet,
+men kördes FÖRE `purge_source()`s `db.commit()`. Felscenario: (1) filen tas bort från disk,
+(2) `db.commit()` misslyckas, (3) `db.rollback()` återställer dokumentet/chunks/aktiva MSU-
+rader, (4) dokumentet är åter levande i databasen men originalfilen är permanent borta.
+Grundaren påpekade även att statusen `failed` beskrevs som återförsökbar men att
+`purge_source()` bara accepterade dokument med `deleted_at IS NULL` — ett nytt anrop på ett
+redan (misslyckat) raderat dokument gav bara `SourcePurgeNotFoundError`/404, ingen verklig
+återförsöksväg fanns.
+
+**Löst genom att dela operationen i två tydligt separata faser:**
+- **Fas A — `purge_source()`, verkligen atomisk, endast databas.** Låser dokumentraden,
+  purgar varje `MemorySourceUnit`, hårdraderar `DocumentChunk`-raderna, soft-deletar
+  dokumentet, sätter `deletion_status='pending'` (eller `'purged'` direkt om dokumentet
+  saknar `storage_key` — inget att purga) — committar, eller vid fel: rullar tillbaka till ett
+  läge där INGENTING ändrats och originalbloben fortfarande ligger kvar exakt där den var.
+  `storage.delete()` anropas ALDRIG någonstans i den här fasen.
+- **Fas B — `retry_source_blob_purge()`, ny, idempotent, oberoende återförsökbar funktion.**
+  Körs bara mot ett dokument fas A REDAN committat som soft-deletat. Kontrollerar på nytt om
+  någon annan levande dokumentrad delar samma innehållsadresserade `storage_key` (samma
+  `maybe_purge_blob`-logik som tidigare kördes inline i fas A), och antingen lämnar
+  `pending` (fortfarande delad) eller anropar `storage.delete()` och committar
+  `purged`/`failed` i en egen, separat transaktion. Säker att anropa hur många gånger som
+  helst: `LocalFilesystemStorage.delete()` använder `Path.unlink(missing_ok=True)`, så en
+  omradering av en redan borttagen fil är ett no-op, inte ett fel.
+
+`purge_source()` gör fortfarande ETT direkt bästa-försök på fas B omedelbart efter att fas A
+committat (den vanliga vägen purgar alltså fortfarande bloben i samma request) — men ett
+fas B-fel fångas, loggas, och rullar ALDRIG tillbaka den redan beständiga fas A-purgen.
+`retry_source_blob_purge()` är inte kopplad till någon ny HTTP-rutt i den här PR:n
+(medvetet avgränsat, en framtida ops/admin-trigger).
+
+**3 nya tester** bevisar det exakta felscenariot grundaren beskrev: (1) ett DB-commitfel under
+fas A lämnar bloben orörd OCH bevisar att `storage.delete()` aldrig ens anropades (spårat via
+en anropsräknande patch, inte bara "filen finns kvar"), (2) en lyckad fas A + ett lagringsfel
+lämnar `deletion_status='failed'` med DB-purgen intakt, och en efterföljande
+`retry_source_blob_purge()` lyckas, (3) den exakta racen — fysisk radering lyckas men
+statuscommitten misslyckas — reproducerad direkt: filen är bevisligen borta innan den
+simulerade commitfelet, ett nytt återförsök felar inte på den redan saknade filen och når
+`purged`. Det befintliga delad-blob-testet uppgraderades till att använda en riktig fil på
+disk och verifiera både överlevnad (fortfarande refererad) och faktisk radering (via
+`get_storage().exists()`) efter att den sista levande referensen försvunnit.
+
+Omverifiering: `test_source_purge.py` 18/18, ingen regression i övriga S1A-filer eller
+`test_storage_local_fs.py` (186 tester tillsammans), hela backend-/security-/account-sviten
+652 passed/1 avsiktligt överhoppad/0 failed (211.68s), bare-DB migrations-round-trip mot en
+färsk `postgres`-superuser-databas ren (ingen ny migration — ren applikationskod). Två
+separata, avgränsade commits (`985da3b` tjänst, `027aa37` tester), pushade. CI-kontroll mot
+exakt ny head — se PR-beskrivningen för slutstatus.
 
 ## Pass 20 (2026-07-30): PR #31 — delad purge_source()-tjänst för library.py och documents.py
 
