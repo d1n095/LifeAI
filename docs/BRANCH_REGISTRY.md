@@ -35,13 +35,21 @@ rollback, backfillens `batch_size<=0`-oändlig-loop-risk, dual-writes ouverifier
 `delete_source` och den tidigare separat implementerade `DELETE /api/documents/{id}`. Pass 21
 (nedan) rättade en verklig bugg Pass 20:s egen "atomisk"-beskrivning inte höll för: bloben
 raderades fysiskt FÖRE DB-commit, så ett commitfel efter en lyckad filradering skulle
-återuppliva ett levande dokument vars originalfil redan var permanent borta. 97 dedikerade
-S1A-tester totalt över 6 filer (`test_memory_source_units.py`: 39, `test_ensure_app_role.py`:
-9, `test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del: 12,
-`test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 18) — dessa delar filer med
-39+18 befintliga, orelaterade tester som förblir gröna (ingen regression). Hela
-backend-/security-/account-sviten: 652/653 gröna (1 avsiktligt överhoppad kapacitetstest). CI
-verifierad grön på exakt head-SHA `a388507` (se Pass 21 för detaljer).
+återuppliva ett levande dokument vars originalfil redan var permanent borta. Pass 22 (nedan)
+åtgärdade två ytterligare integrationsluckor grundaren hittade i blob-/audit-hanteringen:
+`maybe_purge_blob()` kände bara till levande `Document.storage_key`-rader, aldrig
+`ImportJob.source_storage_key` (en väntande/körande/återupptagningsbar importjobb-blob kunde
+raderas av en orelaterad källradering), plus ett TOCTOU-race mellan uppladdning och
+blob-purge; och `source_purged`-revisionsposten skrevs i en SEPARAT commit i routern efter att
+`purge_source()` redan committat, vilket kunde ge ett 500-svar för en radering som redan
+lyckats. 111 dedikerade S1A-tester totalt över 6 filer + 1 routertest
+(`test_memory_source_units.py`: 39, `test_ensure_app_role.py`: 9,
+`test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del: 12,
+`test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 31,
+`test_library_routes.py`s Pass 22-test: 1) — dessa delar filer med 39+18+~200 befintliga,
+orelaterade tester som förblir gröna (ingen regression). Hela backend-/security-/account-sviten:
+666/667 gröna (1 avsiktligt överhoppad kapacitetstest). CI-kontroll mot exakt ny head `c76af35`
+pågår (se Pass 22 för detaljer).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -50,9 +58,85 @@ anropar den inte än — `delete_account` skulle idag blockeras av S1A:s FK:er o
 memory_source_units-objekt existerar för kontot), produktionsdataprofilen (krävs före MERGE,
 inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna PR:s
 merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte bygger
-än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 21:s
+än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 22:s
 ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
 godkännande att gå vidare till konto-integration/merge/deploy/produktionsbackfill.
+
+## Pass 22 (2026-07-30): PR #31 — ImportJob som blob-referens, upload/purge-race, audit-atomicitet
+
+Grundaren bekräftade att Pass 21:s tvåfasfix var korrekt och att testantalet 97 nu gick ihop
+(39+9+17+12+2+18=97), men fann två kvarstående, verkliga integrationsluckor innan
+konto-integration kunde påbörjas:
+
+**1. `ImportJob.source_storage_key` var inte en känd blob-referens.** `maybe_purge_blob()`
+(anropad av `retry_source_blob_purge()`) kontrollerade bara levande `Document.storage_key`-
+rader. Men den råa uppladdningen ett `ImportJob` håller kvar durabelt (`app/worker.py`s
+pollningsloop öppnar den själv, inte requesten som skrev den) delar samma content-adresserade
+`storage_key` som en identisk enskild fil. Scenario: en ny import lagrar sin råfil och väntar
+på workern; ett äldre, innehållsidentiskt dokument raderas; blobpurgen ser inget levande
+`Document` och raderar filen — trots att den väntande importjobbets `source_storage_key`
+fortfarande pekar på den.
+
+**Löst genom `app/rag/blob_references.py`** (ny, kanonisk, delad av både uppladdningsvägen och
+fas B): `storage_key_still_referenced()` kontrollerar nu även `ImportJob`-status mot de
+faktiska återupptagningsvägarna i `app/worker.py` — inte gissat:
+- `pending`/`running`/`blocked` blockerar alltid,
+- `partial` med `blocked_count > 0` blockerar (samma fråga som `_requeue_blocked_jobs`
+  använder, inklusive 2026-07-28-incidenten den dokumenterar),
+- ett terminalt jobb (`completed`/`partial`/`failed`) blockerar OCKÅ om någon av dess EGNA
+  levande `Document`-rader fortfarande sitter fast i `RESUMABLE_INDEX_STATUSES` — exakt samma
+  villkor `_reconcile_orphaned_documents` använder för att återställa jobbet till `pending`,
+  eftersom en enda ZIP-import kan producera flera dokument och radering av ett redan färdigt
+  syskon inte får förstöra bloben ett annat, fortfarande fastkört syskon behöver.
+- ett `cancelled`-jobb, eller ett terminalt jobb utan något fastkört dokument, blockerar inte.
+
+**2. TOCTOU-race mellan uppladdning och purge.** `POST /api/library/import` skriver bloben
+fysiskt till disk INNAN någon databasrad refererar den (content-addressing gör att nyckeln
+inte ens är känd förrän bytes är hashade) — ett samtidigt `retry_source_blob_purge()`-anrop
+kunde köra sin referenskontroll och radera filen i exakt det fönstret, innan `ImportJob`-raden
+committats.
+
+**Löst genom `acquire_storage_key_lock()`** (samma modul): ett transaktionsbundet Postgres
+advisory lock (`pg_advisory_xact_lock`, inte Redis/threading — fungerar mellan processer,
+frigörs automatiskt vid commit/rollback). Både uppladdningsvägen (efter `write_stream()`, före
+`ImportJob`-skapandet) och `retry_source_blob_purge()` tar samma lås före sin egen
+kontrollera-sedan-agera-sekvens — den som kommer först hinner committa eller rulla tillbaka
+helt innan den andra sidans kontroll ens körs. Uppladdningsvägen verifierar att bloben
+fortfarande finns EFTER låset tagits; om den försvunnit misslyckas uppladdningen med 409 utan
+att skapa någon `ImportJob`-referens till en saknad fil (det finns ingen säker väg att skriva
+om originalbytes i efterhand — strömmen är redan fullständigt läst och kastad).
+
+**3. Revisionsposten skrevs i en separat, senare commit.** Båda routrarna körde
+`purge_source()` (redan committad) och anropade DÄREFTER `record_audit()`, som gör sin EGEN
+commit. Ett fel i den andra committen kunde ge klienten ett 500-svar trots att dokumentet
+redan var permanent raderat — ett omförsök gav sedan 404 ("redan raderat").
+
+**Löst genom att flytta revisionsskrivningen in i fas A:s egen transaktion:**
+`app/audit.py::record_audit()` fick en `commit: bool = True`-parameter (`False` lägger bara
+till raden i sessionen, utan egen commit) och en `ip_address: str | None`-parameter separat
+från `request: Request | None`, så att domänlagret (`purge_source()`) kan ta emot ett neutralt
+IP-strängvärde routern extraherat, istället för att importera `fastapi` självt.
+`purge_source()` skriver nu `source_purged`-revisionen med `commit=False` precis innan sin
+egen `db.commit()` — ett fel där rullar tillbaka HELA fas A, inte bara revisionsraden.
+
+**14 nya tester**: varje relevant `ImportJob`-status som blockerar/inte blockerar blobpurge
+(pending/running/blocked/partial±blocked_count), det icke-uppenbara fallet med ett terminalt
+jobb + ett fastkört syskondokument (kontra ett terminalt jobb utan något fastkört), att en
+orelaterad nyckel aldrig blockerar en annan, ett bevis på att `maybe_purge_blob()` delegerar
+till den delade policyn istället för att duplicera den, en RIKTIG tvåtrådars/tvåkopplings-
+reproduktion av upload/purge-racet via det faktiska Postgres-advisory-låset (inte en mockad
+timer), ett HTTP-nivå-409-bevis i `test_library_routes.py`, ett tvingat revisionsfel som
+bevisligen rullar tillbaka HELA fas A (dokument/chunks/MSU oförändrade, `storage.delete()`
+aldrig anropad), och exakt en revisionsrad per HTTP-rutt vid en lyckad radering.
+
+Omverifiering: `test_source_purge.py` 31/31, regressionssvep över `test_library_routes.py` +
+`test_library_import.py` + `test_memory_source_units.py` + `test_memory_source_backfill.py` +
+`test_claims.py` + `test_storage_local_fs.py` = 200/200, hela backend-/security-/account-
+sviten 666 passed/1 avsiktligt överhoppad/0 failed (221.49s, exakt +14 över Pass 21:s 652),
+bare-DB-migrations-round-trip mot en färsk `postgres`-superuser-databas ren (ingen ny migration
+— ren applikationskod). Två separata, avgränsade commits (`94fb325` blob-referens/lås,
+`c76af35` tester), pushade. CI-kontroll mot exakt ny head `c76af35` pågår — se PR-beskrivningen
+för slutstatus.
 
 ## Pass 21 (2026-07-30): PR #31 — purge_source() delad i atomisk DB-fas + återförsökbar blob-fas
 
