@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
@@ -1116,3 +1117,262 @@ def test_successful_purge_writes_exactly_one_audit_entry_from_either_http_route(
     assert len(documents_audit_rows) == 1
     assert library_audit_rows[0].user_id == owner_id
     assert documents_audit_rows[0].user_id == owner_id
+
+
+# --- Pass 23: cross-owner blob-reference visibility (storage_key_still_referenced_global) ------
+#
+# Content-addressed blob storage is GLOBAL -- two different owners' byte-identical uploads
+# share the exact same storage_key. documents/knowledge_import_jobs both have FORCE ROW LEVEL
+# SECURITY with owner-scoped policies, so an ordinary ORM query run inside owner A's RLS
+# session structurally cannot see owner B's rows. Every test below runs through the REAL
+# mainai_app-bound SessionLocal (RLS included, exactly like every other test in this file) --
+# proving the fix actually crosses the RLS boundary via storage_key_still_referenced_global(),
+# not by disabling RLS for the test itself.
+
+
+def test_cross_owner_live_document_blocks_blob_purge():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a1@example.com")
+        owner_b = _make_user(session, email="purge-cross-b1@example.com")
+        storage_key = _store_real_blob(b"shared across two different owners -- live document")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        _make_document(session, owner_b.id, title="owner-b-live", storage_key=storage_key)
+        _set_rls_user(session, owner_a.id)
+
+        result = purge_source(session, document_a.id, owner_a.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cross_owner_pending_import_job_blocks_blob_purge():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a2@example.com")
+        owner_b = _make_user(session, email="purge-cross-b2@example.com")
+        storage_key = _store_real_blob(b"owner b has a pending import job for this")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        _make_import_job(session, owner_b.id, source_storage_key=storage_key, status=ImportJobStatus.pending)
+        _set_rls_user(session, owner_a.id)
+
+        result = purge_source(session, document_a.id, owner_a.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cross_owner_running_import_job_blocks_blob_purge():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a3@example.com")
+        owner_b = _make_user(session, email="purge-cross-b3@example.com")
+        storage_key = _store_real_blob(b"owner b has a running import job for this")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        _make_import_job(session, owner_b.id, source_storage_key=storage_key, status=ImportJobStatus.running)
+        _set_rls_user(session, owner_a.id)
+
+        result = purge_source(session, document_a.id, owner_a.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cross_owner_blocked_import_job_blocks_blob_purge():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a4@example.com")
+        owner_b = _make_user(session, email="purge-cross-b4@example.com")
+        storage_key = _store_real_blob(b"owner b has a blocked import job for this")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        _make_import_job(session, owner_b.id, source_storage_key=storage_key, status=ImportJobStatus.blocked)
+        _set_rls_user(session, owner_a.id)
+
+        result = purge_source(session, document_a.id, owner_a.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cross_owner_partial_with_blocked_count_blocks_blob_purge():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a5@example.com")
+        owner_b = _make_user(session, email="purge-cross-b5@example.com")
+        storage_key = _store_real_blob(b"owner b has a partial job with a real blocked file")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        _make_import_job(
+            session, owner_b.id, source_storage_key=storage_key, status=ImportJobStatus.partial, blocked_count=1
+        )
+        _set_rls_user(session, owner_a.id)
+
+        result = purge_source(session, document_a.id, owner_a.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cross_owner_terminal_job_with_resumable_sibling_blocks_blob_purge():
+    """The non-obvious case, now proven across owners too: owner B's job is terminal
+    (`completed`) but one of B's OWN documents is still stuck mid-pipeline -- app/worker.py's
+    _reconcile_orphaned_documents would still resume it. Owner A purging their own,
+    unrelated document sharing the same content-addressed key must not destroy the blob B's
+    stuck document still needs."""
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a6@example.com")
+        owner_b = _make_user(session, email="purge-cross-b6@example.com")
+        storage_key = _store_real_blob(b"owner b terminal job, but a sibling document is stuck")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        job_b = _make_import_job(session, owner_b.id, source_storage_key=storage_key, status=ImportJobStatus.completed)
+
+        stuck_sibling_b = _make_document(session, owner_b.id, title="owner-b-stuck-sibling", storage_key=None)
+        _set_rls_user(session, owner_b.id)
+        stuck_sibling_b.import_job_id = job_b.id
+        stuck_sibling_b.status = IndexStatus.extracting
+        session.add(stuck_sibling_b)
+        session.commit()
+
+        _set_rls_user(session, owner_a.id)
+        result = purge_source(session, document_a.id, owner_a.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cross_owner_terminal_job_without_resumable_sibling_does_not_block():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a7@example.com")
+        owner_b = _make_user(session, email="purge-cross-b7@example.com")
+        storage_key = _store_real_blob(b"owner b terminal job, nothing left stuck")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        _make_import_job(session, owner_b.id, source_storage_key=storage_key, status=ImportJobStatus.failed)
+        _set_rls_user(session, owner_a.id)
+
+        result = purge_source(session, document_a.id, owner_a.id)
+
+        assert result.deletion_status == DeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cross_owner_last_global_reference_removed_allows_purge():
+    """The full lifecycle across two owners: A's purge is blocked while B's job is still
+    pending; once B's job itself is no longer a live reference (advanced to a terminal,
+    non-resumable state), A's retry can finally purge the shared blob."""
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a8@example.com")
+        owner_b = _make_user(session, email="purge-cross-b8@example.com")
+        storage_key = _store_real_blob(b"blocked until owner b's last reference disappears")
+        document_a = _make_document(session, owner_a.id, storage_key=storage_key)
+        job_b = _make_import_job(session, owner_b.id, source_storage_key=storage_key, status=ImportJobStatus.pending)
+        _set_rls_user(session, owner_a.id)
+
+        first = purge_source(session, document_a.id, owner_a.id)
+        assert first.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+
+        _set_rls_user(session, owner_b.id)
+        job_b.status = ImportJobStatus.failed
+        session.add(job_b)
+        session.commit()
+
+        _set_rls_user(session, owner_a.id)
+        retried = retry_source_blob_purge(session, document_a.id, owner_a.id)
+
+        assert retried == DeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_mainai_app_gets_only_a_boolean_and_cannot_read_other_owners_rows_directly():
+    """The information-minimality guarantee: mainai_app CAN call
+    storage_key_still_referenced_global() and get a correct cross-owner answer (proven by all
+    the tests above), but an ordinary query in the SAME owner-scoped session still cannot see
+    a different owner's Document/ImportJob rows directly -- RLS itself is untouched, only this
+    one narrow function bypasses it internally."""
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, email="purge-cross-a9@example.com")
+        owner_b = _make_user(session, email="purge-cross-b9@example.com")
+        storage_key = _store_real_blob(b"boolean-only proof")
+        _make_document(session, owner_b.id, title="owner-b-invisible", storage_key=storage_key)
+        _set_rls_user(session, owner_a.id)
+
+        still_referenced = storage_key_still_referenced(session, storage_key)
+        assert still_referenced is True  # the function itself sees across owners
+
+        # But an ordinary ORM query in owner A's own RLS session cannot see owner B's row.
+        visible_to_a = session.query(Document).filter(Document.storage_key == storage_key).all()
+        assert visible_to_a == []
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_public_lacks_execute_on_storage_key_still_referenced_global():
+    session = SessionLocal()
+    try:
+        has_execute = session.execute(
+            sa_text("SELECT has_function_privilege('public', 'storage_key_still_referenced_global(text)', 'EXECUTE')")
+        ).scalar()
+        assert has_execute is False
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_apply_runtime_privileges_verifies_storage_key_function_owner_has_bypassrls():
+    """storage_key_still_referenced_global() has no per-caller ownership check by design (see
+    its module docstring) -- it relies entirely on its owning role genuinely having
+    BYPASSRLS (or being superuser), exactly like transition_memory_source_admin/
+    erase_owner_memory_admin already do. Proven here by actually reassigning ownership to a
+    fresh, deliberately non-superuser/non-BYPASSRLS role and confirming apply_and_verify()
+    catches it -- not assumed. Same pattern as
+    tests/backend/test_memory_source_units.py::test_apply_runtime_privileges_verifies_admin_function_owner_has_bypassrls."""
+    from sqlalchemy import text as _sa_text
+
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    weak_role = "s1a_test_weak_owner_no_bypassrls_p23"
+    try:
+        with engine.begin() as conn:
+            conn.execute(_sa_text(f"DROP ROLE IF EXISTS {weak_role}"))
+            conn.execute(_sa_text(f"CREATE ROLE {weak_role} NOSUPERUSER NOBYPASSRLS"))
+            conn.execute(_sa_text(f"ALTER FUNCTION storage_key_still_referenced_global(text) OWNER TO {weak_role}"))
+
+        module = _load_apply_runtime_privileges()
+        with pytest.raises(SystemExit):
+            module.apply_and_verify(settings.database_url)
+    finally:
+        admin_role = engine.url.username
+        with engine.begin() as conn:
+            conn.execute(_sa_text(f"ALTER FUNCTION storage_key_still_referenced_global(text) OWNER TO {admin_role}"))
+            conn.execute(_sa_text(f"DROP ROLE IF EXISTS {weak_role}"))
+        module = _load_apply_runtime_privileges()
+        module.apply_and_verify(settings.database_url)
+        engine.dispose()
