@@ -42,15 +42,19 @@ raderades fysiskt FÖRE DB-commit, så ett commitfel efter en lyckad filradering
 raderas av en orelaterad källradering), plus ett TOCTOU-race mellan uppladdning och
 blob-purge; och `source_purged`-revisionsposten skrevs i en SEPARAT commit i routern efter att
 `purge_source()` redan committat, vilket kunde ge ett 500-svar för en radering som redan
-lyckats. 111 dedikerade S1A-tester totalt över 6 filer + 1 routertest
-(`test_memory_source_units.py`: 39, `test_ensure_app_role.py`: 9,
-`test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del: 12,
-`test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 31,
+lyckats. Pass 23 (nedan) täppte till en blockerande cross-owner RLS-lucka: den globala,
+innehållsadresserade blobreferenskontrollen kördes som vanliga ORM-frågor mot `documents`/
+`knowledge_import_jobs` inuti anropande ägarens egen RLS-scopade session — strukturellt
+oförmögen att se en ANNAN ägares levande dokument eller väntande importjobb som delade samma
+`storage_key`. Löst med en ny, smal `SECURITY DEFINER`-funktion
+(`storage_key_still_referenced_global`, migration `0020`), inte en RLS-avstängning.
+121 dedikerade S1A-tester totalt över 6 filer + 1 routertest (`test_memory_source_units.py`:
+39, `test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s
+S1A-del: 12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 42,
 `test_library_routes.py`s Pass 22-test: 1) — dessa delar filer med 39+18+~200 befintliga,
 orelaterade tester som förblir gröna (ingen regression). Hela backend-/security-/account-sviten:
-666/667 gröna (1 avsiktligt överhoppad kapacitetstest). CI verifierad grön ("All required
-checks passed") på exakt slutlig head-SHA `56e74e3` (registerdokumentationscommitten ovanpå
-Pass 22:s kod/tester) — se Pass 22 för detaljer.
+677/678 gröna (1 avsiktligt överhoppad kapacitetstest). CI-kontroll mot exakt ny head `9de8b9b`
+pågår — se Pass 23 för detaljer.
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -59,9 +63,92 @@ anropar den inte än — `delete_account` skulle idag blockeras av S1A:s FK:er o
 memory_source_units-objekt existerar för kontot), produktionsdataprofilen (krävs före MERGE,
 inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna PR:s
 merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte bygger
-än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 22:s
+än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 23:s
 ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
 godkännande att gå vidare till konto-integration/merge/deploy/produktionsbackfill.
+
+## Pass 23 (2026-07-30): PR #31 — cross-owner RLS-lucka i blobreferenskontrollen stängd
+
+Grundaren bekräftade att Pass 22:s advisory-lock, audit-transaktion och statuspolicy var
+korrekta, men hittade en BLOCKERANDE lucka: `storage_key_still_referenced()` körde vanliga
+ORM-frågor mot `documents`/`knowledge_import_jobs` — båda tabellerna har `FORCE ROW LEVEL
+SECURITY` med ägar-scopade policies (`uploaded_by`/`owner_id = app.current_user_id`). Men
+bloblagringen är GLOBAL och innehållsadresserad: två olika ägares byte-identiska
+uppladdningar delar exakt samma `storage_key`. En källradering i ägare A:s session kunde
+därför strukturellt inte se ägare B:s levande dokument eller väntande/körande/blockerade
+importjobb som delade samma nyckel — A:s purge kunde radera en blob B fortfarande behövde,
+med RLS själv som anledningen till att faran var osynlig för just den kontroll som skulle
+förhindra den.
+
+**Lösningen är INTE `SET row_security = off`** i anropande session — enligt Postgres egen
+dokumentation (och enligt projektets egen tidigare etablerade precedens, migration 0019:s
+`transition_memory_source_admin`/`erase_owner_memory_admin`) ger den inställningen INTE en
+icke-undantagen roll någon åtkomst RLS annars skulle neka; den gör bara ett annars tyst
+filtrerat resultat till ett fel istället. Den enda riktiga vägen att se över alla ägare
+trots FORCE RLS är en roll som genuint har `BYPASSRLS` (eller är superuser) — exakt vad
+migrations-/adminrollen redan har, redan verifierad av `apply_runtime_privileges.py` för de
+två befintliga `*_admin`-funktionerna.
+
+**`migration 0020_storage_key_reference_check.py`** lägger till
+`storage_key_still_referenced_global(text) RETURNS boolean`:
+- `SECURITY DEFINER`, ägd av migrations-/adminrollen (verifierad `BYPASSRLS`, samma mönster
+  som de befintliga admin-funktionerna),
+- `SET search_path = pg_catalog`, alla relationer `public.`-kvalificerade,
+- kontrollerar över ALLA ägare: levande `documents.storage_key`, samt
+  `knowledge_import_jobs.source_storage_key` enligt EXAKT samma runnable/resumable-policy
+  som Pass 22 redan implementerade (pending/running/blocked, partial+blocked_count>0, eller
+  ett terminalt jobb med en levande resumable syskondokument — matchat mot
+  `app/worker.py`s faktiska `_reconcile_orphaned_documents`-logik, inte gissat),
+- returnerar ENDAST en boolean — inget ägar-, dokument- eller jobb-ID läcker någonsin
+  tillbaka till anroparen,
+- `REVOKE ALL FROM PUBLIC` i migrationen; `EXECUTE` till `mainai_app` ges ENDAST via
+  `backend/scripts/s1a_privilege_policy.py` (samma mönster som övriga S1A-funktioner —
+  aldrig en bokstavlig `GRANT ... TO mainai_app` i själva migrationen, eftersom det skulle
+  slå sönder "Backend — Alembic migration check"-jobbet i CI, vars databas aldrig skapar den
+  rollen).
+
+`s1a_privilege_policy.py`s `_FUNCTIONS`-lista fick en ny post — den ENDA posten som är BÅDE
+beviljad till `mainai_app` OCH kräver `BYPASSRLS`, medvetet: till skillnad från de
+ägar-scopade funktionerna behöver den se ALLA ägares rader (inget eget ägarskapstest); till
+skillnad från de rena admin-funktionerna MÅSTE `mainai_app` kunna anropa den (den körs från
+en vanlig ägar-scopad request, inte en admin-väg) — säkert eftersom den bara returnerar en
+boolean.
+
+`app/rag/blob_references.py::storage_key_still_referenced()` delegerar nu helt till denna
+SQL-funktion istället för att fråga de RLS-scopade tabellerna direkt.
+`acquire_storage_key_lock()` schema-kvalificerades (`pg_catalog.pg_advisory_xact_lock`/
+`pg_catalog.hashtextextended`) för konsekvens.
+
+**11 nya cross-owner-tester** (alla genom den RIKTIGA `mainai_app`-bundna sessionen, RLS
+inkluderat, INTE avstängt för testet): en annan ägares levande dokument, väntande/körande/
+blockerade/partial+blocked_count-importjobb, terminalt jobb med kontra utan resumable
+syskondokument, sista globala referensen försvinner och tillåter purge, `mainai_app` kan få
+en boolean över ägargränser men kan fortfarande inte läsa en annan ägares rader via en vanlig
+fråga i samma session, `PUBLIC` saknar `EXECUTE`, och en felkonfigurerad ägare utan
+`BYPASSRLS` upptäcks av `apply_runtime_privileges.py` (samma mönster som
+`test_memory_source_units.py`s befintliga `transition_memory_source_admin`-test).
+
+**En verklig bugg i testinfrastrukturen upptäcktes och åtgärdades under omverifieringen**:
+`tests/backend/test_migration_roundtrip.py`s schemasnapshot jämförde bara tabellkolumner och
+enum-etiketter — migration 0020 är rent funktions-additiv (ingen ny/ändrad tabell eller
+enum), så snapshotet var fullständigt blint för den. `downgrade -1` tog faktiskt bort
+funktionen, men "före"- och "efter downgrade"-snapshoten jämfördes identiska, vilket tyst
+slog ut testets egen `"downgrade -1 must actually change the schema, not silently no-op"`-
+assertion. Fixat genom att även fingeravtrycka `public`-schemats funktioner (namn +
+argumentsignatur), med undantag för funktioner ägda av en installerad EXTENSION
+(`pg_depend.deptype='e'` — pgvectors egna funktioner som `array_to_vector`/`avg(vector)`
+installeras i `public` men rörs aldrig av någon migrations upp/ner och ska inte räknas som
+kvarvarande applikationsschema efter en fullständig `downgrade base`).
+
+Omverifiering: `test_source_purge.py` 42/42, `test_migration_roundtrip.py` 2/2 (båda testerna,
+inklusive den striktare `downgrade base`-varianten), regressionssvep 92/92
+(`test_source_purge.py`+`test_migration_roundtrip.py`+`test_memory_source_units.py`+
+`test_ensure_app_role.py`), hela backend-/security-/account-sviten 677 passed/1 avsiktligt
+överhoppad/0 failed (208.21s, exakt +11 över Pass 22:s 666), bare-DB-migrations-round-trip
+(`upgrade head` → `downgrade -1` → `upgrade head`, inklusive migration 0020) mot en färsk
+`postgres`-superuser-databas ren. Tre separata, avgränsade commits (cross-owner-fix,
+cross-owner-tester, test-infrastruktur-fix), pushade. CI-kontroll mot exakt ny head — se
+PR-beskrivningen för slutstatus.
 
 ## Pass 22 (2026-07-30): PR #31 — ImportJob som blob-referens, upload/purge-race, audit-atomicitet
 
