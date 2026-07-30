@@ -37,6 +37,38 @@ predates S1A's backfill (or was never dual-written) can have ZERO `document_sour
 at all — `legacy_without_memory_source` on the result flags this; no source unit is ever
 fabricated to "fill the gap," and normal chunk/document deletion proceeds exactly as it would
 for a document that never had one.
+
+Two phases, deliberately NOT one atomic unit spanning the database AND the filesystem — an
+earlier version of this module claimed the whole operation was atomic, which was never actually
+true and a founder review caught it: `LocalFilesystemStorage.delete()` physically `unlink()`s
+the blob immediately, with no undo. If that succeeded and the DB `commit()` immediately after
+it then failed, `db.rollback()` would resurrect a live Document/MemorySourceUnit/DocumentChunk
+row whose original file was already, permanently gone — the exact opposite of what "atomic"
+promises. The real, honest contract is:
+
+- **Phase A — `purge_source()`, genuinely atomic (DB-only).** Locks the Document row, purges
+  every MemorySourceUnit, hard-deletes the DocumentChunk rows, soft-deletes the Document, and
+  sets `deletion_status` to `pending` (or `purged` immediately if there's no `storage_key` at
+  all — nothing to purge) — commits, or on any failure rolls back to a state where NOTHING
+  changed and the original blob is still exactly where it was. No `storage.delete()` call
+  happens anywhere in this phase.
+- **Phase B — `retry_source_blob_purge()`, idempotent and independently retryable.** Only ever
+  runs against a document phase A has ALREADY committed as soft-deleted. Re-checks for other
+  live documents still referencing the same content-addressed `storage_key` (same
+  `maybe_purge_blob` logic phase A used to call inline), then either leaves it `pending` (still
+  shared) or calls `storage.delete()` and commits `purged`/`failed` in its own, separate
+  transaction. Safe to call any number of times: `LocalFilesystemStorage.delete()` uses
+  `Path.unlink(missing_ok=True)`, so re-deleting an already-gone file is a no-op, not an error —
+  a phase B run that deletes the file but then fails to commit its own status update leaves the
+  document retryable, and the NEXT phase B call correctly reaches `purged` without erroring on
+  the missing file.
+
+`purge_source()` makes one immediate, best-effort phase B attempt right after phase A's commit
+succeeds (todays's actual UX: usually purges the blob in the same request) — but a phase B
+failure is caught, logged, and never propagated as this call's own failure and never rolls
+phase A back. `deletion_status` staying `pending`/`failed` in the DB is precisely what makes a
+LATER, independent `retry_source_blob_purge()` call (a future ops/admin trigger — not wired to
+an HTTP route in this PR, intentionally out of scope here) able to finish the job.
 """
 
 import logging
@@ -61,10 +93,10 @@ PURGE_REASON = "source_deleted"
 
 
 class SourcePurgeNotFoundError(RuntimeError):
-    """Raised when document_id doesn't resolve to a live, owner_id-owned Document — a missing
-    row, someone else's row (RLS/explicit ownership check both apply), or one already
-    soft-deleted. Callers translate this to an HTTP 404 uniformly; never leaks which of those
-    three it actually was."""
+    """Raised when document_id doesn't resolve to a matching, owner_id-owned Document — a
+    missing row, someone else's row (RLS/explicit ownership check both apply), or (for
+    purge_source() specifically) one already soft-deleted. Callers translate this to an HTTP
+    404 uniformly; never leaks which of those it actually was."""
 
 
 @dataclass
@@ -79,14 +111,20 @@ class PurgeSourceResult:
 
 
 def purge_source(db: Session, document_id: uuid.UUID, owner_id: uuid.UUID) -> PurgeSourceResult:
-    """Deletes a knowledge source: soft-deletes the Document row, hard-deletes its
-    DocumentChunk rows, purges (never hard-deletes) every associated MemorySourceUnit, and
-    releases its storage blob if no other live document still references it (content-addressed
-    — see maybe_purge_blob). KnowledgeClaim/MemorySourceUnit/lifecycle-event rows all survive,
-    see module docstring. Atomic: either the whole thing commits, or none of it does — mirrors
-    app/routers/account.py's delete_account's explicit try/except/rollback discipline rather
-    than relying on the request-scoped session's implicit teardown to clean up a failed
-    transaction.
+    """Phase A + a best-effort phase B attempt. Phase A (genuinely atomic, DB-only):
+    soft-deletes the Document row, hard-deletes its DocumentChunk rows, purges (never
+    hard-deletes) every associated MemorySourceUnit — either the whole DB change commits, or
+    none of it does, mirroring app/routers/account.py's delete_account's explicit
+    try/except/rollback discipline rather than relying on the request-scoped session's
+    implicit teardown. KnowledgeClaim/MemorySourceUnit/lifecycle-event rows all survive, see
+    module docstring. `storage.delete()` is NEVER called before phase A's commit — see module
+    docstring for why that used to be a real bug.
+
+    Immediately after phase A commits, this makes ONE best-effort attempt at phase B
+    (`retry_source_blob_purge`) — but a phase B failure here is caught, logged, and returned
+    via `deletion_status` (`pending`/`failed`), never raised as this call's own failure and
+    never a reason to undo phase A. A later, independent `retry_source_blob_purge()` call can
+    always finish the job.
 
     The caller's session must already be RLS-scoped to owner_id (same convention as every
     other app/rag/*.py entry point in this codebase) — ownership is additionally verified
@@ -163,16 +201,16 @@ def purge_source(db: Session, document_id: uuid.UUID, owner_id: uuid.UUID) -> Pu
                 job.completed_at = datetime.utcnow()
                 db.add(job)
 
-        db.add(document)
-        db.flush()  # deleted_at must be visible to maybe_purge_blob's "still referenced?" query below
-
-        storage = get_storage()
-        document.deletion_status = maybe_purge_blob(db, storage, document.storage_key)
+        # Phase A never calls storage.delete() — nothing here can leave a physically-deleted
+        # blob behind a failed/rolled-back commit. A document with no storage_key at all has
+        # nothing to purge in phase B either, so it's marked purged immediately (matching
+        # maybe_purge_blob's own behavior for storage_key=None); everything else starts phase
+        # B as `pending`.
+        document.deletion_status = DeletionStatus.purged if document.storage_key is None else DeletionStatus.pending
         db.add(document)
         result.deletion_status = document.deletion_status
 
         db.commit()
-        return result
     except SourcePurgeNotFoundError:
         db.rollback()
         raise
@@ -180,3 +218,58 @@ def purge_source(db: Session, document_id: uuid.UUID, owner_id: uuid.UUID) -> Pu
         db.rollback()
         logger.exception("Källradering misslyckades för document_id=%s (owner=%s), återställd (rollback).", document_id, owner_id)
         raise
+
+    if result.deletion_status == DeletionStatus.pending:
+        try:
+            result.deletion_status = retry_source_blob_purge(db, document_id, owner_id)
+        except Exception:
+            # Phase A already committed successfully — that's the real outcome of this call.
+            # A phase B failure here (a DB error committing the status update; storage.delete
+            # itself never raises, see maybe_purge_blob) must never be raised as purge_source's
+            # own failure, and never triggers any rollback of the already-durable phase A work.
+            db.rollback()
+            logger.exception(
+                "Initial blob-purge attempt misslyckades för document_id=%s (owner=%s) efter en lyckad DB-purge -- "
+                "deletion_status kvarstår återförsökbar via retry_source_blob_purge().",
+                document_id,
+                owner_id,
+            )
+
+    return result
+
+
+def retry_source_blob_purge(db: Session, document_id: uuid.UUID, owner_id: uuid.UUID) -> DeletionStatus:
+    """Phase B: the physical blob deletion for a source ALREADY soft-deleted by purge_source()
+    (phase A — DB-only, already committed by the time this runs). Idempotent and independently
+    retryable, deliberately separate from purge_source() itself (see module docstring): never
+    touches memory_source_units/document_chunks/knowledge_claims, which are already
+    permanently settled. Safe to call any number of times — LocalFilesystemStorage.delete()
+    uses Path.unlink(missing_ok=True), so re-deleting an already-gone file is a no-op, and this
+    function's own DB write (`deletion_status`) is a single, independent commit.
+
+    Unlike purge_source(), this accepts a document that's ALREADY soft-deleted
+    (`deleted_at IS NOT NULL`) — that's the whole point, it's meant to be called again after an
+    earlier purge_source() call's own best-effort phase B attempt left `deletion_status` at
+    `pending` or `failed`. Raises SourcePurgeNotFoundError if document_id doesn't resolve to a
+    soft-deleted document owned by owner_id (never a live, not-yet-purged one — call
+    purge_source() for that).
+    """
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.uploaded_by == owner_id, Document.deleted_at.isnot(None))
+        .with_for_update()
+        .first()
+    )
+    if document is None:
+        raise SourcePurgeNotFoundError(
+            f"document {document_id} not found, not owned by {owner_id}, or not yet soft-deleted"
+        )
+
+    if document.deletion_status == DeletionStatus.purged:
+        return document.deletion_status  # idempotent no-op — nothing left to do
+
+    storage = get_storage()
+    document.deletion_status = maybe_purge_blob(db, storage, document.storage_key)
+    db.add(document)
+    db.commit()
+    return document.deletion_status
