@@ -51,7 +51,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("""
-        CREATE OR REPLACE FUNCTION storage_key_still_referenced_global(p_storage_key text)
+        CREATE OR REPLACE FUNCTION public.storage_key_still_referenced_global(p_storage_key text)
         RETURNS boolean
         LANGUAGE plpgsql
         SECURITY DEFINER
@@ -103,7 +103,7 @@ def upgrade() -> None:
         END;
         $$;
 
-        REVOKE ALL ON FUNCTION storage_key_still_referenced_global(text) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION public.storage_key_still_referenced_global(text) FROM PUBLIC;
         -- EXECUTE for mainai_app is granted by backend/scripts/s1a_privilege_policy.py
         -- (applied by ensure_app_role.py/apply_runtime_privileges.py on every boot), not
         -- here -- see migration 0019's module docstring for exactly why a literal GRANT/
@@ -114,4 +114,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP FUNCTION IF EXISTS storage_key_still_referenced_global(text);")
+    op.execute("DROP FUNCTION IF EXISTS public.storage_key_still_referenced_global(text);")

@@ -108,7 +108,7 @@ def storage_key_still_referenced(db: Session, storage_key: str) -> bool:
     Callers must hold acquire_storage_key_lock(db, storage_key) for the duration of their own
     check-then-act sequence around this; this function itself does no locking."""
     result = db.execute(
-        sa_text("SELECT storage_key_still_referenced_global(:key)"),
+        sa_text("SELECT public.storage_key_still_referenced_global(:key)"),
         {"key": storage_key},
     ).scalar()
     return bool(result)

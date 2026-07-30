@@ -68,7 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import psycopg2  # noqa: E402
 from psycopg2 import sql  # noqa: E402
 
-from s1a_privilege_policy import apply_privilege_policy, s1a_objects_exist  # noqa: E402
+from s1a_privilege_policy import apply_privilege_policy  # noqa: E402
 
 APP_ROLE = "mainai_app"
 
@@ -224,17 +224,26 @@ def main() -> None:
             )
 
             # Re-narrow mainai_app's privileges on the S1A tables/functions right back down,
-            # in this SAME transaction, if this database is already past migration 0019 —
-            # see the module docstring. Nothing to narrow yet if the S1A objects don't exist
-            # on this boot (a first-time deploy where this script runs before the migration
-            # does); apply_runtime_privileges.py handles that case after the migration runs.
-            if s1a_objects_exist(cur):
-                policy_errors = apply_privilege_policy(cur, expected_owner=admin_role)
-                if policy_errors:
-                    raise RuntimeError(
-                        "ensure_app_role: S1A privilege re-narrowing failed, refusing to "
-                        "commit the broader GRANT above:\n" + "\n".join(f"  - {e}" for e in policy_errors)
-                    )
+            # in this SAME transaction, unconditionally — see the module docstring. Pass 24:
+            # this used to be gated behind "every S1A object this codebase knows about
+            # exists" (`s1a_objects_exist(cur)`), which opened a real mixed-version boot
+            # window: a RUN_MIGRATIONS=false worker container running code that already knows
+            # about a LATER migration (e.g. 0020), against a database that hasn't received
+            # that migration yet, would find the gate False (that migration's object doesn't
+            # exist yet) and skip narrowing ENTIRELY — including the 0019 tables/functions
+            # that DO already exist and were already correctly narrowed before this boot. The
+            # wide GRANT ALL above would then commit as the durable state for those objects
+            # too, not just the missing one. `require_complete=False` narrows whatever subset
+            # of protected tables/functions already exists, every single boot, with no such
+            # gate — a legitimately-missing future object is simply skipped (nothing to leak,
+            # since mainai_app never had access to an object that doesn't exist), and this
+            # call is safe even on a pre-S1A database where nothing exists yet at all.
+            policy_errors = apply_privilege_policy(cur, expected_owner=admin_role, require_complete=False)
+            if policy_errors:
+                raise RuntimeError(
+                    "ensure_app_role: S1A privilege re-narrowing failed, refusing to "
+                    "commit the broader GRANT above:\n" + "\n".join(f"  - {e}" for e in policy_errors)
+                )
 
         conn.commit()
         committed = True

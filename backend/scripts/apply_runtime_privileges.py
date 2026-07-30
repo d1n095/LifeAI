@@ -75,7 +75,11 @@ def apply_and_verify(database_url: str, *, allow_missing_schema: bool = False) -
             cur.execute("SELECT current_user")
             (expected_owner,) = cur.fetchone()
 
-            errors = apply_privilege_policy(cur, expected_owner=expected_owner)
+            # require_complete=True (the default, explicit here for clarity): run only after
+            # `alembic upgrade head`, every managed table/function MUST exist by this point —
+            # see s1a_privilege_policy.py's module docstring for the contrast with
+            # ensure_app_role.py's require_complete=False, every-boot call.
+            errors = apply_privilege_policy(cur, expected_owner=expected_owner, require_complete=True)
             if errors:
                 print("apply_runtime_privileges: privilege state does NOT match policy:", file=sys.stderr)
                 for err in errors:
