@@ -53,14 +53,18 @@ oförmögen att se en ANNAN ägares levande dokument eller väntande importjobb 
 SECURITY INVOKER` hade passerat alla andra kontroller tyst), och `ensure_app_role.py`s
 S1A-omsmalning var gated på att ALLA S1A-objekt existerar — vilket lämnade ett "mixed-version
 boot window" öppet mellan migration 0019 och 0020 där en bred `GRANT ALL` kunde committas
-oomsmalnad. Löst med en `require_complete`-flagga genom `apply_privilege_policy()`.
-127 dedikerade S1A-tester totalt över 6 filer + 1 routertest (`test_memory_source_units.py`:
-40, `test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s
-S1A-del: 12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 46,
-`test_library_routes.py`s Pass 22-test: 1) — dessa delar filer med 39+18+~200 befintliga,
-orelaterade tester som förblir gröna (ingen regression). Hela backend-/security-/account-sviten:
-682/683 gröna (1 avsiktligt överhoppad kapacitetstest). CI verifierad grön på exakt slutlig
-head-SHA — se Pass 24 för detaljer och den slutgiltiga SHA:n.
+oomsmalnad. Löst med en `require_complete`-flagga genom `apply_privilege_policy()`. Pass 25
+(nedan) stängde en kvarstående verifieringslucka: funktionssignaturer matchades bara på namn,
+inte exakta argumenttyper, plus två test-/dokumentationsfel (mixed-version-testets
+`to_regclass`-bugg, en duplicerad ImportJobStatus-lista i statusdrifttestet, och en felräknad
+testsumma nedan).
+130 dedikerade S1A-tester totalt över 6 filer (`test_memory_source_units.py`: 40,
+`test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s
+S1A-del: 12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 50) + 1
+routertest (`test_library_routes.py`s Pass 22-test) = **131 totalt över 7 filer** — dessa
+delar filer med 39+18+~200 befintliga, orelaterade tester som förblir gröna (ingen
+regression). Hela backend-/security-/account-sviten: se Pass 25 för det verifierade
+slutresultatet och den slutgiltiga CI-verifierade head-SHA:n.
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -69,9 +73,86 @@ anropar den inte än — `delete_account` skulle idag blockeras av S1A:s FK:er o
 memory_source_units-objekt existerar för kontot), produktionsdataprofilen (krävs före MERGE,
 inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna PR:s
 merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte bygger
-än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 24:s
+än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 25:s
 ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
 godkännande att gå vidare till konto-integration/merge/deploy/produktionsbackfill.
+
+## Pass 25 (2026-07-30): PR #31 — exakt funktionssignaturverifiering + test-/dokumentationsfixar
+
+Grundaren bekräftade att Pass 24:s SECURITY DEFINER-verifiering och mixed-version-omsmalning
+var korrekta i sak, men hittade en kvarstående verklig verifieringslucka plus två test-/
+dokumentfel — INGEN account integration ännu.
+
+**1. Exakt funktionssignatur verifierades fortfarande inte.** `_FUNCTIONS` innehöll
+funktionsnamn och förväntad returtyp, men inte förväntade ARGUMENTTYPER —
+`_function_signature()` sökte bara på namn och accepterade den enda overload som råkade
+finnas. En funktion med FEL argumenttyper (t.ex. `storage_key_still_referenced_global
+(integer)` istället för applikationens faktiska `(text)`-anrop) hade kunnat passera alla
+andra kontroller — `SECURITY DEFINER`, boolean-retur, rätt ägare, rätt grants — medan den i
+praktiken var en helt annan funktion än den `blob_references.py` faktiskt anropar, vilket
+bara skulle upptäckas som ett runtime-fel.
+
+Löst genom att döpa om `_function_signature` till `_resolve_function(cur, name,
+expected_arg_types)`, som nu löser funktionen via `to_regprocedure` med den EXAKTA förväntade
+argumentlistan (inte bara namn). `_FUNCTIONS` utökades till 5-tupler med varje funktions
+riktiga identity-argumenttyper, hämtade direkt från migration 0019/0020:s `CREATE FUNCTION`-
+satser. Om mer än en overload av samma namn existerar i `public`, eller om den enda
+overloaden som finns har fel argumenttyper, returneras ett fel och INGET grantas/revokas för
+det namnet — en oväntad overload behandlas som en policyöverträdelse, inte tyst ignorerad.
+
+**Fyra nya tester** (`test_source_purge.py`, mot en isolerad engångsfunktion
+`s1a_test_sig_check_p25` inuti en psycopg2-transaktion som alltid rullas tillbaka — CREATE
+FUNCTION är transaktionell DDL, så inget explicit DROP behövs): A) korrekt funktion med
+korrekt signatur resolverar rent utan fel; B) TVÅ overloads av samma namn (en korrekt `(text)`,
+en oväntad `(integer)`) gör verifieringen röd, och ett medvetet förinlagt `PUBLIC`-grant på
+den oväntade overloaden bevisar att INGET rördes; C) ENDAST fel-signaturen finns (`(integer)`
+när `(text)` förväntas) — behandlas som saknad/fel funktion, accepteras aldrig tyst; D) rätt
+namn OCH rätt argumenttyper resolverar, men funktionen är `SECURITY INVOKER` — fortfarande
+fångad av den befintliga `prosecdef`-kontrollen, vilket bevisar att den nya
+signaturupplösningen inte stör den kedjan.
+
+**2. Mixed-version-testets `to_regclass`-bugg.** `test_mixed_version_boot_window_0019_to_0020`
+kontrollerade om 0020:s funktion existerade med `to_regclass('public.storage_key_still_
+referenced_global')` — `to_regclass` löser RELATIONER (tabeller/vyer), ALDRIG funktioner, så
+den returnerar NULL oavsett om funktionen finns eller inte. Assertionen `is False` passerade
+alltså garanterat, oavsett databasens verkliga tillstånd — testet bevisade ingenting om sin
+egen premiss. Rättat till `to_regprocedure('public.storage_key_still_referenced_global
+(text)') IS NOT NULL`, med en ny explicit `True`-kontroll efter uppgraderingen till 0020 också
+(tidigare bevisades detta bara indirekt via `has_function_privilege`, som visserligen skulle
+kasta ett SQL-fel om funktionen saknades, men aldrig kontrollerades explicit).
+
+**3. Duplicerad ImportJobStatus-lista i statusdrifttestet.** `test_import_job_status_policy_
+matches_the_documented_contract_for_every_status` skrev sin egen `pending/running/blocked/
+partial`-if/elif-kedja som förväntanslogik — strukturellt okopplad från den verkliga policyn,
+så en framtida status som läggs till i workerns faktiska återupptagningsvägar utan en
+motsvarande uppdatering HÄR hade fortfarande kunnat passera. Löst genom nya kanoniska
+konstanter/predikat i `app/models/import_job.py`: `CLAIMABLE_IMPORT_JOB_STATUSES` (vad
+`claim_next_job`, app/jobs/lease.py, plockar upp ovillkorligt), `PROVIDER_REQUEUE_STATUSES`
+(vad `_requeue_blocked_jobs`, app/worker.py, kör tillbaka till `pending`),
+`import_job_requeue_eligible()` och `import_job_still_needs_raw_blob()` (den senare är den
+policy migration 0020:s SQL implementerar i lås). Både `claim_next_job`s och
+`_requeue_blocked_jobs`s SQL bygger nu sina `WHERE`-villkor från dessa konstanters faktiska
+strängvärden (`ANY(:claimable_statuses)`/`ANY(:requeue_statuses)`) istället för hårdkodade
+literaler — inga dubbla statussträngar kvar i worker/lease-lagret. Testet importerar nu
+`import_job_still_needs_raw_blob()` direkt istället för att skriva om policyn för hand.
+
+**4. Felräknad testsumma.** Pass 24:s registerinlägg skrev "127 dedikerade S1A-tester totalt
+över 6 filer + 1 routertest" — men den egna nedbrytningen summerade till 40+9+17+12+2+46=126,
+inte 127; "127" var egentligen totalsumman INKLUSIVE routertestet, inte antalet dedikerade
+tester. Rättat i detta pass tillsammans med de nya testerna: se sammanfattningsblocket ovan
+för den korrekta 130+1=131-summan.
+
+Omverifiering: riktat regressionssvep (`test_memory_source_units.py`+`test_ensure_app_role.py`
++`test_source_purge.py`+`test_migration_roundtrip.py`+`test_worker.py`+
+`test_provider_verification.py`+`test_media_import.py`+`test_library_routes.py`+
+`test_library_import.py`+`test_memory_source_backfill.py`+`test_claims.py`+
+`test_storage_local_fs.py`) 287/287, bare-DB-migrations-round-trip (`upgrade head` →
+`downgrade -1` → `upgrade head`, genom migration 0020) mot en färsk `postgres`-superuser-
+databas (`lifeos_bare_check_p25`, ingen `mainai_app`-roll) ren. Hela backend-/security-/
+account-sviten och CI-verifiering på exakt slutlig head-SHA: se nästa uppdatering av detta
+register eller PR #31:s beskrivning för det slutgiltiga resultatet. Grundaren var explicit:
+INGEN konto-integration, produktionsprofil, produktionsbackfill, merge eller deploy förrän en
+fräsch granskning godkänner detta.
 
 ## Pass 24 (2026-07-30): PR #31 — SECURITY DEFINER-verifiering + mixed-version boot window stängt
 
