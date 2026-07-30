@@ -25,12 +25,18 @@ def _load_module():
 def _fetchone_dispatcher(fake_cursor, *, current_user: str, role_exists: bool):
     """A fully-mocked cursor for these tests only ever needs to answer the two questions the
     pre-S1A version of this script asked (SELECT current_user / role-exists), plus now a
-    `to_regclass` existence probe from `s1a_privilege_policy.s1a_objects_exist()` — run
-    unconditionally after the role-provisioning block to decide whether to also re-narrow
-    S1A privileges in the same transaction. These tests are about connection-string/pooler
-    edge cases, not S1A privilege policy, so the probe is answered as "doesn't exist" here,
-    which makes `s1a_objects_exist()` short-circuit immediately and skip the narrowing path
-    entirely — exactly like a real database that hasn't run migration 0019 yet."""
+    `to_regclass` table-existence probe and a `pg_proc`/`pg_namespace` function-existence
+    probe from `s1a_privilege_policy.apply_privilege_policy(..., require_complete=False)` —
+    called UNCONDITIONALLY after the role-provisioning block now (Pass 24: no longer gated
+    behind "every S1A object exists first", see ensure_app_role.py's module docstring for
+    why), to re-narrow whatever protected tables/functions already exist in the same
+    transaction. These tests are about connection-string/pooler edge cases, not S1A privilege
+    policy, so every existence probe is answered as "doesn't exist" here (also sets
+    `fake_cursor.fetchall.return_value = []` for the function-signature lookup, which uses
+    `fetchall()` not `fetchone()`) — with `require_complete=False` that means every managed
+    table/function is silently skipped, exactly like a real database that hasn't run
+    migration 0019 yet, with no error and nothing narrowed."""
+    fake_cursor.fetchall.return_value = []
 
     def _dispatch(*args, **kwargs):
         executed = fake_cursor.execute.call_args
@@ -40,6 +46,8 @@ def _fetchone_dispatcher(fake_cursor, *, current_user: str, role_exists: bool):
         if "pg_roles" in sql_text:
             return (1,) if role_exists else None
         if "to_regclass" in sql_text:
+            return (False,)
+        if "has_schema_privilege" in sql_text:
             return (False,)
         return None
 
@@ -364,7 +372,9 @@ def test_s1a_renarrowing_failure_rolls_back_the_whole_transaction_not_just_itsel
         monkeypatch.setenv("MAINAI_APP_PASSWORD", app_password)
         monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
         monkeypatch.setattr(
-            module, "apply_privilege_policy", lambda cur, *, expected_owner: ["forced test failure"]
+            module,
+            "apply_privilege_policy",
+            lambda cur, *, expected_owner, require_complete=True: ["forced test failure"],
         )
 
         with pytest.raises(RuntimeError, match="forced test failure"):

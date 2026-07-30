@@ -1338,7 +1338,9 @@ def test_public_lacks_execute_on_storage_key_still_referenced_global():
     session = SessionLocal()
     try:
         has_execute = session.execute(
-            sa_text("SELECT has_function_privilege('public', 'storage_key_still_referenced_global(text)', 'EXECUTE')")
+            sa_text(
+                "SELECT has_function_privilege('public', 'public.storage_key_still_referenced_global(text)', 'EXECUTE')"
+            )
         ).scalar()
         assert has_execute is False
     finally:
@@ -1363,7 +1365,9 @@ def test_apply_runtime_privileges_verifies_storage_key_function_owner_has_bypass
         with engine.begin() as conn:
             conn.execute(_sa_text(f"DROP ROLE IF EXISTS {weak_role}"))
             conn.execute(_sa_text(f"CREATE ROLE {weak_role} NOSUPERUSER NOBYPASSRLS"))
-            conn.execute(_sa_text(f"ALTER FUNCTION storage_key_still_referenced_global(text) OWNER TO {weak_role}"))
+            conn.execute(
+                _sa_text(f"ALTER FUNCTION public.storage_key_still_referenced_global(text) OWNER TO {weak_role}")
+            )
 
         module = _load_apply_runtime_privileges()
         with pytest.raises(SystemExit):
@@ -1371,8 +1375,162 @@ def test_apply_runtime_privileges_verifies_storage_key_function_owner_has_bypass
     finally:
         admin_role = engine.url.username
         with engine.begin() as conn:
-            conn.execute(_sa_text(f"ALTER FUNCTION storage_key_still_referenced_global(text) OWNER TO {admin_role}"))
+            conn.execute(
+                _sa_text(f"ALTER FUNCTION public.storage_key_still_referenced_global(text) OWNER TO {admin_role}")
+            )
             conn.execute(_sa_text(f"DROP ROLE IF EXISTS {weak_role}"))
         module = _load_apply_runtime_privileges()
         module.apply_and_verify(settings.database_url)
         engine.dispose()
+
+
+def test_apply_runtime_privileges_catches_security_invoker_downgrade():
+    """Pass 24: a founder review pointed out that nothing previously verified
+    `storage_key_still_referenced_global()` was still actually SECURITY DEFINER at all --
+    owner, BYPASSRLS, search_path and grants could all stay exactly correct while `ALTER
+    FUNCTION ... SECURITY INVOKER` silently made the function run with the CALLER's
+    (mainai_app's) privileges again, re-subjecting its own queries to mainai_app's ordinary
+    RLS scope and reintroducing the exact cross-owner gap Pass 23 closed -- with boot
+    verification still reporting success throughout. Proven here by actually flipping the
+    function to SECURITY INVOKER and confirming apply_and_verify() catches it."""
+    from sqlalchemy import text as _sa_text
+
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(_sa_text("ALTER FUNCTION public.storage_key_still_referenced_global(text) SECURITY INVOKER"))
+
+        module = _load_apply_runtime_privileges()
+        with pytest.raises(SystemExit):
+            module.apply_and_verify(settings.database_url)
+    finally:
+        with engine.begin() as conn:
+            conn.execute(_sa_text("ALTER FUNCTION public.storage_key_still_referenced_global(text) SECURITY DEFINER"))
+        module = _load_apply_runtime_privileges()
+        module.apply_and_verify(settings.database_url)
+        engine.dispose()
+
+
+def test_apply_runtime_privileges_verifies_return_type_and_language():
+    """Directly proves the new return-type/language catalog checks fire, not just that they
+    exist in the code -- if `storage_key_still_referenced_global()`'s return type were ever
+    anything other than `boolean` (e.g. a future refactor accidentally widened it to return a
+    row, a text summary, or anything else), the whole information-minimality guarantee (see
+    migration 0020's module docstring: "returns nothing but a boolean") would be silently
+    broken. `s1a_privilege_policy.apply_privilege_policy()` is called directly here (not
+    through a real ALTER, since Postgres has no cheap way to change just the return type of
+    an existing function without a DROP+CREATE) with a monkeypatched `_FUNCTIONS` expecting
+    the WRONG return type, and must report a real error."""
+    import importlib.util
+    from pathlib import Path as _Path
+
+    import psycopg2
+
+    from app.config import get_settings as _get_settings
+
+    policy_path = _Path(__file__).resolve().parent.parent.parent / "scripts" / "s1a_privilege_policy.py"
+    spec = importlib.util.spec_from_file_location("s1a_privilege_policy_wrongtype", policy_path)
+    policy_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy_module)
+
+    policy_module._FUNCTIONS = [
+        ("storage_key_still_referenced_global", True, True, "text"),  # wrong -- real type is boolean
+    ]
+
+    settings = _get_settings()
+    conn = psycopg2.connect(settings.database_url)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_user")
+            (expected_owner,) = cur.fetchone()
+            errors = policy_module.apply_privilege_policy(cur, expected_owner=expected_owner, require_complete=False)
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert any("return type" in e and "boolean" in e for e in errors)
+
+
+# --- Pass 24: status-drift protection ------------------------------------------------------
+#
+# storage_key_still_referenced_global() (migration 0020) hardcodes the same string literals
+# as app.models.document.RESUMABLE_INDEX_STATUSES and the same ImportJobStatus rules
+# blob_references.py's module docstring documents -- there is structurally no way for a SQL
+# function to import a Python frozenset, so the two lists can only be kept in sync by hand.
+# These tests exhaustively compare the SQL function's real, observed behavior against the
+# Python contract for EVERY enum value that exists today, so that adding a new IndexStatus or
+# ImportJobStatus value without updating migration 0020 in the same change fails a test
+# immediately, rather than silently reopening a cross-owner/blob-deletion gap later.
+
+
+def test_sibling_document_status_policy_matches_resumable_index_statuses_for_every_status():
+    from app.models.document import RESUMABLE_INDEX_STATUSES
+
+    session = SessionLocal()
+    try:
+        for status in IndexStatus:
+            owner = _make_user(session, email=f"purge-drift-{status.value}@example.com")
+            storage_key = _store_real_blob(f"status drift check: {status.value}".encode())
+            document = _make_document(session, owner.id, storage_key=storage_key)
+            job = _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.completed)
+
+            sibling = _make_document(session, owner.id, title=f"sibling-{status.value}", storage_key=None)
+            _set_rls_user(session, owner.id)
+            sibling.import_job_id = job.id
+            sibling.status = status
+            session.add(sibling)
+            session.commit()
+
+            _set_rls_user(session, owner.id)
+            result = purge_source(session, document.id, owner.id)
+
+            expected_blocked = status in RESUMABLE_INDEX_STATUSES
+            actually_blocked = result.deletion_status == DeletionStatus.pending
+            assert actually_blocked == expected_blocked, (
+                f"IndexStatus.{status.value}: expected blocked={expected_blocked} "
+                f"(RESUMABLE_INDEX_STATUSES membership) but the SQL policy gave "
+                f"deletion_status={result.deletion_status.value} -- migration 0020's hardcoded "
+                f"status list has drifted from app.models.document.RESUMABLE_INDEX_STATUSES"
+            )
+            assert get_storage().exists(storage_key) == expected_blocked
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_import_job_status_policy_matches_the_documented_contract_for_every_status():
+    """The job-status half of the same contract, independent of any sibling document: pending/
+    running/blocked always block; partial blocks iff blocked_count > 0; every other status
+    (completed/failed/cancelled) never blocks on its own."""
+    session = SessionLocal()
+    try:
+        for status in ImportJobStatus:
+            for blocked_count in (0, 1):
+                owner = _make_user(session, email=f"purge-jobdrift-{status.value}-{blocked_count}@example.com")
+                storage_key = _store_real_blob(f"job status drift: {status.value}-{blocked_count}".encode())
+                document = _make_document(session, owner.id, storage_key=storage_key)
+                _make_import_job(
+                    session, owner.id, source_storage_key=storage_key, status=status, blocked_count=blocked_count
+                )
+                _set_rls_user(session, owner.id)
+
+                result = purge_source(session, document.id, owner.id)
+
+                if status in (ImportJobStatus.pending, ImportJobStatus.running, ImportJobStatus.blocked):
+                    expected_blocked = True
+                elif status == ImportJobStatus.partial:
+                    expected_blocked = blocked_count > 0
+                else:
+                    expected_blocked = False
+
+                actually_blocked = result.deletion_status == DeletionStatus.pending
+                assert actually_blocked == expected_blocked, (
+                    f"ImportJobStatus.{status.value} (blocked_count={blocked_count}): expected "
+                    f"blocked={expected_blocked} but the SQL policy gave "
+                    f"deletion_status={result.deletion_status.value}"
+                )
+    finally:
+        session.rollback()
+        session.close()

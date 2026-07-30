@@ -23,6 +23,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import psycopg2
 import pytest
@@ -58,6 +59,8 @@ from app.security import hash_password
 
 
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+_ENSURE_APP_ROLE_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "ensure_app_role.py"
+_BACKEND_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
 
 def _load_apply_runtime_privileges():
@@ -65,6 +68,17 @@ def _load_apply_runtime_privileges():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_ensure_app_role():
+    spec = importlib.util.spec_from_file_location("ensure_app_role", _ENSURE_APP_ROLE_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_alembic(*args: str) -> None:
+    subprocess.run([sys.executable, "-m", "alembic", *args], cwd=_BACKEND_ROOT, check=True, env={**os.environ})
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -1250,6 +1264,127 @@ def test_worker_container_reboot_still_narrows_privileges_via_docker_entrypoint(
         )
     finally:
         engine.dispose()
+
+
+def test_mixed_version_boot_window_0019_to_0020():
+    """Pass 24: a founder review found a real mixed-version boot race. ensure_app_role.py's
+    S1A re-narrowing used to be gated behind "every S1A object this codebase knows about
+    exists" (`s1a_objects_exist(cur)`), checked in the SAME transaction as its own wide
+    `GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainai_app`. During a rolling
+    deploy where the database is still on migration 0019 but a `RUN_MIGRATIONS=false` worker
+    container is already running code that KNOWS about migration 0020 (storage_key_still_
+    referenced_global), that gate was False purely because 0020's function didn't exist yet
+    -- so ensure_app_role.py skipped narrowing ENTIRELY, including the 0019 tables/functions
+    that DID already exist and were already correctly narrowed before this boot. The wide
+    GRANT ALL committed as the durable state for those objects too, reopening exactly the
+    privilege surface the whole S1A policy exists to close, on a container that then
+    continues to serve real traffic.
+
+    Reproduced here end-to-end, in ONE controlled downgrade/upgrade cycle against the real
+    shared test database (never left at anything but `head` afterward, even on failure --
+    same discipline as test_migration_roundtrip.py):
+
+    Scenario A -- ensure_app_role.py's real main() must narrow whatever S1A objects already
+    exist (the 0019 core) even while the database is still on 0019 and storage_key_still_
+    referenced_global() does not exist at all yet -- no error, no wide grant survives.
+
+    Scenario B -- a RUN_MIGRATIONS=false worker's apply_runtime_privileges.py step (which
+    requires the FULL current-head object set) correctly FAILS while still on 0019 -- but the
+    0019 tables' privilege state must stay exactly as narrow as scenario A already left it;
+    a failed apply_runtime_privileges run must never itself re-widen anything.
+
+    Scenario C -- once the database is actually upgraded to 0020, apply_runtime_privileges.py
+    succeeds and grants mainai_app EXECUTE on exactly the one new function, nothing more.
+    """
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    ensure_app_role = _load_ensure_app_role()
+    apply_runtime_privileges = _load_apply_runtime_privileges()
+    app_password = urlparse(settings.app_database_url).password or "mainai_app_pw"
+
+    def _has_table_priv(conn, table: str, priv: str) -> bool:
+        return conn.execute(
+            sa_text("SELECT has_table_privilege('mainai_app', :table, :priv)"), {"table": table, "priv": priv}
+        ).scalar()
+
+    def _has_func_exec(conn, grantee: str, signature: str) -> bool:
+        return conn.execute(
+            sa_text("SELECT has_function_privilege(:grantee, :sig, 'EXECUTE')"), {"grantee": grantee, "sig": signature}
+        ).scalar()
+
+    try:
+        _run_alembic("downgrade", "-1")  # DB is now at 0019 -- 0020's function does not exist
+
+        with engine.connect() as conn:
+            still_referenced_exists = conn.execute(
+                sa_text("SELECT to_regclass('public.storage_key_still_referenced_global') IS NOT NULL")
+            ).scalar()
+        assert still_referenced_exists is False, "test setup: 0020's function must not exist yet at 0019"
+
+        # --- Scenario A -------------------------------------------------------------------
+        # ensure_app_role.py's real main(), run against a database still on 0019, with code
+        # that already knows about 0020 (this exact test file's own imports prove that).
+        env_patch = {
+            "DATABASE_URL": settings.database_url,
+            "MAINAI_APP_PASSWORD": app_password,  # matches the already-provisioned password -- no rotation
+        }
+        old_env = {k: os.environ.get(k) for k in [*env_patch, "RENDER_ENV_FILE"]}
+        try:
+            os.environ.update(env_patch)
+            os.environ.pop("RENDER_ENV_FILE", None)
+            ensure_app_role.main()  # must not raise
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        with engine.connect() as conn:
+            assert _has_table_priv(conn, "memory_source_units", "UPDATE") is False
+            assert _has_table_priv(conn, "memory_source_units", "SELECT") is True
+            assert _has_table_priv(conn, "document_source_units", "UPDATE") is False
+            assert _has_table_priv(conn, "memory_source_lifecycle_events", "INSERT") is False
+            assert _has_func_exec(conn, "mainai_app", "public.transition_own_memory_source(uuid, varchar, text)") is True
+            assert (
+                _has_func_exec(
+                    conn, "mainai_app", "public.transition_memory_source_admin(uuid, varchar, text, varchar, uuid)"
+                )
+                is False
+            )
+
+        # --- Scenario B -------------------------------------------------------------------
+        # A RUN_MIGRATIONS=false worker's apply_runtime_privileges.py step, still at 0019 --
+        # must fail (the full current-head object set, including 0020's function, is required
+        # here) without touching the privilege state scenario A already established.
+        with pytest.raises((RuntimeError, SystemExit)):
+            apply_runtime_privileges.apply_and_verify(settings.database_url)
+
+        with engine.connect() as conn:
+            assert _has_table_priv(conn, "memory_source_units", "UPDATE") is False, (
+                "a FAILED apply_runtime_privileges run must never re-widen mainai_app's privileges"
+            )
+            assert _has_table_priv(conn, "memory_source_units", "SELECT") is True
+
+        # --- Scenario C -------------------------------------------------------------------
+        _run_alembic("upgrade", "head")  # DB is now at 0020
+
+        apply_runtime_privileges.apply_and_verify(settings.database_url)  # must succeed cleanly
+
+        with engine.connect() as conn:
+            assert (
+                _has_func_exec(conn, "mainai_app", "public.storage_key_still_referenced_global(text)") is True
+            )
+            assert (
+                _has_func_exec(conn, "public", "public.storage_key_still_referenced_global(text)") is False
+            )
+    finally:
+        # Guarantees the shared test database is left at head regardless of any assertion
+        # failure above -- every other test file in this session depends on that.
+        try:
+            _run_alembic("upgrade", "head")
+        finally:
+            engine.dispose()
 
 
 # --- erase_owner_memory() ---------------------------------------------------------------
