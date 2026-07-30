@@ -40,8 +40,8 @@ S1A-tester totalt över 6 filer (`test_memory_source_units.py`: 39, `test_ensure
 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s S1A-del: 12,
 `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 18) — dessa delar filer med
 39+18 befintliga, orelaterade tester som förblir gröna (ingen regression). Hela
-backend-/security-/account-sviten: 652/653 gröna (1 avsiktligt överhoppad kapacitetstest). CI-
-status på exakt ny head-SHA kontrolleras löpande (se Pass 21 för senaste kontrollerade läge).
+backend-/security-/account-sviten: 652/653 gröna (1 avsiktligt överhoppad kapacitetstest). CI
+verifierad grön på exakt head-SHA `a388507` (se Pass 21 för detaljer).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -104,9 +104,13 @@ disk och verifiera både överlevnad (fortfarande refererad) och faktisk raderin
 Omverifiering: `test_source_purge.py` 18/18, ingen regression i övriga S1A-filer eller
 `test_storage_local_fs.py` (186 tester tillsammans), hela backend-/security-/account-sviten
 652 passed/1 avsiktligt överhoppad/0 failed (211.68s), bare-DB migrations-round-trip mot en
-färsk `postgres`-superuser-databas ren (ingen ny migration — ren applikationskod). Två
-separata, avgränsade commits (`985da3b` tjänst, `027aa37` tester), pushade. CI-kontroll mot
-exakt ny head — se PR-beskrivningen för slutstatus.
+färsk `postgres`-superuser-databas ren (ingen ny migration — ren applikationskod). Tre
+separata, avgränsade commits (`985da3b` tjänst, `027aa37` tester, `a388507`
+registerdokumentation), pushade. **CI verifierad grön ("All required checks passed",
+`conclusion: success`) på exakt head-SHA `a388507` direkt via GitHubs check-runs-API** — alla
+obligatoriska jobb (backend unit/integration, konto-livscykel, RLS/session-security, E2E,
+migrationskontroll, frontend) `success`. PR-beskrivningen uppdaterad till att matcha (se PR
+#31 direkt, inte denna sammanfattning, för den fullständiga aktuella texten).
 
 ## Pass 20 (2026-07-30): PR #31 — delad purge_source()-tjänst för library.py och documents.py
 
