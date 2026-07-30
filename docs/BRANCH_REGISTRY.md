@@ -48,8 +48,9 @@ lyckats. 111 dedikerade S1A-tester totalt över 6 filer + 1 routertest
 `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 31,
 `test_library_routes.py`s Pass 22-test: 1) — dessa delar filer med 39+18+~200 befintliga,
 orelaterade tester som förblir gröna (ingen regression). Hela backend-/security-/account-sviten:
-666/667 gröna (1 avsiktligt överhoppad kapacitetstest). CI-kontroll mot exakt ny head `c76af35`
-pågår (se Pass 22 för detaljer).
+666/667 gröna (1 avsiktligt överhoppad kapacitetstest). CI verifierad grön ("All required
+checks passed") på exakt slutlig head-SHA `56e74e3` (registerdokumentationscommitten ovanpå
+Pass 22:s kod/tester) — se Pass 22 för detaljer.
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -134,9 +135,12 @@ Omverifiering: `test_source_purge.py` 31/31, regressionssvep över `test_library
 `test_claims.py` + `test_storage_local_fs.py` = 200/200, hela backend-/security-/account-
 sviten 666 passed/1 avsiktligt överhoppad/0 failed (221.49s, exakt +14 över Pass 21:s 652),
 bare-DB-migrations-round-trip mot en färsk `postgres`-superuser-databas ren (ingen ny migration
-— ren applikationskod). Två separata, avgränsade commits (`94fb325` blob-referens/lås,
-`c76af35` tester), pushade. CI-kontroll mot exakt ny head `c76af35` pågår — se PR-beskrivningen
-för slutstatus.
+— ren applikationskod). Tre separata, avgränsade commits (`94fb325` blob-referens/lås,
+`c76af35` tester, `56e74e3` registerdokumentation), pushade. **CI verifierad grön ("All
+required checks passed", `conclusion: success`) på exakt head-SHA `56e74e3` direkt via GitHubs
+check-runs-API** — alla obligatoriska jobb (backend unit/integration, konto-livscykel,
+RLS/session-security, E2E×2, migrationskontroll, frontend) `success`. PR-beskrivningen
+uppdaterad till att matcha.
 
 ## Pass 21 (2026-07-30): PR #31 — purge_source() delad i atomisk DB-fas + återförsökbar blob-fas
 
