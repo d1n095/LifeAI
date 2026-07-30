@@ -47,14 +47,20 @@ innehållsadresserade blobreferenskontrollen kördes som vanliga ORM-frågor mot
 `knowledge_import_jobs` inuti anropande ägarens egen RLS-scopade session — strukturellt
 oförmögen att se en ANNAN ägares levande dokument eller väntande importjobb som delade samma
 `storage_key`. Löst med en ny, smal `SECURITY DEFINER`-funktion
-(`storage_key_still_referenced_global`, migration `0020`), inte en RLS-avstängning.
-121 dedikerade S1A-tester totalt över 6 filer + 1 routertest (`test_memory_source_units.py`:
-39, `test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s
-S1A-del: 12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 42,
+(`storage_key_still_referenced_global`, migration `0020`), inte en RLS-avstängning. Pass 24
+(nedan) täppte till två kvarstående privilegieblockerare grundaren hittade i den granskningen:
+`s1a_privilege_policy.py` verifierade aldrig `pg_proc.prosecdef` (en `ALTER FUNCTION ...
+SECURITY INVOKER` hade passerat alla andra kontroller tyst), och `ensure_app_role.py`s
+S1A-omsmalning var gated på att ALLA S1A-objekt existerar — vilket lämnade ett "mixed-version
+boot window" öppet mellan migration 0019 och 0020 där en bred `GRANT ALL` kunde committas
+oomsmalnad. Löst med en `require_complete`-flagga genom `apply_privilege_policy()`.
+127 dedikerade S1A-tester totalt över 6 filer + 1 routertest (`test_memory_source_units.py`:
+40, `test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s
+S1A-del: 12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 46,
 `test_library_routes.py`s Pass 22-test: 1) — dessa delar filer med 39+18+~200 befintliga,
 orelaterade tester som förblir gröna (ingen regression). Hela backend-/security-/account-sviten:
-677/678 gröna (1 avsiktligt överhoppad kapacitetstest). CI verifierad grön på exakt slutlig
-head-SHA `ac92b36` (se Pass 23 för detaljer).
+682/683 gröna (1 avsiktligt överhoppad kapacitetstest). CI verifierad grön på exakt slutlig
+head-SHA — se Pass 24 för detaljer och den slutgiltiga SHA:n.
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -63,9 +69,94 @@ anropar den inte än — `delete_account` skulle idag blockeras av S1A:s FK:er o
 memory_source_units-objekt existerar för kontot), produktionsdataprofilen (krävs före MERGE,
 inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna PR:s
 merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte bygger
-än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 23:s
+än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 24:s
 ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
 godkännande att gå vidare till konto-integration/merge/deploy/produktionsbackfill.
+
+## Pass 24 (2026-07-30): PR #31 — SECURITY DEFINER-verifiering + mixed-version boot window stängt
+
+Grundaren bekräftade att Pass 23:s cross-owner-lösning var korrekt i sak, men hittade två
+kvarstående privilegieblockerare och begärde en policy-driftkontroll innan konto-integration
+ens skulle övervägas.
+
+**1. `s1a_privilege_policy.py` verifierade aldrig `pg_proc.prosecdef`.** Den kontrollerade
+ägare, `BYPASSRLS`, `search_path` och grants för varje S1A-funktion, men läste aldrig om
+funktionen faktiskt ÄR `SECURITY DEFINER`. En `ALTER FUNCTION ... SECURITY INVOKER` hade
+passerat ALLA andra kontroller tyst — och funktionen skulle då köra med ANROPARENS
+(`mainai_app`s) privilegier/RLS-scope istället för den ägande rollens, vilket tyst
+återinförde exakt den cross-owner-bugg Pass 23 stängde. `_FUNCTIONS`-listan utökades till
+4-tupler med en `expected_return_type`; policyn kräver nu `prosecdef = true`, rätt
+returtyp och `plpgsql` som språk för varje hanterad funktion, och boot-verifieringen
+misslyckas högljutt om något av detta inte stämmer. Verifierat med en RIKTIG
+`ALTER FUNCTION public.storage_key_still_referenced_global(text) SECURITY INVOKER` mot
+databasen — `apply_and_verify` misslyckas, återställdes till `SECURITY DEFINER`, passerar
+igen. Ett separat test verifierar att en felmonkeypatchad förväntad returtyp (text istället
+för boolean) upptäcks, inte tyst accepteras.
+
+**2. Ett "mixed-version boot window" mellan migration 0019 och 0020.** `s1a_objects_exist()`
+kräver nu ALLA S1A-objekt, inklusive migration 0020:s funktion. `ensure_app_role.py` gjorde
+`GRANT ALL ON ALL TABLES` → kontrollerade `s1a_objects_exist()` → smalnade av ENDAST om sant
+→ commitade. Vid en rullande driftsättning där databasen fortfarande är på 0019 men en
+`RUN_MIGRATIONS=false`-worker kör kod som redan känner till 0020, är grinden False ENBART
+för att 0020:s funktion saknas — så `ensure_app_role` hoppade över omsmalningen HELT
+(inklusive de 0019-objekt som FANNS och redan var smala), och den breda `GRANT ALL`
+committades som bestående tillstånd. En äldre backend-instans kunde då fortsätta betjäna
+trafik genom den nu breddade delade `mainai_app`-rollen.
+
+Löst genom en `require_complete`-flagga genom `apply_privilege_policy()`:
+`ensure_app_role.py` (varje boot) anropar den nu med `require_complete=False` —
+omsmalnar OVILLKORLIGT vilken delmängd av skyddade tabeller/funktioner som än existerar just
+nu, i SAMMA transaktion som sin egen `GRANT ALL`, medan ett legitimt saknat FRAMTIDA objekt
+(före sin egen migration) inte längre blockerar omsmalningen av det som redan finns.
+`apply_runtime_privileges.py` (körs efter `alembic upgrade head`) behåller
+`require_complete=True` och vägrar committa NÅGOT om det aktuella head-objektsettet är
+ofullständigt — om databasen redan påstår sig vara på revision 0020 men funktionen saknas,
+misslyckas den utan att committa breda privilegier.
+
+**Tre nya testscenarier (en kombinerad testfunktion mot den delade sessions-scopade
+testdatabasen, med samma `try/finally: återställ till head`-disciplin som
+`test_migration_roundtrip.py`):** A — migrera databasen till 0019, kör den nya
+`ensure_app_role`-logiken (som redan känner till 0020), verifiera att
+`memory_source_units`/`document_source_units`/`lifecycle_events` fortfarande har exakt minsta
+privilegium och att INGEN bred grant committerades trots den saknade 0020-funktionen; B —
+simulera en `RUN_MIGRATIONS=false`-worker på 0019, `apply_runtime_privileges` MÅSTE
+misslyckas eftersom aktuellt head saknas, men privilegietillståndet på 0019-tabellerna
+förblir smalt; C — uppgradera till 0020, `apply_runtime_privileges` passerar och beviljar
+`EXECUTE` på exakt `public.storage_key_still_referenced_global(text)`.
+
+**Schema-kvalificering överallt:** `CREATE OR REPLACE FUNCTION
+public.storage_key_still_referenced_global(...)`, motsvarande `REVOKE`/`DROP FUNCTION` i
+migration 0020, och `blob_references.py`s anropande SQL — ingen funktionsupplösning ska
+någonsin bero på anropande sessions `search_path`.
+
+**Policy-driftkontroll:** migration 0020:s SQL hårdkodar samma statussträngar som Pythons
+`RESUMABLE_INDEX_STATUSES` (`app.models.document`) — SQL kan inte importera en Python-mängd,
+så det enda skyddet mot att de glider isär är ett uttömmande test som jämför OBSERVERAT
+SQL-beteende mot Python-kontraktet för varje nuvarande enum-värde. Två nya tester i
+`test_source_purge.py` itererar över varje `IndexStatus`- respektive `ImportJobStatus`-värde
+och jämför `storage_key_still_referenced_global()`s faktiska purge-blockeringsbeslut mot
+kontraktet — dessa misslyckas automatiskt nästa gång Python-listan ändras utan en
+motsvarande migrations-/SQL-uppdatering.
+
+**`test_migration_roundtrip.py`s schemasnapshot fördjupades ytterligare** (Pass 23 lade bara
+till namn+signatur): varje funktions fingeravtryck inkluderar nu också returtyp,
+`prosecdef`, `proconfig` (search_path), språk, och en md5 av `pg_get_functiondef()` (hela den
+kanoniska CREATE-satsen, kroppen inkluderad) — så "schemat återställdes exakt" faktiskt
+betyder att SECURITY-egenskaperna kom tillbaka också, inte bara att en likadant namngiven
+funktion dök upp igen.
+
+Omverifiering: riktat regressionssvep (`test_source_purge.py`+`test_ensure_app_role.py`+
+`test_memory_source_units.py`+`test_migration_roundtrip.py`+`test_library_routes.py`+
+`test_library_import.py`+`test_memory_source_backfill.py`+`test_claims.py`+
+`test_storage_local_fs.py`) 227/227, hela backend-/security-/account-sviten 682 passed/1
+avsiktligt överhoppad/0 failed (210.04s, exakt +5 över Pass 23:s 677), bare-DB-migrations-
+round-trip (`upgrade head` → `downgrade -1` → `upgrade head`, genom migration 0020) mot en
+färsk `postgres`-superuser-databas (`lifeos_bare_check_p24`, ingen `mainai_app`-roll) ren.
+Två separata, avgränsade commits (privilegiepolicy/mixed-version-boot-window-fix +
+schema-kvalificering; tester), pushade som `6746da3`. CI-verifiering på exakt denna head-SHA
+pågår — se nästa uppdatering av detta register eller PR #31:s beskrivning för resultatet.
+Grundaren var explicit: INGEN konto-integration, produktionsprofil, produktionsbackfill,
+merge eller deploy förrän en fräsch granskning godkänner detta.
 
 ## Pass 23 (2026-07-30): PR #31 — cross-owner RLS-lucka i blobreferenskontrollen stängd
 
