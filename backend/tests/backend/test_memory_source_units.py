@@ -1315,9 +1315,16 @@ def test_mixed_version_boot_window_0019_to_0020():
     try:
         _run_alembic("downgrade", "-1")  # DB is now at 0019 -- 0020's function does not exist
 
+        # Pass 25: a founder review caught this using to_regclass, which resolves RELATIONS
+        # (tables/views/etc.) -- never functions, so it returns NULL for a function name
+        # whether or not that function actually exists, and this assertion would have passed
+        # vacuously regardless of the real database state. to_regprocedure resolves FUNCTIONS
+        # by their exact signature and is what actually proves the test's own setup.
         with engine.connect() as conn:
             still_referenced_exists = conn.execute(
-                sa_text("SELECT to_regclass('public.storage_key_still_referenced_global') IS NOT NULL")
+                sa_text(
+                    "SELECT to_regprocedure('public.storage_key_still_referenced_global(text)') IS NOT NULL"
+                )
             ).scalar()
         assert still_referenced_exists is False, "test setup: 0020's function must not exist yet at 0019"
 
@@ -1368,6 +1375,14 @@ def test_mixed_version_boot_window_0019_to_0020():
 
         # --- Scenario C -------------------------------------------------------------------
         _run_alembic("upgrade", "head")  # DB is now at 0020
+
+        with engine.connect() as conn:
+            still_referenced_exists = conn.execute(
+                sa_text(
+                    "SELECT to_regprocedure('public.storage_key_still_referenced_global(text)') IS NOT NULL"
+                )
+            ).scalar()
+        assert still_referenced_exists is True, "test setup: 0020's function must exist once at head"
 
         apply_runtime_privileges.apply_and_verify(settings.database_url)  # must succeed cleanly
 

@@ -1435,7 +1435,7 @@ def test_apply_runtime_privileges_verifies_return_type_and_language():
     spec.loader.exec_module(policy_module)
 
     policy_module._FUNCTIONS = [
-        ("storage_key_still_referenced_global", True, True, "text"),  # wrong -- real type is boolean
+        ("storage_key_still_referenced_global", True, True, "text", ("text",)),  # wrong -- real type is boolean
     ]
 
     settings = _get_settings()
@@ -1451,6 +1451,177 @@ def test_apply_runtime_privileges_verifies_return_type_and_language():
         conn.close()
 
     assert any("return type" in e and "boolean" in e for e in errors)
+
+
+# --- Pass 25: exact function signature verification ----------------------------------------
+#
+# A founder review caught a real gap in Pass 24's SECURITY DEFINER work: `_FUNCTIONS` carried
+# a function name and expected return type, but never the expected ARGUMENT types --
+# `_function_signature()` resolved by name alone and simply accepted whatever single overload
+# happened to exist. A same-named function with the WRONG arguments (e.g.
+# `storage_key_still_referenced_global(integer)` instead of the application's real `(text)`
+# call) could pass every other check -- SECURITY DEFINER, boolean return, correct owner,
+# correct grants -- while being an entirely different function than the one
+# blob_references.py actually calls, which would only break at runtime.
+#
+# These tests exercise `s1a_privilege_policy._resolve_function()`'s exact-signature logic in
+# isolation, against a throwaway scratch function (never a real S1A object), all inside a
+# single psycopg2 transaction that is ALWAYS rolled back -- CREATE FUNCTION is itself
+# transactional DDL, so the scratch function (and any GRANT/REVOKE the policy issues against
+# it) never persists, with no explicit DROP needed.
+
+
+def _load_policy_module(name: str):
+    policy_path = Path(__file__).resolve().parent.parent.parent / "scripts" / "s1a_privilege_policy.py"
+    spec = importlib.util.spec_from_file_location(name, policy_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _apply_scratch_policy(cur, functions):
+    import psycopg2
+
+    policy_module = _load_policy_module(f"s1a_privilege_policy_sigcheck_{uuid.uuid4().hex}")
+    policy_module._FUNCTIONS = functions
+    cur.execute("SELECT current_user")
+    (expected_owner,) = cur.fetchone()
+    return policy_module.apply_privilege_policy(cur, expected_owner=expected_owner, require_complete=False), psycopg2
+
+
+_SCRATCH_FN = "s1a_test_sig_check_p25"
+
+
+def test_resolve_function_accepts_the_correct_signature():
+    """A: the correct function, with the correct argument types, resolves cleanly and is
+    granted/verified exactly like any real managed function -- no signature-related error."""
+    import psycopg2
+
+    settings = get_settings()
+    conn = psycopg2.connect(settings.database_url)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE FUNCTION public.{_SCRATCH_FN}(text) RETURNS boolean
+                LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+                AS $$ BEGIN RETURN true; END; $$
+                """
+            )
+            errors, _ = _apply_scratch_policy(
+                cur, [(_SCRATCH_FN, True, True, "boolean", ("text",))]
+            )
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert errors == []
+
+
+def test_resolve_function_rejects_an_extra_overload_of_the_same_name():
+    """B: TWO overloads of the same function name exist (the expected `(text)` one, plus an
+    unexpected `(integer)` one) -- refused entirely, not just "the right one happens to also
+    be there so it's fine". A pre-existing PUBLIC grant on the unexpected overload is used to
+    prove nothing was touched: if the policy had silently picked one overload to act on, this
+    grant would have been revoked."""
+    import psycopg2
+
+    settings = get_settings()
+    conn = psycopg2.connect(settings.database_url)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE FUNCTION public.{_SCRATCH_FN}(text) RETURNS boolean
+                LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+                AS $$ BEGIN RETURN true; END; $$
+                """
+            )
+            cur.execute(
+                f"""
+                CREATE FUNCTION public.{_SCRATCH_FN}(integer) RETURNS boolean
+                LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+                AS $$ BEGIN RETURN true; END; $$
+                """
+            )
+            cur.execute(f"GRANT EXECUTE ON FUNCTION public.{_SCRATCH_FN}(integer) TO PUBLIC")
+
+            errors, _ = _apply_scratch_policy(
+                cur, [(_SCRATCH_FN, True, True, "boolean", ("text",))]
+            )
+
+            cur.execute(
+                f"SELECT has_function_privilege('public', 'public.{_SCRATCH_FN}(integer)', 'EXECUTE')"
+            )
+            (integer_overload_still_public,) = cur.fetchone()
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert any("expected exactly one overload" in e for e in errors)
+    assert integer_overload_still_public is True  # untouched -- the policy refused to act at all
+
+
+def test_resolve_function_rejects_the_only_overload_when_its_signature_is_wrong():
+    """C: only a WRONG-signature overload exists (`(integer)`, application expects `(text)`) --
+    must be treated as missing/wrong, never silently accepted as "the one overload that
+    happens to be there"."""
+    import psycopg2
+
+    settings = get_settings()
+    conn = psycopg2.connect(settings.database_url)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE FUNCTION public.{_SCRATCH_FN}(integer) RETURNS boolean
+                LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+                AS $$ BEGIN RETURN true; END; $$
+                """
+            )
+            errors, _ = _apply_scratch_policy(
+                cur, [(_SCRATCH_FN, True, True, "boolean", ("text",))]
+            )
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert any(
+        "the only overload present" in e and "expects" in e and "(text)" in e for e in errors
+    )
+
+
+def test_resolve_function_finds_the_right_signature_but_still_catches_security_invoker():
+    """D: the correct name AND the correct argument types resolve successfully (proving exact-
+    signature resolution doesn't itself get confused by SECURITY INVOKER), but the function is
+    SECURITY INVOKER -- still caught by the downstream prosecdef check, exactly like the real
+    storage_key_still_referenced_global() INVOKER-downgrade test above, just against an
+    isolated scratch function instead of touching the real one."""
+    import psycopg2
+
+    settings = get_settings()
+    conn = psycopg2.connect(settings.database_url)
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE FUNCTION public.{_SCRATCH_FN}(text) RETURNS boolean
+                LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog
+                AS $$ BEGIN RETURN true; END; $$
+                """
+            )
+            errors, _ = _apply_scratch_policy(
+                cur, [(_SCRATCH_FN, True, True, "boolean", ("text",))]
+            )
+        conn.rollback()
+    finally:
+        conn.close()
+
+    assert any("SECURITY DEFINER" in e and "prosecdef=false" in e for e in errors)
 
 
 # --- Pass 24: status-drift protection ------------------------------------------------------
@@ -1501,9 +1672,18 @@ def test_sibling_document_status_policy_matches_resumable_index_statuses_for_eve
 
 
 def test_import_job_status_policy_matches_the_documented_contract_for_every_status():
-    """The job-status half of the same contract, independent of any sibling document: pending/
-    running/blocked always block; partial blocks iff blocked_count > 0; every other status
-    (completed/failed/cancelled) never blocks on its own."""
+    """The job-status half of the same contract, independent of any sibling document.
+
+    Pass 25: the expectation used to be a second, hand-typed `pending/running/blocked`
+    if/elif chain living only in this test -- structurally uncoupled from the actual policy,
+    so a future status added to the worker's real resumption paths without a matching update
+    HERE could still pass. Now imports app.models.import_job's own
+    import_job_still_needs_raw_blob() -- the same canonical predicate app/jobs/lease.py's
+    claim_next_job and app/worker.py's _requeue_blocked_jobs build their real SQL from -- and
+    compares the SQL policy's observed behavior directly against IT, so this test is coupled
+    to the real policy's single source of truth, not a second copy of it."""
+    from app.models.import_job import import_job_still_needs_raw_blob
+
     session = SessionLocal()
     try:
         for status in ImportJobStatus:
@@ -1518,18 +1698,14 @@ def test_import_job_status_policy_matches_the_documented_contract_for_every_stat
 
                 result = purge_source(session, document.id, owner.id)
 
-                if status in (ImportJobStatus.pending, ImportJobStatus.running, ImportJobStatus.blocked):
-                    expected_blocked = True
-                elif status == ImportJobStatus.partial:
-                    expected_blocked = blocked_count > 0
-                else:
-                    expected_blocked = False
-
+                expected_blocked = import_job_still_needs_raw_blob(status, blocked_count)
                 actually_blocked = result.deletion_status == DeletionStatus.pending
                 assert actually_blocked == expected_blocked, (
                     f"ImportJobStatus.{status.value} (blocked_count={blocked_count}): expected "
-                    f"blocked={expected_blocked} but the SQL policy gave "
-                    f"deletion_status={result.deletion_status.value}"
+                    f"blocked={expected_blocked} (import_job_still_needs_raw_blob) but the SQL "
+                    f"policy gave deletion_status={result.deletion_status.value} -- migration "
+                    f"0020's hardcoded status list has drifted from "
+                    f"app.models.import_job.import_job_still_needs_raw_blob()"
                 )
     finally:
         session.rollback()
