@@ -354,6 +354,73 @@ def test_backfill_respects_max_batches_and_batch_size():
         session.close()
 
 
+def test_backfill_rejects_non_positive_batch_size():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        with pytest.raises(ValueError, match="batch_size"):
+            backfill_memory_source_units(session, owner.id, batch_size=0)
+        with pytest.raises(ValueError, match="batch_size"):
+            backfill_memory_source_units(session, owner.id, batch_size=-3)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_backfill_rejects_non_positive_max_batches():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        with pytest.raises(ValueError, match="max_batches"):
+            backfill_memory_source_units(session, owner.id, max_batches=0)
+        with pytest.raises(ValueError, match="max_batches"):
+            backfill_memory_source_units(session, owner.id, max_batches=-1)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_backfill_default_max_batches_is_finite_not_run_to_completion():
+    """A caller relying on the default must get a BOUNDED amount of work per call, not
+    'process everything' -- the pre-Pass-19 default (None) is exactly what let the
+    infinite-loop bug run unbounded instead of surfacing after one finite call. Explicit
+    max_batches=None is still available for a deliberate offline run-to-completion."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        document = _make_document(session, owner.id)
+        _set_rls_user(session, owner.id)
+        total_claims = 25
+        for i in range(total_claims):
+            _make_claim(session, owner.id, document.id, claim_text=f"Bounded default claim {i}")
+        _set_rls_user(session, owner.id)
+
+        result = backfill_memory_source_units(session, owner.id, batch_size=1)  # default max_batches
+
+        assert result.candidates_total < total_claims
+        remaining = (
+            session.query(KnowledgeClaim)
+            .filter(KnowledgeClaim.owner_id == owner.id, KnowledgeClaim.memory_source_id.is_(None))
+            .count()
+        )
+        assert remaining > 0
+
+        # explicit max_batches=None still runs to completion
+        full = backfill_memory_source_units(session, owner.id, batch_size=10, max_batches=None)
+        assert full.candidates_total == remaining
+        assert (
+            session.query(KnowledgeClaim)
+            .filter(KnowledgeClaim.owner_id == owner.id, KnowledgeClaim.memory_source_id.is_(None))
+            .count()
+            == 0
+        )
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_backfill_never_calls_any_provider(monkeypatch):
     from app.providers.openai_provider import OpenAIProvider
 

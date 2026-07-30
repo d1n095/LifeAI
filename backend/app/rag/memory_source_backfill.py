@@ -40,6 +40,27 @@ and a crash between two claims loses at most the in-flight one (retried next run
 valid NULL-memory_source_id candidate). `get_or_create_memory_source_unit` itself is the
 proven-safe primitive for the source-unit half of that atomicity (see its own module
 docstring and tests/backend/test_memory_source_units.py's real concurrent-lock-wait test).
+
+Production execution — NOT YET BUILT, deliberately (Pass 19 review). This module's return
+value (`MemorySourceBackfillResult`) and its `logger.warning`/`logger.exception` calls are
+sufficient for local development and ad-hoc/offline runs, but NOT a durable enough progress/
+failure record for a real production backfill across a whole owner base: a crashed process
+loses whatever was only ever in memory or in ordinary logs, an operator can't ask "how far did
+run X get" without grepping logs, and a specific claim's specific failure reason isn't
+queryable. Before backfill_memory_source_units() is ever run against production data, it
+needs a durable run record with (at minimum): a run id, owner_id, started_at/completed_at,
+status, the per-source-kind/skipped/failed/already_done counters this module already computes,
+a resumable cursor (the last claim id processed, so a restarted run doesn't have to rescan
+from the beginning), and a claim-level failure log (claim id + reason + retry count) —
+`memory_source_backfill_runs`/`memory_source_backfill_failures`-shaped, or reusing an existing
+durable-job pattern rather than inventing a new one from scratch. app/routers/admin.py's
+`trigger_claim_type_backfill` docstring already identifies the same gap for the sibling P3
+claim_type backfill ("the real fix — running this as a durable memory_processing_jobs job with
+its own status/lease/retry, the same worker-container pattern app/worker.py already uses for
+imports") — that same mechanism, extended to cover this backfill too, is the intended design,
+not a second bespoke tracking table. This is a separate, explicitly scoped future PR per
+CLAUDE.md's isolation principle ("en funktion = ett tydligt syfte = en egen branch eller PR"),
+not something to fold into this one — and no production backfill run happens before it exists.
 """
 
 import logging
@@ -63,6 +84,14 @@ logger = logging.getLogger("mainai.memory_source_backfill")
 # trip — each candidate claim is still its own SELECT ... FOR UPDATE SKIP LOCKED + commit, by
 # design (see module docstring's concurrency/restart-safety section).
 BACKFILL_BATCH_SIZE = 50
+
+# A "bounded" function should not default to "process everything" -- that default is exactly
+# what let the pre-Pass-19 infinite-loop bug run for hours undetected instead of surfacing
+# after one bounded call. Matches app/routers/admin.py's MAX_BACKFILL_BATCHES_PER_REQUEST
+# convention for the sibling claim_type backfill. A caller that genuinely wants to run to
+# completion in one call (an offline/maintenance script, never an HTTP request) must pass
+# max_batches=None explicitly -- that is an opt-in, not the default.
+DEFAULT_MAX_BATCHES = 10
 
 
 @dataclass
@@ -155,7 +184,7 @@ def backfill_memory_source_units(
     owner_id: uuid.UUID,
     *,
     batch_size: int = BACKFILL_BATCH_SIZE,
-    max_batches: int | None = None,
+    max_batches: int | None = DEFAULT_MAX_BATCHES,
     dry_run: bool = False,
 ) -> MemorySourceBackfillResult:
     """Owner-scoped, bounded, idempotent, restart-safe backfill of `KnowledgeClaim.
@@ -171,10 +200,20 @@ def backfill_memory_source_units(
     dry-run mode (nothing here needs exclusive access to report on it), so already-seen
     candidates are excluded by id instead of by re-querying a mutated NULL-filter.
 
-    `max_batches=None` (the default) processes every real candidate for this owner; a caller
-    that wants a bounded amount of work per call (e.g. an HTTP request with a timeout) passes
-    a real number, exactly like backfill_claim_types.
+    `max_batches` defaults to `DEFAULT_MAX_BATCHES` (bounded, not "process everything") — a
+    caller that genuinely wants to run every remaining candidate to completion in one call must
+    pass `max_batches=None` explicitly, an opt-in reserved for an offline/maintenance runner,
+    never an HTTP request. `batch_size` must be a positive integer and `max_batches` must be
+    `None` or a positive integer — either bound as `<= 0` would make `_apply`'s per-batch
+    `range(batch_size)` loop body never run, leaving `exhausted` `False` forever and spinning
+    the outer `while` loop indefinitely (the same failure class the Pass 19 review caught: a
+    bounded-sounding function must actually be unable to loop forever, not just unlikely to).
     """
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
+    if max_batches is not None and max_batches <= 0:
+        raise ValueError(f"max_batches must be None or a positive integer, got {max_batches!r}")
+
     result = MemorySourceBackfillResult()
     result.already_done = (
         db.query(KnowledgeClaim)
