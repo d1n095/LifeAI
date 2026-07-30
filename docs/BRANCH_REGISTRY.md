@@ -53,8 +53,8 @@ oförmögen att se en ANNAN ägares levande dokument eller väntande importjobb 
 S1A-del: 12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 42,
 `test_library_routes.py`s Pass 22-test: 1) — dessa delar filer med 39+18+~200 befintliga,
 orelaterade tester som förblir gröna (ingen regression). Hela backend-/security-/account-sviten:
-677/678 gröna (1 avsiktligt överhoppad kapacitetstest). CI-kontroll mot exakt ny head `9de8b9b`
-pågår — se Pass 23 för detaljer.
+677/678 gröna (1 avsiktligt överhoppad kapacitetstest). CI verifierad grön på exakt slutlig
+head-SHA `ac92b36` (se Pass 23 för detaljer).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
@@ -147,8 +147,12 @@ inklusive den striktare `downgrade base`-varianten), regressionssvep 92/92
 överhoppad/0 failed (208.21s, exakt +11 över Pass 22:s 666), bare-DB-migrations-round-trip
 (`upgrade head` → `downgrade -1` → `upgrade head`, inklusive migration 0020) mot en färsk
 `postgres`-superuser-databas ren. Tre separata, avgränsade commits (cross-owner-fix,
-cross-owner-tester, test-infrastruktur-fix), pushade. CI-kontroll mot exakt ny head — se
-PR-beskrivningen för slutstatus.
+cross-owner-tester, test-infrastruktur-fix), pushade. **CI verifierad grön ("All required
+checks passed", `conclusion: success`) på exakt head-SHA `ac92b36` direkt via GitHubs
+check-runs-API** — alla obligatoriska jobb (backend unit/integration, konto-livscykel,
+RLS/session-security, E2E×2, migrationskontroll — som kör exakt den fixade
+`test_migration_roundtrip.py` — frontend) `success`. PR-beskrivningen uppdaterad till att
+matcha.
 
 ## Pass 22 (2026-07-30): PR #31 — ImportJob som blob-referens, upload/purge-race, audit-atomicitet
 
