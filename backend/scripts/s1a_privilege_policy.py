@@ -45,8 +45,8 @@ _PROTECTED_TABLES = [
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
 
 # (function name, granted to mainai_app?, requires BYPASSRLS on its owner?, expected return
-# type) — matched by name alone (each name below has exactly one overload in this schema; see
-# _function_signature). The two owner-scoped functions enforce ownership themselves and
+# type, expected identity argument types) — resolved by name AND exact argument types (Pass
+# 25; see _resolve_function). The two owner-scoped functions enforce ownership themselves and
 # don't need BYPASSRLS; the two admin/migration functions have no such check by design and
 # MUST be owned by a role with real BYPASSRLS (or superuser), since `SET row_security = off`
 # does not grant anything RLS itself would deny.
@@ -66,12 +66,17 @@ _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFEREN
 # — a founder review pointed out that nothing previously verified the function was even
 # still SECURITY DEFINER at all, let alone that it returned only a boolean; see
 # `p.prosecdef`/`prorettype` verification below.
+#
+# Argument types match each function's CREATE statement in the migration exactly (migration
+# 0019 for the first four, 0020 for the last) — "varchar" is Postgres's own alias for
+# VARCHAR(16)'s identity type `character varying` (the length modifier is not part of a
+# function's identity and to_regprocedure resolves either spelling to the same signature).
 _FUNCTIONS = [
-    ("transition_own_memory_source", True, False, "void"),
-    ("transition_memory_source_admin", False, True, "void"),
-    ("erase_owner_memory", True, False, "void"),
-    ("erase_owner_memory_admin", False, True, "void"),
-    ("storage_key_still_referenced_global", True, True, "boolean"),
+    ("transition_own_memory_source", True, False, "void", ("uuid", "varchar", "text")),
+    ("transition_memory_source_admin", False, True, "void", ("uuid", "varchar", "text", "varchar", "uuid")),
+    ("erase_owner_memory", True, False, "void", ("uuid",)),
+    ("erase_owner_memory_admin", False, True, "void", ("uuid",)),
+    ("storage_key_still_referenced_global", True, True, "boolean", ("text",)),
 ]
 
 
@@ -80,15 +85,30 @@ def _table_exists(cur, table_name: str) -> bool:
     return bool(cur.fetchone()[0])
 
 
-def _function_signature(cur, name: str) -> str | None:
-    """Returns the function's full, schema-qualified `public.name(args)` signature as
-    Postgres identifies it (needed for GRANT/REVOKE/has_function_privilege, which all
-    require the exact overload signature), or None if no such function exists. Matched by
-    name alone: every function this module manages has exactly one overload in this schema,
-    and pg_get_function_identity_arguments() includes parameter names (e.g. "p_source_id
-    uuid, ..."), which is brittle to hardcode and keep in sync with the migration by hand —
-    looking up by (schema, name) avoids that entirely, and raises loudly instead of silently
-    matching nothing if that assumption (exactly one overload) is ever violated.
+def _resolve_function(cur, name: str, expected_arg_types: tuple[str, ...]) -> tuple[str | None, list[str]]:
+    """Resolves this function to its exact, schema-qualified `public.name(args)` signature,
+    disambiguated by its expected identity argument types — NOT matched by name alone.
+
+    Pass 25 found a real gap in the previous name-only lookup: a same-named function with the
+    WRONG argument types (e.g. `storage_key_still_referenced_global(integer)` instead of the
+    application's actual `(text)` call) would have been silently accepted as long as it was
+    the only overload present and still SECURITY DEFINER, boolean-returning, correctly owned,
+    and correctly granted — every check downstream of the lookup would pass while
+    `blob_references.py`'s actual `SELECT public.storage_key_still_referenced_global(:key)`
+    call broke at runtime, resolving to a function this policy never actually verified.
+
+    Returns `(signature_or_None, errors)`:
+    - `errors` is non-empty exactly when this name's overload set is itself a policy
+      violation — either more than one overload of `name` exists in `public` at all (an
+      unexpected extra overload could carry its own PUBLIC/mainai_app grants this policy
+      never reviews, so it is refused rather than silently ignored), or exactly one overload
+      exists but its argument types don't match `expected_arg_types` (a right-named,
+      wrong-signature function is treated as a missing/wrong function, never accepted).
+      When `errors` is non-empty, `signature` is always `None` — nothing is ever granted or
+      revoked against an unexpected overload.
+    - When `signature` is `None` and `errors` is EMPTY, the function genuinely does not exist
+      at all yet (zero overloads) — the caller decides whether that's an error, based on
+      `require_complete`.
 
     Always schema-qualified with `public.` explicitly, regardless of the caller's own
     search_path — `regprocedure::text` only omits the schema when `public` happens to be on
@@ -100,25 +120,40 @@ def _function_signature(cur, name: str) -> str | None:
         "WHERE n.nspname = 'public' AND p.proname = %s",
         (name,),
     )
-    rows = cur.fetchall()
+    rows = [r[0] for r in cur.fetchall()]
     if len(rows) > 1:
-        raise RuntimeError(f"s1a_privilege_policy: expected exactly one overload of {name}, found {len(rows)}")
+        return None, [
+            f"{name}: expected exactly one overload in public, found {len(rows)} "
+            f"({', '.join(sorted(rows))}) — refusing to grant/revoke on any of them"
+        ]
     if not rows:
-        return None
-    sig = rows[0][0]
-    return sig if sig.startswith("public.") else f"public.{sig}"
+        return None, []
+
+    expected_args_sql = ", ".join(expected_arg_types)
+    cur.execute("SELECT to_regprocedure(%s)::text", (f"public.{name}({expected_args_sql})",))
+    (resolved,) = cur.fetchone()
+    if resolved is None:
+        return None, [
+            f"{name}: the only overload present is {rows[0]!r}, but the application expects "
+            f"public.{name}({expected_args_sql}) — treating this as a missing/wrong function, "
+            f"not silently accepting whatever overload happens to exist"
+        ]
+    sig = resolved if resolved.startswith("public.") else f"public.{resolved}"
+    return sig, []
 
 
 def s1a_objects_exist(cur) -> bool:
-    """True only if EVERY protected table and EVERY managed function exists — partial
-    existence (e.g. a crash mid-migration) is never treated as "exists". Callers use this to
+    """True only if EVERY protected table and EVERY managed function (with its EXACT expected
+    signature) exists — partial existence (e.g. a crash mid-migration), or a same-named
+    function with the wrong arguments, is never treated as "exists". Callers use this to
     decide whether `apply_privilege_policy()` is safe to run at all; it assumes this is
     already True and does not re-check."""
     for table, _ in _PROTECTED_TABLES:
         if not _table_exists(cur, table):
             return False
-    for name, _, _, _ in _FUNCTIONS:
-        if _function_signature(cur, name) is None:
+    for name, _, _, _, expected_args in _FUNCTIONS:
+        sig, errors = _resolve_function(cur, name, expected_args)
+        if sig is None or errors:
             return False
     return True
 
@@ -161,8 +196,11 @@ def apply_privilege_policy(cur, *, expected_owner: str, require_complete: bool =
             errors.append(f"{table}: table does not exist (required)")
 
     signatures: dict[str, str] = {}
-    for name, _grant_to_app, _requires_bypassrls, _expected_return_type in _FUNCTIONS:
-        sig = _function_signature(cur, name)
+    for name, _grant_to_app, _requires_bypassrls, _expected_return_type, expected_args in _FUNCTIONS:
+        sig, resolve_errors = _resolve_function(cur, name, expected_args)
+        if resolve_errors:
+            errors.extend(resolve_errors)
+            continue
         if sig is None:
             if require_complete:
                 errors.append(f"{name}: function does not exist (required)")
@@ -175,7 +213,7 @@ def apply_privilege_policy(cur, *, expected_owner: str, require_complete: bool =
         cur.execute(f'REVOKE ALL ON TABLE public."{table}" FROM {APP_ROLE}')
         cur.execute(f'GRANT {", ".join(allowed_privs)} ON TABLE public."{table}" TO {APP_ROLE}')
 
-    for name, grant_to_app, _requires_bypassrls, _expected_return_type in _FUNCTIONS:
+    for name, grant_to_app, _requires_bypassrls, _expected_return_type, _expected_args in _FUNCTIONS:
         sig = signatures.get(name)
         if sig is None:
             continue
@@ -205,10 +243,10 @@ def apply_privilege_policy(cur, *, expected_owner: str, require_complete: bool =
             if actually_has != should_have:
                 errors.append(f"{table}.{priv}: {APP_ROLE} has={actually_has}, expected={should_have}")
 
-    for name, grant_to_app, requires_bypassrls, expected_return_type in _FUNCTIONS:
+    for name, grant_to_app, requires_bypassrls, expected_return_type, _expected_args in _FUNCTIONS:
         sig = signatures.get(name)
         if sig is None:
-            continue  # already reported above when require_complete
+            continue  # already reported above (missing, or a wrong/extra overload)
 
         cur.execute("SELECT has_function_privilege(%s, %s, 'EXECUTE')", (APP_ROLE, sig))
         actually_can_execute = bool(cur.fetchone()[0])

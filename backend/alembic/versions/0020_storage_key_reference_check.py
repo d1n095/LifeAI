@@ -71,13 +71,18 @@ def upgrade() -> None:
             END IF;
 
             -- 2. Any ImportJob, across ALL owners, whose raw upload the worker could still
-            -- read from -- the exact same policy app/rag/blob_references.py's module
-            -- docstring documents (matched against app/worker.py's real resumption paths,
-            -- not guessed at). NOTE: app.models.document.RESUMABLE_INDEX_STATUSES's string
+            -- read from -- the exact same policy app/models/import_job.py's
+            -- import_job_still_needs_raw_blob() states in Python (matched against
+            -- app/worker.py's real resumption paths, not guessed at), and
+            -- app/rag/blob_references.py's module docstring documents. NOTE:
+            -- ImportJobStatus's and app.models.document.RESUMABLE_INDEX_STATUSES's string
             -- values are hardcoded below, same as every other lifecycle string literal
             -- already hardcoded in this schema's trigger/SECURITY DEFINER functions (see
-            -- migration 0019) -- if that Python frozenset ever changes, this list must be
-            -- updated in the same change, or this function silently falls out of sync.
+            -- migration 0019) -- SQL cannot import a Python frozenset, so if
+            -- import_job_still_needs_raw_blob() ever changes, this list must be updated in
+            -- the same change, or this function silently falls out of sync (a status-drift
+            -- test in tests/backend/test_source_purge.py compares the two directly, for
+            -- every current ImportJobStatus value, to catch exactly that).
             IF EXISTS (
                 SELECT 1 FROM public.knowledge_import_jobs j
                 WHERE j.source_storage_key = p_storage_key
