@@ -873,3 +873,101 @@ async def test_dual_write_preserves_legacy_provenance_columns(db_session, make_v
     assert claim.version_id == version.id
     assert claim.chunk_id == chunk.id
     assert claim.memory_source_id is not None
+
+
+# --- S1A dual-write: ownership/version integrity fails closed (Pass 19 review) --------------
+
+
+@pytest.mark.asyncio
+async def test_dual_write_rejects_version_belonging_to_a_different_document(db_session, make_verified_user, monkeypatch):
+    from app.providers.openai_provider import OpenAIProvider
+    from app.rag.claims import ClaimExtractionIntegrityError
+
+    async def _fail_if_called(self, messages, model, **kwargs):
+        raise AssertionError("no provider call may happen when ownership/version verification fails closed")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fail_if_called)
+
+    user, _ = make_verified_user()
+    document_a = _make_source(db_session, user.id, project_id=None)
+    document_b = _make_source(db_session, user.id, project_id=None)
+    _make_chunk(db_session, user.id, document_a.id, "Bolaget grundades 2019 i Stockholm.")
+    _set_rls_user(db_session, user.id)
+    version_of_b = KnowledgeVersion(source_id=document_b.id, owner_id=user.id, version_number=1, checksum="e" * 64, extraction_version="v1")
+    db_session.add(version_of_b)
+    db_session.commit()
+
+    with pytest.raises(ClaimExtractionIntegrityError, match="does not structurally belong"):
+        await extract_claims_for_document(db_session, document_a, user.id, version_id=version_of_b.id)
+
+    assert db_session.query(KnowledgeClaim).filter_by(owner_id=user.id).count() == 0
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_dual_write_rejects_version_belonging_to_a_different_owner(db_session, make_verified_user, monkeypatch):
+    from app.providers.openai_provider import OpenAIProvider
+    from app.rag.claims import ClaimExtractionIntegrityError
+
+    async def _fail_if_called(self, messages, model, **kwargs):
+        raise AssertionError("no provider call may happen when ownership/version verification fails closed")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fail_if_called)
+
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    document_a = _make_source(db_session, user_a.id)
+    _make_chunk(db_session, user_a.id, document_a.id, "Bolaget grundades 2019 i Stockholm.")
+    _set_rls_user(db_session, user_b.id)
+    document_b_for_version = _make_source(db_session, user_b.id)
+    version_of_b = KnowledgeVersion(
+        source_id=document_b_for_version.id, owner_id=user_b.id, version_number=1, checksum="f" * 64, extraction_version="v1"
+    )
+    db_session.add(version_of_b)
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    with pytest.raises(ClaimExtractionIntegrityError, match="does not structurally belong"):
+        await extract_claims_for_document(db_session, document_a, user_a.id, version_id=version_of_b.id)
+
+    assert db_session.query(KnowledgeClaim).filter_by(owner_id=user_a.id).count() == 0
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user_a.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_dual_write_rejects_document_not_owned_by_the_given_owner_id(db_session, make_verified_user, monkeypatch):
+    from app.providers.openai_provider import OpenAIProvider
+    from app.rag.claims import ClaimExtractionIntegrityError
+
+    async def _fail_if_called(self, messages, model, **kwargs):
+        raise AssertionError("no provider call may happen when ownership verification fails closed")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fail_if_called)
+
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    document_a = _make_source(db_session, user_a.id)
+    _make_chunk(db_session, user_a.id, document_a.id, "Bolaget grundades 2019 i Stockholm.")
+
+    with pytest.raises(ClaimExtractionIntegrityError, match="is not owned by"):
+        await extract_claims_for_document(db_session, document_a, user_b.id, version_id=None)
+
+    assert db_session.query(KnowledgeClaim).filter_by(owner_id=user_b.id).count() == 0
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user_b.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_dual_write_accepts_a_genuinely_matching_version(db_session, make_verified_user, _fake_claim_provider):
+    """Positive counterpart: a version that genuinely belongs to the same document/owner is
+    accepted and extraction proceeds normally — the integrity check isn't overly strict."""
+    user, _ = make_verified_user()
+    document = _make_source(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    version = KnowledgeVersion(source_id=document.id, owner_id=user.id, version_number=1, checksum="1" * 64, extraction_version="v1")
+    db_session.add(version)
+    db_session.commit()
+    _make_chunk(db_session, user.id, document.id, "Bolaget grundades 2019 i Stockholm.")
+
+    claims = await extract_claims_for_document(db_session, document, user.id, version_id=version.id)
+    assert len(claims) == 1
+    assert claims[0].version_id == version.id

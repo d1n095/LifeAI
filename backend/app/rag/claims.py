@@ -19,10 +19,21 @@ from sqlalchemy.orm import Session
 from app.models.document import ActiveTruthStatus, Document
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
+from app.models.knowledge_version import KnowledgeVersion
 from app.models.memory_source_unit import SnapshotStatus
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+
+
+class ClaimExtractionIntegrityError(RuntimeError):
+    """Raised when extract_claims_for_document's own owner_id/document_id/version_id
+    arguments don't structurally line up -- fails closed BEFORE any provider call or write,
+    same principle as app/rag/memory_source_backfill.py's _ResolutionFailure. The real
+    library_import.py call sites always pass a genuinely matching triple today, but this
+    function must not silently trust that forever: a future caller passing a mismatched
+    version_id must never have its claims/MemorySourceUnit attributed to the wrong owner or
+    document."""
 
 EXTRACTION_VERSION = "claims-v2"
 MAX_CLAIMS_PER_CHUNK = 8
@@ -169,7 +180,27 @@ async def extract_claims_for_document(
     two separate writes that could diverge if the process died in between. The legacy
     source_id/version_id/chunk_id columns are set exactly as before, unchanged, alongside the
     new column — this is additive dual-write, not a replacement.
+
+    Fails closed BEFORE any provider call or write (Pass 19 review): `document` must actually
+    be owned by `owner_id`, and if `version_id` is given it must structurally belong to this
+    same `document`/`owner_id` — `KnowledgeVersion` has only a bare FK to `documents.id`, not a
+    composite owner-anchored one (unlike memory_source_units/document_source_units), so nothing
+    else stops a caller from passing a version that belongs to a different document or owner
+    entirely. Raises ClaimExtractionIntegrityError rather than silently attributing claims (or
+    a MemorySourceUnit) to the wrong source.
     """
+    if document.uploaded_by != owner_id:
+        raise ClaimExtractionIntegrityError(
+            f"document {document.id} is not owned by owner_id={owner_id} (uploaded_by={document.uploaded_by})"
+        )
+    if version_id is not None:
+        version = db.get(KnowledgeVersion, version_id)
+        if version is None or version.source_id != document.id or version.owner_id != owner_id:
+            raise ClaimExtractionIntegrityError(
+                f"version_id={version_id} does not structurally belong to document "
+                f"{document.id}/owner_id={owner_id}"
+            )
+
     chunks = (
         db.query(DocumentChunk)
         .filter_by(document_id=document.id, owner_id=owner_id)
