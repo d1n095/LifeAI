@@ -442,6 +442,37 @@ def test_import_rejects_oversized_upload(client):
     assert res.status_code == 413
 
 
+def test_concurrent_blob_deletion_during_upload_finalization_fails_closed_without_creating_a_job(
+    client, superuser_db, monkeypatch
+):
+    """Pass 22, router-level companion to tests/backend/test_source_purge.py's low-level
+    advisory-lock proof (test_storage_key_lock_serializes_upload_and_purge_...): if the
+    just-written blob vanishes between storage.write_stream() finishing and this request's own
+    storage_key lock being acquired (e.g. a concurrent retry_source_blob_purge() call), the
+    endpoint must fail closed -- no ImportJob committed referencing a blob that no longer
+    exists -- rather than silently proceeding as if nothing happened."""
+    from app.storage.local_fs import LocalFilesystemStorage
+
+    csrf = _login(client)
+
+    def _pretend_missing(self, storage_key):
+        return False
+
+    monkeypatch.setattr(LocalFilesystemStorage, "exists", _pretend_missing)
+    res = client.post(
+        "/api/library/import",
+        files={"file": ("raced-away.txt", b"deleted by a concurrent purge", "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert res.status_code == 409
+
+    from app.models.import_job import ImportJob
+
+    matching_jobs = superuser_db.query(ImportJob).filter_by(source_filename="raced-away.txt").all()
+    assert matching_jobs == [], "no ImportJob may exist referencing a blob that was gone at commit time"
+
+
 def test_import_zip_security_violation_returns_failed_job_not_500(client):
     csrf = _login(client)
     raw = _make_zip({"../../etc/passwd": b"pwned"})

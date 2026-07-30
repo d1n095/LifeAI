@@ -6,6 +6,7 @@ use the `client`/`superuser_db` fixtures, matching tests/backend/test_library_ro
 """
 
 import importlib.util
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models.document import ActiveTruthStatus, DeletionStatus, Document, DocumentSource, IndexStatus
 from app.models.document_chunk import DocumentChunk
+from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.memory_source_unit import (
     DocumentSourceUnit,
@@ -27,6 +29,7 @@ from app.models.memory_source_unit import (
     SnapshotStatus,
 )
 from app.models.user import User, UserRole
+from app.rag.blob_references import acquire_storage_key_lock, storage_key_still_referenced
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
 from app.rag.source_purge import PURGE_REASON, SourcePurgeNotFoundError, purge_source, retry_source_blob_purge
 from app.request_context import current_user_id as current_user_id_var
@@ -133,6 +136,24 @@ def _store_real_blob(content: bytes) -> str:
 
     blob = get_storage().write_stream(_read, max_bytes=max(len(content), 1))
     return blob.storage_key
+
+
+def _make_import_job(
+    session, owner_id, *, source_storage_key, status=ImportJobStatus.pending, blocked_count=0
+) -> ImportJob:
+    """Pass 22: a durable ImportJob row referencing `source_storage_key` -- knowledge_import_jobs
+    is RLS-protected (app/rls.py), same as Document/DocumentChunk, so _set_rls_user is required
+    first."""
+    _set_rls_user(session, owner_id)
+    job = ImportJob(
+        owner_id=owner_id,
+        status=status,
+        source_storage_key=source_storage_key,
+        blocked_count=blocked_count,
+    )
+    session.add(job)
+    session.commit()
+    return job
 
 
 def _document_record_msu(session, owner_id, document_id) -> uuid.UUID:
@@ -706,3 +727,392 @@ def test_both_http_routes_use_the_same_purge_service(client, superuser_db):
     repeat_documents = client.request("DELETE", f"/api/documents/{doc_via_documents.id}", headers={"X-CSRF-Token": csrf})
     assert repeat_library.status_code == 404
     assert repeat_documents.status_code == 404
+
+
+# --- Pass 22: ImportJob is also a physical blob reference ---------------------------------------
+#
+# app/rag/blob_references.py::storage_key_still_referenced() -- shared by maybe_purge_blob()
+# (app/rag/library_import.py, called from retry_source_blob_purge()) -- now checks
+# ImportJob.source_storage_key, not just live Document.storage_key rows. A founder review
+# caught the gap: a pending/running/resumable ImportJob's raw upload used to be treated as an
+# unreferenced blob the moment no live Document happened to share its content-addressed key.
+
+
+def test_pending_import_job_blocks_blob_purge_of_shared_storage_key():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"pending import job still needs this")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.pending)
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_running_import_job_blocks_blob_purge():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"running import job still needs this")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.running)
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_blocked_import_job_blocks_blob_purge():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"blocked import job still needs this")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.blocked)
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_partial_import_job_with_blocked_count_blocks_blob_purge():
+    """The 2026-07-28 incident app/worker.py's _requeue_blocked_jobs docstring describes: a ZIP
+    job with SOME files genuinely failed and OTHERS paused rolls up to `partial`, not `blocked`
+    -- but blocked_count > 0 means the worker's own requeue query still matches it, so the raw
+    blob is still needed exactly like a `blocked` job's is."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"partial job with a real blocked file")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _make_import_job(
+            session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.partial, blocked_count=1
+        )
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_partial_import_job_without_blocked_count_does_not_block_blob_purge():
+    """The narrow-not-broad half of the same policy: a `partial` job where nothing is actually
+    blocked (blocked_count == 0) must NOT permanently pin the blob -- otherwise every ordinary
+    partially-failed ZIP import would leak its raw upload forever."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"partial job, nothing actually blocked")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _make_import_job(
+            session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.partial, blocked_count=0
+        )
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_terminal_import_job_with_stuck_resumable_sibling_document_blocks_blob_purge():
+    """The non-obvious case app/worker.py's _reconcile_orphaned_documents drives: a ZIP job
+    already at a terminal status (`completed`) can still be reset back to `pending` if ANY of
+    its OWN documents is still stuck mid-pipeline -- a DIFFERENT document than the one being
+    purged here, from the very same job. Purging one already-finished sibling must not destroy
+    the raw blob the stuck sibling's eventual resumption still needs."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"terminal job, but a sibling document is still stuck")
+        document = _make_document(session, owner.id, title="finished-sibling", storage_key=storage_key)
+        job = _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.completed)
+
+        stuck_sibling = _make_document(session, owner.id, title="stuck-sibling", storage_key=None)
+        _set_rls_user(session, owner.id)
+        stuck_sibling.import_job_id = job.id
+        stuck_sibling.status = IndexStatus.extracting
+        session.add(stuck_sibling)
+        session.commit()
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.pending
+        assert get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_terminal_import_job_without_stuck_sibling_allows_blob_purge():
+    """The mirror case: a terminal job with no stuck document anywhere is correctly treated as
+    fully expired -- the blob purges normally, exactly like before ImportJob was ever
+    considered a reference at all."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"terminal job, nothing left stuck")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.failed)
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_cancelled_import_job_does_not_block_blob_purge():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"cancelled job needs nothing")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.cancelled)
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_zip_raw_blob_and_document_blob_are_separate_content_addressed_keys():
+    """Content-addressing means a ZIP job's raw upload and one of its extracted documents'
+    OWN storage_key are separate keys whenever their bytes differ (the ordinary case) --
+    purging a document must never mistake a completely unrelated, still-pending job's raw
+    blob for its own, and vice versa. Proven directly: a live pending ImportJob references key
+    B, unrelated to the document being purged (key A) -- purging A must succeed and leave B's
+    blob untouched."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key_a = _store_real_blob(b"this document's own content")
+        storage_key_b = _store_real_blob(b"a completely unrelated zip raw upload")
+        document = _make_document(session, owner.id, storage_key=storage_key_a)
+        _make_import_job(session, owner.id, source_storage_key=storage_key_b, status=ImportJobStatus.pending)
+        _set_rls_user(session, owner.id)
+
+        result = purge_source(session, document.id, owner.id)
+
+        assert result.deletion_status == DeletionStatus.purged
+        assert not get_storage().exists(storage_key_a)
+        assert get_storage().exists(storage_key_b)  # untouched -- a different key entirely
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_maybe_purge_blob_delegates_to_the_shared_reference_policy(monkeypatch):
+    """Proves app/rag/library_import.py::maybe_purge_blob() does not maintain its own,
+    duplicated reference-check logic -- it calls the one canonical
+    storage_key_still_referenced() app/rag/blob_references.py owns, which both
+    retry_source_blob_purge() (phase B) and POST /api/library/import (the upload path) share."""
+    import app.rag.library_import as library_import_module
+
+    calls: list[str] = []
+    real_policy = library_import_module.storage_key_still_referenced
+
+    def _tracking_policy(db, storage_key):
+        calls.append(storage_key)
+        return real_policy(db, storage_key)
+
+    monkeypatch.setattr(library_import_module, "storage_key_still_referenced", _tracking_policy)
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"delegation proof")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _set_rls_user(session, owner.id)
+
+        purge_source(session, document.id, owner.id)
+
+        assert calls == [storage_key]
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_storage_key_lock_serializes_upload_and_purge_so_a_committed_import_job_never_references_a_missing_blob():
+    """The TOCTOU race a founder review found: POST /api/library/import's storage.write_stream()
+    durably writes a blob to disk BEFORE anything in the database references it -- a concurrent
+    retry_source_blob_purge() could run its own reference check + delete in that exact window.
+    Reproduced here with two REAL, separate DB sessions/connections and a real Postgres
+    advisory lock (acquire_storage_key_lock), not a mocked timer: a "purge" thread acquires the
+    lock first and physically deletes the blob while holding it; only after it commits (and so
+    releases the lock) does the "upload" thread's own acquire unblock -- at which point it must
+    observe the blob is gone and refuse to proceed, exactly like app/routers/library.py's
+    import_package does."""
+    storage_key = _store_real_blob(b"raced between a concurrent upload and a concurrent purge")
+    assert get_storage().exists(storage_key)
+
+    lock_acquired = threading.Event()
+    proceed_with_delete = threading.Event()
+    purge_committed = threading.Event()
+
+    def _purge_thread():
+        session = SessionLocal()
+        try:
+            acquire_storage_key_lock(session, storage_key)
+            lock_acquired.set()
+            proceed_with_delete.wait(timeout=5)
+            get_storage().delete(storage_key)
+            session.commit()  # releases the advisory lock
+        finally:
+            purge_committed.set()
+            session.close()
+
+    purge_thread = threading.Thread(target=_purge_thread)
+    purge_thread.start()
+    assert lock_acquired.wait(timeout=5), "purge thread never acquired the storage_key lock"
+
+    upload_session = SessionLocal()
+    try:
+        proceed_with_delete.set()  # let the purge thread proceed to delete + commit
+        # Blocks on the SAME advisory lock (a different connection) until the purge thread's
+        # transaction above commits -- this is the exact serialization point being tested.
+        acquire_storage_key_lock(upload_session, storage_key)
+        blob_survived = get_storage().exists(storage_key)
+        would_create_import_job = blob_survived
+        upload_session.commit()
+    finally:
+        upload_session.close()
+
+    purge_thread.join(timeout=5)
+    assert purge_committed.is_set()
+    assert not blob_survived, "the purge thread's delete must have already happened by the time the lock releases"
+    assert not would_create_import_job, (
+        "the upload path must refuse to create an ImportJob referencing a blob that a concurrent purge already deleted"
+    )
+
+
+# --- Pass 22: the source_purged audit entry moved INTO phase A's own atomic transaction --------
+
+
+def test_forced_audit_failure_rolls_back_the_entire_phase_a_purge(monkeypatch):
+    """The audit row is no longer written by a separate, later commit in the router -- it's
+    added to the session as PART of phase A, right before phase A's own single commit (see
+    source_purge.py's purge_source()). A failure recording it must therefore roll back
+    everything else phase A did too, exactly like any other phase A failure (Pass 21's
+    test_phase_a_db_commit_failure_leaves_blob_untouched_and_never_calls_storage_delete proved
+    the general case; this proves the audit write specifically is inside that same
+    all-or-nothing boundary, not bolted on after it)."""
+    import app.rag.source_purge as source_purge_module
+    from app.storage.local_fs import LocalFilesystemStorage
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"audit failure must not leave a half-done purge")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        chunk = _make_chunk(session, owner.id, document.id)
+        msu_id = _chunk_backed_msu(session, owner.id, document.id, chunk)
+        _set_rls_user(session, owner.id)
+
+        delete_calls: list[str] = []
+        real_delete = LocalFilesystemStorage.delete
+
+        def _tracking_delete(self, key):
+            delete_calls.append(key)
+            return real_delete(self, key)
+
+        def _boom_record_audit(*args, **kwargs):
+            raise RuntimeError("simulated audit insert failure")
+
+        LocalFilesystemStorage.delete = _tracking_delete
+        monkeypatch.setattr(source_purge_module, "record_audit", _boom_record_audit)
+        try:
+            with pytest.raises(RuntimeError, match="simulated audit insert failure"):
+                purge_source(session, document.id, owner.id)
+        finally:
+            LocalFilesystemStorage.delete = real_delete
+
+        assert delete_calls == [], "storage.delete() must never be called before phase A commits"
+
+        session.rollback()
+        session.expire_all()
+        assert get_storage().exists(storage_key)
+        document_after = session.get(Document, document.id)
+        assert document_after.deleted_at is None
+        msu = session.get(MemorySourceUnit, msu_id)
+        assert msu.lifecycle_status == LifecycleStatus.active
+        assert session.query(DocumentChunk).filter_by(id=chunk.id).count() == 1
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_successful_purge_writes_exactly_one_audit_entry_from_either_http_route(client, superuser_db):
+    """Both app/routers/library.py's delete_source and app/routers/documents.py's
+    delete_document now rely on purge_source() itself to write the source_purged audit row
+    (Pass 22) -- neither router calls record_audit() a second time on top of it. Verified at
+    the HTTP level, against the real audit_log table, for both routes."""
+    import uuid as uuid_mod
+
+    from app.models.audit import AuditLog
+    from app.models.document import Document as DocumentModel
+
+    login = client.post("/api/auth/login", json={"email": "founder@lifeos.local", "password": "TestFounderPassword123!"})
+    assert login.status_code == 200
+    csrf = login.json()["csrf_token"]
+    owner_id = uuid_mod.UUID(client.get("/api/auth/me").json()["id"])
+
+    doc_via_library = DocumentModel(uploaded_by=owner_id, title="audit-library.txt", checksum="c" * 64, status=IndexStatus.indexed)
+    doc_via_documents = DocumentModel(
+        uploaded_by=owner_id, title="audit-documents.txt", checksum="d" * 64, status=IndexStatus.indexed
+    )
+    superuser_db.add_all([doc_via_library, doc_via_documents])
+    superuser_db.commit()
+
+    res_library = client.request(
+        "DELETE", f"/api/library/{doc_via_library.id}", json={"confirm": True}, headers={"X-CSRF-Token": csrf}
+    )
+    res_documents = client.request("DELETE", f"/api/documents/{doc_via_documents.id}", headers={"X-CSRF-Token": csrf})
+    assert res_library.status_code == 200
+    assert res_documents.status_code == 200
+
+    library_audit_rows = (
+        superuser_db.query(AuditLog)
+        .filter_by(action="source_purged", entity_type="document", entity_id=str(doc_via_library.id))
+        .all()
+    )
+    documents_audit_rows = (
+        superuser_db.query(AuditLog)
+        .filter_by(action="source_purged", entity_type="document", entity_id=str(doc_via_documents.id))
+        .all()
+    )
+    assert len(library_audit_rows) == 1
+    assert len(documents_audit_rows) == 1
+    assert library_audit_rows[0].user_id == owner_id
+    assert documents_audit_rows[0].user_id == owner_id
