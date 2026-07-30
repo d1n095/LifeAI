@@ -294,7 +294,24 @@ async def _resume_incomplete_document(
         try:
             await extract_claims_for_document(db, document, owner_id, version.id)
         except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
-            pass
+            # S1A dual-write (app/rag/claims.py) flushes MemorySourceUnit/DocumentSourceUnit
+            # rows before it commits — an exception partway through (a later chunk's provider
+            # error surfacing unexpectedly, an identity conflict) can leave those flushed-but-
+            # uncommitted writes sitting in this session. Without rollback here, a LATER
+            # db.commit() elsewhere in this same worker session could commit them anyway,
+            # even though extraction was reported as failed — or, if that later commit itself
+            # hits a DB error, leave the session stuck in PendingRollback and break the rest
+            # of the job. db.rollback() only undoes this function's own uncommitted work
+            # (document.status/indexing were already committed above), so "indexed" below is
+            # still accurate.
+            db.rollback()
+            logger.exception(
+                "Claim-extraktion misslyckades för dokument %s (owner=%s, version=%s) — "
+                "session rullades tillbaka, indexering kvarstår som lyckad.",
+                document.id,
+                owner_id,
+                version.id,
+            )
 
     return FileOutcome(
         filename=filename,
@@ -588,7 +605,18 @@ async def _import_one_file(
     try:
         await extract_claims_for_document(db, document, owner_id, version.id)
     except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
-        pass
+        # See _resume_incomplete_document's matching except block: dual-write flushes
+        # MSU/DSU rows before committing, so an exception here can leave uncommitted writes
+        # in the session that a later commit could accidentally persist, or that could leave
+        # the session in PendingRollback on a DB-level failure. Roll back before continuing.
+        db.rollback()
+        logger.exception(
+            "Claim-extraktion misslyckades för dokument %s (owner=%s, version=%s) — "
+            "session rullades tillbaka, indexering kvarstår som lyckad.",
+            document.id,
+            owner_id,
+            version.id,
+        )
 
     return FileOutcome(
         filename=filename,

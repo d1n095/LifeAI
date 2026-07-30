@@ -661,3 +661,146 @@ async def test_encrypted_entry_in_a_zip_is_reported_with_its_own_status_and_does
     assert "lösenordsskyddat" in encrypted_result["reason"].lower()
     # Never indexed as a Document — an encrypted entry is excluded from the batch entirely.
     assert db_session.query(Document).filter_by(uploaded_by=user.id).count() == 1
+
+
+# --- S1A Pass 19 review: dual-write failure must roll back cleanly, not commit partial ------
+# --- writes and must not corrupt the session for the rest of the job/job-completion steps. --
+
+
+@pytest.mark.asyncio
+async def test_first_import_claim_extraction_crash_after_flush_rolls_back_cleanly(db_session, make_verified_user, monkeypatch):
+    """First-import call site (_import_one_file). Simulates the exact failure window the
+    review flagged: extract_claims_for_document flushes a MemorySourceUnit/DocumentSourceUnit
+    pair (uncommitted, SAVEPOINT-scoped) and THEN raises — proving the surrounding
+    except-block's db.rollback() undoes that flush, the already-committed indexing result
+    survives, the import still reports 'indexed' (claim extraction is best-effort), and the
+    session is still usable for every commit run_import_job makes afterward (job-completion
+    bookkeeping) — not left in PendingRollback."""
+    from datetime import datetime, timezone
+
+    from app.models.document_chunk import DocumentChunk
+    from app.models.knowledge_claim import KnowledgeClaim
+    from app.models.memory_source_unit import MemorySourceUnit, SnapshotStatus
+    from app.rag import library_import as li
+    from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"Text som extraheras och sen kraschar under claim-extraktion.", "crash.txt")
+
+    async def _flush_then_crash(db, document, owner_id, version_id):
+        chunk = db.query(DocumentChunk).filter_by(document_id=document.id, owner_id=owner_id).first()
+        assert chunk is not None, "index_document must have already created chunks by this point"
+        get_or_create_memory_source_unit(
+            db,
+            DocumentSourceLocator(
+                owner_id=owner_id,
+                document_id=document.id,
+                version_id=None,
+                chunk_id=chunk.id,
+                observed_at=datetime.now(timezone.utc),
+                content_text=chunk.text,
+                snapshot_status=SnapshotStatus.exact,
+            ),
+        )
+        raise RuntimeError("simulated crash after MSU/DSU flush, before claim commit")
+
+    monkeypatch.setattr(li, "extract_claims_for_document", _flush_then_crash)
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.completed  # job-completion commit worked -- session was usable
+    assert job.file_results[0]["status"] == "indexed"
+
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="crash.txt").first()
+    assert doc is not None
+    assert doc.status == IndexStatus.indexed  # indexing itself is unaffected by the claim-extraction crash
+
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 0
+    assert db_session.query(KnowledgeClaim).filter_by(owner_id=user.id).count() == 0
+
+    # Session usable for a fresh query AND a fresh commit after the rollback.
+    assert db_session.query(Document).filter_by(uploaded_by=user.id).count() >= 1
+    db_session.add(job)
+    db_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_resume_claim_extraction_crash_after_flush_rolls_back_cleanly(db_session, make_verified_user, monkeypatch):
+    """Second call site (_resume_incomplete_document) — a Document stuck at a RESUMABLE_
+    INDEX_STATUSES status (worker died mid-pipeline on an earlier attempt) with an existing
+    KnowledgeVersion already committed from that earlier attempt. Re-importing identical
+    content resumes it in place. Same crash-after-flush simulation and same assertions as the
+    first-import test above, proving the fix covers BOTH call sites, not just one."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import text as sa_text
+
+    from app.models.document import DocumentSource
+    from app.models.document_chunk import DocumentChunk
+    from app.models.knowledge_claim import KnowledgeClaim
+    from app.models.memory_source_unit import MemorySourceUnit, SnapshotStatus
+    from app.rag import library_import as li
+    from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+    from app.rag.zip_import import sha256_bytes
+    from app.request_context import current_user_id as current_user_id_var
+
+    user, _ = make_verified_user()
+    content = b"Text som ateruppas efter att workern krashade mitt i extraktionen."
+    checksum = sha256_bytes(content)
+
+    current_user_id_var.set(str(user.id))
+    db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+    stuck_document = Document(
+        title="resumed.txt",
+        source=DocumentSource.upload,
+        uploaded_by=user.id,
+        checksum=checksum,
+        original_filename="resumed.txt",
+        status=IndexStatus.extracting,  # a RESUMABLE_INDEX_STATUSES member
+    )
+    db_session.add(stuck_document)
+    db_session.commit()
+    version = KnowledgeVersion(
+        source_id=stuck_document.id, owner_id=user.id, version_number=1, checksum=checksum, extraction_version="v1"
+    )
+    db_session.add(version)
+    db_session.commit()
+
+    job = _make_job(db_session, user.id, content, "resumed.txt")
+
+    async def _flush_then_crash(db, document, owner_id, version_id):
+        chunk = db.query(DocumentChunk).filter_by(document_id=document.id, owner_id=owner_id).first()
+        assert chunk is not None, "index_document must have already created chunks by this point"
+        get_or_create_memory_source_unit(
+            db,
+            DocumentSourceLocator(
+                owner_id=owner_id,
+                document_id=document.id,
+                version_id=None,
+                chunk_id=chunk.id,
+                observed_at=datetime.now(timezone.utc),
+                content_text=chunk.text,
+                snapshot_status=SnapshotStatus.exact,
+            ),
+        )
+        raise RuntimeError("simulated crash after MSU/DSU flush, before claim commit")
+
+    monkeypatch.setattr(li, "extract_claims_for_document", _flush_then_crash)
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.completed
+    assert job.file_results[0]["status"] == "indexed"
+
+    db_session.refresh(stuck_document)
+    assert stuck_document.status == IndexStatus.indexed  # resumed indexing succeeded despite the crash
+
+    assert db_session.query(MemorySourceUnit).filter_by(owner_id=user.id).count() == 0
+    assert db_session.query(KnowledgeClaim).filter_by(owner_id=user.id).count() == 0
+
+    # Session usable for a fresh query AND a fresh commit after the rollback.
+    assert db_session.query(Document).filter_by(uploaded_by=user.id).count() >= 1
+    db_session.add(job)
+    db_session.commit()
