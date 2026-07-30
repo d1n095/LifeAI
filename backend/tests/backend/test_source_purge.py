@@ -28,10 +28,10 @@ from app.models.memory_source_unit import (
 )
 from app.models.user import User, UserRole
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
-from app.rag.source_purge import PURGE_REASON, SourcePurgeNotFoundError, purge_source
+from app.rag.source_purge import PURGE_REASON, SourcePurgeNotFoundError, purge_source, retry_source_blob_purge
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
-from app.storage import StorageError
+from app.storage import StorageError, get_storage
 
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
 
@@ -116,6 +116,23 @@ def _chunk_backed_msu(session, owner_id, document_id, chunk) -> uuid.UUID:
     )
     session.commit()
     return msu_id
+
+
+def _store_real_blob(content: bytes) -> str:
+    """Writes `content` through the real (test) storage backend, exactly like a real import
+    would — needed for the phase-B blob tests below, which must observe an ACTUAL file on
+    disk being deleted (or surviving), not just a DB row carrying a storage_key string that
+    never corresponded to a real file."""
+    pos = 0
+
+    def _read():
+        nonlocal pos
+        chunk = content[pos : pos + (1 << 16)]
+        pos += len(chunk)
+        return chunk
+
+    blob = get_storage().write_stream(_read, max_bytes=max(len(content), 1))
+    return blob.storage_key
 
 
 def _document_record_msu(session, owner_id, document_id) -> uuid.UUID:
@@ -447,7 +464,7 @@ def test_purge_source_shared_blob_not_deleted_while_other_document_references_it
     session = SessionLocal()
     try:
         owner = _make_user(session)
-        storage_key = f"test-shared-blob-{uuid.uuid4().hex}"
+        storage_key = _store_real_blob(b"shared blob content")
         document_a = _make_document(session, owner.id, title="A", storage_key=storage_key)
         document_b = _make_document(session, owner.id, title="B", storage_key=storage_key)
         _set_rls_user(session, owner.id)
@@ -458,6 +475,16 @@ def test_purge_source_shared_blob_not_deleted_while_other_document_references_it
         session.refresh(document_b)
         assert document_b.deleted_at is None
         assert document_b.storage_key == storage_key
+        assert get_storage().exists(storage_key)  # blob survives -- still referenced
+
+        # After the LAST live reference is gone, the blob is actually removed.
+        result_b = purge_source(session, document_b.id, owner.id)
+        assert result_b.deletion_status == DeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+
+        # Explicitly exercising the retry function too, matching the founder's literal
+        # requirement -- idempotent no-op once already purged.
+        assert retry_source_blob_purge(session, document_a.id, owner.id) == DeletionStatus.purged
     finally:
         session.rollback()
         session.close()
@@ -474,7 +501,7 @@ def test_purge_source_blob_failure_leaves_retryable_deletion_status(monkeypatch)
     session = SessionLocal()
     try:
         owner = _make_user(session)
-        storage_key = f"test-failing-blob-{uuid.uuid4().hex}"
+        storage_key = _store_real_blob(b"content that fails to delete")
         document = _make_document(session, owner.id, storage_key=storage_key)
         _set_rls_user(session, owner.id)
 
@@ -483,7 +510,154 @@ def test_purge_source_blob_failure_leaves_retryable_deletion_status(monkeypatch)
         assert result.deletion_status == DeletionStatus.failed
         session.refresh(document)
         assert document.deletion_status == DeletionStatus.failed
-        assert document.deleted_at is not None  # the DB-side deletion itself still succeeded
+        assert document.deleted_at is not None  # phase A (the DB purge) still succeeded
+        assert get_storage().exists(storage_key)  # the file itself was never actually touched
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Pass 21: two-phase blob purge (DB commit vs. physical file delete are NOT one atomic
+# unit -- see app/rag/source_purge.py's module docstring for the bug this fixes) -----------
+
+
+def test_phase_a_db_commit_failure_leaves_blob_untouched_and_never_calls_storage_delete():
+    """The core Pass 21 regression: a DB commit failure during phase A must never have already
+    physically deleted the blob -- proven here by asserting storage.delete() was never even
+    called, not just that the file happens to still exist."""
+    session = SessionLocal()
+    try:
+        from app.storage.local_fs import LocalFilesystemStorage
+
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"never actually deleted")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        chunk = _make_chunk(session, owner.id, document.id)
+        msu_id = _chunk_backed_msu(session, owner.id, document.id, chunk)
+        _set_rls_user(session, owner.id)
+
+        delete_calls: list[str] = []
+        real_delete = LocalFilesystemStorage.delete
+
+        def _tracking_delete(self, key):
+            delete_calls.append(key)
+            return real_delete(self, key)
+
+        real_commit = session.commit
+        commit_calls = {"n": 0}
+
+        def _boom_on_first_commit():
+            commit_calls["n"] += 1
+            if commit_calls["n"] == 1:
+                raise RuntimeError("simulated phase A commit failure")
+            return real_commit()
+
+        LocalFilesystemStorage.delete = _tracking_delete
+        session.commit = _boom_on_first_commit
+        try:
+            with pytest.raises(RuntimeError, match="simulated phase A commit failure"):
+                purge_source(session, document.id, owner.id)
+        finally:
+            LocalFilesystemStorage.delete = real_delete
+            session.commit = real_commit
+
+        assert delete_calls == [], "storage.delete() must never be called before phase A commits"
+
+        session.rollback()
+        session.expire_all()
+        assert get_storage().exists(storage_key)
+        document_after = session.get(Document, document.id)
+        assert document_after.deleted_at is None
+        msu = session.get(MemorySourceUnit, msu_id)
+        assert msu.lifecycle_status == LifecycleStatus.active
+        assert session.query(DocumentChunk).filter_by(id=chunk.id).count() == 1
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_retry_after_storage_failure_succeeds():
+    session = SessionLocal()
+    try:
+        from app.storage.local_fs import LocalFilesystemStorage
+
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"retried after a transient failure")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _set_rls_user(session, owner.id)
+
+        real_delete = LocalFilesystemStorage.delete
+
+        def _always_fails(self, key):
+            raise StorageError("disk full (simulerat, forsta forsoket)")
+
+        LocalFilesystemStorage.delete = _always_fails
+        try:
+            first = purge_source(session, document.id, owner.id)
+        finally:
+            LocalFilesystemStorage.delete = real_delete
+
+        assert first.deletion_status == DeletionStatus.failed
+        assert get_storage().exists(storage_key)
+
+        retried_status = retry_source_blob_purge(session, document.id, owner.id)
+
+        assert retried_status == DeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+        session.refresh(document)
+        assert document.deletion_status == DeletionStatus.purged
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_blob_deleted_but_status_commit_fails_next_retry_is_idempotent_and_reaches_purged():
+    """The exact race the founder's review flagged, now proven safe: the physical unlink can
+    succeed while the DB commit recording that fact fails. A later retry must not error on the
+    already-missing file (Path.unlink(missing_ok=True)) and must still reach `purged`."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"deleted physically before status commit fails")
+        document = _make_document(session, owner.id, storage_key=storage_key)
+        _set_rls_user(session, owner.id)
+
+        # Simulate phase A having already committed (deleted_at set, deletion_status pending)
+        # without going through purge_source's own chunk/MSU machinery -- irrelevant here.
+        document.deleted_at = datetime.utcnow()
+        document.deletion_status = DeletionStatus.pending
+        session.add(document)
+        session.commit()
+
+        real_commit = session.commit
+        commit_calls = {"n": 0}
+
+        def _boom_on_first_commit():
+            commit_calls["n"] += 1
+            if commit_calls["n"] == 1:
+                raise RuntimeError("simulated status-commit failure after a successful unlink")
+            return real_commit()
+
+        session.commit = _boom_on_first_commit
+        try:
+            with pytest.raises(RuntimeError, match="simulated status-commit failure"):
+                retry_source_blob_purge(session, document.id, owner.id)
+        finally:
+            session.commit = real_commit
+
+        # The physical delete already happened even though the status update didn't commit.
+        assert not get_storage().exists(storage_key)
+
+        session.rollback()
+        session.expire_all()
+        stuck = session.get(Document, document.id)
+        assert stuck.deletion_status == DeletionStatus.pending  # unchanged -- still retryable
+
+        # A fresh retry must not raise on the already-missing file, and must reach `purged`.
+        final_status = retry_source_blob_purge(session, document.id, owner.id)
+        assert final_status == DeletionStatus.purged
+        session.refresh(document)
+        assert document.deletion_status == DeletionStatus.purged
     finally:
         session.rollback()
         session.close()
