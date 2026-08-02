@@ -8,10 +8,11 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-02, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`get_job_logs`, inte memorerat).
-**PR #31** står nu på head `ef54588` (Pass 26 + dess egen CI-fix), grön på ALLA obligatoriska
-kontroller UTOM `Frontend — npm audit`, som är ett bekräftat orelaterat, förklarat fynd (se
-Pass 26 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen
-branch grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön). Tidigare rad,
+**PR #31** står nu på head `5f4f2fd` (Pass 27), grön på ALLA obligatoriska kontroller UTOM
+`Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass 26
+nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
+grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön, väntar på grundarens
+uttryckliga godkännande innan merge). Tidigare rad,
 oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA
 `df9e9c8`
 innan merge, inte en äldre commit. **PR #30 mergad** som `9b15840` in i
@@ -62,29 +63,130 @@ oomsmalnad. Löst med en `require_complete`-flagga genom `apply_privilege_policy
 stängde en kvarstående verifieringslucka: funktionssignaturer matchades bara på namn,
 inte exakta argumenttyper, plus två test-/dokumentationsfel (mixed-version-testets
 `to_regclass`-bugg, en duplicerad ImportJobStatus-lista i statusdrifttestet, och en felräknad
-testsumma). Pass 26 (nedan) levererade grundarens sista begärda funktionella S1A-skiva:
+testsumma). Pass 26 levererade grundarens sista begärda funktionella S1A-skiva:
 konto-export/erasure-integrationen — `erase_account_data()`/`export_account_data()` som delade
 domäntjänster, `app/routers/account.py` omskrivet till en tunn wrapper, en durabel
 `storage_deletion_tasks`-köfor fysisk blob-radering (migration `0021`), och stängning av ett
 upload/erasure-race. Verifieringen hittade och åtgärdade också en E2E-privilegielucka i CI
 (åtgärdad direkt i PR #31) och en npm audit-ID-churn (åtgärdad på egen branch, **PR #32**).
-154 dedikerade S1A-/konto-tester totalt över 8 filer (130 tidigare + 1 routertest + Pass 26:s
-24 nya — `test_account_erasure.py`: 20 nya, `test_account_deletion.py`: 4 nya ovanpå 8
-befintliga). Hela backend-/security-/account-sviten: **710 passed, 1 skipped**, verifierat
-direkt (upp från Pass 25:s 686 med exakt Pass 26:s 24 nya tester). CI grön på PR #31:s head
-`ef54588`, alla obligatoriska kontroller UTOM det spårade `npm audit`-fyndet (PR #32).
+Pass 27 (nedan) — en andra granskningsrunda av kontoslicen — stängde ett blockerande
+privilegiehål (`storage_deletion_tasks` gav `mainai_app` SELECT+UPDATE på en tabell utan
+owner_id/RLS), rättade exportauditens transaktionsmodell, synkade modellens enum-typer mot
+migrationens verkliga varchar+CHECK-schema, gjorde taskclaiming atomisk och
+flerworker-säker, samt granskade och dokumenterade alla blob-skrivande vägar. 171 dedikerade
+S1A-/konto-tester totalt över 9 filer (154 tidigare + Pass 27:s 17 nya — `test_account_
+erasure.py`: 14 nya, `test_worker.py`: 1 ny, `test_memory_source_units.py`: 1 ny, `test_
+account_deletion.py`: 1 ny). Hela backend-/security-/account-sviten: **727 passed, 1
+skipped**, verifierat direkt (upp från Pass 26:s 710 med exakt Pass 27:s 17 nya tester). CI
+grön på PR #31:s head `5f4f2fd`, alla obligatoriska kontroller UTOM det fortsatt spårade
+`npm audit`-fyndet (PR #32).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
 och §4.8:s "Status"-avsnitt för den fullständiga listan): produktionsdataprofilen (krävs före
 MERGE, inte före draft), den beständiga run-/felrapporteringen Pass 19 dokumenterar men
 medvetet inte bygger än (krävs före en RIKTIG produktionsbackfill-körning, inte bara denna
-PR:s merge), samt att **PR #32** mergas till huvudgrenen (varefter PR #31 uppdateras DÄREFTER,
+PR:s merge), det dokumenterade kvarstående racet mellan kontoradering och en redan köad
+(`pending`, inte `running`) importkörning (se Pass 27 nedan — medvetet inte stängt i denna
+omgång), samt att **PR #32** mergas till huvudgrenen (varefter PR #31 uppdateras DÄREFTER,
 inte i förväg — se Merge-regeln nedan) innan `npm audit`-kontrollen kan bli grön på PR #31
-själv. Kontoexport/erasure-integrationen (föregående kvarstående punkt) är nu KLAR (Pass 26).
-Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 26:s
-ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
-godkännande att gå vidare till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin
-reboot-knapp.
+själv. Kontoexport/erasure-integrationen är KLAR (Pass 26) och de blockerande fynden från den
+andra granskningsrundan är åtgärdade (Pass 27). Nästa kontrollpunkt enligt grundarens
+instruktion: vänta på FÄRSK granskning av Pass 27:s ändringar innan arbetet fortsätter längre
+— grundaren var explicit att detta INTE är ett godkännande att gå vidare till
+produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att PR #32
+INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 27 (2026-08-02): PR #31 — andra granskningsrundan av kontoslicen: privilegiehål, audittransaktion, schema-drift, atomisk claiming
+
+Grundaren bekräftade att Pass 26:s huvudsakliga erasureflöde (radlåsning, storage-inventering,
+owner-lås) var korrekt genomtänkt, men fann två blockerande problem och en schema-drift innan
+produktionsprofilen.
+
+**1. `storage_deletion_tasks` var för brett privilegierad.** Tabellen saknar avsiktligt
+`owner_id`/RLS (se migration 0021), men bootpolicyn gav ändå `mainai_app` — den vanliga,
+request-scopade applikationsrollen — SELECT+INSERT+UPDATE på HELA tabellen. Det innebar att
+VARJE vanlig requestsession tekniskt kunde läsa alla kontoraderingars storage-nycklar och
+operation-ID:n, eller skriva om vilken tasks status som helst — inte en säkerhetsgräns bara
+för att ingen router råkade göra det idag. Löst genom att smalna av `mainai_app`s grant till
+ENDAST INSERT (`s1a_privilege_policy.py`). All läsning/claiming/uppdatering flyttades till en
+egen, privilegierad maintenance-session (`app/rag/account_erasure.py`s nya
+`_MaintenanceSession`, samma mönster som `app/worker.py`s befintliga `_ClaimSession` för
+`knowledge_import_jobs`) — den vanliga requestsessionen `erase_account_data()` kör på rör
+aldrig tabellen efter sina egna INSERT-satser. En verklig, inte-uppenbar bieffekt upptäcktes
+under implementationen: SQLAlchemy 2.0 hämtar som standard servergenererade kolumner
+(`created_at`/`updated_at`) tillbaka via en `INSERT ... RETURNING`-sats, vilket kräver
+SELECT-privilegium utöver INSERT — utan att stänga av det (`__mapper_args__ = {"eager_
+defaults": False}`) hade även den legitima kontoraderingens egna INSERT av tasks börjat
+misslyckas med "permission denied" så fort omsmalningen tillämpades.
+
+**2. Exportauditens transaktion följde inte den beslutade modellen.** `export_account_data()`
+anropade `record_audit(...)` utan `commit=False`, vilket gjorde att auditfunktionens egen
+separata `db.commit()` kördes istället för en kontrollerad transaktion — motsäger kravet och
+gjorde det omöjligt att skilja "export byggd OCH audit committad" från "export byggd men
+audit-commit misslyckades", med ingen rollback-punkt för det senare fallet. Rättat: `record_
+audit(..., commit=False)` följt av ett explicit `db.commit()`, med `db.rollback()` +
+återkastning vid fel. Nytt test tvingar ett commitfel EFTER auditinsert och bevisar att
+auditposten rullas tillbaka och att exporten aldrig returneras som lyckad.
+
+**3. Modell och migration beskrev olika databastyper.** Migration 0021 skapar `reason`/
+`status` som `varchar(N) + CHECK`, men SQLAlchemy-modellens `Enum(...)` implicerade (om än
+harmlöst i praktiken, eftersom bindprocessorn bara skickar strängvärden) en NATIV Postgres
+ENUM TYPE som aldrig faktiskt skapades. Rättat med `native_enum=False, create_constraint=
+False` och exakt matchande längder — migrationens CHECK förblir den enda databassanningen.
+
+**4. Taskclaiming var en oskyddad, olåst scan.** Både den omedelbara best-effort-attempten och
+workerns återförsöksscan gjorde `.all()`-frågor utan `FOR UPDATE SKIP LOCKED`, vilket kunde
+låta två samtidiga claimers (varandra, eller två workerprocesser) plocka upp och dubbelbehandla
+SAMMA rad. Löst med en ny `claim_storage_deletion_tasks()` — exakt samma atomiska `UPDATE ...
+WHERE id = ANY(SELECT ... FOR UPDATE SKIP LOCKED ...) RETURNING id`-mönster
+`app/jobs/lease.py`s `claim_next_job()` redan använder för `knowledge_import_jobs` — med
+bunden batchstorlek och en lease (`updated_at` + `lease_seconds`) som gör en `processing`-rad
+vars claimer kraschat återclaimbar. Verifierat med ett riktigt tvåtrådars/tvåsessions-test som
+bevisar att ingen rad någonsin claimas av båda samtidigt, plus ett dedikerat lease-utgångstest.
+
+**5. Genomgång av alla blob-skrivande vägar** (`storage.write`/`storage.write_stream`):
+`app/routers/library.py`s uppladdningsändpunkt var redan täckt (Pass 26). `app/rag/library_
+import.py`s `_store_bytes()` (workerns per-fil-skrivningar under bearbetning av ett REDAN
+accepterat importjobb) var det INTE — och kan inte stängas med samma transaktionsbundna lås,
+eftersom `run_import_job` committar efter varje fil för att förbli återupptagningsbar. Löst
+genom att `erase_account_data()` nu VÄGRAR fortsätta medan en `running`-importkörning med
+ogången lease pågår för kontot (`AccountErasureBlockedError`, av routern mappad till HTTP 409)
+— stänger det realistiska, långvariga fallet (en worker som aktivt extraherar/embeddar ett
+flerfilsimport) men INTE ett smalare kvarstående race mot en redan köad (`pending`) körning
+som hinner claimas mellan kontrollen och denna transaktions commit (skulle kräva att `claim_
+next_job()` självt tar ett per-ägarlås, vilket motverkar dess syfte att se alla ägares jobb i
+en enda fråga) — medvetet dokumenterat som kvarstående, inte stängt i denna omgång, hellre än
+en forcerad, overifierad låsomdesign under tidspress. `app/project_memory.py`s tre
+blob-skrivningar är INTE kontobundna data — de är MainAI Cores egna, founder-breda
+projektminnesobjekt (`ProjectSource`/`ProjectCheckpoint`, uttryckligen dokumenterade som
+"Not RLS-protected... founder-wide project state, not per-user data") och korrekt utanför
+kontoraderingens scope.
+
+**Tester:** 17 nya — `test_account_erasure.py` (14: privilegiegräns i realtid (`SELECT`/
+`UPDATE` nekas, `INSERT` fungerar), `claim_storage_deletion_tasks` (operation-scopning,
+gräns, lease-ej-utgången, lease-utgången-återclaim, verkligt tvåtrådarsrace), `erase_account_
+data` vägrar/fortsätter kring `running`/`pending`/utgången-lease-importjobb, exportauditens
+tvingade commitfel, samt modell/schema-testerna för varchar/CHECK); `test_worker.py` (1: `_
+retry_storage_deletion_tasks()` end-to-end genom den riktiga metoden); `test_memory_source_
+units.py` (1: `test_mixed_version_boot_window_0020_to_0021`, samma mekanism som 0019→0020-
+testet, nu för migration 0021; plus `storage_deletion_tasks` tillagd i de befintliga
+least-privilege/reboot-persistence-testerna); `test_account_deletion.py` (1: HTTP-nivå-409 när
+en importkörning aktivt pågår).
+
+Omverifiering: riktat regressionssvep (`test_account_erasure.py`+`test_memory_source_units.py`
++`test_ensure_app_role.py`+`test_source_purge.py`+`test_worker.py`+`test_migration_roundtrip.py`
++`test_library_import.py`+`test_library_routes.py`+`test_claims.py`+`test_memory_source_
+backfill.py`+`test_storage_local_fs.py`+`test_provider_verification.py`+`test_account_
+deletion.py`) 315/315. Bare-DB-migrations-round-trip (`upgrade head` → `downgrade -1` →
+`upgrade head` → `downgrade base` → `upgrade head`) mot en färsk `postgres`-superuser-databas
+(`lifeos_bare_check_p27`, ingen `mainai_app`-roll) ren. Hela backend-/security-/account-sviten:
+**727 passed, 1 skipped** — exakt Pass 26:s 710 + Pass 27:s 17 nya. CI grön på PR #31:s exakta
+head `5f4f2fd`, alla obligatoriska kontroller UTOM det fortsatt spårade, orelaterade `npm
+audit`-fyndet (PR #32, väntar på grundarens uttryckliga godkännande innan merge).
+
+Grundarens instruktion var explicit: stanna nu för ny granskning — ingen produktionsprofil,
+produktionsbackfill, merge eller deploy ännu, och PR #32 ska INTE mergas utan grundarens
+uttryckliga godkännande.
 
 ## Pass 26 (2026-08-02): PR #31 — kontoexport/kontoradering-integration med S1A + två CI-fixar upptäckta under verifiering
 
