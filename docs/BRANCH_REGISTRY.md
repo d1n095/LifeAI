@@ -8,10 +8,11 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-02, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`get_job_logs`, inte memorerat).
-**PR #31** står nu på head (Pass 30, pushas i denna omgång) — se Pass 30-avsnittet nedan för
-den FEMTE granskningsrundans blockerare: ett ogrindat `storage.delete()` i empty-upload-vägen,
-i samma blobintegritetsområde som Pass 29 (åtgärdad). Föregående head `5a3b0cd` (Pass 29) var
-grön på ALLA obligatoriska kontroller UTOM
+**PR #31** står nu på head (Pass 31, pushas i denna omgång) — se Pass 31-avsnittet nedan för
+den SJÄTTE granskningsrundans tre blockerare: durabel `rejected_upload_cleanup`-retry,
+Project Memorys write-before-reference-race, och `LocalFilesystemStorage.write_stream()`s
+egen TOCTOU mot `delete()` — alla i samma blobintegritetsområde Pass 22–30 redan arbetar i.
+Föregående head `3905c18` (Pass 30) var grön på ALLA obligatoriska kontroller UTOM
 `Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass 26
 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
 grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön, väntar på grundarens
@@ -100,13 +101,158 @@ också STÄNGT (Pass 30, nedan). Kontoexport/erasure-integrationen är KLAR (Pas
 granskningsrundans fynd är åtgärdade (Pass 27), den tredje granskningsrundans tre blockerare
 är åtgärdade (Pass 28) — inklusive en verklig Postgres-deadlock Pass 28:s egen fulla
 testsviteskörning avslöjade — den fjärde granskningsrundans cross-domain-fynd är åtgärdat
-(Pass 29), och den FEMTE granskningsrundans blockerare är åtgärdad (Pass 30). Två nya, separata,
-INTE åtgärdade fynd upptäcktes och dokumenterades under Pass 30:s egen genomgång (se det
-avsnittet) — flaggade för grundarens egen prioritering, inte tystat undanskuffade. Nästa
-kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 30:s ändringar
-innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att
-gå vidare till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och
-att PR #32 INTE ska mergas utan uttryckligt godkännande.
+(Pass 29), den FEMTE granskningsrundans blockerare är åtgärdad (Pass 30), och den SJÄTTE
+granskningsrundans tre blockerare är åtgärdade (Pass 31, nedan) — grundaren avvisade
+uttryckligen Pass 30:s klassificering av två av dem som "separata, inte åtgärdade fynd".
+Pass 31:s egen genomgång upptäckte INGEN ny, ytterligare, oåtgärdad lucka — till skillnad
+från Pass 29/30, som båda flaggade minst ett nytt fynd för nästa runda. Nästa kontrollpunkt
+enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändringar innan arbetet
+fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
+till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
+PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 31 (2026-08-02): PR #31 — sjätte granskningsrundan: tre kvarstående luckor i samma blobintegritetsområde (durabel rejected-upload-cleanup, Project Memory-racet, write_stream/unlink-TOCTOU)
+
+Grundarens bedömning: "Pass 30:s empty-upload-fixen är korrekt i sin grundidé, men Code har
+lämnat tre integritetsproblem öppna. Två är uttryckligen samma raceklass som PR #31 redan
+försöker lösa." Grundaren avvisade uttryckligen Pass 30:s klassificering av de två nya fynd
+som dokumenterades men INTE åtgärdades där (Project Memory-racet, write_stream/unlink-TOCTOU)
+som "separata, inte åtgärdade fynd" — och pekade dessutom ut ett tredje, nytt problem i
+`delete_if_unreferenced()`s egen `StorageError`-hantering (en loggrad utan beständig
+återförsöksmekanism). Alla tre är nu åtgärdade.
+
+**1. Durabel `rejected_upload_cleanup`-task (grundarens punkt 1).** `delete_if_unreferenced()`
+loggade tidigare bara ett genuint `StorageError` vid radering av en redan bekräftat orefererad
+blob och returnerade `failed` — ingen beständig post skapades. Grundaren avvisade detta:
+"En loggrad är inte en beständig cleanup-plan." En upprepat misslyckad tom uppladdning (alla
+tomma uppladdningar delar exakt samma innehållsadresserade nyckel) kunde lämna en osynlig,
+oinventerad fysisk orphan på disk utan någon automatiserad väg att någonsin hitta eller
+återförsöka den.
+
+- **Migration `0024`**: breddar `storage_deletion_tasks.reason`s CHECK-constraint till att
+  också tillåta `'rejected_upload_cleanup'`, utöver befintliga `'account_erasure'`. Migration
+  0021/0022 rörs INTE (samma disciplin som `CREATE OR REPLACE` för funktioner — ändra aldrig
+  en redan levererad migration i efterhand).
+- **`app/rag/blob_references.py::enqueue_rejected_upload_cleanup_task()`**: skapar
+  task-raden på den PRIVILEGIERADE admin-/migrationsanslutningen (`_MaintenanceSession`,
+  samma mönster som `attempt_pending_storage_deletions_for_operation()` redan använder) —
+  INTE via en ny `SECURITY DEFINER`-funktion grantad till `mainai_app`, eftersom en sådan
+  funktion (till skillnad från `enqueue_account_erasure_storage_task()`) inte har något
+  `Document`/`ImportJob`-ägarskap att verifiera mot (en avvisad uppladdning fick medvetet
+  ALDRIG en DB-rad). `mainai_app` behåller NOLL direkta privilegier på tabellen, för alla
+  `reason`-värden. Idempotent per fortfarande-utestående cleanup (inga dubbletter för samma
+  nyckel så länge en tidigare task inte nått ett terminalt utfall).
+- Återanvänder EXAKT samma worker-/backoff-/lease-/referenskontroll-maskineri som redan
+  finns för `account_erasure`-tasks (`claim_storage_deletion_tasks()`/
+  `attempt_storage_deletion_task()`/`app/worker.py`s retry-loop) — noll specialfall för den
+  nya `reason`.
+- **Säkerhetskrav uppfyllt strukturellt, inte genom en explicit parameterkontroll:** den nya
+  enqueue-vägen anropas ENDAST internt från `delete_if_unreferenced()`s egen
+  `StorageError`-hanterare, med exakt den `storage_key` samma anrop redan fick — aldrig
+  exponerad som en fristående, request-styrd funktion.
+
+**2. Project Memory write-before-reference-racet (grundarens punkt 2, det första av de två
+"separata fynd" grundaren avvisade klassificeringen av).** `app/project_memory.py`s
+`ingest_doc()`/`ingest_system_map()`/`create_checkpoint()` tog aldrig
+`acquire_storage_key_lock()` mellan den fysiska skrivningen och sin egen DB-commit — samma
+"bytes finns innan någon DB-rad skyddar dem"-race Pass 22 redan stängde för Life
+Library-uppladdningsvägen, kvarlämnad här.
+
+- **`app/rag/blob_references.py::store_content_with_reference_lock()`**: ny delad helper.
+  Skriver via `storage.write_stream()`, tar sedan `acquire_storage_key_lock()` och verifierar
+  att bloben fortfarande finns INNAN anroparen får tillbaka kontrollen för att skapa/committa
+  sin egen DB-rad (anroparen måste hålla samma `db`-sessions öppna transaktion — låset släpps
+  vid nästa commit/rollback). Om bloben försvunnit (en samtidig radering vann racet):
+  återpublicerar från samma in-memory-bytes (write_stream är naturligt idempotent för
+  identiskt innehåll — samma hash ger samma nyckel). Om fortfarande saknad efter
+  återpublicering: `raise StorageError` — fail closed, aldrig en tyst hängande referens.
+- Alla tre `app/project_memory.py`-anropen skriver om till att gå via denna helper istället
+  för `storage.write_stream()` direkt.
+
+**3. `LocalFilesystemStorage.write_stream()`s egen TOCTOU (grundarens punkt 3, det andra av de
+två "separata fynd").** Den gamla publiceringslogiken (`if final_path.exists(): verifiera
+storlek else: os.rename(...)`) hade ett verkligt race mot ett samtidigt `delete()`s
+`unlink()`: om kontrollen observerade "finns redan" men en samtidig radering tog bort filen ett
+ögonblick senare, skrev metoden aldrig sin egen tmp-fil till `final_path` (den trodde en
+befintlig kopia redan täckte det) och returnerade en `StoredBlob` vars `storage_key` inte
+längre pekade på något. Det DB-baserade låset kan INTE stänga detta — nyckeln är inte känd
+förrän bytes är hashade, så anropare kan strukturellt inte ta det låset innan
+`write_stream()` körs; racet ligger helt mellan två råa filsystemsanrop.
+
+- **Ny `_publish()`-metod** använder `os.link()` (en hardlink) som PRIMÄR
+  publiceringsmekanism istället för en enkel existenskontroll: `link(2)` är atomiskt och
+  misslyckas med `FileExistsError` om och endast om något redan finns vid destinationen exakt
+  vid syscall-ögonblicket — ingen "kontrollera, agera separat"-lucka att kapplöpa en samtidig
+  `unlink()` in i. Vid `FileExistsError`: kontrollerar befintlig storlek (samma billiga
+  korruptionskontroll som förut, `StorageIntegrityError` vid mismatch); om filen försvunnit
+  sedan den misslyckade `link()`-anropet (`stat()` ger `FileNotFoundError`): retry-loopen
+  försöker `link()` igen istället för att lita på en föråldrad observation — självläkande.
+  Katalogen `fsync`:as efter en lyckad ny länk (durability över en oren omstart).
+  Temp-filsstädningen är nu ovillkorlig (`os.link()` konsumerar aldrig källan, till skillnad
+  från det gamla `os.rename()`).
+
+**Regressionstester (grundarens exakta krav, alla tre punkter):**
+- `test_source_purge.py`: sju nya tester för durabel `rejected_upload_cleanup`-retry (exakt en
+  task skapas, inga dubbletter för en fortfarande-utestående cleanup, en ny task efter att den
+  gamla nått ett terminalt utfall, worker-loopen både raderar och behåller korrekt, backoff
+  efter upprepat fel, `mainai_app` kan inte skapa godtyckliga rejected-upload-tasks direkt) +
+  en drift-förhindrande skrivvägsregistertest (se nedan). Test F utökad med en direkt
+  verifiering av den nya durabla tasken.
+- `test_project_memory.py`: fyra nya tester (`store_content_with_reference_lock()`s vanliga
+  fall, en RIKTIG tvåtråds-/tvåsessionskapplöpning där en verklig samtidig purge vinner låset
+  först och skrivaren korrekt återpublicerar, fail-closed när även återpublicering
+  misslyckas, samt en riktig tvåtrådskapplöpning genom hela `ingest_doc()` körd fyra gånger
+  med en `threading.Barrier` — ingen levande `ProjectSource` refererar någonsin en försvunnen
+  blob, oavsett vilken sida som vinner den riktiga Postgres-advisory-låset).
+- `test_storage_local_fs.py`: fyra nya tester, grundarens exakta bokstavsordning (A: en
+  deterministisk reproduktion av race-fönstret mellan misslyckad `link()` och `stat()` via
+  riktad felinjicering; B: två RIKTIGA trådar som skriver identiskt innehåll samtidigt,
+  exakt en fil kvar på disk; C/D/E tillsammans: riktiga trådar, `write_stream()` mot
+  `delete()` upprepat 20 gånger, aldrig en blob som saknas efter lyckad retur, inga kvarlämnade
+  temp-filer; F täcks av den befintliga, nu utökade korruptionstestet). Plus ett test som
+  bevisar att `_publish()`s begränsade retry-budget ger upp med `StorageError` istället för
+  att hänga oändligt.
+
+**4. Central skrivvägsregistrering + drift-förhindrande test (grundarens punkt 4).**
+`KNOWN_STORAGE_KEY_COLUMNS` skyddar bara referens-KOLUMNER; det tidigare allowlist-testet
+skyddar bara DELETE-anropsplatser. Ny `KNOWN_STORAGE_WRITE_PATHS`-registry
+(`app/rag/blob_references.py`) täpper till det tredje gapet: varje `.write_stream`-referens i
+`app/` (ett direkt anrop ELLER en bunden metod given som en higher-order-callable, t.ex.
+`run_in_threadpool(storage.write_stream, ...)`), tillsammans med dess låsprotokoll — inklusive
+en explicit FLAGGAD, INTE åtgärdad post för `app/rag/library_import.py::_store_bytes()` (ingen
+lås alls, ett redan känt, dokumenterat gap från Pass 27:s egen granskning, uttryckligen
+utanför scope för detta pass som riktade in sig på Project Memorys skrivare). Ny
+`test_every_storage_write_stream_reference_is_on_the_known_write_path_registry()`
+(`test_source_purge.py`) går igenom hela `app/`s AST och jämför mot registret — en ny,
+odokumenterad skrivare misslyckas testet omedelbart.
+
+**Ingen ny separat, INTE åtgärdad lucka upptäcktes under detta pass egen genomgång** — till
+skillnad från Pass 29/30, som båda flaggade minst ett nytt fynd för nästa runda, stängde detta
+pass alla tre punkter grundaren efterfrågade utan att upptäcka ett fjärde. `app/rag/
+library_import.py::_store_bytes()`s saknade lås (flaggat ovan, punkt 4) är INTE nytt — det är
+samma, redan tidigare dokumenterade Pass 27-fynd, nu bara explicit inskrivet i den nya
+registret istället för att bara nämnas i en modul-docstring.
+
+**Migration `0024`** krävde en utökning av `test_migration_roundtrip.py`s egen
+schema-snapshot-fingerprint: den fångade tidigare bara kolumner/enum-etiketter/
+funktionsdefinitioner, aldrig CHECK-constraints — en ren constraint-ändrande migration (som
+0024) hade därför sett `downgrade -1`/`upgrade head` som en no-op i den testets egen
+`before != after_downgrade`-kontroll. Utökat att också fingerprinta varje CHECK-constraint
+(namn + `pg_get_constraintdef()`) — samma mönster som Pass 24:s egen fördjupning av
+funktionsfingerprinten efter att DEN testet hittade ett liknande blint område.
+
+**Tester:** 16 nya (7 i `test_source_purge.py` för rejected-upload-cleanup + 1
+skrivvägsregister-drifttest, 4 i `test_project_memory.py`, 4 i `test_storage_local_fs.py`) plus
+en befintlig utökad (Test F). Hela backend-/security-/account-sviten: **verifieras nedan**,
+körd TVÅ gånger i följd. `alembic upgrade head` / `downgrade -1` / `upgrade head`-rundtur
+verifierad direkt mot en BAR databas UTAN `mainai_app`-roll alls (endast superusern `lifeos`)
+— CHECK-constraintens exakta text bekräftad före/efter/efter-igen via
+`pg_get_constraintdef()`.
+
+**Grundarens explicita avslutande instruktion (Pass 31), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
 
 ## Pass 30 (2026-08-02): PR #31 — femte granskningsrundan: ogrindat storage.delete() i empty-upload-vägen (samma blobintegritetsområde, inte en orelaterad fråga)
 
