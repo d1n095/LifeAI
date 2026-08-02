@@ -1166,13 +1166,16 @@ def test_mainai_app_privileges_are_exactly_least_privilege_no_truncate_reference
         "memory_source_units": {"SELECT": True, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
         "document_source_units": {"SELECT": True, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
         "memory_source_lifecycle_events": {"SELECT": True, "INSERT": False, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
-        # Pass 27: tightened from SELECT+INSERT+UPDATE to INSERT-only after a founder review —
-        # this table has no owner_id/RLS at all (migration 0021's docstring), so a table-wide
-        # SELECT/UPDATE grant to the ordinary request role would let any request session read
-        # every account-erasure operation's storage keys/ids or rewrite any task's status.
-        # Reading/claiming/updating now runs exclusively on the privileged maintenance session
-        # (app/rag/account_erasure.py's _MaintenanceSession / app/worker.py's _ClaimSession).
-        "storage_deletion_tasks": {"SELECT": False, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
+        # Pass 27 tightened this from SELECT+INSERT+UPDATE to INSERT-only; Pass 28 tightens it
+        # again to ZERO direct privileges -- a founder review found INSERT alone was still
+        # dangerous (indirect access to a privileged physical-delete operation with no
+        # ownership check, see app/rag/account_erasure.py's and migration 0022's docstrings).
+        # The ONLY way an ordinary session may create a row now is the
+        # enqueue_account_erasure_storage_task() SECURITY DEFINER function (checked separately
+        # below) -- reading/claiming/updating still runs exclusively on the privileged
+        # maintenance session (app/rag/account_erasure.py's _MaintenanceSession /
+        # app/worker.py's _ClaimSession), unchanged from Pass 27.
+        "storage_deletion_tasks": {"SELECT": False, "INSERT": False, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
     }
     try:
         with engine.connect() as conn:
@@ -1186,6 +1189,16 @@ def test_mainai_app_privileges_are_exactly_least_privilege_no_truncate_reference
                     if bool(actual) != expected:
                         errors.append(f"{table}.{priv}: mainai_app has={actual}, expected={expected}")
             assert not errors, "\n".join(errors)
+
+            # Pass 28: the one privilege mainai_app DOES need on storage_deletion_tasks --
+            # EXECUTE on the narrow, ownership-verified enqueue function, never the table itself.
+            can_enqueue = conn.execute(
+                sa_text(
+                    "SELECT has_function_privilege('mainai_app', "
+                    "'enqueue_account_erasure_storage_task(uuid, text)', 'EXECUTE')"
+                )
+            ).scalar()
+            assert can_enqueue is True
     finally:
         engine.dispose()
 
@@ -1422,9 +1435,16 @@ def test_mixed_version_boot_window_0020_to_0021():
     rolling deploy where the database is still on 0020 but a RUN_MIGRATIONS=false worker
     already runs code that knows about 0021 must behave the same way: ensure_app_role.py
     still narrows the 0019/0020 objects that already exist (never skipped just because
-    storage_deletion_tasks doesn't exist yet), apply_runtime_privileges.py correctly refuses
-    to proceed at all while incomplete, and once actually upgraded to 0021 it grants mainai_app
-    exactly INSERT on the new table -- nothing more (see Pass 27's tightened policy)."""
+    storage_deletion_tasks doesn't exist yet), and apply_runtime_privileges.py correctly
+    refuses to proceed at all while incomplete.
+
+    Pass 28: Scenario C below now targets revision 0021 EXACTLY, not "head" -- migration 0022
+    (enqueue_account_erasure_storage_task) shipped after this test was written, so the CURRENT
+    codebase's require_complete policy also needs 0022's function/column, meaning
+    apply_runtime_privileges.py correctly still FAILS at 0021 too (0022 is missing) rather than
+    granting the OLD Pass-27 INSERT privilege this test used to assert succeeded. See
+    test_mixed_version_boot_window_0021_to_0022 below for the continuation that proves success
+    once 0022 actually lands."""
     settings = get_settings()
     engine = create_engine(settings.database_url)
     ensure_app_role = _load_ensure_app_role()
@@ -1478,17 +1498,92 @@ def test_mixed_version_boot_window_0020_to_0021():
                 "a FAILED apply_runtime_privileges run must never re-widen mainai_app's privileges"
             )
 
-        # --- Scenario C: once actually upgraded to 0021, apply_runtime_privileges.py succeeds
-        # and grants mainai_app exactly INSERT on the new table.
-        _run_alembic("upgrade", "head")  # DB is now at 0021 (head)
+        # --- Scenario C (Pass 28): upgraded to 0021 EXACTLY (not head) -- storage_deletion_
+        # tasks now exists, but migration 0022's enqueue_account_erasure_storage_task()/
+        # next_attempt_at do not yet -- the CURRENT codebase's require_complete policy needs
+        # BOTH, so apply_runtime_privileges.py must still correctly refuse, exactly like
+        # scenario B, never granting the table any privilege at all (Pass 27's old INSERT
+        # grant is gone from the policy entirely -- see test_mixed_version_boot_window_0021_
+        # to_0022 for the successful continuation once 0022 lands).
+        _run_alembic("upgrade", "0021")  # DB is now at 0021 exactly -- 0022 does not exist yet
 
         with engine.connect() as conn:
-            assert _table_exists(conn, "storage_deletion_tasks") is True, "test setup: 0021's table must exist at head"
+            assert _table_exists(conn, "storage_deletion_tasks") is True, "test setup: 0021's table must exist at 0021"
+            enqueue_exists = conn.execute(
+                sa_text("SELECT to_regprocedure('public.enqueue_account_erasure_storage_task(uuid, text)') IS NOT NULL")
+            ).scalar()
+            assert enqueue_exists is False, "test setup: 0022's function must not exist yet at 0021"
+
+        with pytest.raises((RuntimeError, SystemExit)):
+            apply_runtime_privileges.apply_and_verify(settings.database_url)
+
+        with engine.connect() as conn:
+            # apply_and_verify raised BEFORE ever opening its REVOKE/GRANT transaction (missing
+            # 0022 objects fail the completeness check up front, see apply_runtime_privileges.py's
+            # module docstring: "commits ONLY if verification is fully green"). storage_deletion_
+            # tasks is a table the migration JUST (re)created -- ensure_app_role.py's own
+            # `ALTER DEFAULT PRIVILEGES ... GRANT ALL PRIVILEGES ON TABLES TO mainai_app` (run
+            # once, at role provisioning) means mainai_app gets ALL PRIVILEGES on it automatically
+            # at creation time, before anything has ever had a chance to narrow it -- exactly the
+            # wide-open-until-narrowed window apply_runtime_privileges.py exists to close. It
+            # stays wide here because narrowing genuinely never ran, not because anything re-widened it.
+            assert _has_table_priv(conn, "storage_deletion_tasks", "INSERT") is True
+    finally:
+        try:
+            _run_alembic("upgrade", "head")
+        finally:
+            engine.dispose()
+
+
+def test_mixed_version_boot_window_0021_to_0022():
+    """Pass 28: the continuation of test_mixed_version_boot_window_0020_to_0021 above -- once
+    the database is ACTUALLY upgraded to 0022 (enqueue_account_erasure_storage_task, the
+    SECURITY DEFINER replacement for the direct INSERT Pass 27 still left mainai_app doing),
+    apply_runtime_privileges.py finally succeeds and grants mainai_app EXECUTE on exactly the
+    one new function -- and, just as importantly, confirms storage_deletion_tasks itself gets
+    NO table privilege at all, not even the INSERT Pass 27 used to grant."""
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    apply_runtime_privileges = _load_apply_runtime_privileges()
+
+    def _has_table_priv(conn, table: str, priv: str) -> bool:
+        return conn.execute(
+            sa_text("SELECT has_table_privilege('mainai_app', :table, :priv)"), {"table": table, "priv": priv}
+        ).scalar()
+
+    def _has_func_exec(conn, grantee: str, signature: str) -> bool:
+        return conn.execute(
+            sa_text("SELECT has_function_privilege(:grantee, :sig, 'EXECUTE')"), {"grantee": grantee, "sig": signature}
+        ).scalar()
+
+    try:
+        _run_alembic("downgrade", "0021")  # DB is now at 0021 -- 0022's function does not exist
+
+        with engine.connect() as conn:
+            enqueue_exists = conn.execute(
+                sa_text("SELECT to_regprocedure('public.enqueue_account_erasure_storage_task(uuid, text)') IS NOT NULL")
+            ).scalar()
+        assert enqueue_exists is False, "test setup: 0022's function must not exist yet at 0021"
+
+        # require_complete=True correctly refuses while 0022 is missing (same shape as every
+        # earlier mixed-version window above).
+        with pytest.raises((RuntimeError, SystemExit)):
+            apply_runtime_privileges.apply_and_verify(settings.database_url)
+
+        _run_alembic("upgrade", "head")  # DB is now at 0022 (head)
+
+        with engine.connect() as conn:
+            enqueue_exists = conn.execute(
+                sa_text("SELECT to_regprocedure('public.enqueue_account_erasure_storage_task(uuid, text)') IS NOT NULL")
+            ).scalar()
+        assert enqueue_exists is True, "test setup: 0022's function must exist at head"
 
         apply_runtime_privileges.apply_and_verify(settings.database_url)  # must succeed cleanly
 
         with engine.connect() as conn:
-            assert _has_table_priv(conn, "storage_deletion_tasks", "INSERT") is True
+            assert _has_func_exec(conn, "mainai_app", "public.enqueue_account_erasure_storage_task(uuid, text)") is True
+            assert _has_func_exec(conn, "public", "public.enqueue_account_erasure_storage_task(uuid, text)") is False
+            assert _has_table_priv(conn, "storage_deletion_tasks", "INSERT") is False
             assert _has_table_priv(conn, "storage_deletion_tasks", "SELECT") is False
             assert _has_table_priv(conn, "storage_deletion_tasks", "UPDATE") is False
     finally:

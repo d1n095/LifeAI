@@ -85,3 +85,7 @@ class StorageDeletionTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Pass 28 (migration 0022): worker backoff for a `failed` task -- set only on a failed
+    # attempt (see app/rag/account_erasure.py's attempt_storage_deletion_task), never on
+    # pending/processing. NULL for a task that has never failed.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -115,12 +115,65 @@ stream`/`StorageBackend`. Findings:
     `provider_config`/`provider_verification_checks`. `created_by`/`ingested_by` are free-text
     labels (`String(64)`), never a `users.id` foreign key. Correctly out of account erasure's
     scope entirely: there is no per-account ownership here to erase.
+
+Pass 28 (a third founder review) closed three more real gaps:
+
+1. **Immediate-attempt infinite retry loop.** `attempt_pending_storage_deletions_for_operation()`'s
+   `while True` loop, combined with Pass 27's `claim_storage_deletion_tasks()` treating
+   `pending` and `failed` as equally, immediately claimable, reintroduced a known bug class: a
+   task that fails with a PERMANENT `StorageError` got marked `failed`, and the very next loop
+   iteration claimed and re-attempted that SAME task again — forever, an unbounded busy loop
+   inside a single HTTP request, for as long as the error stayed permanent. Fixed by
+   `claim_storage_deletion_tasks()`'s new `include_failed` parameter: the immediate attempt now
+   claims with `include_failed=False`, so it can only ever see `pending` (or lease-expired
+   `processing`) rows — each task created by THIS operation is tried at most once here.
+   Anything left `failed` is entirely the worker's (app/worker.py's retry loop) responsibility,
+   which claims with the default `include_failed=True` and correctly honors a bounded,
+   exponential, jittered backoff (`next_attempt_at`, migration 0022, set by
+   `attempt_storage_deletion_task()` via `app.jobs.retry.compute_backoff_seconds` on a failed
+   attempt) instead of retrying immediately.
+
+2. **INSERT-only was still dangerous.** Pass 27 narrowed `mainai_app` to INSERT-only on
+   `storage_deletion_tasks`, reasoning that a bare metadata INSERT was harmless. A founder
+   review pointed out this was still wrong: INSERT into this specific table is INDIRECT ACCESS
+   TO A PRIVILEGED PHYSICAL-DELETE OPERATION, since nothing in the database verified an
+   inserted `storage_key` actually belonged to the inserting owner, or referenced anything
+   real at all — `app/project_memory.py`'s founder-wide blobs are exactly the kind of data a
+   maliciously- or accidentally-queued arbitrary key could destroy with zero trace, since the
+   worker's own reference check (`storage_key_still_referenced_global()`, migration 0020) only
+   ever looks at `documents`/`knowledge_import_jobs`. Fixed by `mainai_app` getting ZERO direct
+   privileges on `storage_deletion_tasks` at all (see `backend/scripts/s1a_privilege_policy.py`)
+   and a new SECURITY DEFINER function, `enqueue_account_erasure_storage_task()` (migration
+   0022), the ONLY way an ordinary session may create a task row — it re-derives the caller
+   from `app.current_user_id`, explicitly re-verifies `p_storage_key` belongs to that caller via
+   `Document.storage_key`/`ImportJob.source_storage_key` (never trusting the calling Python
+   code's own inventory query as authorization), sets `reason`/`status` itself, and is
+   idempotent on `(operation_id, storage_key)`. `erase_account_data()`'s storage-key inventory
+   loop below calls this function via `db.execute(sa_text("SELECT enqueue_account_erasure_
+   storage_task(...)"))` instead of `db.add(StorageDeletionTask(...))`.
+
+3. **The pending-ImportJob/account-erasure race, previously left as documented follow-up
+   scope (see item 2 above, "A narrower residual window remains...") — a founder review
+   explicitly rejected leaving it open: "Det räcker inte att dokumentera racet som follow-up.
+   Det är precis den race account-slicen skulle stänga."** Closed by redesigning
+   `app/jobs/lease.py`'s `claim_next_job()` into a two-phase, owner-locked claim (see that
+   module's own docstring for the full mechanism): a lock-free candidate SELECT, THEN
+   `acquire_owner_erasure_lock()` for that candidate's owner BEFORE any row-level lock is
+   taken (never after — the same ordering `erase_account_data()` above already follows, so the
+   two can never deadlock against each other), THEN an atomic re-validated claim of exactly
+   that candidate, retrying with a fresh candidate on a lost race. Whichever side (a worker's
+   claim, or this function's own erasure transaction) acquires a given owner's lock first now
+   fully commits or rolls back before the other's row-level work can even begin — the pending
+   job is either safely swept into this transaction's own storage-key inventory before a
+   worker can start writing new blobs against it, or the worker safely claims and starts the
+   job before erasure gets far enough to see it as blocking (via the existing
+   `AccountErasureBlockedError` guard above, unchanged).
 """
 
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import or_
 from sqlalchemy import text as sa_text
@@ -128,6 +181,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.audit import record_audit
 from app.db import migration_engine
+from app.jobs.retry import compute_backoff_seconds
 from app.models.audit import AuditLog
 from app.models.conversation import Conversation, Message
 from app.models.document import Document
@@ -139,7 +193,7 @@ from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.refresh_token import RefreshToken
 from app.models.source_relationship import SourceRelationship
-from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
+from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
 from app.models.user import User
 from app.rag.blob_references import acquire_owner_erasure_lock, acquire_storage_key_lock, storage_key_still_referenced
@@ -173,7 +227,12 @@ STORAGE_DELETION_LEASE_SECONDS = 300
 
 
 def claim_storage_deletion_tasks(
-    db: Session, *, limit: int, lease_seconds: int = STORAGE_DELETION_LEASE_SECONDS, operation_id: uuid.UUID | None = None
+    db: Session,
+    *,
+    limit: int,
+    lease_seconds: int = STORAGE_DELETION_LEASE_SECONDS,
+    operation_id: uuid.UUID | None = None,
+    include_failed: bool = True,
 ) -> list[uuid.UUID]:
     """Atomically claims up to `limit` eligible `storage_deletion_tasks` rows for the CALLER of
     this function, marking them `processing` with a fresh lease (`updated_at`) in the same
@@ -183,18 +242,26 @@ def claim_storage_deletion_tasks(
     immediate best-effort attempt racing app/worker.py's broad retry scan, or two worker
     processes) can ever claim and reprocess the same row at the same time.
 
-    Eligible: `pending`/`failed` (never yet attempted, or a previous attempt failed), OR
-    `processing` whose lease has expired (`updated_at` older than `lease_seconds` ago) — the
-    same "claimer crashed/was killed mid-attempt, another caller may pick this back up" shape
-    `claim_next_job`'s own `lease_expires_at` reclaim already handles. A `processing` row still
-    within its lease is left alone — someone else is genuinely still working it right now.
+    Eligible: `pending` (never yet attempted) always; `processing` whose lease has expired
+    (`updated_at` older than `lease_seconds` ago — the same "claimer crashed/was killed
+    mid-attempt" shape `claim_next_job`'s own `lease_expires_at` reclaim already handles); and,
+    when `include_failed=True`, `failed` tasks whose backoff has elapsed (`next_attempt_at` is
+    NULL or already past — see `attempt_storage_deletion_task`'s docstring for how that's set).
+    A `processing` row still within its lease is left alone — someone else is genuinely still
+    working it right now.
+
+    `include_failed=False` (Pass 28 — see module docstring's immediate-retry-loop fix): the
+    caller wants ONLY tasks this exact call has never touched yet, e.g. the immediate
+    post-erasure best-effort attempt, which must try each newly created task at most once and
+    leave anything that fails to the worker's own backed-off retry, not loop on it again within
+    the same request.
 
     `operation_id`, when given, scopes the claim to ONE erasure operation's own tasks (the
     immediate best-effort attempt right after that operation's own commit, never a broader
     cross-operation view); omitted, claims across ALL operations (app/worker.py's retry scan).
-    MUST be called on a privileged session (this table grants `mainai_app` INSERT only — see
-    module docstring) — `_MaintenanceSession`/`app.worker._ClaimSession`, never a request-scoped
-    `SessionLocal`.
+    MUST be called on a privileged session (this table grants `mainai_app` no direct
+    privileges at all — see module docstring) — `_MaintenanceSession`/`app.worker._ClaimSession`,
+    never a request-scoped `SessionLocal`.
 
     Returns only task ids; callers re-load each via `db.get(StorageDeletionTask, task_id)` on
     THIS SAME session so the loaded ORM object reflects the just-claimed `processing` status,
@@ -204,6 +271,9 @@ def claim_storage_deletion_tasks(
     if operation_id is not None:
         operation_filter = "AND operation_id = :operation_id"
         params["operation_id"] = str(operation_id)
+    failed_clause = (
+        "OR (status = 'failed' AND (next_attempt_at IS NULL OR next_attempt_at <= now()))" if include_failed else ""
+    )
     rows = db.execute(
         sa_text(f"""
             UPDATE storage_deletion_tasks
@@ -211,7 +281,8 @@ def claim_storage_deletion_tasks(
             WHERE id = ANY(
                 SELECT id FROM storage_deletion_tasks
                 WHERE (
-                    status IN ('pending', 'failed')
+                    status = 'pending'
+                    {failed_clause}
                     OR (status = 'processing' AND updated_at < now() - make_interval(secs => :lease_seconds))
                 )
                 {operation_filter}
@@ -249,13 +320,26 @@ def attempt_storage_deletion_task(db: Session, task: StorageDeletionTask) -> Non
 
     A no-op if the task is already at a terminal-success status (`purged`/`retained_shared`)
     — callers (the immediate best-effort attempt, and app/worker.py's retry loop) may safely
-    call this for any task regardless of its current status."""
+    call this for any task regardless of its current status.
+
+    Pass 28: on a `StorageError` (a real, presumed-transient-or-permanent I/O failure — the
+    caller can't tell which from here), sets `next_attempt_at` to now plus an exponential,
+    jittered backoff (`app.jobs.retry.compute_backoff_seconds`, the SAME pure policy function
+    STEG 11's import-job retries already use, applied here to a different table) keyed off
+    `attempt_count` — so `claim_storage_deletion_tasks()`'s worker-facing scan
+    (`include_failed=True`) won't reclaim this task again until that backoff has elapsed,
+    however many times it keeps failing. `completed_at`/`next_attempt_at` are both explicitly
+    reset to `None` the moment a claim starts processing: a task reclaimed after a previous
+    `failed` attempt must not still read as "completed" or "still backing off" while it's
+    actively being retried right now."""
     if task.status in (StorageDeletionStatus.purged, StorageDeletionStatus.retained_shared):
         return
 
     acquire_storage_key_lock(db, task.storage_key)
     task.status = StorageDeletionStatus.processing
     task.attempt_count += 1
+    task.completed_at = None
+    task.next_attempt_at = None
     db.add(task)
     db.flush()
 
@@ -277,6 +361,9 @@ def attempt_storage_deletion_task(db: Session, task: StorageDeletionTask) -> Non
         except StorageError as exc:
             task.status = StorageDeletionStatus.failed
             task.last_error = str(exc)[:2000]
+            task.next_attempt_at = datetime.utcnow() + timedelta(
+                seconds=compute_backoff_seconds(task.attempt_count, base=5.0, cap=3600.0)
+            )
             logger.exception("Kunde inte radera blob %s fysiskt (task %s).", task.storage_key, task.id)
 
     db.add(task)
@@ -289,11 +376,24 @@ def attempt_pending_storage_deletions_for_operation(operation_id: uuid.UUID) -> 
     cross-operation scan; app/worker.py's retry loop owns that).
 
     Pass 27: takes NO session parameter — `storage_deletion_tasks` grants the ordinary
-    request-scoped role INSERT only (see module docstring), so this opens its own
-    `_MaintenanceSession`, claims this operation's tasks atomically via
+    request-scoped role no direct privileges at all (see module docstring), so this opens its
+    own `_MaintenanceSession`, claims this operation's tasks atomically via
     `claim_storage_deletion_tasks()` (bounded batches, looped until nothing more is claimable),
     and closes that session again before returning — the caller's own request session is never
     touched by this function at all.
+
+    Pass 28: claims with `include_failed=False`. The old default (`include_failed=True`) made
+    this loop and `claim_storage_deletion_tasks()` jointly reintroduce a known bug class (the
+    same one a prior backfill fix already closed elsewhere): a task that fails with a
+    PERMANENT `StorageError` (e.g. a corrupt/unreadable path) got marked `failed` by
+    `attempt_storage_deletion_task()`, and because `failed` was just as immediately claimable
+    as `pending`, the very next iteration of this `while True` loop claimed and re-attempted
+    the SAME task again — forever, for as long as the error stayed permanent, an unbounded
+    busy loop inside a single HTTP request. `include_failed=False` means this call can only
+    ever claim `pending` (or lease-expired `processing`) rows, so each task created by THIS
+    operation is tried at most once here; anything that ends up `failed` is left entirely to
+    app/worker.py's retry loop, which claims with the default `include_failed=True` and so
+    correctly honors `next_attempt_at` backoff instead of retrying immediately.
 
     A failure attempting any individual task is caught, logged, and never re-raised: the
     account is already, durably erased by the time this runs, so a per-task failure here must
@@ -303,7 +403,9 @@ def attempt_pending_storage_deletions_for_operation(operation_id: uuid.UUID) -> 
     db = _MaintenanceSession()
     try:
         while True:
-            claimed_ids = claim_storage_deletion_tasks(db, limit=100, operation_id=operation_id)
+            claimed_ids = claim_storage_deletion_tasks(
+                db, limit=100, operation_id=operation_id, include_failed=False
+            )
             if not claimed_ids:
                 break
             for task_id in claimed_ids:
@@ -346,22 +448,38 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
     operation_id = uuid.uuid4()
 
     try:
+        # Pass 28: acquires the owner-erasure advisory lock BEFORE taking any row-level lock
+        # on `users` (below) — a real deadlock a founder-review-triggered full-suite run
+        # surfaced (not merely theoretical): the OLD ordering took `FOR UPDATE` on the User
+        # row FIRST, then acquired this advisory lock. A concurrent upload
+        # (app/routers/library.py) that had already acquired the SAME advisory lock and was
+        # mid-transaction inserting an ImportJob row could then block on a FOR KEY SHARE lock
+        # Postgres itself takes on `users.id` to validate ImportJob.owner_id's foreign key —
+        # while THIS transaction sat blocked waiting for that same advisory lock, held by the
+        # very upload transaction now blocked on the row lock THIS transaction already held.
+        # Classic deadlock (Postgres's own detector aborts one side with "deadlock detected").
+        # Acquiring the advisory lock first removes the row-lock/advisory-lock cycle entirely:
+        # by the time this transaction ever touches the `users` row below, it already holds
+        # the SAME lock every other writer for this owner (uploads, claim_next_job) also takes
+        # before touching anything, so no other transaction can be mid-flight needing that row.
+        acquire_owner_erasure_lock(db, owner_id)
+
         # Serializes a concurrent SECOND erasure attempt for the SAME account — the second
-        # call's own FOR UPDATE blocks until the first either commits (this row disappears,
-        # so the second query below returns nothing and get_current_user's own earlier lookup
-        # for that request would already have 401'd before ever reaching here on any request
-        # AFTER the first commits) or rolls back (row unchanged, second attempt proceeds
+        # call's own acquire_owner_erasure_lock above already blocks until the first either
+        # commits or rolls back; by the time it proceeds to here, this FOR UPDATE either finds
+        # the row gone (the first attempt committed — get_current_user's own earlier lookup for
+        # that request would already have 401'd before ever reaching here on any request AFTER
+        # the first commits) or unchanged (the first attempt rolled back, second proceeds
         # normally).
         locked_user = db.query(User).filter_by(id=owner_id).with_for_update().first()
         if locked_user is None:
             raise LookupError(f"user {owner_id} not found (already erased?)")
 
-        # Pass 26: closes the erasure/upload race — see acquire_owner_erasure_lock's own
-        # docstring for the full race and why this must be acquired BEFORE inventorying
-        # storage keys (a concurrent upload either fully commits before this proceeds, and so
-        # is correctly swept into the inventory below, or is still blocked and so cannot yet
-        # have written anything this erasure would need to account for).
-        acquire_owner_erasure_lock(db, owner_id)
+        # Pass 26: the owner-erasure lock acquired above (now BEFORE the User row lock, see
+        # Pass 28's comment there) is what closes the erasure/upload race — a concurrent
+        # upload either fully commits before this proceeds, and so is correctly swept into the
+        # storage-key inventory below, or is still blocked and so cannot yet have written
+        # anything this erasure would need to account for.
 
         # Pass 27: refuses to proceed while a worker is ACTIVELY, currently processing an
         # import job for this owner — see module docstring's blob-write-path audit for why a
@@ -404,14 +522,19 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             .all()
         }
         storage_keys = document_keys | import_job_keys  # unique keys, deduplicated across both sources
+        # Pass 28: `mainai_app` now has ZERO direct privileges on `storage_deletion_tasks` (see
+        # module docstring) — a plain ORM `db.add(StorageDeletionTask(...))` would fail with
+        # permission denied. The SECURITY DEFINER `enqueue_account_erasure_storage_task()`
+        # (migration 0022) is the only way this session may create a task row: it re-derives
+        # the caller from the SAME `app.current_user_id` session variable this transaction is
+        # already running under, independently re-verifies each key still belongs to that
+        # caller via `documents`/`knowledge_import_jobs` (never trusting the Python-side
+        # `document_keys`/`import_job_keys` query above as authorization), and sets
+        # `reason`/`status` itself.
         for key in storage_keys:
-            db.add(
-                StorageDeletionTask(
-                    operation_id=operation_id,
-                    storage_key=key,
-                    reason=StorageDeletionReason.account_erasure,
-                    status=StorageDeletionStatus.pending,
-                )
+            db.execute(
+                sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+                {"operation_id": str(operation_id), "storage_key": key},
             )
 
         # --- S1A memory erasure via the controlled, SECURITY DEFINER, owner-verified function

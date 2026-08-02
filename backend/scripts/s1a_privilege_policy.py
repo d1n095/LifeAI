@@ -37,29 +37,29 @@ APP_ROLE = "mainai_app"
 # append-only audit trail written exclusively by the SECURITY DEFINER functions below, never
 # directly by the app role.
 #
-# storage_deletion_tasks (migration 0021, account erasure) — Pass 27, tightened after a
-# founder review: mainai_app gets INSERT ONLY, never SELECT/UPDATE/DELETE. This table
-# deliberately has no owner_id and no RLS at all (see that migration's module docstring for
-# why it must outlive the very account whose erasure created it) — a table-wide SELECT/UPDATE
-# grant to the ordinary, request-scoped application role would let ANY authenticated request
-# session (not just account erasure's own code path — any future bug, injected query, or
-# compromised request handler reusing the same DB role) read every operation's storage keys
-# and operation ids across every account's erasure, or rewrite any task's status/storage_key,
-# including marking a task `purged`/`retained_shared` without ever touching the real file, or
-# resetting `attempt_count`/`last_error` to sabotage the retry queue. That no router happens to
-# do this today is not a security boundary — the privilege model must not depend on it.
-# mainai_app's account-erasure transaction only ever needs to INSERT new rows here (see
-# app/rag/account_erasure.py); reading/claiming/updating pending or failed tasks — both the
-# immediate best-effort attempt right after an erasure commits, AND app/worker.py's
-# cross-operation retry scan — now runs exclusively on a separate, privileged maintenance
-# session bound to the admin/migration connection (mirroring app/worker.py's existing
-# `_ClaimSession` pattern for `knowledge_import_jobs`, which already has the exact same
-# "must see/claim rows across every owner" shape), never on the ordinary per-request session.
+# storage_deletion_tasks (migration 0021, account erasure) — Pass 28, tightened AGAIN after a
+# second founder review: mainai_app gets ZERO direct privileges (Pass 27 had left INSERT,
+# reasoned as harmless metadata access — a founder review correctly pointed out that INSERT
+# into THIS table is not mere metadata: it is indirect access to a privileged PHYSICAL DELETE
+# operation, since nothing previously verified an inserted storage_key actually belonged to
+# the inserting owner or referenced anything real at all. A compromised request path or a
+# future SQL bug could have queued an arbitrary key — including one belonging to
+# app/project_memory.py's founder-wide project-memory blobs, which migration 0020's reference
+# check (Documents/ImportJobs only) would never see, and the maintenance worker would then
+# physically delete it, believing it unreferenced. The ONLY way to create a row now is
+# `enqueue_account_erasure_storage_task()` (migration 0022) — a SECURITY DEFINER function that
+# verifies the caller (`app.current_user_id`) genuinely owns the storage_key via
+# `Document.storage_key`/`ImportJob.source_storage_key` before ever inserting anything, and
+# sets reason/status itself (never caller-supplied). Reading/claiming/updating pending or
+# failed tasks — both the immediate best-effort attempt right after an erasure commits, AND
+# app/worker.py's cross-operation retry scan — runs exclusively on a separate, privileged
+# maintenance session bound to the admin/migration connection (mirroring app/worker.py's
+# existing `_ClaimSession` pattern for `knowledge_import_jobs`).
 _PROTECTED_TABLES = [
     ("memory_source_units", ["SELECT", "INSERT"]),
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
-    ("storage_deletion_tasks", ["INSERT"]),
+    ("storage_deletion_tasks", []),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -91,12 +91,20 @@ _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFEREN
 # 0019 for the first four, 0020 for the last) — "varchar" is Postgres's own alias for
 # VARCHAR(16)'s identity type `character varying` (the length modifier is not part of a
 # function's identity and to_regprocedure resolves either spelling to the same signature).
+#
+# enqueue_account_erasure_storage_task (migration 0022, Pass 28): owner-scoped, same
+# reasoning as transition_own_memory_source/erase_owner_memory above — it only ever touches
+# rows matching the caller's own id (verified explicitly in the function body, not via RLS),
+# so it needs no BYPASSRLS. mainai_app DOES need EXECUTE: it's the only way an ordinary
+# request session may create a storage_deletion_tasks row at all now that table itself grants
+# nothing directly (see _PROTECTED_TABLES above).
 _FUNCTIONS = [
     ("transition_own_memory_source", True, False, "void", ("uuid", "varchar", "text")),
     ("transition_memory_source_admin", False, True, "void", ("uuid", "varchar", "text", "varchar", "uuid")),
     ("erase_owner_memory", True, False, "void", ("uuid",)),
     ("erase_owner_memory_admin", False, True, "void", ("uuid",)),
     ("storage_key_still_referenced_global", True, True, "boolean", ("text",)),
+    ("enqueue_account_erasure_storage_task", True, False, "void", ("uuid", "text")),
 ]
 
 
@@ -231,7 +239,12 @@ def apply_privilege_policy(cur, *, expected_owner: str, require_complete: bool =
         if table not in tables_present:
             continue
         cur.execute(f'REVOKE ALL ON TABLE public."{table}" FROM {APP_ROLE}')
-        cur.execute(f'GRANT {", ".join(allowed_privs)} ON TABLE public."{table}" TO {APP_ROLE}')
+        # Pass 28: storage_deletion_tasks' allowed_privs is deliberately empty (zero direct
+        # privileges) -- `GRANT  ON TABLE ... TO role` (an empty privilege list) is invalid
+        # SQL, and REVOKE ALL above already leaves the role with nothing, so there is simply
+        # no GRANT statement to issue in that case.
+        if allowed_privs:
+            cur.execute(f'GRANT {", ".join(allowed_privs)} ON TABLE public."{table}" TO {APP_ROLE}')
 
     for name, grant_to_app, _requires_bypassrls, _expected_return_type, _expected_args in _FUNCTIONS:
         sig = signatures.get(name)

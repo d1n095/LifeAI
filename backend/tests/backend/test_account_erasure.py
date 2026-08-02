@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from app.audit import record_audit
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
+from app.jobs.lease import claim_next_job
 from app.models.audit import AuditLog
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
 from app.models.document_chunk import DocumentChunk
@@ -35,6 +36,7 @@ from app.models.user import User, UserRole
 from app.rag.account_erasure import (
     AccountErasureBlockedError,
     AccountErasureResult,
+    attempt_pending_storage_deletions_for_operation,
     attempt_storage_deletion_task,
     claim_storage_deletion_tasks,
     erase_account_data,
@@ -296,18 +298,23 @@ def test_erase_account_data_rolls_back_everything_on_a_failure_after_erase_owner
 
 
 def test_erase_account_data_rolls_back_everything_when_a_storage_deletion_task_insert_fails(monkeypatch):
-    """A real Postgres constraint violation while inserting a storage_deletion_tasks row (here,
-    a deliberately invalid attempt_count) must roll back the ENTIRE erasure — S1A memory,
-    documents, and the User row all survive, exactly as if nothing had been attempted."""
-    import app.rag.account_erasure as account_erasure_module
-    from app.models.storage_deletion_task import StorageDeletionTask as _RealTask
+    """A real failure calling `enqueue_account_erasure_storage_task()` (here, a simulated
+    Postgres error) must roll back the ENTIRE erasure — S1A memory, documents, and the User
+    row all survive, exactly as if nothing had been attempted. Pass 28: this call is now a
+    `SELECT enqueue_account_erasure_storage_task(...)` (SECURITY DEFINER function), not a
+    plain ORM insert (see app/rag/account_erasure.py's module docstring) — the failure is
+    simulated by intercepting exactly that statement text on the real session's `execute`,
+    not by breaking the ORM model."""
+    from sqlalchemy.orm import Session as SASession
 
-    class _BrokenStorageDeletionTask(_RealTask):
-        def __init__(self, *args, **kwargs):
-            kwargs["attempt_count"] = -1  # violates ck_storage_deletion_tasks_attempt_count
-            super().__init__(*args, **kwargs)
+    original_execute = SASession.execute
 
-    monkeypatch.setattr(account_erasure_module, "StorageDeletionTask", _BrokenStorageDeletionTask)
+    def _failing_execute(self, statement, *args, **kwargs):
+        if "enqueue_account_erasure_storage_task" in str(statement):
+            raise RuntimeError("simulated failure enqueueing a storage_deletion_task")
+        return original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(SASession, "execute", _failing_execute)
 
     session = SessionLocal()
     try:
@@ -513,6 +520,11 @@ def test_attempt_storage_deletion_task_marks_a_real_storage_error_as_failed_and_
         assert task.status == StorageDeletionStatus.failed
         assert task.last_error is not None
         assert task.attempt_count == 1
+        # Pass 28: a failed attempt sets a future backoff -- the worker's own retry scan
+        # (claim_storage_deletion_tasks with the default include_failed=True) must not
+        # reclaim this task again until that time has passed.
+        assert task.next_attempt_at is not None
+        assert task.next_attempt_at > datetime.now(timezone.utc)
         assert get_storage().exists(storage_key)  # never actually deleted
         monkeypatch.undo()
 
@@ -521,6 +533,7 @@ def test_attempt_storage_deletion_task_marks_a_real_storage_error_as_failed_and_
         attempt_storage_deletion_task(session, task)
         assert task.status == StorageDeletionStatus.purged
         assert task.attempt_count == 2
+        assert task.next_attempt_at is None  # reset the moment a fresh attempt started
         assert not get_storage().exists(storage_key)
     finally:
         session.rollback()
@@ -827,14 +840,166 @@ def test_owner_erasure_lock_serializes_erasure_against_a_concurrent_upload_for_t
         erasure_session.close()
 
 
-# --- storage_deletion_tasks: privilege boundary (Pass 27, founder review round 2) -----------
+# --- claim_next_job(): two-phase owner-locked claim closes the pending-ImportJob/account-
+# erasure orphan-blob race (Pass 28, founder review round 3) ---------------------------------
+
+
+def test_claim_next_job_winning_the_owner_lock_race_blocks_a_concurrent_erasure(monkeypatch):
+    """Reproduces the exact orphan-blob race the founder review found, with claim_next_job
+    winning the owner-lock race for a PENDING job. Proves the required lock ordering (owner
+    lock acquired BEFORE the row-level claim, never after, app/jobs/lease.py's module
+    docstring): a concurrent erasure for the SAME owner must block on the SAME real Postgres
+    advisory lock until claim's transaction fully commits, and once unblocked must find the
+    job already claimed/running -- refusing to erase out from under an active worker
+    (AccountErasureBlockedError), never racing to delete it. Also a deadlock-timeout proof:
+    both threads complete within their bounded joins below, never hanging."""
+    import app.jobs.lease as lease_module
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        owner_id = owner.id
+        storage_key = _store_real_blob(b"claim wins the owner-lock race")
+        _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.pending)
+    finally:
+        session.close()
+
+    lock_acquired = threading.Event()
+    proceed_to_claim = threading.Event()
+    claim_done = threading.Event()
+    real_acquire = lease_module.acquire_owner_erasure_lock
+
+    def _pausing_acquire(db, owner_id_arg):
+        real_acquire(db, owner_id_arg)
+        lock_acquired.set()
+        proceed_to_claim.wait(timeout=5)
+
+    monkeypatch.setattr(lease_module, "acquire_owner_erasure_lock", _pausing_acquire)
+
+    claim_result: dict = {}
+
+    def _claim_thread():
+        claim_db = _AdminSession()
+        try:
+            claim_result["value"] = claim_next_job(claim_db, "race-worker-claim-wins", 120)
+        finally:
+            claim_done.set()
+            claim_db.close()
+
+    t = threading.Thread(target=_claim_thread)
+    t.start()
+    try:
+        assert lock_acquired.wait(timeout=5), "claim_next_job never acquired the owner-erasure lock"
+
+        erasure_session = SessionLocal()
+        try:
+            proceed_to_claim.set()
+            _set_rls_user(erasure_session, owner_id)
+            owner_row = erasure_session.query(User).filter_by(id=owner_id).first()
+            with pytest.raises(AccountErasureBlockedError):
+                erase_account_data(erasure_session, owner_row)
+        finally:
+            erasure_session.rollback()
+            erasure_session.close()
+    finally:
+        t.join(timeout=5)
+
+    assert claim_done.is_set(), "claim_next_job never completed -- possible deadlock"
+    assert claim_result.get("value") is not None, "claim_next_job must have won the race and claimed the job"
+    admin = _AdminSession()
+    try:
+        # Erasure correctly refused rather than racing to delete the account out from under
+        # the worker that just claimed its job.
+        assert admin.query(User).filter_by(id=owner_id).count() == 1
+    finally:
+        admin.close()
+
+
+def test_erasure_winning_the_owner_lock_race_leaves_nothing_for_claim_next_job_to_claim(monkeypatch):
+    """The other race ordering: erase_account_data wins the owner-lock race first for a
+    PENDING job. claim_next_job must then find NOTHING claimable for this owner (both the
+    job row and the owner are gone by the time it gets the lock) rather than claiming a job
+    whose owner has just been erased -- the exact orphan-blob scenario the founder review
+    described, now proven closed. Also proves the pending job's storage_key was correctly
+    swept into the deletion inventory (no orphan left behind), and a second deadlock-timeout
+    proof via the same bounded-join pattern as the test above."""
+    import app.rag.account_erasure as account_erasure_module
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        owner_id = owner.id
+        storage_key = _store_real_blob(b"erasure wins the owner-lock race")
+        job = _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.pending)
+        job_id = job.id
+    finally:
+        session.close()
+
+    lock_acquired = threading.Event()
+    proceed_to_commit = threading.Event()
+    erasure_done = threading.Event()
+    real_acquire = account_erasure_module.acquire_owner_erasure_lock
+
+    def _pausing_acquire(db, owner_id_arg):
+        real_acquire(db, owner_id_arg)
+        lock_acquired.set()
+        proceed_to_commit.wait(timeout=5)
+
+    monkeypatch.setattr(account_erasure_module, "acquire_owner_erasure_lock", _pausing_acquire)
+
+    erasure_result: dict = {}
+
+    def _erasure_thread():
+        erasure_session = SessionLocal()
+        try:
+            _set_rls_user(erasure_session, owner_id)
+            owner_row = erasure_session.query(User).filter_by(id=owner_id).first()
+            erasure_result["value"] = erase_account_data(erasure_session, owner_row)
+        finally:
+            erasure_done.set()
+            erasure_session.close()
+
+    t = threading.Thread(target=_erasure_thread)
+    t.start()
+    claim_db = _AdminSession()
+    try:
+        assert lock_acquired.wait(timeout=5), "erase_account_data never acquired the owner-erasure lock"
+        proceed_to_commit.set()
+        # Blocks on the SAME real Postgres advisory lock (a different connection) until
+        # erasure's transaction above commits -- the exact serialization this test proves.
+        claimed = claim_next_job(claim_db, "race-worker-erasure-wins", 120)
+        t.join(timeout=5)
+
+        assert erasure_done.is_set(), "erase_account_data never completed -- possible deadlock"
+        assert claimed is None, "nothing must be claimable -- the owner and their pending job are both gone"
+        assert claim_db.query(ImportJob).filter_by(id=job_id).count() == 0
+
+        admin = _AdminSession()
+        try:
+            task_keys = {
+                task.storage_key
+                for task in admin.query(StorageDeletionTask).filter_by(operation_id=erasure_result["value"].operation_id).all()
+            }
+        finally:
+            admin.close()
+        assert storage_key in task_keys, (
+            "the pending job's source_storage_key must have been swept into a deletion task -- "
+            "otherwise it would be an orphaned blob with no owner left to ever reference it"
+        )
+    finally:
+        claim_db.rollback()
+        claim_db.close()
+
+
+# --- storage_deletion_tasks: privilege boundary (Pass 28, founder review round 3) -----------
 #
-# The table-wide catalog checks (mainai_app has exactly INSERT, nothing else) live in
+# The table-wide catalog checks (mainai_app has ZERO direct privileges) live in
 # tests/backend/test_memory_source_units.py::test_mainai_app_privileges_are_exactly_least_
 # privilege_no_truncate_references_trigger and ::test_apply_runtime_privileges_survives_a_
-# second_boot (both extended in Pass 27 to cover storage_deletion_tasks). The tests below prove
-# the SAME thing at RUNTIME, through this session's actual mainai_app connection -- not just
-# the catalog's opinion of what it SHOULD be able to do.
+# second_boot (both extended in Pass 28 to cover storage_deletion_tasks' now-empty privilege
+# set and enqueue_account_erasure_storage_task's EXECUTE grant). The tests below prove the
+# SAME thing at RUNTIME, through this session's actual mainai_app connection -- not just the
+# catalog's opinion of what it SHOULD be able to do.
 
 
 def test_mainai_app_session_cannot_select_from_storage_deletion_tasks():
@@ -862,17 +1027,210 @@ def test_mainai_app_session_cannot_update_storage_deletion_tasks():
         session.close()
 
 
-def test_mainai_app_session_can_still_insert_storage_deletion_tasks():
-    """The one privilege the account-erasure transaction actually needs -- proven positively,
-    not just by absence of the tests above."""
+def test_mainai_app_session_cannot_insert_directly_into_storage_deletion_tasks():
+    """Pass 28: the one privilege Pass 27 still left mainai_app with (INSERT) is now revoked
+    too -- see app/rag/account_erasure.py's module docstring for why plain INSERT access was
+    itself dangerous (indirect access to a privileged physical-delete operation with no
+    ownership check). The ONLY way an ordinary session may create a task row now is the
+    enqueue_account_erasure_storage_task() SECURITY DEFINER function, exercised in the
+    section below."""
     session = SessionLocal()
     try:
         owner = _make_user(session)
         _set_rls_user(session, owner.id)
-        session.add(
-            StorageDeletionTask(operation_id=uuid.uuid4(), storage_key=f"insert-only-proof-{uuid.uuid4().hex}", status=StorageDeletionStatus.pending)
+        with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
+            session.add(
+                StorageDeletionTask(
+                    operation_id=uuid.uuid4(), storage_key=f"direct-insert-denied-{uuid.uuid4().hex}", status=StorageDeletionStatus.pending
+                )
+            )
+            session.commit()
+        assert "permission denied" in str(exc_info.value).lower()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_public_lacks_execute_on_enqueue_account_erasure_storage_task():
+    """No role should be able to call this function purely by connecting as PUBLIC -- only
+    mainai_app, via the explicit grant in backend/scripts/s1a_privilege_policy.py, exactly
+    like every other S1A SECURITY DEFINER function (migration 0019's module docstring)."""
+    session = SessionLocal()
+    try:
+        has_exec = session.execute(
+            sa_text(
+                "SELECT has_function_privilege('public', "
+                "'enqueue_account_erasure_storage_task(uuid, text)', 'EXECUTE')"
+            )
+        ).scalar()
+        assert has_exec is False
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- enqueue_account_erasure_storage_task(): ownership-verified, idempotent enqueue (Pass 28)
+
+
+def test_enqueue_account_erasure_storage_task_creates_a_row_for_a_caller_owned_document_key():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"owned document blob")
+        _make_document(session, owner.id, storage_key=storage_key)
+        operation_id = uuid.uuid4()
+
+        _set_rls_user(session, owner.id)
+        session.execute(
+            sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+            {"operation_id": str(operation_id), "storage_key": storage_key},
         )
-        session.commit()  # must not raise
+        session.commit()
+
+        admin = _AdminSession()
+        try:
+            task = admin.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).one()
+            assert task.status == StorageDeletionStatus.pending
+        finally:
+            admin.close()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_enqueue_account_erasure_storage_task_creates_a_row_for_a_caller_owned_import_job_key():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"owned import job blob")
+        _make_import_job(session, owner.id, source_storage_key=storage_key)
+        operation_id = uuid.uuid4()
+
+        _set_rls_user(session, owner.id)
+        session.execute(
+            sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+            {"operation_id": str(operation_id), "storage_key": storage_key},
+        )
+        session.commit()
+
+        admin = _AdminSession()
+        try:
+            assert admin.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).count() == 1
+        finally:
+            admin.close()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_enqueue_account_erasure_storage_task_is_idempotent_on_operation_and_key():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        storage_key = _store_real_blob(b"idempotent enqueue proof")
+        _make_document(session, owner.id, storage_key=storage_key)
+        operation_id = uuid.uuid4()
+
+        _set_rls_user(session, owner.id)
+        for _ in range(3):
+            session.execute(
+                sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+                {"operation_id": str(operation_id), "storage_key": storage_key},
+            )
+        session.commit()
+
+        admin = _AdminSession()
+        try:
+            assert admin.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).count() == 1
+        finally:
+            admin.close()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_enqueue_account_erasure_storage_task_denies_a_key_owned_by_a_different_owner():
+    """The exact cross-owner gap the founder review named: nothing may queue a physical
+    delete for a storage_key it doesn't actually own, no matter how it was found."""
+    session = SessionLocal()
+    try:
+        victim = _make_user(session, email=f"victim-{uuid.uuid4().hex[:8]}@example.com")
+        attacker = _make_user(session, email=f"attacker-{uuid.uuid4().hex[:8]}@example.com")
+        storage_key = _store_real_blob(b"belongs to the victim only")
+        _make_document(session, victim.id, storage_key=storage_key)
+
+        _set_rls_user(session, attacker.id)
+        with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
+            session.execute(
+                sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+                {"operation_id": str(uuid.uuid4()), "storage_key": storage_key},
+            )
+            session.commit()
+        assert "not owned by the caller" in str(exc_info.value).lower()
+
+        admin = _AdminSession()
+        try:
+            assert admin.query(StorageDeletionTask).filter_by(storage_key=storage_key).count() == 0
+        finally:
+            admin.close()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_enqueue_account_erasure_storage_task_denies_an_arbitrary_unreferenced_key():
+    """A storage_key that references nothing real at all -- neither a Document nor an
+    ImportJob -- must be refused, not silently accepted."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
+            session.execute(
+                sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+                {"operation_id": str(uuid.uuid4()), "storage_key": "sha256:nonexistent-arbitrary-key"},
+            )
+            session.commit()
+        assert "not owned by the caller" in str(exc_info.value).lower()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_enqueue_account_erasure_storage_task_denies_a_project_memory_storage_key():
+    """app/project_memory.py's ProjectSource/ProjectCheckpoint blobs are founder-wide project
+    state, never a per-user Document/ImportJob (see account_erasure.py's blob-write-path
+    audit) -- their storage_keys must be just as unenqueueable as any other unowned key, even
+    though a real file exists on disk for them."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        project_memory_key = _store_real_blob(b"founder-wide project memory blob, not user-owned")
+
+        _set_rls_user(session, owner.id)
+        with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
+            session.execute(
+                sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+                {"operation_id": str(uuid.uuid4()), "storage_key": project_memory_key},
+            )
+            session.commit()
+        assert "not owned by the caller" in str(exc_info.value).lower()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_enqueue_account_erasure_storage_task_requires_an_authenticated_caller():
+    session = SessionLocal()
+    try:
+        session.execute(sa_text("SET LOCAL app.current_user_id = ''"))
+        with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
+            session.execute(
+                sa_text("SELECT enqueue_account_erasure_storage_task(:operation_id, :storage_key)"),
+                {"operation_id": str(uuid.uuid4()), "storage_key": "sha256:whatever"},
+            )
+            session.commit()
+        assert "no authenticated user context" in str(exc_info.value).lower()
     finally:
         session.rollback()
         session.close()
@@ -900,6 +1258,89 @@ def test_claim_storage_deletion_tasks_claims_pending_and_failed_scoped_to_operat
         assert admin.get(StorageDeletionTask, t_failed.id).status == StorageDeletionStatus.processing
         # A different operation's own pending task is untouched by this operation-scoped claim.
         assert admin.get(StorageDeletionTask, t_other_op.id).status == StorageDeletionStatus.pending
+    finally:
+        admin.rollback()
+        admin.close()
+
+
+def test_claim_storage_deletion_tasks_include_failed_false_never_claims_a_failed_task():
+    """Pass 28: the exact mechanism the immediate-attempt infinite-retry-loop fix depends on
+    -- with include_failed=False, a `failed` task is invisible to this claim no matter its
+    next_attempt_at, only `pending`/lease-expired `processing` rows are eligible."""
+    admin = _AdminSession()
+    try:
+        op_id = uuid.uuid4()
+        t_pending = StorageDeletionTask(operation_id=op_id, storage_key=f"incl-failed-pending-{uuid.uuid4().hex}", status=StorageDeletionStatus.pending)
+        t_failed_ready = StorageDeletionTask(
+            operation_id=op_id, storage_key=f"incl-failed-ready-{uuid.uuid4().hex}", status=StorageDeletionStatus.failed
+        )
+        admin.add_all([t_pending, t_failed_ready])
+        admin.commit()
+
+        claimed = claim_storage_deletion_tasks(admin, limit=10, operation_id=op_id, include_failed=False)
+
+        assert claimed == [t_pending.id]
+        admin.expire_all()
+        assert admin.get(StorageDeletionTask, t_failed_ready.id).status == StorageDeletionStatus.failed  # untouched
+    finally:
+        admin.rollback()
+        admin.close()
+
+
+def test_claim_storage_deletion_tasks_respects_a_failed_tasks_next_attempt_at_backoff():
+    """Even with the default include_failed=True (the worker's own retry scan), a `failed`
+    task whose backoff hasn't elapsed yet must not be reclaimed -- only once `next_attempt_at`
+    is in the past does it become eligible again."""
+    admin = _AdminSession()
+    try:
+        op_id = uuid.uuid4()
+        not_yet = StorageDeletionTask(
+            operation_id=op_id,
+            storage_key=f"backoff-not-yet-{uuid.uuid4().hex}",
+            status=StorageDeletionStatus.failed,
+            next_attempt_at=datetime.utcnow() + timedelta(hours=1),
+        )
+        elapsed = StorageDeletionTask(
+            operation_id=op_id,
+            storage_key=f"backoff-elapsed-{uuid.uuid4().hex}",
+            status=StorageDeletionStatus.failed,
+            next_attempt_at=datetime.utcnow() - timedelta(seconds=1),
+        )
+        admin.add_all([not_yet, elapsed])
+        admin.commit()
+
+        claimed = claim_storage_deletion_tasks(admin, limit=10, operation_id=op_id)
+
+        assert elapsed.id in claimed
+        assert not_yet.id not in claimed
+    finally:
+        admin.rollback()
+        admin.close()
+
+
+def test_claim_storage_deletion_tasks_never_reclaims_a_terminal_purged_or_retained_shared_task():
+    """Pass 28 point 4 (claim state-transition verification): a terminal-success task must
+    never become claimable again, even if its updated_at looks arbitrarily old -- the WHERE
+    clause's lease-expiry branch only ever applies to status='processing', never to a
+    genuinely finished task."""
+    admin = _AdminSession()
+    try:
+        op_id = uuid.uuid4()
+        purged = StorageDeletionTask(operation_id=op_id, storage_key=f"terminal-purged-{uuid.uuid4().hex}", status=StorageDeletionStatus.purged)
+        retained = StorageDeletionTask(
+            operation_id=op_id, storage_key=f"terminal-retained-{uuid.uuid4().hex}", status=StorageDeletionStatus.retained_shared
+        )
+        admin.add_all([purged, retained])
+        admin.commit()
+        admin.execute(
+            sa_text("UPDATE storage_deletion_tasks SET updated_at = now() - interval '1 year' WHERE operation_id = :op"),
+            {"op": str(op_id)},
+        )
+        admin.commit()
+
+        claimed = claim_storage_deletion_tasks(admin, limit=10, operation_id=op_id, lease_seconds=1)
+
+        assert claimed == []
     finally:
         admin.rollback()
         admin.close()
@@ -1000,6 +1441,118 @@ def test_claim_storage_deletion_tasks_two_concurrent_claimers_never_claim_the_sa
     claimed_b = set(results["b"])
     assert claimed_a.isdisjoint(claimed_b), "the same task was claimed by BOTH concurrent callers"
     assert claimed_a | claimed_b == all_ids, "every task must be claimed by exactly one of the two callers"
+
+
+# --- attempt_pending_storage_deletions_for_operation(): immediate-attempt infinite-retry-loop
+# fix (Pass 28, founder review round 3) -------------------------------------------------------
+
+
+def test_attempt_pending_storage_deletions_for_operation_tries_a_permanently_failing_task_exactly_once(monkeypatch):
+    """The concrete bug the founder review named: with the OLD claim_storage_deletion_tasks
+    default (include_failed=True), a task that fails with a PERMANENT StorageError got
+    reclaimed by the very next iteration of this function's own `while True` loop --
+    forever, an unbounded busy loop inside a single HTTP request. Proven here by counting
+    real storage.delete() calls: a permanently-broken storage backend must be tried exactly
+    once per task, never looped on."""
+    import app.rag.account_erasure as account_erasure_module
+
+    delete_calls: list[str] = []
+
+    class _AlwaysBrokenStorage:
+        def delete(self, key):
+            delete_calls.append(key)
+            raise StorageError("simulated PERMANENT I/O failure -- retrying can never fix this")
+
+        def exists(self, key):
+            return False
+
+    monkeypatch.setattr(account_erasure_module, "get_storage", lambda: _AlwaysBrokenStorage())
+
+    admin = _AdminSession()
+    try:
+        op_id = uuid.uuid4()
+        task_keys = [f"permanent-fail-{i}-{uuid.uuid4().hex}" for i in range(3)]
+        for key in task_keys:
+            admin.add(StorageDeletionTask(operation_id=op_id, storage_key=key, status=StorageDeletionStatus.pending))
+        admin.commit()
+
+        result = attempt_pending_storage_deletions_for_operation(op_id)
+
+        assert sorted(delete_calls) == sorted(task_keys), "each task must be attempted exactly once, not looped on"
+        assert set(result.storage_tasks_pending_or_failed) == {
+            str(t.id) for t in admin.query(StorageDeletionTask).filter_by(operation_id=op_id).all()
+        }
+        admin.expire_all()
+        for t in admin.query(StorageDeletionTask).filter_by(operation_id=op_id).all():
+            assert t.status == StorageDeletionStatus.failed
+            assert t.attempt_count == 1
+            assert t.next_attempt_at is not None  # left for the worker's own backed-off retry
+    finally:
+        admin.rollback()
+        admin.close()
+
+
+def test_attempt_pending_storage_deletions_for_operation_never_reclaims_a_task_that_just_failed(monkeypatch):
+    """Direct proof of the fix's actual mechanism: claim_storage_deletion_tasks is called
+    with include_failed=False, so a task that transitions pending -> failed mid-call can
+    never be seen again by the SAME call, regardless of how many tasks exist."""
+    import app.rag.account_erasure as account_erasure_module
+
+    real_claim = account_erasure_module.claim_storage_deletion_tasks
+    seen_include_failed: list[bool] = []
+
+    def _spy_claim(db, **kwargs):
+        seen_include_failed.append(kwargs.get("include_failed", True))
+        return real_claim(db, **kwargs)
+
+    monkeypatch.setattr(account_erasure_module, "claim_storage_deletion_tasks", _spy_claim)
+
+    class _AlwaysBrokenStorage:
+        def delete(self, key):
+            raise StorageError("simulated permanent failure")
+
+        def exists(self, key):
+            return False
+
+    monkeypatch.setattr(account_erasure_module, "get_storage", lambda: _AlwaysBrokenStorage())
+
+    admin = _AdminSession()
+    try:
+        op_id = uuid.uuid4()
+        admin.add(StorageDeletionTask(operation_id=op_id, storage_key=f"spy-proof-{uuid.uuid4().hex}", status=StorageDeletionStatus.pending))
+        admin.commit()
+
+        attempt_pending_storage_deletions_for_operation(op_id)
+
+        assert seen_include_failed, "claim_storage_deletion_tasks was never called"
+        assert all(v is False for v in seen_include_failed), "every claim from the immediate attempt must pass include_failed=False"
+    finally:
+        admin.rollback()
+        admin.close()
+
+
+def test_worker_retry_can_still_reclaim_a_task_the_immediate_attempt_left_failed(monkeypatch):
+    """The other half of the fix: leaving a permanently-failed task to the worker must not
+    mean it's stuck forever -- once its backoff elapses, the worker's own scan
+    (include_failed=True, the default) picks it back up, same as any other failed task."""
+    admin = _AdminSession()
+    try:
+        task = StorageDeletionTask(
+            operation_id=uuid.uuid4(),
+            storage_key=f"worker-reclaims-{uuid.uuid4().hex}",
+            status=StorageDeletionStatus.failed,
+            attempt_count=1,
+            next_attempt_at=datetime.utcnow() - timedelta(seconds=1),
+        )
+        admin.add(task)
+        admin.commit()
+
+        claimed = claim_storage_deletion_tasks(admin, limit=10)  # worker's own default scan
+
+        assert task.id in claimed
+    finally:
+        admin.rollback()
+        admin.close()
 
 
 # --- erase_account_data(): refuses while a worker is actively processing this owner's import
@@ -1123,8 +1676,13 @@ def test_export_account_data_rolls_back_and_raises_when_the_final_commit_fails(m
 def test_storage_deletion_tasks_reason_and_status_columns_are_plain_varchar_not_native_enum():
     """Migration 0021 defines these as `varchar(N) + CHECK`, never `CREATE TYPE ... AS ENUM`
     -- the model must describe the SAME real schema (native_enum=False on both columns), not
-    a native Postgres enum type that was never actually created."""
-    session = SessionLocal()
+    a native Postgres enum type that was never actually created.
+
+    Pass 28: runs on `_AdminSession`, not the ordinary mainai_app-bound `SessionLocal` --
+    `information_schema.columns` itself filters out columns the querying role has no
+    privilege on at all, and mainai_app now has ZERO direct privileges on this table (see
+    module docstring)."""
+    session = _AdminSession()
     try:
         rows = {
             row[0]: row[1]
