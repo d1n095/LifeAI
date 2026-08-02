@@ -20,7 +20,6 @@ anywhere in this codebase, so this module never re-fetches it itself (see
 ingest_github_status()).
 """
 
-import io
 import json
 import re
 import subprocess
@@ -42,6 +41,7 @@ from app.models.project_memory import (
     ProjectSource,
     SideIssueClassification,
 )
+from app.rag.blob_references import store_content_with_reference_lock
 from app.storage import get_storage
 
 MAX_BRIEF_BYTES = 2 * 1024 * 1024  # a resumption brief is text; 2MB is already generous
@@ -200,8 +200,12 @@ def ingest_doc(db: Session, *, relative_path: str, ingested_by: str) -> ProjectS
         raise ValueError(f"{relative_path} är större än {MAX_DOC_BYTES} bytes — avbryter ingestion.")
 
     storage = get_storage()
-    reader = io.BytesIO(content)
-    blob = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=MAX_DOC_BYTES)
+    # Pass 31 (a sixth founder review round): acquires the storage-key lock and re-verifies
+    # the blob still exists BEFORE this function's own db.commit() below -- see
+    # app/rag/blob_references.py's store_content_with_reference_lock() docstring for the
+    # write-before-reference race this closes (the same shape Pass 22 already closed for the
+    # Life Library upload path, previously left open here).
+    blob = store_content_with_reference_lock(db, storage, content, max_bytes=MAX_DOC_BYTES)
 
     commit_sha: str | None = None
     try:
@@ -455,8 +459,9 @@ def ingest_system_map(db: Session, *, ingested_by: str) -> ProjectSource:
         raise ValueError(f"Systemkartan är större än {MAX_SYSTEM_MAP_BYTES} bytes — avbryter ingestion.")
 
     storage = get_storage()
-    reader = io.BytesIO(content)
-    blob = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=MAX_SYSTEM_MAP_BYTES)
+    # Pass 31: see ingest_doc()'s identical comment above -- closes the same
+    # write-before-reference race for this second writer.
+    blob = store_content_with_reference_lock(db, storage, content, max_bytes=MAX_SYSTEM_MAP_BYTES)
 
     commit_sha: str | None = None
     try:
@@ -733,8 +738,9 @@ def create_checkpoint(
     brief_bytes = brief.encode("utf-8")
 
     storage = get_storage()
-    reader = io.BytesIO(brief_bytes)
-    blob = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=MAX_BRIEF_BYTES)
+    # Pass 31: see ingest_doc()'s identical comment above -- closes the same
+    # write-before-reference race for this third writer.
+    blob = store_content_with_reference_lock(db, storage, brief_bytes, max_bytes=MAX_BRIEF_BYTES)
 
     git_source = latest_git_commit_source(db)
 

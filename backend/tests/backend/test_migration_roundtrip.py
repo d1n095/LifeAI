@@ -69,7 +69,16 @@ def _schema_snapshot() -> dict:
     `prosecdef` (SECURITY DEFINER vs INVOKER), `proconfig` (covers `search_path`), language,
     and an md5 of `pg_get_functiondef()` (the function's full, canonical CREATE-statement
     text, body included) — so "the schema was restored exactly" actually means the SECURITY
-    properties came back too, not just that a same-named function reappeared."""
+    properties came back too, not just that a same-named function reappeared.
+
+    Pass 31, deepened again after this test's OWN gap nearly hid a real bug: migration 0024
+    (Pass 31) is purely a CHECK-constraint change (widening `storage_deletion_tasks.reason`'s
+    allowed values) — no new/changed column, enum, or function at all. Column-name/enum-label/
+    function snapshots alone are completely blind to that, exactly the same shape of gap Pass
+    24's function fingerprint was added to close for migration 0020. Now also fingerprints
+    every CHECK constraint in the `public` schema (name + `pg_get_constraintdef()` text, per
+    table) so a constraint-only migration's `downgrade -1` is provably detected as a real
+    schema change too, not silently treated as a no-op."""
     migration_engine.dispose()  # drop pooled connections so the inspector sees the current schema, not a stale cached one
     inspector = inspect(migration_engine)
     snapshot = {
@@ -79,6 +88,12 @@ def _schema_snapshot() -> dict:
     }
     for enum in inspector.get_enums():
         snapshot[f"enum:{enum['name']}"] = frozenset(enum["labels"])
+    for table in inspector.get_table_names():
+        if table == "alembic_version":
+            continue
+        checks = inspector.get_check_constraints(table)
+        if checks:
+            snapshot[f"checks:{table}"] = frozenset((c["name"], c["sqltext"]) for c in checks)
     with migration_engine.connect() as conn:
         function_rows = conn.execute(
             sa_text(

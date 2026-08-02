@@ -10,11 +10,17 @@ from app.db import Base
 
 
 class StorageDeletionReason(str, enum.Enum):
-    """Closed set matching migration 0021's `ck_storage_deletion_tasks_reason` — a future
-    second reason (e.g. a scheduled retention purge) adds its own value here AND to that
-    CHECK constraint in the same change, never a caller-supplied free-text string."""
+    """Closed set matching migration 0021's `ck_storage_deletion_tasks_reason`, widened by
+    migration 0024 (Pass 31) to add `rejected_upload_cleanup` -- a future further reason adds
+    its own value here AND to that CHECK constraint in the same change, never a
+    caller-supplied free-text string."""
 
     account_erasure = "account_erasure"
+    # Pass 31: a rejected (e.g. empty) upload whose confirmed-unreferenced physical blob failed
+    # to delete immediately -- see app/rag/blob_references.py's
+    # enqueue_rejected_upload_cleanup_task() for how this reason's tasks are created, and
+    # migration 0024's module docstring for the incident this closes.
+    rejected_upload_cleanup = "rejected_upload_cleanup"
 
 
 class StorageDeletionStatus(str, enum.Enum):

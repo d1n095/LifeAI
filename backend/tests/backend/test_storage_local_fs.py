@@ -5,10 +5,11 @@ size limits) from everything built on top of them."""
 
 import hashlib
 import os
+import threading
 
 import pytest
 
-from app.storage.base import InvalidStorageKey, StorageIntegrityError, StorageSizeLimitExceeded
+from app.storage.base import InvalidStorageKey, StorageError, StorageIntegrityError, StorageSizeLimitExceeded
 from app.storage.local_fs import LocalFilesystemStorage
 
 
@@ -157,7 +158,10 @@ def test_delete_is_idempotent(tmp_path):
 def test_dedup_size_mismatch_against_an_existing_blob_raises_integrity_error(tmp_path):
     """A defensive check, not an expected real-world path (a sha256 collision with a
     different length is not something that happens by accident) — proves write_stream
-    doesn't blindly trust "same key exists" without at least a cheap size sanity check."""
+    doesn't blindly trust "same key exists" without at least a cheap size sanity check.
+    Test F (Pass 31, founder's lettering): also proves this holds under the new link()-based
+    retry loop -- a genuinely, persistently corrupt existing blob must raise immediately, not
+    get silently "healed" by retrying, and not get accepted after exhausting retries either."""
     storage = LocalFilesystemStorage(str(tmp_path))
     payload = b"originalinnehall"
     blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
@@ -166,4 +170,143 @@ def test_dedup_size_mismatch_against_an_existing_blob_raises_integrity_error(tmp
     disk_path.write_bytes(payload + b"extra-bytes-that-shouldnt-be-there")
 
     with pytest.raises(StorageIntegrityError):
+        storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+
+# --- Pass 31 (a sixth founder review round): write_stream()/delete() concurrency ------------
+#
+# The old `if final_path.exists(): ... else: os.rename(...)` publish step had a real TOCTOU
+# against a concurrent delete() landing between the check and the (skipped) write -- write_
+# stream() could return a StoredBlob whose storage_key resolves to nothing on disk. Closed via
+# an os.link()-based retry loop (see app/storage/local_fs.py's module + _publish() docstrings).
+# Tests below are the founder's own lettering; F lives on the pre-existing corruption test
+# just above (extended, not duplicated).
+
+
+def test_a_real_concurrent_delete_landing_between_the_failed_link_and_the_stat_recovers(tmp_path, monkeypatch):
+    """Test A (founder's lettering): deterministically reproduces the exact race window --
+    write_stream()'s os.link() observes "already exists" (FileExistsError), and a concurrent
+    delete() removes that file before this call's own follow-up stat() runs. Old code had no
+    such follow-up at all (a bare `if exists(): skip write`); new code must retry its own
+    link() instead of trusting the stale observation, and its own bytes must end up published."""
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"pass 31 test A: race window" * 20
+    first_blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    real_link = os.link
+    call_count = {"n": 0}
+
+    def _flaky_link(src, dst, *a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # A concurrent delete() races in and removes the file that made THIS link()
+            # attempt collide, exactly in the window between the failed link() and the
+            # follow-up stat() that would otherwise trust it's still there.
+            os.unlink(dst)
+            raise FileExistsError()
+        return real_link(src, dst, *a, **kw)
+
+    monkeypatch.setattr(os, "link", _flaky_link)
+
+    second_blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    assert second_blob.storage_key == first_blob.storage_key
+    assert storage.exists(second_blob.storage_key) is True
+    assert call_count["n"] == 2, "expected exactly one failed link() attempt, then one that succeeded on retry"
+
+
+def test_two_identical_concurrent_writers_both_succeed_with_a_single_file_on_disk(tmp_path):
+    """Test B (founder's lettering): two REAL threads writing byte-identical content at the
+    same time -- whichever wins the atomic os.link(), the other must observe a verified,
+    correct existing file and succeed too, never raising and never leaving two copies."""
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"pass 31 test B: two identical concurrent writers" * 30
+
+    start = threading.Barrier(2)
+    results: list = []
+    errors: list[Exception] = []
+
+    def _writer():
+        try:
+            start.wait(timeout=5)
+            results.append(storage.write_stream(_chunks(payload), max_bytes=10_000_000))
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below, not swallowed
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_writer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not any(t.is_alive() for t in threads), "a writer thread never finished -- possible deadlock"
+    assert errors == [], f"unexpected exception(s): {errors}"
+    assert len(results) == 2
+    assert results[0].storage_key == results[1].storage_key
+    assert results[0].sha256 == hashlib.sha256(payload).hexdigest()
+
+    matches = list(tmp_path.rglob(results[0].sha256))
+    assert len(matches) == 1, "two concurrent identical writers must publish exactly one file, not two"
+    assert list((tmp_path / "tmp").iterdir()) == [], "no leftover tempfiles after two concurrent writers"
+
+
+def test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk(tmp_path):
+    """Tests C/D/E (founder's lettering) together: real threads, real filesystem,
+    write_stream() and delete() for the SAME content-addressed key racing repeatedly. The
+    invariant that must hold regardless of scheduling: whenever write_stream() returns
+    successfully, the blob it names genuinely exists on disk at that moment (C/D), no run ever
+    hangs (no deadlock), and no tempfiles are left behind afterward (E)."""
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"pass 31 tests C/D/E: write_stream vs delete" * 15
+
+    failures: list[str] = []
+
+    def _writer():
+        try:
+            blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+            if not storage.exists(blob.storage_key):
+                failures.append("write_stream() returned success but the blob is missing from disk")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"writer raised unexpectedly: {exc!r}")
+
+    def _deleter(storage_key: str):
+        try:
+            storage.delete(storage_key)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"deleter raised unexpectedly: {exc!r}")
+
+    # Publish once up front so the very first iteration's deleter has something real to race
+    # against too, not just an already-empty key.
+    seed = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    for _ in range(20):
+        t1 = threading.Thread(target=_writer)
+        t2 = threading.Thread(target=_deleter, args=(seed.storage_key,))
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        assert not t1.is_alive() and not t2.is_alive(), "a race participant never finished -- possible deadlock"
+
+    assert failures == [], f"race invariant violated: {failures}"
+    assert list((tmp_path / "tmp").iterdir()) == [], "no leftover tempfiles after the write/delete race"
+
+
+def test_publish_gives_up_after_too_many_concurrent_attempts(tmp_path, monkeypatch):
+    """A pathological, never-terminating back-and-forth (nothing in this codebase's real call
+    patterns can actually sustain this -- see _PUBLISH_MAX_ATTEMPTS's own comment) must fail
+    loudly with StorageError rather than looping forever. os.link() is made to always fail
+    with FileExistsError WITHOUT ever actually creating anything at the destination -- so the
+    follow-up `final_path.stat()` genuinely (not mocked) raises FileNotFoundError every single
+    iteration, exhausting the retry budget exactly like a real, relentless back-and-forth
+    would."""
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"pass 31: publish gives up eventually"
+
+    def _always_conflicting_link(src, dst, *a, **kw):
+        raise FileExistsError()
+
+    monkeypatch.setattr(os, "link", _always_conflicting_link)
+
+    with pytest.raises(StorageError):
         storage.write_stream(_chunks(payload), max_bytes=10_000_000)

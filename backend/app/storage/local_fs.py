@@ -7,7 +7,33 @@ against path traversal (there is no user input in the path at all) and the mecha
 makes reference-counted deduplication trivial (identical content from two different
 documents/jobs always resolves to the exact same key, see app/rag/library_import.py's
 `maybe_purge_blob`).
-"""
+
+Pass 31 (a sixth founder review round): `write_stream()`'s publish step used to be
+
+    if final_path.exists():
+        verify size, raise on mismatch
+    else:
+        os.rename(tmp_path, final_path)
+
+which has a real TOCTOU against a concurrent `delete()`'s `unlink()`: if the check observes
+"already exists" but a concurrent delete removes it a moment later, this method skips writing
+its OWN tmp file to `final_path` at all (believing an existing copy already covers it) and
+returns a `StoredBlob` whose `storage_key` no longer resolves to anything on disk. The
+DB-level advisory lock (`app/rag/blob_references.py::acquire_storage_key_lock`) cannot close
+this: content-addressing means the key isn't even known until the bytes are fully hashed, so
+callers structurally cannot take that lock before `write_stream()` runs, and this race is
+entirely BETWEEN two raw filesystem calls, never touching the database at all.
+
+Closed via `os.link()` (a hardlink) as the PRIMARY publish mechanism instead of a plain
+existence check: `link(2)` is atomic and fails with `FileExistsError` if and only if something
+is ALREADY at the destination at the exact instant of the syscall — there is no "check, then
+separately act" gap to race a concurrent `unlink()` into. If it succeeds, this call's own
+bytes are, atomically and unambiguously, the published blob; no verification needed. If it
+fails because something is already there, the existing file's size is checked (the same cheap
+corruption check as before) — but the delete race isn't fully gone just by adding a check;
+see `_publish()`'s own docstring for how the retry loop below still handles a concurrent
+delete landing in that narrower window, by retrying the `link()` itself rather than trusting a
+single stale observation."""
 
 import hashlib
 import os
@@ -16,9 +42,35 @@ import tempfile
 from pathlib import Path
 from typing import BinaryIO, Callable
 
-from app.storage.base import InvalidStorageKey, StorageBackend, StorageIntegrityError, StorageSizeLimitExceeded, StoredBlob
+from app.storage.base import (
+    InvalidStorageKey,
+    StorageBackend,
+    StorageError,
+    StorageIntegrityError,
+    StorageSizeLimitExceeded,
+    StoredBlob,
+)
 
 _KEY_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{64}$")
+
+# Bounded so a pathological, never-terminating back-and-forth (which nothing in this codebase's
+# real call patterns can actually sustain -- a blob only gets deleted once genuinely
+# unreferenced, and re-publishing it is a single retry, not a loop) fails loudly instead of
+# hanging forever.
+_PUBLISH_MAX_ATTEMPTS = 25
+
+
+def _fsync_dir(path: Path) -> None:
+    """fsyncs a directory's own metadata (its entries), not any file's contents -- see
+    `_publish()`'s docstring for why a fresh `os.link()` needs this for real crash durability.
+    Directories can only be opened read-only; `os.fsync` on that fd still flushes the
+    directory's own on-disk data. POSIX/Linux only, matching this backend's own "private VPS
+    volume" scope (see module docstring) -- no Windows fallback needed."""
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 class LocalFilesystemStorage(StorageBackend):
@@ -56,7 +108,6 @@ class LocalFilesystemStorage(StorageBackend):
         tmp_path = Path(tmp_name)
         hasher = hashlib.sha256()
         size = 0
-        wrote_final = False
         try:
             with os.fdopen(fd, "wb") as f:
                 while True:
@@ -77,25 +128,79 @@ class LocalFilesystemStorage(StorageBackend):
             final_key = f"{sha256_hex[:2]}/{sha256_hex}"
             final_path = self._resolve(final_key)
             final_path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(tmp_path, 0o600)
 
-            if final_path.exists():
-                # Content-addressed dedup: identical bytes are already durably stored (by
-                # this or any other document/job) — verify the existing blob's size agrees
-                # as a cheap corruption check, then discard this temp copy instead of
-                # writing a second identical file.
-                if final_path.stat().st_size != size:
-                    raise StorageIntegrityError(
-                        f"En blob med samma sha256 ({sha256_hex}) finns redan men har fel storlek — misstänkt korruption."
-                    )
-            else:
-                os.chmod(tmp_path, 0o600)
-                os.rename(tmp_path, final_path)  # atomic: tmp/ and the blob dir share self.root's filesystem
-                wrote_final = True
+            self._publish(tmp_path, final_path, size, sha256_hex)
 
             return StoredBlob(storage_key=final_key, sha256=sha256_hex, size_bytes=size)
         finally:
-            if not wrote_final:
-                tmp_path.unlink(missing_ok=True)
+            # Pass 31: unconditional now (was `if not wrote_final`) -- os.link() (the new
+            # publish primitive below) never consumes/removes its source the way os.rename()
+            # used to; the temp file always needs its own separate cleanup regardless of
+            # whether _publish() ended up using it as the final blob or discarding it in
+            # favor of an already-present, verified-identical one.
+            tmp_path.unlink(missing_ok=True)
+
+    def _publish(self, tmp_path: Path, final_path: Path, size: int, sha256_hex: str) -> None:
+        """Makes `final_path` durably, verifiably contain `tmp_path`'s bytes -- either by
+        atomically publishing THIS call's own tmp file there, or by confirming an
+        already-present file there genuinely has the right content. See this module's own
+        docstring for the TOCTOU this replaces.
+
+        Loop, not a single check-then-act: `os.link()` atomically closes the "check, then
+        separately act" gap for the COMMON case, but a concurrent `delete()` can still land in
+        the narrow window between this call observing "something's already there" (the
+        `FileExistsError` branch) and it finishing the size verification -- the delete's own
+        `unlink()` and this method's `stat()` are two independent syscalls with no shared
+        lock. When that happens, `final_path.stat()` itself raises `FileNotFoundError` (the
+        `except FileNotFoundError: continue` branch), and the NEXT loop iteration's `os.link()`
+        succeeds instead (nothing is there anymore) -- this call's own tmp file becomes the
+        published blob, self-healing rather than silently returning a false success. A
+        genuinely wrong size on an existing file (a real content mismatch, not a vanished
+        file) still raises `StorageIntegrityError` immediately, exactly like before -- that is
+        never a race, corruption doesn't "come and go" between retries.
+
+        Directory fsync after linking: `os.link()`/`os.rename()` update an in-memory directory
+        entry that is not guaranteed to survive an unclean shutdown until the directory
+        itself is fsynced -- the same durability caveat that already motivated fsyncing the
+        temp file's own data above. Only done on the branch that actually changed the
+        directory (a fresh link); reusing an already-present, previously-published file has
+        nothing new to flush."""
+        for _ in range(_PUBLISH_MAX_ATTEMPTS):
+            try:
+                os.link(tmp_path, final_path)
+                _fsync_dir(final_path.parent)
+                return  # our own bytes are now durably, atomically the published blob
+            except FileExistsError:
+                pass
+
+            try:
+                existing_size = final_path.stat().st_size
+            except FileNotFoundError:
+                continue  # vanished between the failed link() and this stat() -- retry link()
+
+            if existing_size != size:
+                # Content-addressed dedup: identical bytes are already durably stored (by
+                # this or any other document/job) — verify the existing blob's size agrees
+                # as a cheap corruption check.
+                raise StorageIntegrityError(
+                    f"En blob med samma sha256 ({sha256_hex}) finns redan men har fel storlek — misstänkt korruption."
+                )
+
+            # Re-verify existence immediately before trusting this and returning -- shrinks
+            # (does not claim to fully eliminate; that would need a lock spanning both this
+            # call and every possible concurrent delete, which this layer deliberately does
+            # not own) the gap between "observed a matching file" and "told the caller it's
+            # safe to reference". A concurrent delete landing exactly here is caught by the
+            # next loop iteration's link() instead of by this check succeeding falsely.
+            if final_path.exists():
+                return
+            # else: fall through and retry -- link() will succeed next time since nothing is
+            # at final_path anymore.
+
+        raise StorageError(
+            f"Kunde inte publicera blob {sha256_hex} -- för många samtidiga skriv-/raderingsförsök."
+        )
 
     def open_read(self, storage_key: str) -> BinaryIO:
         path = self._resolve(storage_key)

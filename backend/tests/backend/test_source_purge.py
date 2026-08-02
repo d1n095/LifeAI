@@ -30,11 +30,15 @@ from app.models.memory_source_unit import (
     SnapshotStatus,
 )
 from app.models.project_memory import ProjectCheckpoint, ProjectSource
+from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.user import User, UserRole
+from app.rag.account_erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.rag.blob_references import (
+    KNOWN_STORAGE_WRITE_PATHS,
     DeleteIfUnreferencedOutcome,
     acquire_storage_key_lock,
     delete_if_unreferenced,
+    enqueue_rejected_upload_cleanup_task,
     storage_key_still_referenced,
 )
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
@@ -1598,13 +1602,15 @@ def test_delete_if_unreferenced_race_against_a_concurrent_reference_commit_never
     _run_once(cleanup_goes_first=False)
 
 
-def test_delete_if_unreferenced_logs_and_returns_failed_on_a_genuine_storage_error_without_crashing(monkeypatch):
+def test_delete_if_unreferenced_logs_and_returns_failed_on_a_genuine_storage_error_without_crashing(monkeypatch, superuser_db):
     """Test F (founder's lettering): a StorageError deleting an ALREADY-CONFIRMED-unreferenced
     blob must never look like a false success, never leave an unhandled exception propagating
     out of the request, and must never leave the advisory lock held past this function's own
     return (it's transaction-scoped -- released at the caller's own next commit/rollback,
     which app/routers/library.py's empty-upload branch performs unconditionally regardless of
-    outcome, proven separately by the HTTP-level tests in test_library_routes.py)."""
+    outcome, proven separately by the HTTP-level tests in test_library_routes.py). Pass 31:
+    also proves the durable rejected_upload_cleanup task got created (see the dedicated Pass
+    31 tests below for the fuller durable-retry contract)."""
     storage_key = _store_real_blob(b"pass 30 test F storage error proof")
 
     class _AlwaysBrokenStorage:
@@ -1615,11 +1621,20 @@ def test_delete_if_unreferenced_logs_and_returns_failed_on_a_genuine_storage_err
     try:
         outcome = delete_if_unreferenced(session, _AlwaysBrokenStorage(), storage_key)  # must not raise
 
-        assert outcome == DeleteIfUnreferencedOutcome.failed
+        assert outcome == DeleteIfUnreferencedOutcome.failed_queued_for_retry
         session.commit()  # releases the advisory lock -- must not itself raise
     finally:
         session.rollback()
         session.close()
+
+    row = superuser_db.execute(
+        sa_text("SELECT reason, status, attempt_count FROM storage_deletion_tasks WHERE storage_key = :key"),
+        {"key": storage_key},
+    ).first()
+    assert row is not None
+    assert row[0] == "rejected_upload_cleanup"
+    assert row[1] == "pending"
+    assert row[2] == 0
 
 
 def test_every_direct_storage_delete_call_site_is_on_the_known_allowlist():
@@ -1696,6 +1711,230 @@ def test_every_direct_storage_delete_call_site_is_on_the_known_allowlist():
         f"New/unexpected: {found_sites - ALLOWED_CALL_SITES}\n"
         f"Missing (removed or renamed): {ALLOWED_CALL_SITES - found_sites}"
     )
+
+
+def test_every_storage_write_stream_reference_is_on_the_known_write_path_registry():
+    """Pass 31 point 4 (drift prevention, founder's explicit request): KNOWN_STORAGE_KEY_
+    COLUMNS only protects reference COLUMNS; the AST allowlist test above only protects DELETE
+    call sites. This closes the third gap -- every `.write_stream` reference in app/ (a direct
+    call like `storage.write_stream(...)`, OR a bound method passed as a higher-order
+    callable, e.g. `run_in_threadpool(storage.write_stream, ...)`) must be a documented entry
+    in KNOWN_STORAGE_WRITE_PATHS (app/rag/blob_references.py), which records each writer's
+    lock protocol (or the explicit, flagged absence of one). A new persistent writer added
+    anywhere in the backend fails this test immediately instead of silently joining the
+    storage layer with an undocumented, unreviewed locking story."""
+    import ast
+
+    app_root = Path(__file__).resolve().parent.parent.parent / "app"
+
+    class _WriteStreamAttrVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.found: set[tuple[str, str]] = set()
+            self._stack: list[str] = []
+
+        def _visit_function(self, node):
+            self._stack.append(node.name)
+            self.generic_visit(node)
+            self._stack.pop()
+
+        visit_FunctionDef = _visit_function
+        visit_AsyncFunctionDef = _visit_function
+
+        def visit_Attribute(self, node):
+            if node.attr == "write_stream":
+                enclosing = self._stack[-1] if self._stack else "<module>"
+                self.found.add((self._current_file, enclosing))
+            self.generic_visit(node)
+
+    found_sites: set[tuple[str, str]] = set()
+    for path in app_root.rglob("*.py"):
+        source = path.read_text()
+        if "write_stream" not in source:
+            continue
+        visitor = _WriteStreamAttrVisitor()
+        visitor._current_file = str(path.relative_to(app_root))
+        visitor.visit(ast.parse(source, filename=str(path)))
+        found_sites |= visitor.found
+
+    registry_sites = {(file, func) for file, func, _description in KNOWN_STORAGE_WRITE_PATHS}
+    assert found_sites == registry_sites, (
+        f"storage.write_stream() reference sites drifted from KNOWN_STORAGE_WRITE_PATHS.\n"
+        f"New/unexpected: {found_sites - registry_sites}\n"
+        f"Missing (removed or renamed): {registry_sites - found_sites}"
+    )
+
+
+# --- Pass 31 (a sixth founder review round): durable rejected_upload_cleanup retry ----------
+#
+# The gap: delete_if_unreferenced()'s StorageError branch used to only log and return -- a
+# confirmed-unreferenced blob that failed to physically delete became an invisible,
+# uninventoried orphan with no automated way to ever find or retry it. Now it enqueues a
+# durable storage_deletion_tasks row (migration 0024) that app/worker.py's EXISTING retry
+# loop -- the same one that already retries a failed account-erasure blob delete -- picks up
+# and retries with the same backoff/lease/global-reference-check machinery. These tests prove
+# that durable retry contract end-to-end, not just that a row got inserted.
+
+
+def test_enqueue_rejected_upload_cleanup_task_creates_exactly_one_pending_task(superuser_db):
+    storage_key = _store_real_blob(b"pass 31 point 1 test A: single enqueue")
+
+    operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+
+    row = superuser_db.execute(
+        sa_text("SELECT operation_id, reason, status, attempt_count FROM storage_deletion_tasks WHERE storage_key = :key"),
+        {"key": storage_key},
+    ).all()
+    assert len(row) == 1
+    assert str(row[0][0]) == str(operation_id)
+    assert row[0][1] == "rejected_upload_cleanup"
+    assert row[0][2] == "pending"
+    assert row[0][3] == 0
+
+
+def test_enqueue_rejected_upload_cleanup_task_does_not_duplicate_an_outstanding_task(superuser_db):
+    """Repeated failures for the SAME still-unreferenced key (realistic: every empty upload
+    from any founder shares the exact same content-addressed key) must not pile up an
+    unbounded number of redundant retry tasks for one physical file -- the founder's explicit
+    'inga dubbletter för samma cleanup-operation/key' requirement."""
+    storage_key = _store_real_blob(b"pass 31 point 1 test B: no duplicates")
+
+    first_operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+    second_operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+    third_operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+
+    assert first_operation_id == second_operation_id == third_operation_id
+    count = superuser_db.execute(
+        sa_text("SELECT count(*) FROM storage_deletion_tasks WHERE storage_key = :key AND reason = 'rejected_upload_cleanup'"),
+        {"key": storage_key},
+    ).scalar()
+    assert count == 1
+
+
+def test_enqueue_rejected_upload_cleanup_task_creates_a_new_task_once_the_old_one_is_terminal(superuser_db):
+    """Once a prior rejected_upload_cleanup task for this key reaches a TERMINAL outcome
+    (purged/retained_shared), a later, genuinely NEW failure for the same key must get its own
+    fresh retry task -- the dedup above only ever collapses STILL-OUTSTANDING attempts."""
+    storage_key = _store_real_blob(b"pass 31 point 1 test C: new task after terminal")
+
+    first_operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+    superuser_db.execute(
+        sa_text("UPDATE storage_deletion_tasks SET status = 'purged' WHERE storage_key = :key"),
+        {"key": storage_key},
+    )
+    superuser_db.commit()
+
+    second_operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+
+    assert second_operation_id != first_operation_id
+    count = superuser_db.execute(
+        sa_text("SELECT count(*) FROM storage_deletion_tasks WHERE storage_key = :key AND reason = 'rejected_upload_cleanup'"),
+        {"key": storage_key},
+    ).scalar()
+    assert count == 2
+
+
+def test_worker_retry_loop_purges_a_rejected_upload_cleanup_task_once_still_unreferenced(superuser_db):
+    """The SAME claim_storage_deletion_tasks()/attempt_storage_deletion_task() machinery
+    app/worker.py's retry loop already uses for account_erasure tasks -- proving reason=
+    'rejected_upload_cleanup' needs zero special-casing anywhere in that machinery."""
+    storage_key = _store_real_blob(b"pass 31 point 1 test D: worker purges")
+    enqueue_rejected_upload_cleanup_task(storage_key)
+
+    claim_db = superuser_db
+    claimed_ids = claim_storage_deletion_tasks(claim_db, limit=10)
+    assert len(claimed_ids) == 1
+    task = claim_db.get(StorageDeletionTask, claimed_ids[0])
+    attempt_storage_deletion_task(claim_db, task)
+
+    claim_db.expire_all()
+    refreshed = claim_db.get(StorageDeletionTask, claimed_ids[0])
+    assert refreshed.status == StorageDeletionStatus.purged
+    assert get_storage().exists(storage_key) is False
+
+
+def test_worker_retry_loop_retains_a_rejected_upload_cleanup_task_once_a_reference_appears(superuser_db):
+    """If, between the original failed delete and the worker's later retry, something else
+    (a Document, an ImportJob, a ProjectSource/ProjectCheckpoint) comes to reference this exact
+    content-addressed key, the retry must correctly flip to retained_shared, not purge a blob
+    something else now needs -- the SAME cross-domain guarantee migration 0023 already proves
+    for account_erasure tasks, exercised here for rejected_upload_cleanup ones."""
+    owner = _make_user(superuser_db, email="pass31-retain@example.com")
+    content = b"pass 31 point 1 test E: reference appears before retry"
+    storage_key = _store_real_blob(content)
+    enqueue_rejected_upload_cleanup_task(storage_key)
+
+    # A live Document now references the exact same key -- e.g. a later, non-empty import
+    # that happens to share this content.
+    _make_document(superuser_db, owner.id, storage_key=storage_key)
+
+    claimed_ids = claim_storage_deletion_tasks(superuser_db, limit=10)
+    assert len(claimed_ids) == 1
+    task = superuser_db.get(StorageDeletionTask, claimed_ids[0])
+    attempt_storage_deletion_task(superuser_db, task)
+
+    superuser_db.expire_all()
+    refreshed = superuser_db.get(StorageDeletionTask, claimed_ids[0])
+    assert refreshed.status == StorageDeletionStatus.retained_shared
+    assert get_storage().exists(storage_key) is True
+
+
+def test_repeated_storage_error_backs_off_and_is_not_immediately_reclaimed(superuser_db):
+    """A rejected_upload_cleanup task that keeps failing must back off exponentially -- the
+    SAME app.jobs.retry.compute_backoff_seconds policy account_erasure tasks already use (Pass
+    28) -- rather than the worker hammering the same broken key every poll cycle."""
+    storage_key = _store_real_blob(b"pass 31 point 1 test F: backoff")
+    enqueue_rejected_upload_cleanup_task(storage_key)
+
+    class _AlwaysBrokenStorage:
+        def delete(self, key):
+            raise StorageError("simulated permanent failure")
+
+    claimed_ids = claim_storage_deletion_tasks(superuser_db, limit=10)
+    task = superuser_db.get(StorageDeletionTask, claimed_ids[0])
+
+    import app.rag.account_erasure as account_erasure_module
+
+    original_get_storage = account_erasure_module.get_storage
+    account_erasure_module.get_storage = lambda: _AlwaysBrokenStorage()
+    try:
+        attempt_storage_deletion_task(superuser_db, task)
+    finally:
+        account_erasure_module.get_storage = original_get_storage
+
+    superuser_db.expire_all()
+    refreshed = superuser_db.get(StorageDeletionTask, claimed_ids[0])
+    assert refreshed.status == StorageDeletionStatus.failed
+    assert refreshed.attempt_count == 1
+    assert refreshed.next_attempt_at is not None
+    assert refreshed.next_attempt_at > datetime.now(timezone.utc)
+
+    # Not immediately reclaimable: the ordinary worker scan (include_failed=True, the default)
+    # must skip this task until its backoff has elapsed.
+    reclaimed_ids = claim_storage_deletion_tasks(superuser_db, limit=10)
+    assert claimed_ids[0] not in reclaimed_ids
+
+
+def test_mainai_app_session_cannot_insert_arbitrary_rejected_upload_cleanup_tasks():
+    """mainai_app has ZERO direct privileges on storage_deletion_tasks for ANY reason value
+    (see migration 0024's module docstring) -- the only creation path is
+    enqueue_rejected_upload_cleanup_task(), which runs on the privileged maintenance
+    connection, never on this ordinary request-scoped session."""
+    session = SessionLocal()
+    try:
+        with pytest.raises((IntegrityError, DBAPIError)) as exc_info:
+            session.add(
+                StorageDeletionTask(
+                    operation_id=uuid.uuid4(),
+                    storage_key=f"direct-insert-denied-{uuid.uuid4().hex}",
+                    reason=StorageDeletionReason.rejected_upload_cleanup,
+                    status=StorageDeletionStatus.pending,
+                )
+            )
+            session.commit()
+        assert "permission denied" in str(exc_info.value).lower()
+    finally:
+        session.rollback()
+        session.close()
 
 
 def test_public_lacks_execute_on_storage_key_still_referenced_global():
