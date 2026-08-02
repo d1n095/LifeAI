@@ -1,3 +1,13 @@
+import importlib.util
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text as sa_text
+
+from app.config import get_settings
+from app.db import SessionLocal
+from app.models.audit import AuditLog
 from app.models.conversation import Conversation, Message
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
@@ -6,7 +16,32 @@ from app.models.knowledge_version import KnowledgeVersion
 from app.models.project import Project
 from app.models.refresh_token import RefreshToken
 from app.models.source_relationship import RelationshipType, SourceRelationship
-from app.models.user import User
+from app.models.usage import UsageLog
+from app.models.user import User, UserRole
+from app.rag.account_export import export_account_data
+from app.request_context import current_user_id as current_user_id_var
+from app.security import hash_password
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+
+
+def _load_apply_runtime_privileges():
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _narrow_privileges_before_this_module():
+    """Pass 26: DELETE /api/account now calls erase_owner_memory(), which mainai_app is only
+    granted EXECUTE on via apply_runtime_privileges.py/ensure_app_role.py's shared privilege
+    policy — never automatically by the test DB setup's blanket GRANT. Same fixture, same
+    rationale, as tests/backend/test_source_purge.py's identical one: applied explicitly here
+    rather than assuming whatever an earlier test module left behind, since test execution
+    order (including across tests/backend vs. tests/account) is not guaranteed."""
+    module = _load_apply_runtime_privileges()
+    module.apply_and_verify(get_settings().database_url)
 
 
 def _login_and_get_csrf(client, email: str, password: str) -> str:
@@ -250,3 +285,100 @@ def test_deletion_removes_documents_and_knowledge_data_outright(client, superuse
     assert superuser_db.query(DocumentChunk).filter_by(document_id=document_id).count() == 0
     assert superuser_db.query(KnowledgeVersion).filter_by(source_id=document_id).count() == 0
     assert superuser_db.query(ImportJob).filter_by(owner_id=user_id).count() == 0
+
+
+# --- Pass 26: account export/erasure S1A integration -----------------------------------------
+
+
+def _set_rls_user(session, user_id) -> None:
+    current_user_id_var.set(str(user_id))
+    session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user_id)})
+
+
+def test_export_includes_soft_deleted_documents():
+    """A GDPR-shaped export must reflect what the system still holds about the person, not
+    just what's currently visible in the Library UI — a soft-deleted document (deleted_at set,
+    row not yet purged) must still appear."""
+    session = SessionLocal()
+    try:
+        user = User(email="export-softdeleted@example.com", password_hash=hash_password("Sup3rS3cret!"), role=UserRole.member, email_verified=True)
+        session.add(user)
+        session.commit()
+        user_id = user.id
+
+        _set_rls_user(session, user_id)
+        document = Document(title="Soft-deleted källa", source=DocumentSource.upload, uploaded_by=user_id, deleted_at=datetime.utcnow())
+        session.add(document)
+        session.commit()
+        document_id = document.id
+
+        _set_rls_user(session, user_id)
+        user = session.get(User, user_id)
+        export = export_account_data(session, user)
+        source = next(s for s in export["knowledge_sources"] if s["id"] == str(document_id))
+        assert source["deleted_at"] is not None
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_delete_account_writes_exactly_one_account_deleted_audit_row(client, superuser_db, make_verified_user):
+    from app.models.audit import AuditLog
+
+    user, password = make_verified_user(email="onlyoneaudit@example.com")
+    csrf = _login_and_get_csrf(client, "onlyoneaudit@example.com", password)
+
+    res = client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+
+    count = superuser_db.query(AuditLog).filter_by(action="account_deleted").count()
+    assert count == 1
+    row = superuser_db.query(AuditLog).filter_by(action="account_deleted").one()
+    assert row.user_id is None  # the account no longer exists once this commits
+    assert row.entity_id is not None  # the synthetic operation_id, not the erased user's own id
+    assert row.entity_id != str(user.id)
+
+
+def test_delete_account_does_not_clear_cookies_on_wrong_password(client, make_verified_user):
+    """Cookies must only be cleared AFTER a confirmed, successful DB erasure — never on a
+    failed attempt (wrong password). Proven by staying logged in afterward."""
+    user, password = make_verified_user(email="cookiesstay@example.com")
+    csrf = _login_and_get_csrf(client, "cookiesstay@example.com", password)
+
+    res = client.request("DELETE", "/api/account", json={"password": "wrong"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 403
+
+    me = client.get("/api/auth/me")
+    assert me.status_code == 200  # still logged in -- session cookie untouched
+
+
+def test_delete_account_usage_log_survives_anonymized(client, superuser_db, make_verified_user):
+    from datetime import datetime as _datetime
+
+    from app.models.usage import UsageLog
+
+    user, password = make_verified_user(email="usagesurvives@example.com")
+    user_id = user.id
+    csrf = _login_and_get_csrf(client, "usagesurvives@example.com", password)
+
+    usage = UsageLog(
+        user_id=user_id,
+        role="chat",
+        provider="test-provider",
+        model="test-model",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd="0.001",
+        created_at=_datetime.utcnow(),
+    )
+    superuser_db.add(usage)
+    superuser_db.commit()
+    usage_id = usage.id
+
+    res = client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+
+    superuser_db.expire_all()  # this session's identity map may still hold the pre-erasure row
+    row = superuser_db.query(UsageLog).filter_by(id=usage_id).first()
+    assert row is not None  # kept, not deleted
+    assert row.user_id is None  # attribution scrubbed

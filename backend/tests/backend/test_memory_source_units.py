@@ -1313,7 +1313,13 @@ def test_mixed_version_boot_window_0019_to_0020():
         ).scalar()
 
     try:
-        _run_alembic("downgrade", "-1")  # DB is now at 0019 -- 0020's function does not exist
+        # Pass 26: targets revision 0019 BY NAME, not "-1" -- migration 0021 (storage_deletion_
+        # tasks) shipped after this test was written, so a relative "-1" from whatever the
+        # CURRENT head happens to be no longer reliably lands on 0019 (it would land on 0020
+        # instead, where storage_key_still_referenced_global() already exists, silently
+        # invalidating this test's entire "0020's function does not exist yet" premise). An
+        # exact revision target stays correct no matter how many later migrations are added.
+        _run_alembic("downgrade", "0019")  # DB is now at 0019 -- 0020's function does not exist
 
         # Pass 25: a founder review caught this using to_regclass, which resolves RELATIONS
         # (tables/views/etc.) -- never functions, so it returns NULL for a function name
