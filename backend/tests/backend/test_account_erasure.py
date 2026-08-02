@@ -31,6 +31,7 @@ from app.models.memory_source_unit import (
     MemorySourceUnit,
     SnapshotStatus,
 )
+from app.models.project_memory import ProjectCheckpoint, ProjectSource
 from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
 from app.models.user import User, UserRole
 from app.rag.account_erasure import (
@@ -447,6 +448,96 @@ def test_erase_account_data_retains_a_blob_still_referenced_by_another_owner():
         # itself, still bound to owner A's context from the erasure call above.
         _set_rls_user(session, owner_b.id)
         assert session.query(Document).filter_by(uploaded_by=owner_b.id, storage_key=storage_key).count() == 1
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Pass 29: cross-domain blob retention (Project Memory shares the SAME content-addressed
+# storage backend as Document/ImportJob) --------------------------------------------------
+#
+# A founder review found migration 0020's storage_key_still_referenced_global() blind to
+# app/project_memory.py's founder-wide ProjectSource.storage_key/ProjectCheckpoint.
+# brief_storage_key -- both write through the exact same get_storage()/write_stream() backend,
+# so a byte-identical upload from an ordinary account could share a storage_key with Project
+# Memory content, and that account's own erasure would previously have physically deleted the
+# shared blob out from under Project Memory (migration 0023 fixes the SQL function itself; see
+# test_source_purge.py's Pass 29 section for the direct SQL-function tests C/D). Tests A/B
+# below are the founder's own lettering: the end-to-end proof through a REAL erase_account_data()
+# call, not just the SQL function in isolation.
+
+
+def test_erase_account_data_retains_a_blob_still_referenced_by_a_project_source():
+    """Test A (founder's lettering): a ProjectSource sharing the same content-addressed key as
+    an erased owner's Document must survive the erasure untouched -- the blob is retained_
+    shared, never physically deleted, and the ProjectSource row itself is never touched (this
+    domain isn't even visible to account erasure's own queries, only to the SQL reference
+    check the physical-delete decision defers to)."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, email=f"erase-pm-source-{uuid.uuid4().hex[:8]}@example.com")
+        storage_key = _store_real_blob(b"pass 29: shared between a user Document and ProjectSource")
+        _make_document(session, owner.id, storage_key=storage_key)
+
+        admin = _AdminSession()
+        try:
+            project_source = ProjectSource(source_type="doc", source_ref="docs/EXAMPLE.md", storage_key=storage_key, ingested_by="test")
+            admin.add(project_source)
+            admin.commit()
+            project_source_id = project_source.id
+        finally:
+            admin.close()
+
+        _set_rls_user(session, owner.id)
+        result = erase_account_data(session, owner)
+
+        assert result.storage_tasks_retained_shared_immediately == 1
+        assert get_storage().exists(storage_key)  # untouched -- Project Memory still needs it
+        admin = _AdminSession()
+        try:
+            task = admin.query(StorageDeletionTask).filter_by(operation_id=result.operation_id).one()
+            assert task.status == StorageDeletionStatus.retained_shared
+            still_there = admin.query(ProjectSource).filter_by(id=project_source_id).one()
+            assert still_there.storage_key == storage_key
+        finally:
+            admin.close()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_erase_account_data_retains_a_blob_still_referenced_by_a_project_checkpoint():
+    """Test B (founder's lettering): same proof for ProjectCheckpoint.brief_storage_key."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, email=f"erase-pm-checkpoint-{uuid.uuid4().hex[:8]}@example.com")
+        storage_key = _store_real_blob(b"pass 29: shared between a user Document and a checkpoint brief")
+        _make_document(session, owner.id, storage_key=storage_key)
+
+        admin = _AdminSession()
+        try:
+            checkpoint = ProjectCheckpoint(
+                summary="test", branch_name="main", open_pr_refs="", brief_storage_key=storage_key, brief_sha256="a" * 64, created_by="test"
+            )
+            admin.add(checkpoint)
+            admin.commit()
+            checkpoint_id = checkpoint.id
+        finally:
+            admin.close()
+
+        _set_rls_user(session, owner.id)
+        result = erase_account_data(session, owner)
+
+        assert result.storage_tasks_retained_shared_immediately == 1
+        assert get_storage().exists(storage_key)
+        admin = _AdminSession()
+        try:
+            task = admin.query(StorageDeletionTask).filter_by(operation_id=result.operation_id).one()
+            assert task.status == StorageDeletionStatus.retained_shared
+            still_there = admin.query(ProjectCheckpoint).filter_by(id=checkpoint_id).one()
+            assert still_there.brief_storage_key == storage_key
+        finally:
+            admin.close()
     finally:
         session.rollback()
         session.close()

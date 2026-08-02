@@ -29,6 +29,7 @@ from app.models.memory_source_unit import (
     MemorySourceUnit,
     SnapshotStatus,
 )
+from app.models.project_memory import ProjectCheckpoint, ProjectSource
 from app.models.user import User, UserRole
 from app.rag.blob_references import acquire_storage_key_lock, storage_key_still_referenced
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
@@ -1329,6 +1330,141 @@ def test_mainai_app_gets_only_a_boolean_and_cannot_read_other_owners_rows_direct
         # But an ordinary ORM query in owner A's own RLS session cannot see owner B's row.
         visible_to_a = session.query(Document).filter(Document.storage_key == storage_key).all()
         assert visible_to_a == []
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Pass 29: cross-domain blob-reference visibility (Project Memory) --------------------------
+#
+# Content-addressed storage is global not just across OWNERS (Pass 23 above) but across
+# completely unrelated DATA DOMAINS: app/project_memory.py's founder-wide ProjectSource/
+# ProjectCheckpoint rows write through the exact same get_storage()/write_stream() backend as
+# Document/ImportJob. A founder review found storage_key_still_referenced_global() (migration
+# 0020) never checked either table -- migration 0023 adds both. These tests prove the SQL
+# function's behavior directly (not through purge_source(), which only ever touches Document/
+# ImportJob rows) -- see test_account_erasure.py's Pass 29 section for the end-to-end proof
+# through a REAL account erasure (test C/D here, test A/B there, per the founder's own
+# lettering).
+
+
+def test_storage_key_still_referenced_global_sees_a_project_source_after_the_last_document_is_gone():
+    """Test C (founder's lettering): once every Document/ImportJob reference to a key is gone,
+    a ProjectSource still pointing at the SAME (shared, content-addressed) key must keep the
+    function returning true -- the exact case migration 0020 was blind to."""
+    session = SessionLocal()
+    try:
+        storage_key = _store_real_blob(b"pass 29: project-memory-only reference after documents are gone")
+        session.add(
+            ProjectSource(source_type="doc", source_ref="docs/EXAMPLE.md", storage_key=storage_key, ingested_by="test")
+        )
+        session.commit()
+
+        still_referenced = storage_key_still_referenced(session, storage_key)
+
+        assert still_referenced is True
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_storage_key_still_referenced_global_sees_a_project_checkpoint():
+    """Same proof for ProjectCheckpoint.brief_storage_key (the resumption-brief blob) --
+    distinct column, distinct table, same shared storage backend."""
+    session = SessionLocal()
+    try:
+        storage_key = _store_real_blob(b"pass 29: project checkpoint brief reference")
+        session.add(
+            ProjectCheckpoint(
+                summary="test checkpoint",
+                branch_name="main",
+                open_pr_refs="",
+                brief_storage_key=storage_key,
+                brief_sha256="a" * 64,
+                created_by="test",
+            )
+        )
+        session.commit()
+
+        still_referenced = storage_key_still_referenced(session, storage_key)
+
+        assert still_referenced is True
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_storage_key_still_referenced_global_returns_false_once_every_domain_has_let_go():
+    """Test D (founder's lettering): a key referenced by NEITHER Document/ImportJob NOR
+    ProjectSource/ProjectCheckpoint must correctly return false -- the function isn't just
+    permanently true once any domain ever touched it; each domain's reference is checked
+    live, and the key becomes purgeable the moment none of them still hold it."""
+    session = SessionLocal()
+    try:
+        storage_key = _store_real_blob(b"pass 29: no domain references this at all")
+
+        still_referenced = storage_key_still_referenced(session, storage_key)
+
+        assert still_referenced is False
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_known_storage_key_columns_registry_matches_the_sql_functions_real_behavior():
+    """Pass 29 drift-prevention: iterates `app.rag.blob_references.KNOWN_STORAGE_KEY_COLUMNS`
+    -- the canonical, hand-maintained list of every table.column that can hold a live
+    reference into the shared content-addressed storage backend -- and proves
+    `storage_key_still_referenced_global()` actually protects EVERY one of them, not just the
+    ones a human remembers to test by hand. A future storage_key-shaped column added to the
+    registry without a matching SQL-function update fails this test immediately, rather than
+    silently reopening the exact cross-domain orphan-blob gap Pass 29 closed."""
+    from app.rag.blob_references import KNOWN_STORAGE_KEY_COLUMNS
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, email=f"drift-registry-{uuid.uuid4().hex[:8]}@example.com")
+
+        def _make_live_row(table: str, column: str, storage_key: str) -> None:
+            if table == "documents" and column == "storage_key":
+                _make_document(session, owner.id, storage_key=storage_key)
+            elif table == "knowledge_import_jobs" and column == "source_storage_key":
+                _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.pending)
+            elif table == "project_sources" and column == "storage_key":
+                session.add(
+                    ProjectSource(source_type="doc", source_ref="drift-test", storage_key=storage_key, ingested_by="test")
+                )
+                session.commit()
+            elif table == "project_checkpoints" and column == "brief_storage_key":
+                session.add(
+                    ProjectCheckpoint(
+                        summary="drift test",
+                        branch_name="main",
+                        open_pr_refs="",
+                        brief_storage_key=storage_key,
+                        brief_sha256="a" * 64,
+                        created_by="test",
+                    )
+                )
+                session.commit()
+            else:
+                pytest.fail(
+                    f"KNOWN_STORAGE_KEY_COLUMNS has an entry ({table}.{column}) this test doesn't know how to "
+                    "construct a live row for -- add a branch above (see migration 0023's own module docstring's "
+                    "'adding a new column' checklist)."
+                )
+
+        for table, column in KNOWN_STORAGE_KEY_COLUMNS:
+            storage_key = _store_real_blob(f"drift registry proof: {table}.{column}".encode())
+            _make_live_row(table, column, storage_key)
+
+            still_referenced = storage_key_still_referenced(session, storage_key)
+
+            assert still_referenced is True, (
+                f"{table}.{column} is registered in KNOWN_STORAGE_KEY_COLUMNS but "
+                "storage_key_still_referenced_global() did not report it as referenced -- "
+                "the SQL function is missing coverage for this column"
+            )
     finally:
         session.rollback()
         session.close()

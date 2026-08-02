@@ -85,6 +85,36 @@ import uuid
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
+# Pass 29: the canonical, hand-maintained registry of every table.column known to persist a
+# value returned by `StorageBackend.write_stream()` (app/storage/) -- i.e. every place a live
+# row can make a content-addressed physical blob unsafe to delete. `storage_key_still_
+# referenced_global()` (migration 0020, extended by migration 0023 for the two Project Memory
+# entries below) MUST check every single one of these; this constant exists so that claim is
+# machine-checkable rather than a comment someone has to remember to re-read.
+#
+# A founder review found migration 0020 checked only the first two entries -- `project_sources`/
+# `project_checkpoints` share the EXACT SAME storage backend (app/project_memory.py) but were
+# invisible to the global reference check, so an account erasure that happened to share a
+# content-addressed key with founder-wide Project Memory could physically delete a blob Project
+# Memory still needed. See migration 0023's own module docstring for the full incident writeup.
+#
+# Adding a NEW persistent storage_key-shaped column anywhere in this codebase requires, in the
+# SAME change:
+#   1. Add the (table, column) pair here.
+#   2. A new migration that CREATE OR REPLACEs storage_key_still_referenced_global() to also
+#      check it (never edit an already-shipped migration in place).
+#   3. A retention test proving a live row in the new table blocks physical deletion (see
+#      tests/backend/test_source_purge.py's Pass 29 section for the pattern), AND a matching
+#      row in tests/backend/test_source_purge.py's drift test that exercises THIS registry
+#      against the real SQL function so a registry entry with no matching SQL coverage (or vice
+#      versa) fails a test immediately instead of silently reopening this exact gap again.
+KNOWN_STORAGE_KEY_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("documents", "storage_key"),
+    ("knowledge_import_jobs", "source_storage_key"),
+    ("project_sources", "storage_key"),
+    ("project_checkpoints", "brief_storage_key"),
+)
+
 
 def acquire_storage_key_lock(db: Session, storage_key: str) -> None:
     """Blocks until this session holds the advisory lock for `storage_key`, released
