@@ -47,15 +47,38 @@ class StorageDeletionTask(Base):
         UniqueConstraint("operation_id", "storage_key", name="uq_storage_deletion_tasks_operation_key"),
         CheckConstraint("attempt_count >= 0", name="ck_storage_deletion_tasks_attempt_count"),
     )
+    # Pass 27: SQLAlchemy 2.0 defaults to fetching server-generated columns (created_at/
+    # updated_at below) back via an `INSERT ... RETURNING` clause immediately after insert —
+    # but PostgreSQL requires SELECT privilege on any column named in a RETURNING clause, on
+    # top of INSERT itself. mainai_app now has INSERT ONLY on this table (see
+    # backend/scripts/s1a_privilege_policy.py) — the ordinary account-erasure INSERT path
+    # would otherwise fail with "permission denied" the moment it tried to insert a row at
+    # all, purely because of this eager-fetch, not because of anything the caller actually
+    # asked to read. Disabled here since nothing in this codebase reads a freshly-inserted
+    # task's created_at/updated_at before the next real DB round-trip anyway.
+    __mapper_args__ = {"eager_defaults": False}
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     operation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     storage_key: Mapped[str] = mapped_column(String(140))
+    # Pass 27: native_enum=False + create_constraint=False -- migration 0021 defines these as
+    # plain `varchar(N) + CHECK`, not a native Postgres ENUM TYPE (`CREATE TYPE ... AS ENUM`).
+    # The default `Enum(...)` would silently describe a DIFFERENT database type than what the
+    # migration actually created -- harmless today only because SQLAlchemy's bind processor
+    # sends plain strings for either representation, but a real lie about the schema (wrong
+    # future autogenerate diffs, unverified assumption that could break on a dialect/version
+    # change). `create_constraint=False` because migration 0021's own CHECK constraints
+    # (ck_storage_deletion_tasks_reason/_status) are the actual, already-applied source of
+    # truth -- this type must never try to also create its own. Lengths match the migration's
+    # varchar(32)/varchar(16) exactly.
     reason: Mapped[StorageDeletionReason] = mapped_column(
-        Enum(StorageDeletionReason), default=StorageDeletionReason.account_erasure
+        Enum(StorageDeletionReason, native_enum=False, create_constraint=False, length=32),
+        default=StorageDeletionReason.account_erasure,
     )
     status: Mapped[StorageDeletionStatus] = mapped_column(
-        Enum(StorageDeletionStatus), default=StorageDeletionStatus.pending, index=True
+        Enum(StorageDeletionStatus, native_enum=False, create_constraint=False, length=16),
+        default=StorageDeletionStatus.pending,
+        index=True,
     )
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

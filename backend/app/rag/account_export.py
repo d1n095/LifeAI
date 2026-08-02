@@ -305,10 +305,23 @@ def export_account_data(db: Session, user: User, *, client_ip: str | None = None
         ],
     }
 
-    # Written only now that the export object above has been fully, successfully assembled —
-    # an exception raised mid-collection never reaches this line, so a failed export can never
-    # produce a false "account_data_exported" audit entry for data that was never actually
-    # returned to the caller.
-    record_audit(db, user_id=owner_id, action="account_data_exported", ip_address=client_ip)
+    # Pass 27 (a founder review caught this): the audit write must be a CONTROLLED transaction
+    # this function itself commits, not `record_audit`'s own default separate `db.commit()` —
+    # otherwise a caller can't distinguish "the export object was fully built AND the audit
+    # entry durably committed" from "the export object was built but the audit commit failed",
+    # and this function would have no way to roll the audit insert back in that second case.
+    # `commit=False` adds the row to this session without committing; the explicit db.commit()
+    # below is the one and only commit point. Written only now that the export object above
+    # has been fully, successfully assembled — an exception raised mid-collection never reaches
+    # this line, so a failed export can never produce a false "account_data_exported" audit
+    # entry for data that was never actually returned to the caller. If the audit insert OR the
+    # commit itself fails, the except below rolls the audit row back and re-raises — the export
+    # is never returned as if it had succeeded.
+    try:
+        record_audit(db, user_id=owner_id, action="account_data_exported", ip_address=client_ip, commit=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     return export

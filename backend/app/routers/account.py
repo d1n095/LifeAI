@@ -11,7 +11,7 @@ from app.db import get_db
 from app.deps import get_current_user
 from app.limiter import limiter
 from app.models.user import User
-from app.rag.account_erasure import erase_account_data
+from app.rag.account_erasure import AccountErasureBlockedError, erase_account_data
 from app.rag.account_export import export_account_data
 from app.schemas import DeleteAccountIn
 from app.security import verify_password
@@ -56,6 +56,10 @@ def delete_account(
     user_id = user.id
     try:
         erase_account_data(db, user, client_ip=client_ip)
+    except AccountErasureBlockedError as exc:
+        # Not a failure -- nothing was changed (see erase_account_data's own docstring, the
+        # blob-write-path audit). A distinct, actionable response rather than a generic 500.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     except Exception:
         logger.exception("Kontoradering misslyckades för user_id=%s.", user_id)
         # Best-effort only, in a fresh transaction now that the failed one has already been

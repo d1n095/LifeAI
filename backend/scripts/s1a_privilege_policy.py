@@ -37,18 +37,29 @@ APP_ROLE = "mainai_app"
 # append-only audit trail written exclusively by the SECURITY DEFINER functions below, never
 # directly by the app role.
 #
-# storage_deletion_tasks (migration 0021, account erasure): mainai_app needs SELECT/INSERT
-# (account erasure creates tasks and makes one immediate best-effort attempt, scoped to the
-# operation_id it just created) AND UPDATE (that same best-effort attempt writes the task's
-# own status back) -- but never DELETE (a task record is kept, not removed, even once
-# terminal). No SECURITY DEFINER function guards this table's writes the way memory_source_
-# units' lifecycle does: it isn't a security-critical state machine, just a durable retry
-# queue with no owner-scoping at all (see that migration's module docstring for why).
+# storage_deletion_tasks (migration 0021, account erasure) — Pass 27, tightened after a
+# founder review: mainai_app gets INSERT ONLY, never SELECT/UPDATE/DELETE. This table
+# deliberately has no owner_id and no RLS at all (see that migration's module docstring for
+# why it must outlive the very account whose erasure created it) — a table-wide SELECT/UPDATE
+# grant to the ordinary, request-scoped application role would let ANY authenticated request
+# session (not just account erasure's own code path — any future bug, injected query, or
+# compromised request handler reusing the same DB role) read every operation's storage keys
+# and operation ids across every account's erasure, or rewrite any task's status/storage_key,
+# including marking a task `purged`/`retained_shared` without ever touching the real file, or
+# resetting `attempt_count`/`last_error` to sabotage the retry queue. That no router happens to
+# do this today is not a security boundary — the privilege model must not depend on it.
+# mainai_app's account-erasure transaction only ever needs to INSERT new rows here (see
+# app/rag/account_erasure.py); reading/claiming/updating pending or failed tasks — both the
+# immediate best-effort attempt right after an erasure commits, AND app/worker.py's
+# cross-operation retry scan — now runs exclusively on a separate, privileged maintenance
+# session bound to the admin/migration connection (mirroring app/worker.py's existing
+# `_ClaimSession` pattern for `knowledge_import_jobs`, which already has the exact same
+# "must see/claim rows across every owner" shape), never on the ordinary per-request session.
 _PROTECTED_TABLES = [
     ("memory_source_units", ["SELECT", "INSERT"]),
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
-    ("storage_deletion_tasks", ["SELECT", "INSERT", "UPDATE"]),
+    ("storage_deletion_tasks", ["INSERT"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
