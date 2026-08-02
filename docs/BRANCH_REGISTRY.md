@@ -8,7 +8,9 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-02, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`get_job_logs`, inte memorerat).
-**PR #31** står nu på head `5f4f2fd` (Pass 27), grön på ALLA obligatoriska kontroller UTOM
+**PR #31** står nu på head (Pass 28, pushas i denna omgång) — se Pass 28-avsnittet nedan för
+den tredje granskningsrundans tre blockerare (samtliga åtgärdade). Föregående head `5f4f2fd`
+(Pass 27) var grön på ALLA obligatoriska kontroller UTOM
 `Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass 26
 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
 grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön, väntar på grundarens
@@ -85,16 +87,125 @@ grön på PR #31:s head `5f4f2fd`, alla obligatoriska kontroller UTOM det fortsa
 och §4.8:s "Status"-avsnitt för den fullständiga listan): produktionsdataprofilen (krävs före
 MERGE, inte före draft), den beständiga run-/felrapporteringen Pass 19 dokumenterar men
 medvetet inte bygger än (krävs före en RIKTIG produktionsbackfill-körning, inte bara denna
-PR:s merge), det dokumenterade kvarstående racet mellan kontoradering och en redan köad
-(`pending`, inte `running`) importkörning (se Pass 27 nedan — medvetet inte stängt i denna
-omgång), samt att **PR #32** mergas till huvudgrenen (varefter PR #31 uppdateras DÄREFTER,
+PR:s merge), samt att **PR #32** mergas till huvudgrenen (varefter PR #31 uppdateras DÄREFTER,
 inte i förväg — se Merge-regeln nedan) innan `npm audit`-kontrollen kan bli grön på PR #31
-själv. Kontoexport/erasure-integrationen är KLAR (Pass 26) och de blockerande fynden från den
-andra granskningsrundan är åtgärdade (Pass 27). Nästa kontrollpunkt enligt grundarens
-instruktion: vänta på FÄRSK granskning av Pass 27:s ändringar innan arbetet fortsätter längre
-— grundaren var explicit att detta INTE är ett godkännande att gå vidare till
+själv. Det tidigare dokumenterade racet mellan kontoradering och en redan köad (`pending`)
+importkörning — som grundaren i Pass 28 uttryckligen underkände som "acceptabel follow-up" —
+är nu STÄNGT (Pass 28, `claim_next_job()`s tvåfas-ägarlåsta claim). Kontoexport/erasure-
+integrationen är KLAR (Pass 26), den andra granskningsrundans fynd är åtgärdade (Pass 27), och
+den TREDJE granskningsrundans tre blockerare är åtgärdade (Pass 28, nedan) — inklusive en
+verklig Postgres-deadlock Pass 28:s egen fulla testsviteskörning avslöjade (inte teoretisk,
+se Pass 28-avsnittet). Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK
+granskning av Pass 28:s ändringar innan arbetet fortsätter längre — grundaren var explicit att
+detta INTE är ett godkännande att gå vidare till
 produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att PR #32
 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 28 (2026-08-02): PR #31 — tredje granskningsrundan av kontoslicen: oändlig retry-loop, INSERT fortfarande farligt, det avvisade pending-job-racet stängt
+
+Grundarens bedömning: "Pass 27 förbättrar outboxen tydligt, men Code har själv lämnat den
+viktigaste pending-job-racen öppen, och den nya immediate-retryloopen återintroducerar en
+redan känd infinite-loop-felklass." Tre blockerare, alla åtgärdade, plus en verifieringspunkt
+och en verklig deadlock som denna omgångs egen fulla re-verifiering (inte grundarens egen
+granskning) avslöjade:
+
+1. **Oändlig retry-loop vid permanent fel (stängd).** `attempt_pending_storage_deletions_for_
+   operation()`s `while True`-loop, kombinerad med Pass 27:s `claim_storage_deletion_tasks()`
+   som behandlade `pending`/`failed` som lika omedelbart claimbara, återintroducerade en redan
+   känd felklass (samma som en tidigare, redan fixad backfill-bugg): en task som misslyckas med
+   ett PERMANENT `StorageError` blev `failed`, och nästa loop-iteration claimade och
+   återförsökte SAMMA task igen — för evigt. Fixat via en ny `include_failed`-parameter på
+   `claim_storage_deletion_tasks()`: det omedelbara försöket claimar nu med
+   `include_failed=False` (varje task denna operation skapade försöks högst en gång här);
+   allt som blir `failed` lämnas helt åt workerns egen retry-loop
+   (`include_failed=True`, default), som nu respekterar en begränsad, exponentiell, jittrad
+   backoff (`next_attempt_at`, migration `0022`, satt av `attempt_storage_deletion_task()` via
+   `app.jobs.retry.compute_backoff_seconds` — samma rena policyfunktion STEG 11:s
+   importjobb-retries redan använder).
+2. **INSERT-only fortfarande farligt (stängd).** Pass 27:s `mainai_app`-policy (INSERT-only på
+   `storage_deletion_tasks`) var fortfarande fel: INSERT i just den tabellen är INDIREKT ÅTKOMST
+   TILL EN PRIVILEGIERAD FYSISK RADERINGSOPERATION, eftersom ingenting i databasen verifierade
+   att en infogad `storage_key` faktiskt tillhörde den infogande ägaren, eller ens refererade
+   något verkligt alls — `app/project_memory.py`s founder-breda blobbar (utanför workerns
+   referenskontroll, `storage_key_still_referenced_global()`) är exakt den typ av data en
+   felaktigt köad godtycklig nyckel kunde förstöra spårlöst. Fixat: `mainai_app` får NOLL
+   direkta privilegier på `storage_deletion_tasks` (migration `0022` +
+   `s1a_privilege_policy.py`), och en ny `SECURITY DEFINER`-funktion,
+   `enqueue_account_erasure_storage_task(operation_id, storage_key)`, är den ENDA vägen en
+   vanlig session kan skapa en task-rad: den härleder anroparen från `app.current_user_id`,
+   verifierar explicit att nyckeln tillhör just den ägaren via `Document.storage_key`/
+   `ImportJob.source_storage_key` (litar aldrig på Python-kodens egen inventeringsfråga som
+   auktorisering), sätter `reason`/`status` själv, och är idempotent på
+   `(operation_id, storage_key)`. `erase_account_data()`s lagernyckel-inventering anropar nu
+   denna funktion via `db.execute(sa_text("SELECT enqueue_account_erasure_storage_task(...)"))`
+   istället för en ORM-`INSERT`.
+3. **Det avvisade pending-job-racet (stängd, INTE dokumenterad som follow-up).** Grundaren
+   avvisade uttryckligen mitt eget Pass 27-omdöme att lämna racet mellan kontoradering och en
+   redan köad (`pending`) importkörning som dokumenterad follow-up: "Det räcker inte att
+   dokumentera racet som follow-up. Det är precis den race account-slicen skulle stänga."
+   Stängt genom att göra om `app/jobs/lease.py`s `claim_next_job()` till en tvåfas,
+   ägarlåst claim (se den modulens egen docstring för hela mekanismen): en låsfri
+   kandidat-SELECT, DÄREFTER `acquire_owner_erasure_lock()` för den kandidatens ägare INNAN
+   någon radlåsning tas alls (aldrig efter — samma ordning `erase_account_data()` redan
+   följer, så de två kan aldrig deadlocka mot varandra), DÄREFTER en atomisk omvaliderad claim
+   av exakt den kandidaten, med omförsök på en färsk kandidat vid förlorad kapplöpning.
+   Vinnaren av ägarlåset (en workers claim, eller själva erasure-transaktionen) committar eller
+   rullar tillbaka helt innan den andra sidans radnivå-arbete ens kan börja — en väntande job
+   sveps antingen säkert in i erasure-transaktionens egen lagernyckel-inventering innan en
+   worker hinner börja skriva nya blobbar mot den, eller så claimar workern jobbet säkert innan
+   erasure hinner se det som blockerande (via den befintliga `AccountErasureBlockedError`-
+   spärren, oförändrad). Verifierat med RIKTIGA två-trådars-tvåsessions-tester för BÅDA
+   race-ordningarna (`test_claim_next_job_winning_the_owner_lock_race_blocks_a_concurrent_
+   erasure`, `test_erasure_winning_the_owner_lock_race_leaves_nothing_for_claim_next_job_to_
+   claim`), båda med bundna `join(timeout=5)` som dubblerar som deadlock-timeout-bevis, och
+   ett explicit orphan-bevis (den väntande jobbens `source_storage_key` MÅSTE finnas i
+   `storage_deletion_tasks` efter att erasure vunnit racet).
+4. **Claim-tillståndsövergångar (verifierade, inga kodändringar behövdes utöver punkt 1).**
+   `completed_at`/`next_attempt_at` nollställs explicit i början av varje nytt
+   `attempt_storage_deletion_task()`-anrop (defensivt — i praktiken var de redan alltid `NULL`
+   för en icke-terminal task, men detta gör invarianten explicit snarare än implicit).
+   `last_error` sätts konsekvent (`None` vid framgång, felmeddelandet vid `failed`).
+   `attempt_count` inkrementeras ENDAST av ett verkligt I/O-försök, aldrig av en claim (bevisat
+   av design: `claim_storage_deletion_tasks()` rör aldrig den kolumnen). Terminal-tasks
+   (`purged`/`retained_shared`) är aldrig claimbara, bevisat direkt med en ny test
+   (`test_claim_storage_deletion_tasks_never_reclaims_a_terminal_purged_or_retained_shared_
+   task`) som sätter en artificiellt gammal `updated_at` på en terminal task och verifierar den
+   ändå inte claimas.
+
+**En verklig Postgres-deadlock upptäckt under denna omgångs egen fulla testsviteskörning** (inte
+en teoretisk oro, inte grundarens fynd — upptäckt av mig själv genom att faktiskt köra hela
+sviten, inte bara den nya filen isolerat): `erase_account_data()` tog `FOR UPDATE`-lås på
+`users`-raden FÖRE den förvärvade `acquire_owner_erasure_lock()` — omvänd ordning mot varje
+annan plats i kodbasen (uppladdning, `claim_next_job()`) som redan tar ägarlåset FÖRST. En
+konkurrerande uppladdning som redan höll ägarlåset och väntade på ett `FOR KEY SHARE`-lås på
+samma `users`-rad (Postgres FK-validering för `ImportJob.owner_id`) kunde deadlocka mot en
+erasure-transaktion som höll radlåset och väntade på ägarlåset — klassisk cirkulär
+låsordning. Postgres egen deadlock-detektor fångade det (`DeadlockDetected`), men bara i den
+fulla sviten, inte i den isolerade testfilen — ren timing. Fixat genom att flytta
+`acquire_owner_erasure_lock()`-anropet FÖRE `with_for_update()`-frågan, vilket samtidigt
+bevarar den befintliga "serialisera en andra samtidig erasure"-garantin (ägarlåset serialiserar
+redan det fallet) och tar bort låsordningscykeln helt. Verifierat: den tidigare deadlockande
+testen (`test_owner_erasure_lock_serializes_erasure_against_a_concurrent_upload_for_the_same_
+owner`) och de två nya race-testerna körda 8x i rad utan en enda deadlock, plus hela sviten
+grön två gånger i följd.
+
+**Tester:** 17 nya (16 i `test_account_erasure.py` — inklusive de två riktiga
+tvåtrådars-race-testerna för `claim_next_job()`, den permanent-fel-utan-loop-regressionen, sex
+`enqueue_account_erasure_storage_task()`-tester för ägarskap/cross-owner/godtycklig
+nyckel/project_memory-nyckel/idempotens/oautentiserad anropare, samt privilegiegräns- och
+backoff-tester; 1 i `test_memory_source_units.py` — `test_mixed_version_boot_window_0021_to_
+0022`, plus omskrivning av `test_mixed_version_boot_window_0020_to_0021`s scenario C och
+privilegiekatalogens `expectations`-dict för Pass 28:s nollprivilegiepolicy). Hela
+backend-/security-/account-sviten: **744 passed** (upp från Pass 27:s 727 passed + 1 skipped),
+verifierat direkt, inklusive en bar-DB-migrationsrundtripp (`0021→0022→0021→0022`) mot en
+databas UTAN `mainai_app`-rollen alls. `docker-entrypoint.sh`s riktiga boot-ordning
+(`ensure_app_role` → `alembic upgrade head` → `apply_runtime_privileges`) opåverkad — inga
+ändringar i den filen denna omgång.
+
+**Grundarens explicita avslutande instruktion (Pass 28), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
 
 ## Pass 27 (2026-08-02): PR #31 — andra granskningsrundan av kontoslicen: privilegiehål, audittransaktion, schema-drift, atomisk claiming
 
