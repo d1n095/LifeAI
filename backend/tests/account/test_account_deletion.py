@@ -382,3 +382,30 @@ def test_delete_account_usage_log_survives_anonymized(client, superuser_db, make
     row = superuser_db.query(UsageLog).filter_by(id=usage_id).first()
     assert row is not None  # kept, not deleted
     assert row.user_id is None  # attribution scrubbed
+
+
+def test_delete_account_returns_409_while_an_import_job_is_actively_running(client, superuser_db, make_verified_user):
+    """Pass 27: erase_account_data() refuses to proceed while a worker is actively processing
+    an import job for this owner (see app/rag/account_erasure.py's blob-write-path audit) --
+    the router maps that refusal to 409, not the generic 500 an unexpected failure gets, and
+    the account must genuinely survive untouched."""
+    user, password = make_verified_user(email="blockedbyimport@example.com")
+    user_id = user.id
+    csrf = _login_and_get_csrf(client, "blockedbyimport@example.com", password)
+
+    job = ImportJob(owner_id=user_id, status=ImportJobStatus.running, source_storage_key=None)
+    superuser_db.add(job)
+    superuser_db.commit()
+    superuser_db.execute(
+        sa_text("UPDATE knowledge_import_jobs SET lease_expires_at = now() + interval '1 hour' WHERE id = :id"),
+        {"id": str(job.id)},
+    )
+    superuser_db.commit()
+
+    res = client.request("DELETE", "/api/account", json={"password": password}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 409
+
+    superuser_db.expire_all()
+    assert superuser_db.query(User).filter_by(id=user_id).first() is not None
+    # The session is still alive -- erasure never touched cookies since it never proceeded.
+    assert client.get("/api/auth/me").status_code == 200

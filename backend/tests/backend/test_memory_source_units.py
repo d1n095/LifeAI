@@ -1166,6 +1166,13 @@ def test_mainai_app_privileges_are_exactly_least_privilege_no_truncate_reference
         "memory_source_units": {"SELECT": True, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
         "document_source_units": {"SELECT": True, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
         "memory_source_lifecycle_events": {"SELECT": True, "INSERT": False, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
+        # Pass 27: tightened from SELECT+INSERT+UPDATE to INSERT-only after a founder review —
+        # this table has no owner_id/RLS at all (migration 0021's docstring), so a table-wide
+        # SELECT/UPDATE grant to the ordinary request role would let any request session read
+        # every account-erasure operation's storage keys/ids or rewrite any task's status.
+        # Reading/claiming/updating now runs exclusively on the privileged maintenance session
+        # (app/rag/account_erasure.py's _MaintenanceSession / app/worker.py's _ClaimSession).
+        "storage_deletion_tasks": {"SELECT": False, "INSERT": True, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
     }
     try:
         with engine.connect() as conn:
@@ -1402,6 +1409,89 @@ def test_mixed_version_boot_window_0019_to_0020():
     finally:
         # Guarantees the shared test database is left at head regardless of any assertion
         # failure above -- every other test file in this session depends on that.
+        try:
+            _run_alembic("upgrade", "head")
+        finally:
+            engine.dispose()
+
+
+def test_mixed_version_boot_window_0020_to_0021():
+    """Pass 27: the exact same mixed-version boot race test_mixed_version_boot_window_0019_
+    to_0020 above proves for 0019/0020, reproduced for 0020/0021 -- storage_deletion_tasks
+    (migration 0021, account erasure) uses the identical require_complete mechanism, so a
+    rolling deploy where the database is still on 0020 but a RUN_MIGRATIONS=false worker
+    already runs code that knows about 0021 must behave the same way: ensure_app_role.py
+    still narrows the 0019/0020 objects that already exist (never skipped just because
+    storage_deletion_tasks doesn't exist yet), apply_runtime_privileges.py correctly refuses
+    to proceed at all while incomplete, and once actually upgraded to 0021 it grants mainai_app
+    exactly INSERT on the new table -- nothing more (see Pass 27's tightened policy)."""
+    settings = get_settings()
+    engine = create_engine(settings.database_url)
+    ensure_app_role = _load_ensure_app_role()
+    apply_runtime_privileges = _load_apply_runtime_privileges()
+    app_password = urlparse(settings.app_database_url).password or "mainai_app_pw"
+
+    def _has_table_priv(conn, table: str, priv: str) -> bool:
+        return conn.execute(
+            sa_text("SELECT has_table_privilege('mainai_app', :table, :priv)"), {"table": table, "priv": priv}
+        ).scalar()
+
+    def _table_exists(conn, table: str) -> bool:
+        return conn.execute(sa_text("SELECT to_regclass(:t) IS NOT NULL"), {"t": f"public.{table}"}).scalar()
+
+    try:
+        _run_alembic("downgrade", "0020")  # DB is now at 0020 -- storage_deletion_tasks does not exist
+
+        with engine.connect() as conn:
+            assert _table_exists(conn, "storage_deletion_tasks") is False, "test setup: 0021's table must not exist yet at 0020"
+
+        # --- Scenario A: ensure_app_role.py narrows whatever already exists (0019/0020 core),
+        # even though 0021's table is still missing.
+        env_patch = {
+            "DATABASE_URL": settings.database_url,
+            "MAINAI_APP_PASSWORD": app_password,
+        }
+        old_env = {k: os.environ.get(k) for k in [*env_patch, "RENDER_ENV_FILE"]}
+        try:
+            os.environ.update(env_patch)
+            os.environ.pop("RENDER_ENV_FILE", None)
+            ensure_app_role.main()  # must not raise
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        with engine.connect() as conn:
+            assert _has_table_priv(conn, "memory_source_units", "UPDATE") is False
+            assert _has_table_priv(conn, "memory_source_units", "SELECT") is True
+
+        # --- Scenario B: apply_runtime_privileges.py (require_complete=True) must FAIL while
+        # storage_deletion_tasks is still missing -- and must not touch what scenario A already
+        # narrowed.
+        with pytest.raises((RuntimeError, SystemExit)):
+            apply_runtime_privileges.apply_and_verify(settings.database_url)
+
+        with engine.connect() as conn:
+            assert _has_table_priv(conn, "memory_source_units", "UPDATE") is False, (
+                "a FAILED apply_runtime_privileges run must never re-widen mainai_app's privileges"
+            )
+
+        # --- Scenario C: once actually upgraded to 0021, apply_runtime_privileges.py succeeds
+        # and grants mainai_app exactly INSERT on the new table.
+        _run_alembic("upgrade", "head")  # DB is now at 0021 (head)
+
+        with engine.connect() as conn:
+            assert _table_exists(conn, "storage_deletion_tasks") is True, "test setup: 0021's table must exist at head"
+
+        apply_runtime_privileges.apply_and_verify(settings.database_url)  # must succeed cleanly
+
+        with engine.connect() as conn:
+            assert _has_table_priv(conn, "storage_deletion_tasks", "INSERT") is True
+            assert _has_table_priv(conn, "storage_deletion_tasks", "SELECT") is False
+            assert _has_table_priv(conn, "storage_deletion_tasks", "UPDATE") is False
+    finally:
         try:
             _run_alembic("upgrade", "head")
         finally:

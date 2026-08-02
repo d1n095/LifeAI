@@ -16,6 +16,8 @@ from app.config import get_settings
 from app.db import migration_engine
 from app.jobs.lease import claim_next_job, renew_lease
 from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
+from app.storage import get_storage
 
 _ClaimSession = sessionmaker(bind=migration_engine)
 
@@ -216,3 +218,41 @@ def test_request_shutdown_stops_the_poll_loop_without_claiming_further_work(supe
         await asyncio.wait_for(worker.run(), timeout=5.0)
 
     asyncio.run(_run_and_shutdown_immediately())
+
+
+def _store_a_real_blob(content: bytes) -> str:
+    pos = 0
+
+    def _read():
+        nonlocal pos
+        chunk = content[pos : pos + (1 << 16)]
+        pos += len(chunk)
+        return chunk
+
+    return get_storage().write_stream(_read, max_bytes=max(len(content), 1)).storage_key
+
+
+def test_worker_retry_storage_deletion_tasks_claims_and_purges_a_pending_task():
+    """Pass 27: Worker._retry_storage_deletion_tasks now claims via claim_storage_deletion_
+    tasks() (FOR UPDATE SKIP LOCKED, bounded batch) instead of a plain unlocked scan — this
+    proves the real method still does its actual job end to end: a pending task with an
+    unreferenced blob gets purged."""
+    from app.worker import Worker
+
+    storage_key = _store_a_real_blob(b"worker retry claim proof")
+    claim_db = _ClaimSession()
+    try:
+        task = StorageDeletionTask(operation_id=uuid.uuid4(), storage_key=storage_key, status=StorageDeletionStatus.pending)
+        claim_db.add(task)
+        claim_db.commit()
+        task_id = task.id
+
+        Worker()._retry_storage_deletion_tasks(claim_db)
+
+        claim_db.expire_all()
+        refreshed = claim_db.get(StorageDeletionTask, task_id)
+        assert refreshed.status == StorageDeletionStatus.purged
+        assert not get_storage().exists(storage_key)
+    finally:
+        claim_db.rollback()
+        claim_db.close()
