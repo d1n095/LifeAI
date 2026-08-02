@@ -312,13 +312,22 @@ externt/obetrott indata. En DoS i den processen kan i värsta fall krascha en CI
 inte produktionstjänsten.
 
 **Hantering:** `frontend/scripts/check-npm-audit.js` — en liten, daterad, ID-specifik
-allowlist (endast GHSA-mh99-v99m-4gvg/advisory-id `1124334`) som körs istället för
-`npm audit --audit-level=high` direkt i `npm-audit`-jobbet i `.github/workflows/ci.yml`.
+allowlist (GHSA-mh99-v99m-4gvg/advisory-id `1124334`, `1130588`, `1130591`) som körs istället
+för `npm audit --audit-level=high` direkt i `npm-audit`-jobbet i `.github/workflows/ci.yml`.
 Den blockerar fortfarande CI på VILKET SOM HELST annat högt/kritiskt fynd — det här är inte
 en generell avstängning av `npm audit`, bara ett smalt undantag för denna redan utredda,
-fix-lösa post. **Ta bort raden i allowlistan** så fort `eslint-config-next` (eller
+fix-lösa post. **Ta bort raderna i allowlistan** så fort `eslint-config-next` (eller
 `eslint-plugin-react`/`import`/`jsx-a11y` var för sig) publicerar en release kompatibel med
 `eslint@10.x`, eller `brace-expansion` får en patchad `1.x`-release.
+
+**2026-08-02-uppdatering:** samma underliggande GHSA-mh99-v99m-4gvg-fynd, ingen ny sårbarhet
+och ingen ändrad `package-lock.json` — GitHubs advisory-databas bytte bara sitt interna
+`via.source`-id för fyndet (`1124334` → `1130588`/`1130591`), vilket fick den daterade
+ID-specifika allowlistan att sluta matcha och `npm audit`-jobbet att falla rött på PR #31
+(vars eget diff inte rörde `frontend/` alls). Upptäckt och fixat på egen branch
+(`claude/frontend-npm-audit-ghsa-mh99-source-ids`, grenad från huvudgrenen — INTE från PR
+#31:s branch), enligt samma mönster som PR #8/#9-fallet ovan i `CLAUDE.md`. Alla tre id:n
+behålls i allowlistan ifall samma churn upprepas.
 
 ## 4. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
 
