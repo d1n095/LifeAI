@@ -6,9 +6,14 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-07-29, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`/`update_pull_request`/`merge_pull_request`, inte memorerat)
-— **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8`
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-02, mot GitHubs PR-/check-runs-API
+direkt (`mcp__github__pull_request_read`/`get_check_runs`/`get_job_logs`, inte memorerat).
+**PR #31** står nu på head `ef54588` (Pass 26 + dess egen CI-fix), grön på ALLA obligatoriska
+kontroller UTOM `Frontend — npm audit`, som är ett bekräftat orelaterat, förklarat fynd (se
+Pass 26 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen
+branch grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön). Tidigare rad,
+oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA
+`df9e9c8`
 innan merge, inte en äldre commit. **PR #30 mergad** som `9b15840` in i
 `claude/det-kommer-mer-879lcm` — verifierad grön (18/18 checkar, "All required checks passed")
 på exakt head-SHA `b2347e4` (PR-branchens sista commit) direkt innan merge, samma disciplin
@@ -54,28 +59,148 @@ SECURITY INVOKER` hade passerat alla andra kontroller tyst), och `ensure_app_rol
 S1A-omsmalning var gated på att ALLA S1A-objekt existerar — vilket lämnade ett "mixed-version
 boot window" öppet mellan migration 0019 och 0020 där en bred `GRANT ALL` kunde committas
 oomsmalnad. Löst med en `require_complete`-flagga genom `apply_privilege_policy()`. Pass 25
-(nedan) stängde en kvarstående verifieringslucka: funktionssignaturer matchades bara på namn,
+stängde en kvarstående verifieringslucka: funktionssignaturer matchades bara på namn,
 inte exakta argumenttyper, plus två test-/dokumentationsfel (mixed-version-testets
 `to_regclass`-bugg, en duplicerad ImportJobStatus-lista i statusdrifttestet, och en felräknad
-testsumma nedan).
-130 dedikerade S1A-tester totalt över 6 filer (`test_memory_source_units.py`: 40,
-`test_ensure_app_role.py`: 9, `test_memory_source_backfill.py`: 17, `test_claims.py`s
-S1A-del: 12, `test_library_import.py`s S1A-del: 2, `test_source_purge.py`: 50) + 1
-routertest (`test_library_routes.py`s Pass 22-test) = **131 totalt över 7 filer** — dessa
-delar filer med 39+18+~200 befintliga, orelaterade tester som förblir gröna (ingen
-regression). Hela backend-/security-/account-sviten: se Pass 25 för det verifierade
-slutresultatet och den slutgiltiga CI-verifierade head-SHA:n.
+testsumma). Pass 26 (nedan) levererade grundarens sista begärda funktionella S1A-skiva:
+konto-export/erasure-integrationen — `erase_account_data()`/`export_account_data()` som delade
+domäntjänster, `app/routers/account.py` omskrivet till en tunn wrapper, en durabel
+`storage_deletion_tasks`-köfor fysisk blob-radering (migration `0021`), och stängning av ett
+upload/erasure-race. Verifieringen hittade och åtgärdade också en E2E-privilegielucka i CI
+(åtgärdad direkt i PR #31) och en npm audit-ID-churn (åtgärdad på egen branch, **PR #32**).
+154 dedikerade S1A-/konto-tester totalt över 8 filer (130 tidigare + 1 routertest + Pass 26:s
+24 nya — `test_account_erasure.py`: 20 nya, `test_account_deletion.py`: 4 nya ovanpå 8
+befintliga). Hela backend-/security-/account-sviten: **710 passed, 1 skipped**, verifierat
+direkt (upp från Pass 25:s 686 med exakt Pass 26:s 24 nya tester). CI grön på PR #31:s head
+`ef54588`, alla obligatoriska kontroller UTOM det spårade `npm audit`-fyndet (PR #32).
 
 **Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
-och §4.8:s "Status"-avsnitt för den fullständiga listan): konto-export/erasure-integration
-(`erase_owner_memory()` finns redan i migrationen men `delete_account`/`export_account`
-anropar den inte än — `delete_account` skulle idag blockeras av S1A:s FK:er om något
-memory_source_units-objekt existerar för kontot), produktionsdataprofilen (krävs före MERGE,
-inte före draft), och — innan en RIKTIG produktionsbackfill-körning (inte bara denna PR:s
-merge) — den beständiga run-/felrapporteringen Pass 19 dokumenterar men medvetet inte bygger
-än. Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 25:s
+och §4.8:s "Status"-avsnitt för den fullständiga listan): produktionsdataprofilen (krävs före
+MERGE, inte före draft), den beständiga run-/felrapporteringen Pass 19 dokumenterar men
+medvetet inte bygger än (krävs före en RIKTIG produktionsbackfill-körning, inte bara denna
+PR:s merge), samt att **PR #32** mergas till huvudgrenen (varefter PR #31 uppdateras DÄREFTER,
+inte i förväg — se Merge-regeln nedan) innan `npm audit`-kontrollen kan bli grön på PR #31
+själv. Kontoexport/erasure-integrationen (föregående kvarstående punkt) är nu KLAR (Pass 26).
+Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 26:s
 ändringar innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett
-godkännande att gå vidare till konto-integration/merge/deploy/produktionsbackfill.
+godkännande att gå vidare till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin
+reboot-knapp.
+
+## Pass 26 (2026-08-02): PR #31 — kontoexport/kontoradering-integration med S1A + två CI-fixar upptäckta under verifiering
+
+Grundaren bekräftade att Pass 25 var godkänd och gav den fullständiga, 8-punkts specen för
+nästa godkända skiva: **kontoexport och kontoradering**, med explicit instruktion att stanna
+för fräsch granskning efteråt — ingen produktionsprofil, produktionsbackfill, merge eller
+deploy.
+
+**1. Delade domäntjänster.** `app/routers/account.py` skrevs om till en tunn wrapper — routern
+gör ENDAST autentisering, lösenordsverifiering (vid radering), neutral request-metadata-
+extraktion, anrop till tjänsten, cookie-clear EFTER lyckad commit, och fel→HTTP-mappning. All
+affärslogik flyttades till två nya moduler:
+- `app/rag/account_export.py::export_account_data()` — bygger hela exporten.
+- `app/rag/account_erasure.py::erase_account_data()` — hela raderingssekvensen.
+
+**2. Komplett kontoexport.** Behöll alla befintliga sektioner och lade till fyra nya,
+ägarscopade och deterministiskt sorterade: `knowledge_claims` (inkl. `memory_source_id`),
+`memory_source_units` (inkl. rensade/återkallade källor — `content_text`/`content_hash` är
+korrekt `None` för en `purged`-rad, aldrig fabricerat), `document_source_units`,
+`memory_source_lifecycle_events`. Inkluderar mjukraderade dokument. `export_schema_version=2`
++ `generated_at` tillagda. Den föråldrade kommentaren ("claims har ingen backande tabell än")
+rättad. Revisionsposten `account_data_exported` skrivs EXAKT en gång, bara efter att hela
+exportobjektet redan byggts klart — ett fel mitt i insamlingen kan aldrig ge en falsk
+revisionspost för data som aldrig faktiskt returnerades.
+
+**3. Atomisk DB-fas för radering.** `erase_account_data()`: låser `User`-raden (`FOR UPDATE`)
+→ tar en ägarscopad Postgres-advisory-lock (`acquire_owner_erasure_lock`, seed `1`, skild
+namnrymd från `acquire_storage_key_lock`s seed `0`) → inventerar alla unika storage-nycklar
+från BÅDA `Document.storage_key` OCH `ImportJob.source_storage_key` → skapar durabla
+`StorageDeletionTask`-rader FÖRE någon radrensning → anropar
+`SELECT public.erase_owner_memory(:owner_id)` FÖRE dokumentradering (samma arkitekturlärdom
+som `source_purge.py`: `document_source_units.document_id`s RESTRICT-FK skulle annars blockera
+dokumentraderingen) → befintlig städordning (konversationer/tokens raderas, projekt/uppgifter
+nollas, dokument/chunks/versioner/relationer/importjobb raderas, usage/audit anonymiseras) →
+`account_deleted`-revisionsposten skrivs MED `user_id=NULL` INUTI SAMMA transaktion, med ett
+neutralt `erasure_operation_id` som `entity_id` — den gamla separata post-commit
+`record_audit`-anropet borttaget. Hela sekvensen är EN databastransaktion; ingen fysisk
+`storage.delete()` sker före DB-commit.
+
+**4. Durabel fysisk blob-radering.** Ny liten, allmän tabell `storage_deletion_tasks`
+(migration `0021`) — INGEN FK till `users.id` (måste överleva kontot vars radering skapade
+den), INGEN PII. Status: `pending`/`processing`/`purged`/`retained_shared`/`failed`. Ett
+omedelbart best-effort-försök körs direkt efter DB-fasens commit, PLUS en worker-återförsöks-
+mekanism (`Worker._retry_storage_deletion_tasks`, körs varje `run_once()`-cykel via
+superuser-sessionen) för rader som överlever en krasch. Varje nyckel tar samma
+storage-key-lock som upload/purge, kontrollerar `storage_key_still_referenced_global` — delad
+med en ANNAN ägare ⇒ `retained_shared` (raderas aldrig), annars raderas ⇒ `purged`;
+`StorageError` ⇒ `failed` (återförsökbar); redan borttagen fil ⇒ idempotent framgång.
+
+**5. Race mot samtidig uppladdning stängt.** En `User`-radlås ensam räcker inte — en samtidig
+uppladdning kan skriva bytes innan dess `ImportJob`-rad (med FK) ens finns. Samma
+`acquire_owner_erasure_lock` tas nu även i `POST /api/library/import`, FÖRE
+`storage.write_stream`, plus en explicit kontroll att ägaren fortfarande finns direkt efter
+låset (annars skulle en påbörjad begäran innan en samtidig radering committat ändå kunna
+fortsätta skriva en föräldralös blob, som bara skulle upptäckas som ett fult 500-fel EFTER att
+bytes redan skrivits). Ett verkligt tvåtrådars/tvåsessions-samtidighetstest bevisar att ingen
+ordning ger en föräldralös blob.
+
+**Tester:** 20 nya i `tests/backend/test_account_erasure.py` (radering: alla källtyper,
+legacy-konto utan MSU, rollback vid fel efter `erase_owner_memory`, rollback vid
+task-insert-fel, dedup av Document/ImportJob-nycklar, båda nyckelkällorna, omedelbar
+purge/retained_shared, aldrig `storage.delete()` före commit, verklig `StorageError`→`failed`
+→lyckad retry, idempotens på redan borttagen fil, no-op för redan terminal task; export: aktiv/
+återkallad/rensad källa med korrekt innehåll, DSU+lifecycle-events, claims länkade till
+`memory_source_id`, cross-owner-isolering, deterministisk ordning, exakt en audit-rad, ingen
+audit vid exportfel; lås-race: verklig tvåsessionstest). 4 nya i
+`tests/account/test_account_deletion.py` (mjukraderade dokument i export, exakt en
+`account_deleted`-audit, cookies rörs inte vid fel lösenord, usage-log överlever anonymiserad).
+**24 nya S1A/konto-tester totalt**, ovanpå de 8 redan existerande i `test_account_deletion.py`
+— 130+24 = **154 dedikerade S1A/konto-tester totalt över 8 filer** (se tidigare register-poster
+för de övriga filernas nedbrytning; `test_account_erasure.py` kräver samma
+`_narrow_privileges_before_this_module`-modulfixtur som `test_source_purge.py`/
+`test_memory_source_units.py`, eftersom `erase_account_data()` nu anropar `erase_owner_memory()`
+— tillagd även i `test_account_deletion.py` av samma skäl).
+
+**Två CI-problem upptäcktes under verifieringen — hanterade enligt olika regler:**
+
+- **E2E-privilegielucka (åtgärdad DIREKT i PR #31).** `E2E — Playwright (full stack)` föll
+  rött på head `c0586d0` med `permission denied for function erase_owner_memory`. Grundorsak:
+  `.github/workflows/ci.yml`s `e2e-tests`-jobb byggde sin egen roll/databas-setup för hand
+  (`GRANT ALL PRIVILEGES ON ALL TABLES ...`) men körde ALDRIG
+  `scripts/apply_runtime_privileges.py` — till skillnad från `docker-entrypoint.sh`s riktiga
+  bootsekvens (`ensure_app_role` → `alembic upgrade head` → `apply_runtime_privileges` →
+  starta appen), som redan gjorde detta korrekt. Utan det EXECUTE-grantet (S1A-funktionerna
+  REVOKE:ar EXECUTE FROM PUBLIC i sina egna migrationer) kunde `mainai_app` aldrig anropa
+  `erase_owner_memory` i E2E-miljön. Detta var en LATENT lucka sedan S1A:s första funktioner
+  (Pass 14+) — den upptäcktes bara nu eftersom Pass 26:s `e2e/account.spec.ts`-raderingstest är
+  den FÖRSTA Playwright-specen någonsin som når en S1A SECURITY DEFINER-funktion. Fixat direkt
+  i PR #31 (inte en egen branch) eftersom detta är PR #31:s EGEN nya E2E-täckning som
+  exponerade luckan, inte ett orelaterat fynd. Commit `ef54588`.
+- **npm audit-ID-churn (åtgärdad på EGEN branch/PR, per `CLAUDE.md`s etablerade mönster).**
+  `Frontend — npm audit` föll rött på samma head — men PR #31:s diff rör INTE `frontend/`
+  alls (bekräftat med `git diff --stat` mellan bas och head: noll filer). Grundorsak: GitHubs
+  advisory-databas bytte bara sitt interna `via.source`-ID för SAMMA redan dokumenterade/
+  accepterade `brace-expansion`-fynd (GHSA-mh99-v99m-4gvg, `docs/SECURITY_BLOCKERS.md` punkt 3)
+  från `1124334` till `1130588`/`1130591` — ingen ny sårbarhet, ingen ändrad
+  `package-lock.json`. Exakt samma mönster som PR #8/#9-fallet `CLAUDE.md` dokumenterar. Fixat
+  på en egen branch `claude/frontend-npm-audit-ghsa-mh99-source-ids` (grenad från
+  `claude/det-kommer-mer-879lcm`, INTE från PR #31:s branch) → **PR #32**, verifierad grön
+  (`node scripts/check-npm-audit.js` lokalt + full CI, "All required checks passed"). PR #31
+  kommer fortsätta visa `npm audit` som rött tills PR #32 mergas till huvudgrenen och PR #31
+  uppdateras DÄREFTER (inte i förväg — se `CLAUDE.md`s Merge-regel).
+
+Omverifiering: `tests/backend/test_account_erasure.py` (20) + `tests/account/
+test_account_deletion.py` (12, varav 4 nya) körda direkt, samt hela `tests/backend`+
+`tests/security`+`tests/account`-sviten (se resultat nedan/i PR #31:s beskrivning). Bare-DB-
+migrations-round-trip (`upgrade head` → `downgrade -1` → `upgrade head` → `downgrade base` →
+`upgrade head`, hela kedjan inkl. migration 0021) mot en färsk `postgres`-superuser-databas
+utan `mainai_app`-roll, ren. CI grön på PR #31:s exakta slutliga head `ef54588` — ALLA
+obligatoriska kontroller `success` UTOM det redan förklarade/spårade `npm audit`-fyndet
+(PR #32). PR #32 helt grön, "All required checks passed".
+
+Grundarens instruktion var explicit: detta var den sista stora funktionella
+S1A-integrationsskivan innan produktionsprofil och slutgranskning. STANNA nu för fräsch
+granskning — ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge, ingen
+deploy, ingen P4/P6, ingen Admin reboot-knapp i denna PR.
 
 ## Pass 25 (2026-07-30): PR #31 — exakt funktionssignaturverifiering + test-/dokumentationsfixar
 
@@ -1260,22 +1385,36 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 ## Rekommenderad merge-ordning (nuläge)
 
 1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#16~~, ~~#17~~, ~~#18~~,
-   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~, ~~#28~~ — samtliga mergade i
-   huvudgrenen (se Pass 4/5/7-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~ stängda utan
-   merge (#4/#6 subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
+   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~, ~~#28~~, ~~#29~~, ~~#30~~ — samtliga
+   mergade i huvudgrenen (se Pass 4/5/7/10-25-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~
+   stängda utan merge (#4/#6 subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
 2. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
    för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
-3. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
+3. **PR #32** (`claude/frontend-npm-audit-ghsa-mh99-source-ids`) — öppen, oberoende av PR #31,
+   kan mergas till huvudgrenen NÄR SOM HELST (helt grön, "All required checks passed", rör
+   endast `frontend/scripts/check-npm-audit.js` + `docs/SECURITY_BLOCKERS.md`). Rekommenderas
+   mergas FÖRE PR #31, så att PR #31 sedan kan uppdateras från huvudgrenen och få en grön
+   `npm audit`-kontroll — men enligt Merge-regeln ska PR #31 INTE uppdateras i förväg innan
+   PR #32 faktiskt är mergad.
+4. **PR #31** (`claude/s1a-memory-source-implementation`) — draft, öppen, INTE mergbar än
+   (grundaren har inte gett fräsch granskning/godkännande av Pass 26, produktionsdataprofilen
+   är inte gjord). Grön på alla obligatoriska kontroller utom `npm audit` (väntar på PR #32,
+   punkt 3).
+5. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
    ett separat, uttryckligt beslut (branchen är fryst). Kräver DESSUTOM en egen ombasering
-   mot huvudgrenens nya tip (nu `c32c339`, efter PR #28) innan aktivering — dess bas
-   (`15487e2`) är nu långt bakom både P2:s slutliga tip och själva huvudgrenen.
+   mot huvudgrenens nya tip innan aktivering — dess bas (`15487e2`) är nu långt bakom både
+   P2:s slutliga tip och själva huvudgrenen.
 
 ## Vilka brancher blockerar andra
 
-- **Inget öppet PR finns just nu.** PR #28 mergades (Pass 7); inget annat PR är öppet ovanpå
-  huvudgrenen.
+- **PR #31 blockeras INTE av PR #32** i egentlig mening (PR #31:s eget innehåll är oberoende
+  korrekt) men PR #31:s `npm audit`-CI-kontroll förblir röd tills PR #32 mergas till
+  huvudgrenen och PR #31 uppdateras därefter — se punkt 3/4 ovan.
+- **PR #31 mergas inte** förrän grundaren gett en fräsch, uttrycklig granskning/godkännande av
+  Pass 26 OCH produktionsdataprofilen är genomförd (se `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`
+  §4.8:s "Status"-avsnitt).
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
-  ovan) — inte av något annat öppet PR.
+  ovan) — inte av något öppet PR.
 
 ## Kvarstår efter PR #28:s merge (2026-07-28)
 
