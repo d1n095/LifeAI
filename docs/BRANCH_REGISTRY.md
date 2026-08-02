@@ -8,9 +8,10 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-02, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`get_job_logs`, inte memorerat).
-**PR #31** står nu på head (Pass 29, pushas i denna omgång) — se Pass 29-avsnittet nedan för
-den FJÄRDE granskningsrundans cross-domain blobretention-blockerare (åtgärdad). Föregående
-head `9851c0b` (Pass 28) var grön på ALLA obligatoriska kontroller UTOM
+**PR #31** står nu på head (Pass 30, pushas i denna omgång) — se Pass 30-avsnittet nedan för
+den FEMTE granskningsrundans blockerare: ett ogrindat `storage.delete()` i empty-upload-vägen,
+i samma blobintegritetsområde som Pass 29 (åtgärdad). Föregående head `5a3b0cd` (Pass 29) var
+grön på ALLA obligatoriska kontroller UTOM
 `Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass 26
 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
 grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön, väntar på grundarens
@@ -93,15 +94,125 @@ själv. Det tidigare dokumenterade racet mellan kontoradering och en redan köad
 importkörning — som grundaren i Pass 28 uttryckligen underkände som "acceptabel follow-up" —
 är STÄNGT (Pass 28, `claim_next_job()`s tvåfas-ägarlåsta claim). Den cross-domain
 blobretention-blockeraren grundaren hittade i Pass 29 (global blobkontroll som saknade
-Project Memory) är också STÄNGD (Pass 29, nedan). Kontoexport/erasure-integrationen är KLAR
-(Pass 26), den andra granskningsrundans fynd är åtgärdade (Pass 27), den tredje
-granskningsrundans tre blockerare är åtgärdade (Pass 28) — inklusive en verklig
-Postgres-deadlock Pass 28:s egen fulla testsviteskörning avslöjade — och den FJÄRDE
-granskningsrundans cross-domain-fynd är åtgärdat (Pass 29). Nästa kontrollpunkt enligt
-grundarens instruktion: vänta på FÄRSK granskning av Pass 29:s ändringar innan arbetet
-fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
-till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
-PR #32 INTE ska mergas utan uttryckligt godkännande.
+Project Memory) är STÄNGD (Pass 29). Det ogrindade `storage.delete()`-anropet i empty-upload-
+vägen grundaren hittade i Pass 30 (samma blobintegritetsområde, INTE en orelaterad fråga) är
+också STÄNGT (Pass 30, nedan). Kontoexport/erasure-integrationen är KLAR (Pass 26), den andra
+granskningsrundans fynd är åtgärdade (Pass 27), den tredje granskningsrundans tre blockerare
+är åtgärdade (Pass 28) — inklusive en verklig Postgres-deadlock Pass 28:s egen fulla
+testsviteskörning avslöjade — den fjärde granskningsrundans cross-domain-fynd är åtgärdat
+(Pass 29), och den FEMTE granskningsrundans blockerare är åtgärdad (Pass 30). Två nya, separata,
+INTE åtgärdade fynd upptäcktes och dokumenterades under Pass 30:s egen genomgång (se det
+avsnittet) — flaggade för grundarens egen prioritering, inte tystat undanskuffade. Nästa
+kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 30:s ändringar
+innan arbetet fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att
+gå vidare till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och
+att PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 30 (2026-08-02): PR #31 — femte granskningsrundan: ogrindat storage.delete() i empty-upload-vägen (samma blobintegritetsområde, inte en orelaterad fråga)
+
+Grundarens bedömning: "Pass 29:s Project Memory-fix är korrekt, men produktionsprofilen får
+fortfarande inte börja. Code har själv hittat ett fel som ligger direkt i samma
+blobintegritetsområde och som kan orsaka fysisk dataförlust." Pass 29:s eget
+lagringsdomän-inventering hade redan hittat detta (`app/routers/library.py`s empty-upload-
+radering saknade all skyddsmekanism) men klassificerat det som ett separat, orelaterat fynd
+utanför scope. Grundaren avvisade den klassificeringen uttryckligen: samma storagebackend,
+samma globala storage-nycklar, samma cross-domain-retentionpolicy, samma uploadendpoint som
+redan ändrats i denna PR — exakt den typ av fysisk dataförlust Pass 22–29 försöker förhindra.
+
+**Det konkreta felet:** `POST /api/library/import` gjorde, för en tom (0 byte) uppladdning:
+
+```python
+if blob.size_bytes == 0:
+    storage.delete(blob.storage_key)
+    raise HTTPException(400)
+```
+
+— utan `acquire_storage_key_lock()`, utan `storage_key_still_referenced_global()`, innan
+någon ImportJob någonsin skapades. Eftersom lagringen är innehållsadresserad har ALLA tomma
+filer samma `storage_key` (hash av tom byte-sträng). Om `ProjectSource`, `ProjectCheckpoint`,
+`Document` eller `ImportJob` redan refererade samma tomma blob kunde en ny, orelaterad tom
+uppladdning fysiskt radera den — migration 0023:s (Pass 29) breddade globala kontroll kan bara
+skydda en radering som faktiskt GÅR IGENOM protokollet, aldrig ett `storage.delete()`-anrop
+som kringgår det helt.
+
+**Fixat:**
+
+1. **`app/rag/blob_references.py::delete_if_unreferenced()`** — en ny, kanonisk,
+   självförsörjande check-then-act-funktion: tar `acquire_storage_key_lock()` själv,
+   kontrollerar `storage_key_still_referenced()`, raderar bara om orefererad, returnerar ett
+   explicit utfall (`retained`/`purged`/`failed`) istället för att krascha eller tyst svälja
+   ett `StorageError`. Skild från `app/rag/library_import.py::maybe_purge_blob()` (som
+   förutsätter att ANROPAREN redan håller låset för en större omgivande transaktion) — den nya
+   funktionen äger hela sekvensen själv, eftersom det inte finns någon DB-rad än att fästa ett
+   lås runt.
+2. **`app/routers/library.py`s empty-upload-gren** skriven om att anropa
+   `delete_if_unreferenced()` istället för `storage.delete()` direkt, följt av ett explicit
+   `db.rollback()` INNAN `HTTPException` kastas — släpper både owner-erasure-låset (taget
+   längst upp i handlern) och storage-key-låset omedelbart, istället för att förlita sig på
+   `get_db()`s dependency-teardown för att göra det implicit och senare (grundarens
+   uttryckliga krav). Svaret är alltid 400 oavsett utfall (`retained`/`purged`/`failed`) —
+   ingen ImportJob skapas någonsin för en tom uppladdning, strukturellt oförändrat.
+3. **En misslyckad radering av en redan bekräftat OREFERERAD tom blob** loggas
+   (`logger.exception`) men köas INTE till `storage_deletion_tasks` för beständigt återförsök
+   — en medveten, motiverad bedömning (grundaren bad uttryckligen om en bedömning, inte att
+   den tyngsta lösningen skulle byggas blint): eftersom referenskontrollen redan bevisat att
+   INGENTING pekar på nyckeln, kostar en kvarlämnad tom fil bara disk för en fil, inte
+   korrekthet eller dataförlust — asymmetrin som spelar roll är "raderades något som
+   fortfarande behövdes", aldrig "misslyckades en redan-föräldralös filens städning en gång".
+4. **Regressionstester A–F** (grundarens exakta bokstavsordning):
+   - **Test A/B** (`test_library_routes.py`, riktiga HTTP-anrop): en tom blob som delas med en
+     `ProjectSource`/`ProjectCheckpoint` överlever en orelaterad tom uppladdning (400, bloben
+     kvar, raden orörd).
+   - **Test C**: samma för en ANNAN founder-rolls levande `Document`.
+   - **Test D**: en genuint orefererad tom blob raderas korrekt (400, bloben borta) — fixen får
+     inte bli "radera aldrig tomma blobbar", bara "radera aldrig en som fortfarande behövs".
+   - Extra test: en tom uppladdning skapar aldrig en `ImportJob`-rad.
+   - **Test E** (`test_source_purge.py`, verklig tvåtrådskapplöpning): `delete_if_unreferenced()`
+     kapplöper mot en referens-skapande commit för SAMMA nyckel, båda disciplinerade deltagare
+     i samma `acquire_storage_key_lock()`-protokoll — slutläget är aldrig en levande DB-rad som
+     pekar på en försvunnen fysisk blob, oavsett vilken sida som vinner.
+   - **Test F**: ett genuint `StorageError` vid radering av en redan bekräftat orefererad blob
+     kraschar inte, loggas, returnerar `failed`, och släpper låset korrekt vid `commit()`.
+5. **Drift-förhindrande allowlist-test** (grundarens explicita punkt 4):
+   `test_every_direct_storage_delete_call_site_is_on_the_known_allowlist()`
+   (`test_source_purge.py`) — går igenom hela `app/`s AST och hittar varje
+   `storage.delete(...)`-anrop, jämför mot en hand-underhållen allowlist av tre kända,
+   granskade platser. Ett nytt, oväntat anrop misslyckas testet omedelbart.
+
+**Två nya, SEPARATA fynd upptäckta under detta pass egna arbete, INTE åtgärdade här (dokumenterat, inte tystat undanskuffat, per samma "isolera orelaterade ändringar"-princip som `CLAUDE.md` etablerar):**
+
+- **`app/project_memory.py`s `ingest_doc()`/`ingest_system_map()`/`create_checkpoint()`
+  tar ALDRIG `acquire_storage_key_lock()` innan de committar en ny `ProjectSource`/
+  `ProjectCheckpoint`-referens** — till skillnad från Life Library-uppladdningsvägen, som gör
+  det. Det betyder att SKRIV-sidan av samma lås-protokoll fortfarande är oskyddad för Project
+  Memory: en samtidig `retry_source_blob_purge()`/`delete_if_unreferenced()`-radering skulle
+  kunna kapplöpa mot en Project Memory-ingestion utan att någon av parterna delar samma lås på
+  Project Memory-sidan. Kräver att de tre call-sitesen i `app/project_memory.py` börjar ta
+  `acquire_storage_key_lock()` innan sin egen commit, samma mönster som redan finns i
+  `app/routers/library.py`.
+- **En djupare, redan existerande TOCTOU rent inuti `LocalFilesystemStorage.write_stream()`s
+  egen `final_path.exists()`-kontroll kontra ett samtidigt `delete()`s `unlink()`** — båda
+  filsystemsoperationer som sker UTANFÖR det DB-orienterade låset (låset skyddar bara
+  commit/radera-BESLUTET, aldrig de råa filsystemsanropen själva). Upptäckt under
+  konstruktionen av Test E ovan (ett första utkast som exakt återgav produktionens verkliga,
+  olåsta `write_stream()`-ordning triggade detta). Detta är samma form av race som redan fanns
+  i den tidigare granskade och levererade Pass 22-koden — INTE något Pass 30 introducerar —
+  och skulle kräva en arkitekturell omstrukturering av `write_stream()` själv (t.ex. hasha
+  INNAN beslutet att skriva, håll låset över hela existens-kontrollen-och-namnbytet) för att
+  stänga helt. Utanför scope för "stäng det ogrindade direkta delete-anropet"; flaggat för en
+  egen granskningsrunda.
+
+**Tester:** 8 nya (`test_library_routes.py`: 5 — Test A/B/C/D + ImportJob-testet, plus en ny
+modulnivå-`apply_runtime_privileges`-fixture filen aldrig behövde förut; `test_source_purge.py`:
+3 — Test E/F + allowlist-drifttestet). Hela backend-/security-/account-sviten: **758 passed**
+(upp från Pass 29:s 750, exakt Pass 30:s 8 nya), verifierat direkt TVÅ gånger i följd. Ingen ny
+migration denna omgång (ren Python-/routerändring) — `apply_runtime_privileges.py` oförändrad
+signatur/policy, ingen ny SECURITY DEFINER-funktion.
+
+**Grundarens explicita avslutande instruktion (Pass 30), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
 
 ## Pass 29 (2026-08-02): PR #31 — fjärde granskningsrundan: global blobkontroll saknade Project Memory (cross-domain orphan-blob-risk)
 
