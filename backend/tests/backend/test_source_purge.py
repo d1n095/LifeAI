@@ -31,7 +31,12 @@ from app.models.memory_source_unit import (
 )
 from app.models.project_memory import ProjectCheckpoint, ProjectSource
 from app.models.user import User, UserRole
-from app.rag.blob_references import acquire_storage_key_lock, storage_key_still_referenced
+from app.rag.blob_references import (
+    DeleteIfUnreferencedOutcome,
+    acquire_storage_key_lock,
+    delete_if_unreferenced,
+    storage_key_still_referenced,
+)
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
 from app.rag.source_purge import PURGE_REASON, SourcePurgeNotFoundError, purge_source, retry_source_blob_purge
 from app.request_context import current_user_id as current_user_id_var
@@ -1468,6 +1473,229 @@ def test_known_storage_key_columns_registry_matches_the_sql_functions_real_behav
     finally:
         session.rollback()
         session.close()
+
+
+# --- Pass 30 (a fourth founder review round): delete_if_unreferenced() -- the canonical,
+# self-contained check-then-act delete for a blob with no durable DB row yet (see app/rag/
+# blob_references.py's own docstring for the empty-upload incident this closes). Tests E/F
+# below are the founder's own lettering (A-D live in tests/backend/test_library_routes.py's
+# Pass 30 section, exercised through the real HTTP endpoint).
+
+
+def test_delete_if_unreferenced_race_against_a_concurrent_reference_commit_never_leaves_a_dangling_reference(superuser_db):
+    """Test E (founder's lettering): a REAL two-thread, two-session race between
+    delete_if_unreferenced() and a reference-creating commit for the SAME key, both
+    disciplined participants in the SAME acquire_storage_key_lock() protocol. Whichever side
+    wins the real Postgres advisory lock race must fully commit or roll back before the
+    other's own check-then-act can run -- the end state must NEVER be "a live DB row
+    references a storage_key whose physical blob is gone."
+
+    A note on what this test does NOT cover, found while building it (not asked for this
+    round, documented in docs/BRANCH_REGISTRY.md's Pass 30 entry as a distinct, separate
+    finding rather than silently expanded into this fix): app/routers/library.py's REAL
+    upload sequence calls `storage.write_stream()` BEFORE acquiring
+    `acquire_storage_key_lock()` (the key isn't even known until the bytes are hashed, so it
+    structurally can't be locked any earlier). A first draft of this test reproduced that
+    exact real ordering (write_stream, THEN lock, THEN commit) and found a real, narrower
+    TOCTOU purely inside `LocalFilesystemStorage.write_stream()`'s own existence-check vs. a
+    concurrent `delete()`'s `unlink()` -- both file-level operations that happen OUTSIDE any
+    lock (the lock only ever protects the DB-facing commit/delete decision, never the raw
+    filesystem calls themselves). Closing that would mean restructuring write_stream() itself
+    (e.g. hashing to a value BEFORE deciding whether to write, then holding the storage-key
+    lock across the existence-check-and-rename) -- a real architectural change to the
+    SAME-SHAPED protocol `app/rag/source_purge.py`'s already-shipped, previously-reviewed
+    Phase B relies on too, not something specific to this pass's `delete_if_unreferenced()`.
+    Out of scope for "close the empty-upload direct-delete bypass"; flagged for its own
+    review. The test below instead proves the narrower, well-defined guarantee THIS pass
+    actually owns: once both sides are inside the lock-protected commit/delete decision (the
+    part `delete_if_unreferenced()` and library.py's real ImportJob/Document commit both
+    genuinely share), the advisory lock correctly serializes them with no dangling result."""
+    from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
+
+    def _run_once(*, cleanup_goes_first: bool) -> None:
+        owner = _make_user(SessionLocal(), email=f"race-e-{uuid.uuid4().hex[:8]}@example.com")
+        content = f"pass 30 test E race proof {uuid.uuid4().hex}".encode()
+        storage_key = _store_real_blob(content)
+
+        lock_acquired = threading.Event()
+        proceed = threading.Event()
+        winner_done = threading.Event()
+
+        def _winner_thread():
+            db = SessionLocal()
+            try:
+                acquire_storage_key_lock(db, storage_key)
+                lock_acquired.set()
+                proceed.wait(timeout=5)
+                if cleanup_goes_first:
+                    delete_if_unreferenced(db, get_storage(), storage_key)
+                    db.commit()
+                else:
+                    # Bytes are re-verified/re-materialized WHILE still holding the lock, so
+                    # no concurrent delete can interleave between the write and the commit --
+                    # see the docstring above for why this is stricter than production's real
+                    # (unlocked) write_stream() ordering, deliberately, to isolate exactly
+                    # what delete_if_unreferenced() itself is responsible for.
+                    get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content))
+                    _set_rls_user(db, owner.id)
+                    document = Document(
+                        title="race winner",
+                        source=DocumentSource.upload,
+                        uploaded_by=owner.id,
+                        active_truth_status=ActiveTruthStatus.active,
+                        status=IndexStatus.indexed,
+                        storage_key=storage_key,
+                    )
+                    db.add(document)
+                    db.commit()
+            finally:
+                winner_done.set()
+                db.close()
+
+        t = threading.Thread(target=_winner_thread)
+        t.start()
+        assert lock_acquired.wait(timeout=5), "winner thread never acquired the storage-key lock"
+
+        loser_session = SessionLocal()
+        try:
+            proceed.set()
+            # Blocks on the SAME real Postgres advisory lock (a different connection) until
+            # the winner thread's transaction above commits -- the exact serialization this
+            # test proves.
+            acquire_storage_key_lock(loser_session, storage_key)
+            if cleanup_goes_first:
+                get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content))
+                _set_rls_user(loser_session, owner.id)
+                document = Document(
+                    title="race loser",
+                    source=DocumentSource.upload,
+                    uploaded_by=owner.id,
+                    active_truth_status=ActiveTruthStatus.active,
+                    status=IndexStatus.indexed,
+                    storage_key=storage_key,
+                )
+                loser_session.add(document)
+                loser_session.commit()
+            else:
+                delete_if_unreferenced(loser_session, get_storage(), storage_key)
+                loser_session.commit()
+        finally:
+            t.join(timeout=5)
+
+        assert winner_done.is_set(), "winner thread never completed -- possible deadlock"
+
+        # The invariant that actually matters, regardless of which side won: a live Document
+        # row referencing storage_key must NEVER coexist with a missing physical blob.
+        superuser_db.expire_all()
+        any_document_references_key = superuser_db.query(Document).filter_by(storage_key=storage_key).count() > 0
+        blob_exists = get_storage().exists(storage_key)
+        assert not (any_document_references_key and not blob_exists), (
+            "a Document references a storage_key whose physical blob is gone -- exactly the "
+            "dangling-reference outcome the lock protocol must prevent"
+        )
+
+    _run_once(cleanup_goes_first=True)
+    _run_once(cleanup_goes_first=False)
+
+
+def test_delete_if_unreferenced_logs_and_returns_failed_on_a_genuine_storage_error_without_crashing(monkeypatch):
+    """Test F (founder's lettering): a StorageError deleting an ALREADY-CONFIRMED-unreferenced
+    blob must never look like a false success, never leave an unhandled exception propagating
+    out of the request, and must never leave the advisory lock held past this function's own
+    return (it's transaction-scoped -- released at the caller's own next commit/rollback,
+    which app/routers/library.py's empty-upload branch performs unconditionally regardless of
+    outcome, proven separately by the HTTP-level tests in test_library_routes.py)."""
+    storage_key = _store_real_blob(b"pass 30 test F storage error proof")
+
+    class _AlwaysBrokenStorage:
+        def delete(self, key):
+            raise StorageError("simulated permanent failure deleting an already-unreferenced blob")
+
+    session = SessionLocal()
+    try:
+        outcome = delete_if_unreferenced(session, _AlwaysBrokenStorage(), storage_key)  # must not raise
+
+        assert outcome == DeleteIfUnreferencedOutcome.failed
+        session.commit()  # releases the advisory lock -- must not itself raise
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_every_direct_storage_delete_call_site_is_on_the_known_allowlist():
+    """Pass 30 drift-prevention (founder's explicit request, point 4): storage_key_still_
+    referenced_global()/delete_if_unreferenced() can only ever protect a physical delete that
+    actually GOES THROUGH the canonical check-then-act protocol -- neither can protect a
+    `storage.delete(...)` call that bypasses them entirely, exactly like app/routers/
+    library.py's empty-upload path used to (see app/rag/blob_references.py's
+    delete_if_unreferenced() docstring for that incident). This walks the AST of every .py
+    file under app/ and finds every call of the shape `storage.delete(...)` -- the exact
+    naming convention every real call site in this codebase already uses for a
+    `StorageBackend` instance (`storage = get_storage()` then `storage.delete(...)`) -- and
+    asserts the exact set of (file, enclosing function) locations matches a hand-maintained
+    allowlist below. A NEW direct call site (or one hidden behind a differently-named local
+    variable, which this scan cannot see -- a known, accepted limitation, not a silent gap:
+    the convention itself is what's being enforced) fails this test immediately, forcing an
+    explicit reviewed decision instead of silently reopening this exact bug class."""
+    import ast
+
+    app_root = Path(__file__).resolve().parent.parent.parent / "app"
+
+    # (relative file path, enclosing function name): why it's safe to call storage.delete()
+    # directly here, not through delete_if_unreferenced()/maybe_purge_blob().
+    ALLOWED_CALL_SITES = {
+        # Caller holds acquire_storage_key_lock() for the whole check-then-act sequence
+        # (documented in its own docstring); gated by storage_key_still_referenced() just
+        # above the delete() call.
+        ("rag/library_import.py", "maybe_purge_blob"),
+        # Same pattern, inside app/rag/account_erasure.py's own claim/lease-protected task
+        # processing -- gated by storage_key_still_referenced() just above.
+        ("rag/account_erasure.py", "attempt_storage_deletion_task"),
+        # The canonical, self-contained helper itself (Pass 30) -- acquires the lock and
+        # performs the reference check internally; this IS the sanctioned call site every
+        # other caller with no existing DB row should route through.
+        ("rag/blob_references.py", "delete_if_unreferenced"),
+    }
+
+    class _FunctionTrackingVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.found: set[tuple[str, str]] = set()
+            self._stack: list[str] = []
+
+        def _visit_function(self, node):
+            self._stack.append(node.name)
+            self.generic_visit(node)
+            self._stack.pop()
+
+        visit_FunctionDef = _visit_function
+        visit_AsyncFunctionDef = _visit_function
+
+        def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "delete"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "storage"
+            ):
+                enclosing = self._stack[-1] if self._stack else "<module>"
+                self.found.add((self._current_file, enclosing))
+            self.generic_visit(node)
+
+    found_sites: set[tuple[str, str]] = set()
+    for path in app_root.rglob("*.py"):
+        source = path.read_text()
+        if "storage.delete(" not in source:
+            continue
+        visitor = _FunctionTrackingVisitor()
+        visitor._current_file = str(path.relative_to(app_root))
+        visitor.visit(ast.parse(source, filename=str(path)))
+        found_sites |= visitor.found
+
+    assert found_sites == ALLOWED_CALL_SITES, (
+        f"storage.delete() call sites drifted from the reviewed allowlist.\n"
+        f"New/unexpected: {found_sites - ALLOWED_CALL_SITES}\n"
+        f"Missing (removed or renamed): {ALLOWED_CALL_SITES - found_sites}"
+    )
 
 
 def test_public_lacks_execute_on_storage_key_still_referenced_global():

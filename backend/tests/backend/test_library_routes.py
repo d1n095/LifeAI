@@ -4,15 +4,42 @@ for that), so route wiring, auth/CSRF, request validation and response shaping a
 exercised together, the same way a real client would hit them."""
 
 import asyncio
+import importlib.util
 import io
 import time
 import uuid
 import zipfile
+from pathlib import Path
 
 import pytest
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+
+
+def _load_apply_runtime_privileges():
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _narrow_privileges_before_this_module():
+    """Pass 30: the empty-upload path now calls storage_key_still_referenced_global() (via
+    app/rag/blob_references.py's delete_if_unreferenced()), which mainai_app is only granted
+    EXECUTE on via apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy --
+    never automatically by tests/conftest.py's _test_database fixture's own blanket table/
+    sequence GRANT ALL (function EXECUTE grants are a separate privilege class Postgres
+    doesn't cover with that). Same fixture, same rationale, as tests/backend/test_source_
+    purge.py's identical one; this file never needed it before this pass, since the OLD
+    empty-upload path called storage.delete() directly, bypassing this function entirely."""
+    from app.config import get_settings
+
+    module = _load_apply_runtime_privileges()
+    module.apply_and_verify(get_settings().database_url)
 
 
 def _run_worker_once() -> bool:
@@ -625,3 +652,128 @@ def test_source_detail_segments_stay_empty_for_a_text_source(client):
     detail = client.get(f"/api/library/{source_id}").json()
     assert detail["segments"] == []
     assert detail["media_duration_seconds"] is None
+
+
+# --- Pass 30 (a fourth founder review round): empty-upload rejection must go through the SAME
+# canonical check-then-act protocol as every other physical blob delete -- content-addressing
+# means every empty upload shares the exact same storage_key, so an ungated delete here could
+# destroy a completely unrelated, already-live reference sharing that key (see
+# app/rag/blob_references.py's delete_if_unreferenced() module docstring for the full incident).
+# Tests A-D below are the founder's own lettering; E/F (the race and StorageError cases) live in
+# tests/backend/test_source_purge.py's Pass 30 section, at the blob_references.py function level
+# rather than through the full HTTP stack.
+
+
+def _empty_storage_key() -> str:
+    from app.storage import get_storage
+
+    blob = get_storage().write_stream(lambda: b"", max_bytes=1)
+    assert blob.size_bytes == 0
+    return blob.storage_key
+
+
+def test_empty_upload_does_not_delete_a_blob_still_referenced_by_a_project_source(client, superuser_db):
+    """Test A (founder's lettering)."""
+    from app.models.project_memory import ProjectSource
+    from app.storage import get_storage
+
+    storage_key = _empty_storage_key()
+    project_source = ProjectSource(source_type="doc", source_ref="docs/EMPTY.md", storage_key=storage_key, ingested_by="test")
+    superuser_db.add(project_source)
+    superuser_db.commit()
+    project_source_id = project_source.id
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert get_storage().exists(storage_key)  # untouched -- Project Memory still needs it
+
+    superuser_db.expire_all()
+    still_there = superuser_db.query(ProjectSource).filter_by(id=project_source_id).one()
+    assert still_there.storage_key == storage_key
+
+
+def test_empty_upload_does_not_delete_a_blob_still_referenced_by_a_project_checkpoint(client, superuser_db):
+    """Test B (founder's lettering)."""
+    from app.models.project_memory import ProjectCheckpoint
+    from app.storage import get_storage
+
+    storage_key = _empty_storage_key()
+    checkpoint = ProjectCheckpoint(
+        summary="empty-upload test", branch_name="main", open_pr_refs="", brief_storage_key=storage_key, brief_sha256="a" * 64, created_by="test"
+    )
+    superuser_db.add(checkpoint)
+    superuser_db.commit()
+    checkpoint_id = checkpoint.id
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert get_storage().exists(storage_key)
+
+    superuser_db.expire_all()
+    still_there = superuser_db.query(ProjectCheckpoint).filter_by(id=checkpoint_id).one()
+    assert still_there.brief_storage_key == storage_key
+
+
+def test_empty_upload_does_not_delete_a_blob_still_referenced_by_another_owners_document(client, superuser_db, make_verified_user):
+    """Test C (founder's lettering): a DIFFERENT founder-role owner's live Document sharing
+    the same (empty-content) storage_key must survive an unrelated empty upload."""
+    from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
+    from app.storage import get_storage
+
+    other_owner, _ = make_verified_user(role="founder")
+    storage_key = _empty_storage_key()
+    other_document = Document(
+        title="other owner's document",
+        source=DocumentSource.upload,
+        uploaded_by=other_owner.id,
+        active_truth_status=ActiveTruthStatus.active,
+        status=IndexStatus.indexed,
+        storage_key=storage_key,
+    )
+    superuser_db.add(other_document)
+    superuser_db.commit()
+    other_document_id = other_document.id
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert get_storage().exists(storage_key)
+
+    superuser_db.expire_all()
+    still_there = superuser_db.query(Document).filter_by(id=other_document_id).one()
+    assert still_there.storage_key == storage_key
+
+
+def test_empty_upload_purges_a_genuinely_unreferenced_empty_blob(client):
+    """Test D (founder's lettering): with NOTHING in any domain referencing the empty-content
+    key, the endpoint must still correctly purge it -- the fix must not turn into "never
+    delete empty blobs at all", only "never delete one that's still needed"."""
+    from app.storage import get_storage
+
+    storage_key = _empty_storage_key()
+    assert get_storage().exists(storage_key)  # test setup: the blob genuinely exists first
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert not get_storage().exists(storage_key)
+
+
+def test_empty_upload_never_creates_an_import_job(client, superuser_db):
+    """No ImportJob (or Document) row is ever created for a rejected empty upload -- the
+    early-return happens before any DB row is written."""
+    from app.models.import_job import ImportJob
+
+    before = superuser_db.query(ImportJob).count()
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 400
+
+    superuser_db.expire_all()
+    assert superuser_db.query(ImportJob).count() == before

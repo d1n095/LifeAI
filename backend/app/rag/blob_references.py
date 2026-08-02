@@ -80,10 +80,16 @@ calling session's own search_path ever including pg_catalog implicitly (it alway
 never by an assumption this code relies on).
 """
 
+import enum
+import logging
 import uuid
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
+
+from app.storage import StorageBackend, StorageError
+
+logger = logging.getLogger("mainai.rag.blob_references")
 
 # Pass 29: the canonical, hand-maintained registry of every table.column known to persist a
 # value returned by `StorageBackend.write_stream()` (app/storage/) -- i.e. every place a live
@@ -180,3 +186,59 @@ def storage_key_still_referenced(db: Session, storage_key: str) -> bool:
         {"key": storage_key},
     ).scalar()
     return bool(result)
+
+
+class DeleteIfUnreferencedOutcome(str, enum.Enum):
+    """Result of `delete_if_unreferenced()` below."""
+
+    retained = "retained"  # still referenced elsewhere -- correctly NOT deleted
+    purged = "purged"  # not referenced anywhere -- physically deleted
+    failed = "failed"  # not referenced, but the physical delete itself raised StorageError
+
+
+def delete_if_unreferenced(db: Session, storage: StorageBackend, storage_key: str) -> DeleteIfUnreferencedOutcome:
+    """Pass 30 (a fourth founder review round): the ONE canonical, self-contained
+    check-then-act sequence for physically deleting a content-addressed blob that has NOT YET
+    been recorded in any durable DB row -- e.g. a just-written upload discovered to be
+    rejectable (empty) before any Document/ImportJob is ever created for it.
+
+    The bug this closes: `app/routers/library.py`'s empty-upload rejection used to call
+    `storage.delete(blob.storage_key)` directly, completely bypassing BOTH
+    `acquire_storage_key_lock()` and `storage_key_still_referenced()` -- migration 0023's
+    newly-widened global reference check (Pass 29, covering `project_sources`/
+    `project_checkpoints` too) can only ever protect a delete that actually goes THROUGH the
+    canonical protocol; it cannot protect a delete call that skips it entirely. Because storage
+    is content-addressed, EVERY empty upload hashes to the exact same `storage_key` -- so an
+    unrelated, already-live reference to that same (empty-content) key, in ANY domain this
+    codebase knows about (a Document, an ImportJob, a ProjectSource, a ProjectCheckpoint),
+    could have been physically deleted by a completely unrelated founder's own rejected empty
+    upload. This is the exact real, physical, cross-domain data-loss shape migration 0023
+    itself was written to close -- just reachable through a second, ungated code path that
+    happened to exist in the same PR.
+
+    Distinct from `app/rag/library_import.py::maybe_purge_blob()`: that function assumes the
+    CALLER already holds `acquire_storage_key_lock()` for the duration of a LARGER surrounding
+    transaction (e.g. deleting an existing `Document` row and persisting its `deletion_status`
+    in the same transaction) -- it deliberately does no locking itself. This function has no
+    such surrounding transaction to piggyback on (there is no row yet, nothing to persist a
+    status onto), so it owns the whole lock-acquire + reference-check + delete sequence itself,
+    self-contained. Callers get back an outcome instead of a bare boolean/exception so they can
+    log/report distinctly without this function importing any HTTP-layer concern.
+
+    `failed` (a genuine `StorageError` deleting an ALREADY-CONFIRMED-UNREFERENCED key) is
+    deliberately not queued into `storage_deletion_tasks` for durable retry, unlike a REFERENCED
+    blob's eventual erasure-triggered deletion: nothing anywhere still points at this key (the
+    reference check above already proved that), so leaving the physical bytes in place costs
+    nothing but disk space for one file and poses zero data-loss/correctness risk -- the
+    asymmetry that matters is "did something wrongly get deleted while still needed", never
+    "did an already-orphaned file's cleanup fail once". Logged at ERROR (`logger.exception`) so
+    it's visible for manual/automated disk-usage follow-up regardless."""
+    acquire_storage_key_lock(db, storage_key)
+    if storage_key_still_referenced(db, storage_key):
+        return DeleteIfUnreferencedOutcome.retained
+    try:
+        storage.delete(storage_key)
+        return DeleteIfUnreferencedOutcome.purged
+    except StorageError:
+        logger.exception("Kunde inte radera en obekräftad, orefererad blob %s fysiskt.", storage_key)
+        return DeleteIfUnreferencedOutcome.failed

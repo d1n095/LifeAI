@@ -24,7 +24,7 @@ from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
 from app.providers.verification import classify_provider_exception
-from app.rag.blob_references import acquire_owner_erasure_lock, acquire_storage_key_lock
+from app.rag.blob_references import acquire_owner_erasure_lock, acquire_storage_key_lock, delete_if_unreferenced
 from app.rag.library_import import maybe_purge_blob
 from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.rag.trust import assess_claim_confidence
@@ -156,7 +156,21 @@ async def import_package(
         raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}")
 
     if blob.size_bytes == 0:
-        storage.delete(blob.storage_key)
+        # Pass 30 (a fourth founder review round): a bare `storage.delete()` here used to
+        # bypass the canonical check-then-act protocol entirely -- see
+        # app/rag/blob_references.py's delete_if_unreferenced() for the full incident this
+        # closes. Content-addressing means EVERY empty upload shares the exact same
+        # storage_key, so an ungated delete here could physically destroy an unrelated,
+        # already-live reference (a Document, an ImportJob, or founder-wide Project Memory)
+        # to that same empty-content key. The outcome doesn't change this request's own
+        # response -- an empty upload is always rejected -- it only decides whether the
+        # physical bytes are safe to remove.
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        # No DB row was ever written in this request -- rolls back to release the owner-
+        # erasure lock (acquired at the top of this handler) and the storage-key lock
+        # (acquired inside delete_if_unreferenced above) immediately, rather than relying on
+        # get_db()'s dependency-teardown close() to do it implicitly and later.
+        db.rollback()
         raise HTTPException(status_code=400, detail="Filen är tom.")
 
     checksum = blob.sha256
