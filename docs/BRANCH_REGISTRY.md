@@ -8,9 +8,9 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-02, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`get_job_logs`, inte memorerat).
-**PR #31** står nu på head (Pass 28, pushas i denna omgång) — se Pass 28-avsnittet nedan för
-den tredje granskningsrundans tre blockerare (samtliga åtgärdade). Föregående head `5f4f2fd`
-(Pass 27) var grön på ALLA obligatoriska kontroller UTOM
+**PR #31** står nu på head (Pass 29, pushas i denna omgång) — se Pass 29-avsnittet nedan för
+den FJÄRDE granskningsrundans cross-domain blobretention-blockerare (åtgärdad). Föregående
+head `9851c0b` (Pass 28) var grön på ALLA obligatoriska kontroller UTOM
 `Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass 26
 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
 grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön, väntar på grundarens
@@ -91,15 +91,113 @@ PR:s merge), samt att **PR #32** mergas till huvudgrenen (varefter PR #31 uppdat
 inte i förväg — se Merge-regeln nedan) innan `npm audit`-kontrollen kan bli grön på PR #31
 själv. Det tidigare dokumenterade racet mellan kontoradering och en redan köad (`pending`)
 importkörning — som grundaren i Pass 28 uttryckligen underkände som "acceptabel follow-up" —
-är nu STÄNGT (Pass 28, `claim_next_job()`s tvåfas-ägarlåsta claim). Kontoexport/erasure-
-integrationen är KLAR (Pass 26), den andra granskningsrundans fynd är åtgärdade (Pass 27), och
-den TREDJE granskningsrundans tre blockerare är åtgärdade (Pass 28, nedan) — inklusive en
-verklig Postgres-deadlock Pass 28:s egen fulla testsviteskörning avslöjade (inte teoretisk,
-se Pass 28-avsnittet). Nästa kontrollpunkt enligt grundarens instruktion: vänta på FÄRSK
-granskning av Pass 28:s ändringar innan arbetet fortsätter längre — grundaren var explicit att
-detta INTE är ett godkännande att gå vidare till
-produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att PR #32
-INTE ska mergas utan uttryckligt godkännande.
+är STÄNGT (Pass 28, `claim_next_job()`s tvåfas-ägarlåsta claim). Den cross-domain
+blobretention-blockeraren grundaren hittade i Pass 29 (global blobkontroll som saknade
+Project Memory) är också STÄNGD (Pass 29, nedan). Kontoexport/erasure-integrationen är KLAR
+(Pass 26), den andra granskningsrundans fynd är åtgärdade (Pass 27), den tredje
+granskningsrundans tre blockerare är åtgärdade (Pass 28) — inklusive en verklig
+Postgres-deadlock Pass 28:s egen fulla testsviteskörning avslöjade — och den FJÄRDE
+granskningsrundans cross-domain-fynd är åtgärdat (Pass 29). Nästa kontrollpunkt enligt
+grundarens instruktion: vänta på FÄRSK granskning av Pass 29:s ändringar innan arbetet
+fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
+till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
+PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 29 (2026-08-02): PR #31 — fjärde granskningsrundan: global blobkontroll saknade Project Memory (cross-domain orphan-blob-risk)
+
+Grundarens bedömning: "Pass 28:s tre huvudfixar är godkända i sak. Men den fysiska
+blobpolicyn är fortfarande global endast mellan användarkonton, inte global mellan systemets
+datadomäner." Content-addressed lagring är global — samma bytes i två olika domäner får samma
+`storage_key`, exakt samma egenskap som redan tvingade fram migration 0020:s cross-owner-fix
+(Pass 23), bara inte ännu stängd mellan OLIKA DATADOMÄNER (per-konto Life Library-data vs.
+founder-brett projektminne).
+
+**Det konkreta felet:** `storage_key_still_referenced_global()` (migration 0020) kontrollerade
+bara `documents.storage_key`/`knowledge_import_jobs.source_storage_key`. `app/project_
+memory.py`s founder-breda Project Memory skriver genom EXAKT samma `get_storage()`/
+`write_stream()`-backend till `project_sources.storage_key`/`project_checkpoints.
+brief_storage_key` — helt osynligt för funktionen. Scenario: Project Memory lagrar innehåll X
+→ en användare laddar upp byte-identiskt X → båda delar `storage_key` → kontot raderas →
+`enqueue_account_erasure_storage_task()` (migration 0022) godkänner nyckeln korrekt (användaren
+äger verkligen ett Document/ImportJob) → Document/ImportJob-raderna försvinner → den globala
+referenskontrollen ser ingen Document/ImportJob kvar, känner inte till Project Memory,
+returnerar false → maintenance-workern raderar bloben fysiskt → Project Memory pekar nu på en
+fil som inte längre finns. `project_checkpoints.brief_storage_key` är dessutom `NOT NULL` — en
+checkpoint vars brief-blob försvinner är en permanent trasig rad, inte återställningsbar.
+
+**Fixat:**
+
+1. **Migration `0023`** — `CREATE OR REPLACE` av `storage_key_still_referenced_global()`
+   (samma exakta signatur, `SECURITY DEFINER`, `search_path`, `REVOKE PUBLIC` — ingen ny
+   funktion, ingen ändring av den befintliga `documents`/`knowledge_import_jobs`-logiken,
+   kopierad ordagrant från migration 0020) med två nya OR-grenar: `project_sources.storage_key`
+   och `project_checkpoints.brief_storage_key`. `downgrade()` återställer migration 0020:s
+   EXAKTA ursprungliga funktionskropp (inte en `DROP`), så `test_migration_roundtrip.py`s
+   schema-fingeravtryck (som hashar `pg_get_functiondef()`) ser en verklig, annorlunda kropp
+   efter nedgradering och exakt samma kropp igen efter omgradering. Verifierat direkt: kropp
+   innehåller `project_sources`/`project_checkpoints` efter upgrade, INTE efter downgrade,
+   INNEHÅLLER dem igen efter re-upgrade.
+2. **Fullständig lagringsdomän-inventering** (grundarens uttryckliga krav — "gissa inte att
+   Project Memory är den enda ytterligare domänen"), utförd med en dedikerad genomsökning av
+   hela backend/ efter `storage_key`-liknande kolumner, `get_storage()`-anrop,
+   `.write_stream()`/`.delete()`-anrop:
+   - **`documents.storage_key`** — redan skyddad (migration 0020). Klass A.
+   - **`knowledge_import_jobs.source_storage_key`** — redan skyddad (migration 0020). Klass A.
+   - **`project_sources.storage_key`** — SAKNADES, nu skyddad (migration 0023). Klass A.
+   - **`project_checkpoints.brief_storage_key`** — SAKNADES, nu skyddad (migration 0023). Klass A.
+   - **`storage_deletion_tasks.storage_key`** — konsumerar kontrollen (kön för fysisk radering),
+     är inte själv en levande referens. Klass B, korrekt exkluderad.
+   - `documents.media_blob` (LargeBinary, migration 0010) — separat in-DB-kolumn, inte
+     content-addressed lagring. Klass C.
+   - `memory_source_unit.py`s `source_identity_key` — orelaterad identitetssträng, inte en
+     blobnyckel. Klass D.
+   - **Ytterligare fynd, UTANFÖR scope för denna omgång, dokumenterat men INTE åtgärdat här**
+     (per samma "isolera orelaterade ändringar"-princip som `CLAUDE.md` etablerar):
+     `app/routers/library.py:159` gör ett OGRINDAT `storage.delete(blob.storage_key)` för en
+     tom (0 byte) uppladdning, utan någon `storage_key_still_referenced_global()`-kontroll
+     alls — eftersom lagringen är innehållsadresserad kunde hash-nyckeln för tomt innehåll i
+     teorin redan vara refererad av en annan rad (inklusive de två domänerna som fixades här).
+     Blast radius idag är litet (bara tomma filer), men det är en verklig, separat
+     TOCTOU-lucka som INTE är del av detta fynd och bör hanteras i en egen, senare branch/PR
+     om grundaren vill prioritera den.
+3. **Cross-domain regressionstester** (grundarens exakta bokstavsordning A–E):
+   - **Test A** (`test_account_erasure.py`): en `ProjectSource` som delar `storage_key` med en
+     raderad ägares `Document` → task blir `retained_shared`, bloben finns kvar, `ProjectSource`
+     orörd.
+   - **Test B** (`test_account_erasure.py`): samma för `ProjectCheckpoint.brief_storage_key`.
+   - **Test C** (`test_source_purge.py`): endast en `ProjectSource` refererar nyckeln efter att
+     Document/ImportJob-raderna är borta → `storage_key_still_referenced_global()` returnerar
+     `true`.
+   - **Test D** (`test_source_purge.py`): ingen domän alls refererar nyckeln → funktionen
+     returnerar `false` (bevisar att den inte bara blir permanent `true` — varje domäns
+     referens kontrolleras levande).
+   - **Test E** (cross-owner-skyddet, Pass 23): redan täckt av den befintliga svit av tester i
+     `test_source_purge.py` — körda på nytt, oförändrat gröna.
+4. **Drift-förhindrande register + test.** Ny kanonisk konstant, `app.rag.blob_references.
+   KNOWN_STORAGE_KEY_COLUMNS` — den hand-underhållna listan över varje `table.column` som kan
+   hålla en levande referens till den delade content-addressed lagringen, med en dokumenterad
+   process för att lägga till en ny kolumn (registret + en ny migration + ett retentiontest,
+   allt i samma ändring). Ny test,
+   `test_known_storage_key_columns_registry_matches_the_sql_functions_real_behavior`
+   (`test_source_purge.py`), itererar registret och bevisar att SQL-funktionen faktiskt
+   skyddar VARJE post — en framtida kolumn som läggs till i registret utan matchande
+   SQL-täckning misslyckas omedelbart, istället för att tyst återöppna exakt samma
+   cross-domain-lucka.
+
+**Tester:** 6 nya (`test_account_erasure.py`: 2 — Test A/B; `test_source_purge.py`: 4 — Test
+C/D, en extra SQL-nivåtest för `ProjectCheckpoint`, samt drift-registertestet). Hela
+backend-/security-/account-sviten: **750 passed** (upp från Pass 28:s 744, exakt Pass 29:s 6
+nya), verifierat direkt TVÅ gånger i följd. Bare-DB-migrationsrundtripp
+(`0022→0023→0022→0023`) verifierad mot en databas UTAN `mainai_app`-rollen alls —
+funktionskroppen innehåller `project_sources`/`project_checkpoints` efter upgrade, inte efter
+downgrade, igen efter re-upgrade. `apply_runtime_privileges.py` omkörd mot testdatabasen —
+`storage_key_still_referenced_global`s signatur/EXECUTE-grant är oförändrad (samma signatur
+som migration 0020, ingenting att ändra i privilegiepolicyn).
+
+**Grundarens explicita avslutande instruktion (Pass 29), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
 
 ## Pass 28 (2026-08-02): PR #31 — tredje granskningsrundan av kontoslicen: oändlig retry-loop, INSERT fortfarande farligt, det avvisade pending-job-racet stängt
 
