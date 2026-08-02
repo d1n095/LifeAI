@@ -80,6 +80,8 @@ calling session's own search_path ever including pg_catalog implicitly (it alway
 never by an assumption this code relies on).
 """
 
+import uuid
+
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
@@ -91,10 +93,46 @@ def acquire_storage_key_lock(db: Session, storage_key: str) -> None:
     concurrent holder blocks for that entire time. hashtextextended's 64-bit output makes an
     accidental collision between two different storage_keys astronomically unlikely; even if
     one ever happened, the effect is only unnecessary serialization between two unrelated
-    keys, never an incorrect result."""
+    keys, never an incorrect result. Seed `0` -- see acquire_owner_erasure_lock's seed `1` for
+    why the two locks deliberately live in separate hash namespaces."""
     db.execute(
         sa_text("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:key, 0))"),
         {"key": storage_key},
+    )
+
+
+def acquire_owner_erasure_lock(db: Session, owner_id: uuid.UUID) -> None:
+    """Account erasure (app/rag/account_erasure.py), Pass 26: a transaction-scoped advisory
+    lock scoped to ONE owner, closing a real TOCTOU race a founder review caught between
+    account erasure and a concurrent upload for the SAME owner. `POST /api/library/import`
+    (app/routers/library.py) durably writes a blob to disk via `storage.write_stream()`
+    BEFORE any database row references it -- exactly the same "bytes exist before any DB row
+    can protect them" shape `acquire_storage_key_lock` above already closes for uploads vs.
+    purges, except here the race is against account erasure's OWN storage-key inventory
+    (`storage_deletion_tasks`, migration 0021), which only ever runs once, at erasure time,
+    and can never re-scan a blob written after it already finished.
+
+    Both call sites take this SAME lock (same hashed owner_id) before doing their own
+    check-then-act sequence:
+      - Account erasure acquires it FIRST, before inventorying `Document.storage_key`/
+        `ImportJob.source_storage_key` for this owner -- so a concurrent upload either fully
+        commits (and its fresh ImportJob row is correctly swept into the inventory) or is
+        still blocked (and so cannot yet have written anything a rolled-back erasure would
+        need to account for) before erasure's own inventory query ever runs.
+      - The upload endpoint acquires it as the FIRST thing it does, before
+        `storage.write_stream()` even starts (never after) -- if erasure already committed
+        and holds this owner_id's row gone, the upload path re-verifies the owner still
+        exists (see app/routers/library.py) and fails closed BEFORE writing any bytes at all,
+        rather than writing an orphaned blob and finding out only when the later `ImportJob`
+        insert hits the now-dangling `owner_id` foreign key.
+
+    Seed `1` (distinct from acquire_storage_key_lock's seed `0` above): hashtextextended's
+    seed parameter puts the two lock kinds in separate hash namespaces, so a storage_key that
+    happens to collide numerically with some owner_id's UUID string can never make these two,
+    semantically unrelated locks contend with each other."""
+    db.execute(
+        sa_text("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:key, 1))"),
+        {"key": str(owner_id)},
     )
 
 

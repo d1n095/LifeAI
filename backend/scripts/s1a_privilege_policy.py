@@ -36,10 +36,19 @@ APP_ROLE = "mainai_app"
 # TRUNCATE, REFERENCES, TRIGGER) is revoked. lifecycle_events is SELECT-only: it's an
 # append-only audit trail written exclusively by the SECURITY DEFINER functions below, never
 # directly by the app role.
+#
+# storage_deletion_tasks (migration 0021, account erasure): mainai_app needs SELECT/INSERT
+# (account erasure creates tasks and makes one immediate best-effort attempt, scoped to the
+# operation_id it just created) AND UPDATE (that same best-effort attempt writes the task's
+# own status back) -- but never DELETE (a task record is kept, not removed, even once
+# terminal). No SECURITY DEFINER function guards this table's writes the way memory_source_
+# units' lifecycle does: it isn't a security-critical state machine, just a durable retry
+# queue with no owner-scoping at all (see that migration's module docstring for why).
 _PROTECTED_TABLES = [
     ("memory_source_units", ["SELECT", "INSERT"]),
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
+    ("storage_deletion_tasks", ["SELECT", "INSERT", "UPDATE"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]

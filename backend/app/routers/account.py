@@ -1,8 +1,6 @@
 import logging
-import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("mainai.account")
@@ -12,19 +10,9 @@ from app.cookies import clear_session_cookies
 from app.db import get_db
 from app.deps import get_current_user
 from app.limiter import limiter
-from app.models.audit import AuditLog
-from app.models.conversation import Conversation, Message
-from app.models.document import Document
-from app.models.document_chunk import DocumentChunk
-from app.models.email_verification_token import EmailVerificationToken
-from app.models.import_job import ImportJob
-from app.models.knowledge_version import KnowledgeVersion
-from app.models.password_reset_token import PasswordResetToken
-from app.models.project import Project, Task
-from app.models.refresh_token import RefreshToken
-from app.models.source_relationship import SourceRelationship
-from app.models.usage import UsageLog
 from app.models.user import User
+from app.rag.account_erasure import erase_account_data
+from app.rag.account_export import export_account_data
 from app.schemas import DeleteAccountIn
 from app.security import verify_password
 
@@ -33,151 +21,12 @@ router = APIRouter(prefix="/api/account", tags=["account"])
 
 @router.get("/export")
 def export_account(request: Request, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Everything personally identifiable tied to this account: the profile itself, the
-    user's own conversations (RLS-isolated per user already — see app/rls.py), their audit
-    trail, and — since Founder Knowledge Studio v1 (migration 0006) — their Founder Knowledge
-    Studio material. Documents are no longer shared company knowledge the way Project/Task
-    still are (only `created_by` for attribution there, not access control — see app/rls.py
-    and delete_account's comment below for why documents moved): they're owner-scoped,
-    RLS-protected founder data now, so a personal-data export must include them. Deliberately
-    still does NOT include projects/tasks: those remain shared company knowledge, out of
-    scope for a personal-data export. Claims and generated analyses (DEL 8/9 of the Founder
-    Knowledge Studio work order) have no backing table yet — see
-    docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's "design-only" section — so there's nothing to
-    export for them; this export must be revisited once those tables exist."""
-    conversations = db.query(Conversation).filter_by(user_id=user.id).order_by(Conversation.created_at).all()
-    conversations_export = []
-    for conversation in conversations:
-        messages = db.query(Message).filter_by(conversation_id=conversation.id).order_by(Message.created_at).all()
-        conversations_export.append(
-            {
-                "id": str(conversation.id),
-                "title": conversation.title,
-                "created_at": conversation.created_at.isoformat(),
-                "updated_at": conversation.updated_at.isoformat(),
-                "messages": [
-                    {
-                        "role": m.role.value,
-                        "content": m.content,
-                        "provider": m.provider,
-                        "model": m.model,
-                        "created_at": m.created_at.isoformat(),
-                    }
-                    for m in messages
-                ],
-            }
-        )
-
-    audit_entries = db.query(AuditLog).filter_by(user_id=user.id).order_by(AuditLog.created_at).all()
-
-    # Founder Knowledge Studio material — includes soft-deleted sources too (deleted_at is
-    # itself exported below) since a GDPR export must reflect what the system still holds
-    # about the person, not just what's currently visible in the library UI.
-    documents = db.query(Document).filter_by(uploaded_by=user.id).order_by(Document.created_at).all()
-    document_ids = [d.id for d in documents]
-    versions_by_source: dict[uuid.UUID, list] = {}
-    if document_ids:
-        for v in db.query(KnowledgeVersion).filter(KnowledgeVersion.source_id.in_(document_ids)).order_by(KnowledgeVersion.created_at).all():
-            versions_by_source.setdefault(v.source_id, []).append(v)
-
-    documents_export = [
-        {
-            "id": str(d.id),
-            "title": d.title,
-            "source": d.source.value,
-            "category": d.category,
-            "classification": d.classification.value,
-            "active_truth_status": d.active_truth_status.value,
-            "media_type": d.media_type,
-            "original_filename": d.original_filename,
-            "checksum": d.checksum,
-            "project_id": str(d.project_id) if d.project_id else None,
-            "version_number": d.version_number,
-            "status": d.status.value,
-            "chunk_count": d.chunk_count,
-            "media_duration_seconds": d.media_duration_seconds,
-            "transcript_provider": d.transcript_provider,
-            "imported_at": d.imported_at.isoformat() if d.imported_at else None,
-            "created_at": d.created_at.isoformat(),
-            "deleted_at": d.deleted_at.isoformat() if d.deleted_at else None,
-            "versions": [
-                {
-                    "version_number": v.version_number,
-                    "checksum": v.checksum,
-                    "extraction_version": v.extraction_version,
-                    "created_at": v.created_at.isoformat(),
-                }
-                for v in versions_by_source.get(d.id, [])
-            ],
-        }
-        for d in documents
-    ]
-
-    relationships_export = []
-    if document_ids:
-        relationships = (
-            db.query(SourceRelationship)
-            .filter(
-                or_(
-                    SourceRelationship.from_source_id.in_(document_ids),
-                    SourceRelationship.to_source_id.in_(document_ids),
-                )
-            )
-            .order_by(SourceRelationship.created_at)
-            .all()
-        )
-        relationships_export = [
-            {
-                "from_source_id": str(r.from_source_id),
-                "to_source_id": str(r.to_source_id),
-                "relationship_type": r.relationship_type.value,
-                "note": r.note,
-                "created_at": r.created_at.isoformat(),
-            }
-            for r in relationships
-        ]
-
-    import_jobs = db.query(ImportJob).filter_by(owner_id=user.id).order_by(ImportJob.created_at).all()
-    import_jobs_export = [
-        {
-            "id": str(j.id),
-            "status": j.status.value,
-            "source_filename": j.source_filename,
-            "project_id": str(j.project_id) if j.project_id else None,
-            "succeeded_count": j.succeeded_count,
-            "failed_count": j.failed_count,
-            "skipped_count": j.skipped_count,
-            "failure_reason": j.failure_reason,
-            "created_at": j.created_at.isoformat(),
-            "completed_at": j.completed_at.isoformat() if j.completed_at else None,
-        }
-        for j in import_jobs
-    ]
-
-    record_audit(db, user_id=user.id, action="account_data_exported", request=request)
-
-    return {
-        "account": {
-            "id": str(user.id),
-            "email": user.email,
-            "role": user.role.value,
-            "email_verified": user.email_verified,
-            "created_at": user.created_at.isoformat(),
-        },
-        "conversations": conversations_export,
-        "knowledge_sources": documents_export,
-        "knowledge_source_relationships": relationships_export,
-        "knowledge_import_jobs": import_jobs_export,
-        "audit_log": [
-            {
-                "action": a.action,
-                "entity_type": a.entity_type,
-                "entity_id": a.entity_id,
-                "created_at": a.created_at.isoformat(),
-            }
-            for a in audit_entries
-        ],
-    }
+    """Thin wrapper: authenticates (via get_current_user), extracts neutral request metadata,
+    and delegates the entire export to app/rag/account_export.py's export_account_data() — see
+    that module's docstring for exactly what's included and why. No export-building logic
+    lives here."""
+    client_ip = request.client.host if request.client else None
+    return export_account_data(db, user, client_ip=client_ip)
 
 
 @router.delete("")
@@ -193,81 +42,26 @@ def delete_account(
     session cookie alone (which is what every other authenticated endpoint relies on) isn't
     treated as sufficient proof of intent for a destructive, unrecoverable action.
 
-    Explicit manual cleanup rather than DB-level ON DELETE CASCADE/SET NULL: none of the
-    relevant foreign keys are declared with CASCADE/SET NULL at the database level (see
-    backend/alembic/versions/) — only usage_log.user_id/conversation_id are, for a different,
-    already-documented reason (see app/models/usage.py). Doing the cleanup explicitly here
-    works correctly regardless of what's enforced at the DB level, and keeps the exact
-    all-personal-data-deleted / all-shared-data-anonymized split in one auditable place.
-    """
+    Thin wrapper (Pass 26): password verification, neutral request-metadata extraction,
+    error-to-HTTP mapping, and cookie clearing are the ONLY things that happen here — the
+    entire erasure sequence (S1A memory erasure, personal/shared data cleanup, durable
+    storage-deletion tasks, the atomic transaction, the best-effort blob-deletion attempt) is
+    app/rag/account_erasure.py's erase_account_data(). No duplicated erasure logic lives in
+    this router."""
     if not verify_password(payload.password, user.password_hash):
         record_audit(db, user_id=user.id, action="account_deletion_failed_password", request=request)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Fel lösenord. Kontot har inte raderats.")
 
+    client_ip = request.client.host if request.client else None
     user_id = user.id
-
-    # Everything below runs as one transaction — either the whole account disappears
-    # cleanly, or none of it does. autocommit=False (app/db.py) already means nothing here
-    # is visible to any other connection until the single db.commit() at the end; the
-    # explicit try/except/rollback makes that guarantee active too, not just passive: if
-    # anything raises partway through, the transaction is rolled back explicitly before the
-    # exception propagates, rather than relying on Session.close() (app/db.py's get_db())
-    # to clean up an already-failed transaction implicitly.
     try:
-        # Personal data: deleted outright, not anonymized.
-        conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=user_id).all()]
-        if conversation_ids:
-            db.query(Message).filter(Message.conversation_id.in_(conversation_ids)).delete(synchronize_session=False)
-            db.query(Conversation).filter_by(user_id=user_id).delete(synchronize_session=False)
-        db.query(RefreshToken).filter_by(user_id=user_id).delete(synchronize_session=False)
-        db.query(EmailVerificationToken).filter_by(user_id=user_id).delete(synchronize_session=False)
-        db.query(PasswordResetToken).filter_by(user_id=user_id).delete(synchronize_session=False)
-
-        # Shared company data the user merely created or used: kept, attribution scrubbed —
-        # deleting a person's account must not silently delete company knowledge other users
-        # still rely on (same reasoning as app/rls.py's access-control model for these tables).
-        db.query(Project).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
-        db.query(Task).filter_by(created_by=user_id).update({"created_by": None}, synchronize_session=False)
-
-        # Documents (Founder Knowledge Studio): unlike Project/Task, these are now
-        # owner-scoped, RLS-protected personal/founder data (migration 0006 — see
-        # app/models/document.py's docstring), not shared company knowledge — anonymizing
-        # uploaded_by to NULL would both violate the new documents_isolation RLS policy's
-        # WITH CHECK (NULL never matches any current_user_id) and, even if it didn't, would
-        # just leave permanently unreadable orphan rows instead of a clean deletion. Deleted
-        # outright instead, same as conversations above. document_chunks/knowledge_versions/
-        # source_relationships all have ON DELETE CASCADE or ondelete="CASCADE" back to
-        # documents.id (see those models) so this single delete is enough for the bulk of
-        # them, but knowledge_import_jobs has no FK to documents (a job outlives the
-        # documents it created, e.g. to show "3 succeeded, 1 failed" after a partial import)
-        # so it's deleted explicitly by owner_id here too.
-        document_ids = [row.id for row in db.query(Document.id).filter_by(uploaded_by=user_id).all()]
-        if document_ids:
-            db.query(DocumentChunk).filter(DocumentChunk.document_id.in_(document_ids)).delete(synchronize_session=False)
-            db.query(KnowledgeVersion).filter(KnowledgeVersion.source_id.in_(document_ids)).delete(synchronize_session=False)
-            db.query(SourceRelationship).filter(
-                or_(
-                    SourceRelationship.from_source_id.in_(document_ids),
-                    SourceRelationship.to_source_id.in_(document_ids),
-                )
-            ).delete(synchronize_session=False)
-            db.query(Document).filter_by(uploaded_by=user_id).delete(synchronize_session=False)
-        db.query(ImportJob).filter_by(owner_id=user_id).delete(synchronize_session=False)
-
-        db.query(UsageLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
-        # Audit trail: kept for security/compliance purposes independent of the erasure
-        # request, actor identity scrubbed rather than the events themselves being deleted.
-        db.query(AuditLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
-
-        db.delete(user)
-        db.commit()
+        erase_account_data(db, user, client_ip=client_ip)
     except Exception:
-        db.rollback()
-        logger.exception("Kontoradering misslyckades för user_id=%s, återställd (rollback).", user_id)
-        # Best-effort only, in a fresh transaction now that the failed one has been rolled
-        # back — if the DB itself is unreachable this write can fail too, which is fine:
-        # the HTTP 500 and the exception log above are the actual guarantee here, this is
-        # just supplementary visibility.
+        logger.exception("Kontoradering misslyckades för user_id=%s.", user_id)
+        # Best-effort only, in a fresh transaction now that the failed one has already been
+        # rolled back by erase_account_data() itself — if the DB is unreachable this write can
+        # fail too, which is fine: the HTTP 500 and the exception log above are the actual
+        # guarantee here, this is just supplementary visibility.
         try:
             record_audit(db, user_id=user_id, action="account_deletion_failed_error", request=request)
         except Exception:
@@ -277,6 +71,7 @@ def delete_account(
             detail="Kontot kunde inte raderas just nu. Inga ändringar gjordes — försök igen senare.",
         )
 
+    # Cookies are only cleared AFTER erase_account_data() has confirmed its DB transaction
+    # committed — never before, and never if it raised.
     clear_session_cookies(response)
-    record_audit(db, user_id=None, action="account_deleted", request=request)
     return {"status": "account_deleted"}

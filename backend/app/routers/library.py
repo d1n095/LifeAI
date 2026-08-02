@@ -24,7 +24,7 @@ from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
 from app.providers.verification import classify_provider_exception
-from app.rag.blob_references import acquire_storage_key_lock
+from app.rag.blob_references import acquire_owner_erasure_lock, acquire_storage_key_lock
 from app.rag.library_import import maybe_purge_blob
 from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.rag.trust import assess_claim_confidence
@@ -117,7 +117,23 @@ async def import_package(
     memory (no `await file.read()` on the full body). Responds with the job id as soon as the
     original is safely, verifiedly stored; app/worker.py's poll loop does the actual
     extraction/indexing work asynchronously from here on, so this request never blocks on
-    that (see app/rag/library_import.py's module docstring for the full architecture)."""
+    that (see app/rag/library_import.py's module docstring for the full architecture).
+
+    Pass 26: acquires the owner-scoped erasure advisory lock (see app/rag/blob_references.py's
+    acquire_owner_erasure_lock docstring for the full race this closes against a concurrent
+    DELETE /api/account) as the VERY FIRST thing this handler does — before anything else,
+    including `storage.write_stream()` below, which is exactly what makes the lock effective:
+    a concurrent account erasure either fully commits (and this request's own re-check just
+    below then correctly refuses to proceed) or is still blocked behind this request's own
+    hold on the lock (and so cannot yet have inventoried this request's not-yet-written blob).
+    Re-verifies the owner still exists immediately after acquiring the lock — relying on the
+    later `ImportJob.owner_id` foreign key to reject an insert AFTER the blob was already
+    physically written would leave an orphaned, DB-unreferenced file on disk; this check fails
+    closed BEFORE any bytes are written at all."""
+    acquire_owner_erasure_lock(db, user.id)
+    if db.query(User).filter_by(id=user.id).first() is None:
+        raise HTTPException(status_code=401, detail="Kontot finns inte längre.")
+
     if project_id is not None:
         from app.models.project import Project
 

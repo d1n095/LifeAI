@@ -28,6 +28,7 @@ from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
 from app.models.source_relationship import SourceRelationship
+from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
 from app.models.user import User
 
@@ -70,6 +71,9 @@ __all__ = [
     "RefreshToken",
     "RevokedAccessToken",
     "SourceRelationship",
+    "StorageDeletionReason",
+    "StorageDeletionStatus",
+    "StorageDeletionTask",
     "UsageLog",
     "User",
 ]
