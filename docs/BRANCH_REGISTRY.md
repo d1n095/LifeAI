@@ -209,6 +209,16 @@ modulnivå-`apply_runtime_privileges`-fixture filen aldrig behövde förut; `tes
 migration denna omgång (ren Python-/routerändring) — `apply_runtime_privileges.py` oförändrad
 signatur/policy, ingen ny SECURITY DEFINER-funktion.
 
+**CI verifierad grön direkt via GitHubs check-runs-API på PR #31:s exakta slutliga head `3905c18`**
+(`3905c183cdf559a6023eaeb1b71bc0d05f5a09d5`): samtliga obligatoriska jobb `conclusion: success`
+(Alembic-migrationskontroll, backend unit/integration, account-livscykel/rate-limit, RLS/
+sessionssäkerhet, E2E Playwright, E2E same-origin-proxy, frontend build/typecheck/lint) —
+**utom** `Frontend — npm audit` (`failure`, förväntat, sedan tidigare, orelaterat till denna
+PR, spårat i **PR #32**), vilket i sin tur gör att den aggregerande gate-checken "All required
+checks passed" också visar `failure` — samma mönster som varje tidigare Pass i den här kedjan.
+PR #31:s body uppdaterad med Round 17 (Pass 30)-avsnittet, nya testräkningarna och den nya
+head-SHA:n.
+
 **Grundarens explicita avslutande instruktion (Pass 30), oförändrad från tidigare omgångar:**
 ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
 **PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
