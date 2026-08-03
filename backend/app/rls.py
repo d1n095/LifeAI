@@ -27,6 +27,14 @@ RLS_STATEMENTS = [
     # Audio/video import v1 (migration 0009, STEG 12) — see app/models/media_url_import.py.
     "ALTER TABLE media_url_imports ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE media_url_imports FORCE ROW LEVEL SECURITY",
+    # MainAI Runtime Truthfulness and Durable Job Foundation (migration 0025) — see
+    # app/models/mainai_job.py.
+    "ALTER TABLE mainai_jobs ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE mainai_jobs FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE mainai_job_events ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE mainai_job_events FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE mainai_job_proposals ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE mainai_job_proposals FORCE ROW LEVEL SECURITY",
 ]
 
 # One policy per table: rows are only visible/writable when they belong to the user bound
@@ -86,6 +94,21 @@ POLICY_DEFINITIONS = [
     {
         "table": "media_url_imports",
         "name": "media_url_imports_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "mainai_jobs",
+        "name": "mainai_jobs_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "mainai_job_events",
+        "name": "mainai_job_events_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "mainai_job_proposals",
+        "name": "mainai_job_proposals_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
 ]
