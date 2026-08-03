@@ -6,15 +6,15 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-02, mot GitHubs PR-/check-runs-API
-direkt (`mcp__github__pull_request_read`/`get_check_runs`/`get_job_logs`, inte memorerat).
-**PR #31** står nu på head (Pass 31, pushas i denna omgång) — se Pass 31-avsnittet nedan för
-den SJÄTTE granskningsrundans tre blockerare: durabel `rejected_upload_cleanup`-retry,
-Project Memorys write-before-reference-race, och `LocalFilesystemStorage.write_stream()`s
-egen TOCTOU mot `delete()` — alla i samma blobintegritetsområde Pass 22–30 redan arbetar i.
-Föregående head `3905c18` (Pass 30) var grön på ALLA obligatoriska kontroller UTOM
-`Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass 26
-nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-03, mot GitHubs PR-/check-runs-API
+direkt (`mcp__github__pull_request_read`/`get_check_runs`, inte memorerat).
+**PR #31** står nu på head `2bb8e54` (Pass 32, Runda 2) — se Pass 32-avsnittet nedan för den
+SJUNDE granskningsrundans två punkter (`_store_bytes`-låsgapet, ett riktigt filesystemlås) och
+samma dags uppföljande granskning (ops-status-synlighet för `storage_orphan_risk`,
+hash-verifiering istället för bara existens/storlek för dedup-blobbar) — allt i samma
+blobintegritetsområde Pass 22–31 redan arbetar i. CI grön på ALLA obligatoriska kontroller
+UTOM `Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass
+26 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
 grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön, väntar på grundarens
 uttryckliga godkännande innan merge). Tidigare rad,
 oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA
@@ -110,6 +110,149 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 32 (2026-08-03): PR #31 — sjunde granskningsrundan (`_store_bytes`-låsgapet, ett riktigt filesystemlås) och en uppföljande granskning samma dag (ops-status-synlighet, hash-verifiering)
+
+**Runda 1 — grundarens bedömning:** "Pass 31 löser mycket, men den nya kontrollistan avslöjar
+samtidigt att en persistent writer fortfarande saknar protokollet. Dessutom medger
+storagekoden själv att den nya sista kontrollen inte är atomisk mot `unlink()`. Vi ska inte
+börja produktionsprofilen förrän alla registrerade persistenta writers faktiskt är säkra, inte
+bara dokumenterade." Grundaren avvisade uttryckligen `KNOWN_STORAGE_WRITE_PATHS`s egen
+beskrivning av `_store_bytes()` som "flaggad, inte åtgärdad" — registret finns för att BEVISA
+att alla writers är skyddade, inte för att katalogisera kända osäkra.
+
+**1. `_store_bytes()`s saknade lås (grundarens punkt 1).** `app/worker.py`s per-fil-skrivning
+(bearbetar ett REDAN CLAIMAT `ImportJob`) skrev bloben durabelt UTAN
+`acquire_storage_key_lock()` mellan skrivning och `Document.storage_key`-commit — samma
+"bytes finns innan någon DB-rad skyddar dem"-race Pass 22/31 redan stängt för Life
+Library-uppladdning respektive Project Memory, kvarlämnat här.
+
+- **`app/rag/library_import.py::_store_bytes_with_reference_lock()`**: ny wrapper runt
+  `_store_bytes()` (anropar den bara namnet, inte direkt inline-logik, så befintliga tester
+  som monkeypatchar `li._store_bytes` fortsätter fungera via Pythons dynamiska
+  global-namnuppslagning) som applicerar EXAKT samma lås+verifiera+återpublicera-protokoll
+  `store_content_with_reference_lock()` redan ger Project Memory. Anroparen
+  (`_import_one_file`) sätter `Document.storage_key` och committar medan låset fortfarande
+  hålls.
+- `KNOWN_STORAGE_WRITE_PATHS`s post för `_store_bytes` skriven om till FIXED (samma
+  (fil, funktion)-nyckel, eftersom det rå `storage.write_stream()`-anropet fortfarande lever
+  inuti `_store_bytes()` som wrappern anropar — AST-drifttestet skannar exakt den kombinationen).
+
+**2. `LocalFilesystemStorage`s kvarstående race mot `unlink()` (grundarens punkt 2).** Pass
+31:s `_publish()` medgav själv i sin egen docstring att den sista `if final_path.exists():
+return`-kontrollen bara "krymper, inte helt eliminerar" racet mot en samtidig `delete()`.
+Grundaren krävde ett RIKTIGT OS-nivålås, inte ännu en retry-loop.
+
+- **`LocalFilesystemStorage._key_lock()`**: ett riktigt `fcntl.flock()` på en dedikerad
+  lock-fil per TVÅ-HEX-TECKEN-SHARD (samma sharding blobkatalogen redan använder — INTE per
+  exakt sha256, vilket skulle växa obegränsat; lock-filer raderas ALDRIG, eftersom det skulle
+  återintroducera exakt det race en ny fd/flock för "samma" lås skulle innebära).
+  `write_stream()` håller detta lås för `_publish()`s hela kropp; `delete()` håller det runt
+  sitt eget `unlink()`. `_publish()`s retry-loop är nu överflödig och borttagen — riktig
+  ömsesidig uteslutning gör racet den skyddade mot strukturellt omöjligt.
+- **Låsordning, dokumenterad och deadlockfri:** filesystemlåset är alltid det innersta,
+  kortast hållna låset i varje anropskedja och rör aldrig databasen — `delete()`-anropare
+  håller redan DB-advisory-låset (yttre) innan de tar filesystemlåset (inre) runt bara
+  `unlink()`; `write_stream()` håller ALDRIG DB-låset alls när den tar filesystemlåset. Ingen
+  kod tar filesystemlåset först och blockerar sedan länge på DB-låset — den enda ordning som
+  skulle kunna orsaka en deadlock-cykel.
+- Både DB-låset OCH filesystemlåset behövs fortfarande — de skyddar olika lager (filesystemlås:
+  rå publish mot rå unlink; DB-lås: referenskontroll + DB-commit-beslutet). En legitim radering
+  kan fortfarande slutföras helt i gapet mellan en persistent writers `write_stream()`-retur
+  och samma writers senare DB-lås-tagning, vilket är exakt varför persistenta writers
+  fortfarande måste hålla DB-låset från verifiering till referens-commit.
+
+**3. Orphan-riskens operationella synlighet (grundarens punkt 3).**
+`enqueue_rejected_upload_cleanup_task()` kan själv misslyckas (`failed_not_queued`) — grundaren
+krävde att detta aldrig tyst faller in i ett vanligt 400-svar utan operationell signal.
+
+- `delete_if_unreferenced()`s `failed_not_queued`-gren loggar nu vid CRITICAL (inte bara
+  ERROR) och skriver en beständig `AuditLog(action='storage_orphan_risk')`-rad
+  (`_record_storage_orphan_risk_audit()`) på en FRISK, oberoende `_MaintenanceSession` —
+  aldrig anroparens egen `db`-session, eftersom minst en verklig anropare
+  (`library.py`s tom-uppladdning-avvisning) gör `db.rollback()` direkt efteråt, vilket tyst
+  skulle rulla tillbaka en auditrad på samma session.
+- Bygger INTE en andra lokal outbox eller en deterministisk orphan-sweep i detta pass —
+  endast synlighet av det befintliga degraderade tillståndet, som uttryckligen begärt.
+
+**Runda 1-tester:** fem nya i `test_library_import.py` (grundarens bokstäver A–E; F/G täcks
+implicit av trådtesternas egna deadlock-kontroll respektive det befintliga
+skrivvägsregister-drifttestet), tolv nya/omskrivna i `test_storage_local_fs.py` (A/B kombinerat
+till ett riktigt trådtest som bevisar en RIKTIG samtidig `delete()` blockerar hela
+`_publish()`-kritiska sektionen; C/I återanvänder befintliga tester; D utökad till 250
+iterationer; E ny; H ny, bevisar max 256 lock-filer oavsett antal distinkta blobbar; F/G
+dokumenterade som täckta på integrationsnivå), en ny i `test_source_purge.py` (CRITICAL-logg +
+audit-rad för dubbel-misslyckande).
+
+**Runda 2 — samma dag, en uppföljande granskning av Runda 1:s resultat (huvud `910597f`).**
+Grundarens bedömning: "Pass 32 har stängt de två största raceproblemen från Pass 31. Det som
+återstår är mindre arkitektoniskt, men fortfarande blockerande: systemdegraderingen sparas men
+visas inte i ops-status; content-addressing verifierar ännu inte faktiskt content i
+same-size-fallet; CI och slutdokumentation är fortfarande pågående." Två konkreta blockerare,
+båda nu åtgärdade:
+
+**4. Orphan-risk osynlig i founder ops-status.** En beständig `AuditLog(action=
+'storage_orphan_risk')`-rad är INTE samma sak som "founder ops-status kan visa detta" —
+`GET /api/library/ops/status` läste aldrig tillbaka de raderna.
+
+- **`app/rag/blob_references.py::get_storage_cleanup_ops_status()`**: ny funktion som
+  aggregerar `audit_log` (läst direkt på anroparens ordinära `db`-session — `mainai_app` har
+  redan ordinär SELECT där, aldrig smalnat av som `storage_deletion_tasks`) och
+  `storage_deletion_tasks` (läst via den privilegierade `_MaintenanceSession`, eftersom
+  `mainai_app` har NOLL direkta privilegier där sedan Pass 27/28) till en aggregerad,
+  nyckelfri `StorageCleanupOpsStatus`.
+- **`OpsStatusOut`/`ops_status()`**: sex nya fält — `storage_cleanup_degraded`,
+  `storage_orphan_risk_count`, `latest_storage_orphan_risk_at`,
+  `pending_storage_cleanup_tasks`, `failed_storage_cleanup_tasks`,
+  `oldest_failed_storage_cleanup_age_seconds` — endast räkningar/tidsstämplar, ALDRIG en rå
+  `storage_key`.
+- **Degraderingspolicy, dokumenterad eftersom det ännu inte finns någon kvitteringsmekanism:**
+  `pending`/`processing`-tasks driver INTE `degraded` (normal, självläkande drift); `failed`
+  tasks driver det OCH självläker äkta när worker-retryn lyckas (status → `purged`/
+  `retained_shared`); `storage_orphan_risk`-auditrader driver det och självläker ALDRIG i
+  detta pass (`audit_log` är oföränderlig/append-only utan kvitteringskolumn) — en medveten
+  fail-mot-synlighet-policy tills en framtida deterministisk sweep-mekanism (ej byggd nu)
+  lägger till en riktig kvitteringsmarkör.
+
+**5. Content-addressing verifierade bara existens/storlek, inte hash.**
+`_store_bytes_with_reference_lock()`/`store_content_with_reference_lock()` kontrollerade
+`storage.exists()`; `_publish()`s dedup-gren accepterade en befintlig fil när storleken
+matchade — en fil med rätt sökväg och rätt storlek men FEL bytes (disk-korruption, manuell
+redigering) hade accepterats som om den motsvarade sin egen SHA-256.
+
+- **`LocalFilesystemStorage._publish()`**: hashar nu den befintliga same-size-filen
+  (`_hash_file()`, samma hjälpfunktion `verify()` också använder) och REPARERAR den vid
+  mismatch — från anroparens eget nyss hashade, känt korrekta `tmp_path`, fortfarande under
+  shardlåset — och verifierar igen efter reparation. En genuin STORLEKS-mismatch beter sig
+  oförändrat (omedelbart `StorageIntegrityError`, ingen reparation, samma disciplin som Pass
+  31:s test F redan låser fast).
+- **`store_content_with_reference_lock()`/`_store_bytes_with_reference_lock()`**: anropar nu
+  `storage.verify(expected_sha256=..., expected_size=...)` istället för `storage.exists()`
+  både i det ordinära fallet och efter återpublicering — en korrupt blob på rätt sökväg
+  behandlas nu identiskt med en saknad, och `fail closed` gäller likadant om verifieringen
+  fortfarande misslyckas efter återpublicering.
+
+**Runda 2-tester:** fem nya i `test_library_routes.py` (grundarens bokstäver B–F för
+ops-status; A täcks av Runda 2:s `test_source_purge.py`-test för själva audit-skrivningen),
+en ny i `test_storage_local_fs.py` (A: reparerar korrupt same-size-blob; D: reparation som
+fortsätter misslyckas ger `StorageIntegrityError`; C/F dokumenterade som täckta av befintliga
+konkurrenstester), en ny i `test_project_memory.py` (B), två nya i `test_library_import.py`
+(C/D — riktig `run_import_job()`-väg med `storage.verify()` tvingad till alltid `False`,
+bevisar ingen `Document.storage_key` någonsin committas).
+
+**Tester totalt (båda rundorna):** 30 nya/omskrivna över sex testfiler. Hela backend-sviten
+(783 tester + 1 medvetet överhoppad kapacitetstest) körd TVÅ gånger i följd efter varje runda
+— fyra fulla körningar totalt denna dag, alla gröna. Ingen ny migration i detta pass (inga
+schemaändringar krävdes för någon av de fem punkterna).
+
+**Verifierat, inte antaget:** slut-head `2bb8e54` (Runda 2). CI grön på ALLA obligatoriska
+kontroller UTOM `Frontend — npm audit` (samma bekräftade, orelaterade fynd som varje tidigare
+pass, spårat separat i **PR #32**).
+
+**Grundarens explicita avslutande instruktion (Pass 32), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
 
 ## Pass 31 (2026-08-02): PR #31 — sjätte granskningsrundan: tre kvarstående luckor i samma blobintegritetsområde (durabel rejected-upload-cleanup, Project Memory-racet, write_stream/unlink-TOCTOU)
 
