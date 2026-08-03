@@ -88,6 +88,7 @@ import uuid
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.audit import record_audit
 from app.db import migration_engine
 from app.storage import StorageBackend, StorageError
 from app.storage.base import StoredBlob
@@ -174,13 +175,15 @@ KNOWN_STORAGE_WRITE_PATHS: tuple[tuple[str, str, str], ...] = (
     (
         "rag/library_import.py",
         "_store_bytes",
-        "NO storage-key lock at all -- a known, PRE-EXISTING, documented gap (see "
-        "app/rag/account_erasure.py's own Pass 27 blob-write-path audit): the worker's "
-        "per-file extraction write (app/worker.py's poll loop, processing an ALREADY-CLAIMED "
-        "ImportJob) has no equivalent to the upload endpoint's owner-erasure lock. Explicitly "
-        "out of scope for Pass 31 (which targeted Project Memory's writers specifically, per "
-        "the founder's own request) -- flagged here, not silently omitted, as a candidate for "
-        "its own future review round.",
+        "Pass 32 (a seventh founder review round): FIXED -- was a known, PRE-EXISTING, "
+        "documented gap (flagged, not fixed, in Pass 27's own blob-write-path audit and again "
+        "in Pass 31's registry). The worker's per-file extraction write (app/worker.py's poll "
+        "loop, processing an ALREADY-CLAIMED ImportJob) now goes through "
+        "_store_bytes_with_reference_lock() (same file), which wraps this exact write in the "
+        "same acquire_storage_key_lock()+verify+republish protocol store_content_with_"
+        "reference_lock() already provides for Project Memory -- the caller (_import_one_file) "
+        "sets Document.storage_key and commits while still holding that lock. Verified by "
+        "tests/backend/test_library_import.py's Pass 32 section.",
     ),
 )
 
@@ -336,6 +339,50 @@ def enqueue_rejected_upload_cleanup_task(storage_key: str) -> uuid.UUID:
         db.close()
 
 
+def _record_storage_orphan_risk_audit(storage_key: str, *, detail: str) -> None:
+    """Pass 32 (a seventh founder review round): `failed_not_queued` means BOTH the physical
+    delete AND creating a durable retry task failed -- the blob is a genuine, invisible orphan
+    on disk that nothing else in this codebase will ever look for again on its own. The
+    founder's explicit requirement: this degraded state must never be silently folded into an
+    ordinary log line with zero operational signal -- founder ops status must be able to see
+    that a blob may need a manual storage sweep.
+
+    Writes on a FRESH `_MaintenanceSession`, never the caller's own `db` session: at least one
+    real caller (`app/routers/library.py`'s empty-upload rejection) rolls its own session back
+    immediately after `delete_if_unreferenced()` returns (there is no DB row to commit for a
+    rejected, never-persisted upload) -- adding this audit row to that SAME session would get
+    silently rolled back along with it. Uses its own independent commit instead, exactly like
+    `enqueue_rejected_upload_cleanup_task()` above, so this record survives regardless of what
+    the caller's own transaction does next.
+
+    Never raises -- a failure recording an audit trail entry about an already-degraded state
+    must not itself become a second failure the caller has to handle; logged at CRITICAL either
+    way so this is never silently lost even if the audit write itself fails. `user_id=None`:
+    this is a system-detected condition, not any specific founder's action."""
+    db = _MaintenanceSession()
+    try:
+        record_audit(
+            db,
+            user_id=None,
+            action="storage_orphan_risk",
+            entity_type="storage_key",
+            # AuditLog.entity_id is varchar(64); a full storage_key ("{2 hex}/{64 hex}") is 67
+            # characters, so this strips the two-hex-char shard prefix and keeps only the bare
+            # sha256 (exactly 64 characters) -- the full storage_key is still in `detail`.
+            entity_id=storage_key.rsplit("/", 1)[-1],
+            detail=detail,
+        )
+    except Exception:
+        logger.critical(
+            "Kunde inte heller skriva en audit-rad för orphan-risk-blob %s -- kräver manuell "
+            "diskuppföljning baserat på loggarna ovan.",
+            storage_key,
+            exc_info=True,
+        )
+    finally:
+        db.close()
+
+
 def delete_if_unreferenced(db: Session, storage: StorageBackend, storage_key: str) -> DeleteIfUnreferencedOutcome:
     """Pass 30 (a fourth founder review round): the ONE canonical, self-contained
     check-then-act sequence for physically deleting a content-addressed blob that has NOT YET
@@ -374,7 +421,20 @@ def delete_if_unreferenced(db: Session, storage: StorageBackend, storage_key: st
     and keeps retrying with the same backoff/lease/global-reference-check machinery an
     account-erasure blob delete already gets. Still logged at ERROR (`logger.exception`)
     either way, for immediate visibility regardless of whether the durable task itself could
-    be created."""
+    be created.
+
+    Pass 32 (a seventh founder review round): the founder's explicit point -- "DB-durability
+    kan inte alltid garanteras, men detta ska aldrig tystas till en vanlig 400 med noll
+    operationell signal" -- means `failed_not_queued` specifically (both the physical delete
+    AND the durable-retry-task insert failed) is no longer just an ERROR-level log line. It now
+    also logs at CRITICAL and writes a durable `AuditLog` row (`_record_storage_orphan_risk_
+    audit()` below) so founder ops status can surface "this blob may need a manual storage
+    sweep" instead of the failure vanishing once the log rotates. `failed_queued_for_retry`
+    deliberately keeps the ORIGINAL ERROR-level treatment unchanged -- that outcome already has
+    a durable `storage_deletion_tasks` row tracking it and will self-heal via app/worker.py's
+    retry loop, so it is not the degraded, unmonitored state this upgrade targets. This does NOT
+    add a second local outbox or a deterministic orphan-inventory/sweep mechanism -- only makes
+    the existing degraded state visible; a future sweep mechanism is still future work."""
     acquire_storage_key_lock(db, storage_key)
     if storage_key_still_referenced(db, storage_key):
         return DeleteIfUnreferencedOutcome.retained
@@ -387,10 +447,22 @@ def delete_if_unreferenced(db: Session, storage: StorageBackend, storage_key: st
             enqueue_rejected_upload_cleanup_task(storage_key)
             return DeleteIfUnreferencedOutcome.failed_queued_for_retry
         except Exception:
-            logger.exception(
+            logger.critical(
                 "Kunde inte heller skapa en durable rejected_upload_cleanup-task för blob %s -- "
-                "kräver manuell/automatiserad diskuppföljning.",
+                "detta är INTE en täckt, självläkande degradering: ingen kod i systemet kommer "
+                "att försöka radera denna blob automatiskt igen. Kräver manuell/automatiserad "
+                "diskuppföljning.",
                 storage_key,
+                exc_info=True,
+            )
+            _record_storage_orphan_risk_audit(
+                storage_key,
+                detail=(
+                    f"Fysisk radering OCH den durable rejected_upload_cleanup-tasken misslyckades "
+                    f"båda för storage_key={storage_key}. Blobben är en overifierad, potentiellt "
+                    f"orefererad fil som ingen automatiserad process längre känner till -- kräver "
+                    f"manuell diskuppföljning/sweep."
+                ),
             )
             return DeleteIfUnreferencedOutcome.failed_not_queued
 

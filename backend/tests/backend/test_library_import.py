@@ -10,20 +10,49 @@ that module's docstring). `_make_job` below does the storage write a real
 POST /api/library/import would have already done, so every test still just calls
 `run_import_job(db_session, job.id, user.id)`."""
 
+import importlib.util
 import io
+import threading
 import uuid
 import zipfile
+from pathlib import Path
 
 import pytest
 
 from app.config import get_settings
+from app.db import SessionLocal
 from app.models.document import ActiveTruthStatus, Document, IndexStatus, KnowledgeClassification
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
-from app.rag.library_import import run_import_job
-from app.storage import get_storage
+from app.rag.blob_references import acquire_storage_key_lock, delete_if_unreferenced
+from app.rag.library_import import _store_bytes_with_reference_lock, run_import_job
+from app.storage import StorageError, get_storage
 
 EMBEDDING_DIM = get_settings().embedding_dim
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+
+
+def _load_apply_runtime_privileges():
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _narrow_privileges_before_this_module():
+    """Pass 32: _store_bytes_with_reference_lock() now calls storage_key_still_referenced_
+    global() (via app/rag/blob_references.py's delete_if_unreferenced()/
+    storage_key_still_referenced()), which mainai_app is only granted EXECUTE on via
+    apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy -- never
+    automatically by tests/conftest.py's _test_database fixture's own blanket table/sequence
+    GRANT ALL. Same fixture, same rationale, as tests/backend/test_project_memory.py's and
+    test_library_routes.py's identical ones (added there in Pass 30/31 for the same reason);
+    this file never needed it before this pass, since _store_bytes() used to call
+    storage.write_stream() directly with no reference check at all."""
+    module = _load_apply_runtime_privileges()
+    module.apply_and_verify(get_settings().database_url)
 
 
 @pytest.fixture(autouse=True)
@@ -804,3 +833,219 @@ async def test_resume_claim_extraction_crash_after_flush_rolls_back_cleanly(db_s
     assert db_session.query(Document).filter_by(uploaded_by=user.id).count() >= 1
     db_session.add(job)
     db_session.commit()
+
+
+# --- Pass 32 (a seventh founder review round): close _store_bytes()'s missing lock gap ------
+#
+# _store_bytes() durably writes the worker's per-file blob BEFORE the surrounding Document
+# row's storage_key is set and committed -- a founder review pointed out this was a genuine,
+# registered-but-unfixed gap in KNOWN_STORAGE_WRITE_PATHS (app/rag/blob_references.py):
+# registering a writer as "known but still unsafe" prevents drift, but not data corruption.
+# Fixed via _store_bytes_with_reference_lock() (same file), which wraps _store_bytes() in the
+# same lock+verify+republish protocol store_content_with_reference_lock() already provides for
+# Project Memory (Pass 31). Tests below are the founder's own lettering (F -- no deadlocks --
+# is proven implicitly by every threaded test below completing without timing out; G -- the
+# write-path registry no longer describing any persistent writer as NO LOCK -- is covered by
+# tests/backend/test_source_purge.py's existing write-path-registry drift test, unchanged by
+# this pass except for this one entry's description).
+
+
+def test_store_bytes_with_reference_lock_returns_a_verified_present_blob_in_the_ordinary_case(db_session):
+    content = f"pass 32 test A: ordinary case {uuid.uuid4().hex}".encode()
+
+    blob = _store_bytes_with_reference_lock(db_session, get_storage(), content, max_bytes=len(content) + 10)
+    db_session.commit()  # releases the storage-key lock
+
+    assert get_storage().exists(blob.storage_key) is True
+
+
+def test_store_bytes_with_reference_lock_recovers_when_a_real_concurrent_purge_deletes_the_blob_first():
+    """Test B (founder's lettering): a REAL two-thread, two-session race where the deleter
+    genuinely wins the advisory lock FIRST and purges the (at that moment, correctly
+    unreferenced) blob before the writer's own lock acquisition can even run -- mirrors
+    tests/backend/test_project_memory.py's identical Pass 31 test for Project Memory's own
+    writer, now proving the SAME recovery for the worker's per-file write."""
+    content = f"pass 32 test B: real concurrent purge recovers via republish {uuid.uuid4().hex}".encode()
+    storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
+    # Nothing references this key yet -- correctly unreferenced at this point, exactly like a
+    # worker's blob before its own Document.storage_key is committed.
+
+    deleter_holds_lock = threading.Event()
+    writer_may_proceed = threading.Event()
+    deleter_outcome = {}
+
+    def _deleter_thread():
+        db = SessionLocal()
+        try:
+            acquire_storage_key_lock(db, storage_key)
+            deleter_holds_lock.set()
+            writer_may_proceed.wait(timeout=5)
+            deleter_outcome["outcome"] = delete_if_unreferenced(db, get_storage(), storage_key)
+            db.commit()
+        finally:
+            db.close()
+
+    t = threading.Thread(target=_deleter_thread)
+    t.start()
+    assert deleter_holds_lock.wait(timeout=5), "deleter thread never acquired the lock"
+    writer_may_proceed.set()
+
+    writer_db = SessionLocal()
+    try:
+        blob = _store_bytes_with_reference_lock(writer_db, get_storage(), content, max_bytes=len(content) + 10)
+        writer_db.commit()
+        assert blob.storage_key == storage_key
+        assert get_storage().exists(storage_key) is True, (
+            "_store_bytes_with_reference_lock returned successfully but the blob it just "
+            "verified/republished isn't actually on disk"
+        )
+    finally:
+        writer_db.close()
+
+    t.join(timeout=5)
+    assert not t.is_alive(), "deleter thread never completed -- possible deadlock"
+    assert deleter_outcome["outcome"].name == "purged"
+
+
+@pytest.mark.asyncio
+async def test_run_import_job_leaves_no_storage_key_when_the_blob_cannot_be_recovered(db_session, make_verified_user, monkeypatch):
+    """Test C (founder's lettering): if even republishing can't recover a vanished blob, the
+    Document row must never end up referencing a missing blob -- through the REAL pipeline
+    (run_import_job -> _import_one_file), not just the lower-level helper directly."""
+    import app.rag.library_import as li
+
+    user, _ = make_verified_user(email="pass32-c@example.com")
+    job = _make_job(db_session, user.id, b"pass 32 test C content", "testc.txt")
+
+    def _broken_store_bytes_with_reference_lock(db, storage, content, *, max_bytes):
+        raise StorageError("simulated: blob vanished and could not be republished")
+
+    monkeypatch.setattr(li, "_store_bytes_with_reference_lock", _broken_store_bytes_with_reference_lock)
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="testc.txt").first()
+    assert doc is not None
+    assert doc.status == IndexStatus.storage_failed
+    assert doc.storage_key is None
+
+
+def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_never_race_unsafely():
+    """Test D (founder's lettering): races the worker's write against the SAME physical-delete
+    path account-erasure's own durable outbox worker uses (attempt_storage_deletion_task()),
+    not just delete_if_unreferenced() directly -- proving both routes into a physical delete
+    respect the identical storage-key lock, run several times so a real Postgres advisory lock
+    (not manual signaling) decides who actually goes first each time."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+    from app.models.storage_deletion_task import StorageDeletionTask
+    from app.rag.account_erasure import attempt_storage_deletion_task
+    from app.rag.blob_references import enqueue_rejected_upload_cleanup_task
+
+    _AdminSession = sessionmaker(bind=migration_engine)
+
+    for attempt in range(4):
+        content = f"pass 32 test D attempt {attempt} {uuid.uuid4().hex}".encode()
+        storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
+        operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def _outbox_worker():
+            db = _AdminSession()
+            try:
+                barrier.wait(timeout=5)
+                task = db.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).one()
+                attempt_storage_deletion_task(db, task)
+            except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+                errors.append(exc)
+            finally:
+                db.close()
+
+        def _writer():
+            db = SessionLocal()
+            try:
+                barrier.wait(timeout=5)
+                _store_bytes_with_reference_lock(db, get_storage(), content, max_bytes=len(content) + 10)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                db.close()
+
+        t1 = threading.Thread(target=_outbox_worker)
+        t2 = threading.Thread(target=_writer)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not t1.is_alive() and not t2.is_alive(), f"attempt {attempt}: a race participant never finished -- possible deadlock"
+        assert errors == [], f"attempt {attempt}: unexpected exception(s): {errors}"
+        assert get_storage().exists(storage_key) is True, (
+            f"attempt {attempt}: the writer's own later claim (the key is needed again) must "
+            f"win in the end -- the blob must exist on disk regardless of which side ran first"
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_jobs_uploading_identical_content_both_succeed_without_deadlock(db_session, make_verified_user):
+    """Test E (founder's lettering): two REAL, fully concurrent run_import_job() calls (two
+    different owners) uploading byte-identical content -- content-addressing means they target
+    the exact SAME storage_key. Proves the new per-write storage-key lock doesn't introduce
+    lock contention/deadlock for the ordinary, legitimate "two unrelated writers, same content"
+    case, and that both Documents end up referencing a blob that genuinely exists."""
+    import asyncio
+
+    owner_a, _ = make_verified_user(email="pass32-e-a@example.com")
+    owner_b, _ = make_verified_user(email="pass32-e-b@example.com")
+    content = f"pass 32 test E: two concurrent legitimate writers {uuid.uuid4().hex}".encode()
+
+    db_a = SessionLocal()
+    db_b = SessionLocal()
+    job_a = _make_job(db_a, owner_a.id, content, "shared-a.txt")
+    job_b = _make_job(db_b, owner_b.id, content, "shared-b.txt")
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def _run(db, job, owner):
+        try:
+            barrier.wait(timeout=5)
+            asyncio.run(run_import_job(db, job.id, owner.id))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            db.close()
+
+    t1 = threading.Thread(target=_run, args=(db_a, job_a, owner_a))
+    t2 = threading.Thread(target=_run, args=(db_b, job_b, owner_b))
+    t1.start()
+    t2.start()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    assert not t1.is_alive() and not t2.is_alive(), "a concurrent job never finished -- possible deadlock"
+    assert errors == [], f"unexpected exception(s): {errors}"
+
+    # RLS scopes `documents` per-owner via app.current_user_id -- an ordinary SessionLocal()
+    # here would see neither owner's row. Bypass RLS with a session bound to migration_engine,
+    # same pattern as Test D's _AdminSession above.
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+
+    check_db = sessionmaker(bind=migration_engine)()
+    try:
+        doc_a = check_db.query(Document).filter_by(uploaded_by=owner_a.id, original_filename="shared-a.txt").first()
+        doc_b = check_db.query(Document).filter_by(uploaded_by=owner_b.id, original_filename="shared-b.txt").first()
+        assert doc_a is not None and doc_b is not None
+        assert doc_a.status == IndexStatus.indexed
+        assert doc_b.status == IndexStatus.indexed
+        assert doc_a.storage_key == doc_b.storage_key  # content-addressed: same bytes, same key
+        assert get_storage().exists(doc_a.storage_key) is True
+    finally:
+        check_db.close()

@@ -37,7 +37,7 @@ from app.models.document import (
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
-from app.rag.blob_references import storage_key_still_referenced
+from app.rag.blob_references import acquire_storage_key_lock, storage_key_still_referenced
 from app.rag.claims import extract_claims_for_document
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
@@ -156,6 +156,48 @@ def _store_bytes(storage: StorageBackend, content: bytes, *, max_bytes: int):
         return chunk
 
     return storage.write_stream(_read, max_bytes=max_bytes)
+
+
+def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, content: bytes, *, max_bytes: int):
+    """Pass 32 (a seventh founder review round): wraps `_store_bytes()` with the SAME
+    lock+verify+republish protocol `app/rag/blob_references.py`'s
+    `store_content_with_reference_lock()` already provides for Project Memory's writers (Pass
+    31) — see that function's docstring for the write-before-reference race this closes, and
+    this module's own module docstring / `_import_one_file`'s call site for why `_store_bytes`
+    itself (a genuinely persistent writer with no lock at all) was a real, founder-flagged gap:
+    the worker's per-file write here durably creates a blob BEFORE the surrounding `Document`
+    row's `storage_key` is set and committed, exactly the same "bytes exist before any DB row
+    protects them" shape Pass 22 already closed for the Life Library upload endpoint and Pass
+    31 closed for Project Memory.
+
+    Deliberately calls `_store_bytes()` itself (not `store_content_with_reference_lock()`
+    directly) rather than duplicating its logic inline, so existing tests that monkeypatch
+    `li._store_bytes` to observe the pipeline's granular status transitions (see
+    tests/backend/test_library_import.py) continue to observe the real write — Python resolves
+    the bare `_store_bytes(...)` call below against this module's current global at call time,
+    so a monkeypatched replacement is still picked up correctly.
+
+    Callers MUST set `Document.storage_key` and commit while STILL holding this same `db`
+    session's open transaction — the advisory lock releases at that transaction's next commit
+    or rollback, exactly like every other caller of `acquire_storage_key_lock`."""
+    blob = _store_bytes(storage, content, max_bytes=max_bytes)
+    acquire_storage_key_lock(db, blob.storage_key)
+    if storage.exists(blob.storage_key):
+        return blob
+
+    # Lost the race: a concurrent purge/erasure's reference check ran (correctly, since no DB
+    # row referenced this key yet) and physically deleted it before we got here. Safe to
+    # republish now, WHILE holding the lock, so no concurrent deleter's reference check can
+    # run again until this transaction commits or rolls back.
+    logger.warning(
+        "Blob %s försvann mellan skrivning och referens-låset -- återpublicerar från minnet.", blob.storage_key
+    )
+    blob = _store_bytes(storage, content, max_bytes=max_bytes)
+    if not storage.exists(blob.storage_key):
+        raise StorageError(
+            f"Kunde inte publicera blob {blob.storage_key} -- försvann direkt igen efter återpublicering."
+        )
+    return blob
 
 
 def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | None) -> DeletionStatus:
@@ -485,7 +527,7 @@ async def _import_one_file(
     db.add(document)
     db.commit()
     try:
-        blob = _store_bytes(storage, content, max_bytes=max_upload_bytes)
+        blob = _store_bytes_with_reference_lock(db, storage, content, max_bytes=max_upload_bytes)
     except StorageError as exc:
         # P1: reclassified from the old undifferentiated `failed` — the original never made
         # it into durable storage at all, so unlike awaiting_provider/blocked_provider this

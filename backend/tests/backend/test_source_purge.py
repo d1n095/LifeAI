@@ -1637,6 +1637,69 @@ def test_delete_if_unreferenced_logs_and_returns_failed_on_a_genuine_storage_err
     assert row[2] == 0
 
 
+def test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_log_and_an_audit_row(
+    monkeypatch, superuser_db, caplog
+):
+    """Pass 32 (a seventh founder review round): the founder's explicit point -- DB-durability
+    can't always be guaranteed, but this must never be silently folded into an ordinary
+    response with zero operational signal. When BOTH the physical delete AND creating the
+    durable rejected_upload_cleanup task fail, `failed_not_queued` must be visible to founder
+    ops beyond a rotating log file: a CRITICAL-level log record, AND a durable `AuditLog` row
+    (`action='storage_orphan_risk'`) that survives regardless of what the caller's own
+    transaction does next (see `_record_storage_orphan_risk_audit()`'s own docstring for why it
+    uses an independent session/commit, not the caller's `db`)."""
+    import logging
+
+    from app.rag import blob_references as br
+
+    storage_key = _store_real_blob(b"pass 32 test: both the delete and the enqueue fail")
+
+    class _AlwaysBrokenStorage:
+        def delete(self, key):
+            raise StorageError("simulated permanent failure deleting an already-unreferenced blob")
+
+    def _broken_enqueue(_storage_key):
+        raise RuntimeError("simulated: the durable retry task insert itself also fails")
+
+    monkeypatch.setattr(br, "enqueue_rejected_upload_cleanup_task", _broken_enqueue)
+
+    session = SessionLocal()
+    try:
+        with caplog.at_level(logging.CRITICAL, logger="mainai.rag.blob_references"):
+            outcome = delete_if_unreferenced(session, _AlwaysBrokenStorage(), storage_key)  # must not raise
+
+        assert outcome == DeleteIfUnreferencedOutcome.failed_not_queued
+        assert any(rec.levelno >= logging.CRITICAL for rec in caplog.records), (
+            "a double failure (delete AND durable-enqueue) must log at CRITICAL, not just ERROR"
+        )
+        session.commit()  # releases the advisory lock -- must not itself raise
+    finally:
+        session.rollback()
+        session.close()
+
+    # No storage_deletion_tasks row exists for this key (the enqueue itself failed) -- the
+    # audit row is the ONLY durable trace this degraded state left behind.
+    task_row = superuser_db.execute(
+        sa_text("SELECT 1 FROM storage_deletion_tasks WHERE storage_key = :key"),
+        {"key": storage_key},
+    ).first()
+    assert task_row is None
+
+    audit_row = superuser_db.execute(
+        sa_text(
+            "SELECT user_id, entity_type, entity_id, detail FROM audit_log "
+            "WHERE action = 'storage_orphan_risk' AND entity_id = :key "
+            "ORDER BY created_at DESC LIMIT 1"
+        ),
+        {"key": storage_key.rsplit("/", 1)[-1]},
+    ).first()
+    assert audit_row is not None
+    assert audit_row[0] is None  # system-detected condition, not any specific founder's action
+    assert audit_row[1] == "storage_key"
+    assert audit_row[2] == storage_key.rsplit("/", 1)[-1]  # bare sha256 -- entity_id is varchar(64)
+    assert storage_key in audit_row[3]  # the full storage_key is still in the detail text
+
+
 def test_every_direct_storage_delete_call_site_is_on_the_known_allowlist():
     """Pass 30 drift-prevention (founder's explicit request, point 4): storage_key_still_
     referenced_global()/delete_if_unreferenced() can only ever protect a physical delete that

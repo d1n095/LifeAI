@@ -30,17 +30,34 @@ is ALREADY at the destination at the exact instant of the syscall — there is n
 separately act" gap to race a concurrent `unlink()` into. If it succeeds, this call's own
 bytes are, atomically and unambiguously, the published blob; no verification needed. If it
 fails because something is already there, the existing file's size is checked (the same cheap
-corruption check as before) — but the delete race isn't fully gone just by adding a check;
-see `_publish()`'s own docstring for how the retry loop below still handles a concurrent
-delete landing in that narrower window, by retrying the `link()` itself rather than trusting a
-single stale observation."""
+corruption check as before).
 
+Pass 32 (a seventh founder review round): Pass 31's own docstring admitted the size-check
+branch above still wasn't atomic against a concurrent `delete()` — the founder confirmed this
+is real and required an actual OS-level mutual-exclusion primitive, not another retry loop.
+`_key_lock()` below is that primitive: a real `fcntl.flock()` held by `write_stream()` for
+`_publish()`'s entire body AND by `delete()` around its own `unlink()`, so the two can never
+interleave for the same shard anymore — see `_key_lock()`'s docstring for why it locks per
+two-hex-character shard (the same directory sharding blobs already use) rather than per exact
+sha256, and why the lock files are never deleted. This is a SEPARATE, narrower lock than
+`app/rag/blob_references.py::acquire_storage_key_lock()` (a DB advisory lock): this one
+protects raw filesystem publish/unlink from each other; the DB lock protects the
+reference-check + DB-commit decision from a concurrent physical delete. Both are still
+necessary — a legitimate delete can still fully complete in the gap between a persistent
+writer's `write_stream()` return and that same writer's own later DB-lock acquisition, which
+is exactly why every persistent writer (`app/rag/blob_references.py::
+store_content_with_reference_lock()`, `app/rag/library_import.py::
+_store_bytes_with_reference_lock()`) must hold the DB lock from verification through the
+reference commit, not just rely on this filesystem lock."""
+
+import fcntl
 import hashlib
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Iterator
 
 from app.storage.base import (
     InvalidStorageKey,
@@ -52,12 +69,6 @@ from app.storage.base import (
 )
 
 _KEY_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{64}$")
-
-# Bounded so a pathological, never-terminating back-and-forth (which nothing in this codebase's
-# real call patterns can actually sustain -- a blob only gets deleted once genuinely
-# unreferenced, and re-publishing it is a single retry, not a loop) fails loudly instead of
-# hanging forever.
-_PUBLISH_MAX_ATTEMPTS = 25
 
 
 def _fsync_dir(path: Path) -> None:
@@ -78,6 +89,48 @@ class LocalFilesystemStorage(StorageBackend):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "tmp").mkdir(parents=True, exist_ok=True)
+        (self.root / "locks").mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def _key_lock(self, shard: str) -> Iterator[None]:
+        """Real, OS-level mutual exclusion between `_publish()` and `delete()` for every blob
+        sharing `shard` (the same two-hex-character prefix already used for the blob directory
+        layout) -- an `fcntl.flock()` on a small, dedicated lock file, NEVER the blob itself.
+
+        Locked per SHARD, not per exact sha256: bounds the lock directory to at most 256
+        files total (one per possible two-hex-char prefix), created lazily and never removed.
+        Deliberately never deleted -- unlinking a lock file while another holder still has it
+        open would let a second, unrelated fd (and therefore a second, independent flock) get
+        created for what callers believe is "the same" lock, silently reintroducing the exact
+        race this exists to close. A per-exact-sha256 lock file would need the same
+        never-delete rule to be safe, but would then grow forever (one file per distinct
+        content hash ever uploaded, even after the blob itself is purged); reusing the
+        existing 256-way shard keeps this bounded without needing any cleanup logic at all.
+        The coarser granularity only costs unrelated same-shard keys some avoidable
+        contention, never correctness.
+
+        Always the innermost, shortest-held lock on every call path in this codebase, and its
+        critical section never touches the database -- so it can never participate in a
+        lock-ordering cycle with `acquire_storage_key_lock()`'s DB advisory lock. `delete()`
+        callers already hold that DB lock (an outer lock, held across the reference-check +
+        commit decision) before calling `delete()`, which then takes this filesystem lock only
+        around the `unlink()` itself -- DB-lock-then-fs-lock. `write_stream()`'s own use of
+        this lock happens with no DB lock held at all (content-addressing means the key isn't
+        even known until the bytes are fully hashed, so callers structurally cannot hold the DB
+        lock yet) and releases it before returning, well before any caller could go on to take
+        the DB lock -- so the reverse order (fs-lock-then-block-on-db-lock) never happens
+        anywhere, which is what would be needed for a deadlock cycle."""
+        lock_dir = self.root / "locks"
+        lock_path = lock_dir / f"{shard}.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     def _resolve(self, storage_key: str) -> Path:
         # Validated BEFORE any filesystem access, on every call — write_stream constructs
@@ -130,7 +183,8 @@ class LocalFilesystemStorage(StorageBackend):
             final_path.parent.mkdir(parents=True, exist_ok=True)
             os.chmod(tmp_path, 0o600)
 
-            self._publish(tmp_path, final_path, size, sha256_hex)
+            with self._key_lock(sha256_hex[:2]):
+                self._publish(tmp_path, final_path, size, sha256_hex)
 
             return StoredBlob(storage_key=final_key, sha256=sha256_hex, size_bytes=size)
         finally:
@@ -147,60 +201,46 @@ class LocalFilesystemStorage(StorageBackend):
         already-present file there genuinely has the right content. See this module's own
         docstring for the TOCTOU this replaces.
 
-        Loop, not a single check-then-act: `os.link()` atomically closes the "check, then
-        separately act" gap for the COMMON case, but a concurrent `delete()` can still land in
-        the narrow window between this call observing "something's already there" (the
-        `FileExistsError` branch) and it finishing the size verification -- the delete's own
-        `unlink()` and this method's `stat()` are two independent syscalls with no shared
-        lock. When that happens, `final_path.stat()` itself raises `FileNotFoundError` (the
-        `except FileNotFoundError: continue` branch), and the NEXT loop iteration's `os.link()`
-        succeeds instead (nothing is there anymore) -- this call's own tmp file becomes the
-        published blob, self-healing rather than silently returning a false success. A
-        genuinely wrong size on an existing file (a real content mismatch, not a vanished
-        file) still raises `StorageIntegrityError` immediately, exactly like before -- that is
-        never a race, corruption doesn't "come and go" between retries.
+        Pass 32: the caller (`write_stream()`) now holds `_key_lock(sha256_hex[:2])` for this
+        method's entire body, and `delete()` holds the exact same lock around its own
+        `unlink()` -- the two can never interleave anymore, so once `os.link()` fails with
+        `FileExistsError`, whatever is at `final_path` cannot vanish out from under the
+        `stat()` below before the size check completes. Pass 31's version of this method had
+        to retry in a loop specifically because no such lock existed yet; that loop is gone
+        now that real mutual exclusion makes the race it defended against structurally
+        impossible from anything this process does.
 
-        Directory fsync after linking: `os.link()`/`os.rename()` update an in-memory directory
-        entry that is not guaranteed to survive an unclean shutdown until the directory
-        itself is fsynced -- the same durability caveat that already motivated fsyncing the
-        temp file's own data above. Only done on the branch that actually changed the
-        directory (a fresh link); reusing an already-present, previously-published file has
-        nothing new to flush."""
-        for _ in range(_PUBLISH_MAX_ATTEMPTS):
-            try:
-                os.link(tmp_path, final_path)
-                _fsync_dir(final_path.parent)
-                return  # our own bytes are now durably, atomically the published blob
-            except FileExistsError:
-                pass
+        Directory fsync after linking: `os.link()` updates an in-memory directory entry that
+        is not guaranteed to survive an unclean shutdown until the directory itself is
+        fsynced -- the same durability caveat that already motivated fsyncing the temp file's
+        own data above. Only done on the branch that actually changed the directory (a fresh
+        link); reusing an already-present, previously-published file has nothing new to
+        flush."""
+        try:
+            os.link(tmp_path, final_path)
+            _fsync_dir(final_path.parent)
+            return  # our own bytes are now durably, atomically the published blob
+        except FileExistsError:
+            pass
 
-            try:
-                existing_size = final_path.stat().st_size
-            except FileNotFoundError:
-                continue  # vanished between the failed link() and this stat() -- retry link()
+        try:
+            existing_size = final_path.stat().st_size
+        except FileNotFoundError as exc:
+            # Cannot happen from anything this application does under the lock -- delete()
+            # holds the identical shard lock around its own unlink(). Only reachable via
+            # something entirely outside this process's control (e.g. manual filesystem
+            # interference on the host) -- fail loudly rather than silently guessing.
+            raise StorageError(
+                f"Blob {sha256_hex} försvann oväntat under publicering (utanför processens kontroll)."
+            ) from exc
 
-            if existing_size != size:
-                # Content-addressed dedup: identical bytes are already durably stored (by
-                # this or any other document/job) — verify the existing blob's size agrees
-                # as a cheap corruption check.
-                raise StorageIntegrityError(
-                    f"En blob med samma sha256 ({sha256_hex}) finns redan men har fel storlek — misstänkt korruption."
-                )
-
-            # Re-verify existence immediately before trusting this and returning -- shrinks
-            # (does not claim to fully eliminate; that would need a lock spanning both this
-            # call and every possible concurrent delete, which this layer deliberately does
-            # not own) the gap between "observed a matching file" and "told the caller it's
-            # safe to reference". A concurrent delete landing exactly here is caught by the
-            # next loop iteration's link() instead of by this check succeeding falsely.
-            if final_path.exists():
-                return
-            # else: fall through and retry -- link() will succeed next time since nothing is
-            # at final_path anymore.
-
-        raise StorageError(
-            f"Kunde inte publicera blob {sha256_hex} -- för många samtidiga skriv-/raderingsförsök."
-        )
+        if existing_size != size:
+            # Content-addressed dedup: identical bytes are already durably stored (by this or
+            # any other document/job) — verify the existing blob's size agrees as a cheap
+            # corruption check.
+            raise StorageIntegrityError(
+                f"En blob med samma sha256 ({sha256_hex}) finns redan men har fel storlek — misstänkt korruption."
+            )
 
     def open_read(self, storage_key: str) -> BinaryIO:
         path = self._resolve(storage_key)
@@ -221,7 +261,8 @@ class LocalFilesystemStorage(StorageBackend):
 
     def delete(self, storage_key: str) -> None:
         path = self._resolve(storage_key)
-        path.unlink(missing_ok=True)
+        with self._key_lock(storage_key[:2]):
+            path.unlink(missing_ok=True)
 
     def verify(self, storage_key: str, *, expected_sha256: str, expected_size: int | None = None) -> bool:
         try:
