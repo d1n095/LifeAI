@@ -547,6 +547,65 @@ export type AgentTaskEvent = {
 
 export type AgentTaskDetail = AgentTask & { events: AgentTaskEvent[] };
 
+// MainAI Runtime Truthfulness and Durable Job Foundation (see
+// backend/docs/MAINAI_JOB_RUNTIME.md, backend/app/models/mainai_job.py) — a durable job the
+// founder can observe/cancel/retry independently of whatever MainAI claims about its own
+// state. `owner_id` is only ever populated by the admin listing (RLS already scopes every
+// other endpoint to exactly one owner).
+export type MainAIJobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
+
+export type MainAIJob = {
+  id: string;
+  owner_id: string | null;
+  job_type: string;
+  status: MainAIJobStatus;
+  created_at: string;
+  started_at: string | null;
+  last_heartbeat_at: string | null;
+  completed_at: string | null;
+  progress_current: number;
+  progress_total: number | null;
+  current_phase: string | null;
+  public_message: string | null;
+  error_category: string | null;
+  retry_count: number;
+  max_retries: number;
+  input_refs: Record<string, unknown>[];
+  output_refs: Record<string, unknown>[];
+  provider: string | null;
+  model: string | null;
+  cancel_requested: boolean;
+  cancel_acknowledged: boolean;
+  created_by: string;
+};
+
+export type MainAIJobEvent = {
+  id: string;
+  job_id: string;
+  event_type: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+};
+
+export type MainAIJobDetail = MainAIJob & { events: MainAIJobEvent[] };
+
+export type MainAIJobProposal = {
+  id: string;
+  job_id: string;
+  source_document_id: string | null;
+  source_chunk_id: string | null;
+  proposal_type: string;
+  proposal_text: string;
+  status: "proposed" | "dismissed";
+  created_at: string;
+};
+
+// Statuses a cancel button should ever be shown for — mirrors
+// CANCELLABLE_MAINAI_JOB_STATUSES in backend/app/models/mainai_job.py. Kept here rather than
+// re-derived so the UI can never show a cancel button the API would reject.
+export const CANCELLABLE_MAINAI_JOB_STATUSES: MainAIJobStatus[] = ["queued", "running", "paused"];
+export const RETRYABLE_MAINAI_JOB_STATUSES: MainAIJobStatus[] = ["failed"];
+
 export const api = {
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
@@ -717,4 +776,15 @@ export const api = {
     request<Record<string, unknown>>(`/api/admin/agents/tasks/${id}/prepare-pr`, { method: "POST", body: JSON.stringify(payload) }),
   agentAttemptMerge: (id: string) =>
     request<{ merged: boolean; reason: string; conditions: string[] }>(`/api/admin/agents/tasks/${id}/attempt-merge`, { method: "POST" }),
+
+  // MainAI Runtime Truthfulness and Durable Job Foundation (see
+  // backend/docs/MAINAI_JOB_RUNTIME.md).
+  mainaiJobs: () => request<MainAIJob[]>("/api/mainai/jobs"),
+  mainaiJobDetail: (id: string) => request<MainAIJobDetail>(`/api/mainai/jobs/${id}`),
+  mainaiJobProposals: (id: string) => request<MainAIJobProposal[]>(`/api/mainai/jobs/${id}/proposals`),
+  mainaiCreateJob: (payload: { job_type: string; input_refs: { type: string; id: string }[]; idempotency_key?: string }) =>
+    request<MainAIJob>("/api/mainai/jobs", { method: "POST", body: JSON.stringify(payload) }),
+  mainaiCancelJob: (id: string) => request<MainAIJob>(`/api/mainai/jobs/${id}/cancel`, { method: "POST" }),
+  mainaiRetryJob: (id: string) => request<MainAIJob>(`/api/mainai/jobs/${id}/retry`, { method: "POST" }),
+  mainaiJobsAdminAll: () => request<MainAIJob[]>("/api/mainai/jobs/admin/all"),
 };
