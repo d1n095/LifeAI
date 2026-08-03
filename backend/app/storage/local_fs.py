@@ -71,6 +71,18 @@ from app.storage.base import (
 _KEY_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{64}$")
 
 
+def _hash_file(path: Path) -> str:
+    """The same incremental sha256 `verify()` already used, factored out so `_publish()`
+    (Pass 32, an eighth founder review round) can use the identical hashing logic to check an
+    already-present, same-size dedup candidate's ACTUAL content -- not just its size -- before
+    accepting it as a match for the key it sits at."""
+    hasher = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def _fsync_dir(path: Path) -> None:
     """fsyncs a directory's own metadata (its entries), not any file's contents -- see
     `_publish()`'s docstring for why a fresh `os.link()` needs this for real crash durability.
@@ -215,7 +227,24 @@ class LocalFilesystemStorage(StorageBackend):
         fsynced -- the same durability caveat that already motivated fsyncing the temp file's
         own data above. Only done on the branch that actually changed the directory (a fresh
         link); reusing an already-present, previously-published file has nothing new to
-        flush."""
+        flush.
+
+        Pass 32 (an eighth founder review round): the SAME-SIZE dedup branch below used to
+        accept an existing file purely on a size match -- a founder review correctly pointed
+        out this breaks content-addressing's own contract: a file with the right path and the
+        right size but the WRONG bytes (disk corruption, or a manual out-of-band edit) would
+        be silently treated as "the" blob for `sha256_hex`, and every future reader would get
+        back bytes that don't hash to the key they asked for. Now hashes the existing file
+        (`_hash_file()`) and, on a mismatch, REPAIRS it: `tmp_path` is this call's own
+        freshly-hashed, known-correct bytes, and this method holds the shard lock for its
+        entire body, so atomically overwriting whatever is at `final_path` with `tmp_path`
+        (`os.replace()`, not `os.link()` -- the destination already exists) is safe. Re-hashes
+        after repairing rather than trusting the overwrite blindly; a repair that still
+        doesn't match (a write error, or some other application-level bug) raises
+        `StorageIntegrityError` rather than pretending it succeeded. A genuine SIZE mismatch
+        is left exactly as before -- immediately fatal, no repair attempt -- since that shape
+        (same sha256, different length) was never expected to legitimately recur and Pass 31's
+        own tests already lock in "fail immediately, never silently heal" for it."""
         try:
             os.link(tmp_path, final_path)
             _fsync_dir(final_path.parent)
@@ -240,6 +269,19 @@ class LocalFilesystemStorage(StorageBackend):
             # corruption check.
             raise StorageIntegrityError(
                 f"En blob med samma sha256 ({sha256_hex}) finns redan men har fel storlek — misstänkt korruption."
+            )
+
+        if _hash_file(final_path) == sha256_hex:
+            return  # genuinely identical content already durably published -- true dedup
+
+        # Right path, right size, WRONG bytes -- repair from this call's own known-correct
+        # tmp_path, still under the shard lock, then verify the repair actually worked.
+        os.replace(tmp_path, final_path)
+        _fsync_dir(final_path.parent)
+        if final_path.stat().st_size != size or _hash_file(final_path) != sha256_hex:
+            raise StorageIntegrityError(
+                f"Kunde inte reparera blob {sha256_hex} -- innehållet matchar fortfarande inte "
+                f"den förväntade sha256:n efter ompublicering."
             )
 
     def open_read(self, storage_key: str) -> BinaryIO:
@@ -273,8 +315,4 @@ class LocalFilesystemStorage(StorageBackend):
             return False
         if expected_size is not None and path.stat().st_size != expected_size:
             return False
-        hasher = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest() == expected_sha256
+        return _hash_file(path) == expected_sha256

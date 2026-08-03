@@ -179,23 +179,31 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
 
     Callers MUST set `Document.storage_key` and commit while STILL holding this same `db`
     session's open transaction — the advisory lock releases at that transaction's next commit
-    or rollback, exactly like every other caller of `acquire_storage_key_lock`."""
+    or rollback, exactly like every other caller of `acquire_storage_key_lock`.
+
+    Pass 32 (an eighth founder review round): uses `storage.verify(expected_sha256=...,
+    expected_size=...)`, not `storage.exists()` — see `store_content_with_reference_lock()`'s
+    (app/rag/blob_references.py) matching docstring update for why `exists()` alone can't tell
+    a genuinely-published blob apart from a same-path file whose bytes don't actually match
+    this content's hash."""
     blob = _store_bytes(storage, content, max_bytes=max_bytes)
     acquire_storage_key_lock(db, blob.storage_key)
-    if storage.exists(blob.storage_key):
+    if storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
         return blob
 
-    # Lost the race: a concurrent purge/erasure's reference check ran (correctly, since no DB
-    # row referenced this key yet) and physically deleted it before we got here. Safe to
-    # republish now, WHILE holding the lock, so no concurrent deleter's reference check can
-    # run again until this transaction commits or rolls back.
+    # Lost the race, or the blob at this key is corrupt: a concurrent purge/erasure's
+    # reference check ran (correctly, since no DB row referenced this key yet) and physically
+    # deleted it before we got here, or the bytes now at this path don't match its own name.
+    # Safe to republish now, WHILE holding the lock, so no concurrent deleter's reference
+    # check can run again until this transaction commits or rolls back.
     logger.warning(
-        "Blob %s försvann mellan skrivning och referens-låset -- återpublicerar från minnet.", blob.storage_key
+        "Blob %s saknas eller är korrupt vid referens-låset -- återpublicerar från minnet.", blob.storage_key
     )
     blob = _store_bytes(storage, content, max_bytes=max_bytes)
-    if not storage.exists(blob.storage_key):
+    if not storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
         raise StorageError(
-            f"Kunde inte publicera blob {blob.storage_key} -- försvann direkt igen efter återpublicering."
+            f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
+            f"fortfarande inte den förväntade sha256:n efter återpublicering."
         )
     return blob
 

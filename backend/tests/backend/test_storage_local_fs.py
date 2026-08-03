@@ -467,3 +467,66 @@ def test_lock_file_count_stays_bounded_regardless_of_how_many_distinct_blobs_are
     lock_files = list((tmp_path / "locks").iterdir())
     assert len(lock_files) <= 256, f"expected at most 256 shard lock files, found {len(lock_files)}"
     assert list((tmp_path / "tmp").iterdir()) == [], "no leftover tempfiles after many distinct writes"
+
+
+# --- Pass 32 blocker 2 (an eighth founder review round): verify hash, not just size --------
+#
+# _publish()'s SAME-SIZE dedup branch used to accept an existing file purely on a size match --
+# a file with the right content-addressed path and the right size but the WRONG bytes (disk
+# corruption, or a manual out-of-band edit) would be silently treated as "the" blob for its own
+# sha256. Now hashes the existing file and, on a mismatch, repairs it from this call's own
+# known-correct tmp_path bytes (still under the shard lock), then re-verifies. Tests below are
+# the founder's own fresh lettering for this blocker; C (concurrent writers never accept a
+# corrupt existing blob) is covered by the existing two-identical-concurrent-writers test plus
+# the write/delete race test's repeated iterations (both exercise this same _publish() path);
+# F (delete/write race stays deadlock-free) is covered by the SAME pre-existing race tests --
+# no new locking was introduced by this blocker's fix, only a hash check inside an
+# already-locked critical section.
+
+
+def test_publish_repairs_a_same_size_but_corrupt_existing_blob(tmp_path):
+    """Test A (founder's Pass 32 blocker-2 lettering): a file at a content-addressed path with
+    the RIGHT size but the WRONG bytes must never be silently accepted just because its size
+    matches -- write_stream() must detect the hash mismatch and repair the file from its own
+    freshly-hashed, known-correct bytes."""
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"pass 32 blocker 2 test A: same size wrong bytes" * 5
+    blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    disk_path = tmp_path / blob.storage_key
+    corrupted = bytes(b ^ 0xFF for b in payload)
+    assert len(corrupted) == len(payload)
+    disk_path.write_bytes(corrupted)
+    assert storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes) is False
+
+    second_blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    assert second_blob.storage_key == blob.storage_key
+    assert disk_path.read_bytes() == payload  # repaired back to the correct content
+    assert storage.verify(second_blob.storage_key, expected_sha256=second_blob.sha256, expected_size=second_blob.size_bytes) is True
+
+
+def test_publish_raises_if_repairing_a_corrupt_same_size_blob_still_fails(tmp_path, monkeypatch):
+    """Test D (founder's Pass 32 blocker-2 lettering, applied at the storage layer): if even
+    the repair attempt doesn't produce matching bytes (a pathological repeat failure -- e.g. a
+    faulty disk), _publish() must raise StorageIntegrityError rather than silently accepting
+    corrupt content as if it were the real blob."""
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"pass 32 blocker 2 test D: repair itself fails" * 5
+    blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    disk_path = tmp_path / blob.storage_key
+    disk_path.write_bytes(bytes(b ^ 0xFF for b in payload))
+
+    real_replace = os.replace
+
+    def _replace_then_corrupt_again(src, dst, *a, **kw):
+        real_replace(src, dst, *a, **kw)
+        with open(dst, "r+b") as f:
+            f.seek(0)
+            f.write(b"\x00" * min(4, len(payload)))
+
+    monkeypatch.setattr(os, "replace", _replace_then_corrupt_again)
+
+    with pytest.raises(StorageIntegrityError):
+        storage.write_stream(_chunks(payload), max_bytes=10_000_000)

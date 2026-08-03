@@ -24,7 +24,12 @@ from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
 from app.providers.verification import classify_provider_exception
-from app.rag.blob_references import acquire_owner_erasure_lock, acquire_storage_key_lock, delete_if_unreferenced
+from app.rag.blob_references import (
+    acquire_owner_erasure_lock,
+    acquire_storage_key_lock,
+    delete_if_unreferenced,
+    get_storage_cleanup_ops_status,
+)
 from app.rag.library_import import maybe_purge_blob
 from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.rag.trust import assess_claim_confidence
@@ -496,6 +501,8 @@ def ops_status(db: Session = Depends(get_db), user: User = Depends(require_found
     except OSError:
         free_disk_bytes = None
 
+    storage_cleanup = get_storage_cleanup_ops_status(db)
+
     return OpsStatusOut(
         worker_reachable=worker_reachable,
         queue_length=queue_length,
@@ -505,6 +512,12 @@ def ops_status(db: Session = Depends(get_db), user: User = Depends(require_found
         storage_writable=storage_writable,
         free_disk_bytes=free_disk_bytes,
         last_heartbeat_at=last_heartbeat_at,
+        storage_cleanup_degraded=storage_cleanup.storage_cleanup_degraded,
+        storage_orphan_risk_count=storage_cleanup.storage_orphan_risk_count,
+        latest_storage_orphan_risk_at=storage_cleanup.latest_storage_orphan_risk_at,
+        pending_storage_cleanup_tasks=storage_cleanup.pending_storage_cleanup_tasks,
+        failed_storage_cleanup_tasks=storage_cleanup.failed_storage_cleanup_tasks,
+        oldest_failed_storage_cleanup_age_seconds=storage_cleanup.oldest_failed_storage_cleanup_age_seconds,
     )
 
 

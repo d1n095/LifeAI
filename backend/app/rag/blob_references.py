@@ -80,10 +80,12 @@ calling session's own search_path ever including pg_catalog implicitly (it alway
 never by an assumption this code relies on).
 """
 
+import dataclasses
 import enum
 import io
 import logging
 import uuid
+from datetime import datetime
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session, sessionmaker
@@ -492,31 +494,135 @@ def store_content_with_reference_lock(
     lock releases at that session's next commit/rollback, exactly like every other caller of
     `acquire_storage_key_lock`.
 
-    If the blob has vanished by the time the lock is acquired (the deleter above won the
-    race), republishes it from the SAME in-memory `content` bytes this call already has --
+    If the blob has vanished OR is corrupt by the time the lock is acquired (the deleter above
+    won the race, or something replaced the file at that path with the wrong bytes),
+    republishes it from the SAME in-memory `content` bytes this call already has --
     `write_stream()` is naturally idempotent for identical content (same hash -> same key), so
-    a second call safely reproduces the identical blob. If it's STILL missing immediately
-    after that republish attempt (an even rarer, pathological repeat-loss), raises
+    a second call safely reproduces the identical blob. If it's STILL missing or still corrupt
+    immediately after that republish attempt (an even rarer, pathological repeat-loss), raises
     `StorageError` rather than letting the caller commit a DB row that might reference nothing
-    -- fail closed, never a silent dangling reference."""
+    or the wrong bytes -- fail closed, never a silent dangling or corrupt reference.
+
+    Pass 32 (an eighth founder review round): uses `storage.verify(expected_sha256=...,
+    expected_size=...)` here, not `storage.exists()` -- a founder review correctly pointed out
+    that `exists()` alone can't tell a genuinely-published blob apart from a same-path file
+    whose bytes don't actually match this content's hash (disk corruption, or a manual
+    out-of-band edit at that content-addressed path). `write_stream()`'s own dedup path
+    (`LocalFilesystemStorage._publish()`) now repairs that case itself when it can, but this
+    caller-side check is the second, independent line of defense: even if the storage backend
+    somehow returned a `StoredBlob` for content that isn't ACTUALLY on disk correctly, this
+    function must not commit a DB reference to it."""
     reader = io.BytesIO(content)
     blob = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=max_bytes)
 
     acquire_storage_key_lock(db, blob.storage_key)
-    if storage.exists(blob.storage_key):
+    if storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
         return blob
 
-    # Lost the race: something else's reference check ran (and correctly found nothing, since
-    # our row didn't exist yet) and physically deleted this key before we got here. Safe to
+    # Lost the race, or the blob at this key is corrupt: either something else's reference
+    # check ran (correctly, since our row didn't exist yet) and physically deleted this key
+    # before we got here, or the bytes now at this path don't match its own name. Safe to
     # republish now, WHILE holding the lock, so no concurrent deleter's reference check can
     # run again until this transaction commits or rolls back.
     logger.warning(
-        "Blob %s försvann mellan skrivning och referens-låset -- återpublicerar från minnet.", blob.storage_key
+        "Blob %s saknas eller är korrupt vid referens-låset -- återpublicerar från minnet.", blob.storage_key
     )
     reader = io.BytesIO(content)
     blob = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=max_bytes)
-    if not storage.exists(blob.storage_key):
+    if not storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
         raise StorageError(
-            f"Kunde inte publicera blob {blob.storage_key} -- försvann direkt igen efter återpublicering."
+            f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
+            f"fortfarande inte den förväntade sha256:n efter återpublicering."
         )
     return blob
+
+
+@dataclasses.dataclass(frozen=True)
+class StorageCleanupOpsStatus:
+    """Pass 32 (an eighth founder review round): aggregated-only view of the storage cleanup
+    degradation state, for founder ops-status (app/routers/library.py's `ops_status()`) --
+    see `get_storage_cleanup_ops_status()`'s own docstring for the exact policy. NEVER carries
+    a raw storage_key or any other identifying detail -- only counts and timestamps, matching
+    `OpsStatusOut`'s existing "aggregated counts/booleans/timestamps only" contract."""
+
+    storage_cleanup_degraded: bool
+    storage_orphan_risk_count: int
+    latest_storage_orphan_risk_at: datetime | None
+    pending_storage_cleanup_tasks: int
+    failed_storage_cleanup_tasks: int
+    oldest_failed_storage_cleanup_age_seconds: float | None
+
+
+def get_storage_cleanup_ops_status(db: Session) -> StorageCleanupOpsStatus:
+    """Pass 32 (an eighth founder review round): the founder's explicit point -- writing
+    `AuditLog(action='storage_orphan_risk')` (see `_record_storage_orphan_risk_audit()` above)
+    is not, on its own, "founder ops-status can see this" -- until this function existed,
+    nothing ever read those rows back. This is the one place that does, aggregated into counts
+    a founder-only endpoint can safely expose.
+
+    Two different privilege routes, because the two tables involved have different grants:
+      - `audit_log` is readable directly on the caller's own ordinary `db` session (mainai_app
+        has ordinary SELECT there already -- see e.g. app/routers/auth.py's own direct
+        AuditLog query for login-failure rate limiting; audit_log was never narrowed the way
+        storage_deletion_tasks was).
+      - `storage_deletion_tasks` is NOT (Pass 27/28: mainai_app has ZERO direct privileges on
+        it, for any reason -- see backend/scripts/s1a_privilege_policy.py). Reads it via the
+        SAME privileged `_MaintenanceSession` this module already uses for durable-task writes.
+
+    Degradation policy (documented here since there is no UI/API to acknowledge or resolve
+    this yet -- deliberately out of scope for this pass, see the founder's own "kvitterar/
+    resolverar" instruction):
+      - `storage_orphan_risk_count`/`latest_storage_orphan_risk_at` reflect EVERY
+        `storage_orphan_risk` audit row that has ever existed -- `audit_log` is an immutable,
+        append-only trail (see that model's own docstring) with no resolution/acknowledgment
+        column, so there is currently no way to mark one of these as "handled". Any occurrence
+        at all makes `storage_cleanup_degraded` permanently True until a FUTURE deterministic
+        orphan-inventory/sweep mechanism (not built in this pass) adds a real resolution
+        marker -- a deliberate fail-towards-visibility choice, not an oversight.
+      - `pending_storage_cleanup_tasks` (status IN ('pending', 'processing')) does NOT by
+        itself drive `storage_cleanup_degraded` -- a freshly-enqueued durable retry task
+        waiting for the worker's next poll cycle is completely normal, expected, self-healing
+        operation (see `delete_if_unreferenced()`'s own docstring: "the normal, expected shape
+        of a transient I/O failure"), not a degradation.
+      - `failed_storage_cleanup_tasks` (status = 'failed') DOES drive `storage_cleanup_degraded`
+        -- unlike the audit-log case, this one IS genuinely self-resolving: once
+        `app/worker.py`'s retry loop (via `attempt_storage_deletion_task()`) succeeds for that
+        task, its status moves to `purged`/`retained_shared` and it stops being counted here,
+        so `storage_cleanup_degraded` can return to False on its own once nothing else is
+        contributing to it."""
+    audit_row = db.execute(
+        sa_text("SELECT count(*), max(created_at) FROM audit_log WHERE action = 'storage_orphan_risk'")
+    ).first()
+    storage_orphan_risk_count = int(audit_row[0]) if audit_row else 0
+    latest_storage_orphan_risk_at = audit_row[1] if audit_row else None
+
+    task_session = _MaintenanceSession()
+    try:
+        pending_storage_cleanup_tasks = int(
+            task_session.execute(
+                sa_text("SELECT count(*) FROM storage_deletion_tasks WHERE status IN ('pending', 'processing')")
+            ).scalar()
+            or 0
+        )
+        failed_row = task_session.execute(
+            sa_text(
+                "SELECT count(*), extract(epoch FROM (now() - min(created_at))) "
+                "FROM storage_deletion_tasks WHERE status = 'failed'"
+            )
+        ).first()
+    finally:
+        task_session.close()
+
+    failed_storage_cleanup_tasks = int(failed_row[0]) if failed_row else 0
+    oldest_failed_storage_cleanup_age_seconds = (
+        float(failed_row[1]) if failed_row and failed_row[1] is not None else None
+    )
+
+    return StorageCleanupOpsStatus(
+        storage_cleanup_degraded=storage_orphan_risk_count > 0 or failed_storage_cleanup_tasks > 0,
+        storage_orphan_risk_count=storage_orphan_risk_count,
+        latest_storage_orphan_risk_at=latest_storage_orphan_risk_at,
+        pending_storage_cleanup_tasks=pending_storage_cleanup_tasks,
+        failed_storage_cleanup_tasks=failed_storage_cleanup_tasks,
+        oldest_failed_storage_cleanup_age_seconds=oldest_failed_storage_cleanup_age_seconds,
+    )

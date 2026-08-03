@@ -1049,3 +1049,67 @@ async def test_two_concurrent_jobs_uploading_identical_content_both_succeed_with
         assert get_storage().exists(doc_a.storage_key) is True
     finally:
         check_db.close()
+
+
+# --- Pass 32 blocker 2 (an eighth founder review round): verify hash, not just existence -----
+#
+# store_content_with_reference_lock()/_store_bytes_with_reference_lock() used to check
+# storage.exists() after acquiring the DB storage-key lock -- a founder review pointed out this
+# can't tell a genuinely-published blob apart from a same-path file whose bytes don't actually
+# match its own sha256 (disk corruption, or a manual out-of-band edit). Both now call
+# storage.verify(expected_sha256=..., expected_size=...) instead. Tests below are the founder's
+# fresh lettering for this blocker, applied to library_import.py's own persistent-writer helper
+# (Test B, the Project Memory equivalent, lives in test_project_memory.py); E (concurrent
+# writers never accept a corrupt existing blob) and F (delete/write race stays deadlock-free)
+# are covered by test_storage_local_fs.py's existing concurrency tests, since this blocker's
+# fix added no new locking -- only a hash check inside an already-locked critical section.
+
+
+def test_store_bytes_with_reference_lock_repairs_a_corrupt_same_size_existing_blob():
+    """Test C (founder's Pass 32 blocker-2 lettering): the library_import worker's own
+    persistent-writer helper must not accept a same-path, same-size, WRONG-content existing
+    blob either -- same contract as Project Memory's store_content_with_reference_lock(), now
+    verified independently for this second persistent writer."""
+    content = f"pass 32 blocker 2 test C: library_import repairs corrupt blob {uuid.uuid4().hex}".encode()
+    storage = get_storage()
+    reader = io.BytesIO(content)
+    first = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=len(content) + 10)
+
+    disk_path = Path(get_settings().storage_root) / first.storage_key
+    corrupted = bytes(b ^ 0xFF for b in content)
+    assert len(corrupted) == len(content)
+    disk_path.write_bytes(corrupted)
+    assert storage.verify(first.storage_key, expected_sha256=first.sha256, expected_size=first.size_bytes) is False
+
+    db = SessionLocal()
+    try:
+        blob = _store_bytes_with_reference_lock(db, storage, content, max_bytes=len(content) + 10)
+        db.commit()
+    finally:
+        db.close()
+
+    assert blob.storage_key == first.storage_key
+    assert disk_path.read_bytes() == content
+    assert storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes) is True
+
+
+@pytest.mark.asyncio
+async def test_run_import_job_leaves_no_storage_key_when_verification_never_succeeds(db_session, make_verified_user, monkeypatch):
+    """Test D (founder's Pass 32 blocker-2 lettering): if storage.verify() never succeeds even
+    after republishing (a pathological repeat-corruption, simulated here by forcing verify()
+    itself to always return False -- proving the REAL write->lock->verify->republish->verify
+    code path fails closed, not just a fully-swapped fake storage backend), no
+    Document.storage_key / DB reference is ever committed."""
+    user, _ = make_verified_user(email="pass32-blocker2-d@example.com")
+    content = f"pass 32 blocker 2 test D: verification never succeeds {uuid.uuid4().hex}".encode()
+    job = _make_job(db_session, user.id, content, "testd.txt")
+
+    monkeypatch.setattr(get_storage(), "verify", lambda *a, **kw: False)
+
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    doc = db_session.query(Document).filter_by(uploaded_by=user.id, original_filename="testd.txt").first()
+    assert doc is not None
+    assert doc.status == IndexStatus.storage_failed
+    assert doc.storage_key is None

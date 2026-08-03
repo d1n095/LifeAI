@@ -992,9 +992,40 @@ def test_store_content_with_reference_lock_fails_closed_if_the_blob_is_still_mis
         def exists(self, storage_key):
             return False  # simulates the blob vanishing every single time it's checked
 
+        def verify(self, storage_key, *, expected_sha256, expected_size=None):
+            return False  # Pass 32: store_content_with_reference_lock() now calls verify(), not exists()
+
     with pytest.raises(StorageError):
         store_content_with_reference_lock(db_session, _NeverExistsStorage(), content, max_bytes=len(content) + 10)
     db_session.rollback()  # releases the storage-key lock taken before the failure
+
+
+def test_store_content_with_reference_lock_repairs_a_corrupt_same_size_existing_blob(db_session):
+    """Test B (founder's Pass 32 blocker-2 lettering): a same-path, same-size, WRONG-content
+    existing blob must not be silently accepted just because `exists()` would have said True --
+    `store_content_with_reference_lock()` now checks `storage.verify(expected_sha256=...)`, and
+    the write it always performs first (`write_stream()`) itself repairs a corrupt same-size
+    dedup candidate (see app/storage/local_fs.py's `_publish()`), so the call ends up both
+    returning AND leaving on disk the genuinely correct bytes."""
+    import io
+
+    content = f"pass 32 blocker 2 test B: project memory repairs corrupt blob {uuid.uuid4().hex}".encode()
+    storage = get_storage()
+    reader = io.BytesIO(content)
+    first = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=len(content) + 10)
+
+    disk_path = Path(get_settings().storage_root) / first.storage_key
+    corrupted = bytes(b ^ 0xFF for b in content)
+    assert len(corrupted) == len(content)
+    disk_path.write_bytes(corrupted)
+    assert storage.verify(first.storage_key, expected_sha256=first.sha256, expected_size=first.size_bytes) is False
+
+    blob = store_content_with_reference_lock(db_session, storage, content, max_bytes=len(content) + 10)
+    db_session.commit()
+
+    assert blob.storage_key == first.storage_key
+    assert disk_path.read_bytes() == content
+    assert storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes) is True
 
 
 def test_ingest_doc_never_leaves_a_dangling_project_source_under_a_real_concurrent_purge(tmp_path, monkeypatch):

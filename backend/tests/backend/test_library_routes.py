@@ -777,3 +777,180 @@ def test_empty_upload_never_creates_an_import_job(client, superuser_db):
 
     superuser_db.expire_all()
     assert superuser_db.query(ImportJob).count() == before
+
+
+# --- Pass 32 blocker 1 (an eighth founder review round): storage_orphan_risk in ops-status ---
+#
+# _record_storage_orphan_risk_audit() (app/rag/blob_references.py) writes a durable AuditLog
+# row, but nothing ever read it back -- founder ops-status still only showed worker/queue
+# health, with zero signal that a blob may need a manual storage sweep. GET /api/library/
+# ops/status now also surfaces get_storage_cleanup_ops_status()'s aggregated view. Test A
+# (failed_not_queued creates the audit row in the first place) is covered end to end in
+# test_source_purge.py's test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_
+# log_and_an_audit_row -- the tests below focus on what THIS blocker actually required: that
+# ops-status reads it back correctly.
+
+
+def test_ops_status_shows_degraded_when_a_storage_orphan_risk_audit_row_exists(client, superuser_db):
+    """Test B (founder's Pass 32 blocker-1 lettering)."""
+    from datetime import datetime
+
+    from app.models.audit import AuditLog
+
+    superuser_db.add(
+        AuditLog(
+            user_id=None,
+            action="storage_orphan_risk",
+            entity_type="storage_key",
+            entity_id="ab" * 32,
+            detail="pass 32 blocker 1 test B: simulated orphan risk",
+        )
+    )
+    superuser_db.commit()
+
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert body["storage_cleanup_degraded"] is True
+    assert body["storage_orphan_risk_count"] >= 1
+    assert body["latest_storage_orphan_risk_at"] is not None
+    # Sanity: the timestamp really is recent, not some stale/default value.
+    latest = datetime.fromisoformat(body["latest_storage_orphan_risk_at"].replace("Z", "+00:00"))
+    assert (datetime.now(latest.tzinfo) - latest).total_seconds() < 60
+
+
+def test_ops_status_never_exposes_a_raw_storage_key(client, superuser_db):
+    """Test C (founder's Pass 32 blocker-1 lettering): ops-status must show that manual action
+    may be needed WITHOUT ever leaking the actual storage_key -- OpsStatusOut only has counts/
+    timestamps/booleans, never an entity_id/storage_key field."""
+    from app.models.audit import AuditLog
+
+    secret_key = "cd" * 32
+    superuser_db.add(
+        AuditLog(
+            user_id=None,
+            action="storage_orphan_risk",
+            entity_type="storage_key",
+            entity_id=secret_key,
+            detail=f"pass 32 blocker 1 test C: entity_id={secret_key}",
+        )
+    )
+    superuser_db.commit()
+
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    assert secret_key not in res.text
+    assert set(res.json().keys()).isdisjoint({"storage_key", "entity_id", "storage_orphan_risk_keys"})
+
+
+def test_ops_status_shows_not_degraded_under_normal_operation(client):
+    """Test D (founder's Pass 32 blocker-1 lettering): a clean system (no orphan-risk audit
+    rows, no failed storage-cleanup tasks) must report degraded=False -- this is the ordinary,
+    expected state, not something a founder should ever have to double-check."""
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert body["storage_cleanup_degraded"] is False
+    assert body["storage_orphan_risk_count"] == 0
+    assert body["latest_storage_orphan_risk_at"] is None
+    assert body["failed_storage_cleanup_tasks"] == 0
+    assert body["oldest_failed_storage_cleanup_age_seconds"] is None
+
+
+def test_ops_status_counts_pending_and_failed_storage_cleanup_tasks_correctly(client, superuser_db):
+    """Test E (founder's Pass 32 blocker-1 lettering): pending/processing tasks are counted
+    separately from failed ones, and a pending/processing-only backlog does NOT itself flip
+    storage_cleanup_degraded -- see get_storage_cleanup_ops_status()'s own docstring for why
+    (an enqueued durable retry waiting for the worker's next poll is normal operation)."""
+    from sqlalchemy import text as sa_text
+
+    for status in ("pending", "pending", "processing"):
+        superuser_db.execute(
+            sa_text(
+                "INSERT INTO storage_deletion_tasks (id, operation_id, storage_key, status) "
+                "VALUES (gen_random_uuid(), gen_random_uuid(), :key, :status)"
+            ),
+            {"key": f"pass32-b1-teste-{status}-{uuid.uuid4().hex}", "status": status},
+        )
+    for _ in range(3):
+        superuser_db.execute(
+            sa_text(
+                "INSERT INTO storage_deletion_tasks (id, operation_id, storage_key, status) "
+                "VALUES (gen_random_uuid(), gen_random_uuid(), :key, 'failed')"
+            ),
+            {"key": f"pass32-b1-teste-failed-{uuid.uuid4().hex}"},
+        )
+    superuser_db.commit()
+
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert body["pending_storage_cleanup_tasks"] == 3  # 2 pending + 1 processing
+    assert body["failed_storage_cleanup_tasks"] == 3
+    assert body["oldest_failed_storage_cleanup_age_seconds"] is not None
+    assert body["oldest_failed_storage_cleanup_age_seconds"] >= 0
+    assert body["storage_cleanup_degraded"] is True  # driven by the failed tasks, not the pending ones
+
+
+def test_ops_status_degraded_flag_resolves_for_tasks_but_not_for_audit_log_risk(client, superuser_db):
+    """Test F (founder's Pass 32 blocker-1 lettering): the two halves of `storage_cleanup_
+    degraded` behave differently by design -- a failed storage_deletion_tasks row genuinely
+    self-resolves once the worker's retry succeeds (status moves to purged/retained_shared),
+    but a storage_orphan_risk AuditLog row (audit_log is immutable/append-only, see that
+    model's own docstring) currently has no resolution mechanism at all and stays degraded
+    forever once it exists -- documented, deliberate, and proven here rather than silently
+    assumed."""
+    from sqlalchemy import text as sa_text
+
+    _login(client)
+    baseline = client.get("/api/library/ops/status").json()
+    assert baseline["storage_cleanup_degraded"] is False
+
+    task_key = f"pass32-b1-testf-{uuid.uuid4().hex}"
+    superuser_db.execute(
+        sa_text(
+            "INSERT INTO storage_deletion_tasks (id, operation_id, storage_key, status) "
+            "VALUES (gen_random_uuid(), gen_random_uuid(), :key, 'failed')"
+        ),
+        {"key": task_key},
+    )
+    superuser_db.commit()
+
+    degraded_from_task = client.get("/api/library/ops/status").json()
+    assert degraded_from_task["storage_cleanup_degraded"] is True
+
+    # The worker's retry loop succeeded -- this task is now resolved.
+    superuser_db.execute(
+        sa_text("UPDATE storage_deletion_tasks SET status = 'purged' WHERE storage_key = :key"),
+        {"key": task_key},
+    )
+    superuser_db.commit()
+
+    resolved = client.get("/api/library/ops/status").json()
+    assert resolved["storage_cleanup_degraded"] is False, "a resolved (purged) task must stop counting as degraded"
+
+    # Now the audit-log side: this one does NOT self-resolve, by design.
+    from app.models.audit import AuditLog
+
+    superuser_db.add(
+        AuditLog(
+            user_id=None,
+            action="storage_orphan_risk",
+            entity_type="storage_key",
+            entity_id="ef" * 32,
+            detail="pass 32 blocker 1 test F: audit-log risk never self-resolves",
+        )
+    )
+    superuser_db.commit()
+
+    degraded_from_audit = client.get("/api/library/ops/status").json()
+    assert degraded_from_audit["storage_cleanup_degraded"] is True
+    # No amount of task-table cleanup can clear this -- there is nothing to update; the audit
+    # row itself is immutable. This is the documented, current limitation, not a bug.

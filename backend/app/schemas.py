@@ -429,6 +429,19 @@ class OpsStatusOut(BaseModel):
     storage_writable: bool
     free_disk_bytes: int | None
     last_heartbeat_at: datetime | None
+    # Pass 32 (an eighth founder review round): a durable AuditLog(action='storage_orphan_
+    # risk') row on its own is not "founder ops-status can see this" -- these fields are what
+    # actually surfaces it here. See app/rag/blob_references.py's
+    # get_storage_cleanup_ops_status() for the exact degradation policy (in particular: why
+    # storage_orphan_risk_count never self-clears yet, while failed_storage_cleanup_tasks
+    # does). Deliberately never a raw storage_key -- counts and timestamps only, same
+    # "aggregated only" contract as every other field on this model.
+    storage_cleanup_degraded: bool
+    storage_orphan_risk_count: int
+    latest_storage_orphan_risk_at: datetime | None
+    pending_storage_cleanup_tasks: int
+    failed_storage_cleanup_tasks: int
+    oldest_failed_storage_cleanup_age_seconds: float | None
 
 
 class LibrarySearchHit(BaseModel):
