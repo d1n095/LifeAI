@@ -37,12 +37,17 @@ from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
+from app.jobs.mainai_job_lease import claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.provider_verification import VerificationResult
 from app.providers.verification import ensure_verified
+from app.rag.corpus_review_job import run_corpus_review_job
 from app.rag.library_import import run_import_job
+from app.rag.mainai_jobs_service import mark_failed, record_claimed
+from app.request_context import current_user_id
 from app.rag.zip_import import ZipSecurityError
 
 logger = logging.getLogger("mainai.worker")
@@ -97,6 +102,41 @@ async def process_claimed_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUI
             db.add(job)
             db.commit()
             return
+
+
+def _set_mainai_job_rls_owner(db: Session, owner_id: uuid.UUID) -> None:
+    """Same requirement and same fix as app/rag/library_import.py's `_set_rls_owner` (see
+    that function's own docstring for the full reasoning): the worker's fresh session never
+    goes through app/deps.py's get_current_user, and run_corpus_review_job makes several
+    separate db.commit() calls as it progresses through documents, each ending the current
+    transaction — so the RLS-owner contextvar must be set, not just the raw session
+    variable, for every later commit's next transaction to stay correctly scoped."""
+    current_user_id.set(str(owner_id))
+    db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
+
+
+async def process_claimed_mainai_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, worker_id: str, lease_seconds: int) -> None:
+    """Dispatches an already-claimed `mainai_jobs` row to its job_type's own processing
+    function — today only `corpus_review` (app/rag/corpus_review_job.py). That function is
+    responsible for its own terminal state transitions (completed/failed/cancelled) via
+    app/rag/mainai_jobs_service.py; this wrapper exists only to catch anything that escapes
+    it unexpectedly (a bug, not a designed failure path) and still leave the job in a
+    terminal, truthful state rather than stuck `running` forever with a dead claim."""
+    _set_mainai_job_rls_owner(db, owner_id)
+    job = db.get(MainAIJob, job_id, populate_existing=True)
+    try:
+        if job is not None and job.job_type == "corpus_review":
+            record_claimed(db, job, worker_id=worker_id)
+            await run_corpus_review_job(db, job_id, owner_id, worker_id=worker_id, lease_seconds=lease_seconds)
+        elif job is not None:
+            logger.error("Worker %s: mainai_job %s has unknown job_type '%s'.", worker_id, job_id, job.job_type)
+            mark_failed(db, job, error_category=MainAIJobErrorCategory.unexpected)
+    except Exception:  # noqa: BLE001 - the job row is the only place this failure can safely surface
+        logger.exception("Worker %s: unexpected error processing mainai_job %s.", worker_id, job_id)
+        db.rollback()
+        job = db.get(MainAIJob, job_id)
+        if job is not None:
+            mark_failed(db, job, error_category=MainAIJobErrorCategory.unexpected)
 
 
 class Worker:
@@ -211,24 +251,43 @@ class Worker:
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
-        two different sessions/connections — see _ClaimSession's module-level comment."""
+        two different sessions/connections — see _ClaimSession's module-level comment.
+
+        Tries `knowledge_import_jobs` first, then `mainai_jobs` — one shared poll loop
+        servicing both queues (the founder's explicit "reuse the existing architecture"
+        instruction), not a second worker process. Each poll cycle claims and fully processes
+        AT MOST ONE job total across both queues, matching worker_concurrency's existing
+        single-job-at-a-time budget."""
         claim_db = _ClaimSession()
         try:
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
+            mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
             claim_db.close()
-        if claimed is None:
-            return False
-        job_id, owner_id = claimed
-        logger.info("Worker %s: hämtade jobb %s.", self.worker_id, job_id)
-        db = SessionLocal()
-        try:
-            await process_claimed_job(db, job_id, owner_id)
-        finally:
-            db.close()
-        return True
+
+        if claimed is not None:
+            job_id, owner_id = claimed
+            logger.info("Worker %s: hämtade jobb %s.", self.worker_id, job_id)
+            db = SessionLocal()
+            try:
+                await process_claimed_job(db, job_id, owner_id)
+            finally:
+                db.close()
+            return True
+
+        if mainai_claimed is not None:
+            job_id, owner_id = mainai_claimed
+            logger.info("Worker %s: hämtade mainai_job %s.", self.worker_id, job_id)
+            db = SessionLocal()
+            try:
+                await process_claimed_mainai_job(db, job_id, owner_id, self.worker_id, self.settings.worker_lease_seconds)
+            finally:
+                db.close()
+            return True
+
+        return False
 
     async def run(self) -> None:
         logger.info(
