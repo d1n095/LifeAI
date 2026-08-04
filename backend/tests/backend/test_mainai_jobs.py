@@ -687,3 +687,305 @@ def test_api_admin_all_lists_jobs_across_owners(client, db_session, make_verifie
     assert res.status_code == 200
     owner_ids = {j["owner_id"] for j in res.json()}
     assert len(owner_ids) >= 2
+
+
+# --- J: composite owner FK integrity (migration 0026 — founder review correction round) ------
+# The attack this closes: owner A knows owner B's job_id (job IDs aren't secret — they appear
+# in URLs). Before migration 0026, mainai_job_events/mainai_job_proposals had two
+# *independent* FKs (job_id -> mainai_jobs.id, owner_id -> users.id) with nothing tying them
+# together, so A could INSERT a row with owner_id=A (passes RLS's WITH CHECK, since it's A's
+# own session) but job_id = B's job — a row visible to A that claims to be about B's job.
+# mainai_jobs.UNIQUE(id, owner_id) + the child tables' composite FK closes exactly that gap:
+# the (job_id, owner_id) pair itself now has to be a real row in mainai_jobs.
+
+
+def test_mainai_job_events_composite_fk_rejects_owner_mismatch(db_session, superuser_db, make_verified_user):
+    attacker, _ = make_verified_user()
+    victim, _ = make_verified_user()
+    victim_doc = _make_indexed_document(db_session, victim.id)
+    _set_rls_user(db_session, victim.id)
+    victim_job = service.create_job(
+        db_session, owner_id=victim.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(victim_doc.id)}], created_by="founder"
+    )
+
+    # Attacker's own RLS context (owner_id=attacker passes WITH CHECK) but job_id points at
+    # the victim's job — must be rejected by the composite FK, not silently accepted.
+    _set_rls_user(db_session, attacker.id)
+    with pytest.raises(Exception):
+        db_session.execute(
+            sa_text(
+                "INSERT INTO mainai_job_events (id, job_id, owner_id, event_type, detail, created_at) "
+                "VALUES (gen_random_uuid(), :job_id, :owner_id, 'created', '{}'::jsonb, now())"
+            ),
+            {"job_id": str(victim_job.id), "owner_id": str(attacker.id)},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+    count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE owner_id = :o"), {"o": str(attacker.id)}).scalar()
+    assert count == 0
+
+
+def test_mainai_job_events_composite_fk_accepts_matching_owner(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+
+    db_session.execute(
+        sa_text(
+            "INSERT INTO mainai_job_events (id, job_id, owner_id, event_type, detail, created_at) "
+            "VALUES (gen_random_uuid(), :job_id, :owner_id, 'heartbeat', '{}'::jsonb, now())"
+        ),
+        {"job_id": str(job.id), "owner_id": str(user.id)},
+    )
+    db_session.commit()
+
+    count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j AND event_type = 'heartbeat'"), {"j": str(job.id)}).scalar()
+    assert count == 1
+
+
+def test_mainai_job_proposals_composite_fk_rejects_owner_mismatch(db_session, superuser_db, make_verified_user):
+    attacker, _ = make_verified_user()
+    victim, _ = make_verified_user()
+    victim_doc = _make_indexed_document(db_session, victim.id)
+    _set_rls_user(db_session, victim.id)
+    victim_job = service.create_job(
+        db_session, owner_id=victim.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(victim_doc.id)}], created_by="founder"
+    )
+
+    _set_rls_user(db_session, attacker.id)
+    with pytest.raises(Exception):
+        db_session.execute(
+            sa_text(
+                "INSERT INTO mainai_job_proposals (id, job_id, owner_id, proposal_type, proposal_text, status, created_at) "
+                "VALUES (gen_random_uuid(), :job_id, :owner_id, 'review_finding', 'planted', 'proposed', now())"
+            ),
+            {"job_id": str(victim_job.id), "owner_id": str(attacker.id)},
+        )
+        db_session.commit()
+    db_session.rollback()
+
+    count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE owner_id = :o"), {"o": str(attacker.id)}).scalar()
+    assert count == 0
+
+
+def test_mainai_job_proposals_composite_fk_accepts_matching_owner(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+
+    db_session.execute(
+        sa_text(
+            "INSERT INTO mainai_job_proposals (id, job_id, owner_id, proposal_type, proposal_text, status, created_at) "
+            "VALUES (gen_random_uuid(), :job_id, :owner_id, 'review_finding', 'legit', 'proposed', now())"
+        ),
+        {"job_id": str(job.id), "owner_id": str(user.id)},
+    )
+    db_session.commit()
+
+    count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+    assert count == 1
+
+
+# --- K: DB-enforced append-only event log (migration 0026) -----------------------------------
+
+
+def test_mainai_job_events_mainai_app_lacks_update_delete_privilege(db_session, superuser_db, make_verified_user):
+    """mainai_app must not even reach the trigger for UPDATE/DELETE on mainai_job_events —
+    the grant itself is gone (see migration 0026's REVOKE), not just trigger-blocked."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    event_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_events WHERE job_id = :j LIMIT 1"), {"j": str(job.id)}).scalar()
+
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("UPDATE mainai_job_events SET event_type = 'heartbeat' WHERE id = :i"), {"i": str(event_id)})
+        db_session.commit()
+    db_session.rollback()
+
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("DELETE FROM mainai_job_events WHERE id = :i"), {"i": str(event_id)})
+        db_session.commit()
+    db_session.rollback()
+
+    row = superuser_db.execute(sa_text("SELECT event_type FROM mainai_job_events WHERE id = :i"), {"i": str(event_id)}).first()
+    assert row is not None and row[0] == "created"
+
+
+def test_mainai_job_events_trigger_denies_update_even_for_a_privileged_connection(db_session, superuser_db, make_verified_user):
+    """The append-only guarantee isn't just a grant — the BEFORE UPDATE trigger denies it
+    unconditionally, even for the superuser/migration connection (which otherwise bypasses
+    RLS and holds every ordinary privilege)."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    event_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_events WHERE job_id = :j LIMIT 1"), {"j": str(job.id)}).scalar()
+
+    with pytest.raises(Exception):
+        superuser_db.execute(sa_text("UPDATE mainai_job_events SET event_type = 'heartbeat' WHERE id = :i"), {"i": str(event_id)})
+        superuser_db.commit()
+    superuser_db.rollback()
+
+
+def test_mainai_job_events_trigger_denies_delete_without_the_erasure_flag(superuser_db, db_session, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    event_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_events WHERE job_id = :j LIMIT 1"), {"j": str(job.id)}).scalar()
+
+    with pytest.raises(Exception):
+        superuser_db.execute(sa_text("DELETE FROM mainai_job_events WHERE id = :i"), {"i": str(event_id)})
+        superuser_db.commit()
+    superuser_db.rollback()
+
+    row = superuser_db.execute(sa_text("SELECT 1 FROM mainai_job_events WHERE id = :i"), {"i": str(event_id)}).first()
+    assert row is not None
+
+
+# --- L: proposal immutability except the single proposed -> dismissed transition -------------
+
+
+def test_mainai_job_proposals_allows_only_the_proposed_to_dismissed_transition(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    db_session.add(MainAIJobProposal(job_id=job.id, owner_id=user.id, proposal_type="review_finding", proposal_text="original"))
+    db_session.commit()
+    proposal_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+
+    db_session.execute(sa_text("UPDATE mainai_job_proposals SET status = 'dismissed' WHERE id = :i"), {"i": str(proposal_id)})
+    db_session.commit()
+
+    status = superuser_db.execute(sa_text("SELECT status FROM mainai_job_proposals WHERE id = :i"), {"i": str(proposal_id)}).scalar()
+    assert status == "dismissed"
+
+
+def test_mainai_job_proposals_rejects_the_reverse_transition(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    db_session.add(MainAIJobProposal(job_id=job.id, owner_id=user.id, proposal_type="review_finding", proposal_text="original"))
+    db_session.commit()
+    proposal_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+    db_session.execute(sa_text("UPDATE mainai_job_proposals SET status = 'dismissed' WHERE id = :i"), {"i": str(proposal_id)})
+    db_session.commit()
+
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("UPDATE mainai_job_proposals SET status = 'proposed' WHERE id = :i"), {"i": str(proposal_id)})
+        db_session.commit()
+    db_session.rollback()
+
+    status = superuser_db.execute(sa_text("SELECT status FROM mainai_job_proposals WHERE id = :i"), {"i": str(proposal_id)}).scalar()
+    assert status == "dismissed"
+
+
+def test_mainai_job_proposals_rejects_editing_proposal_text(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    db_session.add(MainAIJobProposal(job_id=job.id, owner_id=user.id, proposal_type="review_finding", proposal_text="original"))
+    db_session.commit()
+    proposal_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("UPDATE mainai_job_proposals SET proposal_text = 'tampered' WHERE id = :i"), {"i": str(proposal_id)})
+        db_session.commit()
+    db_session.rollback()
+
+    text_value = superuser_db.execute(sa_text("SELECT proposal_text FROM mainai_job_proposals WHERE id = :i"), {"i": str(proposal_id)}).scalar()
+    assert text_value == "original"
+
+
+def test_mainai_job_proposals_mainai_app_lacks_delete_privilege(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    db_session.add(MainAIJobProposal(job_id=job.id, owner_id=user.id, proposal_type="review_finding", proposal_text="x"))
+    db_session.commit()
+    proposal_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("DELETE FROM mainai_job_proposals WHERE id = :i"), {"i": str(proposal_id)})
+        db_session.commit()
+    db_session.rollback()
+
+    row = superuser_db.execute(sa_text("SELECT 1 FROM mainai_job_proposals WHERE id = :i"), {"i": str(proposal_id)}).first()
+    assert row is not None
+
+
+# --- M: erase_mainai_job_children_for_owner() — the only legitimate deletion path -------------
+
+
+def test_erase_mainai_job_children_for_owner_removes_only_that_owners_rows(db_session, superuser_db, make_verified_user):
+    owner, _ = make_verified_user()
+    other, _ = make_verified_user()
+    owner_doc = _make_indexed_document(db_session, owner.id)
+    other_doc = _make_indexed_document(db_session, other.id)
+    _set_rls_user(db_session, owner.id)
+    owner_job = service.create_job(db_session, owner_id=owner.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(owner_doc.id)}], created_by="founder")
+    db_session.add(MainAIJobProposal(job_id=owner_job.id, owner_id=owner.id, proposal_type="review_finding", proposal_text="x"))
+    db_session.commit()
+
+    _set_rls_user(db_session, other.id)
+    other_job = service.create_job(db_session, owner_id=other.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(other_doc.id)}], created_by="founder")
+    db_session.add(MainAIJobProposal(job_id=other_job.id, owner_id=other.id, proposal_type="review_finding", proposal_text="y"))
+    db_session.commit()
+
+    superuser_db.execute(sa_text("SELECT erase_mainai_job_children_for_owner(:o)"), {"o": str(owner.id)})
+    superuser_db.commit()
+
+    owner_events = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE owner_id = :o"), {"o": str(owner.id)}).scalar()
+    owner_proposals = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE owner_id = :o"), {"o": str(owner.id)}).scalar()
+    other_events = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE owner_id = :o"), {"o": str(other.id)}).scalar()
+    other_proposals = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE owner_id = :o"), {"o": str(other.id)}).scalar()
+    assert owner_events == 0
+    assert owner_proposals == 0
+    assert other_events > 0
+    assert other_proposals == 1
+
+
+def test_mainai_app_can_execute_the_erasure_function(db_session, superuser_db, make_verified_user):
+    """The function itself is what account.py's delete_account() calls, running as mainai_app
+    — not the superuser/migration connection — so mainai_app must actually hold EXECUTE."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+
+    db_session.execute(sa_text("SELECT erase_mainai_job_children_for_owner(:o)"), {"o": str(user.id)})
+    db_session.commit()
+
+    remaining = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+    assert remaining == 0
+
+
+# --- N: account erasure actually removes mainai job data ------------------------------------
+
+
+def test_account_deletion_removes_mainai_job_data(client, db_session, superuser_db, make_verified_user):
+    from app.founder import FOUNDER_USER_ID
+
+    doc = _make_indexed_document(db_session, FOUNDER_USER_ID)
+    _set_rls_user(db_session, FOUNDER_USER_ID)
+    job = service.create_job(
+        db_session, owner_id=FOUNDER_USER_ID, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder"
+    )
+    db_session.add(MainAIJobProposal(job_id=job.id, owner_id=FOUNDER_USER_ID, proposal_type="review_finding", proposal_text="x"))
+    db_session.commit()
+
+    csrf = _login(client)
+    res = client.request("DELETE", "/api/account", json={"password": FOUNDER_PASSWORD}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+
+    assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).scalar() == 0
+    assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j"), {"j": str(job.id)}).scalar() == 0
+    assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar() == 0
