@@ -21,7 +21,7 @@ import sys
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from app.db import migration_engine
 
@@ -40,24 +40,46 @@ def _revision_count() -> int:
 
 
 def _schema_snapshot() -> dict:
-    """Whole-schema fingerprint: every table's column set plus every native enum type's
-    label set, keyed by table/type name. Anything a migration touches (new table, new
-    column, dropped column, an ADD VALUE on an existing enum like migration 0011's) shows up
-    here without this test needing to know which migration or which table in advance. Enum
-    labels are included alongside columns because a migration can be purely additive at the
-    enum level (no new/changed columns at all) — Postgres's ALTER TYPE ... ADD VALUE is
-    exactly that shape, and a snapshot of column names alone would never notice it ran.
-    Excludes `alembic_version` itself — Alembic's own bookkeeping table, which legitimately
-    survives a `downgrade base` (it just ends up empty), not application schema."""
+    """Whole-schema fingerprint: every table's column set, every native enum type's label
+    set, every table's constraint names (PK/FK/unique/check), and every trigger name, keyed
+    by table/type name. Anything a migration touches (new table, new column, dropped column,
+    an ADD VALUE on an existing enum like migration 0011's, a new composite FK or trigger like
+    migration 0026's) shows up here without this test needing to know which migration or which
+    table in advance. Enum labels are included alongside columns because a migration can be
+    purely additive at the enum level (no new/changed columns at all) — Postgres's
+    ALTER TYPE ... ADD VALUE is exactly that shape, and a snapshot of column names alone would
+    never notice it ran. Constraints and triggers are included for the same reason: migration
+    0026 (MainAI job integrity/append-only enforcement) is purely constraint/trigger/function/
+    privilege-level — it adds zero columns, zero tables, zero enum labels — so a column-and-
+    enum-only snapshot would see `downgrade -1` as a silent no-op even though it genuinely
+    drops two composite FKs, a UNIQUE constraint, two triggers, and two functions. Excludes
+    `alembic_version` itself — Alembic's own bookkeeping table, which legitimately survives a
+    `downgrade base` (it just ends up empty), not application schema."""
     migration_engine.dispose()  # drop pooled connections so the inspector sees the current schema, not a stale cached one
     inspector = inspect(migration_engine)
-    snapshot = {
-        table: frozenset(col["name"] for col in inspector.get_columns(table))
-        for table in inspector.get_table_names()
-        if table != "alembic_version"
-    }
+    tables = [t for t in inspector.get_table_names() if t != "alembic_version"]
+    snapshot = {table: frozenset(col["name"] for col in inspector.get_columns(table)) for table in tables}
     for enum in inspector.get_enums():
         snapshot[f"enum:{enum['name']}"] = frozenset(enum["labels"])
+    for table in tables:
+        constraint_names = set()
+        pk = inspector.get_pk_constraint(table)
+        if pk.get("name"):
+            constraint_names.add(pk["name"])
+        constraint_names.update(fk["name"] for fk in inspector.get_foreign_keys(table) if fk.get("name"))
+        constraint_names.update(uc["name"] for uc in inspector.get_unique_constraints(table) if uc.get("name"))
+        constraint_names.update(ck["name"] for ck in inspector.get_check_constraints(table) if ck.get("name"))
+        if constraint_names:
+            snapshot[f"constraints:{table}"] = frozenset(constraint_names)
+    with migration_engine.connect() as conn:
+        trigger_rows = conn.execute(
+            text("SELECT event_object_table, trigger_name FROM information_schema.triggers")
+        ).all()
+    triggers_by_table: dict[str, set[str]] = {}
+    for table_name, trigger_name in trigger_rows:
+        triggers_by_table.setdefault(table_name, set()).add(trigger_name)
+    for table_name, names in triggers_by_table.items():
+        snapshot[f"triggers:{table_name}"] = frozenset(names)
     return snapshot
 
 
