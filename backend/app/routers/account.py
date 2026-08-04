@@ -2,7 +2,7 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("mainai.account")
@@ -19,6 +19,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.import_job import ImportJob
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.mainai_job import MainAIJob
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.refresh_token import RefreshToken
@@ -253,6 +254,16 @@ def delete_account(
             ).delete(synchronize_session=False)
             db.query(Document).filter_by(uploaded_by=user_id).delete(synchronize_session=False)
         db.query(ImportJob).filter_by(owner_id=user_id).delete(synchronize_session=False)
+
+        # MainAI Runtime Truthfulness and Durable Job Foundation (migration 0025/0026, see
+        # docs/MAINAI_JOB_RUNTIME.md): mainai_job_events/mainai_job_proposals are append-only
+        # at the DB level — mainai_app has no DELETE privilege on them at all, only EXECUTE on
+        # this narrow SECURITY DEFINER function, which is the sole path that ever removes
+        # those rows. Children first (their own composite FK requires the parent mainai_jobs
+        # row to still exist), THEN the parent — never relying on the FK's ON DELETE CASCADE
+        # for this, same explicit-delete convention as every table above.
+        db.execute(text("SELECT erase_mainai_job_children_for_owner(:owner_id)"), {"owner_id": str(user_id)})
+        db.query(MainAIJob).filter_by(owner_id=user_id).delete(synchronize_session=False)
 
         db.query(UsageLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
