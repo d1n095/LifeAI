@@ -142,3 +142,30 @@ def apply_rls(engine: Engine) -> None:
                     f"USING ({policy['expr']}) WITH CHECK ({policy['expr']})"
                 )
             )
+
+
+# mainai_job_events/mainai_job_proposals' append-only guarantees (migration 0026) depend on
+# mainai_app NOT holding UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER on them — but
+# scripts/ensure_app_role.py unconditionally re-runs `GRANT ALL PRIVILEGES ON ALL TABLES IN
+# SCHEMA public TO mainai_app` on EVERY container boot, before Alembic even runs (see that
+# script's docstring, and the Pass 12 boot-persistence incident in docs/BRANCH_REGISTRY.md
+# for the exact same class of bug: a REVOKE applied once, at migration time, is silently
+# undone by the next restart, because a normal restart has nothing new for Alembic to apply
+# and so never re-runs migration 0026's REVOKE statements). This function re-asserts the
+# lockdown on every boot, unconditionally and idempotently — REVOKE/GRANT are both no-ops if
+# already in the desired state, so this is cheap and safe to call every time.
+_MAINAI_JOB_RUNTIME_PRIVILEGE_STATEMENTS = [
+    "REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_events FROM mainai_app",
+    "REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_proposals FROM mainai_app",
+    "GRANT EXECUTE ON FUNCTION erase_mainai_job_children_for_owner(uuid) TO mainai_app",
+]
+
+
+def apply_mainai_job_runtime_privileges(engine: Engine) -> None:
+    """Idempotently re-locks down mainai_job_events/mainai_job_proposals on every boot — see
+    module-level comment above and migration 0026's own docstring for the full threat this
+    guards against. Call this AFTER apply_rls() on every startup (see app/main.py), same
+    idempotent-every-boot discipline apply_rls() itself already uses for RLS policies."""
+    with engine.begin() as conn:
+        for statement in _MAINAI_JOB_RUNTIME_PRIVILEGE_STATEMENTS:
+            conn.execute(text(statement))
