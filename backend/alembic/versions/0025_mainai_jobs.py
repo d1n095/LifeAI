@@ -48,9 +48,13 @@ NOTE: this branch (claude/mainai-job-runtime-foundation) is built from the base 
 (claude/det-kommer-mer-879lcm), whose migration head is `0018` — NOT the S1A slice's `0024`
 (that work lives entirely on the still-unmerged PR #31 branch). `down_revision` points at
 `0018` deliberately, matching this branch's real base; the `0025` id itself was chosen to stay
-clear of `0019`-`0024`'s number range so a future rebase/merge with PR #31 has an unambiguous,
-easy-to-eyeball ordering question to resolve explicitly, rather than two different migrations
-silently claiming the same number.
+clear of `0019`-`0024`'s number range purely so the two chains are easy to eyeball as distinct
+during review — it does NOT make them independently mergeable. If both this branch and PR #31
+merge as-is, the result is two divergent Alembic heads off `0018`. This branch's chain must be
+rebased onto PR #31's actual final revision (this migration's `down_revision` updated from
+`0018` accordingly) BEFORE this branch is opened as a PR — see docs/MAINAI_JOB_RUNTIME.md's
+"Relationship to PR #31" section for the full explanation. Do not treat this numbering choice
+as proof the two branches can be reviewed or merged in either order.
 """
 
 from alembic import op

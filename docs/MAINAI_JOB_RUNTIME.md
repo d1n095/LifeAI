@@ -5,16 +5,25 @@ Branch: `claude/mainai-job-runtime-foundation` (based on `claude/det-kommer-mer-
 
 ## Why this exists
 
-MainAI must never be able to claim it "started" or "is working" on something unless a real,
-durable, independently-observable row exists — one a human (or an automated recovery pass)
-can query, cancel, and see fail or complete on its own, without trusting MainAI's own claim
-about its own state. Before this branch, nothing in the codebase enforced that: an agent loop
-could say "I am reading your documents now" and mean nothing more than an in-flight HTTP
-request with no persisted trace if the process died mid-sentence.
+**Goal, not yet a system-wide guarantee**: MainAI should never be able to claim it "started" or
+"is working" on something unless a real, durable, independently-observable row exists — one a
+human (or an automated recovery pass) can query, cancel, and see fail or complete on its own,
+without trusting MainAI's own claim about its own state. Before this branch, nothing in the
+codebase enforced that anywhere: an agent loop could say "I am reading your documents now" and
+mean nothing more than an in-flight HTTP request with no persisted trace if the process died
+mid-sentence.
 
-This is the first slice of that guarantee — a durable job model, a worker that claims and
-resumes it safely across restarts, and a Pydantic-level contract that makes it a validation
-error to *say* "started/status/completed/failed/cancelled" without a real job ID behind it.
+This branch builds the *mechanism* for that guarantee — a durable job model, a worker that
+claims and resumes it safely across restarts, and a Pydantic-level contract
+(`MainAIExecutionResponse`) that makes it a validation error to construct a job-backed response
+object without a real job ID behind it. **It is scoped to `/api/mainai/jobs` and its own
+`corpus_review` job type only.** The contract object is not yet called anywhere in
+`app/chat.py` or `app/agent_orchestration.py` — an ordinary chat reply or agent-orchestration
+response can still say "I'm working on it" in free text today, with nothing structurally
+stopping it. Wiring those paths through the contract is explicitly future work (see "Remaining
+work" below), not something this branch claims to have already done. Read every claim below
+about what "MainAI can never do" as scoped to the job-integrated paths this branch actually
+touches, not as a description of the system as a whole.
 
 ## Scope boundaries (what this branch is, and is not)
 
@@ -44,19 +53,30 @@ error to *say* "started/status/completed/failed/cancelled" without a real job ID
 - Not wired into chat/agent-orchestration UI flows yet. The Jobs/Activity frontend view added
   here is a standalone `/mainai/jobs` page for observing this job type specifically.
 
-## Relationship to PR #31
+## Relationship to PR #31 — NOT mergeable in either order without integration work
 
 This branch's base (`claude/det-kommer-mer-879lcm`) has Alembic head `0018`. PR #31's S1A
 migrations (`0019`-`0024`, `MemorySourceUnit`/provenance work) exist only on PR #31's own
-branch and are **not** touched, imported, or depended on here. This migration is numbered
-`0025` specifically so a future rebase/merge with PR #31 has one unambiguous ordering question
-to resolve explicitly (which migration chain lands on `origin/main` first), rather than two
-different migrations silently claiming the same revision id. PR #31 itself, its branch, and
-its migrations were not modified by this work.
+branch and are **not** touched, imported, or depended on here. Migrations `0025`/`0026` set
+`down_revision = "0018"` — the real head of this branch's actual base.
+
+**This is an Alembic side-branch, not an independent, mergeable-in-any-order chain.** If both
+this branch and PR #31 merge as-is, the result is two divergent Alembic heads off `0018`
+(`0018 → 0019 → ... → 0024` and `0018 → 0025 → 0026`), which Alembic cannot resolve without
+either an explicit merge migration or a rebase. **This branch's own migration chain must be
+made linear on top of PR #31 before either can be reviewed for merge against the other** —
+concretely: after PR #31 merges, this branch rebases onto the new base, `0025.down_revision`
+is updated from `0018` to whatever PR #31's actual final revision id is, `alembic heads` is
+re-run to confirm exactly one head, and the full upgrade/downgrade/upgrade cycle is re-verified
+from both an empty database and from the pre-integration production head. **No PR has been
+opened for this branch, and none should be, until that integration step is done** — the two
+chains are not independently reviewable as "mergeable in either order" the way, say, two
+purely additive, non-overlapping migrations would be.
 
 ## Data model
 
-Three tables (migration `0025_mainai_jobs.py`), same RLS-per-table pattern as every other
+Three tables (migration `0025_mainai_jobs.py`, integrity-hardened by
+`0026_mainai_job_integrity.py` — see below), same RLS-per-table pattern as every other
 owner-scoped table in this codebase (`app/rls.py`, template: migration 0007's
 `knowledge_claims`).
 
@@ -93,15 +113,27 @@ queued ──claim──► running ──complete──► completed
    └──cancel_requested before claim──► cancelled
 ```
 
-### `mainai_job_events` — append-only execution-event history
+### `mainai_job_events` — append-only execution-event history, enforced at the DB level
 
 One row per lifecycle transition (`created`, `claimed`, `heartbeat`, `phase_changed`,
 `progress_updated`, `cancel_requested`, `cancel_acknowledged`, `completed`, `failed`,
-`cancelled`, `retry_scheduled`). Application code only ever INSERTs here — enforced by
-convention and test coverage, not a DB-level immutability trigger, matching this codebase's
-existing append-only tables (e.g. `project_notes`).
+`cancelled`, `retry_scheduled`).
 
-### `mainai_job_proposals` — a job's output, never a promoted claim
+Migration `0025` originally left "append-only" as an application convention only — an
+independent founder review correctly flagged that as insufficient for something meant to be
+independent evidence of what MainAI actually did. Migration `0026` makes it a real DB-level
+guarantee: a `BEFORE UPDATE OR DELETE` trigger (`mainai_job_events_deny_mutation()`) denies
+every UPDATE unconditionally, no exceptions, and denies DELETE unless the deleting
+transaction has explicitly set `app.mainai_job_erasure_in_progress = 'on'` — the only thing
+that ever sets that flag is `erase_mainai_job_children_for_owner()`, a narrow
+`SECURITY DEFINER` function that is the sole legitimate deletion path (account erasure, see
+below). `mainai_app` additionally has `UPDATE`/`DELETE`/`TRUNCATE`/`REFERENCES`/`TRIGGER`
+revoked on this table outright — the trigger is defense in depth on top of that, proven by
+`test_mainai_job_events_trigger_denies_update_even_for_a_privileged_connection`, which shows
+even the superuser/migration connection (which otherwise bypasses RLS and holds every
+ordinary privilege) still cannot UPDATE a row, because triggers fire regardless of role.
+
+### `mainai_job_proposals` — a job's output, never a promoted claim, immutable except one transition
 
 `corpus_review`'s findings land here, each with `source_document_id`/`source_chunk_id`
 provenance, `proposal_text`, and a `status` that starts `proposed` and can only ever become
@@ -109,11 +141,54 @@ provenance, `proposal_text`, and a `status` that starts `proposed` and can only 
 `KnowledgeClaim` automatically — `test_run_corpus_review_job_never_promotes_a_proposal_to_a_
 knowledge_claim` asserts this directly against a real database.
 
+Migration `0026` adds a `BEFORE UPDATE OR DELETE` trigger (`mainai_job_proposals_guard_
+mutation()`) that permits exactly one mutation, ever: `status: 'proposed' -> 'dismissed'`
+with every other column byte-for-byte unchanged. Never the reverse (`dismissed -> proposed`),
+never an edit to `proposal_text`/`source_document_id`/`job_id`/`owner_id` after the fact.
+`mainai_app` keeps ordinary `UPDATE` (needed for that one transition) but has `DELETE`/
+`TRUNCATE`/`REFERENCES`/`TRIGGER` revoked — deletion, like events, only ever happens through
+`erase_mainai_job_children_for_owner()`.
+
+### Composite owner integrity — child rows can no longer point at a different owner's job
+
+Before migration `0026`, `mainai_job_events`/`mainai_job_proposals` had two *independent* FKs
+(`job_id -> mainai_jobs.id`, `owner_id -> users.id`) with nothing tying them together. RLS
+only checks a row's own `owner_id`, so an attacker who knows a victim's `job_id` (job IDs
+aren't secret — they appear in URLs) could INSERT a row with `owner_id = <attacker>` (passes
+RLS's `WITH CHECK`, since it's the attacker's own session) but `job_id = <victim's job>` — a
+row visible to the attacker, but logically attached to someone else's job. `mainai_jobs` now
+has `UNIQUE(id, owner_id)`, and both child tables carry a real composite
+`FOREIGN KEY (job_id, owner_id) REFERENCES mainai_jobs (id, owner_id)` — a job/owner pair
+that doesn't match a real row is now a constraint violation, not a silently-accepted,
+RLS-hidden-from-the-victim row. `test_mainai_job_events_composite_fk_rejects_owner_mismatch`
+and the equivalent proposals test prove this via a direct SQL INSERT under RLS, not just
+through the service layer.
+
 `owner_id` is denormalized onto both child tables rather than resolved via a join in the RLS
 policy — the same choice `document_chunks.owner_id` already makes relative to `documents`,
 for the same reason: every RLS policy in `app/rls.py` is a single-column, non-join predicate,
 and mixing join-based and column-based policies in one schema is a real, easy-to-miss
 inconsistency for a future reviewer.
+
+### `erase_mainai_job_children_for_owner(target_owner_id uuid)` — the only deletion path
+
+A narrow `SECURITY DEFINER` function (migration `0026`) that sets
+`app.mainai_job_erasure_in_progress = 'on'` (satisfying the two tables' delete-deny triggers)
+and deletes `mainai_job_proposals` then `mainai_job_events` for one owner. `mainai_app` holds
+`EXECUTE` on this function and nothing else that could delete these rows — see "Account
+erasure" below for the only caller. `mainai_jobs` itself is not locked down this way (it's a
+live, legitimately-mutable job-state row, not an append-only log) — `mainai_app` keeps
+ordinary `DELETE` on it, and account erasure deletes it directly after the children.
+
+### Account erasure
+
+`app/routers/account.py`'s `delete_account()` explicitly deletes `mainai_job_proposals`/
+`mainai_job_events` (via the function above) and then `mainai_jobs` for the deleted user,
+inside the same transaction as every other table's deletion there — matching this codebase's
+established convention of explicit, ordered per-table deletion rather than relying on
+`ON DELETE CASCADE` (the CASCADE constraints on the FKs above remain as a referential-
+integrity backstop only, not the intended deletion mechanism; see `account.py`'s own
+docstring for why explicit deletion is this codebase's standard, not the exception).
 
 ## Runtime truthfulness contract
 
@@ -247,6 +322,32 @@ exception text.
   partial unique index on `(owner_id, idempotency_key)`, so two different owners submitting
   the same key is not a collision (`test_create_job_different_owners_can_reuse_the_same_
   idempotency_key`).
+- **Composite owner integrity on child rows** (migration `0026`): `mainai_jobs.UNIQUE(id,
+  owner_id)` plus a composite FK on both child tables closes the "known job_id, mismatched
+  owner_id" gap described in "Data model" above — proven via direct SQL INSERT under RLS
+  (`test_mainai_job_events_composite_fk_rejects_owner_mismatch` and the proposals
+  equivalent), not just through the service layer.
+- **DB-enforced append-only event log, not just convention** (migration `0026`):
+  `mainai_job_events` denies every UPDATE unconditionally and denies DELETE outside an
+  authorized erasure, enforced by both a revoked grant AND a trigger that still fires for a
+  privileged connection (`test_mainai_job_events_trigger_denies_update_even_for_a_privileged_
+  connection`). `mainai_job_proposals` permits exactly one mutation ever
+  (`proposed -> dismissed`, no other column changed) and denies everything else, including
+  the reverse transition (`test_mainai_job_proposals_rejects_the_reverse_transition`).
+- **Boot-persistent privilege lockdown**: `scripts/ensure_app_role.py` unconditionally
+  re-grants `ALL PRIVILEGES` to `mainai_app` on every container boot, before Alembic even
+  runs — a REVOKE applied once, at migration time, would be silently undone by the next
+  restart (the exact bug class documented as the Pass 12 incident in
+  `docs/BRANCH_REGISTRY.md`, for a different table). `app/rls.py`'s
+  `apply_mainai_job_runtime_privileges()` re-asserts the `mainai_job_events`/
+  `mainai_job_proposals` lockdown on every boot, called from `app/main.py`'s startup right
+  after `apply_rls()`, using the same idempotent-every-boot discipline `apply_rls()` itself
+  already uses for RLS policies.
+- **Account erasure genuinely removes this data**, not just anonymizes it:
+  `test_account_deletion_removes_mainai_job_data` drives the real `DELETE /api/account`
+  endpoint end to end and confirms `mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`
+  rows are gone afterward, via the superuser connection (bypassing RLS, so a false pass from
+  RLS merely hiding the rows is not possible).
 
 ## Threat model: the `/admin/all` endpoint
 
@@ -265,6 +366,9 @@ explicitly as a known, accepted limitation — not something to silently outgrow
   isolation but not yet wired into `app/chat.py` or `app/agent_orchestration.py` — a
   conversational response still is not *required* to go through it yet.
 - `/admin/all` is founder-gated, not role-gated (see threat model above).
+- **This branch is not yet mergeable against PR #31 in either order** without integration
+  work (rebase + `down_revision` update) — see "Relationship to PR #31" above. No PR has been
+  opened for this branch for exactly that reason.
 - Only one job type exists (`corpus_review`). The lease/claim design documents what a
   storage-writing job type would additionally need (owner-erasure lock coordination) but does
   not implement one.
@@ -303,3 +407,16 @@ explicitly as a known, accepted limitation — not something to silently outgrow
 clean, reversible rollback with no data migration to reverse (this is a net-new schema, not an
 alteration of existing tables). Verified locally: apply `0018→0025`, downgrade `-1`, upgrade
 back to `head` — all three tables present and correctly shaped after the round trip.
+
+`0026_mainai_job_integrity.py`'s `downgrade()` reverses everything it adds in the opposite
+order: restores `mainai_app`'s `ALL PRIVILEGES` grant on the two locked-down tables, drops the
+`erase_mainai_job_children_for_owner()` function, drops both triggers and their functions,
+then drops the composite FKs and the `UNIQUE(id, owner_id)` constraint. Verified locally:
+apply `0025→0026`, downgrade `-1`, upgrade back to `head` — all three tables, both triggers,
+both composite FKs, and the erasure function present and correctly shaped after the round
+trip.
+
+**Still outstanding before this branch is PR-ready** (see "Relationship to PR #31"): a full
+upgrade/downgrade/upgrade cycle from an empty database AND from a pre-integration production
+head, run again after this branch's `down_revision` is rebased onto PR #31's actual final
+revision — not yet done, because that rebase itself hasn't happened yet.
