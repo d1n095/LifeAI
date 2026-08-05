@@ -371,19 +371,38 @@ exception text.
   incident in `docs/BRANCH_REGISTRY.md`, for a different table). `app/rls.py`'s
   `apply_mainai_job_runtime_privileges(engine, require_complete=True)` re-asserts the
   `mainai_job_events`/`mainai_job_proposals` lockdown on every boot, called from
-  `app/main.py`'s startup right after `apply_rls()`. It is not a fire-and-hope enforcement
-  step: after issuing its REVOKE/GRANT statements, in the same transaction, it re-queries
-  Postgres's own catalogs (`information_schema.role_table_grants`,
-  `information_schema.routine_privileges`, `pg_proc`, `pg_language`) and confirms the exact
-  final state — table grants match precisely, each function's signature/owner/`SECURITY
-  DEFINER` flag/`search_path`/language/return type are exactly as expected, no unexpected
-  overload exists, and `PUBLIC` has no `EXECUTE` on any of them — raising (`require_complete=
-  True`, the real startup default) or logging a warning (`require_complete=False`) on any
-  drift, with the whole enforce-then-verify pass rolled back atomically on failure since it
-  runs inside one `engine.begin()` transaction.
-  `test_apply_mainai_job_runtime_privileges_passes_against_the_real_migrated_state` and
-  `test_apply_mainai_job_runtime_privileges_detects_drift_and_rolls_back` prove both directions
-  against a real database, not a mock.
+  `app/main.py`'s startup right after `apply_rls()`, with `engine` expected to be `app/db.py`'s
+  `migration_engine` — the real superuser/admin connection — because the policy reads its own
+  `expected_owner` as `current_user` on that same connection rather than hardcoding a role
+  name. A first version of this policy (Pass 16) only checked that each function's owner
+  *wasn't* `mainai_app`, which a second founder review correctly pointed out proves nothing
+  about who the owner actually *is* — a function reassigned to any other unexpected role would
+  have passed silently. Fixed: it is not a fire-and-hope enforcement step, and it no longer
+  checks by exclusion. After issuing its REVOKE/GRANT statements, in the same transaction, it
+  re-queries Postgres's own catalogs (`pg_tables`, `pg_proc`, `pg_language`, `pg_roles`,
+  `information_schema.routine_privileges`, plus `has_table_privilege`/`has_function_privilege`
+  for *effective* grants — see below) and confirms: `mainai_jobs`/`mainai_job_events`/
+  `mainai_job_proposals` are owned by exactly `expected_owner` (never `mainai_app`); each
+  function's owner is exactly `expected_owner` and that owner actually holds `SUPERUSER` or
+  `BYPASSRLS` (an owner that can't itself bypass FORCE RLS can't make the function do so
+  either); each function's exact argument signature (`pg_get_function_identity_arguments`, not
+  just an argument *count*), return type, `SECURITY DEFINER` flag, `search_path`, and language
+  match; no unexpected second overload exists; `PUBLIC` has no `EXECUTE` on any of them; and
+  mainai_app's table/function grants match exactly — computed via `has_table_privilege`/
+  `has_function_privilege` (Postgres's own *effective*-privilege check, following role
+  membership) rather than a raw `information_schema.role_table_grants` filter, which would
+  only see grants made directly to `mainai_app` by name and miss one reaching it indirectly
+  through membership in some other granted role. Raises (`require_complete=True`, the real
+  startup default) or logs a warning (`require_complete=False`) on any drift, with the whole
+  enforce-then-verify pass — including the enforce phase's own REVOKE/GRANT statements — rolled
+  back atomically on failure since it all runs inside one `engine.begin()` transaction
+  (`test_apply_mainai_job_runtime_privileges_rolls_back_the_enforce_phase_too_on_failure` proves
+  this directly, from a separate connection, rather than trusting that a caught exception
+  implies nothing persisted). `test_apply_mainai_job_runtime_privileges_passes_against_the_
+  real_migrated_state`, `..._detects_a_wrong_function_owner`, `..._detects_an_owner_without_
+  bypassrls_or_superuser`, `..._detects_mainai_app_as_table_owner`, `..._detects_an_unexpected_
+  overload`, and `..._survives_reboots_blanket_grant_all` prove each of these checks against a
+  real database, not a mock.
 - **The erasure-in-progress flag is not itself an authorization boundary.**
   `app.mainai_job_erasure_in_progress` only silences the append-only triggers' DELETE denial —
   it grants no privilege on its own. `test_mainai_app_cannot_delete_events_even_with_the_
