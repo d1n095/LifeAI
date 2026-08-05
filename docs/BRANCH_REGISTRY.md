@@ -136,6 +136,68 @@ fortsätter längre — grundaren var explicit att detta INTE är ett godkännan
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
 
+## Pass 37 (2026-08-05): PR #35 — grundarens tredje granskningsrunda: per-claim transaktionsatomicitet (HIGH), sista substantiella blockeraren löst
+
+**Branch:** `claude/s1a-backfill-run-reporting`. **PR #35** öppen mot `claude/det-kommer-mer-879lcm`.
+**Head efter denna runda: `5d29d7b`** (föregående head `b91d5db`, Pass 36).
+
+Grundaren avvisade uttryckligen att lämna Pass 36:s HIGH-fynd som en merge-blockerande
+follow-up: *"Vid en hård krasch kan claims vara korrekt backfillade medan run-rapporten
+permanent visar för låga counters. Då är själva rapporteringssystemet inte sanningsenligt."*
+och krävde en fullständig omläggning till per-claim-atomicitet, med fyra namngivna
+krasch-fönster-tester, invariant-kontroller på både service- och databasnivå, och en
+fokuserad self-review av enbart denna omläggning.
+
+**Problemet:** `advance_backfill_run()` anropade `backfill_memory_source_units()` för en hel
+batch och aggregerade DÄREFTER `result`-fälten till `run` i EN commit efter att batchen
+returnerat — trots att `_apply()` redan committar PER CLAIM (claim-datan är sin egen
+transaktion). En hård krasch mellan claim N:s datacommit och batchens egen slutcommit lämnade
+claim N korrekt backfillad medan run-rapportens counters/cursor för samma claim aldrig
+committades — en permanent, tyst underräkning i rapporten trots att claim-datan var helt
+korrekt och restart-safe.
+
+**Fixen:** `backfill_memory_source_units()`/`_dry_run()`/`_apply()` fick en ny valfri
+`on_claim_outcome`-callback (default `None`, bevarar PR #31:s ursprungliga fristående beteende
+exakt — dess 17 tester i `test_memory_source_backfill.py` opåverkade). `_apply()`/`_dry_run()`
+anropar callbacken INUTI samma ännu-inte-committade transaktion de strax ska committa för den
+claimen — så claim-data, run-counters, run-cursor och (vid fel) `memory_source_backfill_
+failures`-uppsert hamnar i EN atomisk commit per claim. `_make_on_claim_outcome()` i
+`memory_source_backfill_run.py` är closuren som muterar `run`, asserterar monotonicitet, och
+flushar (aldrig committar — commit-ägarskapet ligger kvar hos `_apply()`/`_dry_run()`).
+`advance_backfill_run()` aggregerar inte längre något efter batchen — endast
+`batches_completed` och den terminala statusövergången kvarstår som batch-nivå-metadata.
+
+**Invariant-kontroller (två oberoende lager, grundarens punkt 6):** service-nivå
+`_assert_monotonic()` (explicit `RuntimeError`-tripwire, inte en strippbar `assert`) som
+verifierar att counters aldrig minskar och cursorn aldrig går bakåt; databas-nivå en ny CHECK-
+constraint `ck_msbr_processed_count_matches_sum` tillagd direkt i migration `0025` (redigerad
+in-place eftersom migrationen fortfarande är omergad/oanvänd) som verifierar att
+`processed_count` alltid är summan av de fem outcome-countrarna.
+
+**Självgranskningsfynd (LOW, åtgärdat i samma runda):** en ursprunglig placering av
+callback-anropet INUTI samma `try` som `get_or_create_memory_source_unit` hade kunnat
+misskategorisera ett fel i callbacken själv som ett claim-resolution-fel. Löst med en
+dedikerad `else:`-gren med egen `try`/`except` (Python: `else` körs bara om `try` inte kastade,
+och undantag i `else` fångas INTE av de tidigare `except`-grenarna).
+
+**7 nya tester** i `test_memory_source_backfill_run.py` (18 → 25): 4 krasch-fönster-tester (ett
+för vart och ett av grundarens fyra namngivna injektionspunkter), 3 invariant-tester (DB CHECK-
+constraint avvisar faktiskt en felaktig `processed_count`, `_assert_monotonic` kastar för både
+minskad counter och cursor som går bakåt).
+
+**Verifiering på slutlig head:** `test_memory_source_backfill.py` 17/17 oförändrad;
+`test_memory_source_backfill_run.py` 25/25, körd 10 gånger i rad utan flakes; de 4 nya
+krasch-fönster-testerna körda 10 gånger i rad isolerat utan flakes; `test_rls_policy_registry.py`
+2/2; full backendsvit **750 passed, 1 skipped, 0 failed** (den enda flakan som observerades under
+rundan var samma redan kända `test_storage_local_fs`-flaka, bekräftad via `git diff --stat` mot
+den filen = inga ändringar); migration 0025 upgrade/downgrade/upgrade verifierad ren; exakt en
+Alembic-head (`0025`). Self-review (BLOCKER/HIGH/MEDIUM/LOW), enbart denna rundas
+transaktionsomläggning: inga BLOCKER/HIGH/MEDIUM, en LOW (åtgärdad — ovan), en LOW (noterad, inte
+en bugg — fler commits per `advance()`-anrop är en förväntad avvägning för atomicitetsgarantin).
+
+Ingen merge, ingen deploy, ingen produktionsbackfill körd. `claude/mainai-job-runtime-foundation`
+ej rörd. Väntar på grundarens granskning av denna rundas fix.
+
 ## Pass 36 (2026-08-05): PR #35 — durable backfill-run reporting, grundarens andra granskningsrunda: BLOCKER/HIGH/MEDIUM alla åtgärdade
 
 **Branch:** `claude/s1a-backfill-run-reporting` (grenad från `claude/det-kommer-mer-879lcm` efter
