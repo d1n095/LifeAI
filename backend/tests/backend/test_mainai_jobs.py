@@ -19,7 +19,9 @@ Covers, in order:
 Real local Postgres (RLS included), matching this repo's existing convention. Only the LLM
 provider is faked, never the DB or RLS."""
 
+import importlib.util
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text as sa_text
@@ -54,6 +56,35 @@ from app.request_context import current_user_id as current_user_id_var
 EMBEDDING_DIM = get_settings().embedding_dim
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+
+
+def _load_apply_runtime_privileges():
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _apply_full_privilege_policy_before_this_module():
+    """test_account_deletion_removes_mainai_job_data (section N below) exercises the real
+    DELETE /api/account endpoint, whose erase_account_data() calls BOTH erase_owner_memory()
+    (S1A, governed by scripts/s1a_privilege_policy.py via apply_runtime_privileges.py — same
+    as tests/backend/test_account_erasure.py's identical fixture) AND
+    erase_own_mainai_job_children() (governed separately by app/rls.py's
+    apply_mainai_job_runtime_privileges()). conftest.py's session-scoped `_test_database`
+    fixture applies neither. Whether this passes must not depend on some OTHER test module
+    (e.g. test_account_erasure.py) having already run first in the same session and left the
+    S1A grant behind — that's exactly the ordering trap this fixture closes, matching
+    production's real boot sequence (app/main.py's on_startup calls both)."""
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    module = _load_apply_runtime_privileges()
+    module.apply_and_verify(get_settings().database_url)
+    apply_mainai_job_runtime_privileges(migration_engine)
 
 
 def _set_rls_user(session, owner_id) -> None:
