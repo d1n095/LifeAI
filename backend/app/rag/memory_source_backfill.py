@@ -41,33 +41,33 @@ valid NULL-memory_source_id candidate). `get_or_create_memory_source_unit` itsel
 proven-safe primitive for the source-unit half of that atomicity (see its own module
 docstring and tests/backend/test_memory_source_units.py's real concurrent-lock-wait test).
 
-Production execution — NOT YET BUILT, deliberately (Pass 19 review). This module's return
-value (`MemorySourceBackfillResult`) and its `logger.warning`/`logger.exception` calls are
-sufficient for local development and ad-hoc/offline runs, but NOT a durable enough progress/
-failure record for a real production backfill across a whole owner base: a crashed process
-loses whatever was only ever in memory or in ordinary logs, an operator can't ask "how far did
-run X get" without grepping logs, and a specific claim's specific failure reason isn't
-queryable. Before backfill_memory_source_units() is ever run against production data, it
-needs a durable run record with (at minimum): a run id, owner_id, started_at/completed_at,
-status, the per-source-kind/skipped/failed/already_done counters this module already computes,
-a resumable cursor (the last claim id processed, so a restarted run doesn't have to rescan
-from the beginning), and a claim-level failure log (claim id + reason + retry count) —
-`memory_source_backfill_runs`/`memory_source_backfill_failures`-shaped, or reusing an existing
-durable-job pattern rather than inventing a new one from scratch. app/routers/admin.py's
-`trigger_claim_type_backfill` docstring already identifies the same gap for the sibling P3
-claim_type backfill ("the real fix — running this as a durable memory_processing_jobs job with
-its own status/lease/retry, the same worker-container pattern app/worker.py already uses for
-imports") — that same mechanism, extended to cover this backfill too, is the intended design,
-not a second bespoke tracking table. This is a separate, explicitly scoped future PR per
-CLAUDE.md's isolation principle ("en funktion = ett tydligt syfte = en egen branch eller PR"),
-not something to fold into this one — and no production backfill run happens before it exists.
+Production execution — durable run tracking now exists (app/rag/memory_source_backfill_run.py,
+migration 0025), closing the gap this docstring used to describe. This module's own
+`MemorySourceBackfillResult` and `logger.warning`/`logger.exception` calls were never a durable
+enough progress/failure record for a real production backfill across a whole owner base on
+their own — a crashed process loses whatever was only ever in memory or in ordinary logs, an
+operator can't ask "how far did run X get" without grepping logs, and a specific claim's
+specific failure reason isn't queryable. `memory_source_backfill_run.py`'s
+`MemorySourceBackfillRun`/`MemorySourceBackfillFailure` durably persist exactly what was
+missing: a run id, owner_id, started_at/completed_at, status, the per-source-kind/skipped/
+failed/already_done counters this module already computes, a resumable `(created_at, id)`
+cursor (see this module's own `after` parameter below), and a claim-level failure log (claim id
++ reason + retry count, never `claim_text`) — built as its own owner-scoped table pair rather
+than folded into the unrelated `knowledge_import_jobs`/worker-lease machinery
+`trigger_claim_type_backfill`'s docstring once speculated about, since a backfill run has no
+uploaded blob, no ZIP extraction, and no worker-container lease semantics to share with that
+table. A genuinely REAL production backfill EXECUTION (as opposed to this module and its
+durable-tracking wrapper simply existing) is still a separate, explicit, later decision — see
+`memory_source_backfill_run.py`'s own module docstring for exactly what remains gated on that.
 """
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Callable
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models.document import Document
@@ -106,11 +106,50 @@ class MemorySourceBackfillResult:
     # had memory_source_id set BEFORE this run (from an earlier backfill run or dual-write) —
     # not affected by candidates_total/chunk_backed/etc., which only describe THIS call's work.
     already_done: int = 0
+    # The newest (created_at, id) pair actually considered (in any outcome) by this call —
+    # None if candidates_total is 0. app/rag/memory_source_backfill_run.py's durable run
+    # tracking persists this as a resumable checkpoint (see its own module docstring for why
+    # both dry_run and real mode need it, not just dry_run).
+    last_seen_created_at: datetime | None = None
+    last_seen_id: uuid.UUID | None = None
+    # One (claim_id, reason) entry per skipped/failed claim in THIS call — `reason` is always
+    # the exact structural failure string `_resolve_locator()`/`_apply()` already log, NEVER
+    # `KnowledgeClaim.claim_text`. app/rag/memory_source_backfill_run.py's durable run
+    # tracking persists these into `memory_source_backfill_failures`.
+    failures: list[tuple[uuid.UUID, str]] = field(default_factory=list)
 
 
 @dataclass
 class _ResolutionFailure:
     reason: str
+
+
+@dataclass
+class ClaimOutcomeDelta:
+    """Founder review round 3 (HIGH — transaction atomicity): one claim's contribution to a
+    durable run's reporting state, handed to an optional `on_claim_outcome` callback so the
+    caller (app/rag/memory_source_backfill_run.py's `advance_backfill_run()`) can apply it to
+    `MemorySourceBackfillRun` and flush/upsert `MemorySourceBackfillFailure` WITHIN the exact
+    same transaction `_apply()`/`_dry_run()` commits for that claim — see `backfill_memory_
+    source_units()`'s own docstring for why this must never be split into a separate, later
+    commit. Exactly one of chunk_backed/version_backed/document_backed/skipped_mismatch/failed
+    is ever 1 for a given claim (mutually exclusive outcomes); `cursor` is `None` when the
+    persisted checkpoint must not advance for this claim (BLOCKER 2's lock-gap freeze)."""
+
+    claim_id: uuid.UUID
+    chunk_backed: int = 0
+    version_backed: int = 0
+    document_backed: int = 0
+    skipped_mismatch: int = 0
+    failed: int = 0
+    # Set only when a memory_source_backfill_failures row must be written/upserted for this
+    # claim — never KnowledgeClaim.claim_text, only the same structural strings already used
+    # elsewhere in this module.
+    failure_reason: str | None = None
+    cursor: tuple[datetime, uuid.UUID] | None = None
+
+
+OnClaimOutcome = Callable[[Session, ClaimOutcomeDelta], None]
 
 
 def _resolve_locator(db: Session, claim: KnowledgeClaim) -> DocumentSourceLocator | _ResolutionFailure:
@@ -167,6 +206,39 @@ def _resolve_locator(db: Session, claim: KnowledgeClaim) -> DocumentSourceLocato
     )
 
 
+def _apply_cursor(query, after: tuple[datetime, uuid.UUID] | None):
+    """Keyset-pagination lower bound matching the `.order_by(created_at.asc(), id.asc())`
+    every query below already uses — excludes everything at or before `after`, never a claim
+    at exactly `after` itself (that one was already considered by the call that produced this
+    cursor)."""
+    if after is None:
+        return query
+    after_created_at, after_id = after
+    return query.filter(
+        or_(
+            KnowledgeClaim.created_at > after_created_at,
+            and_(KnowledgeClaim.created_at == after_created_at, KnowledgeClaim.id > after_id),
+        )
+    )
+
+
+def _advance_cursor(result: MemorySourceBackfillResult, claim: KnowledgeClaim) -> None:
+    result.last_seen_created_at = claim.created_at
+    result.last_seen_id = claim.id
+
+
+def _before_position(query, created_at: datetime, id_: uuid.UUID):
+    """The mirror image of `_apply_cursor` — matches anything strictly BEFORE `(created_at,
+    id_)` in the same `(created_at.asc(), id.asc())` ordering. Used by `_apply()`'s
+    lock-gap check below, never by the plain forward-scan queries."""
+    return query.filter(
+        or_(
+            KnowledgeClaim.created_at < created_at,
+            and_(KnowledgeClaim.created_at == created_at, KnowledgeClaim.id < id_),
+        )
+    )
+
+
 def _tally_outcome(result: MemorySourceBackfillResult, outcome: DocumentSourceLocator | _ResolutionFailure) -> None:
     if isinstance(outcome, _ResolutionFailure):
         result.skipped_mismatch += 1
@@ -179,6 +251,19 @@ def _tally_outcome(result: MemorySourceBackfillResult, outcome: DocumentSourceLo
         result.document_backed += 1
 
 
+def _outcome_bucket_kwargs(outcome: DocumentSourceLocator | _ResolutionFailure) -> dict[str, int]:
+    """The same classification `_tally_outcome` applies to `result`, expressed as
+    `ClaimOutcomeDelta` kwargs — kept as one shared mapping so the two can never silently
+    disagree about which bucket a given outcome belongs to."""
+    if isinstance(outcome, _ResolutionFailure):
+        return {"skipped_mismatch": 1}
+    if outcome.source_kind == SourceKind.document_chunk:
+        return {"chunk_backed": 1}
+    if outcome.source_kind == SourceKind.document_version:
+        return {"version_backed": 1}
+    return {"document_backed": 1}
+
+
 def backfill_memory_source_units(
     db: Session,
     owner_id: uuid.UUID,
@@ -186,6 +271,8 @@ def backfill_memory_source_units(
     batch_size: int = BACKFILL_BATCH_SIZE,
     max_batches: int | None = DEFAULT_MAX_BATCHES,
     dry_run: bool = False,
+    after: tuple[datetime, uuid.UUID] | None = None,
+    on_claim_outcome: OnClaimOutcome | None = None,
 ) -> MemorySourceBackfillResult:
     """Owner-scoped, bounded, idempotent, restart-safe backfill of `KnowledgeClaim.
     memory_source_id` for `owner_id`'s claims. The caller's session must already have
@@ -208,6 +295,25 @@ def backfill_memory_source_units(
     `range(batch_size)` loop body never run, leaving `exhausted` `False` forever and spinning
     the outer `while` loop indefinitely (the same failure class the Pass 19 review caught: a
     bounded-sounding function must actually be unable to loop forever, not just unlikely to).
+
+    `after` is an optional `(created_at, id)` keyset-pagination lower bound, excluding
+    everything at or before it — the durable-run-tracking layer (app/rag/
+    memory_source_backfill_run.py) passes each call's own previous `last_seen_created_at`/
+    `last_seen_id` back in here so a resumed DRY-RUN doesn't re-scan (and double-count)
+    claims a prior call already tallied. Real-mode calls don't strictly need this for
+    correctness (`memory_source_id IS NULL` already excludes anything this function itself
+    already wrote), but accept the same parameter for one consistent checkpoint mechanism
+    across both modes.
+
+    `on_claim_outcome` (founder review round 3 — HIGH, transaction atomicity): an optional
+    callback invoked, per claim, with a `ClaimOutcomeDelta` describing that claim's outcome —
+    called and flushed WITHIN the exact same (still-uncommitted) transaction this function is
+    about to commit for that claim, so the caller can make a durable run's reporting state
+    (`MemorySourceBackfillRun` counters/cursor, `MemorySourceBackfillFailure` rows) commit
+    ATOMICALLY with the claim itself. `None` (the default) preserves this function's original,
+    standalone behavior exactly — used by tests/backend/test_memory_source_backfill.py, which
+    calls this function directly with no durable run involved at all. Only
+    app/rag/memory_source_backfill_run.py's `advance_backfill_run()` passes a real callback.
     """
     if batch_size <= 0:
         raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
@@ -222,12 +328,18 @@ def backfill_memory_source_units(
     )
 
     if dry_run:
-        return _dry_run(db, owner_id, batch_size, max_batches, result)
-    return _apply(db, owner_id, batch_size, max_batches, result)
+        return _dry_run(db, owner_id, batch_size, max_batches, result, after, on_claim_outcome)
+    return _apply(db, owner_id, batch_size, max_batches, result, after, on_claim_outcome)
 
 
 def _dry_run(
-    db: Session, owner_id: uuid.UUID, batch_size: int, max_batches: int | None, result: MemorySourceBackfillResult
+    db: Session,
+    owner_id: uuid.UUID,
+    batch_size: int,
+    max_batches: int | None,
+    result: MemorySourceBackfillResult,
+    after: tuple[datetime, uuid.UUID] | None,
+    on_claim_outcome: OnClaimOutcome | None,
 ) -> MemorySourceBackfillResult:
     seen_ids: set[uuid.UUID] = set()
     batches_done = 0
@@ -235,6 +347,7 @@ def _dry_run(
         query = db.query(KnowledgeClaim).filter(
             KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.memory_source_id.is_(None)
         )
+        query = _apply_cursor(query, after)
         if seen_ids:
             query = query.filter(KnowledgeClaim.id.notin_(seen_ids))
         candidates = query.order_by(KnowledgeClaim.created_at.asc(), KnowledgeClaim.id.asc()).limit(batch_size).all()
@@ -244,17 +357,41 @@ def _dry_run(
         for claim in candidates:
             seen_ids.add(claim.id)
             result.candidates_total += 1
+            _advance_cursor(result, claim)
             outcome = _resolve_locator(db, claim)
+            failure_reason: str | None = None
             if isinstance(outcome, _ResolutionFailure):
                 logger.warning("memory_source_backfill dry-run: claim %s: %s", claim.id, outcome.reason)
+                result.failures.append((claim.id, outcome.reason))
+                failure_reason = outcome.reason
             _tally_outcome(result, outcome)
+
+            # Founder review round 3 (HIGH): dry-run writes nothing to the claim/source-unit
+            # tables (by design — see this function's own docstring), so there is no per-claim
+            # data write to entangle a commit with here. But the durable run's OWN counters/
+            # cursor still need the same crash-safety guarantee as real mode: without a commit
+            # per claim, a crash mid-batch would silently lose this call's progress the exact
+            # same way real mode's did before this round's fix (see module docstring's
+            # ClaimOutcomeDelta / advance_backfill_run's commit-map comment).
+            if on_claim_outcome is not None:
+                delta = ClaimOutcomeDelta(
+                    claim_id=claim.id, failure_reason=failure_reason, cursor=(claim.created_at, claim.id), **_outcome_bucket_kwargs(outcome)
+                )
+                on_claim_outcome(db, delta)
+                db.commit()
         batches_done += 1
 
     return result
 
 
 def _apply(
-    db: Session, owner_id: uuid.UUID, batch_size: int, max_batches: int | None, result: MemorySourceBackfillResult
+    db: Session,
+    owner_id: uuid.UUID,
+    batch_size: int,
+    max_batches: int | None,
+    result: MemorySourceBackfillResult,
+    after: tuple[datetime, uuid.UUID] | None,
+    on_claim_outcome: OnClaimOutcome | None,
 ) -> MemorySourceBackfillResult:
     # A claim that fails resolution or hits a genuine conflict is excluded from re-selection
     # for the REST OF THIS CALL (same pattern as app/rag/claims.py's backfill_claim_types
@@ -266,6 +403,19 @@ def _apply(
     # since-fixed chunk_id, a since-created Document) changed in between.
     excluded_ids: set[uuid.UUID] = set()
 
+    # Founder review, round 2 (BLOCKER 2): `SELECT ... FOR UPDATE SKIP LOCKED` below returns
+    # the smallest UNLOCKED matching row — it cannot tell us whether a SMALLER, still-eligible
+    # row exists but is momentarily locked by some unrelated concurrent transaction. If we kept
+    # advancing `result.last_seen_*` (and therefore the durable persisted cursor) to whatever
+    # SKIP LOCKED happened to return, that smaller locked claim would be permanently excluded
+    # by every future call's cursor filter — even though it was never actually resolved, never
+    # recorded as a failure, and its memory_source_id is still NULL. Once the per-claim gap
+    # check below finds such a gap, this freezes for the REST of this call: real work below
+    # still proceeds normally (claims still get resolved/committed), but `result.last_seen_*`
+    # simply stops moving forward, so the persisted cursor stays at (or before) the locked
+    # claim's position and it remains reachable by a later call once the lock clears.
+    cursor_frozen = False
+
     batches_done = 0
     while max_batches is None or batches_done < max_batches:
         exhausted = False
@@ -273,6 +423,7 @@ def _apply(
             query = db.query(KnowledgeClaim).filter(
                 KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.memory_source_id.is_(None)
             )
+            query = _apply_cursor(query, after)
             if excluded_ids:
                 query = query.filter(KnowledgeClaim.id.notin_(excluded_ids))
             claim = (
@@ -284,13 +435,57 @@ def _apply(
                 exhausted = True
                 break
             result.candidates_total += 1
+            # Captured as local values (not left as live ORM-attribute access) BEFORE any
+            # resolve/commit/rollback below, which could otherwise expire this object's
+            # attributes — _advance_cursor must still see the real claim identity even after
+            # a rollback on the FAILURE path a few lines down.
+            claim_created_at, claim_id = claim.created_at, claim.id
+
+            if not cursor_frozen:
+                gap_query = db.query(KnowledgeClaim.id).filter(
+                    KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.memory_source_id.is_(None)
+                )
+                gap_query = _apply_cursor(gap_query, after)
+                gap_query = _before_position(gap_query, claim_created_at, claim_id)
+                if excluded_ids:
+                    gap_query = gap_query.filter(KnowledgeClaim.id.notin_(excluded_ids))
+                # A plain (non-locking) read sees a row regardless of another transaction's row
+                # lock (Postgres MVCC) — if this finds anything, SKIP LOCKED above must have
+                # jumped over it, since our own query is ordered ascending and would otherwise
+                # have returned it instead of `claim`.
+                if gap_query.first() is not None:
+                    cursor_frozen = True
+                    logger.warning(
+                        "memory_source_backfill: an eligible claim earlier than %s is locked by a "
+                        "concurrent transaction — freezing this run's cursor so it stays reachable "
+                        "instead of skipping it permanently",
+                        claim_id,
+                    )
+
+            if not cursor_frozen:
+                result.last_seen_created_at, result.last_seen_id = claim_created_at, claim_id
+            # Founder review round 3 (HIGH — transaction atomicity): this is the SAME cursor
+            # value handed to `on_claim_outcome` below, so the durable run's persisted cursor
+            # can never disagree with `result.last_seen_*` — both are set from this one local,
+            # exactly once, per claim.
+            cursor_for_commit = (claim_created_at, claim_id) if not cursor_frozen else None
 
             outcome = _resolve_locator(db, claim)
             if isinstance(outcome, _ResolutionFailure):
                 logger.warning("memory_source_backfill: claim %s: %s — leaving untouched", claim.id, outcome.reason)
+                result.failures.append((claim_id, outcome.reason))
                 _tally_outcome(result, outcome)
                 excluded_ids.add(claim.id)
-                db.rollback()
+                # Nothing has been written for this claim yet (_resolve_locator only reads) —
+                # no db.rollback() needed before durably recording the failure + run-state
+                # delta as ONE atomic commit (see this function's docstring / ClaimOutcomeDelta).
+                if on_claim_outcome is not None:
+                    on_claim_outcome(
+                        db, ClaimOutcomeDelta(claim_id=claim_id, failure_reason=outcome.reason, cursor=cursor_for_commit, skipped_mismatch=1)
+                    )
+                    db.commit()
+                else:
+                    db.rollback()
                 continue
 
             try:
@@ -301,21 +496,58 @@ def _apply(
                 memory_source_id = get_or_create_memory_source_unit(db, outcome)
                 claim.memory_source_id = memory_source_id
                 db.add(claim)
-                db.commit()
             except MemorySourceIdentityConflict as exc:
                 db.rollback()
                 result.failed += 1
+                reason = f"identity conflict: {exc}"
+                result.failures.append((claim_id, reason))
                 excluded_ids.add(claim.id)
                 logger.error("memory_source_backfill: claim %s: identity conflict: %s", claim.id, exc)
+                if on_claim_outcome is not None:
+                    on_claim_outcome(db, ClaimOutcomeDelta(claim_id=claim_id, failure_reason=reason, cursor=cursor_for_commit, failed=1))
+                    db.commit()
                 continue
-            except Exception:
+            except Exception as exc:
                 db.rollback()
                 result.failed += 1
+                reason = f"unexpected error: {type(exc).__name__}"
+                result.failures.append((claim_id, reason))
                 excluded_ids.add(claim.id)
                 logger.exception("memory_source_backfill: claim %s: unexpected error", claim.id)
+                if on_claim_outcome is not None:
+                    on_claim_outcome(db, ClaimOutcomeDelta(claim_id=claim_id, failure_reason=reason, cursor=cursor_for_commit, failed=1))
+                    db.commit()
                 continue
-
-            _tally_outcome(result, outcome)
+            else:
+                # get_or_create_memory_source_unit + claim assignment succeeded with no
+                # exception — only NOW is it safe to record the outcome and commit.
+                # Deliberately a SEPARATE try/except from the block above, not folded into
+                # the same `except Exception` used for get_or_create_memory_source_unit: a
+                # failure here (a bug in the callback itself, or the commit itself failing —
+                # DB error, constraint violation, connection loss) must be classified for
+                # what it is and still isolated to this one claim, exactly like every other
+                # failure path in this function (see test_backfill_crash_before_commit_
+                # leaves_no_half_source), without being misattributed to identity resolution
+                # or risking the callback being invoked a second time from inside its own
+                # failure handling.
+                try:
+                    if on_claim_outcome is not None:
+                        on_claim_outcome(
+                            db, ClaimOutcomeDelta(claim_id=claim_id, cursor=cursor_for_commit, **_outcome_bucket_kwargs(outcome))
+                        )
+                    db.commit()
+                except Exception as exc:
+                    db.rollback()
+                    result.failed += 1
+                    reason = f"unexpected error: {type(exc).__name__}"
+                    result.failures.append((claim_id, reason))
+                    excluded_ids.add(claim.id)
+                    logger.exception("memory_source_backfill: claim %s: unexpected error", claim.id)
+                    if on_claim_outcome is not None:
+                        on_claim_outcome(db, ClaimOutcomeDelta(claim_id=claim_id, failure_reason=reason, cursor=cursor_for_commit, failed=1))
+                        db.commit()
+                    continue
+                _tally_outcome(result, outcome)
 
         batches_done += 1
         if exhausted:

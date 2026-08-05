@@ -136,6 +136,124 @@ fortsätter längre — grundaren var explicit att detta INTE är ett godkännan
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
 
+## Pass 37 (2026-08-05): PR #35 — grundarens tredje granskningsrunda: per-claim transaktionsatomicitet (HIGH), sista substantiella blockeraren löst
+
+**Branch:** `claude/s1a-backfill-run-reporting`. **PR #35** öppen mot `claude/det-kommer-mer-879lcm`.
+**Head efter denna runda: `5d29d7b`** (föregående head `b91d5db`, Pass 36).
+
+Grundaren avvisade uttryckligen att lämna Pass 36:s HIGH-fynd som en merge-blockerande
+follow-up: *"Vid en hård krasch kan claims vara korrekt backfillade medan run-rapporten
+permanent visar för låga counters. Då är själva rapporteringssystemet inte sanningsenligt."*
+och krävde en fullständig omläggning till per-claim-atomicitet, med fyra namngivna
+krasch-fönster-tester, invariant-kontroller på både service- och databasnivå, och en
+fokuserad self-review av enbart denna omläggning.
+
+**Problemet:** `advance_backfill_run()` anropade `backfill_memory_source_units()` för en hel
+batch och aggregerade DÄREFTER `result`-fälten till `run` i EN commit efter att batchen
+returnerat — trots att `_apply()` redan committar PER CLAIM (claim-datan är sin egen
+transaktion). En hård krasch mellan claim N:s datacommit och batchens egen slutcommit lämnade
+claim N korrekt backfillad medan run-rapportens counters/cursor för samma claim aldrig
+committades — en permanent, tyst underräkning i rapporten trots att claim-datan var helt
+korrekt och restart-safe.
+
+**Fixen:** `backfill_memory_source_units()`/`_dry_run()`/`_apply()` fick en ny valfri
+`on_claim_outcome`-callback (default `None`, bevarar PR #31:s ursprungliga fristående beteende
+exakt — dess 17 tester i `test_memory_source_backfill.py` opåverkade). `_apply()`/`_dry_run()`
+anropar callbacken INUTI samma ännu-inte-committade transaktion de strax ska committa för den
+claimen — så claim-data, run-counters, run-cursor och (vid fel) `memory_source_backfill_
+failures`-uppsert hamnar i EN atomisk commit per claim. `_make_on_claim_outcome()` i
+`memory_source_backfill_run.py` är closuren som muterar `run`, asserterar monotonicitet, och
+flushar (aldrig committar — commit-ägarskapet ligger kvar hos `_apply()`/`_dry_run()`).
+`advance_backfill_run()` aggregerar inte längre något efter batchen — endast
+`batches_completed` och den terminala statusövergången kvarstår som batch-nivå-metadata.
+
+**Invariant-kontroller (två oberoende lager, grundarens punkt 6):** service-nivå
+`_assert_monotonic()` (explicit `RuntimeError`-tripwire, inte en strippbar `assert`) som
+verifierar att counters aldrig minskar och cursorn aldrig går bakåt; databas-nivå en ny CHECK-
+constraint `ck_msbr_processed_count_matches_sum` tillagd direkt i migration `0025` (redigerad
+in-place eftersom migrationen fortfarande är omergad/oanvänd) som verifierar att
+`processed_count` alltid är summan av de fem outcome-countrarna.
+
+**Självgranskningsfynd (LOW, åtgärdat i samma runda):** en ursprunglig placering av
+callback-anropet INUTI samma `try` som `get_or_create_memory_source_unit` hade kunnat
+misskategorisera ett fel i callbacken själv som ett claim-resolution-fel. Löst med en
+dedikerad `else:`-gren med egen `try`/`except` (Python: `else` körs bara om `try` inte kastade,
+och undantag i `else` fångas INTE av de tidigare `except`-grenarna).
+
+**7 nya tester** i `test_memory_source_backfill_run.py` (18 → 25): 4 krasch-fönster-tester (ett
+för vart och ett av grundarens fyra namngivna injektionspunkter), 3 invariant-tester (DB CHECK-
+constraint avvisar faktiskt en felaktig `processed_count`, `_assert_monotonic` kastar för både
+minskad counter och cursor som går bakåt).
+
+**Verifiering på slutlig head:** `test_memory_source_backfill.py` 17/17 oförändrad;
+`test_memory_source_backfill_run.py` 25/25, körd 10 gånger i rad utan flakes; de 4 nya
+krasch-fönster-testerna körda 10 gånger i rad isolerat utan flakes; `test_rls_policy_registry.py`
+2/2; full backendsvit **750 passed, 1 skipped, 0 failed** (den enda flakan som observerades under
+rundan var samma redan kända `test_storage_local_fs`-flaka, bekräftad via `git diff --stat` mot
+den filen = inga ändringar); migration 0025 upgrade/downgrade/upgrade verifierad ren; exakt en
+Alembic-head (`0025`). Self-review (BLOCKER/HIGH/MEDIUM/LOW), enbart denna rundas
+transaktionsomläggning: inga BLOCKER/HIGH/MEDIUM, en LOW (åtgärdad — ovan), en LOW (noterad, inte
+en bugg — fler commits per `advance()`-anrop är en förväntad avvägning för atomicitetsgarantin).
+
+Ingen merge, ingen deploy, ingen produktionsbackfill körd. `claude/mainai-job-runtime-foundation`
+ej rörd. Väntar på grundarens granskning av denna rundas fix.
+
+## Pass 36 (2026-08-05): PR #35 — durable backfill-run reporting, grundarens andra granskningsrunda: BLOCKER/HIGH/MEDIUM alla åtgärdade
+
+**Branch:** `claude/s1a-backfill-run-reporting` (grenad från `claude/det-kommer-mer-879lcm` efter
+PR #31:s merge). **PR #35** öppen mot `claude/det-kommer-mer-879lcm`. **Head efter denna runda:
+`b91d5db`** (föregående head `6ffd7d4`, den ursprungliga PR:n med 9 filer/1200+ rader).
+
+Grundaren avvisade "bara vänta på CI och godkänn" för denna PR (9 filer, 1200+ rader) och
+begärde: (1) exakt testräkningsreconciliation (levererad: merge-base 793 tester, PR-head 805
+insamlade, exakt 11 rena tillägg, 0 borttagningar — den tidigare "803 passed"-siffran förklarad
+av en redan känd flaky `test_storage_local_fs`-test som misslyckades på just den körningen, inte
+en regression), och (2) en fullständig kodgranskning av migration 0025, `memory_source_backfill_
+run.py`, `memory_source_backfill.py`, `admin.py` och `rls.py` mot en ~20-punktslista, rapporterad
+som BLOCKER/HIGH/MEDIUM/LOW.
+
+**Fynd och fix (samma branch, per grundarens uttryckliga instruktion):**
+
+- **BLOCKER 1 (åtgärdad):** `advance_backfill_run()`/`cancel_backfill_run()` hade ingen
+  concurrency-kontroll på run-raden. En `SELECT ... FOR UPDATE` ensam räcker INTE, eftersom
+  `backfill_memory_source_units()` committar per claim på samma session och därmed släpper
+  radlåset långt innan batchen är klar. Löst med en session-nivå Postgres advisory lock
+  (`_run_lock`, samma dedikerade-anslutning-mönster som `app/cleanup.py`s `_CLEANUP_LOCK_KEY`)
+  hållen för HELA anropet, plus en `FOR UPDATE`-omläsning efter att låset erhållits (grundarens
+  uttryckliga instruktion, implementerad som defense-in-depth ovanpå advisory-låset som faktiskt
+  gör jobbet). Ett andra samtidigt `advance()`/`cancel()`-anrop för SAMMA run får nu
+  `BackfillRunBusy` (409) direkt i stället för att racea.
+- **BLOCKER 2 (åtgärdad):** `SKIP LOCKED` kunde hoppa över en momentant låst claim och samtidigt
+  flytta cursorn förbi den — permanent förlorad för den runen, med risk för falskt `completed`
+  och (i dry-run-scenarier) dubbelräkning om en förlorad batch räknades om. Löst genom en
+  icke-låsande existens-kontroll som fryser den bestående cursorn så fort ett sådant gap
+  upptäcks, plus en cursor-medveten `_real_candidates_remain()`-spärr i `advance_backfill_run()`
+  som hindrar `completed` från att sättas medan en behörig `memory_source_id IS NULL`-claim
+  fortfarande finns kvar (oavsett om den för tillfället är låst).
+- **HIGH (åtgärdad):** `run.error_summary` sparade tidigare rå `str(exc)`. Bytt till
+  `_safe_error_summary()` — endast undantagstypens namn, längdbegränsad — matchar disciplinen
+  modulen redan använder för per-claim-fel.
+- **MEDIUM (åtgärdade):** (4) `memory_source_backfill_runs`/`_failures` saknades i
+  `app/rls.py`s `POLICY_DEFINITIONS` (självläkningsloopen kunde aldrig återskapa en förlorad
+  policy för dessa två tabeller) — tillagda, plus ett nytt drifttest
+  (`tests/backend/test_rls_policy_registry.py`) som verifierar att varje RLS-aktiverad tabell
+  har en matchande policydefinition. (5) Dokumenterat i "Konflikter"-avsnittet nedan: en
+  GARANTERAD migrations-ID-krock mellan denna branch (`0025_memory_source_backfill_runs.py`) och
+  den frysta `claude/mainai-job-runtime-foundation`s egen `0025_mainai_jobs.py` — måste lösas
+  (döpas om) när den branchen integreras, INTE nu; den branchen har inte rörts. (6)
+  `BackfillRunOut`/`_backfill_run_out()` exponerar nu `last_cursor_created_at` utöver
+  `last_cursor_claim_id` så hela checkpointen är synlig via admin-API:t.
+
+**9 nya tester** (concurrent advance/advance, advance/cancel-race, låst claim inte permanent
+överhoppad, `completed` nekas medan en låst kandidat finns kvar, `error_summary` läcker inte rå
+undantagstext, RLS policy-registry-drift ×2, admin-API visar hela cursorn). Full backendsvit:
+**813 passed, 1 skipped, 0 failed** (814 insamlade = 805 tidigare + 9 nya, matchar exakt).
+Migration 0025 upgrade/downgrade/upgrade verifierad ren mot en fristående databas; exakt en
+Alembic-head (`0025`). De 20 ursprungliga testerna (inkl. de 2 vars förväntningar korrekt ändrats
+av HIGH-fixen och completion-spärren) och de 9 nya kördes 5 gånger i rad isolerat utan flakes.
+Ingen deploy, ingen produktionsbackfill, `claude/mainai-job-runtime-foundation` endast läst
+(`git fetch`/`git show`), aldrig ändrad. Väntar på grundarens nya granskningsrapport.
+
 ## Pass 35 (2026-08-05): PR #31 — mergad efter grundarens uttryckliga godkännande
 
 Efter Pass 34:s produktionsdataprofil gav grundaren uttryckligt merge-godkännande på den exakta
@@ -2378,6 +2496,29 @@ förväg:
   egen ombasering när det beslutet tas — inte på något annat öppet PR just nu.
 
 ## Konflikter
+
+**Känd, ännu OLÖST: migrationsnummer-krock mellan PR #35 och den frysta
+`claude/mainai-job-runtime-foundation`-branchen (upptäckt 2026-08-05, founder review round 2 av
+PR #35).** PR #35 (`claude/s1a-backfill-run-reporting`) lägger till
+`backend/alembic/versions/0025_memory_source_backfill_runs.py` med `revision = "0025"`,
+`down_revision = "0024"`. Den frysta `claude/mainai-job-runtime-foundation`-branchen har SEDAN
+TIDIGARE (Pass 14, 2026-08-03/04) sin EGEN, helt oberoende `0025_mainai_jobs.py` med
+`revision = "0025"`, `down_revision = "0018"` (branchad från en äldre punkt i historiken, innan
+migrationerna 0019–0024 fanns). Det här är INTE bara flera Alembic-heads (vilket Alembic kan
+hantera) — det är två OLIKA migrationsfiler som båda hävdar samma `revision = "0025"`, vilket
+Alembic inte kan lösa automatiskt när båda kedjorna någonsin ska samexistera; en av dem måste
+döpas om (samma mönster som redan löstes en gång för PR #16/#17:s `0016`-krock, se nästa post
+nedan). Verifierat genom att läsa båda filerna direkt (`git show
+origin/claude/mainai-job-runtime-foundation:backend/alembic/versions/0025_mainai_jobs.py`),
+inte gissat.
+
+Blockerar INTE PR #35:s egen merge till `claude/det-kommer-mer-879lcm` just nu (målgrenen har
+för närvarande bara EN `0025`-fil). Enligt Merge-regeln (`CLAUDE.md`) ska
+`claude/mainai-job-runtime-foundation` INTE röras eller ombasas i förväg för detta — det görs
+FÖRST när den branchen faktiskt ska integreras, och det är då renumreringen (troligen av
+runtime-foundation-branchens `0025_mainai_jobs.py` till nästa lediga nummer efter vad som då är
+huvudgrenens tip, plus motsvarande `down_revision`-uppdatering) måste genomföras som en del av
+den integrationen.
 
 **Löst 2026-07-26: migrationsnummer-krock mellan PR #16 och PR #17.** Båda branchades från
 samma tip (`7afb01f`) och skapade oberoende av varandra en `0016_*.py`-migration —

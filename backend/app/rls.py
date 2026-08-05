@@ -37,6 +37,14 @@ RLS_STATEMENTS = [
     "ALTER TABLE document_source_units FORCE ROW LEVEL SECURITY",
     "ALTER TABLE memory_source_lifecycle_events ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE memory_source_lifecycle_events FORCE ROW LEVEL SECURITY",
+    # Durable production backfill-run reporting (migration 0025) — see app/models/
+    # memory_source_backfill_run.py and app/rag/memory_source_backfill_run.py. Also enabled
+    # directly in the migration itself; listed here too so this idempotent reapply path stays
+    # the single source of truth for every owner-scoped table, matching the rest of this list.
+    "ALTER TABLE memory_source_backfill_runs ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE memory_source_backfill_runs FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE memory_source_backfill_failures ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE memory_source_backfill_failures FORCE ROW LEVEL SECURITY",
 ]
 
 # One policy per table: rows are only visible/writable when they belong to the user bound
@@ -111,6 +119,16 @@ POLICY_DEFINITIONS = [
     {
         "table": "memory_source_lifecycle_events",
         "name": "memory_source_lifecycle_events_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "memory_source_backfill_runs",
+        "name": "memory_source_backfill_runs_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "memory_source_backfill_failures",
+        "name": "memory_source_backfill_failures_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
 ]

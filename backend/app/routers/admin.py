@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -12,8 +14,21 @@ from app.models.usage import UsageLog
 from app.models.user import User
 from app.providers.registry import get_provider, provider_names
 from app.providers.verification import latest_check, verify_now
+from app.models.memory_source_backfill_run import BackfillRunMode, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.rag.claims import backfill_claim_types
+from app.rag.memory_source_backfill_run import (
+    BackfillRunBusy,
+    BackfillRunNotAdvanceable,
+    advance_backfill_run,
+    cancel_backfill_run,
+    create_or_resume_backfill_run,
+    get_backfill_run,
+    list_backfill_runs,
+)
 from app.schemas import (
+    BackfillRunCreateIn,
+    BackfillRunFailureOut,
+    BackfillRunOut,
     ProviderConfigIn,
     ProviderConfigOut,
     ProviderStatus,
@@ -228,3 +243,157 @@ async def trigger_claim_type_backfill(
         "still_uncategorized": result.still_uncategorized,
         "failed": result.failed,
     }
+
+
+def _backfill_run_out(run: MemorySourceBackfillRun) -> BackfillRunOut:
+    return BackfillRunOut(
+        id=run.id,
+        mode=run.mode.value,
+        status=run.status.value,
+        batch_size=run.batch_size,
+        total_candidates_snapshot=run.total_candidates_snapshot,
+        already_done_snapshot=run.already_done_snapshot,
+        processed_count=run.processed_count,
+        exact_chunk_count=run.exact_chunk_count,
+        degraded_version_count=run.degraded_version_count,
+        missing_document_only_count=run.missing_document_only_count,
+        skipped_unresolvable_count=run.skipped_unresolvable_count,
+        failed_count=run.failed_count,
+        batches_completed=run.batches_completed,
+        last_cursor_created_at=run.last_cursor_created_at,
+        last_cursor_claim_id=run.last_cursor_claim_id,
+        error_summary=run.error_summary,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+@router.post("/memory-source-backfill/runs", response_model=BackfillRunOut)
+def create_backfill_run(
+    body: BackfillRunCreateIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)
+):
+    """S1A durable production backfill-run reporting (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md
+    §4.8, PR #31's own memory_source_backfill.py module docstring — the last blocker that
+    named before a real production backfill run). Creates a new run, or returns the caller's
+    existing active (pending/running) run if one already exists (idempotent — see
+    app/rag/memory_source_backfill_run.py's create_or_resume_backfill_run() docstring).
+
+    This endpoint only CREATES/RESUMES the durable run row — it performs no backfill work
+    itself. Call POST .../runs/{run_id}/advance to actually do bounded work, exactly one
+    batch per call, same bounded-per-request discipline as /claims/backfill-types above."""
+    try:
+        mode = BackfillRunMode(body.mode)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"mode must be 'dry_run' or 'real', got {body.mode!r}")
+
+    run = create_or_resume_backfill_run(db, user.id, mode=mode)
+    record_audit(
+        db,
+        user_id=user.id,
+        action="memory_source_backfill_run_created",
+        entity_type="memory_source_backfill_run",
+        entity_id=str(run.id),
+        detail=f"mode={run.mode.value} status={run.status.value}",
+        request=request,
+    )
+    return _backfill_run_out(run)
+
+
+@router.post("/memory-source-backfill/runs/{run_id}/advance", response_model=BackfillRunOut)
+def advance_backfill_run_endpoint(
+    run_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)
+):
+    """Performs exactly ONE bounded batch of work for `run_id` and returns its updated durable
+    status — see app/rag/memory_source_backfill_run.py's advance_backfill_run() docstring for
+    why this is bounded to one batch per call (no unbounded loop held open inside a request).
+    A caller driving a run to completion calls this repeatedly until `status` is no longer
+    `running`/`pending`."""
+    run = get_backfill_run(db, user.id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backfill run not found")
+    try:
+        run = advance_backfill_run(db, run)
+    except BackfillRunNotAdvanceable as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except BackfillRunBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    record_audit(
+        db,
+        user_id=user.id,
+        action="memory_source_backfill_run_advanced",
+        entity_type="memory_source_backfill_run",
+        entity_id=str(run.id),
+        detail=(
+            f"status={run.status.value} batches_completed={run.batches_completed} "
+            f"processed_count={run.processed_count} failed_count={run.failed_count}"
+        ),
+        request=request,
+    )
+    return _backfill_run_out(run)
+
+
+@router.post("/memory-source-backfill/runs/{run_id}/cancel", response_model=BackfillRunOut)
+def cancel_backfill_run_endpoint(
+    run_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)
+):
+    """Operator-triggered stop — remaining candidates simply stay valid for a future run."""
+    run = get_backfill_run(db, user.id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backfill run not found")
+    try:
+        run = cancel_backfill_run(db, run)
+    except BackfillRunNotAdvanceable as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except BackfillRunBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    record_audit(
+        db,
+        user_id=user.id,
+        action="memory_source_backfill_run_cancelled",
+        entity_type="memory_source_backfill_run",
+        entity_id=str(run.id),
+        request=request,
+    )
+    return _backfill_run_out(run)
+
+
+@router.get("/memory-source-backfill/runs/{run_id}", response_model=BackfillRunOut)
+def get_backfill_run_endpoint(run_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    run = get_backfill_run(db, user.id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backfill run not found")
+    return _backfill_run_out(run)
+
+
+@router.get("/memory-source-backfill/runs", response_model=list[BackfillRunOut])
+def list_backfill_runs_endpoint(db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    return [_backfill_run_out(run) for run in list_backfill_runs(db, user.id)]
+
+
+@router.get("/memory-source-backfill/runs/{run_id}/failures", response_model=list[BackfillRunFailureOut])
+def list_backfill_run_failures_endpoint(
+    run_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)
+):
+    """Claim-level failure report — identifiers and structural reasons only, never
+    `KnowledgeClaim.claim_text` (see migration 0025's module docstring)."""
+    run = get_backfill_run(db, user.id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="backfill run not found")
+    failures = (
+        db.query(MemorySourceBackfillFailure)
+        .filter(MemorySourceBackfillFailure.run_id == run.id)
+        .order_by(MemorySourceBackfillFailure.created_at.asc())
+        .all()
+    )
+    return [
+        BackfillRunFailureOut(
+            claim_id=f.claim_id,
+            reason=f.reason,
+            attempt_count=f.attempt_count,
+            created_at=f.created_at,
+            updated_at=f.updated_at,
+        )
+        for f in failures
+    ]

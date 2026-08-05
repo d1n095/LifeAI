@@ -10,6 +10,7 @@ from app.models.import_job import ImportJob
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.media_url_import import MediaUrlImport
+from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.memory_source_unit import (
     DocumentSourceUnit,
     LifecycleStatus,
@@ -50,6 +51,10 @@ __all__ = [
     "KnowledgeClaim",
     "KnowledgeVersion",
     "MediaUrlImport",
+    "BackfillRunMode",
+    "BackfillRunStatus",
+    "MemorySourceBackfillFailure",
+    "MemorySourceBackfillRun",
     "DocumentSourceUnit",
     "LifecycleStatus",
     "MemorySourceLifecycleEvent",
