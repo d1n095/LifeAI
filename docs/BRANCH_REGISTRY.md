@@ -2379,6 +2379,29 @@ förväg:
 
 ## Konflikter
 
+**Känd, ännu OLÖST: migrationsnummer-krock mellan PR #35 och den frysta
+`claude/mainai-job-runtime-foundation`-branchen (upptäckt 2026-08-05, founder review round 2 av
+PR #35).** PR #35 (`claude/s1a-backfill-run-reporting`) lägger till
+`backend/alembic/versions/0025_memory_source_backfill_runs.py` med `revision = "0025"`,
+`down_revision = "0024"`. Den frysta `claude/mainai-job-runtime-foundation`-branchen har SEDAN
+TIDIGARE (Pass 14, 2026-08-03/04) sin EGEN, helt oberoende `0025_mainai_jobs.py` med
+`revision = "0025"`, `down_revision = "0018"` (branchad från en äldre punkt i historiken, innan
+migrationerna 0019–0024 fanns). Det här är INTE bara flera Alembic-heads (vilket Alembic kan
+hantera) — det är två OLIKA migrationsfiler som båda hävdar samma `revision = "0025"`, vilket
+Alembic inte kan lösa automatiskt när båda kedjorna någonsin ska samexistera; en av dem måste
+döpas om (samma mönster som redan löstes en gång för PR #16/#17:s `0016`-krock, se nästa post
+nedan). Verifierat genom att läsa båda filerna direkt (`git show
+origin/claude/mainai-job-runtime-foundation:backend/alembic/versions/0025_mainai_jobs.py`),
+inte gissat.
+
+Blockerar INTE PR #35:s egen merge till `claude/det-kommer-mer-879lcm` just nu (målgrenen har
+för närvarande bara EN `0025`-fil). Enligt Merge-regeln (`CLAUDE.md`) ska
+`claude/mainai-job-runtime-foundation` INTE röras eller ombasas i förväg för detta — det görs
+FÖRST när den branchen faktiskt ska integreras, och det är då renumreringen (troligen av
+runtime-foundation-branchens `0025_mainai_jobs.py` till nästa lediga nummer efter vad som då är
+huvudgrenens tip, plus motsvarande `down_revision`-uppdatering) måste genomföras som en del av
+den integrationen.
+
 **Löst 2026-07-26: migrationsnummer-krock mellan PR #16 och PR #17.** Båda branchades från
 samma tip (`7afb01f`) och skapade oberoende av varandra en `0016_*.py`-migration —
 `0016_agent_orchestration.py` (PR #16) och `0016_chat_message_status.py` (PR #17), båda med

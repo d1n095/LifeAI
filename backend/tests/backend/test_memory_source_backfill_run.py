@@ -15,6 +15,7 @@ from app.models.knowledge_claim import KnowledgeClaim
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.user import User, UserRole
 from app.rag.memory_source_backfill_run import (
+    BackfillRunBusy,
     BackfillRunNotAdvanceable,
     advance_backfill_run,
     cancel_backfill_run,
@@ -23,6 +24,7 @@ from app.rag.memory_source_backfill_run import (
     record_failure,
 )
 from app.request_context import current_user_id as current_user_id_var
+from app.routers.admin import _backfill_run_out
 from app.security import hash_password
 
 
@@ -340,7 +342,10 @@ def test_advance_backfill_run_top_level_exception_marks_run_failed(monkeypatch):
         session.refresh(run)
         assert run.status == BackfillRunStatus.failed
         assert run.error_summary is not None
-        assert "simulated crash" in run.error_summary
+        # Sanitized (founder review round 2, HIGH finding): type name only, never str(exc) —
+        # see _safe_error_summary()'s docstring for why the raw message is never persisted.
+        assert "simulated crash" not in run.error_summary
+        assert "RuntimeError" in run.error_summary
         assert run.completed_at is not None
     finally:
         session.rollback()
@@ -404,6 +409,361 @@ def test_get_backfill_run_is_owner_scoped():
 
         _set_rls_user(session, owner_b.id)
         assert get_backfill_run(session, owner_b.id, run.id) is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- founder review, round 2: single-flight per run, lock-gap cursor freeze, completion gate,
+# --- error sanitization, RLS policy drift, full cursor exposure -----------------------------
+
+
+def test_concurrent_advance_calls_on_same_run_second_is_rejected_not_lost(monkeypatch):
+    """BLOCKER 1: two overlapping advance() calls on the SAME run must never both proceed —
+    the second must be rejected outright (BackfillRunBusy) rather than racing and silently
+    losing one side's counter increment."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "run-concurrent-advance@example.com")
+        document = _make_document(setup_session, owner.id)
+        chunk = _make_chunk(setup_session, owner.id, document.id)
+        _make_claim(setup_session, owner.id, document.id, chunk_id=chunk.id)
+        owner_id = owner.id
+    finally:
+        setup_session.close()
+
+    import app.rag.memory_source_backfill_run as run_module
+
+    real_backfill = run_module.backfill_memory_source_units
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_backfill(*args, **kwargs):
+        started.set()
+        assert release.wait(timeout=10), "test setup error: release was never signaled"
+        return real_backfill(*args, **kwargs)
+
+    monkeypatch.setattr(run_module, "backfill_memory_source_units", _slow_backfill)
+
+    session_a = SessionLocal()
+    errors: dict = {}
+    try:
+        _set_rls_user(session_a, owner_id)
+        run = create_or_resume_backfill_run(session_a, owner_id, mode=BackfillRunMode.real)
+        run_id = run.id
+
+        def _worker_a():
+            try:
+                # ContextVars don't propagate into a NEW threading.Thread automatically (only
+                # asyncio tasks inherit the creating context) -- must be re-set from INSIDE
+                # this thread, same as test_create_or_resume_two_concurrent_creators_converge_
+                # to_one_run's `_worker` above, or app/db.py's after_begin listener sees no
+                # user id for this thread's transaction and RLS excludes the row entirely.
+                _set_rls_user(session_a, owner_id)
+                run_module.advance_backfill_run(session_a, run)
+            except Exception as exc:  # noqa: BLE001 - captured and asserted on below
+                errors["a"] = exc
+
+        thread_a = threading.Thread(target=_worker_a)
+        thread_a.start()
+        assert started.wait(timeout=10), "thread_a never entered the locked section"
+
+        session_b = SessionLocal()
+        try:
+            _set_rls_user(session_b, owner_id)
+            run_b = get_backfill_run(session_b, owner_id, run_id)
+            with pytest.raises(BackfillRunBusy):
+                advance_backfill_run(session_b, run_b)
+        finally:
+            session_b.rollback()
+            session_b.close()
+
+        release.set()
+        thread_a.join(timeout=10)
+        assert not thread_a.is_alive()
+        assert not errors, f"thread_a raised unexpectedly: {errors}"
+    finally:
+        session_a.rollback()
+        session_a.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        run = get_backfill_run(verify_session, owner_id, run_id)
+        assert run.status == BackfillRunStatus.running  # thread_a's call processed the 1 claim
+        assert run.processed_count == 1  # not lost, not doubled
+
+        run = advance_backfill_run(verify_session, run)
+        assert run.status == BackfillRunStatus.completed
+        assert run.processed_count == 1
+    finally:
+        verify_session.close()
+
+
+def test_advance_vs_cancel_race_second_caller_is_rejected(monkeypatch):
+    """BLOCKER 1: a cancel() landing while an advance() batch is in flight for the SAME run
+    must not be silently clobbered back to running/completed by that batch's own final
+    commit — they now share the same per-run advisory lock, so the second caller is rejected
+    outright instead of racing."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "run-advance-cancel-race@example.com")
+        document = _make_document(setup_session, owner.id)
+        chunk = _make_chunk(setup_session, owner.id, document.id)
+        _make_claim(setup_session, owner.id, document.id, chunk_id=chunk.id)
+        owner_id = owner.id
+    finally:
+        setup_session.close()
+
+    import app.rag.memory_source_backfill_run as run_module
+
+    real_backfill = run_module.backfill_memory_source_units
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_backfill(*args, **kwargs):
+        started.set()
+        assert release.wait(timeout=10), "test setup error: release was never signaled"
+        return real_backfill(*args, **kwargs)
+
+    monkeypatch.setattr(run_module, "backfill_memory_source_units", _slow_backfill)
+
+    session_a = SessionLocal()
+    errors: dict = {}
+    try:
+        _set_rls_user(session_a, owner_id)
+        run = create_or_resume_backfill_run(session_a, owner_id, mode=BackfillRunMode.real)
+        run_id = run.id
+
+        def _worker_a():
+            try:
+                # See test_concurrent_advance_calls_on_same_run_second_is_rejected_not_lost's
+                # identical comment: ContextVars need to be re-set from INSIDE this new thread.
+                _set_rls_user(session_a, owner_id)
+                run_module.advance_backfill_run(session_a, run)
+            except Exception as exc:  # noqa: BLE001
+                errors["a"] = exc
+
+        thread_a = threading.Thread(target=_worker_a)
+        thread_a.start()
+        assert started.wait(timeout=10)
+
+        session_b = SessionLocal()
+        try:
+            _set_rls_user(session_b, owner_id)
+            run_b = get_backfill_run(session_b, owner_id, run_id)
+            with pytest.raises(BackfillRunBusy):
+                cancel_backfill_run(session_b, run_b)
+        finally:
+            session_b.rollback()
+            session_b.close()
+
+        release.set()
+        thread_a.join(timeout=10)
+        assert not thread_a.is_alive()
+        assert not errors, f"thread_a raised unexpectedly: {errors}"
+    finally:
+        session_a.rollback()
+        session_a.close()
+
+    # advance() completed cleanly, never clobbered by the rejected cancel().
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        run = get_backfill_run(verify_session, owner_id, run_id)
+        assert run.status == BackfillRunStatus.running  # thread_a's call processed the 1 claim
+
+        run = advance_backfill_run(verify_session, run)
+        assert run.status == BackfillRunStatus.completed
+    finally:
+        verify_session.close()
+
+
+def test_locked_claim_not_skipped_permanently_behind_cursor():
+    """BLOCKER 2: a claim that's momentarily locked by an unrelated transaction must not be
+    silently skipped past the persisted cursor — it must remain reachable by a later call once
+    the lock clears."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "run-locked-claim@example.com")
+        document = _make_document(setup_session, owner.id)
+        chunk = _make_chunk(setup_session, owner.id, document.id)
+        locked_claim = _make_claim(setup_session, owner.id, document.id, chunk_id=chunk.id, claim_text="Locked")
+        free_claim = _make_claim(setup_session, owner.id, document.id, chunk_id=chunk.id, claim_text="Free")
+        locked_claim_id, free_claim_id, owner_id = locked_claim.id, free_claim.id, owner.id
+    finally:
+        setup_session.close()
+
+    lock_session = SessionLocal()
+    run_id = None
+    try:
+        _set_rls_user(lock_session, owner_id)
+        lock_session.query(KnowledgeClaim).filter(KnowledgeClaim.id == locked_claim_id).with_for_update().one()
+
+        advance_session = SessionLocal()
+        try:
+            _set_rls_user(advance_session, owner_id)
+            run = create_or_resume_backfill_run(advance_session, owner_id, mode=BackfillRunMode.real, batch_size=10)
+            run_id = run.id
+            run = advance_backfill_run(advance_session, run)
+
+            assert run.status == BackfillRunStatus.running
+            # Frozen BEFORE the locked claim's position (which sorts first) -- never advanced.
+            assert run.last_cursor_claim_id is None
+            assert run.last_cursor_created_at is None
+
+            refreshed_free = advance_session.get(KnowledgeClaim, free_claim_id)
+            refreshed_locked = advance_session.get(KnowledgeClaim, locked_claim_id)
+            assert refreshed_free.memory_source_id is not None
+            assert refreshed_locked.memory_source_id is None
+        finally:
+            advance_session.rollback()
+            advance_session.close()
+    finally:
+        lock_session.rollback()  # releases the row lock
+        lock_session.close()
+
+    # Lock released -- the previously-locked claim must now be reachable and get processed
+    # (this call), and a FOLLOWING call must reach genuine completion (never stuck forever
+    # behind a frozen cursor). Two calls, same as every other "reach completion" test in this
+    # file -- a call that just processed a real candidate correctly stays `running`; only a
+    # call finding zero candidates may complete (see module docstring's "no fabricated
+    # completion claims").
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        run = get_backfill_run(verify_session, owner_id, run_id)
+        run = advance_backfill_run(verify_session, run)
+        assert run.status == BackfillRunStatus.running
+        final_locked_claim = verify_session.get(KnowledgeClaim, locked_claim_id)
+        assert final_locked_claim.memory_source_id is not None
+
+        run = advance_backfill_run(verify_session, run)
+        assert run.status == BackfillRunStatus.completed
+        assert run.processed_count == 2
+    finally:
+        verify_session.close()
+
+
+def test_advance_backfill_run_never_completes_while_locked_candidate_remains():
+    """BLOCKER 2: if the ONLY remaining candidate is momentarily locked, a batch that finds
+    zero selectable rows must NOT be treated as genuine exhaustion — `_real_candidates_remain()`
+    must keep the run `running`, never fabricate `completed`."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "run-locked-completion@example.com")
+        document = _make_document(setup_session, owner.id)
+        chunk = _make_chunk(setup_session, owner.id, document.id)
+        claim = _make_claim(setup_session, owner.id, document.id, chunk_id=chunk.id)
+        claim_id, owner_id = claim.id, owner.id
+    finally:
+        setup_session.close()
+
+    lock_session = SessionLocal()
+    run_id = None
+    try:
+        _set_rls_user(lock_session, owner_id)
+        lock_session.query(KnowledgeClaim).filter(KnowledgeClaim.id == claim_id).with_for_update().one()
+
+        advance_session = SessionLocal()
+        try:
+            _set_rls_user(advance_session, owner_id)
+            run = create_or_resume_backfill_run(advance_session, owner_id, mode=BackfillRunMode.real)
+            run_id = run.id
+            run = advance_backfill_run(advance_session, run)
+
+            assert run.status == BackfillRunStatus.running  # NOT completed
+            assert run.processed_count == 0
+            assert run.completed_at is None
+        finally:
+            advance_session.rollback()
+            advance_session.close()
+    finally:
+        lock_session.rollback()
+        lock_session.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        run = get_backfill_run(verify_session, owner_id, run_id)
+        run = advance_backfill_run(verify_session, run)
+        assert run.status == BackfillRunStatus.running  # this call processed the real claim
+
+        run = advance_backfill_run(verify_session, run)
+        assert run.status == BackfillRunStatus.completed
+    finally:
+        verify_session.close()
+
+
+def test_error_summary_never_contains_raw_exception_text(monkeypatch):
+    """HIGH: run.error_summary must never embed str(exc) — only the exception type name,
+    bounded in length. A raw exception string could carry SQL text, bound parameters, or other
+    backend internals."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-error-sanitize@example.com")
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        _make_claim(session, owner.id, document.id, chunk_id=chunk.id)
+        _set_rls_user(session, owner.id)
+
+        run = create_or_resume_backfill_run(session, owner.id, mode=BackfillRunMode.real)
+
+        sensitive_marker = "SELECT secret_column FROM some_table WHERE token='sk-live-should-never-leak'"
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError(sensitive_marker)
+
+        import app.rag.memory_source_backfill_run as run_module
+
+        monkeypatch.setattr(run_module, "backfill_memory_source_units", _boom)
+
+        with pytest.raises(RuntimeError, match="should-never-leak"):
+            advance_backfill_run(session, run)
+
+        session.refresh(run)
+        assert run.status == BackfillRunStatus.failed
+        assert run.error_summary is not None
+        assert sensitive_marker not in run.error_summary
+        assert "RuntimeError" in run.error_summary
+        assert len(run.error_summary) <= 200
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_policy_registry_backfill_tables_present():
+    """MEDIUM 4 sanity check at the service-test layer (the authoritative drift test lives in
+    tests/backend/test_rls_policy_registry.py): the two new tables must both carry an
+    owner-scoped RLS policy, not just ENABLE/FORCE."""
+    from app.rls import POLICY_DEFINITIONS
+
+    policy_tables = {policy["table"] for policy in POLICY_DEFINITIONS}
+    assert "memory_source_backfill_runs" in policy_tables
+    assert "memory_source_backfill_failures" in policy_tables
+
+
+def test_admin_api_exposes_full_cursor_pair():
+    """MEDIUM 6: the operator-visible report must expose BOTH halves of the resumable
+    checkpoint, not just last_cursor_claim_id."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-cursor-api@example.com")
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        for i in range(3):
+            _make_claim(session, owner.id, document.id, chunk_id=chunk.id, claim_text=f"Cursor claim {i}")
+        _set_rls_user(session, owner.id)
+
+        run = create_or_resume_backfill_run(session, owner.id, mode=BackfillRunMode.real, batch_size=1)
+        run = advance_backfill_run(session, run)
+
+        assert run.last_cursor_created_at is not None
+        assert run.last_cursor_claim_id is not None
+
+        out = _backfill_run_out(run)
+        assert out.last_cursor_created_at == run.last_cursor_created_at
+        assert out.last_cursor_claim_id == run.last_cursor_claim_id
     finally:
         session.rollback()
         session.close()

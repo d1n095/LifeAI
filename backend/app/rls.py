@@ -121,6 +121,16 @@ POLICY_DEFINITIONS = [
         "name": "memory_source_lifecycle_events_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
+    {
+        "table": "memory_source_backfill_runs",
+        "name": "memory_source_backfill_runs_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "memory_source_backfill_failures",
+        "name": "memory_source_backfill_failures_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
 ]
 
 

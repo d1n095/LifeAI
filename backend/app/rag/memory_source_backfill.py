@@ -198,6 +198,18 @@ def _advance_cursor(result: MemorySourceBackfillResult, claim: KnowledgeClaim) -
     result.last_seen_id = claim.id
 
 
+def _before_position(query, created_at: datetime, id_: uuid.UUID):
+    """The mirror image of `_apply_cursor` — matches anything strictly BEFORE `(created_at,
+    id_)` in the same `(created_at.asc(), id.asc())` ordering. Used by `_apply()`'s
+    lock-gap check below, never by the plain forward-scan queries."""
+    return query.filter(
+        or_(
+            KnowledgeClaim.created_at < created_at,
+            and_(KnowledgeClaim.created_at == created_at, KnowledgeClaim.id < id_),
+        )
+    )
+
+
 def _tally_outcome(result: MemorySourceBackfillResult, outcome: DocumentSourceLocator | _ResolutionFailure) -> None:
     if isinstance(outcome, _ResolutionFailure):
         result.skipped_mismatch += 1
@@ -320,6 +332,19 @@ def _apply(
     # since-fixed chunk_id, a since-created Document) changed in between.
     excluded_ids: set[uuid.UUID] = set()
 
+    # Founder review, round 2 (BLOCKER 2): `SELECT ... FOR UPDATE SKIP LOCKED` below returns
+    # the smallest UNLOCKED matching row — it cannot tell us whether a SMALLER, still-eligible
+    # row exists but is momentarily locked by some unrelated concurrent transaction. If we kept
+    # advancing `result.last_seen_*` (and therefore the durable persisted cursor) to whatever
+    # SKIP LOCKED happened to return, that smaller locked claim would be permanently excluded
+    # by every future call's cursor filter — even though it was never actually resolved, never
+    # recorded as a failure, and its memory_source_id is still NULL. Once the per-claim gap
+    # check below finds such a gap, this freezes for the REST of this call: real work below
+    # still proceeds normally (claims still get resolved/committed), but `result.last_seen_*`
+    # simply stops moving forward, so the persisted cursor stays at (or before) the locked
+    # claim's position and it remains reachable by a later call once the lock clears.
+    cursor_frozen = False
+
     batches_done = 0
     while max_batches is None or batches_done < max_batches:
         exhausted = False
@@ -344,7 +369,30 @@ def _apply(
             # attributes — _advance_cursor must still see the real claim identity even after
             # a rollback on the FAILURE path a few lines down.
             claim_created_at, claim_id = claim.created_at, claim.id
-            result.last_seen_created_at, result.last_seen_id = claim_created_at, claim_id
+
+            if not cursor_frozen:
+                gap_query = db.query(KnowledgeClaim.id).filter(
+                    KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.memory_source_id.is_(None)
+                )
+                gap_query = _apply_cursor(gap_query, after)
+                gap_query = _before_position(gap_query, claim_created_at, claim_id)
+                if excluded_ids:
+                    gap_query = gap_query.filter(KnowledgeClaim.id.notin_(excluded_ids))
+                # A plain (non-locking) read sees a row regardless of another transaction's row
+                # lock (Postgres MVCC) — if this finds anything, SKIP LOCKED above must have
+                # jumped over it, since our own query is ordered ascending and would otherwise
+                # have returned it instead of `claim`.
+                if gap_query.first() is not None:
+                    cursor_frozen = True
+                    logger.warning(
+                        "memory_source_backfill: an eligible claim earlier than %s is locked by a "
+                        "concurrent transaction — freezing this run's cursor so it stays reachable "
+                        "instead of skipping it permanently",
+                        claim_id,
+                    )
+
+            if not cursor_frozen:
+                result.last_seen_created_at, result.last_seen_id = claim_created_at, claim_id
 
             outcome = _resolve_locator(db, claim)
             if isinstance(outcome, _ResolutionFailure):

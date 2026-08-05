@@ -801,6 +801,7 @@ class BackfillRunOut(BaseModel):
     skipped_unresolvable_count: int
     failed_count: int
     batches_completed: int
+    last_cursor_created_at: datetime | None
     last_cursor_claim_id: uuid.UUID | None
     error_summary: str | None
     started_at: datetime | None

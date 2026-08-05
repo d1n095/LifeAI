@@ -17,6 +17,7 @@ from app.providers.verification import latest_check, verify_now
 from app.models.memory_source_backfill_run import BackfillRunMode, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.rag.claims import backfill_claim_types
 from app.rag.memory_source_backfill_run import (
+    BackfillRunBusy,
     BackfillRunNotAdvanceable,
     advance_backfill_run,
     cancel_backfill_run,
@@ -259,6 +260,7 @@ def _backfill_run_out(run: MemorySourceBackfillRun) -> BackfillRunOut:
         skipped_unresolvable_count=run.skipped_unresolvable_count,
         failed_count=run.failed_count,
         batches_completed=run.batches_completed,
+        last_cursor_created_at=run.last_cursor_created_at,
         last_cursor_claim_id=run.last_cursor_claim_id,
         error_summary=run.error_summary,
         started_at=run.started_at,
@@ -315,6 +317,8 @@ def advance_backfill_run_endpoint(
         run = advance_backfill_run(db, run)
     except BackfillRunNotAdvanceable as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    except BackfillRunBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     record_audit(
         db,
         user_id=user.id,
@@ -341,6 +345,8 @@ def cancel_backfill_run_endpoint(
     try:
         run = cancel_backfill_run(db, run)
     except BackfillRunNotAdvanceable as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except BackfillRunBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     record_audit(
         db,
