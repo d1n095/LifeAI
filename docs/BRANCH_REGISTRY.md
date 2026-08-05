@@ -8,6 +8,17 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-05, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`merge_pull_request`, inte memorerat).
+**PR #31 mergad** (`claude/s1a-memory-source-implementation` → `claude/det-kommer-mer-879lcm`),
+merge-commit `c141c38f913d585b63a202e16b980dc60599cf25`, efter grundarens uttryckliga
+merge-godkännande på den exakta head-SHA:n. Källbranchens head vid merge: `52e42132178852ca
+62eadbf3c6989494864c4849`. Basförälder: `00d950b51cb635e0c32418be8c2cc4a12b03cd03` (innehåller
+PR #32 och PR #33). `merged_by`: `d1n095`. Samtliga 12 verkliga CI-jobb `success` inklusive den
+aggregerande "All required checks passed" och `Frontend — npm audit`; `mergeable_state: clean`;
+0 olösta granskningstrådar. Produktionsdataprofilen (Pass 34, körd av grundaren read-only mot
+produktions-VPS:en): 223/223 `knowledge_claims` klassificerade deterministiskt som `exact_chunk`,
+0 unresolvable. Ingen deploy, migration, backfill eller omstart utfördes i samband med
+mergningen — endast själva mergningen. Den frysta `claude/mainai-job-runtime-foundation`-branchen
+rördes inte. Se Pass 35 nedan för fullständig detalj.
 **PR #32 mergad** (`claude/frontend-npm-audit-ghsa-mh99-source-ids` → `claude/det-kommer-mer-879lcm`,
 merge-commit `d6a5e2f`) efter grundarens uttryckliga godkännande — löste `Frontend — npm audit`
 för PR #31 mot den DÅ kända GHSA-mh99-v99m-4gvg-ID-churnen. **PR #31** fick därefter basgrenen
@@ -40,7 +51,9 @@ inga oavslutade delar kvar — hela dess innehåll är designdokumentation som n
 GODKÄNDA arkitekturen för `MemorySourceUnit`/S1A.
 
 **PR #31** (`claude/s1a-memory-source-implementation`, grenad från `claude/det-kommer-mer-879lcm`
-efter PR #30:s merge) — draft, öppen, INTE mergad, INGEN deploy/produktionsmigration körd.
+efter PR #30:s merge) — **MERGAD** (merge-commit `c141c38`, se ovan och Pass 35 nedan). Historiken
+nedan (draft/granskningsrundorna) beskriver arbetet som ledde fram till mergningen, och lämnas
+oförändrad som historisk logg. INGEN deploy/produktionsmigration/produktionsbackfill har körts.
 Implementerar §4.8:s design: migration `0019_memory_source_units` (tabeller, CHECKs,
 triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
 `erase_owner_memory`/`erase_owner_memory_admin`), SQLAlchemy-modeller,
@@ -122,6 +135,32 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 35 (2026-08-05): PR #31 — mergad efter grundarens uttryckliga godkännande
+
+Efter Pass 34:s produktionsdataprofil gav grundaren uttryckligt merge-godkännande på den exakta
+head-SHA:n `52e42132178852ca62eadbf3c6989494864c4849`. Sessionen utförde exakt de fyra begärda
+stegen, i ordning:
+
+1. **Markerade PR #31 som "Ready for review"** (togs ur draft-läge).
+2. **Sista verifiering** direkt mot GitHubs API (inte memorerat): head-SHA
+   `52e42132178852ca62eadbf3c6989494864c4849`, bas `00d950b51cb635e0c32418be8c2cc4a12b03cd03`
+   (innehåller PR #32 och PR #33), `mergeable_state: clean`, samtliga 12 verkliga CI-jobb
+   `success` inklusive den aggregerande "All required checks passed", 0 olösta
+   granskningstrådar. Repoets etablerade mergemetod verifierades genom att inspektera
+   föräldraantalet på PR #32:s och PR #33:s mergecommits (`d6a5e2f`, `00d950b`) — båda äkta
+   tvåförälder-mergecommits, INTE squash/rebase.
+3. **Mergade** PR #31 med samma metod (`merge`, äkta mergecommit).
+4. **Rapporterade**: merge-commit `c141c38f913d585b63a202e16b980dc60599cf25` (föräldrar
+   `00d950b5` + `52e42132`), ny bas-head `claude/det-kommer-mer-879lcm` @ `c141c38`, PR #31
+   bekräftat `closed`/`merged: true`/`merged_by: d1n095`, ingen deploy/migration/backfill/
+   omstart utförd. Sessionen avslutades automatiskt från PR-aktivitetsprenumerationen (GitHubs
+   webhook bekräftade mergningen och avprenumererade sessionen).
+
+Kvarstående housekeeping efter mergningen — denna registerpost själv — hanteras separat i en
+egen docs-only branch/PR (`claude/branch-registry-pr31-merged`, grenad från exakt `c141c38`,
+ENDAST `docs/BRANCH_REGISTRY.md` ändrad), inte som en direkt commit på basgrenen, per grundarens
+uttryckliga instruktion.
 
 ## Pass 34 (2026-08-05): PR #31 — den verkliga produktionsdataprofilen genomförd (read-only, körd av grundaren från VPS:en)
 
