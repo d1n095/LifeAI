@@ -4,15 +4,18 @@ real, same pattern as tests/backend/test_memory_source_backfill.py.
 """
 
 import threading
+import uuid
 
 import pytest
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import IntegrityError
 
 from app.db import SessionLocal
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
+from app.models.memory_source_unit import MemorySourceUnit
 from app.models.user import User, UserRole
 from app.rag.memory_source_backfill_run import (
     BackfillRunBusy,
@@ -764,6 +767,292 @@ def test_admin_api_exposes_full_cursor_pair():
         out = _backfill_run_out(run)
         assert out.last_cursor_created_at == run.last_cursor_created_at
         assert out.last_cursor_claim_id == run.last_cursor_claim_id
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- founder review, round 3 (HIGH): per-claim transaction atomicity crash-window tests ----
+
+
+def test_crash_between_two_claims_in_same_batch_leaves_run_at_exactly_first_claim(monkeypatch):
+    """The one crash window this design cannot (and does not try to) eliminate: an interruption
+    strictly BETWEEN two claims' own atomic commits, within the same batch/advance() call.
+    Claim 1's data+counters+cursor must be fully durable; claim 2 must be completely untouched
+    (still a valid NULL candidate, not counted anywhere) — no partial state for claim 2, no lost
+    or duplicated credit for claim 1."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-crash-between-claims@example.com")
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        claim_1 = _make_claim(session, owner.id, document.id, chunk_id=chunk.id, claim_text="First claim")
+        claim_2 = _make_claim(session, owner.id, document.id, chunk_id=chunk.id, claim_text="Second claim")
+        claim_1_id, claim_2_id, owner_id = claim_1.id, claim_2.id, owner.id
+        _set_rls_user(session, owner_id)
+
+        run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real, batch_size=10)
+
+        import app.rag.memory_source_backfill as backfill_module
+
+        real_resolve_locator = backfill_module._resolve_locator
+        calls = {"n": 0}
+
+        def _resolve_locator_crashes_on_second_call(db, claim):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("simulated hard crash between claim 1's commit and claim 2's processing")
+            return real_resolve_locator(db, claim)
+
+        monkeypatch.setattr(backfill_module, "_resolve_locator", _resolve_locator_crashes_on_second_call)
+
+        with pytest.raises(RuntimeError, match="simulated hard crash"):
+            advance_backfill_run(session, run)
+
+        session.refresh(run)
+        # A raised-and-caught exception (unlike a real SIGKILL) is explicitly marked `failed` by
+        # this module's own "no silent swallowing" design — the property under test (claim 1's
+        # atomic commit survived exactly, claim 2 untouched) holds identically either way.
+        assert run.status == BackfillRunStatus.failed
+        assert run.processed_count == 1
+        assert run.exact_chunk_count == 1
+        assert run.last_cursor_claim_id == claim_1_id
+
+        refreshed_claim_1 = session.get(KnowledgeClaim, claim_1_id)
+        refreshed_claim_2 = session.get(KnowledgeClaim, claim_2_id)
+        assert refreshed_claim_1.memory_source_id is not None
+        assert refreshed_claim_2.memory_source_id is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_crash_after_memory_source_unit_created_before_claim_linked_leaves_nothing_durable(monkeypatch):
+    """Founder's crash window 1: a real MemorySourceUnit gets created, then the process dies
+    before the claim itself is linked to it. In this design nothing commits until BOTH happen
+    together (get_or_create_memory_source_unit's own writes and claim.memory_source_id are the
+    same uncommitted transaction _apply() only commits once, at the very end) — so this must
+    resolve to a full rollback: no orphaned MemorySourceUnit, no linked claim. Unlike a real
+    SIGKILL, this raised exception IS caught by _apply()'s own per-claim `except Exception`
+    handler (correctly — that handler exists precisely so one bad claim doesn't take the whole
+    batch down) — so the run stays `running`, records this claim as a structural failure with
+    correct counters, and moves on, exactly as it should for an in-process error at this point."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-crash-unit-before-link@example.com")
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        claim = _make_claim(session, owner.id, document.id, chunk_id=chunk.id)
+        claim_id, owner_id = claim.id, owner.id
+        _set_rls_user(session, owner_id)
+
+        units_before = session.query(MemorySourceUnit).filter(MemorySourceUnit.owner_id == owner_id).count()
+
+        run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real)
+
+        import app.rag.memory_source_backfill as backfill_module
+
+        real_get_or_create = backfill_module.get_or_create_memory_source_unit
+
+        def _crashes_after_unit_created(db, locator):
+            real_get_or_create(db, locator)  # the real INSERT happens, uncommitted, in-session
+            raise RuntimeError("simulated crash after MemorySourceUnit created, before claim linked")
+
+        monkeypatch.setattr(backfill_module, "get_or_create_memory_source_unit", _crashes_after_unit_created)
+
+        run = advance_backfill_run(session, run)
+
+        assert run.status == BackfillRunStatus.running  # per-claim failure, not a run-level crash
+        assert run.processed_count == 1
+        assert run.failed_count == 1
+
+        refreshed_claim = session.get(KnowledgeClaim, claim_id)
+        assert refreshed_claim.memory_source_id is None  # never linked
+
+        units_after = session.query(MemorySourceUnit).filter(MemorySourceUnit.owner_id == owner_id).count()
+        assert units_after == units_before  # no orphaned MemorySourceUnit survived the rollback
+
+        failures = (
+            session.query(MemorySourceBackfillFailure)
+            .filter(MemorySourceBackfillFailure.run_id == run.id, MemorySourceBackfillFailure.claim_id == claim_id)
+            .all()
+        )
+        assert len(failures) == 1
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_crash_after_claim_linked_before_run_counters_updated_leaves_nothing_durable(monkeypatch):
+    """Founder's crash window 2: claim.memory_source_id is set in memory, then the process dies
+    before the run's counters/cursor are ever applied. `_apply()` only commits once (after
+    invoking `on_claim_outcome`), so this must ALSO resolve to a full rollback: the claim must
+    NOT end up durably linked while the run's counters stay at zero — that exact combination
+    (claim updated, counter not) is precisely the inconsistency this whole round exists to rule
+    out."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-crash-link-before-counters@example.com")
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        claim = _make_claim(session, owner.id, document.id, chunk_id=chunk.id)
+        claim_id, owner_id = claim.id, owner.id
+        _set_rls_user(session, owner_id)
+
+        run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real)
+
+        import app.rag.memory_source_backfill_run as run_module
+
+        real_make_on_claim_outcome = run_module._make_on_claim_outcome
+
+        def _crashing_on_claim_outcome(db, run_arg):
+            def _raise(inner_db, delta):
+                raise RuntimeError("simulated crash: claim linked in-memory, counters never applied")
+
+            return _raise
+
+        monkeypatch.setattr(run_module, "_make_on_claim_outcome", _crashing_on_claim_outcome)
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            advance_backfill_run(session, run)
+
+        session.refresh(run)
+        assert run.status == BackfillRunStatus.failed
+        assert run.processed_count == 0  # never durably incremented
+
+        refreshed_claim = session.get(KnowledgeClaim, claim_id)
+        assert refreshed_claim.memory_source_id is None  # the in-memory link never committed
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_crash_after_counters_updated_before_cursor_committed_leaves_nothing_durable(monkeypatch):
+    """Founder's crash window 3: run counters mutated, then the process dies before the cursor
+    (or the final commit) lands. In this design counters and cursor are mutated together, in the
+    same in-memory closure call, with no commit boundary between them at all (see
+    _make_on_claim_outcome's own docstring) — so the latest possible injection point for this
+    exact window is right before `_assert_monotonic`'s check (both already mutated in Python,
+    still fully uncommitted). Even there, an interruption must roll back BOTH together: no
+    counter increment may survive without its paired cursor advance, or vice versa."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-crash-counters-before-cursor@example.com")
+        document = _make_document(session, owner.id)
+        chunk = _make_chunk(session, owner.id, document.id)
+        claim = _make_claim(session, owner.id, document.id, chunk_id=chunk.id)
+        claim_id, owner_id = claim.id, owner.id
+        _set_rls_user(session, owner_id)
+
+        run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real)
+
+        import app.rag.memory_source_backfill_run as run_module
+
+        def _crashes_after_mutation_before_flush(run_arg, *, old, claim_id):
+            # By this point (_assert_monotonic's own call site, inside _on_claim_outcome) both
+            # run.processed_count/exact_chunk_count/... AND run.last_cursor_* have already been
+            # mutated in Python -- exactly the latest moment "counters updated, cursor not yet
+            # committed" can be represented in a design with no commit between them.
+            assert run_arg.processed_count > old["processed_count"]
+            assert run_arg.last_cursor_claim_id is not None
+            raise RuntimeError("simulated crash: counters and cursor mutated in memory, never committed")
+
+        monkeypatch.setattr(run_module, "_assert_monotonic", _crashes_after_mutation_before_flush)
+
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            advance_backfill_run(session, run)
+
+        session.refresh(run)
+        assert run.status == BackfillRunStatus.failed
+        assert run.processed_count == 0
+        assert run.last_cursor_created_at is None
+        assert run.last_cursor_claim_id is None
+
+        refreshed_claim = session.get(KnowledgeClaim, claim_id)
+        assert refreshed_claim.memory_source_id is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- founder review, round 3 (point 6): invariant enforcement ------------------------------
+
+
+def test_db_check_constraint_rejects_processed_count_not_matching_outcome_sum():
+    """Migration 0025's `ck_msbr_processed_count_matches_sum` is the DB-level tripwire behind
+    `_make_on_claim_outcome()`'s by-construction guarantee that `processed_count` always equals
+    the sum of the five outcome counters. This proves the constraint actually fires — not just
+    that application code happens to maintain the invariant."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-check-constraint-sum@example.com")
+        _set_rls_user(session, owner.id)
+        run = create_or_resume_backfill_run(session, owner.id, mode=BackfillRunMode.real)
+
+        run.processed_count = 5
+        run.exact_chunk_count = 1  # sum of counters (1) != processed_count (5)
+        session.add(run)
+        with pytest.raises(IntegrityError, match="ck_msbr_processed_count_matches_sum"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_assert_monotonic_raises_on_decreased_counter():
+    """Direct unit-level check of the service-layer monotonicity tripwire (point 6): a counter
+    that decreases relative to its pre-mutation value must raise, naming the offending field."""
+    from app.rag.memory_source_backfill_run import _assert_monotonic
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-monotonic-counter@example.com")
+        _set_rls_user(session, owner.id)
+        run = create_or_resume_backfill_run(session, owner.id, mode=BackfillRunMode.real)
+        run.processed_count = 3
+        old = {
+            "processed_count": 5,
+            "exact_chunk_count": 0,
+            "degraded_version_count": 0,
+            "missing_document_only_count": 0,
+            "skipped_unresolvable_count": 0,
+            "failed_count": 0,
+            "cursor": (None, None),
+        }
+        with pytest.raises(RuntimeError, match="processed_count decreased"):
+            _assert_monotonic(run, old=old, claim_id=uuid.uuid4())
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_assert_monotonic_raises_on_cursor_moving_backward():
+    """Direct unit-level check of the service-layer monotonicity tripwire (point 6): a cursor
+    that moves backward relative to its pre-mutation value must raise."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.rag.memory_source_backfill_run import _assert_monotonic
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "run-monotonic-cursor@example.com")
+        _set_rls_user(session, owner.id)
+        run = create_or_resume_backfill_run(session, owner.id, mode=BackfillRunMode.real)
+        later = datetime.now(timezone.utc)
+        earlier = later - timedelta(hours=1)
+        later_id, earlier_id = uuid.uuid4(), uuid.uuid4()
+        old = {
+            "processed_count": run.processed_count,
+            "exact_chunk_count": run.exact_chunk_count,
+            "degraded_version_count": run.degraded_version_count,
+            "missing_document_only_count": run.missing_document_only_count,
+            "skipped_unresolvable_count": run.skipped_unresolvable_count,
+            "failed_count": run.failed_count,
+            "cursor": (later, later_id),
+        }
+        run.last_cursor_created_at, run.last_cursor_claim_id = earlier, earlier_id
+        with pytest.raises(RuntimeError, match="cursor moved backward"):
+            _assert_monotonic(run, old=old, claim_id=uuid.uuid4())
     finally:
         session.rollback()
         session.close()

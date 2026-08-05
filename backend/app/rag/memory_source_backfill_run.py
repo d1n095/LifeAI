@@ -37,12 +37,28 @@ dedicated connection exactly like `app/cleanup.py`'s `_CLEANUP_LOCK_KEY`, is wha
 a second `advance()`/`cancel()` for the same run from starting at all until the first finishes.
 Non-blocking: a caller that can't acquire it raises `BackfillRunBusy` immediately (mapped to 409
 by the router) rather than hanging an HTTP request on another in-flight call.
+
+Per-claim transaction atomicity (founder review, round 3 — HIGH): `advance_backfill_run()` no
+longer aggregates a batch's counters/cursor/failure-rows into `run` and writes them in one
+commit AFTER `backfill_memory_source_units()` returns. That left a real crash window: claims
+1..N-1 of a batch could already be durably committed (their own `memory_source_id`/
+`MemorySourceUnit` writes, one commit each, inside `_apply()`) while the run's own
+`processed_count`/counters/cursor for those same claims were still sitting uncommitted in
+Python, waiting for the batch's single final commit — a crash in that window permanently
+undercounts the run's report (claim data is fine, restart-safe; the *report* was not). Fixed by
+passing `_on_claim_outcome` below as `on_claim_outcome` into `backfill_memory_source_units()`:
+it is invoked by `_apply()`/`_dry_run()`, per claim, INSIDE the exact same (still-uncommitted)
+transaction that function is about to commit for that claim — so a crash can now only ever land
+either before or after one claim's fully-atomic (data + failure-row + run counters + cursor)
+commit, never in between. See `_on_claim_outcome`'s own docstring for the commit map and the
+monotonicity assertions this closure enforces on every application.
 """
 
 import contextlib
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Callable
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
@@ -51,7 +67,7 @@ from sqlalchemy.orm import Session
 from app.db import engine
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.knowledge_claim import KnowledgeClaim
-from app.rag.memory_source_backfill import MemorySourceBackfillResult, _apply_cursor, backfill_memory_source_units
+from app.rag.memory_source_backfill import ClaimOutcomeDelta, MemorySourceBackfillResult, _apply_cursor, backfill_memory_source_units
 
 logger = logging.getLogger("mainai.rag.memory_source_backfill_run")
 
@@ -270,6 +286,88 @@ def record_failure(db: Session, run: MemorySourceBackfillRun, claim_id: uuid.UUI
         db.flush()
 
 
+def _assert_monotonic(run: MemorySourceBackfillRun, *, old: dict[str, object], claim_id: uuid.UUID) -> None:
+    """Founder review round 3 — point 6: a tripwire, not a normal validation. By construction,
+    `_on_claim_outcome` only ever ADDS to counters and only ever advances-or-freezes the cursor,
+    so none of these can ever actually fire — an explicit `raise` (not a strippable `assert`,
+    which `python -O` disables) makes that guarantee load-bearing instead of assumed, and gives
+    a precise, actionable error naming exactly which field and which claim broke it."""
+    for field in (
+        "processed_count",
+        "exact_chunk_count",
+        "degraded_version_count",
+        "missing_document_only_count",
+        "skipped_unresolvable_count",
+        "failed_count",
+    ):
+        new_value = getattr(run, field)
+        if new_value < old[field]:
+            raise RuntimeError(
+                f"run {run.id}: {field} decreased ({old[field]} -> {new_value}) applying claim {claim_id} — "
+                "counters must never decrease"
+            )
+    old_cursor_created_at, old_cursor_claim_id = old["cursor"]
+    if (
+        old_cursor_created_at is not None
+        and run.last_cursor_created_at is not None
+        and (run.last_cursor_created_at, run.last_cursor_claim_id) < (old_cursor_created_at, old_cursor_claim_id)
+    ):
+        raise RuntimeError(
+            f"run {run.id}: cursor moved backward ({old_cursor_created_at}, {old_cursor_claim_id}) -> "
+            f"({run.last_cursor_created_at}, {run.last_cursor_claim_id}) applying claim {claim_id} — "
+            "cursor must never move backward"
+        )
+
+
+def _make_on_claim_outcome(db: Session, run: MemorySourceBackfillRun) -> Callable[[Session, ClaimOutcomeDelta], None]:
+    """Founder review round 3 (HIGH — transaction atomicity): the callback passed as
+    `on_claim_outcome` into `backfill_memory_source_units()`. Invoked by `_apply()`/`_dry_run()`
+    for EVERY claim they consider, inside the exact same (still-uncommitted) transaction that
+    function is about to commit for that claim — never after the fact, never batched. Commit
+    map for one claim (all in ONE transaction, one `_apply()`-owned `db.commit()`):
+      - claim.memory_source_id (real mode only; _apply() itself)
+      - MemorySourceUnit/DocumentSourceUnit if a new one was needed (get_or_create_memory_
+        source_unit, called by _apply() before this closure runs)
+      - this closure: run.processed_count + the one relevant outcome counter + run.
+        last_cursor_created_at/claim_id (unless frozen — see memory_source_backfill.py's BLOCKER
+        2 fix) — flushed, not committed, here
+      - record_failure()'s MemorySourceBackfillFailure upsert, when `delta.failure_reason` is
+        set — flushed, not committed, here too
+    `batches_completed` and the terminal `completed`/`failed` status transition are the only
+    fields NOT part of this per-claim atomicity — they are meta/batch-level, decided only after
+    the whole batch returns (see advance_backfill_run's own comment at that point for why a
+    crash before that specific commit is harmless)."""
+
+    def _on_claim_outcome(inner_db: Session, delta: ClaimOutcomeDelta) -> None:
+        old = {
+            "processed_count": run.processed_count,
+            "exact_chunk_count": run.exact_chunk_count,
+            "degraded_version_count": run.degraded_version_count,
+            "missing_document_only_count": run.missing_document_only_count,
+            "skipped_unresolvable_count": run.skipped_unresolvable_count,
+            "failed_count": run.failed_count,
+            "cursor": (run.last_cursor_created_at, run.last_cursor_claim_id),
+        }
+
+        run.processed_count += 1
+        run.exact_chunk_count += delta.chunk_backed
+        run.degraded_version_count += delta.version_backed
+        run.missing_document_only_count += delta.document_backed
+        run.skipped_unresolvable_count += delta.skipped_mismatch
+        run.failed_count += delta.failed
+        if delta.cursor is not None:
+            run.last_cursor_created_at, run.last_cursor_claim_id = delta.cursor
+
+        _assert_monotonic(run, old=old, claim_id=delta.claim_id)
+
+        inner_db.add(run)
+        inner_db.flush()
+        if delta.failure_reason is not None:
+            record_failure(inner_db, run, delta.claim_id, delta.failure_reason)
+
+    return _on_claim_outcome
+
+
 def advance_backfill_run(db: Session, run: MemorySourceBackfillRun) -> MemorySourceBackfillRun:
     """Performs exactly ONE bounded batch of work for `run` and durably updates it — see
     module docstring. Transitions `pending` -> `running` on the first call. Transitions to
@@ -314,6 +412,7 @@ def advance_backfill_run(db: Session, run: MemorySourceBackfillRun) -> MemorySou
                 max_batches=1,
                 dry_run=(run.mode == BackfillRunMode.dry_run),
                 after=after,
+                on_claim_outcome=_make_on_claim_outcome(db, run),
             )
         except Exception as exc:
             db.rollback()
@@ -324,19 +423,14 @@ def advance_backfill_run(db: Session, run: MemorySourceBackfillRun) -> MemorySou
             db.commit()
             raise
 
-        for claim_id, reason in result.failures:
-            record_failure(db, run, claim_id, reason)
-
-        run.processed_count += result.candidates_total
-        run.exact_chunk_count += result.chunk_backed
-        run.degraded_version_count += result.version_backed
-        run.missing_document_only_count += result.document_backed
-        run.skipped_unresolvable_count += result.skipped_mismatch
-        run.failed_count += result.failed
+        # Every claim considered by the call above already had its outcome — data write,
+        # failure row, run counters, cursor — committed atomically, per claim, by
+        # _on_claim_outcome (see module docstring). Only batch-level meta state remains:
+        # `batches_completed` and the terminal status/completed_at transition below, neither of
+        # which any claim's own crash-safety depends on (a crash before THIS commit just means
+        # the next advance() call re-decides completion and re-increments batches_completed —
+        # never a lost or duplicated claim outcome).
         run.batches_completed += 1
-        if result.last_seen_created_at is not None and result.last_seen_id is not None:
-            run.last_cursor_created_at = result.last_seen_created_at
-            run.last_cursor_claim_id = result.last_seen_id
 
         if result.candidates_total == 0:
             after_for_check = None

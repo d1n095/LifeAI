@@ -96,6 +96,18 @@ def upgrade() -> None:
             ),
             CONSTRAINT ck_msbr_cursor_pair CHECK (
                 (last_cursor_created_at IS NULL) = (last_cursor_claim_id IS NULL)
+            ),
+            -- Founder review round 3 (point 6): a database-enforced tripwire for the
+            -- outcome-bucket invariant app/rag/memory_source_backfill_run.py's
+            -- _make_on_claim_outcome() maintains by construction (each considered claim
+            -- increments processed_count and exactly ONE outcome bucket, atomically, in the
+            -- same commit — see that module's docstring). Monotonicity (counters never
+            -- decrease, cursor never moves backward) is enforced at the service layer
+            -- (_assert_monotonic()) rather than here, since a plain CHECK constraint only ever
+            -- sees the current row and cannot compare against the pre-UPDATE value.
+            CONSTRAINT ck_msbr_processed_count_matches_sum CHECK (
+                processed_count = exact_chunk_count + degraded_version_count
+                    + missing_document_only_count + skipped_unresolvable_count + failed_count
             )
         );
 
