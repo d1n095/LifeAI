@@ -10,16 +10,26 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`merge_pull_request`, inte memorerat).
 **PR #32 mergad** (`claude/frontend-npm-audit-ghsa-mh99-source-ids` → `claude/det-kommer-mer-879lcm`,
 merge-commit `d6a5e2f`) efter grundarens uttryckliga godkännande — löste `Frontend — npm audit`
-för PR #31. **PR #31** har därefter fått basgrenen mergad in (`--no-ff`, INTE rebase, för att
-bevara både PR #31:s egen Pass 14–32-historik och `claude/mainai-job-runtime-foundation`s
-Pass 14-registerpost från bascommit `82928ce` orörda — se det senare Pass 14-avsnittet nedan
-för den branchens fulla, ostyckta historik) — se Pass 33 nedan för konfliktlösningen och den
-efterföljande re-verifieringen. Före detta stod **PR #31** på head `2bb8e54` (Pass 32, Runda 2)
-— se Pass 32-avsnittet nedan för den SJUNDE granskningsrundans två punkter
-(`_store_bytes`-låsgapet, ett riktigt filesystemlås) och samma dags uppföljande granskning
-(ops-status-synlighet för `storage_orphan_risk`, hash-verifiering istället för bara
-existens/storlek för dedup-blobbar) — allt i samma blobintegritetsområde Pass 22–31 redan
-arbetar i. Tidigare rad, oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön
+för PR #31 mot den DÅ kända GHSA-mh99-v99m-4gvg-ID-churnen. **PR #31** fick därefter basgrenen
+mergad in (`--no-ff`, INTE rebase, för att bevara både PR #31:s egen Pass 14–32-historik och
+`claude/mainai-job-runtime-foundation`s Pass 14-registerpost från bascommit `82928ce` orörda —
+se det senare Pass 14-avsnittet nedan för den branchens fulla, ostyckta historik), merge-commit
+`4569cbc` — se Pass 33 nedan för konfliktlösningen. Under den efterföljande CI-körningen hittade
+`Frontend — npm audit` ett NYTT, från GHSA-mh99-v99m-4gvg fristående fynd (GHSA-rgw5-rvv9-x895,
+en `brace-expansion`-kringgående av samma tidigare fix) — åtgärdat på egen branch
+(`claude/frontend-npm-audit-brace-expansion-bypass`) efter grundarens uttryckliga godkännande,
+mergad som **PR #33**, merge-commit `00d950b`. **PR #31** fick DÄREFTER basgrenen mergad in EN
+GÅNG TILL (samma `--no-ff`-disciplin, samma historikbevaring), merge-commit `9c60d01`, plus en
+dokumentationscommit `15986a7` som lade till den validerade, read-only produktionsprofil-SQL:n
+(`docs/operations/s1a_production_profile.sql`). PR #31:s head är nu `15986a7`, bas är `00d950b`
+(innehåller BÅDE PR #32 och PR #33), `mergeable_state: clean`, samtliga 12 verkliga CI-jobb
+`success` inklusive `Frontend — npm audit` och den aggregerande "All required checks passed" —
+se Pass 33/34 nedan för fullständig detalj. **Produktionsdataprofilen är genomförd** (Pass 34
+nedan) — grundaren körde `docs/operations/s1a_production_profile.sql` read-only direkt mot
+produktions-VPS:en (denna session har fortsatt ingen nätverksväg till VPS:en, verifierat genom
+en misslyckad TCP-anslutning till port 22 — se Pass 34 för detaljer) och delade resultatet:
+0 unresolvable, samtliga 223 knowledge_claims klassificeras deterministiskt som `exact_chunk`.
+Tidigare rad, oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön
 (18/18 checkar) på exakt head-SHA `df9e9c8`
 innan merge, inte en äldre commit. **PR #30 mergad** som `9b15840` in i
 `claude/det-kommer-mer-879lcm` — verifierad grön (18/18 checkar, "All required checks passed")
@@ -113,7 +123,121 @@ fortsätter längre — grundaren var explicit att detta INTE är ett godkännan
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
 
-## Pass 32 (2026-08-03): PR #31 — sjunde granskningsrundan (`_store_bytes`-låsgapet, ett riktigt filesystemlås) och en uppföljande granskning samma dag (ops-status-synlighet, hash-verifiering)
+## Pass 34 (2026-08-05): PR #31 — den verkliga produktionsdataprofilen genomförd (read-only, körd av grundaren från VPS:en)
+
+**Bakgrund:** Efter Pass 33:s CI-grönmärkning återstod ett sista mergegrindvillkor från PR
+#31:s egen "Remaining for this PR"-lista: den verkliga produktionsdataprofilen (`chunk_id`/
+`version_id`-nollkombinationerna), specificerad redan i designfasen
+(`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.8, se rad ~819 där det uttryckligen står att
+INGEN Claude Code-session i den här miljön har produktionsdatabasåtkomst). Denna session
+konstruerade och validerade SQL:n mot en tom, migrerad lokal scratch-databas (syntax-/
+schemakorrekthet, inte verkliga siffror) och committade den som
+`docs/operations/s1a_production_profile.sql` (commit `15986a7`) — insvept i en explicit
+`BEGIN TRANSACTION READ ONLY; ... ROLLBACK;` för säker operatörskörning. Sessionen testade
+därefter aktivt om den kunde nå produktions-VPS:en själv (`87.106.53.187:22`) — TCP-anslutningen
+misslyckades (`UNREACHABLE/FILTERED`), och `$HTTPS_PROXY`-statusen bekräftade att den här
+sandboxade miljöns utgående nätverk bara proxar HTTPS, ingen godtycklig SSH/TCP-utgång. Inga
+SSH-nycklar finns heller konfigurerade i sessionen. Detta är en strukturell miljöbegränsning,
+inte en avsaknad av referenser som skulle kunna arbetas runt — sessionen avstod därför
+uttryckligen från vidare försök och rapporterade blockeraren istället för att gissa eller
+fabricera siffror.
+
+**Grundaren körde SQL:n själv, read-only, direkt på produktions-VPS:en** (`/opt/lifeai`,
+`/etc/lifeai/lifeai.env`) och delade det verkliga resultatet:
+
+| Mätning | Värde |
+|---|---|
+| `total_documents` | 218 |
+| `total_document_chunks` | 32 |
+| `total_knowledge_versions` | 218 |
+| `total_knowledge_claims` | 223 |
+| `chunk_id` OCH `version_id` båda satta | 223 |
+| `chunk_id` satt, `version_id` NULL | 0 |
+| `version_id` satt, `chunk_id` NULL | 0 |
+| Varken satt | 0 |
+| Resolution tier `exact_chunk` | 223 |
+| Resolution tier `degraded_version` | 0 |
+| Resolution tier `missing_document_only` | 0 |
+| `unresolvable_*` (alla orsaker) | 0 |
+
+Säkerhetsbevis grundaren rapporterade: transaktionen kördes explicit `READ ONLY`, avslutades
+med `ROLLBACK`, ingen migration/backfill/write/deploy/omstart utfördes. **Bedömning:** siffrorna
+är internt konsistenta (223 = 223 = 223 över alla tre brytningar) och matchar exakt vad
+`app/rag/memory_source_backfill.py::_resolve_locator()`s första gren (`chunk_id is not None` →
+strukturell chunk-validering → `exact`) skulle ge givet att alla 223 claims har ett strukturellt
+giltigt `chunk_id` som pekar på en `document_chunks`-rad som tillhör samma `source_id`/
+`owner_id`. **Observation, inte en blockerare:** endast 32 `document_chunks`-rader finns totalt
+för 218 dokument (~7 claims per chunk i snitt bland de chunks som faktiskt producerat claims) —
+plausibelt (flera claims kan extraheras ur samma chunk; många av de 218 dokumenten har
+sannolikt inte producerat några claims alls än), men värt att känna till som kontext, inte som
+ett fel i verifieringen. **Slutsats:** produktionsdatan är, vid den här ögonblicksbilden,
+deterministiskt backfillbar under PR #31:s nuvarande `_resolve_locator()`-logik — noll claims
+skulle falla till `degraded`/`missing`/fail-closed. Detta stänger PR #31:s sista uttryckliga
+mergegrindvillkor.
+
+**Kvarstår innan PR #31 kan mergas:** ENDAST grundarens uttryckliga, färska
+merge-godkännande — inga kända kodmässiga eller CI-blockerare återstår. Den beständiga
+produktionskörnings-rapporteringen (run-id/status/counters/per-claim-fel) Pass 19 dokumenterade
+men medvetet inte byggde är INTE ett villkor för PR #31:s merge — den krävs först före en
+RIKTIG produktionsbackfill-KÖRNING, vilket §4.8 uttryckligen scopar som en separat, senare PR.
+Ingen backfill, ingen merge, ingen deploy har utförts av den här sessionen eller begärts av
+grundaren i det här passet.
+
+## Pass 33 (2026-08-05): PR #31 — basgrenen mergad in två gånger (PR #32, sedan PR #33), full CI-reverifiering
+
+Efter en ren statusrapport (ingen kodändring) gav grundaren en exakt, ordnad exekveringsplan:
+(1) verifiera PR #32:s pre-merge-läge exakt, (2) merga PR #32 till basgrenen och rapportera den
+exakta mergecommiten, (3) uppdatera PR #31:s branch från den nya basen via en RIKTIG merge
+(INTE rebase, för att bevara både PR #31:s egen historik och `claude/mainai-job-runtime-
+foundation`s Pass 14-registerpost orörda), lös endast den verkliga `docs/BRANCH_REGISTRY.md`-
+konflikten, (4) full re-verifiering (exakt en Alembic-head, hela backend-/security-/
+account-sviten, frontend tsc/eslint/build/npm audit, samtliga CI-jobb på den exakta nya
+head-SHA:n), (5) därefter — och FÖRST därefter — produktionsdataprofilen.
+
+**PR #32 mergad** som `d6a5e2f`. **PR #31 uppdaterad** via `git merge --no-ff` av den nya basen,
+mergecommit `4569cbc` — `docs/BRANCH_REGISTRY.md`s masthead-konflikt löstes genom att behålla
+PR #31:s egen aktuella statusparagraf (git hade redan automatiskt bevarat båda branchernas
+fullständiga, självständigt numrerade `## Pass 14`-sektioner på olika radnummer i filen).
+
+Under den efterföljande fulla frontend-verifieringen (steg 4) hittade
+`node scripts/check-npm-audit.js` ett NYTT, från GHSA-mh99-v99m-4gvg fristående fynd:
+GHSA-rgw5-rvv9-x895, en `brace-expansion`-kringgående av samma tidigare mitigation
+(`npm audit --json` visade fyra distinkta `via`-källor: 1130588/1130591 redan allowlistade för
+GHSA-mh99-v99m-4gvg, plus NYA 1130734/1130737 för GHSA-rgw5-rvv9-x895). Detta patchades INTE
+inline i PR #31 — rapporterades till grundaren, som gav uttryckligt godkännande enligt samma
+mönster som PR #8/#9/#32 (orelaterad CI-fix på egen branch, grenad från basgrenen, INTE från PR
+#31:s branch). Fixad på `claude/frontend-npm-audit-brace-expansion-bypass` via `npm update
+brace-expansion` (`1.1.16→1.1.18` under `eslint→minimatch`, `5.0.7→5.0.9` under
+`eslint-config-next→typescript-eslint→@typescript-eslint/typescript-estree→minimatch`) — den
+minsta möjliga fixen, helt inom redan deklarerade semver-ranges, INGEN `package.json`-override
+behövdes. Endast `frontend/package-lock.json` ändrad (7 insertions/7 deletions). Full
+verifieringssvit körd: install-integritet, frontend lint/typecheck/build, npm audit, backend-
+tester, same-origin proxy-tester, full-stack Playwright E2E. Lokal Playwright-flakighet (olika
+testset misslyckades mellan repeterade lokala körningar) root-orsakades till rena miljö-/
+test-isolationsartefakter av sessionens egna upprepade körningar mot SAMMA långlivade lokala
+backend/databas (Redis-baserad login-rate-limit uttömd, ett kvarvarande uppladdat testdokument
+från en tidigare körning) — INTE en regression, bekräftat avgörande genom en riktig GitHub
+Actions-körning mot färska per-jobb-containrar som passerade rent (18/18). Grundaren godkände
+och bekräftade denna klassificering uttryckligen. **PR #33 mergad** som `00d950b` efter
+grundarens uttryckliga godkännande.
+
+**PR #31 uppdaterad EN GÅNG TILL** (samma `--no-ff`-disciplin), mergecommit `9c60d01` — denna
+gång INGEN konflikt alls (PR #33 rörde bara `frontend/package-lock.json`, ingen överlappning
+med PR #31:s eget innehåll; `docs/BRANCH_REGISTRY.md`s masthead var redan aktuell från förra
+mergningen). Plus en dokumentationscommit `15986a7` som lade till den validerade produktions-
+profil-SQL:n. Diffen mot den nya basen (`git diff origin/claude/det-kommer-mer-879lcm...HEAD`)
+verifierad att innehålla ENDAST PR #31:s eget avsedda innehåll (48 filer, samma omfattning som
+tidigare) — inga orelaterade ändringar smugit sig in via mergningarna.
+
+**Full re-verifiering på den nya head-SHA:n (`15986a7`):** exakt en Alembic-head (`0024`),
+`apply_runtime_privileges.py` verifierad, hela backend-/security-/account-sviten **793 passed,
+1 skipped** (identiskt med tidigare baseline — ingen regression), frontend `tsc --noEmit` ren,
+`eslint` ren, `next build` lyckad, `npm audit` (fräsch `npm ci`-installation från den committade
+lockfilen) ren. Samtliga 16 GitHub Actions-checkar (12 verkliga jobb + VPS/Docker-jobb korrekt
+`skipped`) `success`, inklusive den aggregerande "All required checks passed"-checken.
+`mergeable_state: clean`. Inga olösta granskningskommentarer (`get_review_comments`: 0 trådar).
+
+
 
 **Runda 1 — grundarens bedömning:** "Pass 31 löser mycket, men den nya kontrollistan avslöjar
 samtidigt att en persistent writer fortfarande saknar protokollet. Dessutom medger
@@ -2026,6 +2150,8 @@ grundprincip för varför de fick egna brancher/PR:er istället för att fogas i
 |---|---|---|---|---|
 | `claude/frontend-npm-audit-next-16-2-11` | [#9](https://github.com/d1n095/LifeAI/pull/9) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `0081e562` | `next` 16.2.10 → 16.2.11 (stänger `npm audit --audit-level=high`, 9 säkerhetsfixar, inga brytande ändringar) | `claude/det-kommer-mer-879lcm` @ a141065 |
 | `claude/frontend-npm-audit-brace-expansion` | [#11](https://github.com/d1n095/LifeAI/pull/11) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `6929b700` | `brace-expansion`/GHSA-mh99-v99m-4gvg — daterad, ID-specifik CI-allowlist (`frontend/scripts/check-npm-audit.js`), se `docs/SECURITY_BLOCKERS.md` punkt 3 | `claude/det-kommer-mer-879lcm` @ 0081e562 (efter PR #9) |
+| `claude/frontend-npm-audit-ghsa-mh99-source-ids` | [#32](https://github.com/d1n095/LifeAI/pull/32) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `d6a5e2f` | GHSA-mh99-v99m-4gvg — allowlist-ID-churn (nya GitHub-advisory-källids för samma redan kända fynd), se Pass 33 | `claude/det-kommer-mer-879lcm` @ 82928ce |
+| `claude/frontend-npm-audit-brace-expansion-bypass` | [#33](https://github.com/d1n095/LifeAI/pull/33) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `00d950b` | GHSA-rgw5-rvv9-x895 — NYTT fynd, kringgår GHSA-mh99-v99m-4gvg:s tidigare fix; `npm update brace-expansion` inom redan deklarerade semver-ranges, se Pass 33 | `claude/det-kommer-mer-879lcm` @ d6a5e2f (efter PR #32) |
 | `claude/development-workflow-principles` | [#10](https://github.com/d1n095/LifeAI/pull/10) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `403adc06` | `CLAUDE.md` + den här filen — arbetsprinciper, inget applikationskod | `claude/det-kommer-mer-879lcm` @ 6929b700 (efter PR #11) |
 | `claude/branch-registry-post-merge-chain-update` | [#12](https://github.com/d1n095/LifeAI/pull/12) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `5769cffa` | Registerpost-mergekedja | `claude/det-kommer-mer-879lcm` @ 403adc06 |
 | `claude/life-library-durable-worker-merged` | [#14](https://github.com/d1n095/LifeAI/pull/14) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `2ddfeddc` | PR #6 (durable worker/lagring) + P1 (provider-verifiering) — landade i huvudgrenen för första gången | `claude/det-kommer-mer-879lcm` @ 5769cffa |
@@ -2167,16 +2293,13 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
    stängda utan merge (#4/#6 subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
 2. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
    för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
-3. **PR #32** (`claude/frontend-npm-audit-ghsa-mh99-source-ids`) — öppen, oberoende av PR #31,
-   kan mergas till huvudgrenen NÄR SOM HELST (helt grön, "All required checks passed", rör
-   endast `frontend/scripts/check-npm-audit.js` + `docs/SECURITY_BLOCKERS.md`). Rekommenderas
-   mergas FÖRE PR #31, så att PR #31 sedan kan uppdateras från huvudgrenen och få en grön
-   `npm audit`-kontroll — men enligt Merge-regeln ska PR #31 INTE uppdateras i förväg innan
-   PR #32 faktiskt är mergad.
-4. **PR #31** (`claude/s1a-memory-source-implementation`) — draft, öppen, INTE mergbar än
-   (grundaren har inte gett fräsch granskning/godkännande av Pass 26, produktionsdataprofilen
-   är inte gjord). Grön på alla obligatoriska kontroller utom `npm audit` (väntar på PR #32,
-   punkt 3).
+3. ~~PR #32~~, ~~PR #33~~ — mergade till huvudgrenen (`d6a5e2f`, `00d950b`), se Pass 33 ovan.
+4. **PR #31** (`claude/s1a-memory-source-implementation`) — draft, öppen, INTE mergad ÄN.
+   Head `15986a7`, bas `00d950b` (innehåller PR #32+#33), `mergeable_state: clean`, ALLA
+   obligatoriska kontroller `success` inklusive `npm audit` och den aggregerande "All required
+   checks passed". Produktionsdataprofilen är genomförd (Pass 34): 0 unresolvable, 223/223
+   claims deterministiskt `exact_chunk`. Enda kvarstående villkoret är grundarens uttryckliga,
+   färska merge-godkännande — inga kända kod- eller CI-blockerare återstår.
 5. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
    ett separat, uttryckligt beslut (branchen är fryst). Kräver DESSUTOM en egen ombasering
    mot huvudgrenens nya tip innan aktivering — dess bas (`15487e2`) är nu långt bakom både
@@ -2184,12 +2307,10 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Vilka brancher blockerar andra
 
-- **PR #31 blockeras INTE av PR #32** i egentlig mening (PR #31:s eget innehåll är oberoende
-  korrekt) men PR #31:s `npm audit`-CI-kontroll förblir röd tills PR #32 mergas till
-  huvudgrenen och PR #31 uppdateras därefter — se punkt 3/4 ovan.
-- **PR #31 mergas inte** förrän grundaren gett en fräsch, uttrycklig granskning/godkännande av
-  Pass 26 OCH produktionsdataprofilen är genomförd (se `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`
-  §4.8:s "Status"-avsnitt).
+- **PR #31 blockeras inte längre av något öppet PR.** PR #32 och PR #33 är båda mergade (se
+  Pass 33), och PR #31:s `npm audit`-kontroll är grön på den nuvarande head-SHA:n.
+- **PR #31 mergas inte** förrän grundaren ger ett uttryckligt, färskt merge-godkännande på den
+  exakta head-SHA:n `15986a7` — inget tekniskt eller CI-villkor återstår (se Pass 34).
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något öppet PR.
 
