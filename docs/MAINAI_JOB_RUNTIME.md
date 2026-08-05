@@ -125,7 +125,7 @@ independent evidence of what MainAI actually did. Migration `0026` makes it a re
 guarantee: a `BEFORE UPDATE OR DELETE` trigger (`mainai_job_events_deny_mutation()`) denies
 every UPDATE unconditionally, no exceptions, and denies DELETE unless the deleting
 transaction has explicitly set `app.mainai_job_erasure_in_progress = 'on'` — the only thing
-that ever sets that flag is `erase_mainai_job_children_for_owner()`, a narrow
+that ever sets that flag is `erase_own_mainai_job_children()`, a narrow
 `SECURITY DEFINER` function that is the sole legitimate deletion path (account erasure, see
 below). `mainai_app` additionally has `UPDATE`/`DELETE`/`TRUNCATE`/`REFERENCES`/`TRIGGER`
 revoked on this table outright — the trigger is defense in depth on top of that, proven by
@@ -147,7 +147,7 @@ with every other column byte-for-byte unchanged. Never the reverse (`dismissed -
 never an edit to `proposal_text`/`source_document_id`/`job_id`/`owner_id` after the fact.
 `mainai_app` keeps ordinary `UPDATE` (needed for that one transition) but has `DELETE`/
 `TRUNCATE`/`REFERENCES`/`TRIGGER` revoked — deletion, like events, only ever happens through
-`erase_mainai_job_children_for_owner()`.
+`erase_own_mainai_job_children()`.
 
 ### Composite owner integrity — child rows can no longer point at a different owner's job
 
@@ -170,15 +170,45 @@ for the same reason: every RLS policy in `app/rls.py` is a single-column, non-jo
 and mixing join-based and column-based policies in one schema is a real, easy-to-miss
 inconsistency for a future reviewer.
 
-### `erase_mainai_job_children_for_owner(target_owner_id uuid)` — the only deletion path
+### `erase_own_mainai_job_children()` — the only deletion path, and no owner parameter to attack
 
-A narrow `SECURITY DEFINER` function (migration `0026`) that sets
+A narrow `SECURITY DEFINER` function (migration `0026`), zero arguments, that sets
 `app.mainai_job_erasure_in_progress = 'on'` (satisfying the two tables' delete-deny triggers)
-and deletes `mainai_job_proposals` then `mainai_job_events` for one owner. `mainai_app` holds
-`EXECUTE` on this function and nothing else that could delete these rows — see "Account
-erasure" below for the only caller. `mainai_jobs` itself is not locked down this way (it's a
-live, legitimately-mutable job-state row, not an append-only log) — `mainai_app` keeps
-ordinary `DELETE` on it, and account erasure deletes it directly after the children.
+and deletes `mainai_job_proposals` then `mainai_job_events` **for the calling session's own
+owner**, derived from `current_setting('app.current_user_id', true)` — the same session GUC
+every RLS policy in `app/rls.py` already trusts — and denies outright (`RAISE EXCEPTION`) if
+that setting is unset. `mainai_app` holds `EXECUTE` on this function and nothing else that
+could delete these rows — granted by `app/rls.py`'s `apply_mainai_job_runtime_privileges()` at
+boot, not by the migration itself (see "Portability" below) — see "Account erasure" below for
+the only caller. `mainai_jobs`
+itself is not locked down this way (it's a live, legitimately-mutable job-state row, not an
+append-only log) — `mainai_app` keeps ordinary `DELETE` on it, and account erasure deletes it
+directly after the children.
+
+**This function's first draft was a real cross-owner deletion vulnerability, found by a
+second independent founder review round and fixed before this branch had ever been opened as
+a PR.** The first draft was `erase_mainai_job_children_for_owner(target_owner_id uuid)`:
+`SECURITY DEFINER`, `EXECUTE` granted to `mainai_app`, deleting `WHERE owner_id =
+target_owner_id` — with no check anywhere that `target_owner_id` matched the calling
+session's own identity. Because the function is `SECURITY DEFINER`, its `DELETE`s run with
+the function *owner's* privileges, not the caller's, so per-table RLS was not actually a
+sufficient boundary around it: any authenticated session could have called `SELECT
+erase_mainai_job_children_for_owner('<some other owner's uuid>')` and erased that owner's
+entire event/proposal history, RLS notwithstanding. The fix removes the parameter entirely —
+there is no argument left for a caller, buggy or malicious, to ever get wrong — and derives
+the owner exclusively from the trusted session context instead. Proven directly by
+`test_erase_own_mainai_job_children_removes_only_the_calling_owners_rows`, `test_erase_own_
+mainai_job_children_has_no_owner_parameter_to_attack` (asserts exactly one zero-argument
+overload exists in `pg_proc` and that no `%_for_owner%`/`%_admin%` variant exists at all), and
+`test_erase_own_mainai_job_children_denies_a_session_with_no_auth_context`.
+
+No cross-owner/admin variant of this function was built. Nothing in this codebase today has a
+legitimate reason to erase another owner's MainAI job data outside that owner's own
+account-deletion flow, and adding one with no real caller would reintroduce exactly the kind
+of speculative, unreviewed privileged surface this fix round exists to close, not add one. If
+a genuine cross-owner maintenance need appears later, it gets its own function, its own
+review, and — per the founder's explicit instruction — it must never be `EXECUTE`-granted to
+`mainai_app`.
 
 ### Account erasure
 
@@ -334,15 +364,33 @@ exception text.
   connection`). `mainai_job_proposals` permits exactly one mutation ever
   (`proposed -> dismissed`, no other column changed) and denies everything else, including
   the reverse transition (`test_mainai_job_proposals_rejects_the_reverse_transition`).
-- **Boot-persistent privilege lockdown**: `scripts/ensure_app_role.py` unconditionally
-  re-grants `ALL PRIVILEGES` to `mainai_app` on every container boot, before Alembic even
-  runs — a REVOKE applied once, at migration time, would be silently undone by the next
-  restart (the exact bug class documented as the Pass 12 incident in
-  `docs/BRANCH_REGISTRY.md`, for a different table). `app/rls.py`'s
-  `apply_mainai_job_runtime_privileges()` re-asserts the `mainai_job_events`/
-  `mainai_job_proposals` lockdown on every boot, called from `app/main.py`'s startup right
-  after `apply_rls()`, using the same idempotent-every-boot discipline `apply_rls()` itself
-  already uses for RLS policies.
+- **Boot-persistent privilege lockdown, verified not just asserted**: `scripts/
+  ensure_app_role.py` unconditionally re-grants `ALL PRIVILEGES` to `mainai_app` on every
+  container boot, before Alembic even runs — a REVOKE applied once, at migration time, would
+  be silently undone by the next restart (the exact bug class documented as the Pass 12
+  incident in `docs/BRANCH_REGISTRY.md`, for a different table). `app/rls.py`'s
+  `apply_mainai_job_runtime_privileges(engine, require_complete=True)` re-asserts the
+  `mainai_job_events`/`mainai_job_proposals` lockdown on every boot, called from
+  `app/main.py`'s startup right after `apply_rls()`. It is not a fire-and-hope enforcement
+  step: after issuing its REVOKE/GRANT statements, in the same transaction, it re-queries
+  Postgres's own catalogs (`information_schema.role_table_grants`,
+  `information_schema.routine_privileges`, `pg_proc`, `pg_language`) and confirms the exact
+  final state — table grants match precisely, each function's signature/owner/`SECURITY
+  DEFINER` flag/`search_path`/language/return type are exactly as expected, no unexpected
+  overload exists, and `PUBLIC` has no `EXECUTE` on any of them — raising (`require_complete=
+  True`, the real startup default) or logging a warning (`require_complete=False`) on any
+  drift, with the whole enforce-then-verify pass rolled back atomically on failure since it
+  runs inside one `engine.begin()` transaction.
+  `test_apply_mainai_job_runtime_privileges_passes_against_the_real_migrated_state` and
+  `test_apply_mainai_job_runtime_privileges_detects_drift_and_rolls_back` prove both directions
+  against a real database, not a mock.
+- **The erasure-in-progress flag is not itself an authorization boundary.**
+  `app.mainai_job_erasure_in_progress` only silences the append-only triggers' DELETE denial —
+  it grants no privilege on its own. `test_mainai_app_cannot_delete_events_even_with_the_
+  erasure_flag_manually_set` proves that a session connected as `mainai_app` which manually
+  sets that GUC to `'on'` still cannot `DELETE` from `mainai_job_events` directly, because
+  `mainai_app` has no table-level `DELETE` privilege on it at all — the only way past both
+  layers together is through `erase_own_mainai_job_children()` itself.
 - **Account erasure genuinely removes this data**, not just anonymizes it:
   `test_account_deletion_removes_mainai_job_data` drives the real `DELETE /api/account`
   endpoint end to end and confirms `mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`
@@ -409,12 +457,37 @@ alteration of existing tables). Verified locally: apply `0018→0025`, downgrade
 back to `head` — all three tables present and correctly shaped after the round trip.
 
 `0026_mainai_job_integrity.py`'s `downgrade()` reverses everything it adds in the opposite
-order: restores `mainai_app`'s `ALL PRIVILEGES` grant on the two locked-down tables, drops the
-`erase_mainai_job_children_for_owner()` function, drops both triggers and their functions,
-then drops the composite FKs and the `UNIQUE(id, owner_id)` constraint. Verified locally:
-apply `0025→0026`, downgrade `-1`, upgrade back to `head` — all three tables, both triggers,
-both composite FKs, and the erasure function present and correctly shaped after the round
-trip.
+order: drops the `erase_own_mainai_job_children()` function, drops both triggers and their
+functions, then drops the composite FKs and the `UNIQUE(id, owner_id)` constraint. It does
+**not** touch any `mainai_app` grant — the migration itself never grants anything to
+`mainai_app` in the first place (see "Portability" below), so there is nothing for its
+downgrade to restore. Verified locally: apply `0025→0026`, downgrade `-1`, upgrade back to
+`head` — all three tables, both triggers, both composite FKs, and the erasure function present
+and correctly shaped after the round trip.
+
+### Portability: this migration never references the `mainai_app` role
+
+A second, independent bug found in this migration's first draft, alongside the cross-owner
+vulnerability above: it issued `GRANT`/`REVOKE ... TO/FROM mainai_app` directly, which fails
+with `role "mainai_app" does not exist` on a bare database that runs `alembic upgrade head`
+before `scripts/ensure_app_role.py` has ever provisioned that role — a scenario PR #31's own
+migrations are already careful to avoid. Fixed by removing every `mainai_app`-specific
+statement from the migration; the only privilege statements it still issues are `REVOKE ALL
+... FROM PUBLIC` on the functions it creates, which needs no named role to exist (`PUBLIC` is
+a pseudo-role that always exists). All `mainai_app`-specific grants — `SELECT`/`INSERT` on the
+two child tables, `EXECUTE` on `erase_own_mainai_job_children()`, and nothing else — now live
+entirely in `app/rls.py`'s `apply_mainai_job_runtime_privileges()`, applied and *verified* at
+application boot, after both Alembic and `ensure_app_role.py` have run. A full
+`upgrade head` → `downgrade -1` → `upgrade head` → `downgrade base` → `upgrade head` round
+trip was re-run against a database, and a source-level grep confirms zero executable
+`mainai_app` references remain in the migration file (only prose in its docstring mentions the
+role by name). A truly role-absent Postgres *cluster* could not be constructed in this shared
+dev environment to additionally prove the round trip empirically against a database where the
+role has never existed anywhere in the cluster — Postgres roles are cluster-level, not
+per-database, and a `mainai_app` role created earlier in this same session for unrelated
+scratch-database testing persists cluster-wide. The source-level grep is the decisive,
+environment-independent guarantee; this limitation is recorded here rather than overclaimed as
+a full empty-cluster test.
 
 **Still outstanding before this branch is PR-ready** (see "Relationship to PR #31"): a full
 upgrade/downgrade/upgrade cycle from an empty database AND from a pre-integration production
