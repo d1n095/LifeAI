@@ -6,19 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-03, mot GitHubs PR-/check-runs-API
-direkt (`mcp__github__pull_request_read`/`get_check_runs`, inte memorerat).
-**PR #31** står nu på head `2bb8e54` (Pass 32, Runda 2) — se Pass 32-avsnittet nedan för den
-SJUNDE granskningsrundans två punkter (`_store_bytes`-låsgapet, ett riktigt filesystemlås) och
-samma dags uppföljande granskning (ops-status-synlighet för `storage_orphan_risk`,
-hash-verifiering istället för bara existens/storlek för dedup-blobbar) — allt i samma
-blobintegritetsområde Pass 22–31 redan arbetar i. CI grön på ALLA obligatoriska kontroller
-UTOM `Frontend — npm audit`, som fortsatt är ett bekräftat orelaterat, förklarat fynd (se Pass
-26 nedan och **PR #32**, `claude/frontend-npm-audit-ghsa-mh99-source-ids` — öppen, egen branch
-grenad från `claude/det-kommer-mer-879lcm`, verifierad helt grön, väntar på grundarens
-uttryckliga godkännande innan merge). Tidigare rad,
-oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA
-`df9e9c8`
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-05, mot GitHubs PR-/check-runs-API
+direkt (`mcp__github__pull_request_read`/`get_check_runs`/`merge_pull_request`, inte memorerat).
+**PR #32 mergad** (`claude/frontend-npm-audit-ghsa-mh99-source-ids` → `claude/det-kommer-mer-879lcm`,
+merge-commit `d6a5e2f`) efter grundarens uttryckliga godkännande — löste `Frontend — npm audit`
+för PR #31. **PR #31** har därefter fått basgrenen mergad in (`--no-ff`, INTE rebase, för att
+bevara både PR #31:s egen Pass 14–32-historik och `claude/mainai-job-runtime-foundation`s
+Pass 14-registerpost från bascommit `82928ce` orörda — se det senare Pass 14-avsnittet nedan
+för den branchens fulla, ostyckta historik) — se Pass 33 nedan för konfliktlösningen och den
+efterföljande re-verifieringen. Före detta stod **PR #31** på head `2bb8e54` (Pass 32, Runda 2)
+— se Pass 32-avsnittet nedan för den SJUNDE granskningsrundans två punkter
+(`_store_bytes`-låsgapet, ett riktigt filesystemlås) och samma dags uppföljande granskning
+(ops-status-synlighet för `storage_orphan_risk`, hash-verifiering istället för bara
+existens/storlek för dedup-blobbar) — allt i samma blobintegritetsområde Pass 22–31 redan
+arbetar i. Tidigare rad, oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön
+(18/18 checkar) på exakt head-SHA `df9e9c8`
 innan merge, inte en äldre commit. **PR #30 mergad** som `9b15840` in i
 `claude/det-kommer-mer-879lcm` — verifierad grön (18/18 checkar, "All required checks passed")
 på exakt head-SHA `b2347e4` (PR-branchens sista commit) direkt innan merge, samma disciplin
@@ -1637,6 +1639,60 @@ mot samma databas efter att `mainai_app` skapats; 591/592 gröna i hela backend-
 account-sviten (1 avsiktligt överhoppad kapacitetstest); grön CI (17/17) på exakt head-SHA
 `7041c2c`, verifierat direkt mot GitHubs check-runs-API. Fem separata, avgränsade commits
 (en per fix-område) enligt `CLAUDE.md`s arbetsdisciplin.
+
+## Pass 14 (2026-08-03/04): MainAI Runtime Truthfulness and Durable Job Foundation — ny branch, byggd medan grundaren sov
+
+Grundaren gav en uttrycklig, avgränsad instruktion att bygga en helt ny grund, INTE en
+dokumentkontroll: "Do not stop after planning. Implement the foundation." Skapad som en helt
+ny, oberoende branch — **`claude/mainai-job-runtime-foundation`**, grenad från
+`claude/det-kommer-mer-879lcm` @ `56f46c8` (INTE från PR #31:s branch — PR #31 och dess
+migrationskedja 0019-0024 är helt orörda; se nedan för varför).
+
+**Syfte:** MainAI ska aldrig kunna påstå att den "arbetar" på något utan att en riktig,
+varaktig, oberoende observerbar rad finns — en människa (eller en automatiserad
+återhämtningspassage) ska kunna fråga, avbryta och se den misslyckas eller slutföras utan att
+lita på MainAI:s eget påstående om sitt eget tillstånd.
+
+**Byggt (7 commits, se `docs/MAINAI_JOB_RUNTIME.md` för fullständig arkitektur/hotmodell):**
+migration `0025` (`mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`, RLS per tabell,
+samma mönster som migration 0007), `app/mainai_runtime_contract.py`
+(`MainAIExecutionResponse`s Pydantic-validator gör det till ett valideringsfel att konstruera
+ett jobbstött svarsläge utan ett riktigt `job_id`, plus `require_capability()`s stängda
+kapacitetsmanifest — idag bara `corpus_review`), `app/jobs/mainai_job_lease.py` (enfas
+claim/lease, säkert eftersom `corpus_review`-jobb aldrig skriver lagringsblobbar),
+`app/rag/mainai_jobs_service.py` (create/get/list/cancel/retry/mark_* — varje mutation
+skriver både en `MainAIJobEvent` och en `audit_log`-rad), `app/rag/corpus_review_job.py`
+(första riktiga jobbtypen — läser befintliga indexerade dokument, anropar samma riktiga
+`chat_with_fallback()` som `agent_orchestration.py` använder, producerar `MainAIJobProposal`-
+rader som ALDRIG blir en `KnowledgeClaim` automatiskt), `app/routers/mainai_jobs.py`
+(grundarens-enda API under `/api/mainai/jobs`, plus en strukturellt separat `/admin/all`),
+`app/worker.py` (delad poll-loop — provar `knowledge_import_jobs` först, sedan `mainai_jobs`,
+inte en andra workerprocess), 43 tester i `tests/backend/test_mainai_jobs.py`, och en
+Jobs/Activity-frontend på `/admin/jobs`.
+
+**Verifiering:** 43/43 nya tester gröna mot riktig Postgres (RLS påslaget, endast AI-
+providern fejkad). Fullständig regressionskörning: `tests/backend/` 541 passed/1 medvetet
+skippad, `tests/security/` + `tests/account/` 65 passed — 0 regressioner. `tsc --noEmit`/
+`eslint`/`next build`: rena. En verklig bugg hittades och fixades under arbetet: `get_job()`s
+`db.get()` returnerade tyst från SQLAlchemys identity map utan att köra om RLS-policyn när
+samma session bytte ägarkontext (workerns poll-loop gör exakt detta) — fixat med
+`populate_existing=True`.
+
+**Explicit ej gjort, i linje med grundarens gränser:** ingen produktionsdrift, ingen deploy,
+ingen merge, ingen omstart av tjänster, PR #31 orörd, ingen godtycklig terminal-/skalexekvering
+implementerad, inga platshållare eller fejkat förlopp. UI:t klarade `tsc`/`eslint`/`next
+build` men kunde inte klickas igenom i en riktig inloggad webbläsare i den här sandlådan — ett
+differentialtest bevisade att det är sandlådans headless-webbläsar-uppsättning som hänger sig
+(redan existerande `/admin/agents`, orörd av denna branch, uppvisar exakt samma "Kontrollerar
+inloggning…"-låsning under samma testsele), inte ett fel i den nya koden. Rekommenderas:
+grundaren klickar igenom `/admin/jobs` manuellt i en riktig webbläsare innan den litas på.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/mainai-job-runtime-foundation` | Ingen PR öppnad ännu (PR-färdig titel/body i sessionens slutrapport) | **Pushad, 7 commits, redo för PR** — inte mergad, inte granskad av grundaren än | MainAI Runtime Truthfulness and Durable Job Foundation: migration 0025, runtime-kontrakt, jobb-API, worker-integration, `corpus_review`-jobbtyp, 43 tester, Jobs/Activity-UI, arkitekturdokument | `claude/det-kommer-mer-879lcm` @ `56f46c8` |
+
+**Beroenden:** Helt oberoende av PR #31 (S1A/MemorySourceUnit) — ingen delad kod, ingen delad
+migration, olika tabeller. Kan granskas/mergas i valfri ordning relativt PR #31.
 
 ## Pass 13 (2026-07-29): PR #30 — SECURITY DEFINER-funktionen fick eget ägarskydd
 

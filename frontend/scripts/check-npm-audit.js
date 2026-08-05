@@ -11,9 +11,18 @@ const ALLOWLISTED_ADVISORY_SOURCES = new Set([
   // GHSA-mh99-v99m-4gvg (brace-expansion DoS). No eslint-config-next release yet supports
   // eslint@10 (which is the only line using a patched brace-expansion) — see
   // docs/SECURITY_BLOCKERS.md, "brace-expansion / GHSA-mh99-v99m-4gvg". Dev-only lint
-  // tooling, never shipped in the production bundle. Remove this line once
+  // tooling, never shipped in the production bundle. Remove these lines once
   // eslint-config-next (or eslint-plugin-react/import/jsx-a11y) ships a compatible release.
+  //
+  // GitHub's advisory database re-numbered this SAME advisory's `via.source` id between
+  // when it was first allowlisted (1124334) and 2026-08-02 (1130588, 1130591) — no
+  // dependency, lockfile, or vulnerable version range changed; `npm audit` just reports a
+  // different internal id for the identical GHSA-mh99-v99m-4gvg finding now. Kept all three
+  // ids rather than replacing, since the same churn could recur and this allowlist is
+  // intentionally id-scoped, not GHSA-scoped.
   1124334,
+  1130588,
+  1130591,
 ]);
 
 function runAudit() {
