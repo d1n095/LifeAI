@@ -1109,6 +1109,164 @@ def test_apply_mainai_job_runtime_privileges_non_fatal_mode_warns_not_raises(sup
         apply_mainai_job_runtime_privileges(migration_engine)
 
 
+def test_apply_mainai_job_runtime_privileges_detects_a_wrong_function_owner(superuser_db):
+    """expected_owner is read from the real migration/admin connection's current_user, not
+    hardcoded — a SECURITY DEFINER function owned by any OTHER real role, even one that is
+    itself privileged (BYPASSRLS here, deliberately, to isolate this check from the separate
+    owner-privilege check below), must be flagged: the whole point of a SECURITY DEFINER
+    function is that its owner's identity is exactly who its DELETEs run as."""
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    role = f"pass17_wrong_owner_{uuid.uuid4().hex[:8]}"
+    expected_owner = superuser_db.execute(sa_text("SELECT current_user")).scalar()
+    superuser_db.execute(sa_text(f"CREATE ROLE {role} WITH BYPASSRLS NOSUPERUSER"))
+    superuser_db.execute(sa_text(f"ALTER FUNCTION erase_own_mainai_job_children() OWNER TO {role}"))
+    superuser_db.commit()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            apply_mainai_job_runtime_privileges(migration_engine, require_complete=True)
+        assert "erase_own_mainai_job_children" in str(exc_info.value)
+        assert "expected the migration/admin role" in str(exc_info.value)
+    finally:
+        superuser_db.execute(sa_text(f"ALTER FUNCTION erase_own_mainai_job_children() OWNER TO {expected_owner}"))
+        superuser_db.execute(sa_text(f"DROP ROLE {role}"))
+        superuser_db.commit()
+        apply_mainai_job_runtime_privileges(migration_engine)
+
+
+def test_apply_mainai_job_runtime_privileges_detects_an_owner_without_bypassrls_or_superuser(superuser_db):
+    """A SECURITY DEFINER function meant to operate under FORCE RLS must be owned by a role
+    that can actually do so — an owner with neither SUPERUSER nor BYPASSRLS is a sign of
+    ownership drift even if its name happens to be unexpected in some other way too."""
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    role = f"pass17_weak_owner_{uuid.uuid4().hex[:8]}"
+    expected_owner = superuser_db.execute(sa_text("SELECT current_user")).scalar()
+    superuser_db.execute(sa_text(f"CREATE ROLE {role}"))  # neither SUPERUSER nor BYPASSRLS by default
+    superuser_db.execute(sa_text(f"ALTER FUNCTION erase_own_mainai_job_children() OWNER TO {role}"))
+    superuser_db.commit()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            apply_mainai_job_runtime_privileges(migration_engine, require_complete=True)
+        assert "neither SUPERUSER nor BYPASSRLS" in str(exc_info.value)
+    finally:
+        superuser_db.execute(sa_text(f"ALTER FUNCTION erase_own_mainai_job_children() OWNER TO {expected_owner}"))
+        superuser_db.execute(sa_text(f"DROP ROLE {role}"))
+        superuser_db.commit()
+        apply_mainai_job_runtime_privileges(migration_engine)
+
+
+def test_apply_mainai_job_runtime_privileges_detects_mainai_app_as_table_owner(superuser_db):
+    """Table ownership matters independently of function ownership: a SECURITY DEFINER
+    function that deletes from these tables is only as trustworthy as the tables' own
+    ownership — mainai_app owning the table it's restricted on would make the whole
+    lockdown meaningless (an owner always has DDL rights over its own table)."""
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    expected_owner = superuser_db.execute(sa_text("SELECT current_user")).scalar()
+    superuser_db.execute(sa_text("ALTER TABLE mainai_job_events OWNER TO mainai_app"))
+    superuser_db.commit()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            apply_mainai_job_runtime_privileges(migration_engine, require_complete=True)
+        assert "mainai_job_events" in str(exc_info.value)
+        assert "must never be owned by mainai_app" in str(exc_info.value)
+    finally:
+        # ALTER TABLE ... OWNER TO rewrites relacl as a side effect (confirmed empirically:
+        # ownership round-tripping through mainai_app wipes out its own SELECT/INSERT grants,
+        # not just the privileges this test is deliberately probing) — re-grant ALL first,
+        # mirroring scripts/ensure_app_role.py's real blanket boot-time grant, before letting
+        # the policy narrow it back down, or this cleanup would leave mainai_app with zero
+        # privileges on this table for the rest of the test session.
+        superuser_db.execute(sa_text(f"ALTER TABLE mainai_job_events OWNER TO {expected_owner}"))
+        superuser_db.execute(sa_text("GRANT ALL PRIVILEGES ON TABLE mainai_job_events TO mainai_app"))
+        superuser_db.commit()
+        apply_mainai_job_runtime_privileges(migration_engine)
+
+
+def test_apply_mainai_job_runtime_privileges_detects_an_unexpected_overload(superuser_db):
+    """pronargs alone can't distinguish an unexpected second overload from the one true
+    zero-argument function — this proves a second overload (even with a harmless-looking
+    single integer argument) is caught, not silently coexisting alongside the real one. Uses
+    erase_own_mainai_job_children (return type void) rather than one of the trigger functions,
+    since Postgres trigger functions can never have declared arguments at all."""
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    superuser_db.execute(
+        sa_text(
+            "CREATE FUNCTION erase_own_mainai_job_children(x integer) RETURNS void "
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ BEGIN END; $$"
+        )
+    )
+    superuser_db.execute(sa_text("REVOKE ALL ON FUNCTION erase_own_mainai_job_children(integer) FROM PUBLIC"))
+    superuser_db.commit()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            apply_mainai_job_runtime_privileges(migration_engine, require_complete=True)
+        assert "expected exactly 1 overload" in str(exc_info.value)
+    finally:
+        superuser_db.execute(sa_text("DROP FUNCTION erase_own_mainai_job_children(integer)"))
+        superuser_db.commit()
+        apply_mainai_job_runtime_privileges(migration_engine)
+
+
+def test_apply_mainai_job_runtime_privileges_rolls_back_the_enforce_phase_too_on_failure(superuser_db):
+    """A policy violation must roll back the WHOLE transaction, including the enforce phase's
+    own REVOKE/GRANT statements that already ran earlier in the same transaction — not just
+    leave the verify phase's read-only findings undone. Proven by manually re-granting an
+    excess table privilege the enforce phase would normally revoke, ALSO injecting a
+    verify-only violation that forces the policy to raise, then checking — from a separate
+    connection — that the excess privilege is still there: if enforce's REVOKE had actually
+    committed before the later verify failure, it wouldn't be."""
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    superuser_db.execute(sa_text("GRANT DELETE ON mainai_job_events TO mainai_app"))
+    superuser_db.execute(sa_text("GRANT EXECUTE ON FUNCTION mainai_job_proposals_guard_mutation() TO mainai_app"))
+    superuser_db.commit()
+    try:
+        with pytest.raises(RuntimeError):
+            apply_mainai_job_runtime_privileges(migration_engine, require_complete=True)
+
+        still_has_delete = superuser_db.execute(
+            sa_text("SELECT has_table_privilege('mainai_app', 'public.mainai_job_events', 'DELETE')")
+        ).scalar()
+        assert still_has_delete is True, "enforce phase's REVOKE must roll back with the rest of the failed transaction"
+    finally:
+        superuser_db.execute(sa_text("REVOKE EXECUTE ON FUNCTION mainai_job_proposals_guard_mutation() FROM mainai_app"))
+        superuser_db.commit()
+        apply_mainai_job_runtime_privileges(migration_engine)
+
+
+def test_apply_mainai_job_runtime_privileges_survives_reboots_blanket_grant_all(superuser_db):
+    """scripts/ensure_app_role.py unconditionally re-grants ALL PRIVILEGES to mainai_app on
+    every container boot, before this policy ever runs (see that script's docstring and the
+    Pass 12 incident in docs/BRANCH_REGISTRY.md) — this proves the policy converges back to
+    the exact intended privilege set even starting from that worst-case over-grant, matching
+    the real boot order (ensure_app_role.py -> alembic -> apply_rls ->
+    apply_mainai_job_runtime_privileges)."""
+    from app.db import migration_engine
+    from app.rls import (
+        _MAINAI_JOB_EVENT_TABLE_ALLOWED_PRIVILEGES,
+        _MAINAI_JOB_PROPOSAL_TABLE_ALLOWED_PRIVILEGES,
+        _effective_table_privileges,
+        apply_mainai_job_runtime_privileges,
+    )
+
+    superuser_db.execute(sa_text("GRANT ALL PRIVILEGES ON TABLE mainai_job_events, mainai_job_proposals TO mainai_app"))
+    superuser_db.commit()
+
+    apply_mainai_job_runtime_privileges(migration_engine, require_complete=True)  # must not raise
+
+    conn = superuser_db.connection()
+    assert _effective_table_privileges(conn, "mainai_app", "mainai_job_events") == _MAINAI_JOB_EVENT_TABLE_ALLOWED_PRIVILEGES
+    assert _effective_table_privileges(conn, "mainai_app", "mainai_job_proposals") == _MAINAI_JOB_PROPOSAL_TABLE_ALLOWED_PRIVILEGES
+
+
 # --- N: account erasure actually removes mainai job data ------------------------------------
 
 
