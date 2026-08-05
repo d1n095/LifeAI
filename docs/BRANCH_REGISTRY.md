@@ -136,6 +136,62 @@ fortsätter längre — grundaren var explicit att detta INTE är ett godkännan
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
 
+## Pass 36 (2026-08-05): PR #35 — durable backfill-run reporting, grundarens andra granskningsrunda: BLOCKER/HIGH/MEDIUM alla åtgärdade
+
+**Branch:** `claude/s1a-backfill-run-reporting` (grenad från `claude/det-kommer-mer-879lcm` efter
+PR #31:s merge). **PR #35** öppen mot `claude/det-kommer-mer-879lcm`. **Head efter denna runda:
+`b91d5db`** (föregående head `6ffd7d4`, den ursprungliga PR:n med 9 filer/1200+ rader).
+
+Grundaren avvisade "bara vänta på CI och godkänn" för denna PR (9 filer, 1200+ rader) och
+begärde: (1) exakt testräkningsreconciliation (levererad: merge-base 793 tester, PR-head 805
+insamlade, exakt 11 rena tillägg, 0 borttagningar — den tidigare "803 passed"-siffran förklarad
+av en redan känd flaky `test_storage_local_fs`-test som misslyckades på just den körningen, inte
+en regression), och (2) en fullständig kodgranskning av migration 0025, `memory_source_backfill_
+run.py`, `memory_source_backfill.py`, `admin.py` och `rls.py` mot en ~20-punktslista, rapporterad
+som BLOCKER/HIGH/MEDIUM/LOW.
+
+**Fynd och fix (samma branch, per grundarens uttryckliga instruktion):**
+
+- **BLOCKER 1 (åtgärdad):** `advance_backfill_run()`/`cancel_backfill_run()` hade ingen
+  concurrency-kontroll på run-raden. En `SELECT ... FOR UPDATE` ensam räcker INTE, eftersom
+  `backfill_memory_source_units()` committar per claim på samma session och därmed släpper
+  radlåset långt innan batchen är klar. Löst med en session-nivå Postgres advisory lock
+  (`_run_lock`, samma dedikerade-anslutning-mönster som `app/cleanup.py`s `_CLEANUP_LOCK_KEY`)
+  hållen för HELA anropet, plus en `FOR UPDATE`-omläsning efter att låset erhållits (grundarens
+  uttryckliga instruktion, implementerad som defense-in-depth ovanpå advisory-låset som faktiskt
+  gör jobbet). Ett andra samtidigt `advance()`/`cancel()`-anrop för SAMMA run får nu
+  `BackfillRunBusy` (409) direkt i stället för att racea.
+- **BLOCKER 2 (åtgärdad):** `SKIP LOCKED` kunde hoppa över en momentant låst claim och samtidigt
+  flytta cursorn förbi den — permanent förlorad för den runen, med risk för falskt `completed`
+  och (i dry-run-scenarier) dubbelräkning om en förlorad batch räknades om. Löst genom en
+  icke-låsande existens-kontroll som fryser den bestående cursorn så fort ett sådant gap
+  upptäcks, plus en cursor-medveten `_real_candidates_remain()`-spärr i `advance_backfill_run()`
+  som hindrar `completed` från att sättas medan en behörig `memory_source_id IS NULL`-claim
+  fortfarande finns kvar (oavsett om den för tillfället är låst).
+- **HIGH (åtgärdad):** `run.error_summary` sparade tidigare rå `str(exc)`. Bytt till
+  `_safe_error_summary()` — endast undantagstypens namn, längdbegränsad — matchar disciplinen
+  modulen redan använder för per-claim-fel.
+- **MEDIUM (åtgärdade):** (4) `memory_source_backfill_runs`/`_failures` saknades i
+  `app/rls.py`s `POLICY_DEFINITIONS` (självläkningsloopen kunde aldrig återskapa en förlorad
+  policy för dessa två tabeller) — tillagda, plus ett nytt drifttest
+  (`tests/backend/test_rls_policy_registry.py`) som verifierar att varje RLS-aktiverad tabell
+  har en matchande policydefinition. (5) Dokumenterat i "Konflikter"-avsnittet nedan: en
+  GARANTERAD migrations-ID-krock mellan denna branch (`0025_memory_source_backfill_runs.py`) och
+  den frysta `claude/mainai-job-runtime-foundation`s egen `0025_mainai_jobs.py` — måste lösas
+  (döpas om) när den branchen integreras, INTE nu; den branchen har inte rörts. (6)
+  `BackfillRunOut`/`_backfill_run_out()` exponerar nu `last_cursor_created_at` utöver
+  `last_cursor_claim_id` så hela checkpointen är synlig via admin-API:t.
+
+**9 nya tester** (concurrent advance/advance, advance/cancel-race, låst claim inte permanent
+överhoppad, `completed` nekas medan en låst kandidat finns kvar, `error_summary` läcker inte rå
+undantagstext, RLS policy-registry-drift ×2, admin-API visar hela cursorn). Full backendsvit:
+**813 passed, 1 skipped, 0 failed** (814 insamlade = 805 tidigare + 9 nya, matchar exakt).
+Migration 0025 upgrade/downgrade/upgrade verifierad ren mot en fristående databas; exakt en
+Alembic-head (`0025`). De 20 ursprungliga testerna (inkl. de 2 vars förväntningar korrekt ändrats
+av HIGH-fixen och completion-spärren) och de 9 nya kördes 5 gånger i rad isolerat utan flakes.
+Ingen deploy, ingen produktionsbackfill, `claude/mainai-job-runtime-foundation` endast läst
+(`git fetch`/`git show`), aldrig ändrad. Väntar på grundarens nya granskningsrapport.
+
 ## Pass 35 (2026-08-05): PR #31 — mergad efter grundarens uttryckliga godkännande
 
 Efter Pass 34:s produktionsdataprofil gav grundaren uttryckligt merge-godkännande på den exakta
