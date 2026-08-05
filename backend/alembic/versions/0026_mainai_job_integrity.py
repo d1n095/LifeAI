@@ -1,5 +1,10 @@
-"""MainAI Runtime Truthfulness and Durable Job Foundation — correction round: close two gaps
-an independent founder review found in migration 0025.
+"""MainAI Runtime Truthfulness and Durable Job Foundation — correction round: close gaps an
+independent founder review found in migration 0025, PLUS a second review round that found
+this migration's own first draft had a critical cross-owner deletion bug and a portability
+bug. Both rounds are folded into this single migration's final shape (no separate 0027 for
+what is really still "make 0026 correct before anything depends on it" — this branch has not
+been opened as a PR yet, so there is no reviewed history to preserve by leaving the bug in
+place and patching it in a later revision).
 
 1. Composite owner FK (child rows can no longer point at a different owner's job). Before
    this migration, `mainai_job_events`/`mainai_job_proposals` had two *independent* FKs
@@ -17,20 +22,48 @@ an independent founder review found in migration 0025.
    `mainai_job_events` gets a BEFORE UPDATE/DELETE trigger that always denies UPDATE (no
    exceptions, ever) and denies DELETE unless the deleting transaction has explicitly set
    `app.mainai_job_erasure_in_progress = 'on'` — the only thing that ever sets that flag is
-   `erase_mainai_job_children_for_owner()` below, a narrow SECURITY DEFINER function that is
-   the *only* way these rows are ever removed (account erasure). `mainai_job_proposals` gets
-   the same DELETE gate plus a narrower UPDATE guard: the only mutation ever permitted is the
-   single `status: 'proposed' -> 'dismissed'` transition with every other column unchanged —
-   never `dismissed -> proposed`, never `proposal_text`/`source_document_id`/`job_id`/
-   `owner_id` edited after the fact.
+   `erase_own_mainai_job_children()` below. `mainai_job_proposals` gets the same DELETE gate
+   plus a narrower UPDATE guard: the only mutation ever permitted is the single
+   `status: 'proposed' -> 'dismissed'` transition with every other column unchanged — never
+   `dismissed -> proposed`, never `proposal_text`/`source_document_id`/`job_id`/`owner_id`
+   edited after the fact.
 
-`mainai_app`'s blanket `ALL PRIVILEGES` grant (from `scripts/ensure_app_role.py`, re-applied
-unconditionally on *every* container boot, before Alembic runs — see that script's own
-docstring and the Pass 12 incident in docs/BRANCH_REGISTRY.md for why this matters) would
-silently re-grant UPDATE/DELETE/TRUNCATE back onto these tables after any restart if the
-REVOKE below were only ever applied once, at migration time. `app/rls.py`'s new
-`apply_mainai_job_runtime_privileges()` re-asserts it on every boot, after `apply_rls()`,
-exactly like `apply_rls()` itself already does for RLS policies — see app/main.py.
+3. `erase_own_mainai_job_children()` — the ONLY legitimate deletion path — takes NO
+   caller-supplied owner argument. The first draft of this migration defined
+   `erase_mainai_job_children_for_owner(target_owner_id uuid)`, SECURITY DEFINER, granted
+   EXECUTE to `mainai_app`, and deleted `WHERE owner_id = target_owner_id` — without ever
+   checking that `target_owner_id` matched the calling session's own
+   `app.current_user_id`. Because the function is SECURITY DEFINER, its DELETEs run with the
+   function owner's privileges, not the caller's — RLS on the tables is therefore not a
+   sufficient owner boundary on its own, and ANY authenticated session could have called
+   `SELECT erase_mainai_job_children_for_owner('<some other user's uuid>')` and erased that
+   other user's event/proposal history. Fixed by deriving the owner from
+   `current_setting('app.current_user_id', true)` INSIDE the function (the same session GUC
+   RLS itself trusts — see app/rls.py) instead of trusting a parameter, and denying outright
+   if that setting is unset. No admin/cross-owner variant of this function exists: nothing in
+   this codebase today has a legitimate reason to erase another owner's mainai job data
+   outside that owner's own account-deletion flow, and building one with no real caller would
+   be exactly the kind of speculative, unverified privileged surface this review round is
+   about closing, not adding. If a real cross-owner maintenance need appears later, it gets
+   its own function, its own review, and its own EXECUTE grant — never `mainai_app`.
+
+4. This migration does NOT reference the `mainai_app` role at all (no GRANT/REVOKE naming it
+   directly) — a second, independent portability bug in the first draft. `REVOKE ... FROM
+   mainai_app` requires the role to already exist; a bare migration database (one that runs
+   `alembic upgrade head` without first running `scripts/ensure_app_role.py` — exactly the
+   scenario PR #31's own migrations are already careful about) would fail this migration with
+   `role "mainai_app" does not exist`. What this migration DOES do, which needs no runtime
+   role to exist: `REVOKE ALL ... FROM PUBLIC` on every function it creates (`PUBLIC` is a
+   pseudo-role that always exists) and `ALTER FUNCTION ... OWNER TO CURRENT_USER` is
+   unnecessary (the migration role already owns what it creates). The actual `mainai_app`
+   grants (`SELECT`/`INSERT` on the two child tables, `EXECUTE` on
+   `erase_own_mainai_job_children()`, and nothing else) live entirely in
+   `app/rls.py`'s `apply_mainai_job_runtime_privileges()`, which now also VERIFIES the exact
+   final state (signature, owner, `SECURITY DEFINER`, `search_path`, `PUBLIC` has no
+   `EXECUTE`, `mainai_app`'s exact table grants) rather than just issuing REVOKE/GRANT and
+   hoping — called from `app/main.py`'s startup, after Alembic has already run and after
+   `ensure_app_role.py` has already provisioned the role, so `require_complete=True` (hard
+   fail on any drift) is the correct default there.
 
 Revision ID: 0026
 Revises: 0025
@@ -72,6 +105,8 @@ def upgrade() -> None:
         END;
         $$;
 
+        REVOKE ALL ON FUNCTION mainai_job_events_deny_mutation() FROM PUBLIC;
+
         CREATE TRIGGER trg_mainai_job_events_deny_mutation
             BEFORE UPDATE OR DELETE ON mainai_job_events
             FOR EACH ROW EXECUTE FUNCTION mainai_job_events_deny_mutation();
@@ -107,41 +142,51 @@ def upgrade() -> None:
         END;
         $$;
 
+        REVOKE ALL ON FUNCTION mainai_job_proposals_guard_mutation() FROM PUBLIC;
+
         CREATE TRIGGER trg_mainai_job_proposals_guard_mutation
             BEFORE UPDATE OR DELETE ON mainai_job_proposals
             FOR EACH ROW EXECUTE FUNCTION mainai_job_proposals_guard_mutation();
     """)
 
     # The only path that may ever remove mainai_job_events/mainai_job_proposals rows —
-    # account erasure (see app/routers/account.py). Deletes both child tables for one owner
-    # inside the SAME transaction as the rest of account deletion; mainai_jobs itself is
-    # deleted separately by the caller afterward (it isn't append-only, mainai_app already
-    # has ordinary DELETE on it — no function needed there).
+    # account erasure (see app/routers/account.py). Takes NO owner argument: the owner is
+    # derived from app.current_user_id (the same session GUC RLS itself trusts), never from a
+    # caller-supplied value, so there is no parameter a compromised or buggy caller could set
+    # to another owner's id. Denies outright if that GUC is unset (no ambient/anonymous
+    # erasure). Deletes both child tables for the CALLING session's own owner inside the same
+    # transaction as the rest of account deletion; mainai_jobs itself is deleted separately by
+    # the caller afterward (it isn't append-only, mainai_app already has ordinary DELETE on
+    # it — no function needed there).
     op.execute("""
-        CREATE FUNCTION erase_mainai_job_children_for_owner(target_owner_id uuid) RETURNS void
+        CREATE FUNCTION erase_own_mainai_job_children() RETURNS void
         LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        DECLARE
+            v_owner_id uuid;
         BEGIN
+            v_owner_id := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+            IF v_owner_id IS NULL THEN
+                RAISE EXCEPTION 'erase_own_mainai_job_children requires an authenticated app.current_user_id session context.';
+            END IF;
             PERFORM set_config('app.mainai_job_erasure_in_progress', 'on', true);
-            DELETE FROM public.mainai_job_proposals WHERE owner_id = target_owner_id;
-            DELETE FROM public.mainai_job_events WHERE owner_id = target_owner_id;
+            DELETE FROM public.mainai_job_proposals WHERE owner_id = v_owner_id;
+            DELETE FROM public.mainai_job_events WHERE owner_id = v_owner_id;
         END;
         $$;
+
+        REVOKE ALL ON FUNCTION erase_own_mainai_job_children() FROM PUBLIC;
     """)
 
-    op.execute("""
-        REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_events FROM mainai_app;
-        REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_proposals FROM mainai_app;
-        GRANT EXECUTE ON FUNCTION erase_mainai_job_children_for_owner(uuid) TO mainai_app;
-    """)
+    # Deliberately NOT here: no `GRANT`/`REVOKE ... TO/FROM mainai_app`. This migration must
+    # apply cleanly on a bare database where that role doesn't exist yet — see this file's own
+    # docstring. The runtime role's exact grants are applied and VERIFIED by
+    # app/rls.py's apply_mainai_job_runtime_privileges(), called from app/main.py's startup
+    # after both Alembic and scripts/ensure_app_role.py have already run.
 
 
 def downgrade() -> None:
     op.execute("""
-        REVOKE EXECUTE ON FUNCTION erase_mainai_job_children_for_owner(uuid) FROM mainai_app;
-        GRANT ALL PRIVILEGES ON mainai_job_events TO mainai_app;
-        GRANT ALL PRIVILEGES ON mainai_job_proposals TO mainai_app;
-
-        DROP FUNCTION erase_mainai_job_children_for_owner(uuid);
+        DROP FUNCTION erase_own_mainai_job_children();
 
         DROP TRIGGER trg_mainai_job_proposals_guard_mutation ON mainai_job_proposals;
         DROP FUNCTION mainai_job_proposals_guard_mutation();

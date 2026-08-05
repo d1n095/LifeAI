@@ -259,10 +259,14 @@ def delete_account(
         # docs/MAINAI_JOB_RUNTIME.md): mainai_job_events/mainai_job_proposals are append-only
         # at the DB level — mainai_app has no DELETE privilege on them at all, only EXECUTE on
         # this narrow SECURITY DEFINER function, which is the sole path that ever removes
-        # those rows. Children first (their own composite FK requires the parent mainai_jobs
-        # row to still exist), THEN the parent — never relying on the FK's ON DELETE CASCADE
-        # for this, same explicit-delete convention as every table above.
-        db.execute(text("SELECT erase_mainai_job_children_for_owner(:owner_id)"), {"owner_id": str(user_id)})
+        # those rows. erase_own_mainai_job_children() takes NO owner argument — it derives the
+        # owner from this session's own app.current_user_id (already set to user_id by
+        # get_current_user's normal auth flow), so there is no parameter this call site could
+        # ever get wrong or that a caller could point at a different user. Children first
+        # (their own composite FK requires the parent mainai_jobs row to still exist), THEN
+        # the parent — never relying on the FK's ON DELETE CASCADE for this, same
+        # explicit-delete convention as every table above.
+        db.execute(text("SELECT erase_own_mainai_job_children()"))
         db.query(MainAIJob).filter_by(owner_id=user_id).delete(synchronize_session=False)
 
         db.query(UsageLog).filter_by(user_id=user_id).update({"user_id": None}, synchronize_session=False)
