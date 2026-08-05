@@ -9,6 +9,18 @@ from app.models.email_verification_token import EmailVerificationToken
 from app.models.import_job import ImportJob
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.mainai_job import (
+    CANCELLABLE_MAINAI_JOB_STATUSES,
+    CLAIMABLE_MAINAI_JOB_STATUSES,
+    RETRYABLE_MAINAI_JOB_STATUSES,
+    MainAIJob,
+    MainAIJobErrorCategory,
+    MainAIJobEvent,
+    MainAIJobEventType,
+    MainAIJobProposal,
+    MainAIJobProposalStatus,
+    MainAIJobStatus,
+)
 from app.models.media_url_import import MediaUrlImport
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.memory_source_unit import (
@@ -50,6 +62,16 @@ __all__ = [
     "ImportJob",
     "KnowledgeClaim",
     "KnowledgeVersion",
+    "CANCELLABLE_MAINAI_JOB_STATUSES",
+    "CLAIMABLE_MAINAI_JOB_STATUSES",
+    "RETRYABLE_MAINAI_JOB_STATUSES",
+    "MainAIJob",
+    "MainAIJobErrorCategory",
+    "MainAIJobEvent",
+    "MainAIJobEventType",
+    "MainAIJobProposal",
+    "MainAIJobProposalStatus",
+    "MainAIJobStatus",
     "MediaUrlImport",
     "BackfillRunMode",
     "BackfillRunStatus",

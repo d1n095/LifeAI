@@ -808,3 +808,69 @@ class BackfillRunOut(BaseModel):
     completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+# --- MainAI Runtime Truthfulness and Durable Job Foundation (migrations 0026/0027,
+# renumbered during integration from the frozen branch's own 0025/0026) ---
+
+
+class MainAIJobCreateIn(BaseModel):
+    job_type: str
+    # [{"type": "document", "id": "<uuid>"}, ...] — validated against the caller's own
+    # documents by app/rag/mainai_jobs_service.py's create_job, never trusted as-is.
+    input_refs: list[dict]
+    idempotency_key: str | None = None
+
+
+class MainAIJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    # Only ever populated by the admin endpoint (GET /api/mainai/jobs/admin/all) — the
+    # normal, per-owner endpoints don't need it (RLS already scopes every row to exactly one
+    # owner, the caller), so it stays None there rather than leaking an id nobody asked for.
+    owner_id: uuid.UUID | None = None
+    job_type: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    completed_at: datetime | None = None
+    progress_current: int
+    progress_total: int | None = None
+    current_phase: str | None = None
+    public_message: str | None = None
+    error_category: str | None = None
+    retry_count: int
+    max_retries: int
+    input_refs: list
+    output_refs: list
+    provider: str | None = None
+    model: str | None = None
+    cancel_requested: bool
+    cancel_acknowledged: bool
+    created_by: str
+
+
+class MainAIJobEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    job_id: uuid.UUID
+    event_type: str
+    detail: dict
+    created_at: datetime
+
+
+class MainAIJobDetailOut(MainAIJobOut):
+    events: list[MainAIJobEventOut]
+
+
+class MainAIJobProposalOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    job_id: uuid.UUID
+    source_document_id: uuid.UUID | None = None
+    source_chunk_id: uuid.UUID | None = None
+    proposal_type: str
+    proposal_text: str
+    status: str
+    created_at: datetime

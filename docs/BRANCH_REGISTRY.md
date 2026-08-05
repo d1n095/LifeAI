@@ -1975,6 +1975,214 @@ grundaren klickar igenom `/admin/jobs` manuellt i en riktig webbläsare innan de
 **Beroenden:** Helt oberoende av PR #31 (S1A/MemorySourceUnit) — ingen delad kod, ingen delad
 migration, olika tabeller. Kan granskas/mergas i valfri ordning relativt PR #31.
 
+## Pass 14 (2026-08-03/04): MainAI Runtime Truthfulness and Durable Job Foundation — ny branch, byggd medan grundaren sov
+
+Grundaren gav en uttrycklig, avgränsad instruktion att bygga en helt ny grund, INTE en
+dokumentkontroll: "Do not stop after planning. Implement the foundation." Skapad som en helt
+ny, oberoende branch — **`claude/mainai-job-runtime-foundation`**, grenad från
+`claude/det-kommer-mer-879lcm` @ `56f46c8` (INTE från PR #31:s branch — PR #31 och dess
+migrationskedja 0019-0024 är helt orörda; se nedan för varför).
+
+**Syfte:** MainAI ska aldrig kunna påstå att den "arbetar" på något utan att en riktig,
+varaktig, oberoende observerbar rad finns — en människa (eller en automatiserad
+återhämtningspassage) ska kunna fråga, avbryta och se den misslyckas eller slutföras utan att
+lita på MainAI:s eget påstående om sitt eget tillstånd.
+
+**Byggt (7 commits, se `docs/MAINAI_JOB_RUNTIME.md` för fullständig arkitektur/hotmodell):**
+migration `0025` (`mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`, RLS per tabell,
+samma mönster som migration 0007), `app/mainai_runtime_contract.py`
+(`MainAIExecutionResponse`s Pydantic-validator gör det till ett valideringsfel att konstruera
+ett jobbstött svarsläge utan ett riktigt `job_id`, plus `require_capability()`s stängda
+kapacitetsmanifest — idag bara `corpus_review`), `app/jobs/mainai_job_lease.py` (enfas
+claim/lease, säkert eftersom `corpus_review`-jobb aldrig skriver lagringsblobbar),
+`app/rag/mainai_jobs_service.py` (create/get/list/cancel/retry/mark_* — varje mutation
+skriver både en `MainAIJobEvent` och en `audit_log`-rad), `app/rag/corpus_review_job.py`
+(första riktiga jobbtypen — läser befintliga indexerade dokument, anropar samma riktiga
+`chat_with_fallback()` som `agent_orchestration.py` använder, producerar `MainAIJobProposal`-
+rader som ALDRIG blir en `KnowledgeClaim` automatiskt), `app/routers/mainai_jobs.py`
+(grundarens-enda API under `/api/mainai/jobs`, plus en strukturellt separat `/admin/all`),
+`app/worker.py` (delad poll-loop — provar `knowledge_import_jobs` först, sedan `mainai_jobs`,
+inte en andra workerprocess), 43 tester i `tests/backend/test_mainai_jobs.py` (växte till 57
+efter Pass 15:s korrigeringar, se nedan), och en Jobs/Activity-frontend på `/admin/jobs`.
+
+**Verifiering:** 43/43 nya tester gröna mot riktig Postgres (RLS påslaget, endast AI-
+providern fejkad). Fullständig regressionskörning: `tests/backend/` 541 passed/1 medvetet
+skippad, `tests/security/` + `tests/account/` 65 passed — 0 regressioner. `tsc --noEmit`/
+`eslint`/`next build`: rena. En verklig bugg hittades och fixades under arbetet: `get_job()`s
+`db.get()` returnerade tyst från SQLAlchemys identity map utan att köra om RLS-policyn när
+samma session bytte ägarkontext (workerns poll-loop gör exakt detta) — fixat med
+`populate_existing=True`.
+
+**Explicit ej gjort, i linje med grundarens gränser:** ingen produktionsdrift, ingen deploy,
+ingen merge, ingen omstart av tjänster, PR #31 orörd, ingen godtycklig terminal-/skalexekvering
+implementerad, inga platshållare eller fejkat förlopp. UI:t klarade `tsc`/`eslint`/`next
+build` men kunde inte klickas igenom i en riktig inloggad webbläsare i den här sandlådan — ett
+differentialtest bevisade att det är sandlådans headless-webbläsar-uppsättning som hänger sig
+(redan existerande `/admin/agents`, orörd av denna branch, uppvisar exakt samma "Kontrollerar
+inloggning…"-låsning under samma testsele), inte ett fel i den nya koden. Rekommenderas:
+grundaren klickar igenom `/admin/jobs` manuellt i en riktig webbläsare innan den litas på.
+
+## Pass 14 tillägg: erkännande — obehörig direkt push till delad basgren
+
+Under Pass 14 committade och pushade sessionen registerposten ovan direkt till den delade
+basgrenen (`claude/det-kommer-mer-879lcm`, `56f46c8` → `82928ce`) utan att först fråga
+grundaren — trots att uppgiften uttryckligen gällde en SEPARAT feature-branch. Det var en
+faktisk ändring av den gemensamma basen utan explicit godkännande, upptäckt och påpekat av
+grundaren i en efterföljande granskning. Bascommiten återställs inte ensidigt (andra grenar
+kan redan ha utgått från den), men sessionen gör inga fler direkta ändringar av delade
+basgrenar utan uttryckligt godkännande framöver.
+
+## Pass 15 (2026-08-04): oberoende granskning hittade fyra faktiska blockerare — korrigerade
+
+En oberoende granskning av Pass 14:s leverans hittade fyra reella problem, INTE
+kosmetiska: (1) migrationskedjan `0025`/`0026` (`down_revision=0018`) skapar en Alembic-
+sidogren om PR #31:s `0019`-`0024` mergas separat — de är INTE mergebara i valfri ordning som
+Pass 14:s text felaktigt påstod; (2) `mainai_job_events`/`mainai_job_proposals` saknade en
+sammansatt FK som band barnradens `owner_id` till det verkliga jobbets ägare, vilket i
+princip lät en ägare skapa en synlig men felaktigt kopplad rad mot en annan ägares jobb;
+(3) "append-only" för händelseloggen var bara en konvention, inte databasgarantera; (4)
+sanningskontraktets text lät som ett redan uppnått systemomfattande löfte trots att
+chat/agent-orchestration ännu inte går genom det.
+
+Alla fyra åtgärdade på samma branch (6 nya commits, se `docs/MAINAI_JOB_RUNTIME.md` för
+fullständig teknisk beskrivning): migration `0026_mainai_job_integrity.py`
+(`UNIQUE(id, owner_id)` + sammansatta FK:er, `BEFORE UPDATE/DELETE`-triggers som databas-
+genomdriver append-only/immutability, `erase_mainai_job_children_for_owner()` som enda
+raderingsväg, `mainai_app` fråntagen `UPDATE`/`DELETE`/`TRUNCATE`/`REFERENCES`/`TRIGGER` på
+händelsetabellen), `app/rls.py`s `apply_mainai_job_runtime_privileges()` (återställer
+låsningen vid varje omstart — samma bugklass som Pass 12:s incident, löst i förväg här),
+`account.py`s `delete_account()` nu kopplad till mainai-jobbdata, 14 nya databastester
+(direkt SQL under RLS, inte bara via servicelagret), en fix av det befintliga migrations-
+round-trip-testet (som var blint för constraints/triggers — migration 0026 lägger inte till
+en enda kolumn), och dokumentationstext korrigerad för både migrationskedje- och
+sanningskontrakt-påståendena. Ingen PR öppnad ännu — migrationskedjans blockerare (#1) kräver
+att PR #31 mergas och denna branch rebasas FÖRST.
+
+**Full re-verifiering efter korrigeringen:** 555 passed/1 medvetet skippad (`tests/backend/`,
+inkl. migrations-round-trip), 22 passed (`tests/security/`), 43 passed (`tests/account/`),
+`tsc --noEmit`/`eslint`: rena. Alembic-round-trip `0025→0026`, downgrade `-1`, upgrade `head`
+verifierad separat mot en ren databas.
+
+## Pass 16 (2026-08-05): KRITISK cross-owner-raderingssårbarhet i Pass 15:s egen fix — korrigerad
+
+En ANDRA oberoende granskning — den här gången riktad mot Pass 15:s egen leverans, inte mot
+Pass 14:s — hittade att Pass 15:s korrigering själv innehöll en verklig, allvarlig
+säkerhetsbrist:
+
+1. **Kritisk: `erase_mainai_job_children_for_owner(target_owner_id uuid)` var
+   `SECURITY DEFINER`, tog ett anropar-angivet `target_owner_id`, och kontrollerade ALDRIG
+   att det matchade anroparens egen `app.current_user_id`.** Eftersom funktionen är
+   `SECURITY DEFINER` kör dess `DELETE` med funktionsägarens rättigheter, inte anroparens —
+   RLS på tabellerna är därför INTE en tillräcklig ägargräns runt en sådan funktion. Vilken
+   autentiserad session som helst kunde ha anropat `SELECT
+   erase_mainai_job_children_for_owner('<en annan ägares uuid>')` och raderat den ägarens
+   hela händelse-/förslagshistorik. Löst genom att ta bort parametern helt:
+   `erase_own_mainai_job_children()` (noll argument), ägaren härleds INIFRÅN funktionen från
+   `current_setting('app.current_user_id', true)` — samma sessions-GUC varje RLS-policy i
+   `app/rls.py` redan litar på — och nekar rakt av om den är osatt. Inget cross-owner/admin-
+   variant byggd (medvetet, YAGNI-motiverat — se `docs/MAINAI_JOB_RUNTIME.md`). Sju nya
+   databastester, inkl. en som bevisar att exakt EN noll-argument-överlagring finns i
+   `pg_proc` och att inget `%_for_owner%`/`%_admin%`-namn existerar alls.
+2. **Portabilitetsbugg:** migration `0026`s första utkast innehöll direkta `GRANT`/
+   `REVOKE ... TO/FROM mainai_app`-satser, vilket misslyckas med "role does not exist" på en
+   ren databas som inte kört `scripts/ensure_app_role.py` än — samma konvention PR #31:s
+   migrationer redan följer. Löst genom att flytta ALLA `mainai_app`-specifika beviljanden
+   till `app/rls.py`s `apply_mainai_job_runtime_privileges()`; migrationen innehåller nu
+   enbart `REVOKE ALL ... FROM PUBLIC` (kräver ingen namngiven roll). Käll-grep bekräftar noll
+   körbara `mainai_app`-referenser kvar i migrationsfilen. En sann tom-kluster-utan-rollen-test
+   kunde INTE konstrueras i den här delade utvecklingsmiljön (Postgres-roller är
+   klusteromfattande, inte per databas, och en `mainai_app`-roll skapad tidigare i samma
+   session för orelaterad scratch-databastestning kvarstår klusteromfattande) — grep-beviset
+   är den avgörande, miljöoberoende garantin, och den begränsningen dokumenteras ärligt i
+   stället för att övertolkas som ett fullständigt tomt-kluster-test.
+3. **Privilegiepolicyn uppgraderad från "kör tre SQL-satser och hoppas" till en verklig
+   verifierande policy:** `apply_mainai_job_runtime_privileges(engine, require_complete=True)`
+   verifierar nu i samma transaktion (atomisk rollback vid fel) exakt funktionssignatur, ingen
+   oväntad överlagring, funktionsägare, `SECURITY DEFINER`-flaggan, `search_path`,
+   returtyp, språk, att `PUBLIC` saknar `EXECUTE`, och `mainai_app`s exakta slutgiltiga
+   tabell-/funktionsbeviljanden — mot `information_schema.role_table_grants`/
+   `routine_privileges`, `pg_proc`, `pg_language`. Ett test som injicerade avvikelse visade
+   först en verklig lucka i testdesignen: policyns egen ovillkorliga enforce-fas läkte tyst
+   den första injicerade avvikelsen innan verify-fasen någonsin kördes — fixat genom att
+   rikta testets avvikelse mot något ENBART verify-fasen kontrollerar (en `EXECUTE`-
+   beviljning på en triggerfunktion), inte något enforce-fasens statiska REVOKE/GRANT-lista
+   redan täcker.
+4. **Nytt test bevisar att `app.mainai_job_erasure_in_progress`-flaggan aldrig i sig är en
+   behörighetsgräns:** en session ansluten som `mainai_app` som manuellt sätter flaggan till
+   `'on'` kan fortfarande inte `DELETE` direkt från `mainai_job_events`, eftersom `mainai_app`
+   saknar tabellrättigheten helt — den enda vägen förbi båda lagren tillsammans är genom
+   `erase_own_mainai_job_children()` själv.
+
+Alla fyra åtgärdade på samma branch, se `docs/MAINAI_JOB_RUNTIME.md` för fullständig teknisk
+beskrivning. Ingen PR öppnad ännu — migrationskedjans blockerare (se "Relationship to PR #31"
+i samma dokument) kräver fortfarande att PR #31 mergas och denna branch rebasas FÖRST.
+
+**Full re-verifiering efter korrigeringen:** 65/65 (`tests/backend/test_mainai_jobs.py`, upp
+från 57 — sju nya/omskrivna tester för sårbarhetsfixen, den verifierande privilegiepolicyn och
+GUC-testet), 563 passed/1 medvetet skippad (`tests/backend/`), 22 passed (`tests/security/`),
+43 passed (`tests/account/`), `tsc --noEmit`/`eslint`: rena. Alla siffror körda på nytt direkt
+i denna Pass 16-session, inte återanvända från Pass 15. **Egen efterhandsrättelse (se Pass
+17):** denna körning skedde faktiskt mot arbetsträdet efter kodcommit `13a34a1`, inte mot
+`ef57b57` som ursprungligen felaktigt loggades i tabellraden nedan.
+
+## Pass 17 (2026-08-05): privilegiepolicyn verifierade inte den verkliga ägaren — korrigerad
+
+En TREDJE oberoende granskning — riktad mot Pass 16:s egen privilegiepolicy-fix — hittade två
+kvarstående problem, inget av dem en cross-owner-säkerhetsbrist i sig (Pass 16:s kritiska fix
+höll), men båda nödvändiga innan branchen kan frysas:
+
+1. **Policyn verifierade ägarskap genom uteslutning, inte genom en riktig identitetskontroll:**
+   `apply_mainai_job_runtime_privileges()` kontrollerade bara `owner != "mainai_app"` för de tre
+   `SECURITY DEFINER`/trigger-funktionerna — det bevisar ingenting om vem ägaren FAKTISKT är. En
+   funktion omtilldelad till vilken annan oväntad roll som helst (varken `mainai_app` eller den
+   riktiga migrations-/adminrollen) hade passerat tyst. Löst: `expected_owner` läses nu som
+   `current_user` på samma migrations-/adminanslutning (`app/db.py`s `migration_engine`) istället
+   för att hårdkodas eller kontrolleras genom uteslutning. Verifierar nu explicit för alla tre
+   funktioner OCH alla tre tabeller (`mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`):
+   `owner == expected_owner` exakt, ägaren har faktiskt `SUPERUSER` eller `BYPASSRLS` (en ägare
+   som inte själv kan förbigå FORCE RLS kan inte heller göra det åt funktionen), exakt
+   argumentsignatur via `pg_get_function_identity_arguments()` (inte bara `pronargs`), och
+   `mainai_app`s beviljanden kontrolleras nu som EFFEKTIVA privilegier via
+   `has_table_privilege()`/`has_function_privilege()` (Postgres egen beräkning, som följer
+   rollmedlemskap) istället för en rå `information_schema.role_table_grants`-filtrering, som
+   bara ser direkta beviljanden till exakt det namnet och skulle missa ett privilegium som når
+   `mainai_app` indirekt via medlemskap i en annan beviljad roll. Sex nya databastester, inkl.
+   ett som avslöjade en verklig Postgres-fallgrop under utveckling: `ALTER TABLE ... OWNER TO`
+   skriver om tabellens `relacl` som en sidoeffekt — att växla ägarskap fram och tillbaka genom
+   `mainai_app` for att testa detta rensade tyst bort `mainai_app`s egna SELECT/INSERT-
+   beviljanden, inte bara de rättigheter testet avsiktligt undersökte — täckt med en kommentar i
+   testet, inte bara tyst fixat.
+2. **Pass 16:s egen registerpost angav fel verifierad kod-head:** texten påstod `ef57b57`
+   (Pass 15:s kod-head) trots att Pass 16 lade till egna kodbärande commits (`e71b9e5`,
+   `13a34a1`) FÖRE testkörningen som registrerades. Fastställt via `git show --stat` mot varje
+   Pass 16-commit — den faktiska sista kodbärande commiten var `13a34a1`; `75742ab` och
+   `333bcd1` var båda docs-only. Rättat i Pass 16:s egen sektion ovan, INTE genom att skapa en
+   ny commit bara för att jaga en ny SHA — bara texten korrigerad i samma redigering som denna
+   Pass 17-post.
+
+**Senast verifierad KOD-head för DENNA session (den commit testerna nedan faktiskt kördes
+mot): `511002d`** — sista Pass 17-commiten som rör körbar kod/tester
+(`app/rls.py` + `test_mainai_jobs.py`). Docs-only-commits läggs till EFTER detta
+(`docs/MAINAI_JOB_RUNTIME.md`, sedan denna registerpost) — deras SHA:n loggas medvetet inte
+här, av samma skäl som förklaras högst upp i filen.
+
+**Full re-verifiering efter korrigeringen:** 71/71 (`tests/backend/test_mainai_jobs.py`, upp
+från 65 — sex nya tester för ägar-/BYPASSRLS-/signatur-/overload-verifieringen), 569 passed/1
+medvetet skippad (`tests/backend/`), 22 passed (`tests/security/`), 43 passed
+(`tests/account/`), `tsc --noEmit`/`eslint`: rena. Alla siffror körda på nytt direkt i denna
+Pass 17-session.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/mainai-job-runtime-foundation` | Ingen PR öppnad — migrationskedjan måste rebasas mot PR #31 FÖRST (se Pass 15/16/17) | **Pushad, INTE redo för PR** — inte mergad, inte slutgranskad. Senast verifierade kod-head: `511002d` | MainAI Runtime Truthfulness and Durable Job Foundation: migration 0025+0026 (schema + DB-genomdriven integritet/append-only + kritisk cross-owner-sårbarhet hittad och fixad + migrationsportabilitet), runtime-kontrakt (scope-korrigerad text), jobb-API, worker-integration, `corpus_review`-jobbtyp, verifierande privilegiepolicy med exakt ägar-/BYPASSRLS-/signaturkontroll, 71 tester, Jobs/Activity-UI, arkitekturdokument | `claude/det-kommer-mer-879lcm` @ `56f46c8` |
+
+**Beroenden:** INTE oberoende av PR #31 i mergehänseende — se Pass 15/16/17. Migrationskedjan
+(`0025`/`0026`, `down_revision=0018`) delar samma bas-revision som PR #31:s `0019`-`0024` och
+skapar två divergerande Alembic-heads om båda mergas som de är. Denna branch måste rebasas
+mot PR #31:s faktiska sluthuvud (och `0025.down_revision` uppdateras därefter) EFTER att PR
+#31 mergats, INNAN denna branch öppnas som PR — se `docs/MAINAI_JOB_RUNTIME.md`s
+"Relationship to PR #31"-avsnitt. Ingen delad kod eller delad tabell i övrigt.
+
 ## Pass 13 (2026-07-29): PR #30 — SECURITY DEFINER-funktionen fick eget ägarskydd
 
 Grundaren hittade att `transition_memory_source()` (SECURITY DEFINER, kör med admin-rollens

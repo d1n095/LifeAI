@@ -41,15 +41,20 @@ def _revision_count() -> int:
 
 
 def _schema_snapshot() -> dict:
-    """Whole-schema fingerprint: every table's column set plus every native enum type's
-    label set, keyed by table/type name. Anything a migration touches (new table, new
-    column, dropped column, an ADD VALUE on an existing enum like migration 0011's) shows up
-    here without this test needing to know which migration or which table in advance. Enum
-    labels are included alongside columns because a migration can be purely additive at the
-    enum level (no new/changed columns at all) — Postgres's ALTER TYPE ... ADD VALUE is
-    exactly that shape, and a snapshot of column names alone would never notice it ran.
-    Excludes `alembic_version` itself — Alembic's own bookkeeping table, which legitimately
-    survives a `downgrade base` (it just ends up empty), not application schema.
+    """Whole-schema fingerprint: every table's column set, every native enum type's label set,
+    every CHECK constraint's full text, every table's PK/FK/unique constraint names, every
+    trigger name, and every function's full signature+behavior fingerprint — keyed by
+    table/type name. Anything a migration touches (new table, new column, dropped column, an
+    ADD VALUE on an existing enum like migration 0011's, a new composite FK or trigger like
+    migration 0027's) shows up here without this test needing to know which migration or which
+    table in advance. Enum labels are included alongside columns because a migration can be
+    purely additive at the enum level (no new/changed columns at all) — Postgres's
+    ALTER TYPE ... ADD VALUE is exactly that shape, and a snapshot of column names alone would
+    never notice it ran. Constraints and triggers are included for the same reason: migration
+    0027 (MainAI job integrity/append-only enforcement) is purely constraint/trigger/function/
+    privilege-level — it adds zero columns, zero tables, zero enum labels — so a column-and-
+    enum-only snapshot would see `downgrade -1` as a silent no-op even though it genuinely
+    drops two composite FKs, a UNIQUE constraint, two triggers, and two functions.
 
     Also fingerprints every function in the `public` schema — added after a real gap this
     test itself caught: migration 0020 (Pass 23) is purely additive at the function level
@@ -78,22 +83,42 @@ def _schema_snapshot() -> dict:
     24's function fingerprint was added to close for migration 0020. Now also fingerprints
     every CHECK constraint in the `public` schema (name + `pg_get_constraintdef()` text, per
     table) so a constraint-only migration's `downgrade -1` is provably detected as a real
-    schema change too, not silently treated as a no-op."""
+    schema change too, not silently treated as a no-op.
+
+    Integration (mainai-job-runtime): added PK/FK/unique constraint NAMES and trigger names
+    per table, on top of the above — the CHECK-constraint text fingerprint already covers
+    CHECK constraints in more detail (full definition text, not just a name), but nothing
+    before this covered composite FKs, UNIQUE constraints, or triggers at all, and migration
+    0027 adds exactly those (a composite FK on each child table, a UNIQUE(id, owner_id) on
+    `mainai_jobs`, and append-only-enforcement triggers on both child tables)."""
     migration_engine.dispose()  # drop pooled connections so the inspector sees the current schema, not a stale cached one
     inspector = inspect(migration_engine)
-    snapshot = {
-        table: frozenset(col["name"] for col in inspector.get_columns(table))
-        for table in inspector.get_table_names()
-        if table != "alembic_version"
-    }
+    tables = [t for t in inspector.get_table_names() if t != "alembic_version"]
+    snapshot = {table: frozenset(col["name"] for col in inspector.get_columns(table)) for table in tables}
     for enum in inspector.get_enums():
         snapshot[f"enum:{enum['name']}"] = frozenset(enum["labels"])
-    for table in inspector.get_table_names():
-        if table == "alembic_version":
-            continue
+    for table in tables:
         checks = inspector.get_check_constraints(table)
         if checks:
             snapshot[f"checks:{table}"] = frozenset((c["name"], c["sqltext"]) for c in checks)
+        constraint_names = set()
+        pk = inspector.get_pk_constraint(table)
+        if pk.get("name"):
+            constraint_names.add(pk["name"])
+        constraint_names.update(fk["name"] for fk in inspector.get_foreign_keys(table) if fk.get("name"))
+        constraint_names.update(uc["name"] for uc in inspector.get_unique_constraints(table) if uc.get("name"))
+        constraint_names.update(ck["name"] for ck in checks if ck.get("name"))
+        if constraint_names:
+            snapshot[f"constraints:{table}"] = frozenset(constraint_names)
+    with migration_engine.connect() as conn:
+        trigger_rows = conn.execute(
+            sa_text("SELECT event_object_table, trigger_name FROM information_schema.triggers")
+        ).all()
+    triggers_by_table: dict[str, set[str]] = {}
+    for table_name, trigger_name in trigger_rows:
+        triggers_by_table.setdefault(table_name, set()).add(trigger_name)
+    for table_name, names in triggers_by_table.items():
+        snapshot[f"triggers:{table_name}"] = frozenset(names)
     with migration_engine.connect() as conn:
         function_rows = conn.execute(
             sa_text(

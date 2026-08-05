@@ -11,8 +11,8 @@ from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
 from app.providers.base import looks_like_placeholder_secret
-from app.rls import apply_rls
-from app.routers import account, admin, agents, auth, chat, conversations, documents, health, knowledge, library, memory, projects, workbench
+from app.rls import apply_mainai_job_runtime_privileges, apply_rls
+from app.routers import account, admin, agents, auth, chat, conversations, documents, health, knowledge, library, mainai_jobs, memory, projects, workbench
 from app.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ app.include_router(workbench.router)
 app.include_router(admin.router)
 app.include_router(memory.router)
 app.include_router(agents.router)
+app.include_router(mainai_jobs.router)
 
 
 @app.on_event("startup")
@@ -73,6 +74,11 @@ def on_startup():
     # though the exact same credential worked moments later. ensure_app_role.py now also
     # retries its own self-test connection, so this is defense in depth, not the only guard.
     call_with_db_retry(lambda: apply_rls(migration_engine))
+    # See app/rls.py's own docstring: mainai_app's blanket ALL PRIVILEGES grant is
+    # unconditionally re-applied by ensure_app_role.py on every boot, BEFORE this code runs —
+    # a REVOKE from migration 0026 alone would be silently undone by the next restart without
+    # this every-boot reassertion (the exact Pass 12 boot-persistence bug class, applied here).
+    call_with_db_retry(lambda: apply_mainai_job_runtime_privileges(migration_engine))
 
     _check_smtp_mode()
     _warn_placeholder_provider_keys()
