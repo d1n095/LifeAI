@@ -41,33 +41,32 @@ valid NULL-memory_source_id candidate). `get_or_create_memory_source_unit` itsel
 proven-safe primitive for the source-unit half of that atomicity (see its own module
 docstring and tests/backend/test_memory_source_units.py's real concurrent-lock-wait test).
 
-Production execution — NOT YET BUILT, deliberately (Pass 19 review). This module's return
-value (`MemorySourceBackfillResult`) and its `logger.warning`/`logger.exception` calls are
-sufficient for local development and ad-hoc/offline runs, but NOT a durable enough progress/
-failure record for a real production backfill across a whole owner base: a crashed process
-loses whatever was only ever in memory or in ordinary logs, an operator can't ask "how far did
-run X get" without grepping logs, and a specific claim's specific failure reason isn't
-queryable. Before backfill_memory_source_units() is ever run against production data, it
-needs a durable run record with (at minimum): a run id, owner_id, started_at/completed_at,
-status, the per-source-kind/skipped/failed/already_done counters this module already computes,
-a resumable cursor (the last claim id processed, so a restarted run doesn't have to rescan
-from the beginning), and a claim-level failure log (claim id + reason + retry count) —
-`memory_source_backfill_runs`/`memory_source_backfill_failures`-shaped, or reusing an existing
-durable-job pattern rather than inventing a new one from scratch. app/routers/admin.py's
-`trigger_claim_type_backfill` docstring already identifies the same gap for the sibling P3
-claim_type backfill ("the real fix — running this as a durable memory_processing_jobs job with
-its own status/lease/retry, the same worker-container pattern app/worker.py already uses for
-imports") — that same mechanism, extended to cover this backfill too, is the intended design,
-not a second bespoke tracking table. This is a separate, explicitly scoped future PR per
-CLAUDE.md's isolation principle ("en funktion = ett tydligt syfte = en egen branch eller PR"),
-not something to fold into this one — and no production backfill run happens before it exists.
+Production execution — durable run tracking now exists (app/rag/memory_source_backfill_run.py,
+migration 0025), closing the gap this docstring used to describe. This module's own
+`MemorySourceBackfillResult` and `logger.warning`/`logger.exception` calls were never a durable
+enough progress/failure record for a real production backfill across a whole owner base on
+their own — a crashed process loses whatever was only ever in memory or in ordinary logs, an
+operator can't ask "how far did run X get" without grepping logs, and a specific claim's
+specific failure reason isn't queryable. `memory_source_backfill_run.py`'s
+`MemorySourceBackfillRun`/`MemorySourceBackfillFailure` durably persist exactly what was
+missing: a run id, owner_id, started_at/completed_at, status, the per-source-kind/skipped/
+failed/already_done counters this module already computes, a resumable `(created_at, id)`
+cursor (see this module's own `after` parameter below), and a claim-level failure log (claim id
++ reason + retry count, never `claim_text`) — built as its own owner-scoped table pair rather
+than folded into the unrelated `knowledge_import_jobs`/worker-lease machinery
+`trigger_claim_type_backfill`'s docstring once speculated about, since a backfill run has no
+uploaded blob, no ZIP extraction, and no worker-container lease semantics to share with that
+table. A genuinely REAL production backfill EXECUTION (as opposed to this module and its
+durable-tracking wrapper simply existing) is still a separate, explicit, later decision — see
+`memory_source_backfill_run.py`'s own module docstring for exactly what remains gated on that.
 """
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models.document import Document
@@ -106,6 +105,17 @@ class MemorySourceBackfillResult:
     # had memory_source_id set BEFORE this run (from an earlier backfill run or dual-write) —
     # not affected by candidates_total/chunk_backed/etc., which only describe THIS call's work.
     already_done: int = 0
+    # The newest (created_at, id) pair actually considered (in any outcome) by this call —
+    # None if candidates_total is 0. app/rag/memory_source_backfill_run.py's durable run
+    # tracking persists this as a resumable checkpoint (see its own module docstring for why
+    # both dry_run and real mode need it, not just dry_run).
+    last_seen_created_at: datetime | None = None
+    last_seen_id: uuid.UUID | None = None
+    # One (claim_id, reason) entry per skipped/failed claim in THIS call — `reason` is always
+    # the exact structural failure string `_resolve_locator()`/`_apply()` already log, NEVER
+    # `KnowledgeClaim.claim_text`. app/rag/memory_source_backfill_run.py's durable run
+    # tracking persists these into `memory_source_backfill_failures`.
+    failures: list[tuple[uuid.UUID, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -167,6 +177,27 @@ def _resolve_locator(db: Session, claim: KnowledgeClaim) -> DocumentSourceLocato
     )
 
 
+def _apply_cursor(query, after: tuple[datetime, uuid.UUID] | None):
+    """Keyset-pagination lower bound matching the `.order_by(created_at.asc(), id.asc())`
+    every query below already uses — excludes everything at or before `after`, never a claim
+    at exactly `after` itself (that one was already considered by the call that produced this
+    cursor)."""
+    if after is None:
+        return query
+    after_created_at, after_id = after
+    return query.filter(
+        or_(
+            KnowledgeClaim.created_at > after_created_at,
+            and_(KnowledgeClaim.created_at == after_created_at, KnowledgeClaim.id > after_id),
+        )
+    )
+
+
+def _advance_cursor(result: MemorySourceBackfillResult, claim: KnowledgeClaim) -> None:
+    result.last_seen_created_at = claim.created_at
+    result.last_seen_id = claim.id
+
+
 def _tally_outcome(result: MemorySourceBackfillResult, outcome: DocumentSourceLocator | _ResolutionFailure) -> None:
     if isinstance(outcome, _ResolutionFailure):
         result.skipped_mismatch += 1
@@ -186,6 +217,7 @@ def backfill_memory_source_units(
     batch_size: int = BACKFILL_BATCH_SIZE,
     max_batches: int | None = DEFAULT_MAX_BATCHES,
     dry_run: bool = False,
+    after: tuple[datetime, uuid.UUID] | None = None,
 ) -> MemorySourceBackfillResult:
     """Owner-scoped, bounded, idempotent, restart-safe backfill of `KnowledgeClaim.
     memory_source_id` for `owner_id`'s claims. The caller's session must already have
@@ -208,6 +240,15 @@ def backfill_memory_source_units(
     `range(batch_size)` loop body never run, leaving `exhausted` `False` forever and spinning
     the outer `while` loop indefinitely (the same failure class the Pass 19 review caught: a
     bounded-sounding function must actually be unable to loop forever, not just unlikely to).
+
+    `after` is an optional `(created_at, id)` keyset-pagination lower bound, excluding
+    everything at or before it — the durable-run-tracking layer (app/rag/
+    memory_source_backfill_run.py) passes each call's own previous `last_seen_created_at`/
+    `last_seen_id` back in here so a resumed DRY-RUN doesn't re-scan (and double-count)
+    claims a prior call already tallied. Real-mode calls don't strictly need this for
+    correctness (`memory_source_id IS NULL` already excludes anything this function itself
+    already wrote), but accept the same parameter for one consistent checkpoint mechanism
+    across both modes.
     """
     if batch_size <= 0:
         raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")
@@ -222,12 +263,17 @@ def backfill_memory_source_units(
     )
 
     if dry_run:
-        return _dry_run(db, owner_id, batch_size, max_batches, result)
-    return _apply(db, owner_id, batch_size, max_batches, result)
+        return _dry_run(db, owner_id, batch_size, max_batches, result, after)
+    return _apply(db, owner_id, batch_size, max_batches, result, after)
 
 
 def _dry_run(
-    db: Session, owner_id: uuid.UUID, batch_size: int, max_batches: int | None, result: MemorySourceBackfillResult
+    db: Session,
+    owner_id: uuid.UUID,
+    batch_size: int,
+    max_batches: int | None,
+    result: MemorySourceBackfillResult,
+    after: tuple[datetime, uuid.UUID] | None,
 ) -> MemorySourceBackfillResult:
     seen_ids: set[uuid.UUID] = set()
     batches_done = 0
@@ -235,6 +281,7 @@ def _dry_run(
         query = db.query(KnowledgeClaim).filter(
             KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.memory_source_id.is_(None)
         )
+        query = _apply_cursor(query, after)
         if seen_ids:
             query = query.filter(KnowledgeClaim.id.notin_(seen_ids))
         candidates = query.order_by(KnowledgeClaim.created_at.asc(), KnowledgeClaim.id.asc()).limit(batch_size).all()
@@ -244,9 +291,11 @@ def _dry_run(
         for claim in candidates:
             seen_ids.add(claim.id)
             result.candidates_total += 1
+            _advance_cursor(result, claim)
             outcome = _resolve_locator(db, claim)
             if isinstance(outcome, _ResolutionFailure):
                 logger.warning("memory_source_backfill dry-run: claim %s: %s", claim.id, outcome.reason)
+                result.failures.append((claim.id, outcome.reason))
             _tally_outcome(result, outcome)
         batches_done += 1
 
@@ -254,7 +303,12 @@ def _dry_run(
 
 
 def _apply(
-    db: Session, owner_id: uuid.UUID, batch_size: int, max_batches: int | None, result: MemorySourceBackfillResult
+    db: Session,
+    owner_id: uuid.UUID,
+    batch_size: int,
+    max_batches: int | None,
+    result: MemorySourceBackfillResult,
+    after: tuple[datetime, uuid.UUID] | None,
 ) -> MemorySourceBackfillResult:
     # A claim that fails resolution or hits a genuine conflict is excluded from re-selection
     # for the REST OF THIS CALL (same pattern as app/rag/claims.py's backfill_claim_types
@@ -273,6 +327,7 @@ def _apply(
             query = db.query(KnowledgeClaim).filter(
                 KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.memory_source_id.is_(None)
             )
+            query = _apply_cursor(query, after)
             if excluded_ids:
                 query = query.filter(KnowledgeClaim.id.notin_(excluded_ids))
             claim = (
@@ -284,10 +339,17 @@ def _apply(
                 exhausted = True
                 break
             result.candidates_total += 1
+            # Captured as local values (not left as live ORM-attribute access) BEFORE any
+            # resolve/commit/rollback below, which could otherwise expire this object's
+            # attributes — _advance_cursor must still see the real claim identity even after
+            # a rollback on the FAILURE path a few lines down.
+            claim_created_at, claim_id = claim.created_at, claim.id
+            result.last_seen_created_at, result.last_seen_id = claim_created_at, claim_id
 
             outcome = _resolve_locator(db, claim)
             if isinstance(outcome, _ResolutionFailure):
                 logger.warning("memory_source_backfill: claim %s: %s — leaving untouched", claim.id, outcome.reason)
+                result.failures.append((claim_id, outcome.reason))
                 _tally_outcome(result, outcome)
                 excluded_ids.add(claim.id)
                 db.rollback()
@@ -305,12 +367,14 @@ def _apply(
             except MemorySourceIdentityConflict as exc:
                 db.rollback()
                 result.failed += 1
+                result.failures.append((claim_id, f"identity conflict: {exc}"))
                 excluded_ids.add(claim.id)
                 logger.error("memory_source_backfill: claim %s: identity conflict: %s", claim.id, exc)
                 continue
-            except Exception:
+            except Exception as exc:
                 db.rollback()
                 result.failed += 1
+                result.failures.append((claim_id, f"unexpected error: {type(exc).__name__}"))
                 excluded_ids.add(claim.id)
                 logger.exception("memory_source_backfill: claim %s: unexpected error", claim.id)
                 continue

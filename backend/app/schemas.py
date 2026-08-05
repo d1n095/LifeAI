@@ -773,3 +773,37 @@ class RecordTestResultsIn(BaseModel):
 class PrepareGithubPrIn(BaseModel):
     branch_name: str
     base_branch: str
+
+
+class BackfillRunCreateIn(BaseModel):
+    mode: str  # "dry_run" | "real" — validated against BackfillRunMode by the router
+
+
+class BackfillRunFailureOut(BaseModel):
+    claim_id: uuid.UUID
+    reason: str
+    attempt_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class BackfillRunOut(BaseModel):
+    id: uuid.UUID
+    mode: str
+    status: str
+    batch_size: int
+    total_candidates_snapshot: int
+    already_done_snapshot: int
+    processed_count: int
+    exact_chunk_count: int
+    degraded_version_count: int
+    missing_document_only_count: int
+    skipped_unresolvable_count: int
+    failed_count: int
+    batches_completed: int
+    last_cursor_claim_id: uuid.UUID | None
+    error_summary: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
