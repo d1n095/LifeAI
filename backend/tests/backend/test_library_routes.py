@@ -4,15 +4,42 @@ for that), so route wiring, auth/CSRF, request validation and response shaping a
 exercised together, the same way a real client would hit them."""
 
 import asyncio
+import importlib.util
 import io
 import time
 import uuid
 import zipfile
+from pathlib import Path
 
 import pytest
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+
+
+def _load_apply_runtime_privileges():
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _narrow_privileges_before_this_module():
+    """Pass 30: the empty-upload path now calls storage_key_still_referenced_global() (via
+    app/rag/blob_references.py's delete_if_unreferenced()), which mainai_app is only granted
+    EXECUTE on via apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy --
+    never automatically by tests/conftest.py's _test_database fixture's own blanket table/
+    sequence GRANT ALL (function EXECUTE grants are a separate privilege class Postgres
+    doesn't cover with that). Same fixture, same rationale, as tests/backend/test_source_
+    purge.py's identical one; this file never needed it before this pass, since the OLD
+    empty-upload path called storage.delete() directly, bypassing this function entirely."""
+    from app.config import get_settings
+
+    module = _load_apply_runtime_privileges()
+    module.apply_and_verify(get_settings().database_url)
 
 
 def _run_worker_once() -> bool:
@@ -442,6 +469,37 @@ def test_import_rejects_oversized_upload(client):
     assert res.status_code == 413
 
 
+def test_concurrent_blob_deletion_during_upload_finalization_fails_closed_without_creating_a_job(
+    client, superuser_db, monkeypatch
+):
+    """Pass 22, router-level companion to tests/backend/test_source_purge.py's low-level
+    advisory-lock proof (test_storage_key_lock_serializes_upload_and_purge_...): if the
+    just-written blob vanishes between storage.write_stream() finishing and this request's own
+    storage_key lock being acquired (e.g. a concurrent retry_source_blob_purge() call), the
+    endpoint must fail closed -- no ImportJob committed referencing a blob that no longer
+    exists -- rather than silently proceeding as if nothing happened."""
+    from app.storage.local_fs import LocalFilesystemStorage
+
+    csrf = _login(client)
+
+    def _pretend_missing(self, storage_key):
+        return False
+
+    monkeypatch.setattr(LocalFilesystemStorage, "exists", _pretend_missing)
+    res = client.post(
+        "/api/library/import",
+        files={"file": ("raced-away.txt", b"deleted by a concurrent purge", "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert res.status_code == 409
+
+    from app.models.import_job import ImportJob
+
+    matching_jobs = superuser_db.query(ImportJob).filter_by(source_filename="raced-away.txt").all()
+    assert matching_jobs == [], "no ImportJob may exist referencing a blob that was gone at commit time"
+
+
 def test_import_zip_security_violation_returns_failed_job_not_500(client):
     csrf = _login(client)
     raw = _make_zip({"../../etc/passwd": b"pwned"})
@@ -594,3 +652,305 @@ def test_source_detail_segments_stay_empty_for_a_text_source(client):
     detail = client.get(f"/api/library/{source_id}").json()
     assert detail["segments"] == []
     assert detail["media_duration_seconds"] is None
+
+
+# --- Pass 30 (a fourth founder review round): empty-upload rejection must go through the SAME
+# canonical check-then-act protocol as every other physical blob delete -- content-addressing
+# means every empty upload shares the exact same storage_key, so an ungated delete here could
+# destroy a completely unrelated, already-live reference sharing that key (see
+# app/rag/blob_references.py's delete_if_unreferenced() module docstring for the full incident).
+# Tests A-D below are the founder's own lettering; E/F (the race and StorageError cases) live in
+# tests/backend/test_source_purge.py's Pass 30 section, at the blob_references.py function level
+# rather than through the full HTTP stack.
+
+
+def _empty_storage_key() -> str:
+    from app.storage import get_storage
+
+    blob = get_storage().write_stream(lambda: b"", max_bytes=1)
+    assert blob.size_bytes == 0
+    return blob.storage_key
+
+
+def test_empty_upload_does_not_delete_a_blob_still_referenced_by_a_project_source(client, superuser_db):
+    """Test A (founder's lettering)."""
+    from app.models.project_memory import ProjectSource
+    from app.storage import get_storage
+
+    storage_key = _empty_storage_key()
+    project_source = ProjectSource(source_type="doc", source_ref="docs/EMPTY.md", storage_key=storage_key, ingested_by="test")
+    superuser_db.add(project_source)
+    superuser_db.commit()
+    project_source_id = project_source.id
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert get_storage().exists(storage_key)  # untouched -- Project Memory still needs it
+
+    superuser_db.expire_all()
+    still_there = superuser_db.query(ProjectSource).filter_by(id=project_source_id).one()
+    assert still_there.storage_key == storage_key
+
+
+def test_empty_upload_does_not_delete_a_blob_still_referenced_by_a_project_checkpoint(client, superuser_db):
+    """Test B (founder's lettering)."""
+    from app.models.project_memory import ProjectCheckpoint
+    from app.storage import get_storage
+
+    storage_key = _empty_storage_key()
+    checkpoint = ProjectCheckpoint(
+        summary="empty-upload test", branch_name="main", open_pr_refs="", brief_storage_key=storage_key, brief_sha256="a" * 64, created_by="test"
+    )
+    superuser_db.add(checkpoint)
+    superuser_db.commit()
+    checkpoint_id = checkpoint.id
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert get_storage().exists(storage_key)
+
+    superuser_db.expire_all()
+    still_there = superuser_db.query(ProjectCheckpoint).filter_by(id=checkpoint_id).one()
+    assert still_there.brief_storage_key == storage_key
+
+
+def test_empty_upload_does_not_delete_a_blob_still_referenced_by_another_owners_document(client, superuser_db, make_verified_user):
+    """Test C (founder's lettering): a DIFFERENT founder-role owner's live Document sharing
+    the same (empty-content) storage_key must survive an unrelated empty upload."""
+    from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
+    from app.storage import get_storage
+
+    other_owner, _ = make_verified_user(role="founder")
+    storage_key = _empty_storage_key()
+    other_document = Document(
+        title="other owner's document",
+        source=DocumentSource.upload,
+        uploaded_by=other_owner.id,
+        active_truth_status=ActiveTruthStatus.active,
+        status=IndexStatus.indexed,
+        storage_key=storage_key,
+    )
+    superuser_db.add(other_document)
+    superuser_db.commit()
+    other_document_id = other_document.id
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert get_storage().exists(storage_key)
+
+    superuser_db.expire_all()
+    still_there = superuser_db.query(Document).filter_by(id=other_document_id).one()
+    assert still_there.storage_key == storage_key
+
+
+def test_empty_upload_purges_a_genuinely_unreferenced_empty_blob(client):
+    """Test D (founder's lettering): with NOTHING in any domain referencing the empty-content
+    key, the endpoint must still correctly purge it -- the fix must not turn into "never
+    delete empty blobs at all", only "never delete one that's still needed"."""
+    from app.storage import get_storage
+
+    storage_key = _empty_storage_key()
+    assert get_storage().exists(storage_key)  # test setup: the blob genuinely exists first
+
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+
+    assert res.status_code == 400
+    assert not get_storage().exists(storage_key)
+
+
+def test_empty_upload_never_creates_an_import_job(client, superuser_db):
+    """No ImportJob (or Document) row is ever created for a rejected empty upload -- the
+    early-return happens before any DB row is written."""
+    from app.models.import_job import ImportJob
+
+    before = superuser_db.query(ImportJob).count()
+    csrf = _login(client)
+    res = client.post("/api/library/import", files={"file": ("empty.txt", b"", "text/plain")}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 400
+
+    superuser_db.expire_all()
+    assert superuser_db.query(ImportJob).count() == before
+
+
+# --- Pass 32 blocker 1 (an eighth founder review round): storage_orphan_risk in ops-status ---
+#
+# _record_storage_orphan_risk_audit() (app/rag/blob_references.py) writes a durable AuditLog
+# row, but nothing ever read it back -- founder ops-status still only showed worker/queue
+# health, with zero signal that a blob may need a manual storage sweep. GET /api/library/
+# ops/status now also surfaces get_storage_cleanup_ops_status()'s aggregated view. Test A
+# (failed_not_queued creates the audit row in the first place) is covered end to end in
+# test_source_purge.py's test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_
+# log_and_an_audit_row -- the tests below focus on what THIS blocker actually required: that
+# ops-status reads it back correctly.
+
+
+def test_ops_status_shows_degraded_when_a_storage_orphan_risk_audit_row_exists(client, superuser_db):
+    """Test B (founder's Pass 32 blocker-1 lettering)."""
+    from datetime import datetime
+
+    from app.models.audit import AuditLog
+
+    superuser_db.add(
+        AuditLog(
+            user_id=None,
+            action="storage_orphan_risk",
+            entity_type="storage_key",
+            entity_id="ab" * 32,
+            detail="pass 32 blocker 1 test B: simulated orphan risk",
+        )
+    )
+    superuser_db.commit()
+
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert body["storage_cleanup_degraded"] is True
+    assert body["storage_orphan_risk_count"] >= 1
+    assert body["latest_storage_orphan_risk_at"] is not None
+    # Sanity: the timestamp really is recent, not some stale/default value.
+    latest = datetime.fromisoformat(body["latest_storage_orphan_risk_at"].replace("Z", "+00:00"))
+    assert (datetime.now(latest.tzinfo) - latest).total_seconds() < 60
+
+
+def test_ops_status_never_exposes_a_raw_storage_key(client, superuser_db):
+    """Test C (founder's Pass 32 blocker-1 lettering): ops-status must show that manual action
+    may be needed WITHOUT ever leaking the actual storage_key -- OpsStatusOut only has counts/
+    timestamps/booleans, never an entity_id/storage_key field."""
+    from app.models.audit import AuditLog
+
+    secret_key = "cd" * 32
+    superuser_db.add(
+        AuditLog(
+            user_id=None,
+            action="storage_orphan_risk",
+            entity_type="storage_key",
+            entity_id=secret_key,
+            detail=f"pass 32 blocker 1 test C: entity_id={secret_key}",
+        )
+    )
+    superuser_db.commit()
+
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    assert secret_key not in res.text
+    assert set(res.json().keys()).isdisjoint({"storage_key", "entity_id", "storage_orphan_risk_keys"})
+
+
+def test_ops_status_shows_not_degraded_under_normal_operation(client):
+    """Test D (founder's Pass 32 blocker-1 lettering): a clean system (no orphan-risk audit
+    rows, no failed storage-cleanup tasks) must report degraded=False -- this is the ordinary,
+    expected state, not something a founder should ever have to double-check."""
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert body["storage_cleanup_degraded"] is False
+    assert body["storage_orphan_risk_count"] == 0
+    assert body["latest_storage_orphan_risk_at"] is None
+    assert body["failed_storage_cleanup_tasks"] == 0
+    assert body["oldest_failed_storage_cleanup_age_seconds"] is None
+
+
+def test_ops_status_counts_pending_and_failed_storage_cleanup_tasks_correctly(client, superuser_db):
+    """Test E (founder's Pass 32 blocker-1 lettering): pending/processing tasks are counted
+    separately from failed ones, and a pending/processing-only backlog does NOT itself flip
+    storage_cleanup_degraded -- see get_storage_cleanup_ops_status()'s own docstring for why
+    (an enqueued durable retry waiting for the worker's next poll is normal operation)."""
+    from sqlalchemy import text as sa_text
+
+    for status in ("pending", "pending", "processing"):
+        superuser_db.execute(
+            sa_text(
+                "INSERT INTO storage_deletion_tasks (id, operation_id, storage_key, status) "
+                "VALUES (gen_random_uuid(), gen_random_uuid(), :key, :status)"
+            ),
+            {"key": f"pass32-b1-teste-{status}-{uuid.uuid4().hex}", "status": status},
+        )
+    for _ in range(3):
+        superuser_db.execute(
+            sa_text(
+                "INSERT INTO storage_deletion_tasks (id, operation_id, storage_key, status) "
+                "VALUES (gen_random_uuid(), gen_random_uuid(), :key, 'failed')"
+            ),
+            {"key": f"pass32-b1-teste-failed-{uuid.uuid4().hex}"},
+        )
+    superuser_db.commit()
+
+    _login(client)
+    res = client.get("/api/library/ops/status")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert body["pending_storage_cleanup_tasks"] == 3  # 2 pending + 1 processing
+    assert body["failed_storage_cleanup_tasks"] == 3
+    assert body["oldest_failed_storage_cleanup_age_seconds"] is not None
+    assert body["oldest_failed_storage_cleanup_age_seconds"] >= 0
+    assert body["storage_cleanup_degraded"] is True  # driven by the failed tasks, not the pending ones
+
+
+def test_ops_status_degraded_flag_resolves_for_tasks_but_not_for_audit_log_risk(client, superuser_db):
+    """Test F (founder's Pass 32 blocker-1 lettering): the two halves of `storage_cleanup_
+    degraded` behave differently by design -- a failed storage_deletion_tasks row genuinely
+    self-resolves once the worker's retry succeeds (status moves to purged/retained_shared),
+    but a storage_orphan_risk AuditLog row (audit_log is immutable/append-only, see that
+    model's own docstring) currently has no resolution mechanism at all and stays degraded
+    forever once it exists -- documented, deliberate, and proven here rather than silently
+    assumed."""
+    from sqlalchemy import text as sa_text
+
+    _login(client)
+    baseline = client.get("/api/library/ops/status").json()
+    assert baseline["storage_cleanup_degraded"] is False
+
+    task_key = f"pass32-b1-testf-{uuid.uuid4().hex}"
+    superuser_db.execute(
+        sa_text(
+            "INSERT INTO storage_deletion_tasks (id, operation_id, storage_key, status) "
+            "VALUES (gen_random_uuid(), gen_random_uuid(), :key, 'failed')"
+        ),
+        {"key": task_key},
+    )
+    superuser_db.commit()
+
+    degraded_from_task = client.get("/api/library/ops/status").json()
+    assert degraded_from_task["storage_cleanup_degraded"] is True
+
+    # The worker's retry loop succeeded -- this task is now resolved.
+    superuser_db.execute(
+        sa_text("UPDATE storage_deletion_tasks SET status = 'purged' WHERE storage_key = :key"),
+        {"key": task_key},
+    )
+    superuser_db.commit()
+
+    resolved = client.get("/api/library/ops/status").json()
+    assert resolved["storage_cleanup_degraded"] is False, "a resolved (purged) task must stop counting as degraded"
+
+    # Now the audit-log side: this one does NOT self-resolve, by design.
+    from app.models.audit import AuditLog
+
+    superuser_db.add(
+        AuditLog(
+            user_id=None,
+            action="storage_orphan_risk",
+            entity_type="storage_key",
+            entity_id="ef" * 32,
+            detail="pass 32 blocker 1 test F: audit-log risk never self-resolves",
+        )
+    )
+    superuser_db.commit()
+
+    degraded_from_audit = client.get("/api/library/ops/status").json()
+    assert degraded_from_audit["storage_cleanup_degraded"] is True
+    # No amount of task-table cleanup can clear this -- there is nothing to update; the audit
+    # row itself is immutable. This is the documented, current limitation, not a bug.

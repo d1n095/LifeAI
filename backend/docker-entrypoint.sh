@@ -36,4 +36,17 @@ else
   echo "RUN_MIGRATIONS=false, hoppar över alembic upgrade head."
 fi
 
+# S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8): re-applies and verifies the narrowed
+# mainai_app privilege state on the memory-provenance tables/functions on EVERY boot of EVERY
+# container that reaches this line — NOT only inside the RUN_MIGRATIONS=true branch above.
+# ensure_app_role.py re-grants ALL PRIVILEGES to mainai_app unconditionally on every boot
+# (not just role creation, not just this container), which would silently undo a REVOKE that
+# only ran once at migration time. The durable-worker container sets RUN_MIGRATIONS=false and
+# skips `alembic upgrade head` (redundant against the same database — see the comment above),
+# but it still runs ensure_app_role.py and therefore still needs its own privilege state
+# re-narrowed on every restart; skipping this script there would leave mainai_app's
+# privileges wide open indefinitely after any worker-only restart.
+echo "Kör apply_runtime_privileges..."
+python scripts/apply_runtime_privileges.py
+
 exec "$@"

@@ -37,6 +37,7 @@ from app.models.document import (
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
+from app.rag.blob_references import acquire_storage_key_lock, storage_key_still_referenced
 from app.rag.claims import extract_claims_for_document
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
@@ -157,21 +158,74 @@ def _store_bytes(storage: StorageBackend, content: bytes, *, max_bytes: int):
     return storage.write_stream(_read, max_bytes=max_bytes)
 
 
+def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, content: bytes, *, max_bytes: int):
+    """Pass 32 (a seventh founder review round): wraps `_store_bytes()` with the SAME
+    lock+verify+republish protocol `app/rag/blob_references.py`'s
+    `store_content_with_reference_lock()` already provides for Project Memory's writers (Pass
+    31) — see that function's docstring for the write-before-reference race this closes, and
+    this module's own module docstring / `_import_one_file`'s call site for why `_store_bytes`
+    itself (a genuinely persistent writer with no lock at all) was a real, founder-flagged gap:
+    the worker's per-file write here durably creates a blob BEFORE the surrounding `Document`
+    row's `storage_key` is set and committed, exactly the same "bytes exist before any DB row
+    protects them" shape Pass 22 already closed for the Life Library upload endpoint and Pass
+    31 closed for Project Memory.
+
+    Deliberately calls `_store_bytes()` itself (not `store_content_with_reference_lock()`
+    directly) rather than duplicating its logic inline, so existing tests that monkeypatch
+    `li._store_bytes` to observe the pipeline's granular status transitions (see
+    tests/backend/test_library_import.py) continue to observe the real write — Python resolves
+    the bare `_store_bytes(...)` call below against this module's current global at call time,
+    so a monkeypatched replacement is still picked up correctly.
+
+    Callers MUST set `Document.storage_key` and commit while STILL holding this same `db`
+    session's open transaction — the advisory lock releases at that transaction's next commit
+    or rollback, exactly like every other caller of `acquire_storage_key_lock`.
+
+    Pass 32 (an eighth founder review round): uses `storage.verify(expected_sha256=...,
+    expected_size=...)`, not `storage.exists()` — see `store_content_with_reference_lock()`'s
+    (app/rag/blob_references.py) matching docstring update for why `exists()` alone can't tell
+    a genuinely-published blob apart from a same-path file whose bytes don't actually match
+    this content's hash."""
+    blob = _store_bytes(storage, content, max_bytes=max_bytes)
+    acquire_storage_key_lock(db, blob.storage_key)
+    if storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
+        return blob
+
+    # Lost the race, or the blob at this key is corrupt: a concurrent purge/erasure's
+    # reference check ran (correctly, since no DB row referenced this key yet) and physically
+    # deleted it before we got here, or the bytes now at this path don't match its own name.
+    # Safe to republish now, WHILE holding the lock, so no concurrent deleter's reference
+    # check can run again until this transaction commits or rolls back.
+    logger.warning(
+        "Blob %s saknas eller är korrupt vid referens-låset -- återpublicerar från minnet.", blob.storage_key
+    )
+    blob = _store_bytes(storage, content, max_bytes=max_bytes)
+    if not storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
+        raise StorageError(
+            f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
+            f"fortfarande inte den förväntade sha256:n efter återpublicering."
+        )
+    return blob
+
+
 def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | None) -> DeletionStatus:
-    """Life Library durable-worker package (DEL 5): physically removes a blob ONLY when no
-    live (non-deleted) Document still points at it — content-addressing (see
-    app/storage/local_fs.py) means two different documents with byte-identical content
-    already share one physical file, so this reference count is a live DB query, not a
-    maintained counter that could drift. Returns the DeletionStatus to persist on the
-    caller's Document row: `purged` (removed, or nothing to remove), `pending` (still
-    referenced elsewhere — correct to leave the file in place), `failed` (a real I/O error,
-    surfaced distinctly rather than silently retried forever)."""
+    """Life Library durable-worker package (DEL 5): physically removes a blob ONLY when
+    nothing still needs it — content-addressing (see app/storage/local_fs.py) means two
+    different documents (or a pending ImportJob's raw upload) with byte-identical content
+    already share one physical file, so the reference check is a live DB query, not a
+    maintained counter that could drift. Pass 22: the reference check itself now lives in
+    app/rag/blob_references.py::storage_key_still_referenced() — a live Document.storage_key
+    row was always checked here, but a pending/running/resumable ImportJob.source_storage_key
+    was not, which let a source purge physically delete a blob a not-yet-processed import job
+    still needed (see that module's docstring for the full incident and the fix). Returns the
+    DeletionStatus to persist on the caller's Document row: `purged` (removed, or nothing to
+    remove), `pending` (still referenced elsewhere — correct to leave the file in place),
+    `failed` (a real I/O error, surfaced distinctly rather than silently retried forever).
+    Callers with a real storage_key must hold app.rag.blob_references.acquire_storage_key_lock
+    for this call — this function itself does no locking."""
     if storage_key is None:
         return DeletionStatus.purged
-    still_referenced = (
-        db.query(Document.id).filter(Document.storage_key == storage_key, Document.deleted_at.is_(None)).first() is not None
-    )
-    if still_referenced:
+    if storage_key_still_referenced(db, storage_key):
         return DeletionStatus.pending
     try:
         storage.delete(storage_key)
@@ -294,7 +348,24 @@ async def _resume_incomplete_document(
         try:
             await extract_claims_for_document(db, document, owner_id, version.id)
         except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
-            pass
+            # S1A dual-write (app/rag/claims.py) flushes MemorySourceUnit/DocumentSourceUnit
+            # rows before it commits — an exception partway through (a later chunk's provider
+            # error surfacing unexpectedly, an identity conflict) can leave those flushed-but-
+            # uncommitted writes sitting in this session. Without rollback here, a LATER
+            # db.commit() elsewhere in this same worker session could commit them anyway,
+            # even though extraction was reported as failed — or, if that later commit itself
+            # hits a DB error, leave the session stuck in PendingRollback and break the rest
+            # of the job. db.rollback() only undoes this function's own uncommitted work
+            # (document.status/indexing were already committed above), so "indexed" below is
+            # still accurate.
+            db.rollback()
+            logger.exception(
+                "Claim-extraktion misslyckades för dokument %s (owner=%s, version=%s) — "
+                "session rullades tillbaka, indexering kvarstår som lyckad.",
+                document.id,
+                owner_id,
+                version.id,
+            )
 
     return FileOutcome(
         filename=filename,
@@ -464,7 +535,7 @@ async def _import_one_file(
     db.add(document)
     db.commit()
     try:
-        blob = _store_bytes(storage, content, max_bytes=max_upload_bytes)
+        blob = _store_bytes_with_reference_lock(db, storage, content, max_bytes=max_upload_bytes)
     except StorageError as exc:
         # P1: reclassified from the old undifferentiated `failed` — the original never made
         # it into durable storage at all, so unlike awaiting_provider/blocked_provider this
@@ -588,7 +659,18 @@ async def _import_one_file(
     try:
         await extract_claims_for_document(db, document, owner_id, version.id)
     except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
-        pass
+        # See _resume_incomplete_document's matching except block: dual-write flushes
+        # MSU/DSU rows before committing, so an exception here can leave uncommitted writes
+        # in the session that a later commit could accidentally persist, or that could leave
+        # the session in PendingRollback on a DB-level failure. Roll back before continuing.
+        db.rollback()
+        logger.exception(
+            "Claim-extraktion misslyckades för dokument %s (owner=%s, version=%s) — "
+            "session rullades tillbaka, indexering kvarstår som lyckad.",
+            document.id,
+            owner_id,
+            version.id,
+        )
 
     return FileOutcome(
         filename=filename,

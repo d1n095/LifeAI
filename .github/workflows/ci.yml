@@ -374,6 +374,19 @@ jobs:
       - run: alembic upgrade head
         working-directory: backend
 
+      # Mirrors backend/docker-entrypoint.sh's real boot order (ensure_app_role ->
+      # alembic upgrade head -> apply_runtime_privileges -> start app). Without this step,
+      # the "GRANT ALL PRIVILEGES ON ALL TABLES" above never narrows mainai_app, but it also
+      # never GRANTs EXECUTE on the S1A SECURITY DEFINER functions (erase_owner_memory,
+      # transition_own_memory_source, storage_key_still_referenced_global) — those functions
+      # REVOKE EXECUTE FROM PUBLIC in their own migrations, so only this policy script's
+      # explicit GRANT makes them callable. Went unnoticed until e2e/account.spec.ts's
+      # account-deletion test started exercising erase_owner_memory, the first S1A
+      # SECURITY DEFINER call any Playwright spec reaches.
+      - name: Apply S1A runtime privilege policy
+        working-directory: backend
+        run: python scripts/apply_runtime_privileges.py
+
       # No NEXT_PUBLIC_API_URL — same-origin proxy mode, matching every real deployment (see
       # frontend/lib/api.ts's comment on that var and playwright.config.ts's webServer entry,
       # which passes INTERNAL_API_URL to the started `next start` process at runtime).

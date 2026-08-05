@@ -10,6 +10,16 @@ from app.models.import_job import ImportJob
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.media_url_import import MediaUrlImport
+from app.models.memory_source_unit import (
+    DocumentSourceUnit,
+    LifecycleStatus,
+    MemorySourceLifecycleEvent,
+    MemorySourceUnit,
+    OccurredAtBasis,
+    SnapshotStatus,
+    SourceKind,
+    SourceRole,
+)
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.project_memory import ProjectBranchPRStatus, ProjectCheckpoint, ProjectCheckpointNote, ProjectNote, ProjectSource
@@ -18,6 +28,7 @@ from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
 from app.models.source_relationship import SourceRelationship
+from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
 from app.models.user import User
 
@@ -39,6 +50,14 @@ __all__ = [
     "KnowledgeClaim",
     "KnowledgeVersion",
     "MediaUrlImport",
+    "DocumentSourceUnit",
+    "LifecycleStatus",
+    "MemorySourceLifecycleEvent",
+    "MemorySourceUnit",
+    "OccurredAtBasis",
+    "SnapshotStatus",
+    "SourceKind",
+    "SourceRole",
     "PasswordResetToken",
     "Project",
     "Task",
@@ -52,6 +71,9 @@ __all__ = [
     "RefreshToken",
     "RevokedAccessToken",
     "SourceRelationship",
+    "StorageDeletionReason",
+    "StorageDeletionStatus",
+    "StorageDeletionTask",
     "UsageLog",
     "User",
 ]

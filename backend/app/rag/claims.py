@@ -12,14 +12,28 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models.document import ActiveTruthStatus, Document
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
+from app.models.knowledge_version import KnowledgeVersion
+from app.models.memory_source_unit import SnapshotStatus
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
+from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+
+
+class ClaimExtractionIntegrityError(RuntimeError):
+    """Raised when extract_claims_for_document's own owner_id/document_id/version_id
+    arguments don't structurally line up -- fails closed BEFORE any provider call or write,
+    same principle as app/rag/memory_source_backfill.py's _ResolutionFailure. The real
+    library_import.py call sites always pass a genuinely matching triple today, but this
+    function must not silently trust that forever: a future caller passing a mismatched
+    version_id must never have its claims/MemorySourceUnit attributed to the wrong owner or
+    document."""
 
 EXTRACTION_VERSION = "claims-v2"
 MAX_CLAIMS_PER_CHUNK = 8
@@ -152,7 +166,41 @@ async def extract_claims_for_document(
     just that chunk, never aborts the document's import — matching this codebase's
     established "one file's/one chunk's error must not corrupt the whole batch" principle
     (see app/rag/library_import.py's per-file FileOutcome handling).
+
+    S1A dual-write (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, phase 3 of the cutover
+    plan): for every chunk that actually produces at least one claim, finds-or-creates exactly
+    one `document_chunk` MemorySourceUnit (app/rag/memory_source.py) using the chunk's REAL
+    `text` — never invented, never the provider's own output — and sets the same
+    `memory_source_id` on every claim extracted from that chunk. A chunk whose provider call
+    fails or whose response parses to zero claims never gets a source unit at all, so a
+    provider error or an empty extraction can never leave an orphaned MemorySourceUnit with no
+    claim pointing to it. The source unit (created via a SAVEPOINT-scoped flush, not its own
+    commit — see get_or_create_memory_source_unit) and every claim from this call share the
+    same outer transaction, committed together by the single db.commit() below — atomic, not
+    two separate writes that could diverge if the process died in between. The legacy
+    source_id/version_id/chunk_id columns are set exactly as before, unchanged, alongside the
+    new column — this is additive dual-write, not a replacement.
+
+    Fails closed BEFORE any provider call or write (Pass 19 review): `document` must actually
+    be owned by `owner_id`, and if `version_id` is given it must structurally belong to this
+    same `document`/`owner_id` — `KnowledgeVersion` has only a bare FK to `documents.id`, not a
+    composite owner-anchored one (unlike memory_source_units/document_source_units), so nothing
+    else stops a caller from passing a version that belongs to a different document or owner
+    entirely. Raises ClaimExtractionIntegrityError rather than silently attributing claims (or
+    a MemorySourceUnit) to the wrong source.
     """
+    if document.uploaded_by != owner_id:
+        raise ClaimExtractionIntegrityError(
+            f"document {document.id} is not owned by owner_id={owner_id} (uploaded_by={document.uploaded_by})"
+        )
+    if version_id is not None:
+        version = db.get(KnowledgeVersion, version_id)
+        if version is None or version.source_id != document.id or version.owner_id != owner_id:
+            raise ClaimExtractionIntegrityError(
+                f"version_id={version_id} does not structurally belong to document "
+                f"{document.id}/owner_id={owner_id}"
+            )
+
     chunks = (
         db.query(DocumentChunk)
         .filter_by(document_id=document.id, owner_id=owner_id)
@@ -173,7 +221,24 @@ async def extract_claims_for_document(
         except ProviderError:
             continue
 
-        for claim_text, claim_type in _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]:
+        parsed_claims = _parse_claims(result.content)[:MAX_CLAIMS_PER_CHUNK]
+        if not parsed_claims:
+            continue
+
+        memory_source_id = get_or_create_memory_source_unit(
+            db,
+            DocumentSourceLocator(
+                owner_id=owner_id,
+                document_id=document.id,
+                version_id=None,
+                chunk_id=chunk.id,
+                observed_at=datetime.now(timezone.utc),
+                content_text=chunk.text,
+                snapshot_status=SnapshotStatus.exact,
+            ),
+        )
+
+        for claim_text, claim_type in parsed_claims:
             score = grounding_score(claim_text, chunk.text)
             claim = KnowledgeClaim(
                 owner_id=owner_id,
@@ -187,6 +252,7 @@ async def extract_claims_for_document(
                 confidence=_confidence_for_score(score),
                 grounding_score=score,
                 extraction_version=EXTRACTION_VERSION,
+                memory_source_id=memory_source_id,
             )
             db.add(claim)
             created.append(claim)

@@ -39,9 +39,11 @@ from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
-from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
 from app.models.provider_verification import VerificationResult
+from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
+from app.rag.account_erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.rag.library_import import run_import_job
 from app.rag.zip_import import ZipSecurityError
 
@@ -156,8 +158,9 @@ class Worker:
         db.execute(
             text(
                 "UPDATE knowledge_import_jobs SET status = 'pending', completed_at = NULL, failure_reason = NULL "
-                "WHERE status = 'blocked' OR (status = 'partial' AND blocked_count > 0)"
-            )
+                "WHERE status = ANY(:requeue_statuses) OR (status = 'partial' AND blocked_count > 0)"
+            ),
+            {"requeue_statuses": [s.value for s in PROVIDER_REQUEUE_STATUSES]},
         )
         db.commit()
 
@@ -208,6 +211,49 @@ class Worker:
             len(stuck_job_ids),
         )
 
+    def _retry_storage_deletion_tasks(self, db: Session) -> None:
+        """Pass 26 (account erasure — see app/rag/account_erasure.py's module docstring): the
+        "avgränsad maintenance-runner" that finishes any `storage_deletion_tasks` row an
+        account erasure's own immediate best-effort attempt left `pending`/`failed` (a
+        process crash between that erasure's DB commit and its best-effort attempt, or a
+        transient storage I/O error), OR a task stuck `processing` because ITS claimer
+        crashed mid-attempt (Pass 27 — see `claim_storage_deletion_tasks`'s lease-expiry
+        reclaim). Deliberately a broad, CROSS-OPERATION scan — unlike
+        `attempt_pending_storage_deletions_for_operation()` (account_erasure.py), which is
+        scoped to the ONE operation_id a single erasure request just created — so this runs on
+        the superuser claim session (`_ClaimSession`), the same reasoning `_requeue_blocked_
+        jobs`/`_reconcile_orphaned_documents` above already use: this table has no owner_id
+        and no RLS at all (see migration 0021's module docstring), and Pass 27 tightened
+        `mainai_app`'s own grant on it down to INSERT only — this worker's superuser
+        connection is now the ONLY place that ever reads or updates a `storage_deletion_tasks`
+        row.
+
+        Pass 27: claims a BOUNDED batch atomically via `claim_storage_deletion_tasks()` (the
+        same `FOR UPDATE SKIP LOCKED` + lease pattern `app/jobs/lease.py`'s `claim_next_job()`
+        already uses for `knowledge_import_jobs`) instead of a plain, unlocked `.all()` scan —
+        so this poll cycle can never claim and re-process the same row `attempt_pending_
+        storage_deletions_for_operation()`'s own immediate attempt just claimed (or another
+        worker process's own poll cycle claimed), and a task whose claimer crashed becomes
+        reclaimable again once its lease expires rather than sitting `processing` forever.
+
+        Each task is individually wrapped: a failure attempting ONE task is caught, logged,
+        and never stops the rest of the batch or this poll cycle — `attempt_storage_deletion_
+        task` itself commits (or the caller's own except below rolls back) independently per
+        task, exactly like `attempt_pending_storage_deletions_for_operation`'s own per-task
+        try/except."""
+        claimed_ids = claim_storage_deletion_tasks(db, limit=50)
+        for task_id in claimed_ids:
+            task = db.get(StorageDeletionTask, task_id)
+            if task is None:
+                continue
+            try:
+                attempt_storage_deletion_task(db, task)
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Worker %s: återförsök av storage_deletion_task %s misslyckades.", self.worker_id, task_id
+                )
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -216,6 +262,7 @@ class Worker:
         try:
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
+            self._retry_storage_deletion_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
             claim_db.close()

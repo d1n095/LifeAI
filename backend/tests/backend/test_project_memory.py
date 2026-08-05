@@ -17,13 +17,17 @@ No mocks for storage or the DB — this exercises the real Postgres test databas
 LocalFilesystemStorage backend (see tests/conftest.py's STORAGE_ROOT tempdir), matching this
 repo's existing convention of testing real scenarios, not just isolated units."""
 
+import importlib.util
 import subprocess
+import threading
 import uuid
+from pathlib import Path
 
 import pytest
 
 from app.config import get_settings
-from app.models.project_memory import NoteKind, NoteStatus, ProjectCheckpointNote, SideIssueClassification
+from app.db import SessionLocal
+from app.models.project_memory import NoteKind, NoteStatus, ProjectCheckpointNote, ProjectSource, SideIssueClassification
 from app.project_memory import (
     add_note,
     build_system_map,
@@ -48,9 +52,35 @@ from app.project_memory import (
     resolve_note,
     retrieve_relevant_context,
 )
+from app.rag.blob_references import acquire_storage_key_lock, delete_if_unreferenced, store_content_with_reference_lock
+from app.storage import StorageError, get_storage
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+
+
+def _load_apply_runtime_privileges():
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _narrow_privileges_before_this_module():
+    """Pass 31: ingest_doc()/ingest_system_map()/create_checkpoint() now call
+    storage_key_still_referenced_global() (via app/rag/blob_references.py's
+    store_content_with_reference_lock()), which mainai_app is only granted EXECUTE on via
+    apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy -- never
+    automatically by tests/conftest.py's _test_database fixture's own blanket table/sequence
+    GRANT ALL. Same fixture, same rationale, as tests/backend/test_library_routes.py's
+    identical one (added there in Pass 30 for the same reason); this file never needed it
+    before this pass, since these three functions used to call storage.write_stream()
+    directly with no reference check at all."""
+    module = _load_apply_runtime_privileges()
+    module.apply_and_verify(get_settings().database_url)
 
 
 def _init_fake_repo(tmp_path) -> str:
@@ -872,3 +902,192 @@ def test_ingest_system_map_stores_durably_and_records_counts(db_session, tmp_pat
 
     latest = latest_system_map(db_session)
     assert latest.id == source.id
+
+
+# --- Pass 31 (a sixth founder review round): close the write-before-reference race ----------
+#
+# ingest_doc()/ingest_system_map()/create_checkpoint() write through the SAME global,
+# content-addressed storage backend the Life Library upload path uses, but never took
+# acquire_storage_key_lock() before committing their ProjectSource/ProjectCheckpoint row --
+# the exact same "bytes exist before any DB row protects them" race Pass 22 already closed for
+# uploads, left open here. Fixed via app/rag/blob_references.py's
+# store_content_with_reference_lock(). Tests below are the founder's own lettering (A: a
+# ProjectSource write vs. concurrent purge/delete; B: same for ProjectCheckpoint -- covered
+# together by the ingest_doc()-based race test since both writers share the identical
+# store_content_with_reference_lock() code path; C: writer wins -> reference committed and
+# blob present; D: deleter wins -> writer recovers via republish; E: no deadlocks).
+
+
+def test_store_content_with_reference_lock_returns_a_verified_present_blob_in_the_ordinary_case(db_session):
+    content = f"pass 31 point 2 test: ordinary case {uuid.uuid4().hex}".encode()
+
+    blob = store_content_with_reference_lock(db_session, get_storage(), content, max_bytes=len(content) + 10)
+    db_session.commit()  # releases the storage-key lock
+
+    assert get_storage().exists(blob.storage_key) is True
+
+
+def test_store_content_with_reference_lock_recovers_when_a_real_concurrent_purge_deletes_the_blob_first():
+    """Test D (founder's lettering): a REAL two-thread, two-session race where the deleter
+    genuinely wins the advisory lock FIRST and purges the (at that moment, correctly
+    unreferenced) blob before the writer's own lock acquisition can even run. Proves
+    store_content_with_reference_lock() recovers by republishing from the same in-memory
+    bytes it already has, rather than returning a StoredBlob pointing at nothing."""
+    content = f"pass 31 point 2 test D: real concurrent delete recovers via republish {uuid.uuid4().hex}".encode()
+    storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
+    # Nothing references this key yet -- correctly unreferenced at this point, exactly like a
+    # ProjectSource writer's blob before its own DB row is committed.
+
+    deleter_holds_lock = threading.Event()
+    writer_may_proceed = threading.Event()
+    deleter_outcome = {}
+
+    def _deleter_thread():
+        db = SessionLocal()
+        try:
+            acquire_storage_key_lock(db, storage_key)
+            deleter_holds_lock.set()
+            writer_may_proceed.wait(timeout=5)
+            deleter_outcome["outcome"] = delete_if_unreferenced(db, get_storage(), storage_key)
+            db.commit()
+        finally:
+            db.close()
+
+    t = threading.Thread(target=_deleter_thread)
+    t.start()
+    assert deleter_holds_lock.wait(timeout=5), "deleter thread never acquired the lock"
+    writer_may_proceed.set()
+
+    writer_db = SessionLocal()
+    try:
+        # write_stream() itself is unlocked (structurally can't be locked before the key is
+        # known -- see acquire_storage_key_lock's own docstring), so this runs immediately,
+        # independent of the deleter thread holding the lock. Content-addressing means this
+        # reproduces the exact same blob the deleter is about to (or already did) purge.
+        blob = store_content_with_reference_lock(writer_db, get_storage(), content, max_bytes=len(content) + 10)
+        writer_db.commit()
+        assert blob.storage_key == storage_key
+        assert get_storage().exists(storage_key) is True, (
+            "store_content_with_reference_lock returned successfully but the blob it just "
+            "verified/republished isn't actually on disk"
+        )
+    finally:
+        writer_db.close()
+
+    t.join(timeout=5)
+    assert not t.is_alive(), "deleter thread never completed -- possible deadlock"
+    assert deleter_outcome["outcome"].name == "purged"
+
+
+def test_store_content_with_reference_lock_fails_closed_if_the_blob_is_still_missing_after_republishing(db_session):
+    """If even the republish attempt can't make the blob durably present (a pathological,
+    repeat-loss scenario), this must raise rather than return a StoredBlob a caller would then
+    commit a DB row against -- fail closed, never a silent dangling reference."""
+    content = f"pass 31 point 2 test: republish still missing -> fail closed {uuid.uuid4().hex}".encode()
+
+    class _NeverExistsStorage:
+        def write_stream(self, read_chunk, *, max_bytes, chunk_size=1 << 20):
+            return get_storage().write_stream(read_chunk, max_bytes=max_bytes, chunk_size=chunk_size)
+
+        def exists(self, storage_key):
+            return False  # simulates the blob vanishing every single time it's checked
+
+        def verify(self, storage_key, *, expected_sha256, expected_size=None):
+            return False  # Pass 32: store_content_with_reference_lock() now calls verify(), not exists()
+
+    with pytest.raises(StorageError):
+        store_content_with_reference_lock(db_session, _NeverExistsStorage(), content, max_bytes=len(content) + 10)
+    db_session.rollback()  # releases the storage-key lock taken before the failure
+
+
+def test_store_content_with_reference_lock_repairs_a_corrupt_same_size_existing_blob(db_session):
+    """Test B (founder's Pass 32 blocker-2 lettering): a same-path, same-size, WRONG-content
+    existing blob must not be silently accepted just because `exists()` would have said True --
+    `store_content_with_reference_lock()` now checks `storage.verify(expected_sha256=...)`, and
+    the write it always performs first (`write_stream()`) itself repairs a corrupt same-size
+    dedup candidate (see app/storage/local_fs.py's `_publish()`), so the call ends up both
+    returning AND leaving on disk the genuinely correct bytes."""
+    import io
+
+    content = f"pass 32 blocker 2 test B: project memory repairs corrupt blob {uuid.uuid4().hex}".encode()
+    storage = get_storage()
+    reader = io.BytesIO(content)
+    first = storage.write_stream(lambda: reader.read(1 << 20), max_bytes=len(content) + 10)
+
+    disk_path = Path(get_settings().storage_root) / first.storage_key
+    corrupted = bytes(b ^ 0xFF for b in content)
+    assert len(corrupted) == len(content)
+    disk_path.write_bytes(corrupted)
+    assert storage.verify(first.storage_key, expected_sha256=first.sha256, expected_size=first.size_bytes) is False
+
+    blob = store_content_with_reference_lock(db_session, storage, content, max_bytes=len(content) + 10)
+    db_session.commit()
+
+    assert blob.storage_key == first.storage_key
+    assert disk_path.read_bytes() == content
+    assert storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes) is True
+
+
+def test_ingest_doc_never_leaves_a_dangling_project_source_under_a_real_concurrent_purge(tmp_path, monkeypatch):
+    """Tests A/C/E (founder's lettering) through the real ingest_doc() call, not just the
+    lower-level helper: a REAL two-thread, two-session race between ingest_doc() (now
+    lock-protected) and a concurrent delete_if_unreferenced() for the exact same
+    content-addressed key, run several times with both sides starting simultaneously (a real
+    Postgres advisory lock, not Python scheduling, decides who actually goes first each time --
+    exercising both orderings across repeated runs). The invariant that must hold regardless of
+    which side wins: no live ProjectSource ever references a storage_key whose physical blob
+    is gone, and neither side ever hangs (no deadlock)."""
+    _init_fake_repo(tmp_path)
+    monkeypatch.setattr(get_settings(), "project_root", str(tmp_path))
+
+    for attempt in range(4):
+        doc_name = f"race-{attempt}.md"
+        (tmp_path / doc_name).write_text(f"Race content {attempt} {uuid.uuid4().hex}\n")
+        content = (tmp_path / doc_name).read_bytes()
+        storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
+
+        barrier = threading.Barrier(2)
+        errors: list[Exception] = []
+
+        def _ingest():
+            db = SessionLocal()
+            try:
+                barrier.wait(timeout=5)
+                ingest_doc(db, relative_path=doc_name, ingested_by="race-ingest")
+            except Exception as exc:  # noqa: BLE001 - captured for the assertion below, not swallowed
+                errors.append(exc)
+            finally:
+                db.close()
+
+        def _delete():
+            db = SessionLocal()
+            try:
+                barrier.wait(timeout=5)
+                delete_if_unreferenced(db, get_storage(), storage_key)
+                db.commit()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                db.close()
+
+        t1 = threading.Thread(target=_ingest)
+        t2 = threading.Thread(target=_delete)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not t1.is_alive() and not t2.is_alive(), "a race participant never finished -- possible deadlock"
+        assert not errors, f"unexpected exception during the race (attempt {attempt}): {errors}"
+
+        db = SessionLocal()
+        try:
+            any_source_references_key = db.query(ProjectSource).filter_by(storage_key=storage_key).count() > 0
+            blob_exists = get_storage().exists(storage_key)
+            assert not (any_source_references_key and not blob_exists), (
+                f"attempt {attempt}: a ProjectSource references a storage_key whose physical "
+                f"blob is gone -- exactly the dangling-reference outcome the lock protocol "
+                f"must prevent"
+            )
+        finally:
+            db.close()

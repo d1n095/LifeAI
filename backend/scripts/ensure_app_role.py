@@ -42,15 +42,33 @@ never touches it. Whenever the password genuinely does change, this script prove
 credential actually works through the pooler — retrying with backoff — before reporting
 success, instead of leaving that risk for app/main.py's own startup path (which, before this
 fix, had no such retry and took the whole process down on the first transient rejection).
+
+The `GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public` below runs on EVERY boot, including
+an ordinary restart on a database that's already past migration 0019 (S1A) — which would
+otherwise re-widen mainai_app's carefully narrowed privileges on the S1A tables/functions
+right back open, if only for the brief window until apply_runtime_privileges.py next runs
+(which, on a mid-deploy crash between this script and that one, might be never). This script
+therefore re-applies the SAME S1A privilege policy (backend/scripts/s1a_privilege_policy.py)
+immediately afterward, in the SAME transaction, whenever the S1A objects already exist — the
+transaction only commits if that re-narrowing verifies clean, so the wide-open GRANT above is
+never the durable, committed state for those specific tables. On a boot where this script
+runs BEFORE `alembic upgrade head` first creates the S1A tables, there's nothing to narrow
+yet here; apply_runtime_privileges.py (run after the migration, see docker-entrypoint.sh)
+applies the same policy for the first time in that case.
 """
 
 import os
 import sys
 import time
+from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
-import psycopg2
-from psycopg2 import sql
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import psycopg2  # noqa: E402
+from psycopg2 import sql  # noqa: E402
+
+from s1a_privilege_policy import apply_privilege_policy  # noqa: E402
 
 APP_ROLE = "mainai_app"
 
@@ -133,7 +151,8 @@ def main() -> None:
     password_changed = False
 
     conn = psycopg2.connect(database_url)
-    conn.autocommit = True
+    conn.autocommit = False
+    committed = False
     try:
         with conn.cursor() as cur:
             # The connected role, not DATABASE_URL's username. Under Supabase's Session
@@ -203,7 +222,34 @@ def main() -> None:
                     "GRANT ALL PRIVILEGES ON SEQUENCES TO {app}"
                 ).format(admin=sql.Identifier(admin_role), app=sql.Identifier(APP_ROLE))
             )
+
+            # Re-narrow mainai_app's privileges on the S1A tables/functions right back down,
+            # in this SAME transaction, unconditionally — see the module docstring. Pass 24:
+            # this used to be gated behind "every S1A object this codebase knows about
+            # exists" (`s1a_objects_exist(cur)`), which opened a real mixed-version boot
+            # window: a RUN_MIGRATIONS=false worker container running code that already knows
+            # about a LATER migration (e.g. 0020), against a database that hasn't received
+            # that migration yet, would find the gate False (that migration's object doesn't
+            # exist yet) and skip narrowing ENTIRELY — including the 0019 tables/functions
+            # that DO already exist and were already correctly narrowed before this boot. The
+            # wide GRANT ALL above would then commit as the durable state for those objects
+            # too, not just the missing one. `require_complete=False` narrows whatever subset
+            # of protected tables/functions already exists, every single boot, with no such
+            # gate — a legitimately-missing future object is simply skipped (nothing to leak,
+            # since mainai_app never had access to an object that doesn't exist), and this
+            # call is safe even on a pre-S1A database where nothing exists yet at all.
+            policy_errors = apply_privilege_policy(cur, expected_owner=admin_role, require_complete=False)
+            if policy_errors:
+                raise RuntimeError(
+                    "ensure_app_role: S1A privilege re-narrowing failed, refusing to "
+                    "commit the broader GRANT above:\n" + "\n".join(f"  - {e}" for e in policy_errors)
+                )
+
+        conn.commit()
+        committed = True
     finally:
+        if not committed:
+            conn.rollback()
         conn.close()
 
     if password_changed:

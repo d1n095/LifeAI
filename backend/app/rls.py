@@ -27,6 +27,16 @@ RLS_STATEMENTS = [
     # Audio/video import v1 (migration 0009, STEG 12) — see app/models/media_url_import.py.
     "ALTER TABLE media_url_imports ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE media_url_imports FORCE ROW LEVEL SECURITY",
+    # S1A universal provenance core (migration 0019) — see docs/MAINAI_PROJECT_UNDERSTANDING_
+    # PLAN.md §4.8 and app/models/memory_source_unit.py. Also enabled directly in the
+    # migration itself; listed here too so this idempotent reapply path stays the single
+    # source of truth for every owner-scoped table, matching the rest of this list.
+    "ALTER TABLE memory_source_units ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE memory_source_units FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE document_source_units ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE document_source_units FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE memory_source_lifecycle_events ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE memory_source_lifecycle_events FORCE ROW LEVEL SECURITY",
 ]
 
 # One policy per table: rows are only visible/writable when they belong to the user bound
@@ -86,6 +96,21 @@ POLICY_DEFINITIONS = [
     {
         "table": "media_url_imports",
         "name": "media_url_imports_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "memory_source_units",
+        "name": "memory_source_units_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "document_source_units",
+        "name": "document_source_units_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "memory_source_lifecycle_events",
+        "name": "memory_source_lifecycle_events_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
 ]

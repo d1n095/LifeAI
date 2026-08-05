@@ -31,6 +31,61 @@ class ImportJobStatus(str, enum.Enum):
     blocked = "blocked"
 
 
+# Pass 25: canonical Python statement of the status policies previously duplicated by hand
+# across app/jobs/lease.py, app/worker.py, migration 0020's SQL, and their tests. SQL cannot
+# import a Python frozenset (see migration 0020's own module docstring), so the SQL functions
+# below still hardcode the same string literals — but every PYTHON caller (worker, lease
+# layer, tests) now derives its status strings from these constants instead of re-typing them,
+# so a rename or an added status can only drift out of sync with the SQL, never with itself.
+
+# claim_next_job's (app/jobs/lease.py) WHERE clause picks these up unconditionally — `running`
+# is ALSO reclaimable, but only together with an expired lease, which is a time condition, not
+# a status membership test, so it is deliberately not part of this set.
+CLAIMABLE_IMPORT_JOB_STATUSES = frozenset({ImportJobStatus.pending})
+
+# _requeue_blocked_jobs (app/worker.py) flips these back to `pending` in bulk once the active
+# embedding provider verifies ok again — a `partial` job with blocked_count > 0 also requeues
+# (see import_job_requeue_eligible below), but that's a value condition on top of status, not
+# status membership alone.
+PROVIDER_REQUEUE_STATUSES = frozenset({ImportJobStatus.blocked})
+
+# Pending/running obviously still need their own raw uploaded blob to do the work at all;
+# `blocked` resumes automatically via import_job_requeue_eligible below with no re-upload
+# either. This is the canonical Python statement of the policy migration 0020's
+# storage_key_still_referenced_global() SQL implements in lockstep — see
+# import_job_still_needs_raw_blob below and that migration's own module docstring.
+DIRECTLY_RESUMABLE_IMPORT_JOB_STATUSES = frozenset(
+    {ImportJobStatus.pending, ImportJobStatus.running, ImportJobStatus.blocked}
+)
+
+
+def _import_job_partial_still_blocked(status: ImportJobStatus, blocked_count: int) -> bool:
+    """The `partial` + blocked_count rule shared by both predicates below — a ZIP job where
+    SOME files genuinely failed and OTHERS paused on the provider rolls up to
+    ImportJobStatus.partial, not `blocked` (see app/worker.py's _requeue_blocked_jobs module
+    docstring for the 2026-07-28 incident this covers), but its blocked_count column is still
+    > 0 while any file remains actually stuck."""
+    return status == ImportJobStatus.partial and blocked_count > 0
+
+
+def import_job_requeue_eligible(status: ImportJobStatus, blocked_count: int) -> bool:
+    """True if this ImportJob should be flipped back to `pending` by _requeue_blocked_jobs
+    once the active provider verifies ok — the canonical Python statement of that function's
+    own WHERE clause (app/worker.py), so a status-drift test can compare the two directly
+    instead of re-deriving the rule by hand."""
+    return status in PROVIDER_REQUEUE_STATUSES or _import_job_partial_still_blocked(status, blocked_count)
+
+
+def import_job_still_needs_raw_blob(status: ImportJobStatus, blocked_count: int) -> bool:
+    """True if an ImportJob in this status (with this blocked_count) could still be resumed by
+    the worker reading its own raw uploaded blob directly — the single Python source of truth
+    for the policy migration 0020's storage_key_still_referenced_global() SQL and
+    app/rag/blob_references.py's module docstring both describe. A status-drift test compares
+    this function's real decision against the SQL function's real decision for every
+    ImportJobStatus value, so the two can never silently drift apart without a test failing."""
+    return status in DIRECTLY_RESUMABLE_IMPORT_JOB_STATUSES or _import_job_partial_still_blocked(status, blocked_count)
+
+
 class ImportJob(Base):
     """Tracks one import operation (a single file or a ZIP package) end to end — the
     resumability/idempotency anchor DEL 10 asks for. There is no external worker/queue

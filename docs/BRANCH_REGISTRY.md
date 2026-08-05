@@ -6,22 +6,1763 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-04 (Pass 14) — ny branch
-`claude/mainai-job-runtime-foundation` skapad, pushad (7 commits, head `238aff5`), ingen PR
-öppnad än (väntar på grundarens granskning). Dessförinnan 2026-07-29, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`/`update_pull_request`/`merge_pull_request`, inte memorerat)
-— **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8`
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-05, mot GitHubs PR-/check-runs-API
+direkt (`mcp__github__pull_request_read`/`get_check_runs`/`merge_pull_request`, inte memorerat).
+**PR #32 mergad** (`claude/frontend-npm-audit-ghsa-mh99-source-ids` → `claude/det-kommer-mer-879lcm`,
+merge-commit `d6a5e2f`) efter grundarens uttryckliga godkännande — löste `Frontend — npm audit`
+för PR #31 mot den DÅ kända GHSA-mh99-v99m-4gvg-ID-churnen. **PR #31** fick därefter basgrenen
+mergad in (`--no-ff`, INTE rebase, för att bevara både PR #31:s egen Pass 14–32-historik och
+`claude/mainai-job-runtime-foundation`s Pass 14-registerpost från bascommit `82928ce` orörda —
+se det senare Pass 14-avsnittet nedan för den branchens fulla, ostyckta historik), merge-commit
+`4569cbc` — se Pass 33 nedan för konfliktlösningen. Under den efterföljande CI-körningen hittade
+`Frontend — npm audit` ett NYTT, från GHSA-mh99-v99m-4gvg fristående fynd (GHSA-rgw5-rvv9-x895,
+en `brace-expansion`-kringgående av samma tidigare fix) — åtgärdat på egen branch
+(`claude/frontend-npm-audit-brace-expansion-bypass`) efter grundarens uttryckliga godkännande,
+mergad som **PR #33**, merge-commit `00d950b`. **PR #31** fick DÄREFTER basgrenen mergad in EN
+GÅNG TILL (samma `--no-ff`-disciplin, samma historikbevaring), merge-commit `9c60d01`, plus en
+dokumentationscommit `15986a7` som lade till den validerade, read-only produktionsprofil-SQL:n
+(`docs/operations/s1a_production_profile.sql`). PR #31:s head är nu `15986a7`, bas är `00d950b`
+(innehåller BÅDE PR #32 och PR #33), `mergeable_state: clean`, samtliga 12 verkliga CI-jobb
+`success` inklusive `Frontend — npm audit` och den aggregerande "All required checks passed" —
+se Pass 33/34 nedan för fullständig detalj. **Produktionsdataprofilen är genomförd** (Pass 34
+nedan) — grundaren körde `docs/operations/s1a_production_profile.sql` read-only direkt mot
+produktions-VPS:en (denna session har fortsatt ingen nätverksväg till VPS:en, verifierat genom
+en misslyckad TCP-anslutning till port 22 — se Pass 34 för detaljer) och delade resultatet:
+0 unresolvable, samtliga 223 knowledge_claims klassificeras deterministiskt som `exact_chunk`.
+Tidigare rad, oförändrad: **PR #29 mergad** som `0bdf03d`, verifierad grön
+(18/18 checkar) på exakt head-SHA `df9e9c8`
 innan merge, inte en äldre commit. **PR #30 mergad** som `9b15840` in i
 `claude/det-kommer-mer-879lcm` — verifierad grön (18/18 checkar, "All required checks passed")
 på exakt head-SHA `b2347e4` (PR-branchens sista commit) direkt innan merge, samma disciplin
 som PR #29. `claude/memory-source-unit-design` är nu mergad och kan städas bort (branchen har
 inga oavslutade delar kvar — hela dess innehåll är designdokumentation som nu lever i
 `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`s §4.8 på huvudgrenen). §4.8 är den kanoniska,
-GODKÄNDA arkitekturen för `MemorySourceUnit`/S1A — inget ytterligare designbeslut krävs innan
-en S1A-implementations-PR (migration + kod) öppnas — se §4.8:s "Status: PR #30 kontra
-S1A-implementations-PR:n" för den exakta listan (produktionsdataprofil, migrationsfil,
-`apply_runtime_privileges`, `app/rls.py`, delad `purge_source()`, kontoradering/export,
-testmatris) på vad som krävs för att MERGA den kommande implementations-PR:n.
+GODKÄNDA arkitekturen för `MemorySourceUnit`/S1A.
+
+**PR #31** (`claude/s1a-memory-source-implementation`, grenad från `claude/det-kommer-mer-879lcm`
+efter PR #30:s merge) — draft, öppen, INTE mergad, INGEN deploy/produktionsmigration körd.
+Implementerar §4.8:s design: migration `0019_memory_source_units` (tabeller, CHECKs,
+triggers, `transition_own_memory_source`/`transition_memory_source_admin`/
+`erase_owner_memory`/`erase_owner_memory_admin`), SQLAlchemy-modeller,
+`app/rag/memory_source.py`s race-säkra find-or-create, den delade `backend/scripts/
+s1a_privilege_policy.py` (använd atomiskt av både `ensure_app_role.py` och
+`apply_runtime_privileges.py`), grundlagret verifierat genom FYRA granskningsrundor (Pass
+14–17). Pass 18 lade till deterministisk backfill (`app/rag/memory_source_backfill.py`) och
+dual-write (`app/rag/claims.py`) ovanpå det godkända grundlagret. Pass 19 åtgärdade fyra
+integrationsproblem grundaren hittade i den granskningen (`library_import.py`s saknade
+rollback, backfillens `batch_size<=0`-oändlig-loop-risk, dual-writes ouverifierade
+`version_id`, produktionsrapportering dokumenterad men inte byggd) och rättade en felaktig
+"96 tester"-siffra i PR-beskrivningen. Pass 20 (nedan) lade till den delade
+`app/rag/source_purge.py::purge_source()`-tjänsten, nu använd av BÅDA `library.py`s
+`delete_source` och den tidigare separat implementerade `DELETE /api/documents/{id}`. Pass 21
+(nedan) rättade en verklig bugg Pass 20:s egen "atomisk"-beskrivning inte höll för: bloben
+raderades fysiskt FÖRE DB-commit, så ett commitfel efter en lyckad filradering skulle
+återuppliva ett levande dokument vars originalfil redan var permanent borta. Pass 22 (nedan)
+åtgärdade två ytterligare integrationsluckor grundaren hittade i blob-/audit-hanteringen:
+`maybe_purge_blob()` kände bara till levande `Document.storage_key`-rader, aldrig
+`ImportJob.source_storage_key` (en väntande/körande/återupptagningsbar importjobb-blob kunde
+raderas av en orelaterad källradering), plus ett TOCTOU-race mellan uppladdning och
+blob-purge; och `source_purged`-revisionsposten skrevs i en SEPARAT commit i routern efter att
+`purge_source()` redan committat, vilket kunde ge ett 500-svar för en radering som redan
+lyckats. Pass 23 (nedan) täppte till en blockerande cross-owner RLS-lucka: den globala,
+innehållsadresserade blobreferenskontrollen kördes som vanliga ORM-frågor mot `documents`/
+`knowledge_import_jobs` inuti anropande ägarens egen RLS-scopade session — strukturellt
+oförmögen att se en ANNAN ägares levande dokument eller väntande importjobb som delade samma
+`storage_key`. Löst med en ny, smal `SECURITY DEFINER`-funktion
+(`storage_key_still_referenced_global`, migration `0020`), inte en RLS-avstängning. Pass 24
+(nedan) täppte till två kvarstående privilegieblockerare grundaren hittade i den granskningen:
+`s1a_privilege_policy.py` verifierade aldrig `pg_proc.prosecdef` (en `ALTER FUNCTION ...
+SECURITY INVOKER` hade passerat alla andra kontroller tyst), och `ensure_app_role.py`s
+S1A-omsmalning var gated på att ALLA S1A-objekt existerar — vilket lämnade ett "mixed-version
+boot window" öppet mellan migration 0019 och 0020 där en bred `GRANT ALL` kunde committas
+oomsmalnad. Löst med en `require_complete`-flagga genom `apply_privilege_policy()`. Pass 25
+stängde en kvarstående verifieringslucka: funktionssignaturer matchades bara på namn,
+inte exakta argumenttyper, plus två test-/dokumentationsfel (mixed-version-testets
+`to_regclass`-bugg, en duplicerad ImportJobStatus-lista i statusdrifttestet, och en felräknad
+testsumma). Pass 26 levererade grundarens sista begärda funktionella S1A-skiva:
+konto-export/erasure-integrationen — `erase_account_data()`/`export_account_data()` som delade
+domäntjänster, `app/routers/account.py` omskrivet till en tunn wrapper, en durabel
+`storage_deletion_tasks`-köfor fysisk blob-radering (migration `0021`), och stängning av ett
+upload/erasure-race. Verifieringen hittade och åtgärdade också en E2E-privilegielucka i CI
+(åtgärdad direkt i PR #31) och en npm audit-ID-churn (åtgärdad på egen branch, **PR #32**).
+Pass 27 (nedan) — en andra granskningsrunda av kontoslicen — stängde ett blockerande
+privilegiehål (`storage_deletion_tasks` gav `mainai_app` SELECT+UPDATE på en tabell utan
+owner_id/RLS), rättade exportauditens transaktionsmodell, synkade modellens enum-typer mot
+migrationens verkliga varchar+CHECK-schema, gjorde taskclaiming atomisk och
+flerworker-säker, samt granskade och dokumenterade alla blob-skrivande vägar. 171 dedikerade
+S1A-/konto-tester totalt över 9 filer (154 tidigare + Pass 27:s 17 nya — `test_account_
+erasure.py`: 14 nya, `test_worker.py`: 1 ny, `test_memory_source_units.py`: 1 ny, `test_
+account_deletion.py`: 1 ny). Hela backend-/security-/account-sviten: **727 passed, 1
+skipped**, verifierat direkt (upp från Pass 26:s 710 med exakt Pass 27:s 17 nya tester). CI
+grön på PR #31:s head `5f4f2fd`, alla obligatoriska kontroller UTOM det fortsatt spårade
+`npm audit`-fyndet (PR #32).
+
+**Kvarstår innan PR #31 kan gå från draft till granskningsklar/mergbar** (se PR-beskrivningen
+och §4.8:s "Status"-avsnitt för den fullständiga listan): produktionsdataprofilen (krävs före
+MERGE, inte före draft), den beständiga run-/felrapporteringen Pass 19 dokumenterar men
+medvetet inte bygger än (krävs före en RIKTIG produktionsbackfill-körning, inte bara denna
+PR:s merge), samt att **PR #32** mergas till huvudgrenen (varefter PR #31 uppdateras DÄREFTER,
+inte i förväg — se Merge-regeln nedan) innan `npm audit`-kontrollen kan bli grön på PR #31
+själv. Det tidigare dokumenterade racet mellan kontoradering och en redan köad (`pending`)
+importkörning — som grundaren i Pass 28 uttryckligen underkände som "acceptabel follow-up" —
+är STÄNGT (Pass 28, `claim_next_job()`s tvåfas-ägarlåsta claim). Den cross-domain
+blobretention-blockeraren grundaren hittade i Pass 29 (global blobkontroll som saknade
+Project Memory) är STÄNGD (Pass 29). Det ogrindade `storage.delete()`-anropet i empty-upload-
+vägen grundaren hittade i Pass 30 (samma blobintegritetsområde, INTE en orelaterad fråga) är
+också STÄNGT (Pass 30, nedan). Kontoexport/erasure-integrationen är KLAR (Pass 26), den andra
+granskningsrundans fynd är åtgärdade (Pass 27), den tredje granskningsrundans tre blockerare
+är åtgärdade (Pass 28) — inklusive en verklig Postgres-deadlock Pass 28:s egen fulla
+testsviteskörning avslöjade — den fjärde granskningsrundans cross-domain-fynd är åtgärdat
+(Pass 29), den FEMTE granskningsrundans blockerare är åtgärdad (Pass 30), och den SJÄTTE
+granskningsrundans tre blockerare är åtgärdade (Pass 31, nedan) — grundaren avvisade
+uttryckligen Pass 30:s klassificering av två av dem som "separata, inte åtgärdade fynd".
+Pass 31:s egen genomgång upptäckte INGEN ny, ytterligare, oåtgärdad lucka — till skillnad
+från Pass 29/30, som båda flaggade minst ett nytt fynd för nästa runda. Nästa kontrollpunkt
+enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändringar innan arbetet
+fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
+till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
+PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 34 (2026-08-05): PR #31 — den verkliga produktionsdataprofilen genomförd (read-only, körd av grundaren från VPS:en)
+
+**Bakgrund:** Efter Pass 33:s CI-grönmärkning återstod ett sista mergegrindvillkor från PR
+#31:s egen "Remaining for this PR"-lista: den verkliga produktionsdataprofilen (`chunk_id`/
+`version_id`-nollkombinationerna), specificerad redan i designfasen
+(`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.8, se rad ~819 där det uttryckligen står att
+INGEN Claude Code-session i den här miljön har produktionsdatabasåtkomst). Denna session
+konstruerade och validerade SQL:n mot en tom, migrerad lokal scratch-databas (syntax-/
+schemakorrekthet, inte verkliga siffror) och committade den som
+`docs/operations/s1a_production_profile.sql` (commit `15986a7`) — insvept i en explicit
+`BEGIN TRANSACTION READ ONLY; ... ROLLBACK;` för säker operatörskörning. Sessionen testade
+därefter aktivt om den kunde nå produktions-VPS:en själv (`87.106.53.187:22`) — TCP-anslutningen
+misslyckades (`UNREACHABLE/FILTERED`), och `$HTTPS_PROXY`-statusen bekräftade att den här
+sandboxade miljöns utgående nätverk bara proxar HTTPS, ingen godtycklig SSH/TCP-utgång. Inga
+SSH-nycklar finns heller konfigurerade i sessionen. Detta är en strukturell miljöbegränsning,
+inte en avsaknad av referenser som skulle kunna arbetas runt — sessionen avstod därför
+uttryckligen från vidare försök och rapporterade blockeraren istället för att gissa eller
+fabricera siffror.
+
+**Grundaren körde SQL:n själv, read-only, direkt på produktions-VPS:en** (`/opt/lifeai`,
+`/etc/lifeai/lifeai.env`) och delade det verkliga resultatet:
+
+| Mätning | Värde |
+|---|---|
+| `total_documents` | 218 |
+| `total_document_chunks` | 32 |
+| `total_knowledge_versions` | 218 |
+| `total_knowledge_claims` | 223 |
+| `chunk_id` OCH `version_id` båda satta | 223 |
+| `chunk_id` satt, `version_id` NULL | 0 |
+| `version_id` satt, `chunk_id` NULL | 0 |
+| Varken satt | 0 |
+| Resolution tier `exact_chunk` | 223 |
+| Resolution tier `degraded_version` | 0 |
+| Resolution tier `missing_document_only` | 0 |
+| `unresolvable_*` (alla orsaker) | 0 |
+
+Säkerhetsbevis grundaren rapporterade: transaktionen kördes explicit `READ ONLY`, avslutades
+med `ROLLBACK`, ingen migration/backfill/write/deploy/omstart utfördes. **Bedömning:** siffrorna
+är internt konsistenta (223 = 223 = 223 över alla tre brytningar) och matchar exakt vad
+`app/rag/memory_source_backfill.py::_resolve_locator()`s första gren (`chunk_id is not None` →
+strukturell chunk-validering → `exact`) skulle ge givet att alla 223 claims har ett strukturellt
+giltigt `chunk_id` som pekar på en `document_chunks`-rad som tillhör samma `source_id`/
+`owner_id`. **Observation, inte en blockerare:** endast 32 `document_chunks`-rader finns totalt
+för 218 dokument (~7 claims per chunk i snitt bland de chunks som faktiskt producerat claims) —
+plausibelt (flera claims kan extraheras ur samma chunk; många av de 218 dokumenten har
+sannolikt inte producerat några claims alls än), men värt att känna till som kontext, inte som
+ett fel i verifieringen. **Slutsats:** produktionsdatan är, vid den här ögonblicksbilden,
+deterministiskt backfillbar under PR #31:s nuvarande `_resolve_locator()`-logik — noll claims
+skulle falla till `degraded`/`missing`/fail-closed. Detta stänger PR #31:s sista uttryckliga
+mergegrindvillkor.
+
+**Kvarstår innan PR #31 kan mergas:** ENDAST grundarens uttryckliga, färska
+merge-godkännande — inga kända kodmässiga eller CI-blockerare återstår. Den beständiga
+produktionskörnings-rapporteringen (run-id/status/counters/per-claim-fel) Pass 19 dokumenterade
+men medvetet inte byggde är INTE ett villkor för PR #31:s merge — den krävs först före en
+RIKTIG produktionsbackfill-KÖRNING, vilket §4.8 uttryckligen scopar som en separat, senare PR.
+Ingen backfill, ingen merge, ingen deploy har utförts av den här sessionen eller begärts av
+grundaren i det här passet.
+
+## Pass 33 (2026-08-05): PR #31 — basgrenen mergad in två gånger (PR #32, sedan PR #33), full CI-reverifiering
+
+Efter en ren statusrapport (ingen kodändring) gav grundaren en exakt, ordnad exekveringsplan:
+(1) verifiera PR #32:s pre-merge-läge exakt, (2) merga PR #32 till basgrenen och rapportera den
+exakta mergecommiten, (3) uppdatera PR #31:s branch från den nya basen via en RIKTIG merge
+(INTE rebase, för att bevara både PR #31:s egen historik och `claude/mainai-job-runtime-
+foundation`s Pass 14-registerpost orörda), lös endast den verkliga `docs/BRANCH_REGISTRY.md`-
+konflikten, (4) full re-verifiering (exakt en Alembic-head, hela backend-/security-/
+account-sviten, frontend tsc/eslint/build/npm audit, samtliga CI-jobb på den exakta nya
+head-SHA:n), (5) därefter — och FÖRST därefter — produktionsdataprofilen.
+
+**PR #32 mergad** som `d6a5e2f`. **PR #31 uppdaterad** via `git merge --no-ff` av den nya basen,
+mergecommit `4569cbc` — `docs/BRANCH_REGISTRY.md`s masthead-konflikt löstes genom att behålla
+PR #31:s egen aktuella statusparagraf (git hade redan automatiskt bevarat båda branchernas
+fullständiga, självständigt numrerade `## Pass 14`-sektioner på olika radnummer i filen).
+
+Under den efterföljande fulla frontend-verifieringen (steg 4) hittade
+`node scripts/check-npm-audit.js` ett NYTT, från GHSA-mh99-v99m-4gvg fristående fynd:
+GHSA-rgw5-rvv9-x895, en `brace-expansion`-kringgående av samma tidigare mitigation
+(`npm audit --json` visade fyra distinkta `via`-källor: 1130588/1130591 redan allowlistade för
+GHSA-mh99-v99m-4gvg, plus NYA 1130734/1130737 för GHSA-rgw5-rvv9-x895). Detta patchades INTE
+inline i PR #31 — rapporterades till grundaren, som gav uttryckligt godkännande enligt samma
+mönster som PR #8/#9/#32 (orelaterad CI-fix på egen branch, grenad från basgrenen, INTE från PR
+#31:s branch). Fixad på `claude/frontend-npm-audit-brace-expansion-bypass` via `npm update
+brace-expansion` (`1.1.16→1.1.18` under `eslint→minimatch`, `5.0.7→5.0.9` under
+`eslint-config-next→typescript-eslint→@typescript-eslint/typescript-estree→minimatch`) — den
+minsta möjliga fixen, helt inom redan deklarerade semver-ranges, INGEN `package.json`-override
+behövdes. Endast `frontend/package-lock.json` ändrad (7 insertions/7 deletions). Full
+verifieringssvit körd: install-integritet, frontend lint/typecheck/build, npm audit, backend-
+tester, same-origin proxy-tester, full-stack Playwright E2E. Lokal Playwright-flakighet (olika
+testset misslyckades mellan repeterade lokala körningar) root-orsakades till rena miljö-/
+test-isolationsartefakter av sessionens egna upprepade körningar mot SAMMA långlivade lokala
+backend/databas (Redis-baserad login-rate-limit uttömd, ett kvarvarande uppladdat testdokument
+från en tidigare körning) — INTE en regression, bekräftat avgörande genom en riktig GitHub
+Actions-körning mot färska per-jobb-containrar som passerade rent (18/18). Grundaren godkände
+och bekräftade denna klassificering uttryckligen. **PR #33 mergad** som `00d950b` efter
+grundarens uttryckliga godkännande.
+
+**PR #31 uppdaterad EN GÅNG TILL** (samma `--no-ff`-disciplin), mergecommit `9c60d01` — denna
+gång INGEN konflikt alls (PR #33 rörde bara `frontend/package-lock.json`, ingen överlappning
+med PR #31:s eget innehåll; `docs/BRANCH_REGISTRY.md`s masthead var redan aktuell från förra
+mergningen). Plus en dokumentationscommit `15986a7` som lade till den validerade produktions-
+profil-SQL:n. Diffen mot den nya basen (`git diff origin/claude/det-kommer-mer-879lcm...HEAD`)
+verifierad att innehålla ENDAST PR #31:s eget avsedda innehåll (48 filer, samma omfattning som
+tidigare) — inga orelaterade ändringar smugit sig in via mergningarna.
+
+**Full re-verifiering på den nya head-SHA:n (`15986a7`):** exakt en Alembic-head (`0024`),
+`apply_runtime_privileges.py` verifierad, hela backend-/security-/account-sviten **793 passed,
+1 skipped** (identiskt med tidigare baseline — ingen regression), frontend `tsc --noEmit` ren,
+`eslint` ren, `next build` lyckad, `npm audit` (fräsch `npm ci`-installation från den committade
+lockfilen) ren. Samtliga 16 GitHub Actions-checkar (12 verkliga jobb + VPS/Docker-jobb korrekt
+`skipped`) `success`, inklusive den aggregerande "All required checks passed"-checken.
+`mergeable_state: clean`. Inga olösta granskningskommentarer (`get_review_comments`: 0 trådar).
+
+
+
+**Runda 1 — grundarens bedömning:** "Pass 31 löser mycket, men den nya kontrollistan avslöjar
+samtidigt att en persistent writer fortfarande saknar protokollet. Dessutom medger
+storagekoden själv att den nya sista kontrollen inte är atomisk mot `unlink()`. Vi ska inte
+börja produktionsprofilen förrän alla registrerade persistenta writers faktiskt är säkra, inte
+bara dokumenterade." Grundaren avvisade uttryckligen `KNOWN_STORAGE_WRITE_PATHS`s egen
+beskrivning av `_store_bytes()` som "flaggad, inte åtgärdad" — registret finns för att BEVISA
+att alla writers är skyddade, inte för att katalogisera kända osäkra.
+
+**1. `_store_bytes()`s saknade lås (grundarens punkt 1).** `app/worker.py`s per-fil-skrivning
+(bearbetar ett REDAN CLAIMAT `ImportJob`) skrev bloben durabelt UTAN
+`acquire_storage_key_lock()` mellan skrivning och `Document.storage_key`-commit — samma
+"bytes finns innan någon DB-rad skyddar dem"-race Pass 22/31 redan stängt för Life
+Library-uppladdning respektive Project Memory, kvarlämnat här.
+
+- **`app/rag/library_import.py::_store_bytes_with_reference_lock()`**: ny wrapper runt
+  `_store_bytes()` (anropar den bara namnet, inte direkt inline-logik, så befintliga tester
+  som monkeypatchar `li._store_bytes` fortsätter fungera via Pythons dynamiska
+  global-namnuppslagning) som applicerar EXAKT samma lås+verifiera+återpublicera-protokoll
+  `store_content_with_reference_lock()` redan ger Project Memory. Anroparen
+  (`_import_one_file`) sätter `Document.storage_key` och committar medan låset fortfarande
+  hålls.
+- `KNOWN_STORAGE_WRITE_PATHS`s post för `_store_bytes` skriven om till FIXED (samma
+  (fil, funktion)-nyckel, eftersom det rå `storage.write_stream()`-anropet fortfarande lever
+  inuti `_store_bytes()` som wrappern anropar — AST-drifttestet skannar exakt den kombinationen).
+
+**2. `LocalFilesystemStorage`s kvarstående race mot `unlink()` (grundarens punkt 2).** Pass
+31:s `_publish()` medgav själv i sin egen docstring att den sista `if final_path.exists():
+return`-kontrollen bara "krymper, inte helt eliminerar" racet mot en samtidig `delete()`.
+Grundaren krävde ett RIKTIGT OS-nivålås, inte ännu en retry-loop.
+
+- **`LocalFilesystemStorage._key_lock()`**: ett riktigt `fcntl.flock()` på en dedikerad
+  lock-fil per TVÅ-HEX-TECKEN-SHARD (samma sharding blobkatalogen redan använder — INTE per
+  exakt sha256, vilket skulle växa obegränsat; lock-filer raderas ALDRIG, eftersom det skulle
+  återintroducera exakt det race en ny fd/flock för "samma" lås skulle innebära).
+  `write_stream()` håller detta lås för `_publish()`s hela kropp; `delete()` håller det runt
+  sitt eget `unlink()`. `_publish()`s retry-loop är nu överflödig och borttagen — riktig
+  ömsesidig uteslutning gör racet den skyddade mot strukturellt omöjligt.
+- **Låsordning, dokumenterad och deadlockfri:** filesystemlåset är alltid det innersta,
+  kortast hållna låset i varje anropskedja och rör aldrig databasen — `delete()`-anropare
+  håller redan DB-advisory-låset (yttre) innan de tar filesystemlåset (inre) runt bara
+  `unlink()`; `write_stream()` håller ALDRIG DB-låset alls när den tar filesystemlåset. Ingen
+  kod tar filesystemlåset först och blockerar sedan länge på DB-låset — den enda ordning som
+  skulle kunna orsaka en deadlock-cykel.
+- Både DB-låset OCH filesystemlåset behövs fortfarande — de skyddar olika lager (filesystemlås:
+  rå publish mot rå unlink; DB-lås: referenskontroll + DB-commit-beslutet). En legitim radering
+  kan fortfarande slutföras helt i gapet mellan en persistent writers `write_stream()`-retur
+  och samma writers senare DB-lås-tagning, vilket är exakt varför persistenta writers
+  fortfarande måste hålla DB-låset från verifiering till referens-commit.
+
+**3. Orphan-riskens operationella synlighet (grundarens punkt 3).**
+`enqueue_rejected_upload_cleanup_task()` kan själv misslyckas (`failed_not_queued`) — grundaren
+krävde att detta aldrig tyst faller in i ett vanligt 400-svar utan operationell signal.
+
+- `delete_if_unreferenced()`s `failed_not_queued`-gren loggar nu vid CRITICAL (inte bara
+  ERROR) och skriver en beständig `AuditLog(action='storage_orphan_risk')`-rad
+  (`_record_storage_orphan_risk_audit()`) på en FRISK, oberoende `_MaintenanceSession` —
+  aldrig anroparens egen `db`-session, eftersom minst en verklig anropare
+  (`library.py`s tom-uppladdning-avvisning) gör `db.rollback()` direkt efteråt, vilket tyst
+  skulle rulla tillbaka en auditrad på samma session.
+- Bygger INTE en andra lokal outbox eller en deterministisk orphan-sweep i detta pass —
+  endast synlighet av det befintliga degraderade tillståndet, som uttryckligen begärt.
+
+**Runda 1-tester:** fem nya i `test_library_import.py` (grundarens bokstäver A–E; F/G täcks
+implicit av trådtesternas egna deadlock-kontroll respektive det befintliga
+skrivvägsregister-drifttestet), tolv nya/omskrivna i `test_storage_local_fs.py` (A/B kombinerat
+till ett riktigt trådtest som bevisar en RIKTIG samtidig `delete()` blockerar hela
+`_publish()`-kritiska sektionen; C/I återanvänder befintliga tester; D utökad till 250
+iterationer; E ny; H ny, bevisar max 256 lock-filer oavsett antal distinkta blobbar; F/G
+dokumenterade som täckta på integrationsnivå), en ny i `test_source_purge.py` (CRITICAL-logg +
+audit-rad för dubbel-misslyckande).
+
+**Runda 2 — samma dag, en uppföljande granskning av Runda 1:s resultat (huvud `910597f`).**
+Grundarens bedömning: "Pass 32 har stängt de två största raceproblemen från Pass 31. Det som
+återstår är mindre arkitektoniskt, men fortfarande blockerande: systemdegraderingen sparas men
+visas inte i ops-status; content-addressing verifierar ännu inte faktiskt content i
+same-size-fallet; CI och slutdokumentation är fortfarande pågående." Två konkreta blockerare,
+båda nu åtgärdade:
+
+**4. Orphan-risk osynlig i founder ops-status.** En beständig `AuditLog(action=
+'storage_orphan_risk')`-rad är INTE samma sak som "founder ops-status kan visa detta" —
+`GET /api/library/ops/status` läste aldrig tillbaka de raderna.
+
+- **`app/rag/blob_references.py::get_storage_cleanup_ops_status()`**: ny funktion som
+  aggregerar `audit_log` (läst direkt på anroparens ordinära `db`-session — `mainai_app` har
+  redan ordinär SELECT där, aldrig smalnat av som `storage_deletion_tasks`) och
+  `storage_deletion_tasks` (läst via den privilegierade `_MaintenanceSession`, eftersom
+  `mainai_app` har NOLL direkta privilegier där sedan Pass 27/28) till en aggregerad,
+  nyckelfri `StorageCleanupOpsStatus`.
+- **`OpsStatusOut`/`ops_status()`**: sex nya fält — `storage_cleanup_degraded`,
+  `storage_orphan_risk_count`, `latest_storage_orphan_risk_at`,
+  `pending_storage_cleanup_tasks`, `failed_storage_cleanup_tasks`,
+  `oldest_failed_storage_cleanup_age_seconds` — endast räkningar/tidsstämplar, ALDRIG en rå
+  `storage_key`.
+- **Degraderingspolicy, dokumenterad eftersom det ännu inte finns någon kvitteringsmekanism:**
+  `pending`/`processing`-tasks driver INTE `degraded` (normal, självläkande drift); `failed`
+  tasks driver det OCH självläker äkta när worker-retryn lyckas (status → `purged`/
+  `retained_shared`); `storage_orphan_risk`-auditrader driver det och självläker ALDRIG i
+  detta pass (`audit_log` är oföränderlig/append-only utan kvitteringskolumn) — en medveten
+  fail-mot-synlighet-policy tills en framtida deterministisk sweep-mekanism (ej byggd nu)
+  lägger till en riktig kvitteringsmarkör.
+
+**5. Content-addressing verifierade bara existens/storlek, inte hash.**
+`_store_bytes_with_reference_lock()`/`store_content_with_reference_lock()` kontrollerade
+`storage.exists()`; `_publish()`s dedup-gren accepterade en befintlig fil när storleken
+matchade — en fil med rätt sökväg och rätt storlek men FEL bytes (disk-korruption, manuell
+redigering) hade accepterats som om den motsvarade sin egen SHA-256.
+
+- **`LocalFilesystemStorage._publish()`**: hashar nu den befintliga same-size-filen
+  (`_hash_file()`, samma hjälpfunktion `verify()` också använder) och REPARERAR den vid
+  mismatch — från anroparens eget nyss hashade, känt korrekta `tmp_path`, fortfarande under
+  shardlåset — och verifierar igen efter reparation. En genuin STORLEKS-mismatch beter sig
+  oförändrat (omedelbart `StorageIntegrityError`, ingen reparation, samma disciplin som Pass
+  31:s test F redan låser fast).
+- **`store_content_with_reference_lock()`/`_store_bytes_with_reference_lock()`**: anropar nu
+  `storage.verify(expected_sha256=..., expected_size=...)` istället för `storage.exists()`
+  både i det ordinära fallet och efter återpublicering — en korrupt blob på rätt sökväg
+  behandlas nu identiskt med en saknad, och `fail closed` gäller likadant om verifieringen
+  fortfarande misslyckas efter återpublicering.
+
+**Runda 2-tester:** fem nya i `test_library_routes.py` (grundarens bokstäver B–F för
+ops-status; A täcks av Runda 2:s `test_source_purge.py`-test för själva audit-skrivningen),
+en ny i `test_storage_local_fs.py` (A: reparerar korrupt same-size-blob; D: reparation som
+fortsätter misslyckas ger `StorageIntegrityError`; C/F dokumenterade som täckta av befintliga
+konkurrenstester), en ny i `test_project_memory.py` (B), två nya i `test_library_import.py`
+(C/D — riktig `run_import_job()`-väg med `storage.verify()` tvingad till alltid `False`,
+bevisar ingen `Document.storage_key` någonsin committas).
+
+**Tester totalt (båda rundorna):** 30 nya/omskrivna över sex testfiler. Hela backend-sviten
+(783 tester + 1 medvetet överhoppad kapacitetstest) körd TVÅ gånger i följd efter varje runda
+— fyra fulla körningar totalt denna dag, alla gröna. Ingen ny migration i detta pass (inga
+schemaändringar krävdes för någon av de fem punkterna).
+
+**Verifierat, inte antaget:** slut-head `2bb8e54` (Runda 2). CI grön på ALLA obligatoriska
+kontroller UTOM `Frontend — npm audit` (samma bekräftade, orelaterade fynd som varje tidigare
+pass, spårat separat i **PR #32**).
+
+**Grundarens explicita avslutande instruktion (Pass 32), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
+
+## Pass 31 (2026-08-02): PR #31 — sjätte granskningsrundan: tre kvarstående luckor i samma blobintegritetsområde (durabel rejected-upload-cleanup, Project Memory-racet, write_stream/unlink-TOCTOU)
+
+Grundarens bedömning: "Pass 30:s empty-upload-fixen är korrekt i sin grundidé, men Code har
+lämnat tre integritetsproblem öppna. Två är uttryckligen samma raceklass som PR #31 redan
+försöker lösa." Grundaren avvisade uttryckligen Pass 30:s klassificering av de två nya fynd
+som dokumenterades men INTE åtgärdades där (Project Memory-racet, write_stream/unlink-TOCTOU)
+som "separata, inte åtgärdade fynd" — och pekade dessutom ut ett tredje, nytt problem i
+`delete_if_unreferenced()`s egen `StorageError`-hantering (en loggrad utan beständig
+återförsöksmekanism). Alla tre är nu åtgärdade.
+
+**1. Durabel `rejected_upload_cleanup`-task (grundarens punkt 1).** `delete_if_unreferenced()`
+loggade tidigare bara ett genuint `StorageError` vid radering av en redan bekräftat orefererad
+blob och returnerade `failed` — ingen beständig post skapades. Grundaren avvisade detta:
+"En loggrad är inte en beständig cleanup-plan." En upprepat misslyckad tom uppladdning (alla
+tomma uppladdningar delar exakt samma innehållsadresserade nyckel) kunde lämna en osynlig,
+oinventerad fysisk orphan på disk utan någon automatiserad väg att någonsin hitta eller
+återförsöka den.
+
+- **Migration `0024`**: breddar `storage_deletion_tasks.reason`s CHECK-constraint till att
+  också tillåta `'rejected_upload_cleanup'`, utöver befintliga `'account_erasure'`. Migration
+  0021/0022 rörs INTE (samma disciplin som `CREATE OR REPLACE` för funktioner — ändra aldrig
+  en redan levererad migration i efterhand).
+- **`app/rag/blob_references.py::enqueue_rejected_upload_cleanup_task()`**: skapar
+  task-raden på den PRIVILEGIERADE admin-/migrationsanslutningen (`_MaintenanceSession`,
+  samma mönster som `attempt_pending_storage_deletions_for_operation()` redan använder) —
+  INTE via en ny `SECURITY DEFINER`-funktion grantad till `mainai_app`, eftersom en sådan
+  funktion (till skillnad från `enqueue_account_erasure_storage_task()`) inte har något
+  `Document`/`ImportJob`-ägarskap att verifiera mot (en avvisad uppladdning fick medvetet
+  ALDRIG en DB-rad). `mainai_app` behåller NOLL direkta privilegier på tabellen, för alla
+  `reason`-värden. Idempotent per fortfarande-utestående cleanup (inga dubbletter för samma
+  nyckel så länge en tidigare task inte nått ett terminalt utfall).
+- Återanvänder EXAKT samma worker-/backoff-/lease-/referenskontroll-maskineri som redan
+  finns för `account_erasure`-tasks (`claim_storage_deletion_tasks()`/
+  `attempt_storage_deletion_task()`/`app/worker.py`s retry-loop) — noll specialfall för den
+  nya `reason`.
+- **Säkerhetskrav uppfyllt strukturellt, inte genom en explicit parameterkontroll:** den nya
+  enqueue-vägen anropas ENDAST internt från `delete_if_unreferenced()`s egen
+  `StorageError`-hanterare, med exakt den `storage_key` samma anrop redan fick — aldrig
+  exponerad som en fristående, request-styrd funktion.
+
+**2. Project Memory write-before-reference-racet (grundarens punkt 2, det första av de två
+"separata fynd" grundaren avvisade klassificeringen av).** `app/project_memory.py`s
+`ingest_doc()`/`ingest_system_map()`/`create_checkpoint()` tog aldrig
+`acquire_storage_key_lock()` mellan den fysiska skrivningen och sin egen DB-commit — samma
+"bytes finns innan någon DB-rad skyddar dem"-race Pass 22 redan stängde för Life
+Library-uppladdningsvägen, kvarlämnad här.
+
+- **`app/rag/blob_references.py::store_content_with_reference_lock()`**: ny delad helper.
+  Skriver via `storage.write_stream()`, tar sedan `acquire_storage_key_lock()` och verifierar
+  att bloben fortfarande finns INNAN anroparen får tillbaka kontrollen för att skapa/committa
+  sin egen DB-rad (anroparen måste hålla samma `db`-sessions öppna transaktion — låset släpps
+  vid nästa commit/rollback). Om bloben försvunnit (en samtidig radering vann racet):
+  återpublicerar från samma in-memory-bytes (write_stream är naturligt idempotent för
+  identiskt innehåll — samma hash ger samma nyckel). Om fortfarande saknad efter
+  återpublicering: `raise StorageError` — fail closed, aldrig en tyst hängande referens.
+- Alla tre `app/project_memory.py`-anropen skriver om till att gå via denna helper istället
+  för `storage.write_stream()` direkt.
+
+**3. `LocalFilesystemStorage.write_stream()`s egen TOCTOU (grundarens punkt 3, det andra av de
+två "separata fynd").** Den gamla publiceringslogiken (`if final_path.exists(): verifiera
+storlek else: os.rename(...)`) hade ett verkligt race mot ett samtidigt `delete()`s
+`unlink()`: om kontrollen observerade "finns redan" men en samtidig radering tog bort filen ett
+ögonblick senare, skrev metoden aldrig sin egen tmp-fil till `final_path` (den trodde en
+befintlig kopia redan täckte det) och returnerade en `StoredBlob` vars `storage_key` inte
+längre pekade på något. Det DB-baserade låset kan INTE stänga detta — nyckeln är inte känd
+förrän bytes är hashade, så anropare kan strukturellt inte ta det låset innan
+`write_stream()` körs; racet ligger helt mellan två råa filsystemsanrop.
+
+- **Ny `_publish()`-metod** använder `os.link()` (en hardlink) som PRIMÄR
+  publiceringsmekanism istället för en enkel existenskontroll: `link(2)` är atomiskt och
+  misslyckas med `FileExistsError` om och endast om något redan finns vid destinationen exakt
+  vid syscall-ögonblicket — ingen "kontrollera, agera separat"-lucka att kapplöpa en samtidig
+  `unlink()` in i. Vid `FileExistsError`: kontrollerar befintlig storlek (samma billiga
+  korruptionskontroll som förut, `StorageIntegrityError` vid mismatch); om filen försvunnit
+  sedan den misslyckade `link()`-anropet (`stat()` ger `FileNotFoundError`): retry-loopen
+  försöker `link()` igen istället för att lita på en föråldrad observation — självläkande.
+  Katalogen `fsync`:as efter en lyckad ny länk (durability över en oren omstart).
+  Temp-filsstädningen är nu ovillkorlig (`os.link()` konsumerar aldrig källan, till skillnad
+  från det gamla `os.rename()`).
+
+**Regressionstester (grundarens exakta krav, alla tre punkter):**
+- `test_source_purge.py`: sju nya tester för durabel `rejected_upload_cleanup`-retry (exakt en
+  task skapas, inga dubbletter för en fortfarande-utestående cleanup, en ny task efter att den
+  gamla nått ett terminalt utfall, worker-loopen både raderar och behåller korrekt, backoff
+  efter upprepat fel, `mainai_app` kan inte skapa godtyckliga rejected-upload-tasks direkt) +
+  en drift-förhindrande skrivvägsregistertest (se nedan). Test F utökad med en direkt
+  verifiering av den nya durabla tasken.
+- `test_project_memory.py`: fyra nya tester (`store_content_with_reference_lock()`s vanliga
+  fall, en RIKTIG tvåtråds-/tvåsessionskapplöpning där en verklig samtidig purge vinner låset
+  först och skrivaren korrekt återpublicerar, fail-closed när även återpublicering
+  misslyckas, samt en riktig tvåtrådskapplöpning genom hela `ingest_doc()` körd fyra gånger
+  med en `threading.Barrier` — ingen levande `ProjectSource` refererar någonsin en försvunnen
+  blob, oavsett vilken sida som vinner den riktiga Postgres-advisory-låset).
+- `test_storage_local_fs.py`: fyra nya tester, grundarens exakta bokstavsordning (A: en
+  deterministisk reproduktion av race-fönstret mellan misslyckad `link()` och `stat()` via
+  riktad felinjicering; B: två RIKTIGA trådar som skriver identiskt innehåll samtidigt,
+  exakt en fil kvar på disk; C/D/E tillsammans: riktiga trådar, `write_stream()` mot
+  `delete()` upprepat 20 gånger, aldrig en blob som saknas efter lyckad retur, inga kvarlämnade
+  temp-filer; F täcks av den befintliga, nu utökade korruptionstestet). Plus ett test som
+  bevisar att `_publish()`s begränsade retry-budget ger upp med `StorageError` istället för
+  att hänga oändligt.
+
+**4. Central skrivvägsregistrering + drift-förhindrande test (grundarens punkt 4).**
+`KNOWN_STORAGE_KEY_COLUMNS` skyddar bara referens-KOLUMNER; det tidigare allowlist-testet
+skyddar bara DELETE-anropsplatser. Ny `KNOWN_STORAGE_WRITE_PATHS`-registry
+(`app/rag/blob_references.py`) täpper till det tredje gapet: varje `.write_stream`-referens i
+`app/` (ett direkt anrop ELLER en bunden metod given som en higher-order-callable, t.ex.
+`run_in_threadpool(storage.write_stream, ...)`), tillsammans med dess låsprotokoll — inklusive
+en explicit FLAGGAD, INTE åtgärdad post för `app/rag/library_import.py::_store_bytes()` (ingen
+lås alls, ett redan känt, dokumenterat gap från Pass 27:s egen granskning, uttryckligen
+utanför scope för detta pass som riktade in sig på Project Memorys skrivare). Ny
+`test_every_storage_write_stream_reference_is_on_the_known_write_path_registry()`
+(`test_source_purge.py`) går igenom hela `app/`s AST och jämför mot registret — en ny,
+odokumenterad skrivare misslyckas testet omedelbart.
+
+**Ingen ny separat, INTE åtgärdad lucka upptäcktes under detta pass egen genomgång** — till
+skillnad från Pass 29/30, som båda flaggade minst ett nytt fynd för nästa runda, stängde detta
+pass alla tre punkter grundaren efterfrågade utan att upptäcka ett fjärde. `app/rag/
+library_import.py::_store_bytes()`s saknade lås (flaggat ovan, punkt 4) är INTE nytt — det är
+samma, redan tidigare dokumenterade Pass 27-fynd, nu bara explicit inskrivet i den nya
+registret istället för att bara nämnas i en modul-docstring.
+
+**Migration `0024`** krävde en utökning av `test_migration_roundtrip.py`s egen
+schema-snapshot-fingerprint: den fångade tidigare bara kolumner/enum-etiketter/
+funktionsdefinitioner, aldrig CHECK-constraints — en ren constraint-ändrande migration (som
+0024) hade därför sett `downgrade -1`/`upgrade head` som en no-op i den testets egen
+`before != after_downgrade`-kontroll. Utökat att också fingerprinta varje CHECK-constraint
+(namn + `pg_get_constraintdef()`) — samma mönster som Pass 24:s egen fördjupning av
+funktionsfingerprinten efter att DEN testet hittade ett liknande blint område.
+
+**Tester:** 16 nya (7 i `test_source_purge.py` för rejected-upload-cleanup + 1
+skrivvägsregister-drifttest, 4 i `test_project_memory.py`, 4 i `test_storage_local_fs.py`) plus
+en befintlig utökad (Test F). Hela backend-/security-/account-sviten: **verifieras nedan**,
+körd TVÅ gånger i följd. `alembic upgrade head` / `downgrade -1` / `upgrade head`-rundtur
+verifierad direkt mot en BAR databas UTAN `mainai_app`-roll alls (endast superusern `lifeos`)
+— CHECK-constraintens exakta text bekräftad före/efter/efter-igen via
+`pg_get_constraintdef()`.
+
+**Grundarens explicita avslutande instruktion (Pass 31), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
+
+## Pass 30 (2026-08-02): PR #31 — femte granskningsrundan: ogrindat storage.delete() i empty-upload-vägen (samma blobintegritetsområde, inte en orelaterad fråga)
+
+Grundarens bedömning: "Pass 29:s Project Memory-fix är korrekt, men produktionsprofilen får
+fortfarande inte börja. Code har själv hittat ett fel som ligger direkt i samma
+blobintegritetsområde och som kan orsaka fysisk dataförlust." Pass 29:s eget
+lagringsdomän-inventering hade redan hittat detta (`app/routers/library.py`s empty-upload-
+radering saknade all skyddsmekanism) men klassificerat det som ett separat, orelaterat fynd
+utanför scope. Grundaren avvisade den klassificeringen uttryckligen: samma storagebackend,
+samma globala storage-nycklar, samma cross-domain-retentionpolicy, samma uploadendpoint som
+redan ändrats i denna PR — exakt den typ av fysisk dataförlust Pass 22–29 försöker förhindra.
+
+**Det konkreta felet:** `POST /api/library/import` gjorde, för en tom (0 byte) uppladdning:
+
+```python
+if blob.size_bytes == 0:
+    storage.delete(blob.storage_key)
+    raise HTTPException(400)
+```
+
+— utan `acquire_storage_key_lock()`, utan `storage_key_still_referenced_global()`, innan
+någon ImportJob någonsin skapades. Eftersom lagringen är innehållsadresserad har ALLA tomma
+filer samma `storage_key` (hash av tom byte-sträng). Om `ProjectSource`, `ProjectCheckpoint`,
+`Document` eller `ImportJob` redan refererade samma tomma blob kunde en ny, orelaterad tom
+uppladdning fysiskt radera den — migration 0023:s (Pass 29) breddade globala kontroll kan bara
+skydda en radering som faktiskt GÅR IGENOM protokollet, aldrig ett `storage.delete()`-anrop
+som kringgår det helt.
+
+**Fixat:**
+
+1. **`app/rag/blob_references.py::delete_if_unreferenced()`** — en ny, kanonisk,
+   självförsörjande check-then-act-funktion: tar `acquire_storage_key_lock()` själv,
+   kontrollerar `storage_key_still_referenced()`, raderar bara om orefererad, returnerar ett
+   explicit utfall (`retained`/`purged`/`failed`) istället för att krascha eller tyst svälja
+   ett `StorageError`. Skild från `app/rag/library_import.py::maybe_purge_blob()` (som
+   förutsätter att ANROPAREN redan håller låset för en större omgivande transaktion) — den nya
+   funktionen äger hela sekvensen själv, eftersom det inte finns någon DB-rad än att fästa ett
+   lås runt.
+2. **`app/routers/library.py`s empty-upload-gren** skriven om att anropa
+   `delete_if_unreferenced()` istället för `storage.delete()` direkt, följt av ett explicit
+   `db.rollback()` INNAN `HTTPException` kastas — släpper både owner-erasure-låset (taget
+   längst upp i handlern) och storage-key-låset omedelbart, istället för att förlita sig på
+   `get_db()`s dependency-teardown för att göra det implicit och senare (grundarens
+   uttryckliga krav). Svaret är alltid 400 oavsett utfall (`retained`/`purged`/`failed`) —
+   ingen ImportJob skapas någonsin för en tom uppladdning, strukturellt oförändrat.
+3. **En misslyckad radering av en redan bekräftat OREFERERAD tom blob** loggas
+   (`logger.exception`) men köas INTE till `storage_deletion_tasks` för beständigt återförsök
+   — en medveten, motiverad bedömning (grundaren bad uttryckligen om en bedömning, inte att
+   den tyngsta lösningen skulle byggas blint): eftersom referenskontrollen redan bevisat att
+   INGENTING pekar på nyckeln, kostar en kvarlämnad tom fil bara disk för en fil, inte
+   korrekthet eller dataförlust — asymmetrin som spelar roll är "raderades något som
+   fortfarande behövdes", aldrig "misslyckades en redan-föräldralös filens städning en gång".
+4. **Regressionstester A–F** (grundarens exakta bokstavsordning):
+   - **Test A/B** (`test_library_routes.py`, riktiga HTTP-anrop): en tom blob som delas med en
+     `ProjectSource`/`ProjectCheckpoint` överlever en orelaterad tom uppladdning (400, bloben
+     kvar, raden orörd).
+   - **Test C**: samma för en ANNAN founder-rolls levande `Document`.
+   - **Test D**: en genuint orefererad tom blob raderas korrekt (400, bloben borta) — fixen får
+     inte bli "radera aldrig tomma blobbar", bara "radera aldrig en som fortfarande behövs".
+   - Extra test: en tom uppladdning skapar aldrig en `ImportJob`-rad.
+   - **Test E** (`test_source_purge.py`, verklig tvåtrådskapplöpning): `delete_if_unreferenced()`
+     kapplöper mot en referens-skapande commit för SAMMA nyckel, båda disciplinerade deltagare
+     i samma `acquire_storage_key_lock()`-protokoll — slutläget är aldrig en levande DB-rad som
+     pekar på en försvunnen fysisk blob, oavsett vilken sida som vinner.
+   - **Test F**: ett genuint `StorageError` vid radering av en redan bekräftat orefererad blob
+     kraschar inte, loggas, returnerar `failed`, och släpper låset korrekt vid `commit()`.
+5. **Drift-förhindrande allowlist-test** (grundarens explicita punkt 4):
+   `test_every_direct_storage_delete_call_site_is_on_the_known_allowlist()`
+   (`test_source_purge.py`) — går igenom hela `app/`s AST och hittar varje
+   `storage.delete(...)`-anrop, jämför mot en hand-underhållen allowlist av tre kända,
+   granskade platser. Ett nytt, oväntat anrop misslyckas testet omedelbart.
+
+**Två nya, SEPARATA fynd upptäckta under detta pass egna arbete, INTE åtgärdade här (dokumenterat, inte tystat undanskuffat, per samma "isolera orelaterade ändringar"-princip som `CLAUDE.md` etablerar):**
+
+- **`app/project_memory.py`s `ingest_doc()`/`ingest_system_map()`/`create_checkpoint()`
+  tar ALDRIG `acquire_storage_key_lock()` innan de committar en ny `ProjectSource`/
+  `ProjectCheckpoint`-referens** — till skillnad från Life Library-uppladdningsvägen, som gör
+  det. Det betyder att SKRIV-sidan av samma lås-protokoll fortfarande är oskyddad för Project
+  Memory: en samtidig `retry_source_blob_purge()`/`delete_if_unreferenced()`-radering skulle
+  kunna kapplöpa mot en Project Memory-ingestion utan att någon av parterna delar samma lås på
+  Project Memory-sidan. Kräver att de tre call-sitesen i `app/project_memory.py` börjar ta
+  `acquire_storage_key_lock()` innan sin egen commit, samma mönster som redan finns i
+  `app/routers/library.py`.
+- **En djupare, redan existerande TOCTOU rent inuti `LocalFilesystemStorage.write_stream()`s
+  egen `final_path.exists()`-kontroll kontra ett samtidigt `delete()`s `unlink()`** — båda
+  filsystemsoperationer som sker UTANFÖR det DB-orienterade låset (låset skyddar bara
+  commit/radera-BESLUTET, aldrig de råa filsystemsanropen själva). Upptäckt under
+  konstruktionen av Test E ovan (ett första utkast som exakt återgav produktionens verkliga,
+  olåsta `write_stream()`-ordning triggade detta). Detta är samma form av race som redan fanns
+  i den tidigare granskade och levererade Pass 22-koden — INTE något Pass 30 introducerar —
+  och skulle kräva en arkitekturell omstrukturering av `write_stream()` själv (t.ex. hasha
+  INNAN beslutet att skriva, håll låset över hela existens-kontrollen-och-namnbytet) för att
+  stänga helt. Utanför scope för "stäng det ogrindade direkta delete-anropet"; flaggat för en
+  egen granskningsrunda.
+
+**Tester:** 8 nya (`test_library_routes.py`: 5 — Test A/B/C/D + ImportJob-testet, plus en ny
+modulnivå-`apply_runtime_privileges`-fixture filen aldrig behövde förut; `test_source_purge.py`:
+3 — Test E/F + allowlist-drifttestet). Hela backend-/security-/account-sviten: **758 passed**
+(upp från Pass 29:s 750, exakt Pass 30:s 8 nya), verifierat direkt TVÅ gånger i följd. Ingen ny
+migration denna omgång (ren Python-/routerändring) — `apply_runtime_privileges.py` oförändrad
+signatur/policy, ingen ny SECURITY DEFINER-funktion.
+
+**CI verifierad grön direkt via GitHubs check-runs-API på PR #31:s exakta slutliga head `3905c18`**
+(`3905c183cdf559a6023eaeb1b71bc0d05f5a09d5`): samtliga obligatoriska jobb `conclusion: success`
+(Alembic-migrationskontroll, backend unit/integration, account-livscykel/rate-limit, RLS/
+sessionssäkerhet, E2E Playwright, E2E same-origin-proxy, frontend build/typecheck/lint) —
+**utom** `Frontend — npm audit` (`failure`, förväntat, sedan tidigare, orelaterat till denna
+PR, spårat i **PR #32**), vilket i sin tur gör att den aggregerande gate-checken "All required
+checks passed" också visar `failure` — samma mönster som varje tidigare Pass i den här kedjan.
+PR #31:s body uppdaterad med Round 17 (Pass 30)-avsnittet, nya testräkningarna och den nya
+head-SHA:n.
+
+**Grundarens explicita avslutande instruktion (Pass 30), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
+
+## Pass 29 (2026-08-02): PR #31 — fjärde granskningsrundan: global blobkontroll saknade Project Memory (cross-domain orphan-blob-risk)
+
+Grundarens bedömning: "Pass 28:s tre huvudfixar är godkända i sak. Men den fysiska
+blobpolicyn är fortfarande global endast mellan användarkonton, inte global mellan systemets
+datadomäner." Content-addressed lagring är global — samma bytes i två olika domäner får samma
+`storage_key`, exakt samma egenskap som redan tvingade fram migration 0020:s cross-owner-fix
+(Pass 23), bara inte ännu stängd mellan OLIKA DATADOMÄNER (per-konto Life Library-data vs.
+founder-brett projektminne).
+
+**Det konkreta felet:** `storage_key_still_referenced_global()` (migration 0020) kontrollerade
+bara `documents.storage_key`/`knowledge_import_jobs.source_storage_key`. `app/project_
+memory.py`s founder-breda Project Memory skriver genom EXAKT samma `get_storage()`/
+`write_stream()`-backend till `project_sources.storage_key`/`project_checkpoints.
+brief_storage_key` — helt osynligt för funktionen. Scenario: Project Memory lagrar innehåll X
+→ en användare laddar upp byte-identiskt X → båda delar `storage_key` → kontot raderas →
+`enqueue_account_erasure_storage_task()` (migration 0022) godkänner nyckeln korrekt (användaren
+äger verkligen ett Document/ImportJob) → Document/ImportJob-raderna försvinner → den globala
+referenskontrollen ser ingen Document/ImportJob kvar, känner inte till Project Memory,
+returnerar false → maintenance-workern raderar bloben fysiskt → Project Memory pekar nu på en
+fil som inte längre finns. `project_checkpoints.brief_storage_key` är dessutom `NOT NULL` — en
+checkpoint vars brief-blob försvinner är en permanent trasig rad, inte återställningsbar.
+
+**Fixat:**
+
+1. **Migration `0023`** — `CREATE OR REPLACE` av `storage_key_still_referenced_global()`
+   (samma exakta signatur, `SECURITY DEFINER`, `search_path`, `REVOKE PUBLIC` — ingen ny
+   funktion, ingen ändring av den befintliga `documents`/`knowledge_import_jobs`-logiken,
+   kopierad ordagrant från migration 0020) med två nya OR-grenar: `project_sources.storage_key`
+   och `project_checkpoints.brief_storage_key`. `downgrade()` återställer migration 0020:s
+   EXAKTA ursprungliga funktionskropp (inte en `DROP`), så `test_migration_roundtrip.py`s
+   schema-fingeravtryck (som hashar `pg_get_functiondef()`) ser en verklig, annorlunda kropp
+   efter nedgradering och exakt samma kropp igen efter omgradering. Verifierat direkt: kropp
+   innehåller `project_sources`/`project_checkpoints` efter upgrade, INTE efter downgrade,
+   INNEHÅLLER dem igen efter re-upgrade.
+2. **Fullständig lagringsdomän-inventering** (grundarens uttryckliga krav — "gissa inte att
+   Project Memory är den enda ytterligare domänen"), utförd med en dedikerad genomsökning av
+   hela backend/ efter `storage_key`-liknande kolumner, `get_storage()`-anrop,
+   `.write_stream()`/`.delete()`-anrop:
+   - **`documents.storage_key`** — redan skyddad (migration 0020). Klass A.
+   - **`knowledge_import_jobs.source_storage_key`** — redan skyddad (migration 0020). Klass A.
+   - **`project_sources.storage_key`** — SAKNADES, nu skyddad (migration 0023). Klass A.
+   - **`project_checkpoints.brief_storage_key`** — SAKNADES, nu skyddad (migration 0023). Klass A.
+   - **`storage_deletion_tasks.storage_key`** — konsumerar kontrollen (kön för fysisk radering),
+     är inte själv en levande referens. Klass B, korrekt exkluderad.
+   - `documents.media_blob` (LargeBinary, migration 0010) — separat in-DB-kolumn, inte
+     content-addressed lagring. Klass C.
+   - `memory_source_unit.py`s `source_identity_key` — orelaterad identitetssträng, inte en
+     blobnyckel. Klass D.
+   - **Ytterligare fynd, UTANFÖR scope för denna omgång, dokumenterat men INTE åtgärdat här**
+     (per samma "isolera orelaterade ändringar"-princip som `CLAUDE.md` etablerar):
+     `app/routers/library.py:159` gör ett OGRINDAT `storage.delete(blob.storage_key)` för en
+     tom (0 byte) uppladdning, utan någon `storage_key_still_referenced_global()`-kontroll
+     alls — eftersom lagringen är innehållsadresserad kunde hash-nyckeln för tomt innehåll i
+     teorin redan vara refererad av en annan rad (inklusive de två domänerna som fixades här).
+     Blast radius idag är litet (bara tomma filer), men det är en verklig, separat
+     TOCTOU-lucka som INTE är del av detta fynd och bör hanteras i en egen, senare branch/PR
+     om grundaren vill prioritera den.
+3. **Cross-domain regressionstester** (grundarens exakta bokstavsordning A–E):
+   - **Test A** (`test_account_erasure.py`): en `ProjectSource` som delar `storage_key` med en
+     raderad ägares `Document` → task blir `retained_shared`, bloben finns kvar, `ProjectSource`
+     orörd.
+   - **Test B** (`test_account_erasure.py`): samma för `ProjectCheckpoint.brief_storage_key`.
+   - **Test C** (`test_source_purge.py`): endast en `ProjectSource` refererar nyckeln efter att
+     Document/ImportJob-raderna är borta → `storage_key_still_referenced_global()` returnerar
+     `true`.
+   - **Test D** (`test_source_purge.py`): ingen domän alls refererar nyckeln → funktionen
+     returnerar `false` (bevisar att den inte bara blir permanent `true` — varje domäns
+     referens kontrolleras levande).
+   - **Test E** (cross-owner-skyddet, Pass 23): redan täckt av den befintliga svit av tester i
+     `test_source_purge.py` — körda på nytt, oförändrat gröna.
+4. **Drift-förhindrande register + test.** Ny kanonisk konstant, `app.rag.blob_references.
+   KNOWN_STORAGE_KEY_COLUMNS` — den hand-underhållna listan över varje `table.column` som kan
+   hålla en levande referens till den delade content-addressed lagringen, med en dokumenterad
+   process för att lägga till en ny kolumn (registret + en ny migration + ett retentiontest,
+   allt i samma ändring). Ny test,
+   `test_known_storage_key_columns_registry_matches_the_sql_functions_real_behavior`
+   (`test_source_purge.py`), itererar registret och bevisar att SQL-funktionen faktiskt
+   skyddar VARJE post — en framtida kolumn som läggs till i registret utan matchande
+   SQL-täckning misslyckas omedelbart, istället för att tyst återöppna exakt samma
+   cross-domain-lucka.
+
+**Tester:** 6 nya (`test_account_erasure.py`: 2 — Test A/B; `test_source_purge.py`: 4 — Test
+C/D, en extra SQL-nivåtest för `ProjectCheckpoint`, samt drift-registertestet). Hela
+backend-/security-/account-sviten: **750 passed** (upp från Pass 28:s 744, exakt Pass 29:s 6
+nya), verifierat direkt TVÅ gånger i följd. Bare-DB-migrationsrundtripp
+(`0022→0023→0022→0023`) verifierad mot en databas UTAN `mainai_app`-rollen alls —
+funktionskroppen innehåller `project_sources`/`project_checkpoints` efter upgrade, inte efter
+downgrade, igen efter re-upgrade. `apply_runtime_privileges.py` omkörd mot testdatabasen —
+`storage_key_still_referenced_global`s signatur/EXECUTE-grant är oförändrad (samma signatur
+som migration 0020, ingenting att ändra i privilegiepolicyn).
+
+**Grundarens explicita avslutande instruktion (Pass 29), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
+
+## Pass 28 (2026-08-02): PR #31 — tredje granskningsrundan av kontoslicen: oändlig retry-loop, INSERT fortfarande farligt, det avvisade pending-job-racet stängt
+
+Grundarens bedömning: "Pass 27 förbättrar outboxen tydligt, men Code har själv lämnat den
+viktigaste pending-job-racen öppen, och den nya immediate-retryloopen återintroducerar en
+redan känd infinite-loop-felklass." Tre blockerare, alla åtgärdade, plus en verifieringspunkt
+och en verklig deadlock som denna omgångs egen fulla re-verifiering (inte grundarens egen
+granskning) avslöjade:
+
+1. **Oändlig retry-loop vid permanent fel (stängd).** `attempt_pending_storage_deletions_for_
+   operation()`s `while True`-loop, kombinerad med Pass 27:s `claim_storage_deletion_tasks()`
+   som behandlade `pending`/`failed` som lika omedelbart claimbara, återintroducerade en redan
+   känd felklass (samma som en tidigare, redan fixad backfill-bugg): en task som misslyckas med
+   ett PERMANENT `StorageError` blev `failed`, och nästa loop-iteration claimade och
+   återförsökte SAMMA task igen — för evigt. Fixat via en ny `include_failed`-parameter på
+   `claim_storage_deletion_tasks()`: det omedelbara försöket claimar nu med
+   `include_failed=False` (varje task denna operation skapade försöks högst en gång här);
+   allt som blir `failed` lämnas helt åt workerns egen retry-loop
+   (`include_failed=True`, default), som nu respekterar en begränsad, exponentiell, jittrad
+   backoff (`next_attempt_at`, migration `0022`, satt av `attempt_storage_deletion_task()` via
+   `app.jobs.retry.compute_backoff_seconds` — samma rena policyfunktion STEG 11:s
+   importjobb-retries redan använder).
+2. **INSERT-only fortfarande farligt (stängd).** Pass 27:s `mainai_app`-policy (INSERT-only på
+   `storage_deletion_tasks`) var fortfarande fel: INSERT i just den tabellen är INDIREKT ÅTKOMST
+   TILL EN PRIVILEGIERAD FYSISK RADERINGSOPERATION, eftersom ingenting i databasen verifierade
+   att en infogad `storage_key` faktiskt tillhörde den infogande ägaren, eller ens refererade
+   något verkligt alls — `app/project_memory.py`s founder-breda blobbar (utanför workerns
+   referenskontroll, `storage_key_still_referenced_global()`) är exakt den typ av data en
+   felaktigt köad godtycklig nyckel kunde förstöra spårlöst. Fixat: `mainai_app` får NOLL
+   direkta privilegier på `storage_deletion_tasks` (migration `0022` +
+   `s1a_privilege_policy.py`), och en ny `SECURITY DEFINER`-funktion,
+   `enqueue_account_erasure_storage_task(operation_id, storage_key)`, är den ENDA vägen en
+   vanlig session kan skapa en task-rad: den härleder anroparen från `app.current_user_id`,
+   verifierar explicit att nyckeln tillhör just den ägaren via `Document.storage_key`/
+   `ImportJob.source_storage_key` (litar aldrig på Python-kodens egen inventeringsfråga som
+   auktorisering), sätter `reason`/`status` själv, och är idempotent på
+   `(operation_id, storage_key)`. `erase_account_data()`s lagernyckel-inventering anropar nu
+   denna funktion via `db.execute(sa_text("SELECT enqueue_account_erasure_storage_task(...)"))`
+   istället för en ORM-`INSERT`.
+3. **Det avvisade pending-job-racet (stängd, INTE dokumenterad som follow-up).** Grundaren
+   avvisade uttryckligen mitt eget Pass 27-omdöme att lämna racet mellan kontoradering och en
+   redan köad (`pending`) importkörning som dokumenterad follow-up: "Det räcker inte att
+   dokumentera racet som follow-up. Det är precis den race account-slicen skulle stänga."
+   Stängt genom att göra om `app/jobs/lease.py`s `claim_next_job()` till en tvåfas,
+   ägarlåst claim (se den modulens egen docstring för hela mekanismen): en låsfri
+   kandidat-SELECT, DÄREFTER `acquire_owner_erasure_lock()` för den kandidatens ägare INNAN
+   någon radlåsning tas alls (aldrig efter — samma ordning `erase_account_data()` redan
+   följer, så de två kan aldrig deadlocka mot varandra), DÄREFTER en atomisk omvaliderad claim
+   av exakt den kandidaten, med omförsök på en färsk kandidat vid förlorad kapplöpning.
+   Vinnaren av ägarlåset (en workers claim, eller själva erasure-transaktionen) committar eller
+   rullar tillbaka helt innan den andra sidans radnivå-arbete ens kan börja — en väntande job
+   sveps antingen säkert in i erasure-transaktionens egen lagernyckel-inventering innan en
+   worker hinner börja skriva nya blobbar mot den, eller så claimar workern jobbet säkert innan
+   erasure hinner se det som blockerande (via den befintliga `AccountErasureBlockedError`-
+   spärren, oförändrad). Verifierat med RIKTIGA två-trådars-tvåsessions-tester för BÅDA
+   race-ordningarna (`test_claim_next_job_winning_the_owner_lock_race_blocks_a_concurrent_
+   erasure`, `test_erasure_winning_the_owner_lock_race_leaves_nothing_for_claim_next_job_to_
+   claim`), båda med bundna `join(timeout=5)` som dubblerar som deadlock-timeout-bevis, och
+   ett explicit orphan-bevis (den väntande jobbens `source_storage_key` MÅSTE finnas i
+   `storage_deletion_tasks` efter att erasure vunnit racet).
+4. **Claim-tillståndsövergångar (verifierade, inga kodändringar behövdes utöver punkt 1).**
+   `completed_at`/`next_attempt_at` nollställs explicit i början av varje nytt
+   `attempt_storage_deletion_task()`-anrop (defensivt — i praktiken var de redan alltid `NULL`
+   för en icke-terminal task, men detta gör invarianten explicit snarare än implicit).
+   `last_error` sätts konsekvent (`None` vid framgång, felmeddelandet vid `failed`).
+   `attempt_count` inkrementeras ENDAST av ett verkligt I/O-försök, aldrig av en claim (bevisat
+   av design: `claim_storage_deletion_tasks()` rör aldrig den kolumnen). Terminal-tasks
+   (`purged`/`retained_shared`) är aldrig claimbara, bevisat direkt med en ny test
+   (`test_claim_storage_deletion_tasks_never_reclaims_a_terminal_purged_or_retained_shared_
+   task`) som sätter en artificiellt gammal `updated_at` på en terminal task och verifierar den
+   ändå inte claimas.
+
+**En verklig Postgres-deadlock upptäckt under denna omgångs egen fulla testsviteskörning** (inte
+en teoretisk oro, inte grundarens fynd — upptäckt av mig själv genom att faktiskt köra hela
+sviten, inte bara den nya filen isolerat): `erase_account_data()` tog `FOR UPDATE`-lås på
+`users`-raden FÖRE den förvärvade `acquire_owner_erasure_lock()` — omvänd ordning mot varje
+annan plats i kodbasen (uppladdning, `claim_next_job()`) som redan tar ägarlåset FÖRST. En
+konkurrerande uppladdning som redan höll ägarlåset och väntade på ett `FOR KEY SHARE`-lås på
+samma `users`-rad (Postgres FK-validering för `ImportJob.owner_id`) kunde deadlocka mot en
+erasure-transaktion som höll radlåset och väntade på ägarlåset — klassisk cirkulär
+låsordning. Postgres egen deadlock-detektor fångade det (`DeadlockDetected`), men bara i den
+fulla sviten, inte i den isolerade testfilen — ren timing. Fixat genom att flytta
+`acquire_owner_erasure_lock()`-anropet FÖRE `with_for_update()`-frågan, vilket samtidigt
+bevarar den befintliga "serialisera en andra samtidig erasure"-garantin (ägarlåset serialiserar
+redan det fallet) och tar bort låsordningscykeln helt. Verifierat: den tidigare deadlockande
+testen (`test_owner_erasure_lock_serializes_erasure_against_a_concurrent_upload_for_the_same_
+owner`) och de två nya race-testerna körda 8x i rad utan en enda deadlock, plus hela sviten
+grön två gånger i följd.
+
+**Tester:** 17 nya (16 i `test_account_erasure.py` — inklusive de två riktiga
+tvåtrådars-race-testerna för `claim_next_job()`, den permanent-fel-utan-loop-regressionen, sex
+`enqueue_account_erasure_storage_task()`-tester för ägarskap/cross-owner/godtycklig
+nyckel/project_memory-nyckel/idempotens/oautentiserad anropare, samt privilegiegräns- och
+backoff-tester; 1 i `test_memory_source_units.py` — `test_mixed_version_boot_window_0021_to_
+0022`, plus omskrivning av `test_mixed_version_boot_window_0020_to_0021`s scenario C och
+privilegiekatalogens `expectations`-dict för Pass 28:s nollprivilegiepolicy). Hela
+backend-/security-/account-sviten: **744 passed** (upp från Pass 27:s 727 passed + 1 skipped),
+verifierat direkt, inklusive en bar-DB-migrationsrundtripp (`0021→0022→0021→0022`) mot en
+databas UTAN `mainai_app`-rollen alls. `docker-entrypoint.sh`s riktiga boot-ordning
+(`ensure_app_role` → `alembic upgrade head` → `apply_runtime_privileges`) opåverkad — inga
+ändringar i den filen denna omgång.
+
+**Grundarens explicita avslutande instruktion (Pass 28), oförändrad från tidigare omgångar:**
+ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge av PR #31, ingen merge av
+**PR #32** utan uttryckligt godkännande, ingen deploy — vänta på färsk granskning innan arbetet
+fortsätter längre.
+
+## Pass 27 (2026-08-02): PR #31 — andra granskningsrundan av kontoslicen: privilegiehål, audittransaktion, schema-drift, atomisk claiming
+
+Grundaren bekräftade att Pass 26:s huvudsakliga erasureflöde (radlåsning, storage-inventering,
+owner-lås) var korrekt genomtänkt, men fann två blockerande problem och en schema-drift innan
+produktionsprofilen.
+
+**1. `storage_deletion_tasks` var för brett privilegierad.** Tabellen saknar avsiktligt
+`owner_id`/RLS (se migration 0021), men bootpolicyn gav ändå `mainai_app` — den vanliga,
+request-scopade applikationsrollen — SELECT+INSERT+UPDATE på HELA tabellen. Det innebar att
+VARJE vanlig requestsession tekniskt kunde läsa alla kontoraderingars storage-nycklar och
+operation-ID:n, eller skriva om vilken tasks status som helst — inte en säkerhetsgräns bara
+för att ingen router råkade göra det idag. Löst genom att smalna av `mainai_app`s grant till
+ENDAST INSERT (`s1a_privilege_policy.py`). All läsning/claiming/uppdatering flyttades till en
+egen, privilegierad maintenance-session (`app/rag/account_erasure.py`s nya
+`_MaintenanceSession`, samma mönster som `app/worker.py`s befintliga `_ClaimSession` för
+`knowledge_import_jobs`) — den vanliga requestsessionen `erase_account_data()` kör på rör
+aldrig tabellen efter sina egna INSERT-satser. En verklig, inte-uppenbar bieffekt upptäcktes
+under implementationen: SQLAlchemy 2.0 hämtar som standard servergenererade kolumner
+(`created_at`/`updated_at`) tillbaka via en `INSERT ... RETURNING`-sats, vilket kräver
+SELECT-privilegium utöver INSERT — utan att stänga av det (`__mapper_args__ = {"eager_
+defaults": False}`) hade även den legitima kontoraderingens egna INSERT av tasks börjat
+misslyckas med "permission denied" så fort omsmalningen tillämpades.
+
+**2. Exportauditens transaktion följde inte den beslutade modellen.** `export_account_data()`
+anropade `record_audit(...)` utan `commit=False`, vilket gjorde att auditfunktionens egen
+separata `db.commit()` kördes istället för en kontrollerad transaktion — motsäger kravet och
+gjorde det omöjligt att skilja "export byggd OCH audit committad" från "export byggd men
+audit-commit misslyckades", med ingen rollback-punkt för det senare fallet. Rättat: `record_
+audit(..., commit=False)` följt av ett explicit `db.commit()`, med `db.rollback()` +
+återkastning vid fel. Nytt test tvingar ett commitfel EFTER auditinsert och bevisar att
+auditposten rullas tillbaka och att exporten aldrig returneras som lyckad.
+
+**3. Modell och migration beskrev olika databastyper.** Migration 0021 skapar `reason`/
+`status` som `varchar(N) + CHECK`, men SQLAlchemy-modellens `Enum(...)` implicerade (om än
+harmlöst i praktiken, eftersom bindprocessorn bara skickar strängvärden) en NATIV Postgres
+ENUM TYPE som aldrig faktiskt skapades. Rättat med `native_enum=False, create_constraint=
+False` och exakt matchande längder — migrationens CHECK förblir den enda databassanningen.
+
+**4. Taskclaiming var en oskyddad, olåst scan.** Både den omedelbara best-effort-attempten och
+workerns återförsöksscan gjorde `.all()`-frågor utan `FOR UPDATE SKIP LOCKED`, vilket kunde
+låta två samtidiga claimers (varandra, eller två workerprocesser) plocka upp och dubbelbehandla
+SAMMA rad. Löst med en ny `claim_storage_deletion_tasks()` — exakt samma atomiska `UPDATE ...
+WHERE id = ANY(SELECT ... FOR UPDATE SKIP LOCKED ...) RETURNING id`-mönster
+`app/jobs/lease.py`s `claim_next_job()` redan använder för `knowledge_import_jobs` — med
+bunden batchstorlek och en lease (`updated_at` + `lease_seconds`) som gör en `processing`-rad
+vars claimer kraschat återclaimbar. Verifierat med ett riktigt tvåtrådars/tvåsessions-test som
+bevisar att ingen rad någonsin claimas av båda samtidigt, plus ett dedikerat lease-utgångstest.
+
+**5. Genomgång av alla blob-skrivande vägar** (`storage.write`/`storage.write_stream`):
+`app/routers/library.py`s uppladdningsändpunkt var redan täckt (Pass 26). `app/rag/library_
+import.py`s `_store_bytes()` (workerns per-fil-skrivningar under bearbetning av ett REDAN
+accepterat importjobb) var det INTE — och kan inte stängas med samma transaktionsbundna lås,
+eftersom `run_import_job` committar efter varje fil för att förbli återupptagningsbar. Löst
+genom att `erase_account_data()` nu VÄGRAR fortsätta medan en `running`-importkörning med
+ogången lease pågår för kontot (`AccountErasureBlockedError`, av routern mappad till HTTP 409)
+— stänger det realistiska, långvariga fallet (en worker som aktivt extraherar/embeddar ett
+flerfilsimport) men INTE ett smalare kvarstående race mot en redan köad (`pending`) körning
+som hinner claimas mellan kontrollen och denna transaktions commit (skulle kräva att `claim_
+next_job()` självt tar ett per-ägarlås, vilket motverkar dess syfte att se alla ägares jobb i
+en enda fråga) — medvetet dokumenterat som kvarstående, inte stängt i denna omgång, hellre än
+en forcerad, overifierad låsomdesign under tidspress. `app/project_memory.py`s tre
+blob-skrivningar är INTE kontobundna data — de är MainAI Cores egna, founder-breda
+projektminnesobjekt (`ProjectSource`/`ProjectCheckpoint`, uttryckligen dokumenterade som
+"Not RLS-protected... founder-wide project state, not per-user data") och korrekt utanför
+kontoraderingens scope.
+
+**Tester:** 17 nya — `test_account_erasure.py` (14: privilegiegräns i realtid (`SELECT`/
+`UPDATE` nekas, `INSERT` fungerar), `claim_storage_deletion_tasks` (operation-scopning,
+gräns, lease-ej-utgången, lease-utgången-återclaim, verkligt tvåtrådarsrace), `erase_account_
+data` vägrar/fortsätter kring `running`/`pending`/utgången-lease-importjobb, exportauditens
+tvingade commitfel, samt modell/schema-testerna för varchar/CHECK); `test_worker.py` (1: `_
+retry_storage_deletion_tasks()` end-to-end genom den riktiga metoden); `test_memory_source_
+units.py` (1: `test_mixed_version_boot_window_0020_to_0021`, samma mekanism som 0019→0020-
+testet, nu för migration 0021; plus `storage_deletion_tasks` tillagd i de befintliga
+least-privilege/reboot-persistence-testerna); `test_account_deletion.py` (1: HTTP-nivå-409 när
+en importkörning aktivt pågår).
+
+Omverifiering: riktat regressionssvep (`test_account_erasure.py`+`test_memory_source_units.py`
++`test_ensure_app_role.py`+`test_source_purge.py`+`test_worker.py`+`test_migration_roundtrip.py`
++`test_library_import.py`+`test_library_routes.py`+`test_claims.py`+`test_memory_source_
+backfill.py`+`test_storage_local_fs.py`+`test_provider_verification.py`+`test_account_
+deletion.py`) 315/315. Bare-DB-migrations-round-trip (`upgrade head` → `downgrade -1` →
+`upgrade head` → `downgrade base` → `upgrade head`) mot en färsk `postgres`-superuser-databas
+(`lifeos_bare_check_p27`, ingen `mainai_app`-roll) ren. Hela backend-/security-/account-sviten:
+**727 passed, 1 skipped** — exakt Pass 26:s 710 + Pass 27:s 17 nya. CI grön på PR #31:s exakta
+head `5f4f2fd`, alla obligatoriska kontroller UTOM det fortsatt spårade, orelaterade `npm
+audit`-fyndet (PR #32, väntar på grundarens uttryckliga godkännande innan merge).
+
+Grundarens instruktion var explicit: stanna nu för ny granskning — ingen produktionsprofil,
+produktionsbackfill, merge eller deploy ännu, och PR #32 ska INTE mergas utan grundarens
+uttryckliga godkännande.
+
+## Pass 26 (2026-08-02): PR #31 — kontoexport/kontoradering-integration med S1A + två CI-fixar upptäckta under verifiering
+
+Grundaren bekräftade att Pass 25 var godkänd och gav den fullständiga, 8-punkts specen för
+nästa godkända skiva: **kontoexport och kontoradering**, med explicit instruktion att stanna
+för fräsch granskning efteråt — ingen produktionsprofil, produktionsbackfill, merge eller
+deploy.
+
+**1. Delade domäntjänster.** `app/routers/account.py` skrevs om till en tunn wrapper — routern
+gör ENDAST autentisering, lösenordsverifiering (vid radering), neutral request-metadata-
+extraktion, anrop till tjänsten, cookie-clear EFTER lyckad commit, och fel→HTTP-mappning. All
+affärslogik flyttades till två nya moduler:
+- `app/rag/account_export.py::export_account_data()` — bygger hela exporten.
+- `app/rag/account_erasure.py::erase_account_data()` — hela raderingssekvensen.
+
+**2. Komplett kontoexport.** Behöll alla befintliga sektioner och lade till fyra nya,
+ägarscopade och deterministiskt sorterade: `knowledge_claims` (inkl. `memory_source_id`),
+`memory_source_units` (inkl. rensade/återkallade källor — `content_text`/`content_hash` är
+korrekt `None` för en `purged`-rad, aldrig fabricerat), `document_source_units`,
+`memory_source_lifecycle_events`. Inkluderar mjukraderade dokument. `export_schema_version=2`
++ `generated_at` tillagda. Den föråldrade kommentaren ("claims har ingen backande tabell än")
+rättad. Revisionsposten `account_data_exported` skrivs EXAKT en gång, bara efter att hela
+exportobjektet redan byggts klart — ett fel mitt i insamlingen kan aldrig ge en falsk
+revisionspost för data som aldrig faktiskt returnerades.
+
+**3. Atomisk DB-fas för radering.** `erase_account_data()`: låser `User`-raden (`FOR UPDATE`)
+→ tar en ägarscopad Postgres-advisory-lock (`acquire_owner_erasure_lock`, seed `1`, skild
+namnrymd från `acquire_storage_key_lock`s seed `0`) → inventerar alla unika storage-nycklar
+från BÅDA `Document.storage_key` OCH `ImportJob.source_storage_key` → skapar durabla
+`StorageDeletionTask`-rader FÖRE någon radrensning → anropar
+`SELECT public.erase_owner_memory(:owner_id)` FÖRE dokumentradering (samma arkitekturlärdom
+som `source_purge.py`: `document_source_units.document_id`s RESTRICT-FK skulle annars blockera
+dokumentraderingen) → befintlig städordning (konversationer/tokens raderas, projekt/uppgifter
+nollas, dokument/chunks/versioner/relationer/importjobb raderas, usage/audit anonymiseras) →
+`account_deleted`-revisionsposten skrivs MED `user_id=NULL` INUTI SAMMA transaktion, med ett
+neutralt `erasure_operation_id` som `entity_id` — den gamla separata post-commit
+`record_audit`-anropet borttaget. Hela sekvensen är EN databastransaktion; ingen fysisk
+`storage.delete()` sker före DB-commit.
+
+**4. Durabel fysisk blob-radering.** Ny liten, allmän tabell `storage_deletion_tasks`
+(migration `0021`) — INGEN FK till `users.id` (måste överleva kontot vars radering skapade
+den), INGEN PII. Status: `pending`/`processing`/`purged`/`retained_shared`/`failed`. Ett
+omedelbart best-effort-försök körs direkt efter DB-fasens commit, PLUS en worker-återförsöks-
+mekanism (`Worker._retry_storage_deletion_tasks`, körs varje `run_once()`-cykel via
+superuser-sessionen) för rader som överlever en krasch. Varje nyckel tar samma
+storage-key-lock som upload/purge, kontrollerar `storage_key_still_referenced_global` — delad
+med en ANNAN ägare ⇒ `retained_shared` (raderas aldrig), annars raderas ⇒ `purged`;
+`StorageError` ⇒ `failed` (återförsökbar); redan borttagen fil ⇒ idempotent framgång.
+
+**5. Race mot samtidig uppladdning stängt.** En `User`-radlås ensam räcker inte — en samtidig
+uppladdning kan skriva bytes innan dess `ImportJob`-rad (med FK) ens finns. Samma
+`acquire_owner_erasure_lock` tas nu även i `POST /api/library/import`, FÖRE
+`storage.write_stream`, plus en explicit kontroll att ägaren fortfarande finns direkt efter
+låset (annars skulle en påbörjad begäran innan en samtidig radering committat ändå kunna
+fortsätta skriva en föräldralös blob, som bara skulle upptäckas som ett fult 500-fel EFTER att
+bytes redan skrivits). Ett verkligt tvåtrådars/tvåsessions-samtidighetstest bevisar att ingen
+ordning ger en föräldralös blob.
+
+**Tester:** 20 nya i `tests/backend/test_account_erasure.py` (radering: alla källtyper,
+legacy-konto utan MSU, rollback vid fel efter `erase_owner_memory`, rollback vid
+task-insert-fel, dedup av Document/ImportJob-nycklar, båda nyckelkällorna, omedelbar
+purge/retained_shared, aldrig `storage.delete()` före commit, verklig `StorageError`→`failed`
+→lyckad retry, idempotens på redan borttagen fil, no-op för redan terminal task; export: aktiv/
+återkallad/rensad källa med korrekt innehåll, DSU+lifecycle-events, claims länkade till
+`memory_source_id`, cross-owner-isolering, deterministisk ordning, exakt en audit-rad, ingen
+audit vid exportfel; lås-race: verklig tvåsessionstest). 4 nya i
+`tests/account/test_account_deletion.py` (mjukraderade dokument i export, exakt en
+`account_deleted`-audit, cookies rörs inte vid fel lösenord, usage-log överlever anonymiserad).
+**24 nya S1A/konto-tester totalt**, ovanpå de 8 redan existerande i `test_account_deletion.py`
+— 130+24 = **154 dedikerade S1A/konto-tester totalt över 8 filer** (se tidigare register-poster
+för de övriga filernas nedbrytning; `test_account_erasure.py` kräver samma
+`_narrow_privileges_before_this_module`-modulfixtur som `test_source_purge.py`/
+`test_memory_source_units.py`, eftersom `erase_account_data()` nu anropar `erase_owner_memory()`
+— tillagd även i `test_account_deletion.py` av samma skäl).
+
+**Två CI-problem upptäcktes under verifieringen — hanterade enligt olika regler:**
+
+- **E2E-privilegielucka (åtgärdad DIREKT i PR #31).** `E2E — Playwright (full stack)` föll
+  rött på head `c0586d0` med `permission denied for function erase_owner_memory`. Grundorsak:
+  `.github/workflows/ci.yml`s `e2e-tests`-jobb byggde sin egen roll/databas-setup för hand
+  (`GRANT ALL PRIVILEGES ON ALL TABLES ...`) men körde ALDRIG
+  `scripts/apply_runtime_privileges.py` — till skillnad från `docker-entrypoint.sh`s riktiga
+  bootsekvens (`ensure_app_role` → `alembic upgrade head` → `apply_runtime_privileges` →
+  starta appen), som redan gjorde detta korrekt. Utan det EXECUTE-grantet (S1A-funktionerna
+  REVOKE:ar EXECUTE FROM PUBLIC i sina egna migrationer) kunde `mainai_app` aldrig anropa
+  `erase_owner_memory` i E2E-miljön. Detta var en LATENT lucka sedan S1A:s första funktioner
+  (Pass 14+) — den upptäcktes bara nu eftersom Pass 26:s `e2e/account.spec.ts`-raderingstest är
+  den FÖRSTA Playwright-specen någonsin som når en S1A SECURITY DEFINER-funktion. Fixat direkt
+  i PR #31 (inte en egen branch) eftersom detta är PR #31:s EGEN nya E2E-täckning som
+  exponerade luckan, inte ett orelaterat fynd. Commit `ef54588`.
+- **npm audit-ID-churn (åtgärdad på EGEN branch/PR, per `CLAUDE.md`s etablerade mönster).**
+  `Frontend — npm audit` föll rött på samma head — men PR #31:s diff rör INTE `frontend/`
+  alls (bekräftat med `git diff --stat` mellan bas och head: noll filer). Grundorsak: GitHubs
+  advisory-databas bytte bara sitt interna `via.source`-ID för SAMMA redan dokumenterade/
+  accepterade `brace-expansion`-fynd (GHSA-mh99-v99m-4gvg, `docs/SECURITY_BLOCKERS.md` punkt 3)
+  från `1124334` till `1130588`/`1130591` — ingen ny sårbarhet, ingen ändrad
+  `package-lock.json`. Exakt samma mönster som PR #8/#9-fallet `CLAUDE.md` dokumenterar. Fixat
+  på en egen branch `claude/frontend-npm-audit-ghsa-mh99-source-ids` (grenad från
+  `claude/det-kommer-mer-879lcm`, INTE från PR #31:s branch) → **PR #32**, verifierad grön
+  (`node scripts/check-npm-audit.js` lokalt + full CI, "All required checks passed"). PR #31
+  kommer fortsätta visa `npm audit` som rött tills PR #32 mergas till huvudgrenen och PR #31
+  uppdateras DÄREFTER (inte i förväg — se `CLAUDE.md`s Merge-regel).
+
+Omverifiering: `tests/backend/test_account_erasure.py` (20) + `tests/account/
+test_account_deletion.py` (12, varav 4 nya) körda direkt, samt hela `tests/backend`+
+`tests/security`+`tests/account`-sviten (se resultat nedan/i PR #31:s beskrivning). Bare-DB-
+migrations-round-trip (`upgrade head` → `downgrade -1` → `upgrade head` → `downgrade base` →
+`upgrade head`, hela kedjan inkl. migration 0021) mot en färsk `postgres`-superuser-databas
+utan `mainai_app`-roll, ren. CI grön på PR #31:s exakta slutliga head `ef54588` — ALLA
+obligatoriska kontroller `success` UTOM det redan förklarade/spårade `npm audit`-fyndet
+(PR #32). PR #32 helt grön, "All required checks passed".
+
+Grundarens instruktion var explicit: detta var den sista stora funktionella
+S1A-integrationsskivan innan produktionsprofil och slutgranskning. STANNA nu för fräsch
+granskning — ingen produktionsdataprofil, ingen produktionsbackfill, ingen merge, ingen
+deploy, ingen P4/P6, ingen Admin reboot-knapp i denna PR.
+
+## Pass 25 (2026-07-30): PR #31 — exakt funktionssignaturverifiering + test-/dokumentationsfixar
+
+Grundaren bekräftade att Pass 24:s SECURITY DEFINER-verifiering och mixed-version-omsmalning
+var korrekta i sak, men hittade en kvarstående verklig verifieringslucka plus två test-/
+dokumentfel — INGEN account integration ännu.
+
+**1. Exakt funktionssignatur verifierades fortfarande inte.** `_FUNCTIONS` innehöll
+funktionsnamn och förväntad returtyp, men inte förväntade ARGUMENTTYPER —
+`_function_signature()` sökte bara på namn och accepterade den enda overload som råkade
+finnas. En funktion med FEL argumenttyper (t.ex. `storage_key_still_referenced_global
+(integer)` istället för applikationens faktiska `(text)`-anrop) hade kunnat passera alla
+andra kontroller — `SECURITY DEFINER`, boolean-retur, rätt ägare, rätt grants — medan den i
+praktiken var en helt annan funktion än den `blob_references.py` faktiskt anropar, vilket
+bara skulle upptäckas som ett runtime-fel.
+
+Löst genom att döpa om `_function_signature` till `_resolve_function(cur, name,
+expected_arg_types)`, som nu löser funktionen via `to_regprocedure` med den EXAKTA förväntade
+argumentlistan (inte bara namn). `_FUNCTIONS` utökades till 5-tupler med varje funktions
+riktiga identity-argumenttyper, hämtade direkt från migration 0019/0020:s `CREATE FUNCTION`-
+satser. Om mer än en overload av samma namn existerar i `public`, eller om den enda
+overloaden som finns har fel argumenttyper, returneras ett fel och INGET grantas/revokas för
+det namnet — en oväntad overload behandlas som en policyöverträdelse, inte tyst ignorerad.
+
+**Fyra nya tester** (`test_source_purge.py`, mot en isolerad engångsfunktion
+`s1a_test_sig_check_p25` inuti en psycopg2-transaktion som alltid rullas tillbaka — CREATE
+FUNCTION är transaktionell DDL, så inget explicit DROP behövs): A) korrekt funktion med
+korrekt signatur resolverar rent utan fel; B) TVÅ overloads av samma namn (en korrekt `(text)`,
+en oväntad `(integer)`) gör verifieringen röd, och ett medvetet förinlagt `PUBLIC`-grant på
+den oväntade overloaden bevisar att INGET rördes; C) ENDAST fel-signaturen finns (`(integer)`
+när `(text)` förväntas) — behandlas som saknad/fel funktion, accepteras aldrig tyst; D) rätt
+namn OCH rätt argumenttyper resolverar, men funktionen är `SECURITY INVOKER` — fortfarande
+fångad av den befintliga `prosecdef`-kontrollen, vilket bevisar att den nya
+signaturupplösningen inte stör den kedjan.
+
+**2. Mixed-version-testets `to_regclass`-bugg.** `test_mixed_version_boot_window_0019_to_0020`
+kontrollerade om 0020:s funktion existerade med `to_regclass('public.storage_key_still_
+referenced_global')` — `to_regclass` löser RELATIONER (tabeller/vyer), ALDRIG funktioner, så
+den returnerar NULL oavsett om funktionen finns eller inte. Assertionen `is False` passerade
+alltså garanterat, oavsett databasens verkliga tillstånd — testet bevisade ingenting om sin
+egen premiss. Rättat till `to_regprocedure('public.storage_key_still_referenced_global
+(text)') IS NOT NULL`, med en ny explicit `True`-kontroll efter uppgraderingen till 0020 också
+(tidigare bevisades detta bara indirekt via `has_function_privilege`, som visserligen skulle
+kasta ett SQL-fel om funktionen saknades, men aldrig kontrollerades explicit).
+
+**3. Duplicerad ImportJobStatus-lista i statusdrifttestet.** `test_import_job_status_policy_
+matches_the_documented_contract_for_every_status` skrev sin egen `pending/running/blocked/
+partial`-if/elif-kedja som förväntanslogik — strukturellt okopplad från den verkliga policyn,
+så en framtida status som läggs till i workerns faktiska återupptagningsvägar utan en
+motsvarande uppdatering HÄR hade fortfarande kunnat passera. Löst genom nya kanoniska
+konstanter/predikat i `app/models/import_job.py`: `CLAIMABLE_IMPORT_JOB_STATUSES` (vad
+`claim_next_job`, app/jobs/lease.py, plockar upp ovillkorligt), `PROVIDER_REQUEUE_STATUSES`
+(vad `_requeue_blocked_jobs`, app/worker.py, kör tillbaka till `pending`),
+`import_job_requeue_eligible()` och `import_job_still_needs_raw_blob()` (den senare är den
+policy migration 0020:s SQL implementerar i lås). Både `claim_next_job`s och
+`_requeue_blocked_jobs`s SQL bygger nu sina `WHERE`-villkor från dessa konstanters faktiska
+strängvärden (`ANY(:claimable_statuses)`/`ANY(:requeue_statuses)`) istället för hårdkodade
+literaler — inga dubbla statussträngar kvar i worker/lease-lagret. Testet importerar nu
+`import_job_still_needs_raw_blob()` direkt istället för att skriva om policyn för hand.
+
+**4. Felräknad testsumma.** Pass 24:s registerinlägg skrev "127 dedikerade S1A-tester totalt
+över 6 filer + 1 routertest" — men den egna nedbrytningen summerade till 40+9+17+12+2+46=126,
+inte 127; "127" var egentligen totalsumman INKLUSIVE routertestet, inte antalet dedikerade
+tester. Rättat i detta pass tillsammans med de nya testerna: se sammanfattningsblocket ovan
+för den korrekta 130+1=131-summan.
+
+Omverifiering: riktat regressionssvep (`test_memory_source_units.py`+`test_ensure_app_role.py`
++`test_source_purge.py`+`test_migration_roundtrip.py`+`test_worker.py`+
+`test_provider_verification.py`+`test_media_import.py`+`test_library_routes.py`+
+`test_library_import.py`+`test_memory_source_backfill.py`+`test_claims.py`+
+`test_storage_local_fs.py`) 287/287, bare-DB-migrations-round-trip (`upgrade head` →
+`downgrade -1` → `upgrade head`, genom migration 0020) mot en färsk `postgres`-superuser-
+databas (`lifeos_bare_check_p25`, ingen `mainai_app`-roll) ren. Hela backend-/security-/
+account-sviten och CI-verifiering på exakt slutlig head-SHA: se nästa uppdatering av detta
+register eller PR #31:s beskrivning för det slutgiltiga resultatet. Grundaren var explicit:
+INGEN konto-integration, produktionsprofil, produktionsbackfill, merge eller deploy förrän en
+fräsch granskning godkänner detta.
+
+## Pass 24 (2026-07-30): PR #31 — SECURITY DEFINER-verifiering + mixed-version boot window stängt
+
+Grundaren bekräftade att Pass 23:s cross-owner-lösning var korrekt i sak, men hittade två
+kvarstående privilegieblockerare och begärde en policy-driftkontroll innan konto-integration
+ens skulle övervägas.
+
+**1. `s1a_privilege_policy.py` verifierade aldrig `pg_proc.prosecdef`.** Den kontrollerade
+ägare, `BYPASSRLS`, `search_path` och grants för varje S1A-funktion, men läste aldrig om
+funktionen faktiskt ÄR `SECURITY DEFINER`. En `ALTER FUNCTION ... SECURITY INVOKER` hade
+passerat ALLA andra kontroller tyst — och funktionen skulle då köra med ANROPARENS
+(`mainai_app`s) privilegier/RLS-scope istället för den ägande rollens, vilket tyst
+återinförde exakt den cross-owner-bugg Pass 23 stängde. `_FUNCTIONS`-listan utökades till
+4-tupler med en `expected_return_type`; policyn kräver nu `prosecdef = true`, rätt
+returtyp och `plpgsql` som språk för varje hanterad funktion, och boot-verifieringen
+misslyckas högljutt om något av detta inte stämmer. Verifierat med en RIKTIG
+`ALTER FUNCTION public.storage_key_still_referenced_global(text) SECURITY INVOKER` mot
+databasen — `apply_and_verify` misslyckas, återställdes till `SECURITY DEFINER`, passerar
+igen. Ett separat test verifierar att en felmonkeypatchad förväntad returtyp (text istället
+för boolean) upptäcks, inte tyst accepteras.
+
+**2. Ett "mixed-version boot window" mellan migration 0019 och 0020.** `s1a_objects_exist()`
+kräver nu ALLA S1A-objekt, inklusive migration 0020:s funktion. `ensure_app_role.py` gjorde
+`GRANT ALL ON ALL TABLES` → kontrollerade `s1a_objects_exist()` → smalnade av ENDAST om sant
+→ commitade. Vid en rullande driftsättning där databasen fortfarande är på 0019 men en
+`RUN_MIGRATIONS=false`-worker kör kod som redan känner till 0020, är grinden False ENBART
+för att 0020:s funktion saknas — så `ensure_app_role` hoppade över omsmalningen HELT
+(inklusive de 0019-objekt som FANNS och redan var smala), och den breda `GRANT ALL`
+committades som bestående tillstånd. En äldre backend-instans kunde då fortsätta betjäna
+trafik genom den nu breddade delade `mainai_app`-rollen.
+
+Löst genom en `require_complete`-flagga genom `apply_privilege_policy()`:
+`ensure_app_role.py` (varje boot) anropar den nu med `require_complete=False` —
+omsmalnar OVILLKORLIGT vilken delmängd av skyddade tabeller/funktioner som än existerar just
+nu, i SAMMA transaktion som sin egen `GRANT ALL`, medan ett legitimt saknat FRAMTIDA objekt
+(före sin egen migration) inte längre blockerar omsmalningen av det som redan finns.
+`apply_runtime_privileges.py` (körs efter `alembic upgrade head`) behåller
+`require_complete=True` och vägrar committa NÅGOT om det aktuella head-objektsettet är
+ofullständigt — om databasen redan påstår sig vara på revision 0020 men funktionen saknas,
+misslyckas den utan att committa breda privilegier.
+
+**Tre nya testscenarier (en kombinerad testfunktion mot den delade sessions-scopade
+testdatabasen, med samma `try/finally: återställ till head`-disciplin som
+`test_migration_roundtrip.py`):** A — migrera databasen till 0019, kör den nya
+`ensure_app_role`-logiken (som redan känner till 0020), verifiera att
+`memory_source_units`/`document_source_units`/`lifecycle_events` fortfarande har exakt minsta
+privilegium och att INGEN bred grant committerades trots den saknade 0020-funktionen; B —
+simulera en `RUN_MIGRATIONS=false`-worker på 0019, `apply_runtime_privileges` MÅSTE
+misslyckas eftersom aktuellt head saknas, men privilegietillståndet på 0019-tabellerna
+förblir smalt; C — uppgradera till 0020, `apply_runtime_privileges` passerar och beviljar
+`EXECUTE` på exakt `public.storage_key_still_referenced_global(text)`.
+
+**Schema-kvalificering överallt:** `CREATE OR REPLACE FUNCTION
+public.storage_key_still_referenced_global(...)`, motsvarande `REVOKE`/`DROP FUNCTION` i
+migration 0020, och `blob_references.py`s anropande SQL — ingen funktionsupplösning ska
+någonsin bero på anropande sessions `search_path`.
+
+**Policy-driftkontroll:** migration 0020:s SQL hårdkodar samma statussträngar som Pythons
+`RESUMABLE_INDEX_STATUSES` (`app.models.document`) — SQL kan inte importera en Python-mängd,
+så det enda skyddet mot att de glider isär är ett uttömmande test som jämför OBSERVERAT
+SQL-beteende mot Python-kontraktet för varje nuvarande enum-värde. Två nya tester i
+`test_source_purge.py` itererar över varje `IndexStatus`- respektive `ImportJobStatus`-värde
+och jämför `storage_key_still_referenced_global()`s faktiska purge-blockeringsbeslut mot
+kontraktet — dessa misslyckas automatiskt nästa gång Python-listan ändras utan en
+motsvarande migrations-/SQL-uppdatering.
+
+**`test_migration_roundtrip.py`s schemasnapshot fördjupades ytterligare** (Pass 23 lade bara
+till namn+signatur): varje funktions fingeravtryck inkluderar nu också returtyp,
+`prosecdef`, `proconfig` (search_path), språk, och en md5 av `pg_get_functiondef()` (hela den
+kanoniska CREATE-satsen, kroppen inkluderad) — så "schemat återställdes exakt" faktiskt
+betyder att SECURITY-egenskaperna kom tillbaka också, inte bara att en likadant namngiven
+funktion dök upp igen.
+
+Omverifiering: riktat regressionssvep (`test_source_purge.py`+`test_ensure_app_role.py`+
+`test_memory_source_units.py`+`test_migration_roundtrip.py`+`test_library_routes.py`+
+`test_library_import.py`+`test_memory_source_backfill.py`+`test_claims.py`+
+`test_storage_local_fs.py`) 227/227, hela backend-/security-/account-sviten 682 passed/1
+avsiktligt överhoppad/0 failed (210.04s, exakt +5 över Pass 23:s 677), bare-DB-migrations-
+round-trip (`upgrade head` → `downgrade -1` → `upgrade head`, genom migration 0020) mot en
+färsk `postgres`-superuser-databas (`lifeos_bare_check_p24`, ingen `mainai_app`-roll) ren.
+Tre separata, avgränsade commits (privilegiepolicy/mixed-version-boot-window-fix +
+schema-kvalificering; tester; detta registerinlägg), pushade — kod-/testhead `6746da3`,
+docs-head `794aea7`. **CI verifierad grön ("All required checks passed", `conclusion:
+success`) på exakt head-SHA `794aea7` direkt via GitHubs check-runs-API** — alla obligatoriska
+jobb (backend unit/integration, konto-livscykel, RLS/session-security, E2E×2,
+migrationskontroll, frontend) `success`. PR #31:s beskrivning uppdaterad till att matcha
+(Round 11/Pass 24, korrigerade testantal 127+1=128, ny "Verified, not assumed"-sektion).
+Grundaren var explicit: INGEN konto-integration, produktionsprofil, produktionsbackfill,
+merge eller deploy förrän en fräsch granskning godkänner detta.
+
+## Pass 23 (2026-07-30): PR #31 — cross-owner RLS-lucka i blobreferenskontrollen stängd
+
+Grundaren bekräftade att Pass 22:s advisory-lock, audit-transaktion och statuspolicy var
+korrekta, men hittade en BLOCKERANDE lucka: `storage_key_still_referenced()` körde vanliga
+ORM-frågor mot `documents`/`knowledge_import_jobs` — båda tabellerna har `FORCE ROW LEVEL
+SECURITY` med ägar-scopade policies (`uploaded_by`/`owner_id = app.current_user_id`). Men
+bloblagringen är GLOBAL och innehållsadresserad: två olika ägares byte-identiska
+uppladdningar delar exakt samma `storage_key`. En källradering i ägare A:s session kunde
+därför strukturellt inte se ägare B:s levande dokument eller väntande/körande/blockerade
+importjobb som delade samma nyckel — A:s purge kunde radera en blob B fortfarande behövde,
+med RLS själv som anledningen till att faran var osynlig för just den kontroll som skulle
+förhindra den.
+
+**Lösningen är INTE `SET row_security = off`** i anropande session — enligt Postgres egen
+dokumentation (och enligt projektets egen tidigare etablerade precedens, migration 0019:s
+`transition_memory_source_admin`/`erase_owner_memory_admin`) ger den inställningen INTE en
+icke-undantagen roll någon åtkomst RLS annars skulle neka; den gör bara ett annars tyst
+filtrerat resultat till ett fel istället. Den enda riktiga vägen att se över alla ägare
+trots FORCE RLS är en roll som genuint har `BYPASSRLS` (eller är superuser) — exakt vad
+migrations-/adminrollen redan har, redan verifierad av `apply_runtime_privileges.py` för de
+två befintliga `*_admin`-funktionerna.
+
+**`migration 0020_storage_key_reference_check.py`** lägger till
+`storage_key_still_referenced_global(text) RETURNS boolean`:
+- `SECURITY DEFINER`, ägd av migrations-/adminrollen (verifierad `BYPASSRLS`, samma mönster
+  som de befintliga admin-funktionerna),
+- `SET search_path = pg_catalog`, alla relationer `public.`-kvalificerade,
+- kontrollerar över ALLA ägare: levande `documents.storage_key`, samt
+  `knowledge_import_jobs.source_storage_key` enligt EXAKT samma runnable/resumable-policy
+  som Pass 22 redan implementerade (pending/running/blocked, partial+blocked_count>0, eller
+  ett terminalt jobb med en levande resumable syskondokument — matchat mot
+  `app/worker.py`s faktiska `_reconcile_orphaned_documents`-logik, inte gissat),
+- returnerar ENDAST en boolean — inget ägar-, dokument- eller jobb-ID läcker någonsin
+  tillbaka till anroparen,
+- `REVOKE ALL FROM PUBLIC` i migrationen; `EXECUTE` till `mainai_app` ges ENDAST via
+  `backend/scripts/s1a_privilege_policy.py` (samma mönster som övriga S1A-funktioner —
+  aldrig en bokstavlig `GRANT ... TO mainai_app` i själva migrationen, eftersom det skulle
+  slå sönder "Backend — Alembic migration check"-jobbet i CI, vars databas aldrig skapar den
+  rollen).
+
+`s1a_privilege_policy.py`s `_FUNCTIONS`-lista fick en ny post — den ENDA posten som är BÅDE
+beviljad till `mainai_app` OCH kräver `BYPASSRLS`, medvetet: till skillnad från de
+ägar-scopade funktionerna behöver den se ALLA ägares rader (inget eget ägarskapstest); till
+skillnad från de rena admin-funktionerna MÅSTE `mainai_app` kunna anropa den (den körs från
+en vanlig ägar-scopad request, inte en admin-väg) — säkert eftersom den bara returnerar en
+boolean.
+
+`app/rag/blob_references.py::storage_key_still_referenced()` delegerar nu helt till denna
+SQL-funktion istället för att fråga de RLS-scopade tabellerna direkt.
+`acquire_storage_key_lock()` schema-kvalificerades (`pg_catalog.pg_advisory_xact_lock`/
+`pg_catalog.hashtextextended`) för konsekvens.
+
+**11 nya cross-owner-tester** (alla genom den RIKTIGA `mainai_app`-bundna sessionen, RLS
+inkluderat, INTE avstängt för testet): en annan ägares levande dokument, väntande/körande/
+blockerade/partial+blocked_count-importjobb, terminalt jobb med kontra utan resumable
+syskondokument, sista globala referensen försvinner och tillåter purge, `mainai_app` kan få
+en boolean över ägargränser men kan fortfarande inte läsa en annan ägares rader via en vanlig
+fråga i samma session, `PUBLIC` saknar `EXECUTE`, och en felkonfigurerad ägare utan
+`BYPASSRLS` upptäcks av `apply_runtime_privileges.py` (samma mönster som
+`test_memory_source_units.py`s befintliga `transition_memory_source_admin`-test).
+
+**En verklig bugg i testinfrastrukturen upptäcktes och åtgärdades under omverifieringen**:
+`tests/backend/test_migration_roundtrip.py`s schemasnapshot jämförde bara tabellkolumner och
+enum-etiketter — migration 0020 är rent funktions-additiv (ingen ny/ändrad tabell eller
+enum), så snapshotet var fullständigt blint för den. `downgrade -1` tog faktiskt bort
+funktionen, men "före"- och "efter downgrade"-snapshoten jämfördes identiska, vilket tyst
+slog ut testets egen `"downgrade -1 must actually change the schema, not silently no-op"`-
+assertion. Fixat genom att även fingeravtrycka `public`-schemats funktioner (namn +
+argumentsignatur), med undantag för funktioner ägda av en installerad EXTENSION
+(`pg_depend.deptype='e'` — pgvectors egna funktioner som `array_to_vector`/`avg(vector)`
+installeras i `public` men rörs aldrig av någon migrations upp/ner och ska inte räknas som
+kvarvarande applikationsschema efter en fullständig `downgrade base`).
+
+Omverifiering: `test_source_purge.py` 42/42, `test_migration_roundtrip.py` 2/2 (båda testerna,
+inklusive den striktare `downgrade base`-varianten), regressionssvep 92/92
+(`test_source_purge.py`+`test_migration_roundtrip.py`+`test_memory_source_units.py`+
+`test_ensure_app_role.py`), hela backend-/security-/account-sviten 677 passed/1 avsiktligt
+överhoppad/0 failed (208.21s, exakt +11 över Pass 22:s 666), bare-DB-migrations-round-trip
+(`upgrade head` → `downgrade -1` → `upgrade head`, inklusive migration 0020) mot en färsk
+`postgres`-superuser-databas ren. Tre separata, avgränsade commits (cross-owner-fix,
+cross-owner-tester, test-infrastruktur-fix), pushade. **CI verifierad grön ("All required
+checks passed", `conclusion: success`) på exakt head-SHA `ac92b36` direkt via GitHubs
+check-runs-API** — alla obligatoriska jobb (backend unit/integration, konto-livscykel,
+RLS/session-security, E2E×2, migrationskontroll — som kör exakt den fixade
+`test_migration_roundtrip.py` — frontend) `success`. PR-beskrivningen uppdaterad till att
+matcha.
+
+## Pass 22 (2026-07-30): PR #31 — ImportJob som blob-referens, upload/purge-race, audit-atomicitet
+
+Grundaren bekräftade att Pass 21:s tvåfasfix var korrekt och att testantalet 97 nu gick ihop
+(39+9+17+12+2+18=97), men fann två kvarstående, verkliga integrationsluckor innan
+konto-integration kunde påbörjas:
+
+**1. `ImportJob.source_storage_key` var inte en känd blob-referens.** `maybe_purge_blob()`
+(anropad av `retry_source_blob_purge()`) kontrollerade bara levande `Document.storage_key`-
+rader. Men den råa uppladdningen ett `ImportJob` håller kvar durabelt (`app/worker.py`s
+pollningsloop öppnar den själv, inte requesten som skrev den) delar samma content-adresserade
+`storage_key` som en identisk enskild fil. Scenario: en ny import lagrar sin råfil och väntar
+på workern; ett äldre, innehållsidentiskt dokument raderas; blobpurgen ser inget levande
+`Document` och raderar filen — trots att den väntande importjobbets `source_storage_key`
+fortfarande pekar på den.
+
+**Löst genom `app/rag/blob_references.py`** (ny, kanonisk, delad av både uppladdningsvägen och
+fas B): `storage_key_still_referenced()` kontrollerar nu även `ImportJob`-status mot de
+faktiska återupptagningsvägarna i `app/worker.py` — inte gissat:
+- `pending`/`running`/`blocked` blockerar alltid,
+- `partial` med `blocked_count > 0` blockerar (samma fråga som `_requeue_blocked_jobs`
+  använder, inklusive 2026-07-28-incidenten den dokumenterar),
+- ett terminalt jobb (`completed`/`partial`/`failed`) blockerar OCKÅ om någon av dess EGNA
+  levande `Document`-rader fortfarande sitter fast i `RESUMABLE_INDEX_STATUSES` — exakt samma
+  villkor `_reconcile_orphaned_documents` använder för att återställa jobbet till `pending`,
+  eftersom en enda ZIP-import kan producera flera dokument och radering av ett redan färdigt
+  syskon inte får förstöra bloben ett annat, fortfarande fastkört syskon behöver.
+- ett `cancelled`-jobb, eller ett terminalt jobb utan något fastkört dokument, blockerar inte.
+
+**2. TOCTOU-race mellan uppladdning och purge.** `POST /api/library/import` skriver bloben
+fysiskt till disk INNAN någon databasrad refererar den (content-addressing gör att nyckeln
+inte ens är känd förrän bytes är hashade) — ett samtidigt `retry_source_blob_purge()`-anrop
+kunde köra sin referenskontroll och radera filen i exakt det fönstret, innan `ImportJob`-raden
+committats.
+
+**Löst genom `acquire_storage_key_lock()`** (samma modul): ett transaktionsbundet Postgres
+advisory lock (`pg_advisory_xact_lock`, inte Redis/threading — fungerar mellan processer,
+frigörs automatiskt vid commit/rollback). Både uppladdningsvägen (efter `write_stream()`, före
+`ImportJob`-skapandet) och `retry_source_blob_purge()` tar samma lås före sin egen
+kontrollera-sedan-agera-sekvens — den som kommer först hinner committa eller rulla tillbaka
+helt innan den andra sidans kontroll ens körs. Uppladdningsvägen verifierar att bloben
+fortfarande finns EFTER låset tagits; om den försvunnit misslyckas uppladdningen med 409 utan
+att skapa någon `ImportJob`-referens till en saknad fil (det finns ingen säker väg att skriva
+om originalbytes i efterhand — strömmen är redan fullständigt läst och kastad).
+
+**3. Revisionsposten skrevs i en separat, senare commit.** Båda routrarna körde
+`purge_source()` (redan committad) och anropade DÄREFTER `record_audit()`, som gör sin EGEN
+commit. Ett fel i den andra committen kunde ge klienten ett 500-svar trots att dokumentet
+redan var permanent raderat — ett omförsök gav sedan 404 ("redan raderat").
+
+**Löst genom att flytta revisionsskrivningen in i fas A:s egen transaktion:**
+`app/audit.py::record_audit()` fick en `commit: bool = True`-parameter (`False` lägger bara
+till raden i sessionen, utan egen commit) och en `ip_address: str | None`-parameter separat
+från `request: Request | None`, så att domänlagret (`purge_source()`) kan ta emot ett neutralt
+IP-strängvärde routern extraherat, istället för att importera `fastapi` självt.
+`purge_source()` skriver nu `source_purged`-revisionen med `commit=False` precis innan sin
+egen `db.commit()` — ett fel där rullar tillbaka HELA fas A, inte bara revisionsraden.
+
+**14 nya tester**: varje relevant `ImportJob`-status som blockerar/inte blockerar blobpurge
+(pending/running/blocked/partial±blocked_count), det icke-uppenbara fallet med ett terminalt
+jobb + ett fastkört syskondokument (kontra ett terminalt jobb utan något fastkört), att en
+orelaterad nyckel aldrig blockerar en annan, ett bevis på att `maybe_purge_blob()` delegerar
+till den delade policyn istället för att duplicera den, en RIKTIG tvåtrådars/tvåkopplings-
+reproduktion av upload/purge-racet via det faktiska Postgres-advisory-låset (inte en mockad
+timer), ett HTTP-nivå-409-bevis i `test_library_routes.py`, ett tvingat revisionsfel som
+bevisligen rullar tillbaka HELA fas A (dokument/chunks/MSU oförändrade, `storage.delete()`
+aldrig anropad), och exakt en revisionsrad per HTTP-rutt vid en lyckad radering.
+
+Omverifiering: `test_source_purge.py` 31/31, regressionssvep över `test_library_routes.py` +
+`test_library_import.py` + `test_memory_source_units.py` + `test_memory_source_backfill.py` +
+`test_claims.py` + `test_storage_local_fs.py` = 200/200, hela backend-/security-/account-
+sviten 666 passed/1 avsiktligt överhoppad/0 failed (221.49s, exakt +14 över Pass 21:s 652),
+bare-DB-migrations-round-trip mot en färsk `postgres`-superuser-databas ren (ingen ny migration
+— ren applikationskod). Tre separata, avgränsade commits (`94fb325` blob-referens/lås,
+`c76af35` tester, `56e74e3` registerdokumentation), pushade. **CI verifierad grön ("All
+required checks passed", `conclusion: success`) på exakt head-SHA `56e74e3` direkt via GitHubs
+check-runs-API** — alla obligatoriska jobb (backend unit/integration, konto-livscykel,
+RLS/session-security, E2E×2, migrationskontroll, frontend) `success`. PR-beskrivningen
+uppdaterad till att matcha.
+
+## Pass 21 (2026-07-30): PR #31 — purge_source() delad i atomisk DB-fas + återförsökbar blob-fas
+
+Grundaren bekräftade att den gemensamma raderingsvägen och lifecycle-ordningen i Pass 20 var
+korrekt implementerad, men hittade en verklig blockerare: `purge_source()`s egen docstring
+påstod att HELA operationen (databas + filsystem) var atomisk, vilket aldrig stämde.
+`LocalFilesystemStorage.delete()` gör en riktig, omedelbar `unlink()` UTAN ångra-möjlighet,
+men kördes FÖRE `purge_source()`s `db.commit()`. Felscenario: (1) filen tas bort från disk,
+(2) `db.commit()` misslyckas, (3) `db.rollback()` återställer dokumentet/chunks/aktiva MSU-
+rader, (4) dokumentet är åter levande i databasen men originalfilen är permanent borta.
+Grundaren påpekade även att statusen `failed` beskrevs som återförsökbar men att
+`purge_source()` bara accepterade dokument med `deleted_at IS NULL` — ett nytt anrop på ett
+redan (misslyckat) raderat dokument gav bara `SourcePurgeNotFoundError`/404, ingen verklig
+återförsöksväg fanns.
+
+**Löst genom att dela operationen i två tydligt separata faser:**
+- **Fas A — `purge_source()`, verkligen atomisk, endast databas.** Låser dokumentraden,
+  purgar varje `MemorySourceUnit`, hårdraderar `DocumentChunk`-raderna, soft-deletar
+  dokumentet, sätter `deletion_status='pending'` (eller `'purged'` direkt om dokumentet
+  saknar `storage_key` — inget att purga) — committar, eller vid fel: rullar tillbaka till ett
+  läge där INGENTING ändrats och originalbloben fortfarande ligger kvar exakt där den var.
+  `storage.delete()` anropas ALDRIG någonstans i den här fasen.
+- **Fas B — `retry_source_blob_purge()`, ny, idempotent, oberoende återförsökbar funktion.**
+  Körs bara mot ett dokument fas A REDAN committat som soft-deletat. Kontrollerar på nytt om
+  någon annan levande dokumentrad delar samma innehållsadresserade `storage_key` (samma
+  `maybe_purge_blob`-logik som tidigare kördes inline i fas A), och antingen lämnar
+  `pending` (fortfarande delad) eller anropar `storage.delete()` och committar
+  `purged`/`failed` i en egen, separat transaktion. Säker att anropa hur många gånger som
+  helst: `LocalFilesystemStorage.delete()` använder `Path.unlink(missing_ok=True)`, så en
+  omradering av en redan borttagen fil är ett no-op, inte ett fel.
+
+`purge_source()` gör fortfarande ETT direkt bästa-försök på fas B omedelbart efter att fas A
+committat (den vanliga vägen purgar alltså fortfarande bloben i samma request) — men ett
+fas B-fel fångas, loggas, och rullar ALDRIG tillbaka den redan beständiga fas A-purgen.
+`retry_source_blob_purge()` är inte kopplad till någon ny HTTP-rutt i den här PR:n
+(medvetet avgränsat, en framtida ops/admin-trigger).
+
+**3 nya tester** bevisar det exakta felscenariot grundaren beskrev: (1) ett DB-commitfel under
+fas A lämnar bloben orörd OCH bevisar att `storage.delete()` aldrig ens anropades (spårat via
+en anropsräknande patch, inte bara "filen finns kvar"), (2) en lyckad fas A + ett lagringsfel
+lämnar `deletion_status='failed'` med DB-purgen intakt, och en efterföljande
+`retry_source_blob_purge()` lyckas, (3) den exakta racen — fysisk radering lyckas men
+statuscommitten misslyckas — reproducerad direkt: filen är bevisligen borta innan den
+simulerade commitfelet, ett nytt återförsök felar inte på den redan saknade filen och når
+`purged`. Det befintliga delad-blob-testet uppgraderades till att använda en riktig fil på
+disk och verifiera både överlevnad (fortfarande refererad) och faktisk radering (via
+`get_storage().exists()`) efter att den sista levande referensen försvunnit.
+
+Omverifiering: `test_source_purge.py` 18/18, ingen regression i övriga S1A-filer eller
+`test_storage_local_fs.py` (186 tester tillsammans), hela backend-/security-/account-sviten
+652 passed/1 avsiktligt överhoppad/0 failed (211.68s), bare-DB migrations-round-trip mot en
+färsk `postgres`-superuser-databas ren (ingen ny migration — ren applikationskod). Tre
+separata, avgränsade commits (`985da3b` tjänst, `027aa37` tester, `a388507`
+registerdokumentation), pushade. **CI verifierad grön ("All required checks passed",
+`conclusion: success`) på exakt head-SHA `a388507` direkt via GitHubs check-runs-API** — alla
+obligatoriska jobb (backend unit/integration, konto-livscykel, RLS/session-security, E2E,
+migrationskontroll, frontend) `success`. PR-beskrivningen uppdaterad till att matcha (se PR
+#31 direkt, inte denna sammanfattning, för den fullständiga aktuella texten).
+
+## Pass 20 (2026-07-30): PR #31 — delad purge_source()-tjänst för library.py och documents.py
+
+Grundaren godkände Pass 19:s tre kodfixar (rollback, argumentvakter, version-integritet) som
+korrekta, påpekade att den fjärde punkten (produktionsrapportering) skulle beskrivas som
+DESIGNAD, inte implementerad, och att PR-beskrivningens "96 tests" inte gick ihop med sin egen
+uppräkning. Efter att PR-beskrivningen rättats (se ovan) beställde grundaren nästa isolerade
+S1A-slice: en gemensam `purge_source()`-tjänst enligt §4.8:s "En gemensam purge-tjänst",
+använd av BÅDA raderingsvägarna.
+
+**`app/rag/source_purge.py::purge_source(db, document_id, owner_id)`** — en domänservice, inte
+routerlogik:
+- Verifierar dokumentägarskap explicit (`Document.uploaded_by == owner_id`), utöver RLS —
+  stänger en tidigare odokumenterad lucka i `documents.py`s gamla implementation, som aldrig
+  kontrollerade ägarskap alls.
+- Låser `Document`-raden (`FOR UPDATE`) — den verkliga serialiseringspunkten mot samtidiga
+  raderingsförsök av samma källa.
+- För varje `document_source_units`-rad som hör till dokumentet: en `active`/`revoked`
+  `memory_source_units`-rad övergår till `purged` via `transition_own_memory_source()` (aldrig
+  en direkt `UPDATE`), en redan-`purged` rad hoppas över (idempotent no-op — ett andra
+  `purged -> purged`-anrop skulle annars få funktionen att resa "illegal transition").
+- FÖRST DÄREFTER hårdraderas `DocumentChunk`-raderna — ordningen är inte godtycklig:
+  `trg_dsu_guard_update` (migration 0019) tillåter bara att `document_source_units.chunk_id`
+  nollas (vilket `DocumentChunk`s `ON DELETE SET NULL` utlöser) när förälderns
+  `lifecycle_status` INTE längre är `active`. Ett direkt bevis på detta lades till som ett eget
+  test: att radera chunken FÖRE purge av en `active` förälder avvisas av triggern med "chunk_id
+  cannot be cleared while parent is active".
+- `KnowledgeClaim`/`memory_source_units`/`document_source_units`/
+  `memory_source_lifecycle_events`-rader raderas ALDRIG av den här funktionen — en
+  medveten, grundarbekräftad avvikelse från §4.8:s ursprungliga per-dokument-purge-steg (som
+  skulle ha raderat claims), specifikt för källradering (till skillnad från full
+  kontoradering, som förblir `erase_owner_memory()`s ansvar, orört här).
+- Ett dokument utan några `document_source_units`-rader alls (aldrig backfillat/dual-writat)
+  hanteras via `legacy_without_memory_source` i resultatet — ingen source unit fabriceras.
+- Atomisk: explicit `try/except/rollback` (samma disciplin som `account.py`s `delete_account`),
+  återanvänder befintlig `maybe_purge_blob()`/referensräkningslogik oförändrad.
+
+**Router-omskrivning**: `library.py`s `delete_source` är nu en tunn wrapper (validerar
+`confirm`, anropar tjänsten, loggar audit). `documents.py`s `delete_document` byter från ett
+hårt `db.delete(document)` till samma tjänst — en AVSIKTLIG beteendeförändring: migration
+0019:s `document_source_units.document_id`-FK (ingen `ON DELETE`-åtgärd) skulle annars
+RESTRICT-blockera den gamla hårda raderingen så fort ett memory_source_units-objekt finns för
+dokumentet. Ingen dubblerad cleanup-kod kvar i någon router.
+
+**15 nya tester** (`test_source_purge.py`) täcker exakt grundarens 15-punktslista: aktiv/
+revoked/redan-purgad källa, flera claims som delar en källa, flera chunks+en document_record-
+källa i samma dokument, claims+lifecycle-events överlever, content/hash/version nollas,
+chunk_id nollas först efter purge (plus den omvända regressionen: fel ordning avvisas av
+triggern), cross-owner nekas, dokument utan memory source (legacy), ett simulerat DB-fel som
+rullar tillbaka allt, en blob som delas mellan två dokument som INTE raderas, en
+lagringsfel-simulering som lämnar en återförsökbar `deletion_status`, och ett HTTP-nivå-test
+som bevisar att båda `/api/library`- och `/api/documents`-rutterna producerar identiska utfall
+via samma tjänst.
+
+Omverifiering: `test_source_purge.py` 15/15, ingen regression i `test_library_routes.py`
+(31/31) eller övriga S1A-filer (173/173 tillsammans), hela backend-/security-/account-sviten
+649 passed/1 avsiktligt överhoppad/0 failed (258.73s), bare-DB migrations-round-trip mot en
+färsk `postgres`-superuser-databas ren (ingen ny migration i detta pass — ren applikationskod).
+Två separata, avgränsade commits (`007a136` tjänst+routrar, `8352fcf` tester), pushade. CI-
+kontroll mot exakt ny head — se PR-beskrivningen för slutstatus.
+
+## Pass 19 (2026-07-29): PR #31 — fyra integrationsproblem i backfill/dual-write, alla åtgärdade
+
+Grundaren bekräftade att Pass 18:s backfill-/dual-write-kärna (fail-closed-exkludering,
+atomisk commit, `FOR UPDATE SKIP LOCKED`, MSU-skapande efter första parsade claimet,
+providerfel/tom-output skapar ingen MSU) i stort sett var korrekt, men hittade tre verkliga
+integrationsproblem plus ett fjärde krav innan produktionskörning:
+
+1. **`library_import.py` svalde dual-write-fel utan rollback.** Båda anropen till
+   `extract_claims_for_document` fångade `Exception` och gjorde bara `pass` — nu när
+   extraction även flushar MSU/DSU-rader kunde ett fel efter flush men före commit lämna
+   ocommittade writes i sessionen, som ett SENARE `db.commit()` i samma worker-session kunde
+   råka committa, eller lämna sessionen i `PendingRollback`-läge. Åtgärdat: båda call sites
+   (`_import_one_file` och `_resume_incomplete_document`) kör nu `db.rollback()` + loggar
+   innan de fortsätter — indexeringen (redan committad) påverkas inte, claim-extraktion
+   förblir best-effort. Två nya integrationstester driver HELA `run_import_job`-vägen (första
+   importen respektive återupptagen import via en dokumentrad fastnad i en
+   `RESUMABLE_INDEX_STATUSES`-status) med en fejkad `extract_claims_for_document` som
+   verkligen flushar en MSU/DSU och SEDAN kraschar — bevisar att inga MSU/DSU/claims
+   committas, att indexeringen består, att sessionen kan göra en ny fråga/commit efteråt, och
+   att importen ändå rapporteras `indexed`.
+2. **Backfillen kunde fortfarande loopa oändligt.** `_apply()`s `for _ in range(batch_size)`
+   blir en tom loop om `batch_size <= 0` — `exhausted` förblir `False` för evigt och den yttre
+   `while`-loopen (med `max_batches=None`, det gamla standardvärdet) fortsätter i all
+   oändlighet. Exakt samma felklass som redan kostat timmar en gång. Åtgärdat: `batch_size`
+   och `max_batches` valideras nu explicit (`ValueError` vid `<= 0`), och standardvärdet för
+   `max_batches` är nu ett ändligt `DEFAULT_MAX_BATCHES = 10` istället för `None` — en
+   anropare som verkligen vill köra klart måste uttryckligen skicka `max_batches=None`. Nya
+   tester bevisar både valideringen och att standardkörningen faktiskt är begränsad.
+3. **Dual-write verifierade aldrig `version_id`.** `extract_claims_for_document` skrev en
+   anropar-given `version_id` direkt på varje claim utan att kontrollera att versionen
+   strukturellt hör till samma dokument/ägare — `knowledge_versions` har bara en enkel FK mot
+   `documents.id`, ingen kompositkoppling som `memory_source_units` har. Åtgärdat: en ny
+   `ClaimExtractionIntegrityError` reser sig, INNAN något providersanrop eller någon skrivning,
+   om `document.uploaded_by != owner_id` eller om en given `version_id` inte har
+   `source_id == document.id` och `owner_id == owner_id`. Fyra nya tester: version från ett
+   annat dokument, version från en annan ägare, dokument som inte ägs av den givna
+   `owner_id`, och den positiva motsvarigheten (en verkligt matchande version accepteras) —
+   alla med en providermock som reser ett `AssertionError` om den någonsin anropas.
+4. **Beständig produktionsrapportering — dokumenterad, INTE byggd.** Grundaren krävde att en
+   riktig produktionskörning ska ha ett beständigt run-ID, status, räknare och
+   claim-specifika fel/retries innan den körs — vanliga processloggar räcker inte. Detta är nu
+   skrivet som ett explicit designavsnitt i `app/rag/memory_source_backfill.py`s
+   moduldocstring, som pekar mot den redan tidigare identifierade `memory_processing_jobs`-
+   planen (`app/routers/admin.py`s `trigger_claim_type_backfill`-docstring) istället för en ny
+   fristående mekanism. Medvetet INTE byggd i den här PR:n — en egen, separat avgränsad PR
+   krävs innan någon RIKTIG produktionsbackfill-körning, per isoleringsprincipen.
+
+Omverifiering: `test_memory_source_backfill.py` 17/17, `test_claims.py` 51/51,
+`test_library_import.py`s nya tester 2/2, hela backend-/security-/account-sviten 634 passed/1
+avsiktligt överhoppad/0 failed (264.86s), bare-DB migrations-round-trip mot en färsk
+`postgres`-superuser-databas ren. Tre separata, avgränsade commits (`64b7a39` library_import-
+rollback, `a8e6f11` backfill-guards+designnot, `2bd3bcf` dual-write version-integritet),
+pushade. CI-kontroll mot exakt ny head — se PR-beskrivningen för slutstatus.
+
+## Pass 18 (2026-07-29): PR #31 — deterministisk backfill + dual-write, en verklig oändlig-loop-bugg hittad och fixad under egen testning
+
+Grundaren godkände Pass 17:s grundlager ("provenance-grundlagret... tillräckligt strikt för
+att gå vidare med backfill och dual-write") och beställde de två nästa S1A-slicerna:
+
+1. **`app/rag/memory_source_backfill.py`** (ny modul): owner-scopad, batchad, idempotent,
+   restart-säker backfill av `knowledge_claims.memory_source_id IS NULL`. Resolveringsordning
+   exakt enligt §4.8: giltig `chunk_id` → `document_chunk`/`exact` (text läst från
+   `DocumentChunk.text`), annars giltig `version_id` → `document_version`/`degraded`, annars
+   `document_record`/`missing`. En `chunk_id`/`version_id` som är SATT men strukturellt
+   ogiltig (fel ägare/dokument) failar closed — faller ALDRIG vidare till nästa nivå (det vore
+   precis den gissning §4.8 förbjuder). Konkurrenssäkert via `SELECT ... FOR UPDATE SKIP
+   LOCKED`, en claim i taget, committad atomiskt med sin source unit.
+2. **Dual-write i `app/rag/claims.py`s enda claim-skrivväg**: för varje chunk som producerar
+   minst en claim, en `document_chunk`-MSU med chunkens verkliga text, samma
+   `memory_source_id` på alla claims från den chunken, atomiskt med claim-inserten. En chunk
+   utan claims (providerfel eller tom extraktion) får ingen source unit — ingen orphan MSU
+   möjlig.
+
+**Verklig bugg hittad under egen testning, inte i granskning:** den första versionen av
+`_apply()`s huvudloop exkluderade aldrig en permanent misslyckad claim (fail-closed-mismatch
+eller `MemorySourceIdentityConflict`) från omval — med standardvärdet `max_batches=None`
+valde loopen om SAMMA claim för evigt. Upptäcktes konkret: en bakgrundskörning av det nya
+testet för denna exakta situation (en enda alltid-mismatchande claim, inget `max_batches`)
+gick från att verka "hänga tyst" till att efter ~2h46m visa sig faktiskt köra oändligt (CPU-
+bunden, INTE en I/O-väntan eller en förlorad process) — verifierat konkret med `ps -eo
+pid,etime,stat,cmd`, inte antaget. Rättat genom att exkludera en misslyckad claims id från
+återval för RESTEN av det anropet (samma mönster som `backfill_claim_types`s `failed_ids`) —
+claimen är fortfarande en giltig kandidat vid nästa SEPARATA anrop. Efter fixen: alla 14
+backfill-tester gröna på 8.92s, inklusive exakt den tidigare hängande situationen.
+
+**Full omverifiering (i förgrunden, inte bakgrunden, efter incidenten ovan):**
+- `test_memory_source_backfill.py`: 14/14 gröna.
+- `test_claims.py` (S1A dual-write-tester + befintliga): 47/47 gröna.
+- `test_memory_source_units.py` (ingen regression): 39/39 gröna.
+- Hela `tests/backend` + `tests/security` + `tests/account`: **625 passed, 1 avsiktligt
+  överhoppad**, 0 failed, 240.51s.
+- `alembic upgrade head` / `downgrade -1` / `upgrade head` mot en färsk `postgres`-
+  superuser-databas (migrationsfilen refererar aldrig `mainai_app` vid namn, verifierat med
+  `grep`) — rent round-trip.
+
+Två separata, avgränsade commits (`1fa7619` backfill, `7c60102` dual-write), pushade till
+`claude/s1a-memory-source-implementation`. CI-kontroll mot exakt head `7c60102` pågick vid
+tidpunkten detta pass skrevs — se PR-beskrivningen för slutstatus.
+
+## Pass 17 (2026-07-29): PR #31 — fjärde granskningsrundan hittade 2 kvarstående problem, alla åtgärdade
+
+Grundaren bekräftade Pass 16:s tre fixar (source_role='unknown', document_version aldrig
+exact, document_chunk exact bunden till verklig chunktext, actor_kind borttaget) som korrekta,
+men granskade en gång till och hittade 2 sista problem — samma explicita instruktion att
+INTE fortsätta till backfill/dual-write:
+
+1. **Hashen var fortfarande självdeklarerad vid rå DB-insert**: triggern verifierade att
+   `content_text` matchade `document_chunks.text`, men läste aldrig `content_hash` och
+   räknade aldrig ut SHA-256 själv — en rå insert (mainai_app har direkt `INSERT`) kunde
+   alltså använda korrekt chunktext men lagra t.ex. 64 nollor som hash, vilket format-/
+   versions-CHECK:arna fortfarande accepterade. Åtgärdat: `trg_dsu_validate_fields` beräknar
+   nu själv `encode(sha256(convert_to(<verklig chunktext>, 'UTF8')), 'hex')` med Postgres
+   egen inbyggda `sha256(bytea)` (pg_catalog, PG16+, inget pgcrypto-beroende) och kräver att
+   `content_hash` matchar exakt, samt att `content_hash_version = 'sha256-utf8-v1'`. Ny test
+   bevisar att korrekt chunk_id + korrekt text + en felaktig men formatgiltig 64-hex-hash
+   avvisas vid commit.
+2. **Actor-loggningen saknade en verklig founder-kontroll**: `transition_own_memory_source`
+   loggade alltid `actor_type='founder'`, men verifierade bara att anroparen ÄGER raden —
+   `users`-tabellen har även `admin`/`member` (för närvarande oåtkomliga via appens
+   registreringsflöde, men kvar i schemat för den framtida UserAI-fasen). Åtgärdat:
+   funktionen slår nu upp `users.role` för anroparen och NEKAR anropet om det inte är exakt
+   `'founder'`, istället för att felmärka en member/admins handling som founder-utförd. Ny
+   test bevisar att en `member` som äger en source ändå nekas.
+
+Omverifiering: migrations-round-trip mot en färsk `postgres`-superuser-databas UTAN
+`mainai_app`-roll; 603/604 gröna i hela backend-/security-/account-sviten (1 avsiktligt
+överhoppad kapacitetstest); grön CI (18/18, "All required checks passed") på exakt head-SHA
+`32a2c65`, verifierat direkt mot GitHubs check-runs-API. Två separata, avgränsade commits.
+PR-beskrivningen på GitHub uppdaterad med "Review Round 3/4" och aktuella testsiffror.
+
+## Pass 16 (2026-07-29): PR #31 — tredje granskningsrundan hittade 3 provenance-problem, alla åtgärdade
+
+Grundaren bekräftade Pass 15:s fem fixar som korrekta, men granskade en gång till (medan
+migrationen fortfarande är odriftsatt) och hittade 3 nya problem:
+
+1. **En `exact`-snapshot var inte bunden till verklig källtext**: Python-hjälparen beräknade
+   SHA-256 av caller-supplied `content_text`, vilket bara bevisar att hashen matchar den
+   inskickade texten — inte att texten faktiskt kommer från den länkade `chunk_id`.
+   Dessutom tillät DSU-triggern `document_version + exact` trots att `KnowledgeVersion`
+   saknar en kanonisk textkolumn (bara checksum/metadata). Åtgärdat: `trg_dsu_validate_fields`
+   verifierar nu, för `document_chunk + exact`, att förälderns `content_text` matchar
+   `document_chunks.text` för den länkade chunk_id:n. `document_version` får aldrig längre
+   vara `exact` — begränsad till `degraded`/`missing`, precis som `document_record` redan var.
+2. **`content_hash_version` var fri och oskyddad av update-guarden**: ny CHECK
+   `ck_msu_content_hash_version_matches_hash` (NULL endast tillsammans med `content_hash`,
+   annars exakt `'sha256-utf8-v1'`), och fältet ingår nu i `trg_msu_guard_update`s
+   immutabilitetsjämförelse.
+3. **Owner-funktionen kunde märka användaråtgärder som `system`**: `transition_own_memory_
+   source` tog emot ett fritt `p_actor_kind`. Åtgärdat: parametern helt borttagen — funktionen
+   loggar nu ovillkorligt `actor_type='founder'` (härlett från att den enda vägen in är den
+   egna ägarkontrollen). `downgrade()`s `DROP FUNCTION`-signatur uppdaterad i samma commit.
+
+Omverifiering: migrations-round-trip; 601/602 gröna i hela backend-/security-/account-sviten;
+grön CI (18/18) på exakt head-SHA `6b3820a`. Under körningen upptäcktes och fixades även en
+riktig bugg i en BEFINTLIG test (`test_get_or_create_memory_source_unit_rejects_mismatched_
+locator`) som det nya content_text-kravet avslöjade: testet skapade en chunk med text "Text A"
+men byggde sin locator med hjälpfunktionens orelaterade default-text, så de aldrig matchade —
+harmlöst innan denna runda (inget kontrollerade det), ett riktigt fel nu.
+
+## Pass 15 (2026-07-29): PR #31 — andra granskningsrundan hittade 5 kvarstående problem, alla åtgärdade
+
+Grundaren bekräftade att Pass 14:s 8 fynd var korrekt åtgärdade, men granskade koden en gång
+till (medan migrationen fortfarande är odriftsatt och lätt att ändra) och hittade 5 nya
+problem — med samma explicita instruktion att INTE fortsätta till backfill/dual-write ännu:
+
+1. **`source_role` kunde bli en falsk auktoritetsclaim**: `mainai_app` har direkt `INSERT` på
+   både MSU och DSU, och databasen hindrade inte att ett dokument skapades med
+   `source_role='founder'` — permanent, eftersom fältet är immutable. Åtgärdat: DSU-
+   valideringstriggern kräver nu att förälderns `source_role` är exakt `'unknown'` för alla
+   `document_source_units`-rader. Ny test bevisar att `source_role='founder'` avvisas.
+2. **Downgrade lämnade kvar en global säkerhetsändring**: migrationen körde
+   `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, men `downgrade()` kunde inte återställa det
+   säkert. Åtgärdat: den raden är helt borttagen ur migrationen — den levde redan dubbelt i
+   `apply_runtime_privileges.py`, som är den enda platsen den nu körs.
+3. **Privilegiehärdningen var varken atomisk eller ägarverifierad**: skriptet använde
+   `autocommit=True` och kontrollerade bara "inte `mainai_app`", inte exakt vilken roll som
+   faktiskt ägde tabellerna/funktionerna. Åtgärdat: hela REVOKE/GRANT/verifiering extraherad
+   till en delad `backend/scripts/s1a_privilege_policy.py`, körd i EN transaktion, commit
+   endast om verifieringen är helt grön. `ensure_app_role.py` applicerar samma policy i SAMMA
+   transaktion som sin egen breda `GRANT ALL`, närhelst S1A-objekten redan finns — stänger
+   fönstret mellan `ensure_app_role` och `apply_runtime_privileges` där breda rättigheter
+   annars kunde bli det committade sluttillståndet vid en krasch. Ny test tvingar fram ett
+   fel i omsmalningen och bevisar att HELA transaktionen (inklusive den breda GRANT-satsen)
+   rullas tillbaka, inte bara det misslyckade steget.
+4. **Lifecycle-CHECK:arna var inte fullständigt koherenta**: en `active`-rad kunde t.ex. bära
+   ett kvarglömt `revocation_reason`. Åtgärdat: `ck_msu_lifecycle_coherence` skärpt så alla
+   fyra revoke/purge-fält verifieras tillsammans per status, och `purged`-rader tillåts bevara
+   `revoked_at`/`revocation_reason` bara som par (aldrig ett utan det andra).
+   `memory_source_lifecycle_events.reason` är nu `NOT NULL`.
+5. **Hash kunde deklareras av anroparen**: `content_hash` accepterades direkt från
+   `DocumentSourceLocator`, vilket lät en anropare hävda ett overifierat hash-värde för en
+   `exact`-snapshot. Åtgärdat: `content_hash`/`content_hash_version` beräknas nu internt
+   (SHA-256 över exakt UTF-8-innehåll, `app/rag/memory_source.py`s `compute_content_hash`),
+   med en ny DB-CHECK för 64 gemena hex-tecken. `created_at`-defaults bytta från naiv
+   `datetime.utcnow()` till `server_default=func.now()`.
+
+PR #31:s beskrivning på GitHub uppdaterad till att matcha den aktuella koden (tog bort det
+felaktiga `row_security=off`-påståendet och föråldrade testsiffror).
+
+Omverifiering: migrations-round-trip mot en färsk `postgres`-superuser-databas UTAN
+`mainai_app`-roll (samma villkor som "Alembic migration check"-jobbet); 598/599 gröna i hela
+backend-/security-/account-sviten (1 avsiktligt överhoppad kapacitetstest); grön CI (18/18,
+"All required checks passed") på exakt head-SHA `637576c`, verifierat direkt mot GitHubs
+check-runs-API. Fyra separata, avgränsade commits enligt `CLAUDE.md`s arbetsdisciplin.
+
+## Pass 14 (2026-07-29): PR #31 — kodgranskning hittade 8 blockerande fel, alla åtgärdade
+
+Grundaren granskade PR #31:s faktiska kod (inte bara design) och hittade 8 konkreta problem,
+med explicit instruktion att stanna innan backfill/dual-write fick fortsätta:
+
+1. **Cross-owner-FK-lucka**: `knowledge_claims.memory_source_id` hade en enkel-kolumn-FK, som
+   bara bevisar att raden finns — inte att den tillhör samma ägare, eftersom FK-kontroller
+   körs oberoende av RLS. Åtgärdat: sammansatt FK `(memory_source_id, owner_id)` mot
+   `memory_source_units(id, owner_id)`, både i migrationen och i SQLAlchemy-modellen
+   (`ForeignKeyConstraint` i `__table_args__`). Ny test bevisar att en cross-owner-referens nu
+   avvisas av databasen, inte bara döljs av RLS efteråt.
+2. **`mainai_app` behöll onödiga rättigheter**: `apply_runtime_privileges.py` REVOKEade bara
+   UPDATE/DELETE — TRUNCATE (som INTE alls omfattas av RLS), REFERENCES och TRIGGER lämnades
+   kvar. Åtgärdat: deny-by-default (REVOKE ALL, sedan explicit GRANT exakt SELECT+INSERT på
+   MSU/DSU, SELECT-only på lifecycle_events), verifierat mot alla sju tabellrättigheter.
+3. **Worker-omstart-bugg**: `apply_runtime_privileges.py` kördes bara inuti
+   `RUN_MIGRATIONS=true`-grenen i `docker-entrypoint.sh` — worker-containern sätter
+   `RUN_MIGRATIONS=false` men kör ändå `ensure_app_role.py`s ovillkorliga fullrättighets-
+   återgivning. Åtgärdat: körs nu ovillkorligt på varje boot. Ny test kör det RIKTIGA
+   entrypoint-skriptet via subprocess med `RUN_MIGRATIONS=false` och bevisar att rättigheterna
+   ändå smalnas av.
+4. **`row_security = off` gav ingen faktisk RLS-bypass**: enligt Postgres egen dokumentation
+   ger flaggan bara ett fel istället för tyst filtrerat resultat — den beviljar aldrig åtkomst
+   RLS annars skulle neka. Åtgärdat: borttagen från alla fyra SECURITY DEFINER-funktioner; de
+   två ägar-scopade behöver ingen bypass alls (egen explicit ägarkontroll räcker), de två
+   admin-funktionerna kräver nu explicit, EXTERNT verifierad BYPASSRLS/superuser på den ägande
+   rollen (`apply_runtime_privileges.py`). Ny test byter faktiskt ägare på
+   `transition_memory_source_admin` till en riktig `NOSUPERUSER NOBYPASSRLS`-roll och bevisar
+   att verifieringen slår larm istället för att tyst lita på det gamla antagandet.
+5. **Fel undantag fångades i find-or-create**: `get_or_create_memory_source_unit()` fångade
+   ALLA `IntegrityError` och antog att det var `uq_msu_owner_identity`-racet. Åtgärdat:
+   inspekterar `exc.orig.diag.constraint_name`, återkastar allt annat oförändrat. Utökat att
+   även jämföra `content_hash` (inte bara `snapshot_status`) och att ALDRIG tyst återanvända en
+   `revoked`/`purged` källa.
+6. **"Samtidighets"-testet var inte samtidigt**: session A committade helt innan session B ens
+   startade. Åtgärdat: nytt test håller session A:s INSERT öppet (ej committat) på huvudtråden
+   medan session B kör på en bakgrundstråd, verifierat via `pg_stat_activity` att session B
+   faktiskt går in i ett riktigt lock-wait innan session A committar och släpper den.
+7. **Trigger-funktioner använde okvalificerade tabellnamn**: sårbart för `pg_temp`-skuggning
+   eftersom Postgres alltid kollar sessionens temp-schema först, oavsett `search_path` — och
+   `mainai_app` kan skapa temp-tabeller som standard. Åtgärdat: alla triggerfunktioner
+   schema-kvalificerade (`public.<tabell>`) och `search_path` låst till enbart `pg_catalog`.
+8. **`apply_runtime_privileges.py` behövde egen härdning**: verifierar nu funktionens
+   ÄGARROLL (inte bara tabellägare), dess `rolsuper`/`rolbypassrls`, dess `search_path`/
+   `proconfig`, och FALLERAR HÖGLJUTT (istället för att tyst hoppa över) om en förväntad S1A-
+   tabell/funktion saknas vid den här punkten i bootsekvensen.
+
+Under omverifieringen upptäcktes och åtgärdades även en kvarglömd `$$ LANGUAGE plpgsql;`-rad
+från en tidigare redigeringsomgång i `trg_msu_guard_update`, som bröt migrationens rena
+körning mot en bar `postgres`-superuser-databas (exakt "Alembic migration check"-jobbets
+villkor) — fångad genom att faktiskt köra om den testen, inte anta att den fortfarande
+fungerade efter de andra ändringarna.
+
+Omverifiering: migrations-round-trip (`upgrade head` → `downgrade -1` → `upgrade head`) mot en
+färsk `postgres`-superuser-databas UTAN `mainai_app`-roll; `apply_runtime_privileges.py` kört
+mot samma databas efter att `mainai_app` skapats; 591/592 gröna i hela backend-/security-/
+account-sviten (1 avsiktligt överhoppad kapacitetstest); grön CI (17/17) på exakt head-SHA
+`7041c2c`, verifierat direkt mot GitHubs check-runs-API. Fem separata, avgränsade commits
+(en per fix-område) enligt `CLAUDE.md`s arbetsdisciplin.
 
 ## Pass 14 (2026-08-03/04): MainAI Runtime Truthfulness and Durable Job Foundation — ny branch, byggd medan grundaren sov
 
@@ -409,6 +2150,8 @@ grundprincip för varför de fick egna brancher/PR:er istället för att fogas i
 |---|---|---|---|---|
 | `claude/frontend-npm-audit-next-16-2-11` | [#9](https://github.com/d1n095/LifeAI/pull/9) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `0081e562` | `next` 16.2.10 → 16.2.11 (stänger `npm audit --audit-level=high`, 9 säkerhetsfixar, inga brytande ändringar) | `claude/det-kommer-mer-879lcm` @ a141065 |
 | `claude/frontend-npm-audit-brace-expansion` | [#11](https://github.com/d1n095/LifeAI/pull/11) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `6929b700` | `brace-expansion`/GHSA-mh99-v99m-4gvg — daterad, ID-specifik CI-allowlist (`frontend/scripts/check-npm-audit.js`), se `docs/SECURITY_BLOCKERS.md` punkt 3 | `claude/det-kommer-mer-879lcm` @ 0081e562 (efter PR #9) |
+| `claude/frontend-npm-audit-ghsa-mh99-source-ids` | [#32](https://github.com/d1n095/LifeAI/pull/32) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `d6a5e2f` | GHSA-mh99-v99m-4gvg — allowlist-ID-churn (nya GitHub-advisory-källids för samma redan kända fynd), se Pass 33 | `claude/det-kommer-mer-879lcm` @ 82928ce |
+| `claude/frontend-npm-audit-brace-expansion-bypass` | [#33](https://github.com/d1n095/LifeAI/pull/33) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `00d950b` | GHSA-rgw5-rvv9-x895 — NYTT fynd, kringgår GHSA-mh99-v99m-4gvg:s tidigare fix; `npm update brace-expansion` inom redan deklarerade semver-ranges, se Pass 33 | `claude/det-kommer-mer-879lcm` @ d6a5e2f (efter PR #32) |
 | `claude/development-workflow-principles` | [#10](https://github.com/d1n095/LifeAI/pull/10) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `403adc06` | `CLAUDE.md` + den här filen — arbetsprinciper, inget applikationskod | `claude/det-kommer-mer-879lcm` @ 6929b700 (efter PR #11) |
 | `claude/branch-registry-post-merge-chain-update` | [#12](https://github.com/d1n095/LifeAI/pull/12) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `5769cffa` | Registerpost-mergekedja | `claude/det-kommer-mer-879lcm` @ 403adc06 |
 | `claude/life-library-durable-worker-merged` | [#14](https://github.com/d1n095/LifeAI/pull/14) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `2ddfeddc` | PR #6 (durable worker/lagring) + P1 (provider-verifiering) — landade i huvudgrenen för första gången | `claude/det-kommer-mer-879lcm` @ 5769cffa |
@@ -545,22 +2288,31 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 ## Rekommenderad merge-ordning (nuläge)
 
 1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#16~~, ~~#17~~, ~~#18~~,
-   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~, ~~#28~~ — samtliga mergade i
-   huvudgrenen (se Pass 4/5/7-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~ stängda utan
-   merge (#4/#6 subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
+   ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~, ~~#28~~, ~~#29~~, ~~#30~~ — samtliga
+   mergade i huvudgrenen (se Pass 4/5/7/10-25-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~
+   stängda utan merge (#4/#6 subsumerade, se ovan; #26 suppersederad av #28, se Pass 6).
 2. ~~PR C~~ — stängd, inte byggd. Se "LLM Coupling & Failure-Boundary Audit"-sektionen ovan
    för verifiering och den nya, separata "ta bort död kod"-uppföljningsuppgiften.
-3. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
+3. ~~PR #32~~, ~~PR #33~~ — mergade till huvudgrenen (`d6a5e2f`, `00d950b`), se Pass 33 ovan.
+4. **PR #31** (`claude/s1a-memory-source-implementation`) — draft, öppen, INTE mergad ÄN.
+   Head `15986a7`, bas `00d950b` (innehåller PR #32+#33), `mergeable_state: clean`, ALLA
+   obligatoriska kontroller `success` inklusive `npm audit` och den aggregerande "All required
+   checks passed". Produktionsdataprofilen är genomförd (Pass 34): 0 unresolvable, 223/223
+   claims deterministiskt `exact_chunk`. Enda kvarstående villkoret är grundarens uttryckliga,
+   färska merge-godkännande — inga kända kod- eller CI-blockerare återstår.
+5. **P7A** → implementation kan börja på `claude/p7a-governance-ingestion-plan` FÖRST efter
    ett separat, uttryckligt beslut (branchen är fryst). Kräver DESSUTOM en egen ombasering
-   mot huvudgrenens nya tip (nu `c32c339`, efter PR #28) innan aktivering — dess bas
-   (`15487e2`) är nu långt bakom både P2:s slutliga tip och själva huvudgrenen.
+   mot huvudgrenens nya tip innan aktivering — dess bas (`15487e2`) är nu långt bakom både
+   P2:s slutliga tip och själva huvudgrenen.
 
 ## Vilka brancher blockerar andra
 
-- **Inget öppet PR finns just nu.** PR #28 mergades (Pass 7); inget annat PR är öppet ovanpå
-  huvudgrenen.
+- **PR #31 blockeras inte längre av något öppet PR.** PR #32 och PR #33 är båda mergade (se
+  Pass 33), och PR #31:s `npm audit`-kontroll är grön på den nuvarande head-SHA:n.
+- **PR #31 mergas inte** förrän grundaren ger ett uttryckligt, färskt merge-godkännande på den
+  exakta head-SHA:n `15986a7` — inget tekniskt eller CI-villkor återstår (se Pass 34).
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
-  ovan) — inte av något annat öppet PR.
+  ovan) — inte av något öppet PR.
 
 ## Kvarstår efter PR #28:s merge (2026-07-28)
 

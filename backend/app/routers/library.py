@@ -24,7 +24,14 @@ from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
 from app.providers.verification import classify_provider_exception
+from app.rag.blob_references import (
+    acquire_owner_erasure_lock,
+    acquire_storage_key_lock,
+    delete_if_unreferenced,
+    get_storage_cleanup_ops_status,
+)
 from app.rag.library_import import maybe_purge_blob
+from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.storage import get_storage
@@ -115,7 +122,23 @@ async def import_package(
     memory (no `await file.read()` on the full body). Responds with the job id as soon as the
     original is safely, verifiedly stored; app/worker.py's poll loop does the actual
     extraction/indexing work asynchronously from here on, so this request never blocks on
-    that (see app/rag/library_import.py's module docstring for the full architecture)."""
+    that (see app/rag/library_import.py's module docstring for the full architecture).
+
+    Pass 26: acquires the owner-scoped erasure advisory lock (see app/rag/blob_references.py's
+    acquire_owner_erasure_lock docstring for the full race this closes against a concurrent
+    DELETE /api/account) as the VERY FIRST thing this handler does — before anything else,
+    including `storage.write_stream()` below, which is exactly what makes the lock effective:
+    a concurrent account erasure either fully commits (and this request's own re-check just
+    below then correctly refuses to proceed) or is still blocked behind this request's own
+    hold on the lock (and so cannot yet have inventoried this request's not-yet-written blob).
+    Re-verifies the owner still exists immediately after acquiring the lock — relying on the
+    later `ImportJob.owner_id` foreign key to reject an insert AFTER the blob was already
+    physically written would leave an orphaned, DB-unreferenced file on disk; this check fails
+    closed BEFORE any bytes are written at all."""
+    acquire_owner_erasure_lock(db, user.id)
+    if db.query(User).filter_by(id=user.id).first() is None:
+        raise HTTPException(status_code=401, detail="Kontot finns inte längre.")
+
     if project_id is not None:
         from app.models.project import Project
 
@@ -138,7 +161,21 @@ async def import_package(
         raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}")
 
     if blob.size_bytes == 0:
-        storage.delete(blob.storage_key)
+        # Pass 30 (a fourth founder review round): a bare `storage.delete()` here used to
+        # bypass the canonical check-then-act protocol entirely -- see
+        # app/rag/blob_references.py's delete_if_unreferenced() for the full incident this
+        # closes. Content-addressing means EVERY empty upload shares the exact same
+        # storage_key, so an ungated delete here could physically destroy an unrelated,
+        # already-live reference (a Document, an ImportJob, or founder-wide Project Memory)
+        # to that same empty-content key. The outcome doesn't change this request's own
+        # response -- an empty upload is always rejected -- it only decides whether the
+        # physical bytes are safe to remove.
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        # No DB row was ever written in this request -- rolls back to release the owner-
+        # erasure lock (acquired at the top of this handler) and the storage-key lock
+        # (acquired inside delete_if_unreferenced above) immediately, rather than relying on
+        # get_db()'s dependency-teardown close() to do it implicitly and later.
+        db.rollback()
         raise HTTPException(status_code=400, detail="Filen är tom.")
 
     checksum = blob.sha256
@@ -170,6 +207,28 @@ async def import_package(
         )
         if still_has_result:
             return existing
+
+    # Pass 22: storage.write_stream() above already made this blob's bytes durable on disk,
+    # but nothing in the database references it yet — a concurrent retry_source_blob_purge()
+    # could run its own reference check in exactly this window, see nothing pointing at this
+    # key, and physically delete it before the ImportJob row below is even created. Acquiring
+    # the SAME storage_key-scoped advisory lock retry_source_blob_purge() takes closes that
+    # race: whichever side gets here first fully commits or rolls back before the other's own
+    # check can run (see app/rag/blob_references.py's module docstring). The lock is
+    # transaction-scoped — released automatically at this request's eventual commit below (or
+    # at rollback, if the HTTPException just below fires).
+    acquire_storage_key_lock(db, blob.storage_key)
+    if not storage.exists(blob.storage_key):
+        # Lost the race: a concurrent purge deleted this exact blob in the window between
+        # write_stream() finishing and this lock being acquired. There is no safe way to
+        # recreate the original bytes here — the incoming stream has already been fully read
+        # and discarded (see LocalFilesystemStorage.write_stream) — so this fails closed
+        # rather than ever committing an ImportJob whose source_storage_key points at
+        # nothing. A retried upload re-runs write_stream() and gets a fresh, real blob.
+        raise HTTPException(
+            status_code=409,
+            detail="Uppladdningen kolliderade med en samtidig radering av en identisk fil. Försök igen.",
+        )
 
     job = ImportJob(
         owner_id=user.id,
@@ -365,53 +424,27 @@ def get_source_media(source_id: uuid.UUID, db: Session = Depends(get_db), user: 
 def delete_source(
     source_id: uuid.UUID,
     payload: DeleteConfirmIn,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ):
-    """Soft delete (Document.deleted_at) + immediate hard purge of the chunks/embeddings
-    that make the source searchable at all — see app/rag/vector_store.py's search()/
-    hybrid_search(), which both exclude deleted_at IS NOT NULL sources, and this purge,
-    which means even a direct DocumentChunk query (bypassing those functions) would find
-    nothing. KnowledgeVersion/SourceRelationship rows are kept as revision history — see
-    docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's "Export och radering" section for why."""
-    document = _visible_document_query(db, user.id).filter(Document.id == source_id).first()
-    if document is None:
-        raise HTTPException(status_code=404, detail="Källan hittades inte.")
+    """Thin wrapper: validates the request (confirmation required) and delegates all actual
+    deletion/purge logic to the shared app/rag/source_purge.py::purge_source() service — see
+    that module's docstring for the full behavior (soft delete, chunk purge, S1A memory-source
+    purge, blob release, source_purged audit entry — all one atomic commit as of Pass 22). The
+    still-live older `DELETE /api/documents/{id}` (app/routers/documents.py) calls the exact
+    same service — never a second, diverging implementation. The router's only job re: the
+    audit trail is extracting a neutral IP string from the request — purge_source() itself
+    never imports fastapi."""
     if not payload.confirm:
         raise HTTPException(status_code=400, detail="Radering kräver explicit bekräftelse (confirm: true).")
 
-    db.query(DocumentChunk).filter_by(document_id=source_id).delete(synchronize_session=False)
-    document.deleted_at = datetime.utcnow()
-    document.chunk_count = 0
-    # DEL 5's "väntande/pågående jobb får inte lämnas i ett odefinierat tillstånd": a source
-    # can be deleted while its own indexing is still mid-pipeline (received/original_storing/
-    # extracting/extracted/embedding, or the legacy pending/indexing). Rather than leaving
-    # the row frozen at a non-terminal IndexStatus forever once it's hidden by deleted_at,
-    # give it a definitive terminal status right here — `cancelled`, not `failed`: nothing
-    # actually went wrong, the founder just chose to stop it.
-    if document.status not in (IndexStatus.indexed, IndexStatus.failed, IndexStatus.cancelled):
-        document.status = IndexStatus.cancelled
-        document.error_message = "Källan togs bort innan bearbetningen slutfördes."
+    client_ip = request.client.host if request.client else None
+    try:
+        purge_source(db, source_id, user.id, client_ip=client_ip)
+    except SourcePurgeNotFoundError:
+        raise HTTPException(status_code=404, detail="Källan hittades inte.")
 
-    # The worker checks cancellation between pipeline steps for the general (multi-file ZIP
-    # batch) case — but the common case, a single-file import, has its own job row that's
-    # ENTIRELY about this one document, so cancel it outright rather than waiting for the
-    # worker's own next per-file check to notice. A multi-file job keeps running for its
-    # other files; only this document's own status (above) reflects the cancellation there.
-    if document.import_job_id is not None:
-        job = db.get(ImportJob, document.import_job_id)
-        if job is not None and job.status in (ImportJobStatus.pending, ImportJobStatus.running) and job.progress_total <= 1:
-            job.status = ImportJobStatus.cancelled
-            job.completed_at = datetime.utcnow()
-            db.add(job)
-
-    db.add(document)
-    db.flush()  # deleted_at must be visible to maybe_purge_blob's "still referenced?" query below
-
-    storage = get_storage()
-    document.deletion_status = maybe_purge_blob(db, storage, document.storage_key)
-    db.add(document)
-    db.commit()
     return {"status": "deleted"}
 
 
@@ -468,6 +501,8 @@ def ops_status(db: Session = Depends(get_db), user: User = Depends(require_found
     except OSError:
         free_disk_bytes = None
 
+    storage_cleanup = get_storage_cleanup_ops_status(db)
+
     return OpsStatusOut(
         worker_reachable=worker_reachable,
         queue_length=queue_length,
@@ -477,6 +512,12 @@ def ops_status(db: Session = Depends(get_db), user: User = Depends(require_found
         storage_writable=storage_writable,
         free_disk_bytes=free_disk_bytes,
         last_heartbeat_at=last_heartbeat_at,
+        storage_cleanup_degraded=storage_cleanup.storage_cleanup_degraded,
+        storage_orphan_risk_count=storage_cleanup.storage_orphan_risk_count,
+        latest_storage_orphan_risk_at=storage_cleanup.latest_storage_orphan_risk_at,
+        pending_storage_cleanup_tasks=storage_cleanup.pending_storage_cleanup_tasks,
+        failed_storage_cleanup_tasks=storage_cleanup.failed_storage_cleanup_tasks,
+        oldest_failed_storage_cleanup_age_seconds=storage_cleanup.oldest_failed_storage_cleanup_age_seconds,
     )
 
 
