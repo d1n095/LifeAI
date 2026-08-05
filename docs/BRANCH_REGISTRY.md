@@ -6,19 +6,20 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-05 (Pass 16) — en ANDRA
-oberoende granskning av Pass 15:s egen korrigering hittade en KRITISK cross-owner-
-raderingssårbarhet i Pass 15:s egen `erase_mainai_job_children_for_owner()`, plus en
-migrationsportabilitetsbugg, plus otillräcklig privilegiepolicy-verifiering — alla
-korrigerade på samma branch. **Senast verifierade KOD-head (den commit testerna nedan
-faktiskt kördes mot): `ef57b57`** — samma kod-head som Pass 15 loggade, eftersom Pass 15:s
-EGEN registerpost-commit (`cc9a052`) var docs-only och inte själv en del av det verifierade
-kodtillståndet. Se Pass 16 nedan för fullständig detalj och varför denna post medvetet inte
-jagar sitt eget kommande SHA (se CLAUDE.md:s merge-regel-anda: en registerpost som beskriver
-sin egen framtida commit-SHA är en logisk paradox — Pass 15 gjorde det misstaget, Pass 16
-gör det inte). **INTE redo för PR**: migrationskedjans blockerare kräver fortfarande att PR
-#31 mergas och denna branch rebasas mot dess faktiska sluthuvud FÖRST. Dessförinnan
-2026-07-29, mot GitHubs PR-API direkt
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-05 (Pass 17) — en TREDJE
+oberoende granskning hittade att Pass 16:s egen privilegiepolicy-fix bara kontrollerade att en
+funktions ägare INTE var `mainai_app`, vilket inte bevisar vem ägaren FAKTISKT är, plus att
+Pass 16:s registerpost själv angav fel verifierad kod-head (`ef57b57`, Pass 15:s kod-head,
+istället för Pass 16:s egen sista kodbärande commit). Båda korrigerade på samma branch — se
+Pass 17 nedan. **Korrigering av Pass 16:s misstag:** Pass 16:s 65/563/22/43-testkörning
+kördes i själva verket mot arbetsträdet EFTER commit `13a34a1` (sista Pass 16-commiten som
+rör körbar kod/tester — migration, `app/rls.py`, `app/routers/account.py`,
+`test_mainai_jobs.py`) och FÖRE de två efterföljande docs-only-commiterna (`75742ab`,
+`333bcd1`) — INTE mot `ef57b57` som ursprungligen felaktigt loggades. Fastställt genom
+`git show --stat` mot varje Pass 16-commit, inte gissat. Se Pass 17 nedan för samma
+verifiering av DESS egen kod-head, gjord korrekt från början den här gången. **INTE redo för
+PR**: migrationskedjans blockerare kräver fortfarande att PR #31 mergas och denna branch
+rebasas mot dess faktiska sluthuvud FÖRST. Dessförinnan 2026-07-29, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`/`update_pull_request`/`merge_pull_request`, inte memorerat)
 — **PR #29 mergad** som `0bdf03d`, verifierad grön (18/18 checkar) på exakt head-SHA `df9e9c8`
 innan merge, inte en äldre commit. **PR #30 mergad** som `9b15840` in i
@@ -179,13 +180,62 @@ i samma dokument) kräver fortfarande att PR #31 mergas och denna branch rebasas
 från 57 — sju nya/omskrivna tester för sårbarhetsfixen, den verifierande privilegiepolicyn och
 GUC-testet), 563 passed/1 medvetet skippad (`tests/backend/`), 22 passed (`tests/security/`),
 43 passed (`tests/account/`), `tsc --noEmit`/`eslint`: rena. Alla siffror körda på nytt direkt
-i denna Pass 16-session, inte återanvända från Pass 15.
+i denna Pass 16-session, inte återanvända från Pass 15. **Egen efterhandsrättelse (se Pass
+17):** denna körning skedde faktiskt mot arbetsträdet efter kodcommit `13a34a1`, inte mot
+`ef57b57` som ursprungligen felaktigt loggades i tabellraden nedan.
+
+## Pass 17 (2026-08-05): privilegiepolicyn verifierade inte den verkliga ägaren — korrigerad
+
+En TREDJE oberoende granskning — riktad mot Pass 16:s egen privilegiepolicy-fix — hittade två
+kvarstående problem, inget av dem en cross-owner-säkerhetsbrist i sig (Pass 16:s kritiska fix
+höll), men båda nödvändiga innan branchen kan frysas:
+
+1. **Policyn verifierade ägarskap genom uteslutning, inte genom en riktig identitetskontroll:**
+   `apply_mainai_job_runtime_privileges()` kontrollerade bara `owner != "mainai_app"` för de tre
+   `SECURITY DEFINER`/trigger-funktionerna — det bevisar ingenting om vem ägaren FAKTISKT är. En
+   funktion omtilldelad till vilken annan oväntad roll som helst (varken `mainai_app` eller den
+   riktiga migrations-/adminrollen) hade passerat tyst. Löst: `expected_owner` läses nu som
+   `current_user` på samma migrations-/adminanslutning (`app/db.py`s `migration_engine`) istället
+   för att hårdkodas eller kontrolleras genom uteslutning. Verifierar nu explicit för alla tre
+   funktioner OCH alla tre tabeller (`mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`):
+   `owner == expected_owner` exakt, ägaren har faktiskt `SUPERUSER` eller `BYPASSRLS` (en ägare
+   som inte själv kan förbigå FORCE RLS kan inte heller göra det åt funktionen), exakt
+   argumentsignatur via `pg_get_function_identity_arguments()` (inte bara `pronargs`), och
+   `mainai_app`s beviljanden kontrolleras nu som EFFEKTIVA privilegier via
+   `has_table_privilege()`/`has_function_privilege()` (Postgres egen beräkning, som följer
+   rollmedlemskap) istället för en rå `information_schema.role_table_grants`-filtrering, som
+   bara ser direkta beviljanden till exakt det namnet och skulle missa ett privilegium som når
+   `mainai_app` indirekt via medlemskap i en annan beviljad roll. Sex nya databastester, inkl.
+   ett som avslöjade en verklig Postgres-fallgrop under utveckling: `ALTER TABLE ... OWNER TO`
+   skriver om tabellens `relacl` som en sidoeffekt — att växla ägarskap fram och tillbaka genom
+   `mainai_app` for att testa detta rensade tyst bort `mainai_app`s egna SELECT/INSERT-
+   beviljanden, inte bara de rättigheter testet avsiktligt undersökte — täckt med en kommentar i
+   testet, inte bara tyst fixat.
+2. **Pass 16:s egen registerpost angav fel verifierad kod-head:** texten påstod `ef57b57`
+   (Pass 15:s kod-head) trots att Pass 16 lade till egna kodbärande commits (`e71b9e5`,
+   `13a34a1`) FÖRE testkörningen som registrerades. Fastställt via `git show --stat` mot varje
+   Pass 16-commit — den faktiska sista kodbärande commiten var `13a34a1`; `75742ab` och
+   `333bcd1` var båda docs-only. Rättat i Pass 16:s egen sektion ovan, INTE genom att skapa en
+   ny commit bara för att jaga en ny SHA — bara texten korrigerad i samma redigering som denna
+   Pass 17-post.
+
+**Senast verifierad KOD-head för DENNA session (den commit testerna nedan faktiskt kördes
+mot): `511002d`** — sista Pass 17-commiten som rör körbar kod/tester
+(`app/rls.py` + `test_mainai_jobs.py`). Docs-only-commits läggs till EFTER detta
+(`docs/MAINAI_JOB_RUNTIME.md`, sedan denna registerpost) — deras SHA:n loggas medvetet inte
+här, av samma skäl som förklaras högst upp i filen.
+
+**Full re-verifiering efter korrigeringen:** 71/71 (`tests/backend/test_mainai_jobs.py`, upp
+från 65 — sex nya tester för ägar-/BYPASSRLS-/signatur-/overload-verifieringen), 569 passed/1
+medvetet skippad (`tests/backend/`), 22 passed (`tests/security/`), 43 passed
+(`tests/account/`), `tsc --noEmit`/`eslint`: rena. Alla siffror körda på nytt direkt i denna
+Pass 17-session.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/mainai-job-runtime-foundation` | Ingen PR öppnad — migrationskedjan måste rebasas mot PR #31 FÖRST (se Pass 15/16) | **Pushad, INTE redo för PR** — inte mergad, inte slutgranskad. Senast verifierade kod-head: `ef57b57`; branchens faktiska git-tipp efter denna registerpost är nödvändigtvis en nyare, docs-only-commit (se förklaringen högst upp i denna fil för varför den SHA:n medvetet inte loggas här) | MainAI Runtime Truthfulness and Durable Job Foundation: migration 0025+0026 (schema + DB-genomdriven integritet/append-only + kritisk cross-owner-sårbarhet hittad och fixad + migrationsportabilitet), runtime-kontrakt (scope-korrigerad text), jobb-API, worker-integration, `corpus_review`-jobbtyp, verifierande privilegiepolicy, 65 tester, Jobs/Activity-UI, arkitekturdokument | `claude/det-kommer-mer-879lcm` @ `56f46c8` |
+| `claude/mainai-job-runtime-foundation` | Ingen PR öppnad — migrationskedjan måste rebasas mot PR #31 FÖRST (se Pass 15/16/17) | **Pushad, INTE redo för PR** — inte mergad, inte slutgranskad. Senast verifierade kod-head: `511002d` | MainAI Runtime Truthfulness and Durable Job Foundation: migration 0025+0026 (schema + DB-genomdriven integritet/append-only + kritisk cross-owner-sårbarhet hittad och fixad + migrationsportabilitet), runtime-kontrakt (scope-korrigerad text), jobb-API, worker-integration, `corpus_review`-jobbtyp, verifierande privilegiepolicy med exakt ägar-/BYPASSRLS-/signaturkontroll, 71 tester, Jobs/Activity-UI, arkitekturdokument | `claude/det-kommer-mer-879lcm` @ `56f46c8` |
 
-**Beroenden:** INTE oberoende av PR #31 i mergehänseende — se Pass 15/16. Migrationskedjan
+**Beroenden:** INTE oberoende av PR #31 i mergehänseende — se Pass 15/16/17. Migrationskedjan
 (`0025`/`0026`, `down_revision=0018`) delar samma bas-revision som PR #31:s `0019`-`0024` och
 skapar två divergerande Alembic-heads om båda mergas som de är. Denna branch måste rebasas
 mot PR #31:s faktiska sluthuvud (och `0025.down_revision` uppdateras därefter) EFTER att PR
