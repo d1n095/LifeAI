@@ -922,10 +922,20 @@ def test_mainai_job_proposals_mainai_app_lacks_delete_privilege(db_session, supe
     assert row is not None
 
 
-# --- M: erase_mainai_job_children_for_owner() — the only legitimate deletion path -------------
+# --- M: erase_own_mainai_job_children() — the only legitimate deletion path -------------------
+#
+# This function's FIRST draft (this same PR, before an independent security review) was named
+# erase_mainai_job_children_for_owner(target_owner_id uuid), took the owner as a caller-
+# supplied argument, and never checked it against app.current_user_id. Because the function
+# is SECURITY DEFINER, its DELETEs ran with the function owner's privileges regardless of who
+# called it or which owner_id they passed — RLS on the tables was NOT a sufficient boundary,
+# and any authenticated session could have erased any other owner's event/proposal history by
+# simply passing their uuid. The tests below prove the actual, fixed function: no argument
+# exists to attack, the owner is derived from the calling session's own RLS-trusted GUC, and
+# a session with no authenticated context at all is denied outright.
 
 
-def test_erase_mainai_job_children_for_owner_removes_only_that_owners_rows(db_session, superuser_db, make_verified_user):
+def test_erase_own_mainai_job_children_removes_only_the_calling_owners_rows(db_session, superuser_db, make_verified_user):
     owner, _ = make_verified_user()
     other, _ = make_verified_user()
     owner_doc = _make_indexed_document(db_session, owner.id)
@@ -940,8 +950,9 @@ def test_erase_mainai_job_children_for_owner_removes_only_that_owners_rows(db_se
     db_session.add(MainAIJobProposal(job_id=other_job.id, owner_id=other.id, proposal_type="review_finding", proposal_text="y"))
     db_session.commit()
 
-    superuser_db.execute(sa_text("SELECT erase_mainai_job_children_for_owner(:o)"), {"o": str(owner.id)})
-    superuser_db.commit()
+    _set_rls_user(db_session, owner.id)
+    db_session.execute(sa_text("SELECT erase_own_mainai_job_children()"))
+    db_session.commit()
 
     owner_events = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE owner_id = :o"), {"o": str(owner.id)}).scalar()
     owner_proposals = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE owner_id = :o"), {"o": str(owner.id)}).scalar()
@@ -953,6 +964,45 @@ def test_erase_mainai_job_children_for_owner_removes_only_that_owners_rows(db_se
     assert other_proposals == 1
 
 
+def test_erase_own_mainai_job_children_has_no_owner_parameter_to_attack(superuser_db):
+    """The vulnerable first draft took target_owner_id uuid. Proves that signature is gone
+    entirely — not just unused — by checking pg_proc directly: exactly one overload, zero
+    arguments. A caller literally cannot supply an owner id, attacker-controlled or otherwise."""
+    row = superuser_db.execute(
+        sa_text(
+            "SELECT count(*), max(pronargs) FROM pg_proc "
+            "WHERE proname = 'erase_own_mainai_job_children' AND pronamespace = 'public'::regnamespace"
+        )
+    ).first()
+    overload_count, nargs = row
+    assert overload_count == 1
+    assert nargs == 0
+
+    no_such_function = superuser_db.execute(
+        sa_text("SELECT count(*) FROM pg_proc WHERE proname LIKE '%mainai_job_children_for_owner%' OR proname LIKE '%mainai_job_children_admin%'")
+    ).scalar()
+    assert no_such_function == 0, "the caller-supplied-owner-id function (vulnerable or an unreviewed admin variant) must not exist"
+
+
+def test_erase_own_mainai_job_children_denies_a_session_with_no_auth_context(db_session, make_verified_user):
+    """No app.current_user_id set at all (an unauthenticated/ambient connection) must be
+    denied outright, not silently resolve to erasing nothing or, worse, NULL-matching rows."""
+    from app.request_context import current_user_id as current_user_id_var
+
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    db_session.commit()
+
+    current_user_id_var.set(None)
+    db_session.execute(sa_text("SET LOCAL app.current_user_id = ''"))
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("SELECT erase_own_mainai_job_children()"))
+        db_session.commit()
+    db_session.rollback()
+
+
 def test_mainai_app_can_execute_the_erasure_function(db_session, superuser_db, make_verified_user):
     """The function itself is what account.py's delete_account() calls, running as mainai_app
     — not the superuser/migration connection — so mainai_app must actually hold EXECUTE."""
@@ -961,11 +1011,102 @@ def test_mainai_app_can_execute_the_erasure_function(db_session, superuser_db, m
     _set_rls_user(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
 
-    db_session.execute(sa_text("SELECT erase_mainai_job_children_for_owner(:o)"), {"o": str(user.id)})
+    db_session.execute(sa_text("SELECT erase_own_mainai_job_children()"))
     db_session.commit()
 
     remaining = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j"), {"j": str(job.id)}).scalar()
     assert remaining == 0
+
+
+def test_public_role_has_no_execute_on_any_mainai_job_function(superuser_db):
+    rows = superuser_db.execute(
+        sa_text(
+            "SELECT routine_name FROM information_schema.routine_privileges "
+            "WHERE routine_schema = 'public' AND privilege_type = 'EXECUTE' AND grantee = 'PUBLIC' "
+            "AND routine_name IN ('erase_own_mainai_job_children', 'mainai_job_events_deny_mutation', 'mainai_job_proposals_guard_mutation')"
+        )
+    ).all()
+    assert rows == []
+
+
+def test_mainai_app_lacks_execute_on_the_trigger_functions(superuser_db):
+    """Trigger functions are never meant to be called directly by application code — firing a
+    trigger doesn't require EXECUTE on the calling role at all — so mainai_app holding EXECUTE
+    on them would itself be a sign of drift."""
+    for fn in ("mainai_job_events_deny_mutation", "mainai_job_proposals_guard_mutation"):
+        rows = superuser_db.execute(
+            sa_text(
+                "SELECT 1 FROM information_schema.routine_privileges "
+                "WHERE routine_schema = 'public' AND routine_name = :fn AND privilege_type = 'EXECUTE' AND grantee = 'mainai_app'"
+            ),
+            {"fn": fn},
+        ).all()
+        assert rows == [], f"mainai_app must not hold EXECUTE on trigger function {fn}"
+
+
+def test_mainai_app_cannot_delete_events_even_with_the_erasure_flag_manually_set(db_session, superuser_db, make_verified_user):
+    """The erasure GUC is not itself an authorization boundary — mainai_app must be denied by
+    plain table privileges before the trigger's flag check is even reached. A session that
+    manually sets the flag without going through erase_own_mainai_job_children() must still be
+    unable to DELETE."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    event_id = superuser_db.execute(sa_text("SELECT id FROM mainai_job_events WHERE job_id = :j LIMIT 1"), {"j": str(job.id)}).scalar()
+
+    db_session.execute(sa_text("SET LOCAL app.mainai_job_erasure_in_progress = 'on'"))
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("DELETE FROM mainai_job_events WHERE id = :i"), {"i": str(event_id)})
+        db_session.commit()
+    db_session.rollback()
+
+    row = superuser_db.execute(sa_text("SELECT 1 FROM mainai_job_events WHERE id = :i"), {"i": str(event_id)}).first()
+    assert row is not None
+
+
+def test_apply_mainai_job_runtime_privileges_passes_against_the_real_migrated_state(superuser_db):
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    apply_mainai_job_runtime_privileges(migration_engine)  # must not raise
+
+
+def test_apply_mainai_job_runtime_privileges_detects_drift_and_rolls_back(superuser_db):
+    """Proves the policy actually VERIFIES rather than just issuing REVOKE/GRANT and trusting
+    them. Deliberately targets drift the enforce phase's own three static statements do NOT
+    fix — a table-level over-grant (e.g. DELETE on mainai_job_events) would be self-healed by
+    the enforce phase before verify ever ran, so that would never actually exercise the
+    verify path. Granting EXECUTE on a TRIGGER function to mainai_app is different: nothing in
+    the enforce phase ever touches function-level grants except the one legitimate GRANT
+    EXECUTE on erase_own_mainai_job_children(), so this drift survives into the verify phase
+    and must be caught there."""
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    superuser_db.execute(sa_text("GRANT EXECUTE ON FUNCTION mainai_job_events_deny_mutation() TO mainai_app"))
+    superuser_db.commit()
+    try:
+        with pytest.raises(RuntimeError, match="mainai_job_events_deny_mutation"):
+            apply_mainai_job_runtime_privileges(migration_engine, require_complete=True)
+    finally:
+        superuser_db.execute(sa_text("REVOKE EXECUTE ON FUNCTION mainai_job_events_deny_mutation() FROM mainai_app"))
+        superuser_db.commit()
+        apply_mainai_job_runtime_privileges(migration_engine)
+
+
+def test_apply_mainai_job_runtime_privileges_non_fatal_mode_warns_not_raises(superuser_db, caplog):
+    from app.db import migration_engine
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    superuser_db.execute(sa_text("GRANT EXECUTE ON FUNCTION mainai_job_proposals_guard_mutation() TO mainai_app"))
+    superuser_db.commit()
+    try:
+        apply_mainai_job_runtime_privileges(migration_engine, require_complete=False)  # must not raise
+    finally:
+        superuser_db.execute(sa_text("REVOKE EXECUTE ON FUNCTION mainai_job_proposals_guard_mutation() FROM mainai_app"))
+        superuser_db.commit()
+        apply_mainai_job_runtime_privileges(migration_engine)
 
 
 # --- N: account erasure actually removes mainai job data ------------------------------------
