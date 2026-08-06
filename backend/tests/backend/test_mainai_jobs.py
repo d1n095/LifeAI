@@ -39,6 +39,7 @@ from app.mainai_runtime_contract import (
     require_capability,
     sanitize_unverified_execution_claims,
 )
+import app.mainai_runtime_contract as mainai_runtime_contract
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
 from app.models.document_chunk import DocumentChunk
 from app.models.mainai_job import (
@@ -183,24 +184,129 @@ def test_sanitize_unverified_execution_claims_leaves_ordinary_text_untouched():
 
 
 def test_sanitize_unverified_execution_claims_flags_swedish_background_work_claim():
+    """Founder re-review round (PR #36), fourth pass: the founder classified the previous
+    append-only version HIGH -- it left "Jag arbetar med det i bakgrunden" fully visible,
+    immediately followed by a correction, so the user could read both the false claim AND the
+    correction in the same message. This version must REPLACE the claim, not follow it."""
     text = "Jag arbetar med det i bakgrunden, återkommer strax."
     sanitized = sanitize_unverified_execution_claims(text)
     assert sanitized != text
-    assert sanitized.startswith(text)
-    assert "MainAI-obs" in sanitized
+    assert "jag arbetar" not in sanitized.lower(), "the false claim itself must be gone, not just followed by a correction"
+    assert "MainAI" in sanitized  # still visibly a MainAI-issued correction, just not appended after the lie
 
 
 def test_sanitize_unverified_execution_claims_flags_english_job_started_claim():
     text = "The job has started and I'll let you know when it's done."
     sanitized = sanitize_unverified_execution_claims(text)
-    assert "MainAI-obs" in sanitized
+    assert "the job has started" not in sanitized.lower()
+    assert "no background job is running" in sanitized.lower()
 
 
 def test_sanitize_unverified_execution_claims_is_case_insensitive_and_idempotent():
     text = "JOBBET HAR STARTAT, vänta lite."
     once = sanitize_unverified_execution_claims(text)
+    assert "jobbet har startat" not in once.lower()
     twice = sanitize_unverified_execution_claims(once)
-    assert once == twice, "sanitizing an already-sanitized reply must never append the notice a second time"
+    assert once == twice, "sanitizing an already-sanitized reply must never re-trigger a second replacement"
+
+
+def test_sanitize_unverified_execution_claims_never_leaves_a_self_contradictory_message():
+    """The founder's explicit HIGH-classification test: the model claims it's working, AND
+    (elsewhere in the same message) the correction must not coexist with that exact claim --
+    the output must not simultaneously assert "I'm working on it" and "no work is happening"."""
+    text = "Visst! Jag arbetar med det i bakgrunden och återkommer så snart jag är klar."
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert "jag arbetar med det i bakgrunden" not in sanitized.lower()
+    assert "jag återkommer" not in sanitized.lower()
+
+
+@pytest.mark.parametrize(
+    "text,should_be_removed",
+    [
+        ("Jag arbetar med det i bakgrunden.", "jag arbetar med det i bakgrunden"),
+        ("I'm working on it in the background.", "working on it in the background"),
+        ("Jag återkommer till dig senare med svaret.", "återkommer till dig senare"),
+        ("I'll get back to you later once I've checked.", "get back to you later"),
+        ("Jag övervakar situationen och hör av mig.", "övervakar situationen"),
+        ("I'm monitoring the situation closely.", "monitoring the situation"),
+        ("Jag har granskat allt och hittade inget konstigt.", "granskat allt"),
+        ("I've reviewed everything already.", "reviewed everything"),
+        ("Granskningen är klar.", "granskningen är klar"),
+        ("The task is done.", "the task is done"),
+        ("Jobbet har startat för fem minuter sedan.", "jobbet har startat"),
+        ("I've started the job already.", "started the job"),
+        ("Jag kommer meddela när granskningen är klar.", "kommer meddela när granskningen är klar"),
+        ("I'll let you know when it's done.", "let you know when it's done"),
+    ],
+)
+def test_sanitize_unverified_execution_claims_covers_all_seven_categories_sv_and_en(text, should_be_removed):
+    """The founder's explicit list of seven claim categories, Swedish and English."""
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert should_be_removed not in sanitized.lower()
+
+
+def test_sanitize_unverified_execution_claims_catches_an_indirect_inflected_phrasing_not_in_any_literal_list():
+    """Not a literal substring anywhere in the old list -- proves regex-based inflection
+    coverage, not just a fixed set of exact phrases."""
+    text = "Jag jobbar på det i bakgrunden just nu."
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert "jobbar på det i bakgrunden" not in sanitized.lower()
+
+
+def test_sanitize_unverified_execution_claims_preserves_unrelated_sentences_in_the_same_message():
+    text = "Bolaget grundades 2019. Jag arbetar med det i bakgrunden. Omsättningen var 5 MSEK 2020."
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert "Bolaget grundades 2019" in sanitized
+    assert "Omsättningen var 5 MSEK 2020" in sanitized
+    assert "jag arbetar med det i bakgrunden" not in sanitized.lower()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The migration is complete.",
+        "This is done well, professionally written.",
+        "It's done!",
+        "Skatteberäkningen är klar imorgon.",
+        "Rapporten är klar.",
+        "I'm done with this for today, thanks for asking.",
+        "Jag är klar med kaffet, vill du ha en kopp?",
+        "Det är klart om en timme enligt schemat.",
+        "Jag är klar för idag, vi hörs imorgon.",
+    ],
+)
+def test_sanitize_unverified_execution_claims_leaves_ordinary_klar_done_sentences_untouched(text):
+    """Found and fixed during this round's own mandated self-review (not a founder-review
+    finding itself): category 5's first draft used bare generic subjects (jag är / det är /
+    i'm / it's / this is) + klar/done, which matched ordinary sentences with nothing to do with
+    a background job -- a real violation of the founder's "ordinary informational answers must
+    be left unchanged" requirement. Fixed by requiring an explicit job/task/work noun
+    (jobbet/uppgiften/granskningen/körningen/arbetet, the job/the task/the review) in the
+    Swedish and English patterns instead."""
+    assert sanitize_unverified_execution_claims(text) == text
+
+
+@pytest.mark.parametrize(
+    "text,should_be_removed",
+    [
+        ("Jobbet är klart nu.", "jobbet är klart"),
+        ("Granskningen är klar.", "granskningen är klar"),
+        ("Uppgiften är färdig.", "uppgiften är färdig"),
+        ("Jag är klar med jobbet.", "jag är klar med jobbet"),
+        ("The job is done.", "the job is done"),
+        ("The task is finished.", "the task is finished"),
+        ("The review is complete.", "the review is complete"),
+        ("I'm done with the review.", "done with the review"),
+    ],
+)
+def test_sanitize_unverified_execution_claims_still_catches_explicit_job_done_claims(text, should_be_removed):
+    """The narrowed category-5 patterns (see the ordinary-klar/done test above) must still
+    catch every phrasing that DOES explicitly name the job/task/work as done -- the fix must
+    close the false-positive gap without opening a false-negative one for the founder's actual
+    category 5."""
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert should_be_removed not in sanitized.lower()
+    assert "MainAI" in sanitized
 
 
 def test_require_capability_fails_closed_for_unknown_capability(db_session):
@@ -1786,3 +1892,381 @@ def test_api_retry_is_rate_limited_per_ip(client):
 
     statuses = [client.post(f"/api/mainai/jobs/{unknown_job_id}/retry", headers=headers).status_code for _ in range(limit + 5)]
     assert 429 in statuses
+
+
+# --- Q: stable pagination ordering (founder re-review round, PR #36, fourth pass, M1) ---------
+
+
+def test_list_jobs_orders_deterministically_when_created_at_ties(db_session, superuser_db, make_verified_user):
+    """list_jobs() used to order by created_at alone -- two jobs sharing the exact same
+    timestamp (forced here directly via SQL, since real created_at has enough precision that a
+    natural tie is rare but not impossible under fast/automated job creation) could shuffle
+    order between page fetches. id DESC as the tiebreaker makes the ordering total."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    jobs = [
+        service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+        for _ in range(5)
+    ]
+    tied_at = "2026-01-01T00:00:00+00:00"
+    for j in jobs:
+        superuser_db.execute(sa_text("UPDATE mainai_jobs SET created_at = :t WHERE id = :j"), {"t": tied_at, "j": str(j.id)})
+    superuser_db.commit()
+
+    _set_rls_user(db_session, user.id)
+    page1 = service.list_jobs(db_session, limit=3, offset=0)
+    page2 = service.list_jobs(db_session, limit=3, offset=3)
+    ids_seen = [j.id for j in page1] + [j.id for j in page2]
+    assert len(ids_seen) == len(set(ids_seen)), "no job should appear on two pages"
+    assert set(str(j.id) for j in jobs) <= set(str(i) for i in ids_seen)
+
+    # Re-fetching the same two pages again must return the identical rows in the identical
+    # order -- this is what "deterministic" actually means, not just "no duplicates this once".
+    page1_again = service.list_jobs(db_session, limit=3, offset=0)
+    page2_again = service.list_jobs(db_session, limit=3, offset=3)
+    assert [j.id for j in page1] == [j.id for j in page1_again]
+    assert [j.id for j in page2] == [j.id for j in page2_again]
+
+
+def test_admin_all_and_owner_list_use_the_same_stable_ordering(client, db_session, superuser_db, make_verified_user):
+    _login(client)
+    from app.founder import FOUNDER_USER_ID
+
+    doc = _make_indexed_document(db_session, FOUNDER_USER_ID)
+    _set_rls_user(db_session, FOUNDER_USER_ID)
+    jobs = [
+        service.create_job(db_session, owner_id=FOUNDER_USER_ID, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+        for _ in range(3)
+    ]
+    tied_at = "2026-01-02T00:00:00+00:00"
+    for j in jobs:
+        superuser_db.execute(sa_text("UPDATE mainai_jobs SET created_at = :t WHERE id = :j"), {"t": tied_at, "j": str(j.id)})
+    superuser_db.commit()
+
+    owner_order = [str(j.id) for j in service.list_jobs(db_session, limit=10, offset=0) if str(j.id) in {str(j.id) for j in jobs}]
+    admin_res = client.get("/api/mainai/jobs/admin/all?limit=50&offset=0")
+    assert admin_res.status_code == 200
+    admin_order = [row["id"] for row in admin_res.json() if row["id"] in {str(j.id) for j in jobs}]
+    assert owner_order == admin_order, "owner list and admin list must apply the identical tiebreaker"
+
+
+# --- R: capability policy enforcement -- production/sandbox actually verkställs (M3) -----------
+
+
+def test_get_capability_status_reports_production_prohibited_in_production(db_session, monkeypatch):
+    monkeypatch.setitem(mainai_runtime_contract._CAPABILITY_WRITE_PROFILE["corpus_review"], "production_prohibited", True)
+    monkeypatch.setattr(get_settings(), "environment", "production")
+    status = get_capability_status(db_session, "corpus_review")
+    assert status.currently_available is False
+    assert status.unavailable_reason == "production_prohibited"
+    assert "openai" not in (status.unavailable_reason or "").lower()  # no secrets/provider names in the reason
+
+
+def test_get_capability_status_reports_sandbox_only_in_production(db_session, monkeypatch):
+    monkeypatch.setitem(mainai_runtime_contract._CAPABILITY_WRITE_PROFILE["corpus_review"], "sandbox_only", True)
+    monkeypatch.setattr(get_settings(), "environment", "production")
+    status = get_capability_status(db_session, "corpus_review")
+    assert status.currently_available is False
+    assert status.unavailable_reason == "sandbox_only"
+
+
+def test_get_capability_status_allows_sandbox_only_capability_outside_production(db_session, monkeypatch):
+    monkeypatch.setitem(mainai_runtime_contract._CAPABILITY_WRITE_PROFILE["corpus_review"], "sandbox_only", True)
+    monkeypatch.setattr(get_settings(), "environment", "development")
+    status = get_capability_status(db_session, "corpus_review")
+    assert status.currently_available is True
+
+
+def test_create_job_rejects_a_production_prohibited_capability_before_creating_any_row(db_session, superuser_db, make_verified_user, monkeypatch):
+    monkeypatch.setitem(mainai_runtime_contract._CAPABILITY_WRITE_PROFILE["corpus_review"], "production_prohibited", True)
+    monkeypatch.setattr(get_settings(), "environment", "production")
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    with pytest.raises(CapabilityUnavailableError) as exc_info:
+        service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    assert exc_info.value.reason == "production_prohibited"
+    count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(user.id)}).scalar()
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_re_checks_capability_at_execution_time_and_fails_the_job(db_session, superuser_db, make_verified_user, monkeypatch):
+    """The founder's explicit requirement: creation and worker execution must use the SAME
+    central policy function, so a capability that becomes production_prohibited (or
+    unconfigured) AFTER a job was already queued is caught at execution time too, not silently
+    executed anyway."""
+    from app.worker import process_claimed_mainai_job
+
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _make_chunk(db_session, user.id, doc.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+
+    job_id, owner_id, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    assert job_id == job.id
+
+    # The capability becomes blocked AFTER the job was already claimed -- simulating a policy
+    # or configuration change between queueing and actual execution.
+    monkeypatch.setitem(mainai_runtime_contract._CAPABILITY_WRITE_PROFILE["corpus_review"], "production_prohibited", True)
+    monkeypatch.setattr(get_settings(), "environment", "production")
+
+    db = db_session
+    await process_claimed_mainai_job(db, job_id, owner_id, "worker-1", generation, 120)
+
+    refreshed = superuser_db.get(MainAIJob, job_id)
+    assert refreshed.status == MainAIJobStatus.failed
+    assert refreshed.error_category == MainAIJobErrorCategory.capability_unavailable.value
+
+
+# --- S: progress_current cannot regress at the DB level (M4) -----------------------------------
+
+
+def test_progress_regression_is_rejected_at_the_db_level(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.update_progress(db_session, job, worker_id=worker_id, lease_generation=generation, current=3, total=5)
+    db_session.commit()
+
+    with pytest.raises(Exception):
+        superuser_db.execute(sa_text("UPDATE mainai_jobs SET progress_current = 1 WHERE id = :j"), {"j": str(job.id)})
+        superuser_db.commit()
+    superuser_db.rollback()
+
+    current = superuser_db.execute(sa_text("SELECT progress_current FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).scalar()
+    assert current == 3, "the rejected UPDATE must not have partially applied"
+
+
+def test_progress_reset_to_zero_is_allowed_only_on_the_failed_to_queued_retry_transition(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.update_progress(db_session, job, worker_id=worker_id, lease_generation=generation, current=2, total=5)
+    db_session.commit()
+    job = service.get_job(db_session, job.id)
+    service.mark_failed(db_session, job, worker_id=worker_id, lease_generation=generation, error_category=MainAIJobErrorCategory.transient_io)
+
+    # retry_job() itself is the legitimate reset path -- must succeed, not be rejected by the
+    # very trigger meant to stop an ILLEGITIMATE regression.
+    job = service.get_job(db_session, job.id)
+    retried = service.retry_job(db_session, job.id, requested_by=user.id)
+    assert retried.progress_current == 0
+    assert retried.status == MainAIJobStatus.queued
+
+
+def test_progress_regression_from_a_stale_worker_is_rejected_by_fencing_before_the_trigger_even_runs(db_session, superuser_db, make_verified_user):
+    """A stale worker's write is already rejected by _guarded_job_write's WHERE clause (zero
+    rows matched) before the progress-regression trigger would ever see the row -- this proves
+    the two layers compose correctly, not that the trigger is doing the fencing layer's job."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.update_progress(db_session, job, worker_id=worker_id, lease_generation=generation, current=3, total=5)
+    db_session.commit()
+
+    with pytest.raises(JobLeaseLostError):
+        job = service.get_job(db_session, job.id)
+        service.update_progress(db_session, job, worker_id=worker_id, lease_generation=generation + 999, current=1, total=5)
+
+
+# --- T: mid-run lease loss rolls back the in-flight proposal end to end (M5) --------------------
+
+
+@pytest.mark.asyncio
+async def test_run_corpus_review_job_rolls_back_the_proposal_when_lease_dies_between_provider_call_and_commit(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """The founder's explicit end-to-end scenario: the provider call succeeds, a
+    MainAIJobProposal is added to the session, and ONLY THEN -- before that proposal (and the
+    matching progress update) is ever committed -- the lease is reclaimed by another worker.
+    Simulated by making the fake provider's own return trigger the reclaim as a side effect,
+    landing exactly between the successful chat_with_fallback() call and
+    record_document_reviewed()'s guarded commit inside run_corpus_review_job()."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+
+    admin = sessionmaker(bind=migration_engine)()
+    claimed_b: tuple | None = None
+
+    async def _chat_that_gets_reclaimed_mid_flight(self, messages, model, **kwargs):
+        nonlocal claimed_b
+        admin.execute(sa_text("UPDATE mainai_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :j"), {"j": str(job_id)})
+        admin.commit()
+        claimed_b = claim_next_mainai_job(admin, "worker-b", 120)
+        return ChatResult(content="Ser bra ut.", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat_that_gets_reclaimed_mid_flight)
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _make_chunk(db_session, user.id, doc.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    job_id = job.id
+    _, _, generation_a = claim_next_mainai_job(admin, "worker-a", 120)
+
+    try:
+        _set_rls_user(db_session, user.id)
+        await run_corpus_review_job(db_session, job_id, user.id, worker_id="worker-a", lease_generation=generation_a, lease_seconds=120)
+
+        # Worker A's proposal must never have landed -- the guarded commit inside
+        # record_document_reviewed() failed (lease already reclaimed) and corpus_review_job.py
+        # rolled back the whole in-flight transaction, discarding the added-but-uncommitted
+        # MainAIJobProposal along with it.
+        proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job_id)}).scalar()
+        assert proposal_count == 0
+        row = superuser_db.execute(sa_text("SELECT status, locked_by FROM mainai_jobs WHERE id = :j"), {"j": str(job_id)}).first()
+        assert row[0] == "running"
+        assert row[1] == "worker-b"
+
+        # Worker B, the legitimate new claimant, can still finish the job normally.
+        assert claimed_b is not None
+        _, _, generation_b = claimed_b
+        monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Ser bra ut igen."))
+        fresh_job = service.get_job(db_session, job_id)
+        db_session.commit()
+        await run_corpus_review_job(db_session, job_id, user.id, worker_id="worker-b", lease_generation=generation_b, lease_seconds=120)
+
+        final = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :j"), {"j": str(job_id)}).scalar()
+        assert final == "completed"
+        proposals = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job_id)}).scalar()
+        assert proposals == 1, "exactly one proposal after the job actually finished -- worker A's rolled-back attempt must not have left a trace"
+    finally:
+        admin.close()
+
+
+# --- U: idempotency semantics -- identical replay vs. genuine conflict (M6) --------------------
+
+
+def test_create_job_same_key_identical_payload_returns_the_original_job(db_session, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    refs = [{"type": "document", "id": str(doc.id)}]
+    first = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=refs, created_by="founder", idempotency_key="key-1")
+    second = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=refs, created_by="founder", idempotency_key="key-1")
+    assert first.id == second.id
+
+
+def test_create_job_same_key_different_input_refs_raises_idempotency_conflict(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc1 = _make_indexed_document(db_session, user.id, title="A")
+    doc2 = _make_indexed_document(db_session, user.id, title="B")
+    _set_rls_user(db_session, user.id)
+    first = service.create_job(
+        db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc1.id)}], created_by="founder", idempotency_key="key-2"
+    )
+    with pytest.raises(service.IdempotencyConflictError):
+        service.create_job(
+            db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc2.id)}], created_by="founder", idempotency_key="key-2"
+        )
+    count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(user.id)}).scalar()
+    assert count == 1, "the conflicting call must not have created a second row"
+    assert first.id is not None
+
+
+def test_create_job_idempotency_lookup_never_gives_a_misleading_capability_error_for_an_existing_key(db_session, make_verified_user):
+    """The founder's explicit requirement: the idempotency lookup happens before
+    require_capability(), so a replay under an EXISTING key with a mismatched job_type gets a
+    clearly-labeled IdempotencyConflictError, never a confusing CapabilityUnavailableError."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    service.create_job(
+        db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder", idempotency_key="key-3"
+    )
+    with pytest.raises(service.IdempotencyConflictError):
+        service.create_job(
+            db_session, owner_id=user.id, job_type="not_a_real_capability", input_refs=[], created_by="founder", idempotency_key="key-3"
+        )
+
+
+def test_create_job_unknown_capability_without_an_existing_key_still_fails_closed(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    with pytest.raises(CapabilityUnavailableError):
+        service.create_job(db_session, owner_id=user.id, job_type="not_a_real_capability", input_refs=[], created_by="founder", idempotency_key="key-4")
+    count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(user.id)}).scalar()
+    assert count == 0
+
+
+def test_api_create_job_same_key_different_payload_returns_409_idempotency_conflict(client, db_session):
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+    from app.founder import FOUNDER_USER_ID
+
+    doc1 = _make_indexed_document(db_session, FOUNDER_USER_ID, title="A")
+    doc2 = _make_indexed_document(db_session, FOUNDER_USER_ID, title="B")
+
+    first = client.post(
+        "/api/mainai/jobs",
+        json={"job_type": "corpus_review", "input_refs": [{"type": "document", "id": str(doc1.id)}], "idempotency_key": "api-key-1"},
+        headers=headers,
+    )
+    assert first.status_code == 201, first.text
+
+    second = client.post(
+        "/api/mainai/jobs",
+        json={"job_type": "corpus_review", "input_refs": [{"type": "document", "id": str(doc2.id)}], "idempotency_key": "api-key-1"},
+        headers=headers,
+    )
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["reason"] == "idempotency_conflict"
+
+
+def test_create_job_concurrent_identical_requests_still_return_the_same_job_id_and_one_created_event(
+    db_session, superuser_db, make_verified_user
+):
+    """Re-verifies the existing race-safety guarantee still holds after the fingerprint check
+    and reordered capability check were added -- two real threads, two real sessions."""
+    import threading
+
+    from app.db import SessionLocal
+
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    barrier = threading.Barrier(2)
+    results: list = []
+    errors: list = []
+
+    def _create():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, user.id)
+            barrier.wait(timeout=5)
+            job = service.create_job(
+                session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder", idempotency_key="race-key-1"
+            )
+            results.append(job.id)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_create)
+    t2 = threading.Thread(target=_create)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert errors == []
+    assert len(results) == 2
+    assert results[0] == results[1]
+    row_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o AND idempotency_key = 'race-key-1'"), {"o": str(user.id)}).scalar()
+    assert row_count == 1
+    created_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j AND event_type = 'created'"), {"j": str(results[0])}
+    ).scalar()
+    assert created_events == 1

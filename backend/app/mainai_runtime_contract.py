@@ -23,6 +23,7 @@ encodes a cross-cutting SAFETY RULE, not a single endpoint's request/response sh
 """
 
 import enum
+import re
 import uuid
 
 from pydantic import BaseModel, model_validator
@@ -77,54 +78,134 @@ def build_answer_response(message: str) -> "MainAIExecutionResponse":
 # capability on this path and must never claim one) plus the structural job_id=None guarantee
 # build_answer_response() above enforces. This pattern list is explicitly SECONDARY
 # defense-in-depth for the one channel neither of those constrains — the model's own free-text
-# content — not "the only protection," which is exactly what the founder's review said not to
-# ship: if the model ignores the system prompt anyway, a chat reply is corrected rather than
-# silently forwarded verbatim. Deliberately narrow and reviewed (not a general sentiment/intent
-# classifier, which would be unreviewable and prone to both false positives on completely
-# unrelated text and false negatives on phrasing this list doesn't anticipate) — covers the
-# specific claim shapes this contract is actually about: ongoing background work, a job having
-# started, or something being "done"/"completed" outside of a real MainAIJob. Swedish first
-# (chat.py's SYSTEM_PROMPT is Swedish and instructs the model to reply in the founder's own
-# language) with English equivalents, since the underlying provider can still answer in either.
-_UNVERIFIED_EXECUTION_CLAIM_PATTERNS: tuple[str, ...] = (
-    "jag arbetar med det i bakgrunden",
-    "jag arbetar på det i bakgrunden",
-    "jag jobbar med det i bakgrunden",
-    "arbetar med detta i bakgrunden",
-    "jobbet har startat",
-    "jobbet är startat",
-    "uppgiften har startat",
-    "jag har startat jobbet",
-    "jag har påbörjat körningen",
-    "körningen pågår i bakgrunden",
-    "i'm working on it in the background",
-    "i am working on it in the background",
-    "working on this in the background",
-    "the job has started",
-    "the job is now running",
-    "i've started the job",
-    "i have started the job",
-    "running this in the background",
+# content — not "the only protection."
+#
+# Fourth re-review round (same PR): an earlier version of this function only ever APPENDED a
+# correction after the model's original text, so a message could (and, once tested end-to-end,
+# demonstrably did) end up telling the founder "Jag arbetar med det i bakgrunden." immediately
+# followed by "[MainAI-obs: detta svar beskriver inget verkligt bakgrundsjobb...]" — both claims
+# visible in the same message at once. The founder's review classified that as HIGH: the user
+# can still be left with self-contradictory, misleading text. This version REPLACES the specific
+# sentence containing an unverified execution claim with a fixed truthful sentence instead of
+# appending after it — the false claim itself is gone from what the founder actually reads, not
+# just followed by a disclaimer.
+#
+# Still deliberately NOT a general sentiment/intent classifier (unreviewable, prone to false
+# positives on unrelated text) and still explicitly not "the only protection" — it is defense in
+# depth on top of (1) the system-prompt instruction and (2) build_answer_response()'s structural
+# job_id=None guarantee, which is what actually prevents this response from ever being
+# CLASSIFIED as execution_started/status/completed. This function only ever affects the free-text
+# CONTENT, never the response's structural mode.
+#
+# Each rule below is a regex (not a bare substring) so it matches reasonable inflections of the
+# same claim, not just one exact phrasing — the founder's explicit instruction to "avoid a
+# growing open keyword list as the only solution." It remains a deterministic, reviewable ruleset
+# rather than a second model call (which would add its own latency/cost/failure surface and
+# would itself need review) — residual bypass risk for a genuinely novel phrasing this ruleset
+# doesn't anticipate is real and is documented in docs/MAINAI_JOB_RUNTIME.md, not hidden. Seven
+# claim categories, Swedish and English, matching the founder's explicit list:
+#   1. working/laboring in the background
+#   2. will get back to you / follow up later
+#   3. monitoring/watching it
+#   4. has already reviewed everything
+#   5. is done/finished
+#   6. has started the job
+#   7. will notify you when done
+_EXECUTION_CLAIM_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # 1. working/laboring in the background
+    (re.compile(r"\b(jag\s+)?(arbetar|jobbar|kör|bearbetar|processar)\s+(med\s+|på\s+)?(det|detta|frågan|dokumenten)?\s*i\s+bakgrunden\b", re.I), "sv"),
+    (re.compile(r"\b(i'?m|i\s+am)\s+working\s+on\s+(it|this|that)\s+in\s+the\s+background\b", re.I), "en"),
+    (re.compile(r"\brunning\s+(this|it)\s+in\s+the\s+background\b", re.I), "en"),
+    (re.compile(r"\bworking\s+on\s+(it|this)\s+in\s+the\s+background\b", re.I), "en"),
+    # 2. will get back to you / follow up later
+    (re.compile(r"\bjag\s+(återkommer|hör av mig|kommer att höra av mig)\s+(till dig\s+)?(senare|strax|snart|inom kort)\b", re.I), "sv"),
+    (re.compile(r"\bi'?ll\s+(get back to you|follow up|update you|circle back)\s+(later|soon|shortly)\b", re.I), "en"),
+    # 3. monitoring/watching it
+    (re.compile(r"\bjag\s+(övervakar|bevakar|monitorerar|håller koll på)\s+(det|detta|situationen|läget)\b", re.I), "sv"),
+    (re.compile(r"\bi'?m\s+(monitoring|keeping an eye on|watching)\s+(it|this|the situation)\b", re.I), "en"),
+    # 4. has already reviewed everything
+    (re.compile(r"\bjag\s+har\s+(granskat|gått igenom|läst igenom|kontrollerat)\s+(allt|alla|allting|hela)\b", re.I), "sv"),
+    (re.compile(r"\bi'?ve\s+(reviewed|checked|gone through|looked at)\s+(everything|all of (it|them))\b", re.I), "en"),
+    # 5. is done/finished -- deliberately requires an explicit job/task/work noun, NOT a bare
+    # "jag är"/"det är"/"i'm"/"it's"/"this is" (those matched ordinary sentences with nothing to
+    # do with a background job -- e.g. "Jag är klar med kaffet" / "It's done!" -- a real false
+    # positive found and fixed during this round's own self-review; see
+    # docs/MAINAI_JOB_RUNTIME.md).
+    (
+        re.compile(
+            r"\b(jobbet|uppgiften|granskningen|körningen|arbetet|bakgrundsjobbet)\s+(är|har blivit)\s+"
+            r"(klar|färdig|klart|färdigt|avslutad|avslutat|slutförd|slutfört)\b",
+            re.I,
+        ),
+        "sv",
+    ),
+    (re.compile(r"\bjag\s+är\s+klar\s+med\s+(jobbet|uppgiften|granskningen|körningen|arbetet|det(ta)?\s+jobbet)\b", re.I), "sv"),
+    (
+        re.compile(
+            r"\b(the\s+job|the\s+task|the\s+review|the\s+background\s+job|my\s+work\s+on\s+this)\s+is\s+"
+            r"(done|finished|complete|completed)\b",
+            re.I,
+        ),
+        "en",
+    ),
+    (re.compile(r"\bi'?m\s+done\s+with\s+(the\s+job|the\s+task|the\s+review|this\s+job)\b", re.I), "en"),
+    # 6. has started the job
+    (re.compile(r"\b(jobbet|uppgiften|körningen)\s+(har|är)\s+startat\b", re.I), "sv"),
+    (re.compile(r"\bjag\s+har\s+(startat|påbörjat|initierat)\s+(jobbet|uppgiften|körningen)\b", re.I), "sv"),
+    (re.compile(r"\bthe\s+(job|task)\s+(has\s+started|is\s+now\s+running)\b", re.I), "en"),
+    (re.compile(r"\bi'?ve?\s+(started|initiated|kicked off)\s+the\s+(job|task)\b", re.I), "en"),
+    # 7. will notify you when done
+    (re.compile(r"\bjag\s+(kommer\s+att\s+)?(meddela|höra av mig|återkomma till dig)\s+när\s+(det|jobbet|granskningen|detta|uppgiften)\s+är\s+(klart|färdigt)\b", re.I), "sv"),
+    (re.compile(r"\bi'?ll\s+(let you know|notify you|update you|ping you)\s+when\s+(it'?s?|this is|the job is|the task is)\s+(done|ready|finished|complete)\b", re.I), "en"),
 )
 
-_UNVERIFIED_EXECUTION_CLAIM_NOTICE = (
-    "\n\n[MainAI-obs: detta svar beskriver inget verkligt bakgrundsjobb — se docs/MAINAI_JOB_RUNTIME.md. "
-    "Om ett riktigt granskningsjobb ska köras, starta det via Jobb & Aktivitet.]"
-)
+_TRUTHFUL_REPLACEMENT: dict[str, str] = {
+    "sv": "[MainAI: det här svaret är hela mitt arbete med frågan — inget bakgrundsjobb pågår eller är avslutat.]",
+    "en": "[MainAI: this reply is the entire work on your question — no background job is running or has been completed.]",
+}
+
+# Sentence boundary: end-of-sentence punctuation followed by whitespace, or a newline. A
+# deliberately simple heuristic (matches this codebase's other lightweight text-processing
+# choices) — good enough to isolate a single offending sentence from the rest of an otherwise
+# legitimate answer without needing a real NLP sentence tokenizer for this narrow purpose.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
 
 def sanitize_unverified_execution_claims(message: str) -> str:
-    """Appends a corrective notice (never silently rewrites the model's own words — an edited
-    quote would be its own honesty problem) the instant `message` contains a phrase from
-    `_UNVERIFIED_EXECUTION_CLAIM_PATTERNS`, case-insensitively. Idempotent (appending twice
-    would be a real bug, not just cosmetic — checked explicitly) and safe to call on every
-    chat reply unconditionally, matching chat.py's actual call site usage."""
-    lowered = message.lower()
-    if _UNVERIFIED_EXECUTION_CLAIM_NOTICE.strip() in message:
-        return message  # already sanitized -- never append the notice twice
-    if any(pattern in lowered for pattern in _UNVERIFIED_EXECUTION_CLAIM_PATTERNS):
-        return message + _UNVERIFIED_EXECUTION_CLAIM_NOTICE
-    return message
+    """Replaces (never just follows) every sentence containing an unverified execution claim
+    with a fixed truthful sentence, leaving the rest of the message untouched. Founder
+    re-review round (PR #36), fourth pass: the previous append-only version left the model's
+    original false claim fully visible, immediately followed by a correction — a
+    self-contradictory message the founder classified HIGH. This version removes the claim
+    itself from what the founder reads.
+
+    Naturally idempotent: the replacement sentences themselves never match
+    `_EXECUTION_CLAIM_RULES`, so a second call on already-sanitized text is a no-op — no
+    separate "already sanitized" check is needed the way the previous append-only notice
+    required one. Safe to call unconditionally on every chat reply, matching chat.py's call
+    site usage."""
+    sentences = _SENTENCE_SPLIT_RE.split(message)
+    output: list[str] = []
+    last_was_replacement = False
+    changed = False
+    for sentence in sentences:
+        matched_lang: str | None = None
+        for pattern, lang in _EXECUTION_CLAIM_RULES:
+            if pattern.search(sentence):
+                matched_lang = lang
+                break
+        if matched_lang is not None:
+            changed = True
+            if not last_was_replacement:
+                output.append(_TRUTHFUL_REPLACEMENT[matched_lang])
+            last_was_replacement = True
+        else:
+            if sentence.strip():
+                output.append(sentence)
+            last_was_replacement = False
+    if not changed:
+        return message
+    return " ".join(output).strip()
 
 
 class MainAIExecutionResponse(BaseModel):
@@ -221,7 +302,15 @@ def get_capability_status(db, capability: str) -> CapabilityStatus:
     """Builds the real CapabilityStatus for `capability` against the CURRENT runtime state of
     `db`'s session. Fail-closed for anything not in CAPABILITY_MANIFEST OR not in
     _CAPABILITY_PROVIDER_ROLE/_CAPABILITY_WRITE_PROFILE (an implemented capability with no
-    write-profile entry is a bug in this module, not a reason to guess a permissive default)."""
+    write-profile entry is a bug in this module, not a reason to guess a permissive default).
+
+    Founder re-review round (PR #36), fourth pass: `sandbox_only`/`production_prohibited` used
+    to be pure metadata on `CapabilityStatus` — reported, never enforced. `corpus_review` itself
+    sets both `False` so this had no live effect yet, but nothing would have stopped a FUTURE
+    capability that set either flag `True` from still running in production, since no code
+    path ever read them. Now checked here, in the one function both `require_capability()`
+    (job creation, and — as of this same pass — `app/worker.py`'s execution-time re-check) call,
+    so job creation and worker execution can never apply a different policy from each other."""
     implemented = capability in CAPABILITY_MANIFEST
     if not implemented:
         return CapabilityStatus(
@@ -233,7 +322,8 @@ def get_capability_status(db, capability: str) -> CapabilityStatus:
             unavailable_reason="not_implemented",
         )
 
-    from app.providers.registry import resolve_active  # local import: this module stays DB/provider-free at import time
+    from app.config import get_settings  # local import: this module stays DB/provider-free at import time
+    from app.providers.registry import resolve_active
 
     role = _CAPABILITY_PROVIDER_ROLE.get(capability)
     configured = False
@@ -245,7 +335,19 @@ def get_capability_status(db, capability: str) -> CapabilityStatus:
             configured = False
 
     profile = _CAPABILITY_WRITE_PROFILE.get(capability, {})
-    currently_available = implemented and configured
+    sandbox_only = bool(profile.get("sandbox_only"))
+    production_prohibited = bool(profile.get("production_prohibited"))
+    in_production = get_settings().environment == "production"
+
+    unavailable_reason: str | None = None
+    if not configured:
+        unavailable_reason = "not_configured"
+    elif in_production and production_prohibited:
+        unavailable_reason = "production_prohibited"
+    elif in_production and sandbox_only:
+        unavailable_reason = "sandbox_only"
+
+    currently_available = implemented and configured and unavailable_reason is None
     return CapabilityStatus(
         capability=capability,
         implemented=True,
@@ -256,18 +358,20 @@ def get_capability_status(db, capability: str) -> CapabilityStatus:
         sandbox_only=profile.get("sandbox_only"),
         production_prohibited=profile.get("production_prohibited"),
         requires_user_action=not configured,
-        unavailable_reason=None if currently_available else "not_configured",
+        unavailable_reason=unavailable_reason,
     )
 
 
 def require_capability(db, capability: str) -> None:
-    """Fail closed: raises CapabilityUnavailableError unless `capability` is both implemented
-    AND currently configured to actually run. Called BEFORE any MainAIJob row is created (see
-    app/rag/mainai_jobs_service.py's create_job) — an unavailable capability must never reach
-    the point of creating a job row at all, let alone claiming execution started. `db` is
-    required (a behavior change from this function's pre-review-round signature, which took no
-    db and could only ever check the static implemented-or-not list) — every call site already
-    has a session in scope."""
+    """Fail closed: raises CapabilityUnavailableError unless `capability` is implemented,
+    currently configured to run, AND not blocked by its own sandbox_only/production_prohibited
+    policy in the current environment. This is the ONE central policy function — called both by
+    `app/rag/mainai_jobs_service.py`'s create_job (job creation) AND, as of the founder
+    re-review round's fourth pass, `app/worker.py`'s process_claimed_mainai_job (job execution,
+    re-checked immediately before dispatch) — so a capability that becomes unconfigured or
+    newly production-prohibited between a job's creation and its actual execution is caught at
+    BOTH points the same way, not just at creation time. `db` is required — every call site
+    already has a session in scope; never guess a permissive default with no db access."""
     status = get_capability_status(db, capability)
     if not status.currently_available:
         raise CapabilityUnavailableError(capability, reason=status.unavailable_reason or "not_implemented")

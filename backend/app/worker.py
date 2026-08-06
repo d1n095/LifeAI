@@ -39,6 +39,7 @@ from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
+from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
@@ -133,10 +134,26 @@ async def process_claimed_mainai_job(
     JobLeaseLostError escaping record_claimed() itself (this claim was reclaimed before the
     worker even got here — theoretically possible, never actually observed) is handled the
     same as any other lease loss: log and stop, no mark_failed attempt, since this worker no
-    longer has any right to write to the row at all."""
+    longer has any right to write to the row at all.
+
+    Founder re-review round (PR #36), fourth pass: `require_capability()` is re-checked here,
+    immediately before dispatch, using the exact same central policy function
+    `app/rag/mainai_jobs_service.py`'s create_job() calls at creation time — a capability that
+    became unconfigured, or is now `production_prohibited`/`sandbox_only` in the CURRENT
+    environment, since this job was created is caught here too, not just at creation. A job
+    that fails this check is marked `failed` with `capability_unavailable`, never silently
+    executed anyway."""
     _set_mainai_job_rls_owner(db, owner_id)
     job = db.get(MainAIJob, job_id, populate_existing=True)
     try:
+        if job is not None:
+            try:
+                require_capability(db, job.job_type)
+            except CapabilityUnavailableError:
+                logger.warning("Worker %s: mainai_job %s's capability '%s' is no longer available at execution time.", worker_id, job_id, job.job_type)
+                record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
+                mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.capability_unavailable)
+                return
         if job is not None and job.job_type == "corpus_review":
             record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
             await run_corpus_review_job(db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)

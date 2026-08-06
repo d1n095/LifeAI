@@ -66,6 +66,29 @@ class InvalidInputRefsError(Exception):
     entitled to touch."""
 
 
+class IdempotencyConflictError(Exception):
+    """Founder re-review round (PR #36), fourth pass: raised when `(owner_id, idempotency_key)`
+    matches an EXISTING job, but the new call's `job_type`/`input_refs` differ from that job's
+    own — mapped to HTTP 409 by the router. Replaces the previous, undocumented-and-untested
+    policy of silently returning the original job regardless of payload: the founder's explicit
+    choice is that a genuinely different request under a reused key is a conflict, not a
+    silent no-op. A caller that wants a new job must use a new idempotency_key; a caller
+    replaying its own exact original request (same job_type, same input_refs) still gets the
+    original job back, unchanged, as before."""
+
+
+def _canonical_request_fingerprint(job_type: str, input_refs: list[dict]) -> str:
+    """A stable, order-independent representation of "what job was actually requested" —
+    compared between a new create_job() call and an existing job under the same idempotency
+    key to tell a genuine replay (identical fingerprint) apart from a reused key with a
+    materially different request (different fingerprint -> IdempotencyConflictError). Only
+    `type`/`id` are compared per ref (the two fields _validate_input_refs actually requires) so
+    an extra, ignored key some future caller adds to a ref dict doesn't spuriously change the
+    fingerprint."""
+    normalized_refs = sorted(json.dumps({"type": r.get("type"), "id": r.get("id")}, sort_keys=True) for r in input_refs)
+    return json.dumps({"job_type": job_type, "input_refs": normalized_refs}, sort_keys=True)
+
+
 def _record_event(db: Session, job: MainAIJob, event_type: MainAIJobEventType, detail: dict | None = None) -> MainAIJobEvent:
     event = MainAIJobEvent(job_id=job.id, owner_id=job.owner_id, event_type=event_type, detail=detail or {})
     db.add(event)
@@ -149,15 +172,31 @@ def create_job(
     made safe: it's a classic TOCTOU race — both callers can pass the SELECT before either
     commits its INSERT). Reproduced live during review: two real threads, two real sessions,
     same (owner_id, idempotency_key) — the loser previously got an UNHANDLED IntegrityError
-    instead of the existing job."""
-    require_capability(db, job_type)  # raises CapabilityUnavailableError — never caught here, the router maps it to 409
+    instead of the existing job.
+
+    Fourth pass: the idempotency lookup now happens BEFORE require_capability(), not after —
+    a replay under an EXISTING key must be recognized as a replay before anything about the
+    (possibly since-changed, possibly irrelevant) capability of the NEW call's job_type is even
+    considered; otherwise a caller retrying with the same key but a client-side bug that
+    changed job_type could get a misleading CapabilityUnavailableError instead of either the
+    original job (identical request) or a clear IdempotencyConflictError (different request) —
+    see _canonical_request_fingerprint(). A genuinely new capability check (no matching key, or
+    no key at all) still runs and still fails closed exactly as before."""
+    fingerprint = _canonical_request_fingerprint(job_type, input_refs)
 
     if idempotency_key:
         existing = db.execute(
             select(MainAIJob).where(MainAIJob.owner_id == owner_id, MainAIJob.idempotency_key == idempotency_key)
         ).scalar_one_or_none()
         if existing is not None:
+            if _canonical_request_fingerprint(existing.job_type, existing.input_refs) != fingerprint:
+                raise IdempotencyConflictError(
+                    f"idempotency_key '{idempotency_key}' was already used for a different request "
+                    f"(job {existing.id}, job_type '{existing.job_type}')."
+                )
             return existing
+
+    require_capability(db, job_type)  # raises CapabilityUnavailableError — never caught here, the router maps it to 409
 
     if job_type == "corpus_review":
         _validate_input_refs(db, owner_id, input_refs)
@@ -203,6 +242,11 @@ def create_job(
             # commit as one fast transaction) but re-raising the original conflict is more
             # honest than returning None or looping forever.
             raise
+        if _canonical_request_fingerprint(existing.job_type, existing.input_refs) != fingerprint:
+            raise IdempotencyConflictError(
+                f"idempotency_key '{idempotency_key}' was already used for a different request "
+                f"(job {existing.id}, job_type '{existing.job_type}')."
+            ) from exc
         return existing
 
     db.commit()
@@ -229,9 +273,16 @@ def get_job(db: Session, job_id: uuid.UUID) -> MainAIJob:
 
 
 def list_jobs(db: Session, *, limit: int = 50, offset: int = 0) -> list[MainAIJob]:
+    """Founder re-review round (PR #36), fourth pass: `created_at` alone is not a stable sort
+    key for limit/offset pagination -- two jobs created within the same timestamp (realistic
+    under fast/automated job creation) could shuffle order between page fetches, producing a
+    duplicate or missing row across pages. `id` (a UUID, unique and immutable) as the secondary
+    key makes the ordering total and deterministic regardless of `created_at` ties."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    return list(db.execute(select(MainAIJob).order_by(MainAIJob.created_at.desc()).limit(limit).offset(offset)).scalars())
+    return list(
+        db.execute(select(MainAIJob).order_by(MainAIJob.created_at.desc(), MainAIJob.id.desc()).limit(limit).offset(offset)).scalars()
+    )
 
 
 def list_job_events(db: Session, job_id: uuid.UUID, *, limit: int = 200) -> list[MainAIJobEvent]:
@@ -267,7 +318,20 @@ def retry_job(db: Session, job_id: uuid.UUID, *, requested_by: uuid.UUID, reques
     RETRYABLE_MAINAI_JOB_STATUSES's own docstring) within its retry budget can be retried.
     Resets progress fields so the corpus_review loop restarts its batch scan from the top —
     safe because it is itself idempotent per already-produced proposal (see
-    app/rag/corpus_review_job.py)."""
+    app/rag/corpus_review_job.py).
+
+    Documented, deliberate scope of what this DOES and does NOT reset (founder re-review
+    round, PR #36, fourth pass): `started_at`, `locked_by`, `lease_expires_at`,
+    `last_heartbeat_at`, `lease_generation`, `provider`, and `model` are left exactly as the
+    failed attempt left them. This is safe, not an oversight: while `status` is `queued`, every
+    worker-driven guarded write requires `status = 'running'` (see `_guarded_job_write`), so
+    these stale values can never be acted on by anyone; the next successful claim
+    (`claim_next_mainai_job`) unconditionally overwrites `locked_by`/`lease_generation`/
+    `lease_expires_at`/`last_heartbeat_at` with fresh values regardless of what they held
+    before. The one visible consequence: `started_at` (`COALESCE(started_at, now())` at claim
+    time) will keep reflecting the job's FIRST-EVER claim across every retry, not the most
+    recent attempt — an explicit design choice ("when did work on this job begin at all"), not
+    a bug, and now stated here rather than left implicit."""
     job = get_job(db, job_id)
     if job.status not in RETRYABLE_MAINAI_JOB_STATUSES:
         raise InvalidJobTransitionError(f"Cannot retry a job in status '{job.status.value}'.")
@@ -480,9 +544,18 @@ def record_document_skipped(
     ever inserting the event — a stale worker must not be able to write ANY event, including
     this one, as if it still owned the job. `detail` never carries raw exception text, only the
     closed-vocabulary `reason` and (for a provider failure) the same safe `error_category`
-    mark_failed() would use — never str(exception)."""
+    mark_failed() would use — never str(exception).
+
+    Founder re-review round (PR #36), fourth pass: skip events are NOT deduplicated across
+    retries the way proposals are (`_already_reviewed_document_ids()` only tracks documents
+    with a PROPOSAL, never a skip) — a document skipped on attempt 1 that's skipped again on
+    attempt 2 (after a retry) gets a second `document_skipped` event. This is intentional, not
+    a bug: each event is a true record of what happened during that specific attempt. `detail`
+    now includes `job.retry_count` (the attempt number this event happened during) so the two
+    events can be told apart in the job's history instead of looking like an unexplained
+    duplicate."""
     _guarded_job_write(db, job.id, worker_id=worker_id, lease_generation=lease_generation, set_sql="locked_by = locked_by", params={})
-    detail = {"document_id": str(document_id), "reason": reason}
+    detail = {"document_id": str(document_id), "reason": reason, "attempt": job.retry_count}
     if error_category is not None:
         detail["error_category"] = error_category
     _record_event(db, job, MainAIJobEventType.document_skipped, detail)
@@ -490,6 +563,7 @@ def record_document_skipped(
 
 __all__ = [
     "CapabilityUnavailableError",
+    "IdempotencyConflictError",
     "InvalidInputRefsError",
     "InvalidJobTransitionError",
     "JobLeaseLostError",

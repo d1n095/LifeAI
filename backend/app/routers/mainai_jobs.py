@@ -64,6 +64,12 @@ def create_job(
         # (implemented, but no provider is wired up yet -- founder-fixable, not a code gap)
         # instead of one indistinguishable 409 string.
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"message": str(exc), "reason": exc.reason}) from exc
+    except service.IdempotencyConflictError as exc:
+        # Distinct `reason` from CapabilityUnavailableError's 409 above -- founder re-review
+        # round (PR #36), fourth pass: reusing an idempotency_key with a materially different
+        # job_type/input_refs is its own, clearly-labeled conflict, never silently accepted as
+        # if it were the same request and never confused with "this job_type is unavailable".
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"message": str(exc), "reason": "idempotency_conflict"}) from exc
     except service.InvalidInputRefsError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return job
@@ -129,7 +135,7 @@ def list_all_jobs_admin(limit: int = 100, offset: int = 0, user: User = Depends(
     offset = max(0, offset)
     with migration_engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT * FROM mainai_jobs ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+            text("SELECT * FROM mainai_jobs ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"),
             {"limit": limit, "offset": offset},
         ).mappings().all()
     return [MainAIJobOut(**dict(row)) for row in rows]
