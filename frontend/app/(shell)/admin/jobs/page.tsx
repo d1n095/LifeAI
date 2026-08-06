@@ -37,10 +37,16 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const POLL_INTERVAL_MS = 4000;
+const PAGE_SIZE = 20;
 
 export default function MainAIJobsPage() {
   const [scope, setScope] = useState<"mine" | "admin">("mine");
   const [jobs, setJobs] = useState<MainAIJob[]>([]);
+  const [page, setPage] = useState(0);
+  // Whether the last fetch returned a full page — the only signal we have that a next page
+  // might exist, since list_jobs/list_all_jobs_admin (see app/routers/mainai_jobs.py) return
+  // a plain limit/offset slice with no total count.
+  const [hasNextPage, setHasNextPage] = useState(false);
   const [selected, setSelected] = useState<MainAIJobDetail | null>(null);
   const [proposals, setProposals] = useState<MainAIJobProposal[]>([]);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
@@ -50,7 +56,11 @@ export default function MainAIJobsPage() {
 
   async function refreshJobs() {
     try {
-      setJobs(scope === "admin" ? await api.mainaiJobsAdminAll() : await api.mainaiJobs());
+      const offset = page * PAGE_SIZE;
+      const result =
+        scope === "admin" ? await api.mainaiJobsAdminAll(PAGE_SIZE, offset) : await api.mainaiJobs(PAGE_SIZE, offset);
+      setJobs(result);
+      setHasNextPage(result.length === PAGE_SIZE);
     } catch (e: any) {
       setError(e.message);
     }
@@ -68,13 +78,18 @@ export default function MainAIJobsPage() {
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPage(0);
+  }, [scope]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshJobs();
     api
       .listDocuments()
       .then((docs) => setDocuments(docs.filter((d) => d.status === "indexed")))
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope]);
+  }, [scope, page]);
 
   // Real polling of the server's own state — not a client-side animation. Progress/phase/
   // heartbeat shown below always reflect the last successful poll, nothing interpolated.
@@ -85,7 +100,7 @@ export default function MainAIJobsPage() {
     }, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, selected?.id]);
+  }, [scope, page, selected?.id]);
 
   function toggleDoc(id: string) {
     setSelectedDocIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -244,6 +259,27 @@ export default function MainAIJobsPage() {
                 )}
               </tbody>
             </table>
+            {(page > 0 || hasNextPage) && (
+              <div className="flex items-center justify-between border-t border-border/60 px-4 py-2 text-xs text-white/50">
+                <button
+                  type="button"
+                  disabled={page === 0}
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  className="rounded border border-border px-2 py-1 disabled:opacity-30"
+                >
+                  Föregående
+                </button>
+                <span>Sida {page + 1}</span>
+                <button
+                  type="button"
+                  disabled={!hasNextPage}
+                  onClick={() => setPage((p) => p + 1)}
+                  className="rounded border border-border px-2 py-1 disabled:opacity-30"
+                >
+                  Nästa
+                </button>
+              </div>
+            )}
           </div>
         </div>
 

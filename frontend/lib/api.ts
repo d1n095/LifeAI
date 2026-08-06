@@ -779,12 +779,12 @@ export const api = {
 
   // MainAI Runtime Truthfulness and Durable Job Foundation (see
   // backend/docs/MAINAI_JOB_RUNTIME.md).
-  mainaiJobs: () => request<MainAIJob[]>("/api/mainai/jobs"),
+  mainaiJobs: (limit = 20, offset = 0) => request<MainAIJob[]>(`/api/mainai/jobs?limit=${limit}&offset=${offset}`),
   mainaiJobDetail: (id: string) => request<MainAIJobDetail>(`/api/mainai/jobs/${id}`),
   mainaiJobProposals: (id: string) => request<MainAIJobProposal[]>(`/api/mainai/jobs/${id}/proposals`),
   mainaiCreateJob: (payload: { job_type: string; input_refs: { type: string; id: string }[]; idempotency_key?: string }) =>
     request<MainAIJob>("/api/mainai/jobs", { method: "POST", body: JSON.stringify(payload) }),
   mainaiCancelJob: (id: string) => request<MainAIJob>(`/api/mainai/jobs/${id}/cancel`, { method: "POST" }),
   mainaiRetryJob: (id: string) => request<MainAIJob>(`/api/mainai/jobs/${id}/retry`, { method: "POST" }),
-  mainaiJobsAdminAll: () => request<MainAIJob[]>("/api/mainai/jobs/admin/all"),
+  mainaiJobsAdminAll: (limit = 20, offset = 0) => request<MainAIJob[]>(`/api/mainai/jobs/admin/all?limit=${limit}&offset=${offset}`),
 };

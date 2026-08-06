@@ -96,6 +96,7 @@ def list_job_proposals(job_id: uuid.UUID, db: Session = Depends(get_db), user: U
 
 
 @router.post("/{job_id}/cancel", response_model=MainAIJobOut)
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 def cancel_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     try:
         return service.request_cancel(db, job_id, requested_by=user.id, request=request)
@@ -106,6 +107,7 @@ def cancel_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db
 
 
 @router.post("/{job_id}/retry", response_model=MainAIJobOut)
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 def retry_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     try:
         return service.retry_job(db, job_id, requested_by=user.id, request=request)

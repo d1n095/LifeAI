@@ -1717,3 +1717,36 @@ async def test_run_corpus_review_job_stops_immediately_and_cleanly_when_its_leas
     assert job.status == MainAIJobStatus.running, "a stale-generation call must not have changed the job at all"
     proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
     assert proposal_count == 0
+
+
+# --- P: rate limiting on cancel/retry (founder re-review round, PR #36, LOW item #8) ----------
+
+
+def test_api_cancel_is_rate_limited_per_ip(client):
+    """create_job already carried @limiter.limit — cancel/retry did not, so a caller could
+    hammer either endpoint with unlimited requests (each one a real DB round-trip and, for
+    retry, a real state-transition attempt) with no backpressure at all. Both now share the
+    same rate_limit_default_per_minute budget create_job already used, verified here the same
+    way tests/account/test_rate_limiting.py verifies other limiter-guarded endpoints: enough
+    real requests to a real client to observe an actual 429, not a mocked limiter.
+
+    The limit string is built once, at import time (`@limiter.limit(f"{settings...}/minute")`
+    -- see app/routers/mainai_jobs.py), not re-read per request, so monkeypatching settings
+    at test time would have no effect; this drives the real configured budget instead."""
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+    unknown_job_id = uuid.uuid4()
+    limit = get_settings().rate_limit_default_per_minute
+
+    statuses = [client.post(f"/api/mainai/jobs/{unknown_job_id}/cancel", headers=headers).status_code for _ in range(limit + 5)]
+    assert 429 in statuses
+
+
+def test_api_retry_is_rate_limited_per_ip(client):
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+    unknown_job_id = uuid.uuid4()
+    limit = get_settings().rate_limit_default_per_minute
+
+    statuses = [client.post(f"/api/mainai/jobs/{unknown_job_id}/retry", headers=headers).status_code for _ in range(limit + 5)]
+    assert 429 in statuses
