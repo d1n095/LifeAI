@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   CANCELLABLE_MAINAI_JOB_STATUSES,
@@ -53,15 +53,26 @@ export default function MainAIJobsPage() {
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Founder re-review round (PR #36), fourth pass: refreshJobs() is called both on
+  // scope/page change AND every POLL_INTERVAL_MS tick, with no guarantee those requests
+  // resolve in the order they were sent. A monotonic counter — bumped at the START of every
+  // call, captured into that call's own closure — lets a response tell whether it's still the
+  // most recent request in flight; a stale one (an older request that happens to resolve
+  // after a newer one) is discarded instead of silently overwriting the page the user is
+  // actually looking at with out-of-date data.
+  const latestRequestId = useRef(0);
 
   async function refreshJobs() {
+    const requestId = ++latestRequestId.current;
     try {
       const offset = page * PAGE_SIZE;
       const result =
         scope === "admin" ? await api.mainaiJobsAdminAll(PAGE_SIZE, offset) : await api.mainaiJobs(PAGE_SIZE, offset);
+      if (requestId !== latestRequestId.current) return; // a newer refreshJobs() call has since started -- discard this stale response
       setJobs(result);
       setHasNextPage(result.length === PAGE_SIZE);
     } catch (e: any) {
+      if (requestId !== latestRequestId.current) return;
       setError(e.message);
     }
   }
