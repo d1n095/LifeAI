@@ -20,6 +20,7 @@ Real local Postgres (RLS included), matching this repo's existing convention. On
 provider is faked, never the DB or RLS."""
 
 import importlib.util
+import json
 import uuid
 from pathlib import Path
 
@@ -27,7 +28,7 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.config import get_settings
-from app.jobs.mainai_job_lease import claim_next_mainai_job, renew_mainai_job_lease
+from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job, renew_mainai_job_lease
 from app.mainai_runtime_contract import (
     CAPABILITY_MANIFEST,
     CapabilityUnavailableError,
@@ -260,6 +261,62 @@ def test_create_job_different_owners_can_reuse_the_same_idempotency_key(db_sessi
     assert job_a.id != job_b.id
 
 
+def test_create_job_concurrent_same_owner_and_key_is_race_safe(db_session, superuser_db, make_verified_user):
+    """Founder re-review round (PR #36): reproduces, as a permanent regression test, the exact
+    race an independent review found and this session's own manual repro confirmed -- two real
+    threads, two real DB sessions, the same (owner_id, idempotency_key), racing each other. The
+    OLD select-then-insert implementation let the loser hit an unhandled IntegrityError instead
+    of getting the winner's job back; the SAVEPOINT-based fix must make both calls succeed
+    idempotently, exactly once, with exactly one 'created' event."""
+    import threading
+
+    from app.db import SessionLocal
+
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    db_session.commit()
+    doc_id = doc.id
+    key = f"race-{uuid.uuid4()}"
+
+    results: list[uuid.UUID] = []
+    errors: list[str] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _worker():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, user.id)
+            barrier.wait()
+            job = service.create_job(
+                session, owner_id=user.id, job_type="corpus_review",
+                input_refs=[{"type": "document", "id": str(doc_id)}], created_by="founder", idempotency_key=key,
+            )
+            results.append(job.id)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below, not swallowed
+            errors.append(repr(exc))
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=_worker), threading.Thread(target=_worker)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == [], f"both concurrent calls must succeed idempotently, got: {errors}"
+    assert len(results) == 2
+    assert results[0] == results[1], "both callers must get back the SAME job id"
+
+    row_count = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o AND idempotency_key = :k"), {"o": str(user.id), "k": key}
+    ).scalar()
+    assert row_count == 1, "exactly one row, no duplicate created by the race"
+    created_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j AND event_type = 'created'"), {"j": str(results[0])}
+    ).scalar()
+    assert created_events == 1, "exactly one 'created' event, not one per racing caller"
+
+
 def test_create_job_writes_a_created_event_and_audit_entry(db_session, superuser_db, make_verified_user):
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
@@ -317,11 +374,31 @@ def test_request_cancel_is_idempotent(db_session, make_verified_user):
     assert job2.cancel_requested is True
 
 
+def _claim(db, job_id) -> tuple[str, int]:
+    """Test helper: claims `job_id` on the superuser connection (matching real usage — the
+    worker always claims on migration_engine, see app/worker.py's _ClaimSession) and returns
+    (worker_id, lease_generation) for callers that need to exercise a fencing-guarded
+    mark_*/update_progress/record_* call the way corpus_review_job.py actually would, instead
+    of calling those functions against a job that was never really claimed."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+
+    claim_db = sessionmaker(bind=migration_engine)()
+    try:
+        _, _, generation = claim_next_mainai_job(claim_db, "test-worker", 120)
+    finally:
+        claim_db.close()
+    return "test-worker", generation
+
+
 def test_request_cancel_rejects_an_already_terminal_job(db_session, make_verified_user):
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    service.mark_completed(db_session, job)
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.mark_completed(db_session, job, worker_id=worker_id, lease_generation=generation)
     with pytest.raises(service.InvalidJobTransitionError):
         service.request_cancel(db_session, job.id, requested_by=user.id)
 
@@ -332,7 +409,9 @@ def test_retry_job_rejects_a_cancelled_job(db_session, make_verified_user):
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    service.mark_cancelled(db_session, job)
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.mark_cancelled(db_session, job, worker_id=worker_id, lease_generation=generation)
     with pytest.raises(service.InvalidJobTransitionError):
         service.retry_job(db_session, job.id, requested_by=user.id)
 
@@ -341,7 +420,9 @@ def test_retry_job_rejects_a_completed_job(db_session, make_verified_user):
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    service.mark_completed(db_session, job)
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.mark_completed(db_session, job, worker_id=worker_id, lease_generation=generation)
     with pytest.raises(service.InvalidJobTransitionError):
         service.retry_job(db_session, job.id, requested_by=user.id)
 
@@ -350,7 +431,9 @@ def test_retry_job_succeeds_for_a_failed_job_within_budget(db_session, make_veri
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    service.mark_failed(db_session, job, error_category=MainAIJobErrorCategory.transient_io)
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.mark_failed(db_session, job, worker_id=worker_id, lease_generation=generation, error_category=MainAIJobErrorCategory.transient_io)
     retried = service.retry_job(db_session, job.id, requested_by=user.id)
     assert retried.status == MainAIJobStatus.queued
     assert retried.retry_count == 1
@@ -364,10 +447,14 @@ def test_retry_job_rejects_once_retry_budget_is_exhausted(db_session, make_verif
     job.max_retries = 1
     db_session.add(job)
     db_session.commit()
-    service.mark_failed(db_session, job, error_category=MainAIJobErrorCategory.transient_io)
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.mark_failed(db_session, job, worker_id=worker_id, lease_generation=generation, error_category=MainAIJobErrorCategory.transient_io)
     service.retry_job(db_session, job.id, requested_by=user.id)  # retry_count -> 1, at budget
     job = service.get_job(db_session, job.id)
-    service.mark_failed(db_session, job, error_category=MainAIJobErrorCategory.transient_io)
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.mark_failed(db_session, job, worker_id=worker_id, lease_generation=generation, error_category=MainAIJobErrorCategory.transient_io)
     with pytest.raises(service.InvalidJobTransitionError):
         service.retry_job(db_session, job.id, requested_by=user.id)
 
@@ -378,7 +465,9 @@ def test_mark_failed_never_stores_raw_exception_text_as_public_message(db_sessio
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    service.mark_failed(db_session, job, error_category=MainAIJobErrorCategory.unexpected)
+    worker_id, generation = _claim(db_session, job.id)
+    job = service.get_job(db_session, job.id)
+    service.mark_failed(db_session, job, worker_id=worker_id, lease_generation=generation, error_category=MainAIJobErrorCategory.unexpected)
     assert "Traceback" not in job.public_message
     assert job.public_message == service._PUBLIC_ERROR_MESSAGES[MainAIJobErrorCategory.unexpected]
 
@@ -398,11 +487,12 @@ def test_claim_next_mainai_job_claims_a_queued_job(db_session, superuser_db, mak
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
 
     claimed = claim_next_mainai_job(superuser_db, "worker-1", 120)
-    assert claimed == (job.id, user.id)
+    assert claimed == (job.id, user.id, 1)
 
-    row = superuser_db.execute(sa_text("SELECT status, locked_by FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).first()
+    row = superuser_db.execute(sa_text("SELECT status, locked_by, lease_generation FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).first()
     assert row[0] == "running"
     assert row[1] == "worker-1"
+    assert row[2] == 1
 
 
 def test_claim_next_mainai_job_returns_none_when_nothing_claimable(superuser_db):
@@ -413,14 +503,15 @@ def test_claim_next_mainai_job_reclaims_an_expired_lease(db_session, superuser_d
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    claim_next_mainai_job(superuser_db, "worker-crashed", 120)
+    first_claim = claim_next_mainai_job(superuser_db, "worker-crashed", 120)
     superuser_db.execute(sa_text("UPDATE mainai_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :j"), {"j": str(job.id)})
     superuser_db.commit()
 
     claimed = claim_next_mainai_job(superuser_db, "worker-2", 120)
-    assert claimed == (job.id, user.id)
-    row = superuser_db.execute(sa_text("SELECT locked_by FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).first()
+    assert claimed == (job.id, user.id, first_claim[2] + 1)
+    row = superuser_db.execute(sa_text("SELECT locked_by, lease_generation FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).first()
     assert row[0] == "worker-2"
+    assert row[1] == first_claim[2] + 1
 
 
 def test_claim_next_mainai_job_does_not_reclaim_a_still_valid_lease(db_session, superuser_db, make_verified_user):
@@ -435,12 +526,37 @@ def test_renew_mainai_job_lease_extends_expiry(db_session, superuser_db, make_ve
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    claim_next_mainai_job(superuser_db, "worker-1", 5)
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 5)
     before = superuser_db.execute(sa_text("SELECT lease_expires_at FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).scalar()
-    renew_mainai_job_lease(superuser_db, job.id, 600)
+    renew_mainai_job_lease(superuser_db, job.id, "worker-1", generation, 600)
     superuser_db.commit()
     after = superuser_db.execute(sa_text("SELECT lease_expires_at FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).scalar()
     assert after > before
+
+
+def test_renew_mainai_job_lease_rejects_a_stale_worker_id(db_session, superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    claim_next_mainai_job(superuser_db, "worker-1", 120)
+    with pytest.raises(JobLeaseLostError):
+        renew_mainai_job_lease(superuser_db, job.id, "worker-imposter", 1, 600)
+
+
+def test_renew_mainai_job_lease_rejects_a_stale_generation(db_session, superuser_db, make_verified_user):
+    """The exact incident this migration/module closes: a worker whose lease already expired
+    and was reclaimed by someone else (a NEW generation) must not be able to renew using its
+    own now-stale generation number, even if it (coincidentally or via hostname reuse) still
+    presents the SAME worker_id string the new claimant also happens to use."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    _, _, first_generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    superuser_db.execute(sa_text("UPDATE mainai_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :j"), {"j": str(job.id)})
+    superuser_db.commit()
+    claim_next_mainai_job(superuser_db, "worker-1", 120)  # same worker_id string reclaims its own expired lease -- new generation
+    with pytest.raises(JobLeaseLostError):
+        renew_mainai_job_lease(superuser_db, job.id, "worker-1", first_generation, 600)
 
 
 def test_two_workers_racing_many_jobs_never_claim_the_same_job(db_session, superuser_db, make_verified_user):
@@ -516,10 +632,10 @@ async def test_run_corpus_review_job_produces_a_proposal_with_provenance(db_sess
     doc = _make_indexed_document(db_session, user.id)
     _make_chunk(db_session, user.id, doc.id, "Bolaget grundades 2019.")
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
 
     _set_rls_user(db_session, user.id)
-    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_seconds=120)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
     job = superuser_db.get(MainAIJob, job.id)
     assert job.status == MainAIJobStatus.completed
@@ -543,29 +659,108 @@ async def test_run_corpus_review_job_never_promotes_a_proposal_to_a_knowledge_cl
     doc = _make_indexed_document(db_session, user.id)
     _make_chunk(db_session, user.id, doc.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
     _set_rls_user(db_session, user.id)
-    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_seconds=120)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
     claim_count = superuser_db.execute(sa_text("SELECT count(*) FROM knowledge_claims")).scalar()
     assert claim_count == 0
 
 
 @pytest.mark.asyncio
-async def test_run_corpus_review_job_fails_the_job_with_a_safe_category_on_provider_error(db_session, superuser_db, make_verified_user, monkeypatch):
+async def test_run_corpus_review_job_records_a_per_document_skip_on_provider_error_and_still_completes(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """Founder re-review round (PR #36): a provider failure for ONE document no longer fails
+    the WHOLE job — it's recorded as a `document_skipped` event (reason `provider_failed`,
+    safe error_category, never raw exception text) and the job still reaches `completed`,
+    honestly reporting that document as not reviewed in the completion message. Mixed outcomes
+    within a single run (some documents reviewed, some provider-failed) are the expected case,
+    not a systemic failure — see corpus_review_job.py's module docstring."""
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_permanent_error())
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
     _make_chunk(db_session, user.id, doc.id)
     job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
-    claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
     _set_rls_user(db_session, user.id)
-    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_seconds=120)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
     job = superuser_db.get(MainAIJob, job.id)
-    assert job.status == MainAIJobStatus.failed
-    assert job.error_category == MainAIJobErrorCategory.permanent.value
+    assert job.status == MainAIJobStatus.completed
+    assert "1 failed" in job.public_message
     assert "Traceback" not in (job.public_message or "")
+
+    events = superuser_db.execute(
+        sa_text("SELECT event_type, detail FROM mainai_job_events WHERE job_id = :j AND event_type = 'document_skipped'"), {"j": str(job.id)}
+    ).all()
+    assert len(events) == 1
+    detail = events[0][1]
+    assert detail["reason"] == "provider_failed"
+    assert detail["document_id"] == str(doc.id)
+    assert detail["error_category"] == MainAIJobErrorCategory.permanent.value
+    assert "Traceback" not in json.dumps(detail)
+
+    proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+    assert proposal_count == 0
+
+
+@pytest.mark.asyncio
+async def test_run_corpus_review_job_mixed_outcomes_in_one_run(db_session, superuser_db, make_verified_user, monkeypatch):
+    """One run, three documents, three different outcomes: reviewed, deleted mid-run, and a
+    provider failure -- exactly the "blandade utfall" scenario the founder's review asked to
+    be tested explicitly, not inferred from three separate single-outcome tests."""
+    calls = {"n": 0}
+
+    async def _chat(self, messages, model, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ChatResult(content="Ser bra ut.", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
+        raise ProviderError("bad request", category="invalid_key")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat)
+    user, _ = make_verified_user()
+    doc_reviewed = _make_indexed_document(db_session, user.id, title="reviewed")
+    doc_deleted = _make_indexed_document(db_session, user.id, title="deleted")
+    doc_failed = _make_indexed_document(db_session, user.id, title="failed")
+    _make_chunk(db_session, user.id, doc_reviewed.id)
+    _make_chunk(db_session, user.id, doc_failed.id)
+    deleted_id = doc_deleted.id
+    job = service.create_job(
+        db_session,
+        owner_id=user.id,
+        job_type="corpus_review",
+        input_refs=[
+            {"type": "document", "id": str(doc_reviewed.id)},
+            {"type": "document", "id": str(doc_deleted.id)},
+            {"type": "document", "id": str(doc_failed.id)},
+        ],
+        created_by="founder",
+    )
+    # Delete doc_deleted AFTER the job's own snapshot was taken (input_refs already committed)
+    # but BEFORE the loop reaches it -- exactly "raderas efter snapshot men före fetch".
+    superuser_db.execute(sa_text("DELETE FROM documents WHERE id = :d"), {"d": str(deleted_id)})
+    superuser_db.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, user.id)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    job = superuser_db.get(MainAIJob, job.id)
+    assert job.status == MainAIJobStatus.completed
+    assert "Reviewed 1 of 3" in job.public_message
+    assert "1 deleted" in job.public_message
+    assert "1 failed" in job.public_message
+
+    skip_events = superuser_db.execute(
+        sa_text("SELECT detail FROM mainai_job_events WHERE job_id = :j AND event_type = 'document_skipped' ORDER BY created_at"), {"j": str(job.id)}
+    ).all()
+    reasons = {row[0]["reason"] for row in skip_events}
+    assert reasons == {"deleted", "provider_failed"}
+
+    proposals = superuser_db.execute(sa_text("SELECT source_document_id FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).all()
+    assert len(proposals) == 1
+    assert str(proposals[0][0]) == str(doc_reviewed.id)
 
 
 @pytest.mark.asyncio
@@ -582,13 +777,13 @@ async def test_run_corpus_review_job_honors_cancel_requested_between_documents(d
         input_refs=[{"type": "document", "id": str(doc1.id)}, {"type": "document", "id": str(doc2.id)}],
         created_by="founder",
     )
-    claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
     # Cancel BEFORE the loop's first cancellation check runs.
     superuser_db.execute(sa_text("UPDATE mainai_jobs SET cancel_requested = true WHERE id = :j"), {"j": str(job.id)})
     superuser_db.commit()
 
     _set_rls_user(db_session, user.id)
-    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_seconds=120)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
     job = superuser_db.get(MainAIJob, job.id)
     assert job.status == MainAIJobStatus.cancelled
@@ -614,14 +809,14 @@ async def test_run_corpus_review_job_is_restart_safe_and_skips_already_reviewed_
         input_refs=[{"type": "document", "id": str(doc1.id)}, {"type": "document", "id": str(doc2.id)}],
         created_by="founder",
     )
-    claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
 
     # Simulate document 1 already reviewed by a prior, crashed attempt.
     _set_rls_user(db_session, user.id)
     db_session.add(MainAIJobProposal(job_id=job.id, owner_id=user.id, source_document_id=doc1.id, proposal_type="review_finding", proposal_text="första granskningen"))
     db_session.commit()
 
-    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_seconds=120)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
     job = superuser_db.get(MainAIJob, job.id)
     assert job.status == MainAIJobStatus.completed
@@ -695,8 +890,9 @@ def test_api_cancel_returns_409_for_an_already_completed_job(client, db_session)
         "/api/mainai/jobs", json={"job_type": "corpus_review", "input_refs": [{"type": "document", "id": str(doc.id)}]}, headers=headers
     )
     job_id = create_res.json()["id"]
-    job = db_session.get(MainAIJob, uuid.UUID(job_id))
-    service.mark_completed(db_session, job)
+    worker_id, generation = _claim(db_session, uuid.UUID(job_id))
+    job = service.get_job(db_session, uuid.UUID(job_id))
+    service.mark_completed(db_session, job, worker_id=worker_id, lease_generation=generation)
 
     res = client.post(f"/api/mainai/jobs/{job_id}/cancel", headers=headers)
     assert res.status_code == 409
@@ -1319,3 +1515,117 @@ def test_account_deletion_removes_mainai_job_data(client, db_session, superuser_
     assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE id = :j"), {"j": str(job.id)}).scalar() == 0
     assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j"), {"j": str(job.id)}).scalar() == 0
     assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar() == 0
+
+
+# --- O: lease fencing — founder re-review round (PR #36) --------------------------------------
+# Reproduces, as a permanent regression test, the exact incident an independent founder review
+# found and this session's own manual repro confirmed: a worker whose lease has already expired
+# and been reclaimed by a second worker must be rejected by EVERY subsequent write it attempts
+# -- not just future claims. Real separate sessions/connections throughout, matching this
+# file's existing concurrency-test convention (see test_two_workers_racing_many_jobs_never_
+# claim_the_same_job and test_owner_erasure_lock_serializes_erasure... in test_account_erasure.py).
+
+
+def test_stale_worker_is_rejected_by_every_write_after_a_reclaim(db_session, superuser_db, make_verified_user):
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+    from app.rag.mainai_jobs_service import record_document_reviewed, record_document_skipped
+
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    job_id = job.id
+
+    admin = sessionmaker(bind=migration_engine)()
+    try:
+        _, _, generation_a = claim_next_mainai_job(admin, "worker-a", 120)
+        # Simulate worker A stalling long enough for its lease to genuinely expire.
+        admin.execute(sa_text("UPDATE mainai_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :j"), {"j": str(job_id)})
+        admin.commit()
+        claimed_b = claim_next_mainai_job(admin, "worker-b", 120)
+        assert claimed_b is not None
+        _, _, generation_b = claimed_b
+        assert generation_b == generation_a + 1
+    finally:
+        admin.close()
+
+    # Worker A -- unaware it lost the lease, exactly as corpus_review_job.py's real code path
+    # behaves -- now attempts every kind of write this module fences. ALL must be rejected.
+    _set_rls_user(db_session, user.id)
+    stale_job = service.get_job(db_session, job_id)
+
+    with pytest.raises(JobLeaseLostError):
+        renew_mainai_job_lease(db_session, job_id, "worker-a", generation_a, 120)
+
+    with pytest.raises(JobLeaseLostError):
+        service.update_progress(db_session, stale_job, worker_id="worker-a", lease_generation=generation_a, current=1, total=1)
+
+    with pytest.raises(JobLeaseLostError):
+        record_document_reviewed(
+            db_session, stale_job, worker_id="worker-a", lease_generation=generation_a,
+            current=1, total=1, provider="openai", model="gpt-4o-mini",
+            proposal_output_ref={"type": "mainai_job_proposal", "id": str(uuid.uuid4())},
+        )
+
+    with pytest.raises(JobLeaseLostError):
+        record_document_skipped(db_session, stale_job, worker_id="worker-a", lease_generation=generation_a, document_id=doc.id, reason="unavailable")
+
+    with pytest.raises(JobLeaseLostError):
+        service.mark_completed(db_session, stale_job, worker_id="worker-a", lease_generation=generation_a)
+
+    with pytest.raises(JobLeaseLostError):
+        service.mark_failed(db_session, stale_job, worker_id="worker-a", lease_generation=generation_a, error_category=MainAIJobErrorCategory.unexpected)
+
+    with pytest.raises(JobLeaseLostError):
+        service.mark_cancelled(db_session, stale_job, worker_id="worker-a", lease_generation=generation_a)
+
+    # None of worker A's rejected attempts may have left ANY trace.
+    assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job_id)}).scalar() == 0
+    row = superuser_db.execute(sa_text("SELECT status, locked_by, lease_generation FROM mainai_jobs WHERE id = :j"), {"j": str(job_id)}).first()
+    assert row[0] == "running"
+    assert row[1] == "worker-b"
+    assert row[2] == generation_a + 1
+
+    # Worker B, the legitimate current claimant, proceeds completely normally.
+    fresh_job = service.get_job(db_session, job_id)
+    _, _, generation_b = claimed_b
+    service.update_progress(db_session, fresh_job, worker_id="worker-b", lease_generation=generation_b, current=0, total=1)
+    db_session.commit()
+    fresh_job = service.get_job(db_session, job_id)
+    service.mark_completed(db_session, fresh_job, worker_id="worker-b", lease_generation=generation_b)
+
+    final = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :j"), {"j": str(job_id)}).scalar()
+    assert final == "completed"
+    completed_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j AND event_type = 'completed'"), {"j": str(job_id)}
+    ).scalar()
+    assert completed_events == 1, "exactly one completed event -- worker A's rejected attempt must not have added a second"
+
+
+@pytest.mark.asyncio
+async def test_run_corpus_review_job_stops_immediately_and_cleanly_when_its_lease_is_already_lost(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """The real entry point (not the individual service calls above): if run_corpus_review_job
+    is somehow invoked with a stale (worker_id, lease_generation) -- e.g. a worker that was
+    slow to even start after claiming -- its very first write (the initial update_progress
+    call) must reject it, and the function must return cleanly with no further side effects,
+    never raising out to the caller (app/worker.py catches JobLeaseLostError explicitly, but
+    run_corpus_review_job itself is documented to swallow it and just stop)."""
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok())
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _make_chunk(db_session, user.id, doc.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    _, _, real_generation = claim_next_mainai_job(superuser_db, "worker-real", 120)
+
+    _set_rls_user(db_session, user.id)
+    # A stale generation number for the SAME worker_id -- the exact scenario a hostname-reused
+    # restarted worker process would hit.
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-real", lease_generation=real_generation + 999, lease_seconds=120)
+
+    job = superuser_db.get(MainAIJob, job.id)
+    assert job.status == MainAIJobStatus.running, "a stale-generation call must not have changed the job at all"
+    proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+    assert proposal_count == 0

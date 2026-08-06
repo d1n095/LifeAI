@@ -37,7 +37,7 @@ from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
-from app.jobs.mainai_job_lease import claim_next_mainai_job
+from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
@@ -117,28 +117,44 @@ def _set_mainai_job_rls_owner(db: Session, owner_id: uuid.UUID) -> None:
     db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
 
 
-async def process_claimed_mainai_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, worker_id: str, lease_seconds: int) -> None:
+async def process_claimed_mainai_job(
+    db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, worker_id: str, lease_generation: int, lease_seconds: int
+) -> None:
     """Dispatches an already-claimed `mainai_jobs` row to its job_type's own processing
     function — today only `corpus_review` (app/rag/corpus_review_job.py). That function is
     responsible for its own terminal state transitions (completed/failed/cancelled) via
     app/rag/mainai_jobs_service.py; this wrapper exists only to catch anything that escapes
     it unexpectedly (a bug, not a designed failure path) and still leave the job in a
-    terminal, truthful state rather than stuck `running` forever with a dead claim."""
+    terminal, truthful state rather than stuck `running` forever with a dead claim.
+
+    `lease_generation` is the exact fencing token claim_next_mainai_job() returned for this
+    claim (migration 0028) — threaded through to every downstream write so a worker that later
+    loses this lease (reclaimed by someone else) can never mutate the job again. A
+    JobLeaseLostError escaping record_claimed() itself (this claim was reclaimed before the
+    worker even got here — theoretically possible, never actually observed) is handled the
+    same as any other lease loss: log and stop, no mark_failed attempt, since this worker no
+    longer has any right to write to the row at all."""
     _set_mainai_job_rls_owner(db, owner_id)
     job = db.get(MainAIJob, job_id, populate_existing=True)
     try:
         if job is not None and job.job_type == "corpus_review":
-            record_claimed(db, job, worker_id=worker_id)
-            await run_corpus_review_job(db, job_id, owner_id, worker_id=worker_id, lease_seconds=lease_seconds)
+            record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
+            await run_corpus_review_job(db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
         elif job is not None:
             logger.error("Worker %s: mainai_job %s has unknown job_type '%s'.", worker_id, job_id, job.job_type)
-            mark_failed(db, job, error_category=MainAIJobErrorCategory.unexpected)
+            mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
+    except JobLeaseLostError:
+        logger.warning("Worker %s: lease lost for mainai_job %s before/during dispatch (generation %s).", worker_id, job_id, lease_generation)
+        db.rollback()
     except Exception:  # noqa: BLE001 - the job row is the only place this failure can safely surface
         logger.exception("Worker %s: unexpected error processing mainai_job %s.", worker_id, job_id)
         db.rollback()
         job = db.get(MainAIJob, job_id)
         if job is not None:
-            mark_failed(db, job, error_category=MainAIJobErrorCategory.unexpected)
+            try:
+                mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
+            except JobLeaseLostError:
+                logger.warning("Worker %s: lease already lost for mainai_job %s -- could not record the failure.", worker_id, job_id)
 
 
 class Worker:
@@ -325,11 +341,11 @@ class Worker:
             return True
 
         if mainai_claimed is not None:
-            job_id, owner_id = mainai_claimed
-            logger.info("Worker %s: hämtade mainai_job %s.", self.worker_id, job_id)
+            job_id, owner_id, lease_generation = mainai_claimed
+            logger.info("Worker %s: hämtade mainai_job %s (generation %s).", self.worker_id, job_id, lease_generation)
             db = SessionLocal()
             try:
-                await process_claimed_mainai_job(db, job_id, owner_id, self.worker_id, self.settings.worker_lease_seconds)
+                await process_claimed_mainai_job(db, job_id, owner_id, self.worker_id, lease_generation, self.settings.worker_lease_seconds)
             finally:
                 db.close()
             return True

@@ -11,14 +11,17 @@ since it must see jobs across every owner before any single owner's RLS context 
 exactly the same split app/worker.py already uses for `knowledge_import_jobs`.
 """
 
+import json
 import logging
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit
+from app.jobs.mainai_job_lease import JobLeaseLostError
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, IndexStatus
 from app.models.mainai_job import (
@@ -69,6 +72,29 @@ def _record_event(db: Session, job: MainAIJob, event_type: MainAIJobEventType, d
     return event
 
 
+def _guarded_job_write(db: Session, job_id: uuid.UUID, *, worker_id: str, lease_generation: int, set_sql: str, params: dict) -> None:
+    """The ONLY way any worker-driven code may mutate a claimed `mainai_jobs` row (migration
+    0028, founder re-review round on PR #36 — see app/jobs/mainai_job_lease.py's module
+    docstring for the incident this closes). Atomically re-verifies, in the SAME statement as
+    the write itself, that `worker_id`/`lease_generation` still exactly match the row's
+    CURRENT claim and that it is still `running` — never trusts an in-memory ORM `job` object,
+    which may already be stale by the time this runs. Raises JobLeaseLostError (updating
+    NOTHING) the instant that's no longer true, whether because another worker legitimately
+    reclaimed this job (this worker's own lease expired) or because the job already reached a
+    terminal state through some other path.
+
+    A zero-rowcount UPDATE is indistinguishable, by design, between "the row doesn't exist"
+    and "the row exists but the WHERE clause didn't match" — both are correctly treated as
+    lease-lost here, since neither case gives this caller any right to keep acting on the job."""
+    result = db.execute(
+        text(f"UPDATE mainai_jobs SET {set_sql} WHERE id = :job_id AND locked_by = :worker_id "
+             "AND lease_generation = :lease_generation AND status = 'running'"),
+        {**params, "job_id": str(job_id), "worker_id": worker_id, "lease_generation": lease_generation},
+    )
+    if result.rowcount == 0:
+        raise JobLeaseLostError(job_id, worker_id, lease_generation)
+
+
 def _validate_input_refs(db: Session, owner_id: uuid.UUID, input_refs: list[dict]) -> None:
     """corpus_review's own contract: every ref must be `{"type": "document", "id": "..."}`
     pointing at a document this owner's own RLS scope can see (enforced by the query itself,
@@ -108,8 +134,22 @@ def create_job(
     or future caller can bypass it by calling this function directly.
 
     Idempotent per (owner_id, idempotency_key): a second call with the same key for the same
-    owner returns the ORIGINAL job unchanged (no new row, no new event) rather than creating a
-    duplicate — mirrors ImportJob's source_checksum idempotency (app/models/import_job.py)."""
+    owner returns the ORIGINAL job unchanged (no new row, no new event) — regardless of
+    whether its job_type/input_refs differ from the first call's, deliberately: the key alone
+    is the identity, exactly matching ImportJob's own source_checksum idempotency
+    (app/models/import_job.py), which has no payload-mismatch detection either. A caller that
+    needs a genuinely different job must use a different idempotency_key.
+
+    Founder re-review round (PR #36): the ONLY safe way to make this idempotent under real
+    concurrency — two requests with the same key racing each other, e.g. a client retrying
+    after an HTTP timeout — is the same SAVEPOINT + real INSERT + catch the exact unique-
+    violation + rollback-to-savepoint + fresh SELECT pattern already used by
+    app/rag/memory_source.py::get_or_create_memory_source_unit() (see that function's own
+    docstring for why a plain SELECT-then-INSERT, which this function used to do, cannot be
+    made safe: it's a classic TOCTOU race — both callers can pass the SELECT before either
+    commits its INSERT). Reproduced live during review: two real threads, two real sessions,
+    same (owner_id, idempotency_key) — the loser previously got an UNHANDLED IntegrityError
+    instead of the existing job."""
     require_capability(job_type)  # raises CapabilityUnavailableError — never caught here, the router maps it to 409
 
     if idempotency_key:
@@ -122,19 +162,49 @@ def create_job(
     if job_type == "corpus_review":
         _validate_input_refs(db, owner_id, input_refs)
 
-    job = MainAIJob(
-        owner_id=owner_id,
-        job_type=job_type,
-        status=MainAIJobStatus.queued,
-        input_refs=input_refs,
-        output_refs=[],
-        created_by=created_by,
-        idempotency_key=idempotency_key,
-    )
-    db.add(job)
-    db.flush()  # job.id is needed for the event row below
-    _record_event(db, job, MainAIJobEventType.created, {"job_type": job_type, "input_refs": input_refs})
-    record_audit(db, user_id=owner_id, action="mainai_job_created", entity_type="mainai_job", entity_id=str(job.id), request=request)
+    savepoint = db.begin_nested()
+    try:
+        job = MainAIJob(
+            owner_id=owner_id,
+            job_type=job_type,
+            status=MainAIJobStatus.queued,
+            input_refs=input_refs,
+            output_refs=[],
+            created_by=created_by,
+            idempotency_key=idempotency_key,
+        )
+        db.add(job)
+        db.flush()  # job.id is needed for the event row below
+        _record_event(db, job, MainAIJobEventType.created, {"job_type": job_type, "input_refs": input_refs})
+        # commit=False: record_audit()'s own default (commit=True) would end the OUTER
+        # transaction here, not just this SAVEPOINT -- invalidating `savepoint` before its own
+        # explicit .commit()/.rollback() below ever runs. The audit row becomes durable
+        # together with everything else in this block via the plain db.commit() at the very
+        # end of this function, same as every other write here.
+        record_audit(db, user_id=owner_id, action="mainai_job_created", entity_type="mainai_job", entity_id=str(job.id), request=request, commit=False)
+        savepoint.commit()
+    except IntegrityError as exc:
+        # Only the exact idempotency-key collision this function is designed to recover from
+        # is treated as "someone else already created this" — any other IntegrityError (a
+        # real bug, a different constraint, e.g. a bad owner_id FK) is re-raised unmodified
+        # rather than silently misdiagnosed as an idempotency race, same reasoning as
+        # get_or_create_memory_source_unit's identical guard.
+        constraint_name = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
+        savepoint.rollback()
+        if constraint_name != "uq_mainai_jobs_owner_idempotency_key":
+            raise
+        existing = db.execute(
+            select(MainAIJob).where(MainAIJob.owner_id == owner_id, MainAIJob.idempotency_key == idempotency_key)
+        ).scalar_one_or_none()
+        if existing is None:
+            # The row that won the race hasn't committed yet from THIS session's read view
+            # (READ COMMITTED can't see an in-flight-but-not-yet-committed transaction) —
+            # vanishingly unlikely to matter in practice (the winner's own INSERT+events
+            # commit as one fast transaction) but re-raising the original conflict is more
+            # honest than returning None or looping forever.
+            raise
+        return existing
+
     db.commit()
     db.refresh(job)
     return job
@@ -209,6 +279,19 @@ def retry_job(db: Session, job_id: uuid.UUID, *, requested_by: uuid.UUID, reques
     job.public_message = None
     job.cancel_requested = False
     job.cancel_acknowledged = False
+    # completed_at must go back to NULL together with the status leaving its terminal set --
+    # migration 0028's ck_mainai_jobs_completed_at_matches_terminal_status enforces this at
+    # the DB level now (a real gap this constraint caught: this line was missing before the
+    # founder re-review round added that CHECK). progress_current/progress_total/current_phase
+    # reset too, matching this function's own long-standing docstring claim ("resets progress
+    # fields") that the code itself didn't actually do -- corpus_review_job.py recomputes them
+    # from scratch on its next run regardless, but leaving stale "3/5"-style progress visible
+    # on a `queued` job between the retry and the next claim would be misleading in the admin
+    # UI (app/routers/mainai_jobs.py's GET /jobs, frontend/app/(shell)/admin/jobs/page.tsx).
+    job.completed_at = None
+    job.progress_current = 0
+    job.progress_total = None
+    job.current_phase = None
     db.add(job)
     _record_event(db, job, MainAIJobEventType.retry_scheduled, {"retry_count": job.retry_count})
     record_audit(db, user_id=requested_by, action="mainai_job_retry", entity_type="mainai_job", entity_id=str(job.id), request=request)
@@ -217,50 +300,76 @@ def retry_job(db: Session, job_id: uuid.UUID, *, requested_by: uuid.UUID, reques
     return job
 
 
-def record_claimed(db: Session, job: MainAIJob, *, worker_id: str) -> None:
+def record_claimed(db: Session, job: MainAIJob, *, worker_id: str, lease_generation: int) -> None:
     """Called by the worker (app/worker.py's process_claimed_mainai_job) immediately after
-    claim_next_mainai_job() has already committed the status/locked_by/lease change via raw
-    SQL (app/jobs/mainai_job_lease.py — that function runs on the superuser/migration
-    connection, across every owner's rows at once, so it cannot itself write an
+    claim_next_mainai_job() has already committed the status/locked_by/lease/lease_generation
+    change via raw SQL (app/jobs/mainai_job_lease.py — that function runs on the superuser/
+    migration connection, across every owner's rows at once, so it cannot itself write an
     owner-RLS-scoped MainAIJobEvent or an audit entry). This is the "start" half of the
     founder's create/start/cancel/retry/complete/fail audit requirement — it runs on the
-    normal RLS-scoped session, once the worker has already re-scoped it to this job's owner."""
+    normal RLS-scoped session, once the worker has already re-scoped it to this job's owner.
+
+    Still goes through the same fencing gate as every other worker-driven write below (a
+    harmless self-assignment as the SET clause — there is nothing to change, only to verify)
+    rather than blindly trusting the (worker_id, lease_generation) claim_next_mainai_job just
+    returned: consistency with every other call site here matters more than the few
+    microseconds saved by special-casing "this one is called right after claiming so it can't
+    possibly be stale" — a future refactor that reorders these calls should not silently
+    reintroduce the exact bug this module exists to close."""
+    _guarded_job_write(db, job.id, worker_id=worker_id, lease_generation=lease_generation, set_sql="locked_by = locked_by", params={})
     _record_event(db, job, MainAIJobEventType.claimed, {"worker_id": worker_id})
     record_audit(db, user_id=job.owner_id, action="mainai_job_claimed", entity_type="mainai_job", entity_id=str(job.id), detail=worker_id)
     db.commit()
 
 
-def mark_completed(db: Session, job: MainAIJob, *, public_message: str | None = None) -> None:
-    job.status = MainAIJobStatus.completed
-    job.completed_at = datetime.utcnow()
-    job.public_message = public_message or "Completed."
-    db.add(job)
+def mark_completed(db: Session, job: MainAIJob, *, worker_id: str, lease_generation: int, public_message: str | None = None) -> None:
+    _guarded_job_write(
+        db,
+        job.id,
+        worker_id=worker_id,
+        lease_generation=lease_generation,
+        set_sql="status = 'completed', completed_at = :completed_at, public_message = :message",
+        params={"completed_at": datetime.utcnow(), "message": public_message or "Completed."},
+    )
+    db.refresh(job)
     _record_event(db, job, MainAIJobEventType.completed)
     record_audit(db, user_id=job.owner_id, action="mainai_job_completed", entity_type="mainai_job", entity_id=str(job.id))
     db.commit()
 
 
-def mark_failed(db: Session, job: MainAIJob, *, error_category: MainAIJobErrorCategory) -> None:
+def mark_failed(db: Session, job: MainAIJob, *, worker_id: str, lease_generation: int, error_category: MainAIJobErrorCategory) -> None:
     """`error_category` is the ONLY thing derived from the real failure — public_message
     always comes from the fixed _PUBLIC_ERROR_MESSAGES table above, never from the exception
     itself. Callers are expected to log the real exception separately (see
     app/rag/corpus_review_job.py) — this function only ever persists the safe category."""
-    job.status = MainAIJobStatus.failed
-    job.completed_at = datetime.utcnow()
-    job.error_category = error_category.value
-    job.public_message = _PUBLIC_ERROR_MESSAGES[error_category]
-    db.add(job)
+    _guarded_job_write(
+        db,
+        job.id,
+        worker_id=worker_id,
+        lease_generation=lease_generation,
+        set_sql="status = 'failed', completed_at = :completed_at, error_category = :category, public_message = :message",
+        params={
+            "completed_at": datetime.utcnow(),
+            "category": error_category.value,
+            "message": _PUBLIC_ERROR_MESSAGES[error_category],
+        },
+    )
+    db.refresh(job)
     _record_event(db, job, MainAIJobEventType.failed, {"error_category": error_category.value})
     record_audit(db, user_id=job.owner_id, action="mainai_job_failed", entity_type="mainai_job", entity_id=str(job.id), detail=error_category.value)
     db.commit()
 
 
-def mark_cancelled(db: Session, job: MainAIJob) -> None:
-    job.status = MainAIJobStatus.cancelled
-    job.completed_at = datetime.utcnow()
-    job.cancel_acknowledged = True
-    job.public_message = _PUBLIC_ERROR_MESSAGES[MainAIJobErrorCategory.cancelled_by_owner]
-    db.add(job)
+def mark_cancelled(db: Session, job: MainAIJob, *, worker_id: str, lease_generation: int) -> None:
+    _guarded_job_write(
+        db,
+        job.id,
+        worker_id=worker_id,
+        lease_generation=lease_generation,
+        set_sql="status = 'cancelled', completed_at = :completed_at, cancel_acknowledged = true, public_message = :message",
+        params={"completed_at": datetime.utcnow(), "message": _PUBLIC_ERROR_MESSAGES[MainAIJobErrorCategory.cancelled_by_owner]},
+    )
+    db.refresh(job)
     _record_event(db, job, MainAIJobEventType.cancel_acknowledged)
     _record_event(db, job, MainAIJobEventType.cancelled)
     record_audit(db, user_id=job.owner_id, action="mainai_job_cancelled", entity_type="mainai_job", entity_id=str(job.id))
@@ -271,6 +380,8 @@ def update_progress(
     db: Session,
     job: MainAIJob,
     *,
+    worker_id: str,
+    lease_generation: int,
     current: int | None = None,
     total: int | None = None,
     phase: str | None = None,
@@ -278,24 +389,110 @@ def update_progress(
     """Called between batches by the job's own processing loop. Deliberately does NOT commit
     — the caller's own batch transaction decides the commit boundary (see
     app/rag/corpus_review_job.py), so progress is only ever durable together with the work it
-    describes, never ahead of it."""
+    describes, never ahead of it.
+
+    Requires and re-verifies (worker_id, lease_generation) via the same fencing gate as every
+    other worker-driven write — see _guarded_job_write's docstring. A no-op call (nothing to
+    set) is not fenced, since it changes nothing about the row."""
     phase_changed = phase is not None and phase != job.current_phase
+    set_parts: list[str] = []
+    params: dict = {}
     if current is not None:
-        job.progress_current = current
+        set_parts.append("progress_current = :current")
+        params["current"] = current
     if total is not None:
-        job.progress_total = total
+        set_parts.append("progress_total = :total")
+        params["total"] = total
     if phase is not None:
-        job.current_phase = phase
-    db.add(job)
+        set_parts.append("current_phase = :phase")
+        params["phase"] = phase
+    if not set_parts:
+        return
+    _guarded_job_write(db, job.id, worker_id=worker_id, lease_generation=lease_generation, set_sql=", ".join(set_parts), params=params)
+    db.refresh(job)
     if phase_changed:
         _record_event(db, job, MainAIJobEventType.phase_changed, {"phase": phase})
     _record_event(db, job, MainAIJobEventType.progress_updated, {"current": job.progress_current, "total": job.progress_total})
+
+
+def record_document_reviewed(
+    db: Session,
+    job: MainAIJob,
+    *,
+    worker_id: str,
+    lease_generation: int,
+    current: int,
+    total: int,
+    provider: str,
+    model: str,
+    proposal_output_ref: dict,
+) -> None:
+    """One successful per-document `corpus_review` outcome (app/rag/corpus_review_job.py):
+    progress advances, provider/model attribution updates, and the new proposal's reference is
+    appended to `output_refs` — all in the SAME fencing-guarded UPDATE (`output_refs || ...`
+    is Postgres's own jsonb array-concatenation operator, evaluated inside the guarded
+    statement, never read-modify-written in Python), so a stale worker's "success" can never
+    partially land (e.g. output_refs updated but progress not, or vice versa) between a
+    lease-loss check and the write. Only the guarded columns on `mainai_jobs` are covered here
+    — the `MainAIJobProposal` row itself is a separate INSERT the caller makes in the SAME
+    transaction as this call, which only commits together with it."""
+    result = db.execute(
+        text(
+            "UPDATE mainai_jobs SET progress_current = :current, progress_total = :total, "
+            "current_phase = 'reviewing', provider = :provider, model = :model, "
+            "output_refs = output_refs || CAST(:output_ref AS jsonb) "
+            "WHERE id = :job_id AND locked_by = :worker_id AND lease_generation = :lease_generation AND status = 'running'"
+        ),
+        {
+            "current": current,
+            "total": total,
+            "provider": provider,
+            "model": model,
+            "output_ref": json.dumps([proposal_output_ref]),
+            "job_id": str(job.id),
+            "worker_id": worker_id,
+            "lease_generation": lease_generation,
+        },
+    )
+    if result.rowcount == 0:
+        raise JobLeaseLostError(job.id, worker_id, lease_generation)
+    db.refresh(job)
+    _record_event(db, job, MainAIJobEventType.progress_updated, {"current": current, "total": total})
+
+
+def record_document_skipped(
+    db: Session,
+    job: MainAIJob,
+    *,
+    worker_id: str,
+    lease_generation: int,
+    document_id: uuid.UUID,
+    reason: str,
+    error_category: str | None = None,
+) -> None:
+    """One per-document `corpus_review` outcome that was NOT a successful review — deleted
+    mid-run, no reviewable content, or a provider failure specific to this one document (see
+    corpus_review_job.py's three call sites for the exact `reason` values; migration 0028
+    added `document_skipped` to mainai_job_events' allowed event types for exactly this).
+    Verifies the caller's fencing token via the same guarded gate as every other worker-driven
+    write (a harmless self-assignment as the SET clause, matching record_claimed's reasoning
+    for why even a "nothing to change on the job row" write still goes through the gate) before
+    ever inserting the event — a stale worker must not be able to write ANY event, including
+    this one, as if it still owned the job. `detail` never carries raw exception text, only the
+    closed-vocabulary `reason` and (for a provider failure) the same safe `error_category`
+    mark_failed() would use — never str(exception)."""
+    _guarded_job_write(db, job.id, worker_id=worker_id, lease_generation=lease_generation, set_sql="locked_by = locked_by", params={})
+    detail = {"document_id": str(document_id), "reason": reason}
+    if error_category is not None:
+        detail["error_category"] = error_category
+    _record_event(db, job, MainAIJobEventType.document_skipped, detail)
 
 
 __all__ = [
     "CapabilityUnavailableError",
     "InvalidInputRefsError",
     "InvalidJobTransitionError",
+    "JobLeaseLostError",
     "JobNotFoundError",
     "create_job",
     "get_job",
@@ -304,6 +501,9 @@ __all__ = [
     "mark_cancelled",
     "mark_completed",
     "mark_failed",
+    "record_claimed",
+    "record_document_reviewed",
+    "record_document_skipped",
     "request_cancel",
     "retry_job",
     "update_progress",

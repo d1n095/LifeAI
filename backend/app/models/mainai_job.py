@@ -59,6 +59,12 @@ class MainAIJobEventType(str, enum.Enum):
     failed = "failed"
     cancelled = "cancelled"
     retry_scheduled = "retry_scheduled"
+    # migration 0028 (founder re-review round, PR #36): one per-document outcome that was
+    # NOT a successful review — corpus_review_job.py records this instead of silently folding
+    # "deleted mid-run" / "no reviewable content" / "provider failed for this one document"
+    # into a bare progress-count increment. `detail` always carries a closed-vocabulary
+    # `reason` (see corpus_review_job.py's _SkipReason), never raw exception text.
+    document_skipped = "document_skipped"
 
 
 class MainAIJobProposalStatus(str, enum.Enum):
@@ -111,6 +117,15 @@ class MainAIJob(Base):
     # via app/jobs/mainai_job_lease.py since the two job families have unrelated columns.
     locked_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    # Lease fencing token (migration 0028, founder re-review round on PR #36): bumped by
+    # exactly 1 on every claim AND every reclaim (app/jobs/mainai_job_lease.py). worker_id
+    # alone is not a safe fencing key -- app/worker.py's _worker_id() can return the SAME
+    # value across a process restart (hostname-based), so a worker_id-only check can't tell a
+    # genuinely stale execution from a legitimately restarted one reusing that identity. Every
+    # worker-driven mutation of a claimed job (app/rag/mainai_jobs_service.py) must present
+    # BOTH worker_id and this exact generation number, or it is rejected with
+    # JobLeaseLostError -- see that module's docstring for the full incident this closes.
+    lease_generation: Mapped[int] = mapped_column(Integer, default=0)
 
     # Exact execution attribution — the founder's explicit "exact worker/model/tool
     # attribution" requirement. `locked_by` above already carries the worker; provider/model
