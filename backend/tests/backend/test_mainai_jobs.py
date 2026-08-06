@@ -34,6 +34,7 @@ from app.mainai_runtime_contract import (
     CapabilityUnavailableError,
     ExecutionResponseMode,
     MainAIExecutionResponse,
+    get_capability_status,
     require_capability,
 )
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
@@ -167,14 +168,66 @@ def test_execution_response_answer_and_proposal_never_require_a_job_id():
         assert resp.job_id is None
 
 
-def test_require_capability_fails_closed_for_unknown_capability():
-    with pytest.raises(CapabilityUnavailableError):
-        require_capability("delete_production_database")
+def test_require_capability_fails_closed_for_unknown_capability(db_session):
+    with pytest.raises(CapabilityUnavailableError) as exc_info:
+        require_capability(db_session, "delete_production_database")
+    assert exc_info.value.reason == "not_implemented"
 
 
-def test_require_capability_accepts_every_manifest_entry():
+def test_require_capability_accepts_every_manifest_entry_when_configured(db_session):
+    """The test environment's OPENAI_API_KEY (tests/conftest.py's fake-but-real-looking
+    default) makes every manifest entry's dependency configured, matching a real founder
+    deployment with an actual key set."""
     for capability in CAPABILITY_MANIFEST:
-        require_capability(capability)  # must not raise
+        require_capability(db_session, capability)  # must not raise
+
+
+def test_get_capability_status_reports_not_implemented_for_unknown_capability(db_session):
+    status = get_capability_status(db_session, "delete_production_database")
+    assert status.implemented is False
+    assert status.configured is False
+    assert status.currently_available is False
+    assert status.unavailable_reason == "not_implemented"
+
+
+def test_get_capability_status_reports_currently_available_when_configured(db_session):
+    status = get_capability_status(db_session, "corpus_review")
+    assert status.implemented is True
+    assert status.configured is True
+    assert status.currently_available is True
+    assert status.requires_user_action is False
+    assert status.unavailable_reason is None
+    assert status.modifies_existing_data is False
+    assert status.writes_new_records is True
+
+
+def test_get_capability_status_reports_not_configured_when_no_provider_key_present(db_session, monkeypatch):
+    """Founder re-review round (PR #36): the exact gap the review found -- a capability must
+    not be reported as available just because it's implemented in code, if nothing is actually
+    configured to execute it."""
+    from app.providers.openai_provider import OpenAIProvider
+
+    monkeypatch.setattr(OpenAIProvider, "is_configured", lambda self: False)
+
+    status = get_capability_status(db_session, "corpus_review")
+    assert status.configured is False
+    assert status.currently_available is False
+    assert status.requires_user_action is True
+    assert status.unavailable_reason == "not_configured"
+
+
+def test_create_job_fails_closed_with_not_configured_reason_when_no_provider_available(db_session, make_verified_user, monkeypatch):
+    from app.providers.openai_provider import OpenAIProvider
+
+    monkeypatch.setattr(OpenAIProvider, "is_configured", lambda self: False)
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    with pytest.raises(CapabilityUnavailableError) as exc_info:
+        service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    assert exc_info.value.reason == "not_configured"
+    # No job row may be created for a capability that's implemented but not currently runnable.
+    count = db_session.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(user.id)}).scalar()
+    assert count == 0
 
 
 # --- C: create_job() ---------------------------------------------------------------------------

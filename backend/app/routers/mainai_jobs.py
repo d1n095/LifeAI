@@ -59,7 +59,11 @@ def create_job(
             request=request,
         )
     except CapabilityUnavailableError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        # `reason` is machine-readable (founder re-review round, PR #36) so a caller/UI can
+        # tell "not_implemented" (this job_type doesn't exist) apart from "not_configured"
+        # (implemented, but no provider is wired up yet -- founder-fixable, not a code gap)
+        # instead of one indistinguishable 409 string.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"message": str(exc), "reason": exc.reason}) from exc
     except service.InvalidInputRefsError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return job

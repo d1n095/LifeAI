@@ -150,7 +150,7 @@ def create_job(
     commits its INSERT). Reproduced live during review: two real threads, two real sessions,
     same (owner_id, idempotency_key) — the loser previously got an UNHANDLED IntegrityError
     instead of the existing job."""
-    require_capability(job_type)  # raises CapabilityUnavailableError — never caught here, the router maps it to 409
+    require_capability(db, job_type)  # raises CapabilityUnavailableError — never caught here, the router maps it to 409
 
     if idempotency_key:
         existing = db.execute(
