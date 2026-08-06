@@ -198,6 +198,87 @@ en bugg — fler commits per `advance()`-anrop är en förväntad avvägning fö
 Ingen merge, ingen deploy, ingen produktionsbackfill körd. `claude/mainai-job-runtime-foundation`
 ej rörd. Väntar på grundarens granskning av denna rundas fix.
 
+## Pass 38 (2026-08-06): `claude/mainai-job-runtime-integration` — den frysta job-runtime-branchen integrerad mot PR #31+#35, Alembic-kollisionen löst
+
+**Branch:** `claude/mainai-job-runtime-integration`, grenad från `claude/det-kommer-mer-879lcm`s
+head `ceb6cb93b38cca69dd450eb5ce5a50632c197e8a` (PR #31 + PR #35 mergade). **Head efter denna
+runda: `2ec2bfc48f547bf0f3a3f563db5ef111f6b6546a`.** Historikbevarande merge (`git merge --no-ff`,
+INTE rebase, INTE squash) av den frysta `claude/mainai-job-runtime-foundation` (byggd under Pass
+14-17 + en korrigeringsrunda, se ovan, INNAN PR #31/#35 mergades — se
+`docs/MAINAI_JOB_RUNTIME.md`s egen "Relationship to PR #31"-sektion för varför den branchen
+uttryckligen inte fick öppnas som PR förrän detta gjordes). `claude/mainai-job-runtime-foundation`
+själv är INTE rörd/modifierad — den frysta historiken finns kvar orörd, endast mergad IN i en ny
+branch.
+
+**Alembic-kollisionen (väntad, namngiven i förväg av grundaren):** den frysta branchens
+`0025_mainai_jobs.py` (`down_revision="0018"`) kolliderade med bas-grenens EGEN
+`0025_memory_source_backfill_runs.py` (`down_revision="0024"`, PR #35:s riktiga head) — två
+filer som båda deklarerade `revision="0025"`. Löst genom omnumrering, INGEN SQL ändrad: `0025_
+mainai_jobs.py` → `0026_mainai_jobs.py` (`down_revision` "0018"→"0025"), `0026_mainai_job_
+integrity.py` → `0027_mainai_job_integrity.py` (`down_revision` "0025"→"0026"). Kedjan är nu
+linjär `0001`→`0027`, exakt en head, verifierat både genom statisk kedjegenomgång och en
+verklig `alembic upgrade head`-körning mot ett schema som redan hade PR #31+#35:s tabeller (INTE
+bara en tom databas). `test_migration_roundtrip.py`s `_schema_snapshot()` genomgick en verklig
+sammanslagning (inte "välj ena sidan") av HEAD:s funktions-fingeravtryck och den frysta
+branchens PK/FK/unique-constraint- och trigger-namn-fingeravtryck till EN enhetlig snapshot-
+funktion — täcker nu kolumner, enum-etiketter, CHECK-villkorstext, PK/FK/unique-namn, trigger-
+namn och funktions-fingeravtryck (signatur, returtyp, `prosecdef`, `proconfig`, språk,
+`pg_get_functiondef()`-hash) i en enda körning.
+
+**Konfliktlösningar av substans (inte mekaniska):**
+- `app/routers/account.py`: den frysta branchens inline-raderingslogik föregår PR #31 Pass 26:s
+  refaktorering (som flyttade all raderingslogik till `app/rag/account_erasure.py::erase_
+  account_data()`). Löst genom att BEHÅLLA basgrenens tunna wrapper oförändrad (`git diff` mot
+  bas = tomt) och istället lägga till den EN nya raderingsstatements i rätt domäntjänst (nedan)
+  — inte genom att återuppliva föråldrad inline-logik.
+- `app/rag/account_erasure.py`: tillagt (inte en konflikt) — `erase_own_mainai_job_children()`
+  (migration 0027s SECURITY DEFINER-funktion, tar INGET owner-argument, härleder ägaren från
+  sessionens egna `app.current_user_id`) anropas för barntabellerna FÖRE `mainai_jobs`-raden
+  raderas direkt (komposit-FK kräver att föräldraraden finns kvar när barnen raderas) — inuti
+  SAMMA transaktion/commit som resten av kontoraderingen, ingen separat commit.
+- `app/rls.py`, `app/schemas.py`, `app/worker.py`, `docs/BRANCH_REGISTRY.md`: additiva
+  konflikter (båda sidors listor/importer/sektioner behållna), plus 4 föråldrade "migration
+  0026"-docstring-referenser i `app/rls.py` rättade till "migration 0027" (menar
+  integritetsmigrationen, som bytte nummer).
+
+**Verklig testregression hittad och fixad (inte kosmetisk):** `test_account_erasure.py`s 14
+raderingsrelaterade tester failade — root-orsak: `erase_account_data()` anropar nu BÅDE
+`erase_owner_memory()` (S1A-privilegiepolicyn, `scripts/s1a_privilege_policy.py` via
+`apply_runtime_privileges.py`) OCH `erase_own_mainai_job_children()` (en HELT SEPARAT
+privilegiepolicy, `app/rls.py::apply_mainai_job_runtime_privileges()`) — testfilens egen
+modulfixtur applicerade bara den FÖRRA. Fixat genom att lägga till det senare anropet i samma
+fixtur (matchar produktionens verkliga bootordning, `app/main.py::on_startup()` anropar båda).
+En SPEGELBILD av samma buggklass hittades sedan i `test_mainai_jobs.py::test_account_deletion_
+removes_mainai_job_data` (denna gången bara den SENARE policyn applicerad, inte den FÖRRA) —
+samma fix, egen modulfixtur tillagd i den filen, eftersom filen tidigare bara råkade passera
+NÄR den kördes efter `test_account_erasure.py` i samma pytest-session (en tyst
+körordningsberoende, inte en verklig garanti).
+
+**Verifiering på slutlig head:** `test_mainai_jobs.py` 71/71 fristående; kombinerat med
+`test_rls_policy_registry.py` 73/73; hela backendsviten **890 passed, 1 skipped, 0 riktiga
+failures** (den enda observerade failuren var den redan kända `test_storage_local_fs.py`-
+trådtimingflakan, bekräftad orelaterad genom `git diff --stat` mot den filen = inga ändringar,
+och genom 5 upprepade körningar isolerat = 4 passed, 1 failed). Migrationskedjan `0001`→`0027`
+verifierad mot verkligt PR #31+#35-schema. Frontend: `tsc --noEmit` rent, `npm run lint` rent
+(0 fel), `npm run build` (Next.js 16.2.11, Turbopack) lyckades inklusive den nya `/admin/jobs`-
+routen. Fokuserad self-review (BLOCKER/HIGH/MEDIUM/LOW) av själva integrationsytan (migration
+0027, `app/rls.py`, `app/worker.py`, `app/rag/account_erasure.py`s nya rader, `app/main.py`s
+bootordning) — inga BLOCKER/HIGH hittade utöver den redan fixade testregressionen ovan;
+`docs/MAINAI_JOB_RUNTIME.md` fick en integrationsanteckning (dess "Relationship to PR #31"-
+sektion beskrev integrationen som ogjord — nu markerad som gjord, utan att skriva om den
+historiska texten).
+
+**Vad som INTE gjorts i denna runda** (ärligt, inte antaget): ingen ny, dedikerad
+säkerhetsgranskning av den frysta branchens EGEN, redan Pass 14-17-granskade kod (jobbmodell,
+sanningsenlig exekvering, concurrency/lease-design, capability manifest, jobb-API,
+händelsehistorik, corpus-review-jobb) utöver vad som redan låg i dess egen granskningshistorik
+— granskningen ovan är fokuserad på det som är NYTT i just denna integration. Inga nya
+concurrency-/E2E-tester specifikt för integrationsytan utöver de befintliga fixarna. Ingen
+draft-PR öppnad än i denna del av rundan (se separat commit/push-steg).
+
+Ingen merge, ingen deploy, ingen produktionsmigration, ingen produktionsbackfill, ingen
+omstart. `claude/mainai-job-runtime-foundation` (den frysta branchen) ej rörd.
+
 ## Pass 36 (2026-08-05): PR #35 — durable backfill-run reporting, grundarens andra granskningsrunda: BLOCKER/HIGH/MEDIUM alla åtgärdade
 
 **Branch:** `claude/s1a-backfill-run-reporting` (grenad från `claude/det-kommer-mer-879lcm` efter
