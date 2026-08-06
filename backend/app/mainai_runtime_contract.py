@@ -55,6 +55,78 @@ _JOB_BACKED_MODES = frozenset(
 )
 
 
+def build_answer_response(message: str) -> "MainAIExecutionResponse":
+    """The one, structurally-enforced way to construct a plain informational reply — `mode=
+    answer`, `job_id=None` always. Founder re-review round (PR #36): before this, nothing in
+    the codebase actually constructed a MainAIExecutionResponse anywhere outside this module's
+    own tests — the contract existed but no live surface used it, so the founder's original
+    goal ("MainAI must never be able to claim it started/is working on something without a
+    real job") remained completely unenforced on app/routers/chat.py, the highest-traffic
+    surface in the system. This is now that live wiring's entry point (see chat.py's
+    _attempt_assistant_reply): `message` is sanitized via sanitize_unverified_execution_claims
+    below BEFORE this is ever called, so this function's own Pydantic validation (job_id must
+    be None for `answer`) is a real, enforced guarantee about the object this call site
+    produces, not just a shape nothing here ever exercises."""
+    return MainAIExecutionResponse(mode=ExecutionResponseMode.answer, job_id=None, message=message)
+
+
+# Founder re-review round (PR #36), explicit requirement: "the model must not be able to
+# produce 'I'm working on it in the background', 'the job has started', or 'done' as a
+# STRUCTURAL execution claim without contract proof." The PRIMARY defense is prompt-level (see
+# chat.py's SYSTEM_PROMPT, which now explicitly tells the model it has no background-execution
+# capability on this path and must never claim one) plus the structural job_id=None guarantee
+# build_answer_response() above enforces. This pattern list is explicitly SECONDARY
+# defense-in-depth for the one channel neither of those constrains — the model's own free-text
+# content — not "the only protection," which is exactly what the founder's review said not to
+# ship: if the model ignores the system prompt anyway, a chat reply is corrected rather than
+# silently forwarded verbatim. Deliberately narrow and reviewed (not a general sentiment/intent
+# classifier, which would be unreviewable and prone to both false positives on completely
+# unrelated text and false negatives on phrasing this list doesn't anticipate) — covers the
+# specific claim shapes this contract is actually about: ongoing background work, a job having
+# started, or something being "done"/"completed" outside of a real MainAIJob. Swedish first
+# (chat.py's SYSTEM_PROMPT is Swedish and instructs the model to reply in the founder's own
+# language) with English equivalents, since the underlying provider can still answer in either.
+_UNVERIFIED_EXECUTION_CLAIM_PATTERNS: tuple[str, ...] = (
+    "jag arbetar med det i bakgrunden",
+    "jag arbetar på det i bakgrunden",
+    "jag jobbar med det i bakgrunden",
+    "arbetar med detta i bakgrunden",
+    "jobbet har startat",
+    "jobbet är startat",
+    "uppgiften har startat",
+    "jag har startat jobbet",
+    "jag har påbörjat körningen",
+    "körningen pågår i bakgrunden",
+    "i'm working on it in the background",
+    "i am working on it in the background",
+    "working on this in the background",
+    "the job has started",
+    "the job is now running",
+    "i've started the job",
+    "i have started the job",
+    "running this in the background",
+)
+
+_UNVERIFIED_EXECUTION_CLAIM_NOTICE = (
+    "\n\n[MainAI-obs: detta svar beskriver inget verkligt bakgrundsjobb — se docs/MAINAI_JOB_RUNTIME.md. "
+    "Om ett riktigt granskningsjobb ska köras, starta det via Jobb & Aktivitet.]"
+)
+
+
+def sanitize_unverified_execution_claims(message: str) -> str:
+    """Appends a corrective notice (never silently rewrites the model's own words — an edited
+    quote would be its own honesty problem) the instant `message` contains a phrase from
+    `_UNVERIFIED_EXECUTION_CLAIM_PATTERNS`, case-insensitively. Idempotent (appending twice
+    would be a real bug, not just cosmetic — checked explicitly) and safe to call on every
+    chat reply unconditionally, matching chat.py's actual call site usage."""
+    lowered = message.lower()
+    if _UNVERIFIED_EXECUTION_CLAIM_NOTICE.strip() in message:
+        return message  # already sanitized -- never append the notice twice
+    if any(pattern in lowered for pattern in _UNVERIFIED_EXECUTION_CLAIM_PATTERNS):
+        return message + _UNVERIFIED_EXECUTION_CLAIM_NOTICE
+    return message
+
+
 class MainAIExecutionResponse(BaseModel):
     """The one shape every MainAI runtime response must fit. `job_id` is `None` for
     `answer`/`proposal` and REQUIRED (validated below, not just typed as optional) for every

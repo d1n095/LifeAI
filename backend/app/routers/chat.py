@@ -19,6 +19,7 @@ from app.context.resolver import ConversationMessage, resolve_context
 from app.db import get_db
 from app.deps import require_founder
 from app.limiter import limiter
+from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
 from app.models.usage import UsageLog
 from app.models.user import User
@@ -36,7 +37,14 @@ router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(requ
 SYSTEM_PROMPT = (
     "Du är MainAI, grundarens Founder AI — inte en delad eller allmän assistent. Svara "
     "utifrån den kontext som ges nedan från kunskapsbiblioteket. Svara på samma språk som "
-    "grundaren skriver på."
+    "grundaren skriver på.\n\n"
+    "VIKTIGT om vad du faktiskt kan göra: det här svaret är ditt HELA arbete med frågan — det "
+    "finns inget bakgrundsjobb, ingen pågående körning och ingen separat process som fortsätter "
+    "efter att du svarat. Du får ALDRIG påstå att du 'arbetar med det i bakgrunden', att 'jobbet "
+    "har startat', att du 'kommer återkomma' eller liknande — det skulle vara osant. Om något du "
+    "beskriver kräver en riktig, varaktig körning (t.ex. en granskning av flera dokument) ska du "
+    "säga att grundaren själv kan starta ett sådant jobb via Jobb & Aktivitet — aldrig låtsas att "
+    "du redan gör det."
 )
 
 settings = get_settings()
@@ -193,10 +201,21 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         )
     )
 
+    # Founder re-review round (PR #36): the runtime truthfulness contract (app/
+    # mainai_runtime_contract.py) existed but was never actually wired into a live surface --
+    # this is that wiring. sanitize_unverified_execution_claims() is the secondary,
+    # defense-in-depth check for the one channel the SYSTEM_PROMPT instruction above can't
+    # structurally guarantee (the model's own free text); build_answer_response()'s own
+    # Pydantic validation is the structural guarantee that this reply is shaped as a plain
+    # `answer` with `job_id=None` -- this endpoint has no background-job concept at all, so
+    # that is the only mode a chat reply could ever truthfully be.
+    safe_content = sanitize_unverified_execution_claims(result.content)
+    build_answer_response(safe_content)  # raises on a contract violation; never actually can for mode=answer/job_id=None, but every call site goes through this the same way
+
     if assistant_row is None:
         assistant_row = MessageModel(conversation_id=conversation.id, role=MessageRole.assistant, in_reply_to_id=user_message.id)
         db.add(assistant_row)
-    assistant_row.content = result.content
+    assistant_row.content = safe_content
     assistant_row.provider = result.provider
     assistant_row.model = result.model
     assistant_row.source_document_ids = ",".join(h["document_id"] for h in hits)
@@ -227,7 +246,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         user_message_id=user_message.id,
         assistant_status="succeeded",
         assistant_message_id=assistant_row.id,
-        reply=result.content,
+        reply=safe_content,
         provider=result.provider,
         model=result.model,
         sources=sources,

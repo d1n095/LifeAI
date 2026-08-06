@@ -34,8 +34,10 @@ from app.mainai_runtime_contract import (
     CapabilityUnavailableError,
     ExecutionResponseMode,
     MainAIExecutionResponse,
+    build_answer_response,
     get_capability_status,
     require_capability,
+    sanitize_unverified_execution_claims,
 )
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
 from app.models.document_chunk import DocumentChunk
@@ -166,6 +168,39 @@ def test_execution_response_answer_and_proposal_never_require_a_job_id():
     for mode in (ExecutionResponseMode.answer, ExecutionResponseMode.proposal):
         resp = MainAIExecutionResponse(mode=mode, job_id=None, message="ok")
         assert resp.job_id is None
+
+
+def test_build_answer_response_is_always_mode_answer_with_no_job_id():
+    resp = build_answer_response("Hej, har du en fråga om dina dokument?")
+    assert resp.mode == ExecutionResponseMode.answer
+    assert resp.job_id is None
+    assert resp.message == "Hej, har du en fråga om dina dokument?"
+
+
+def test_sanitize_unverified_execution_claims_leaves_ordinary_text_untouched():
+    text = "Bolaget grundades 2019 enligt dokumentet du laddade upp."
+    assert sanitize_unverified_execution_claims(text) == text
+
+
+def test_sanitize_unverified_execution_claims_flags_swedish_background_work_claim():
+    text = "Jag arbetar med det i bakgrunden, återkommer strax."
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert sanitized != text
+    assert sanitized.startswith(text)
+    assert "MainAI-obs" in sanitized
+
+
+def test_sanitize_unverified_execution_claims_flags_english_job_started_claim():
+    text = "The job has started and I'll let you know when it's done."
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert "MainAI-obs" in sanitized
+
+
+def test_sanitize_unverified_execution_claims_is_case_insensitive_and_idempotent():
+    text = "JOBBET HAR STARTAT, vänta lite."
+    once = sanitize_unverified_execution_claims(text)
+    twice = sanitize_unverified_execution_claims(once)
+    assert once == twice, "sanitizing an already-sanitized reply must never append the notice a second time"
 
 
 def test_require_capability_fails_closed_for_unknown_capability(db_session):
