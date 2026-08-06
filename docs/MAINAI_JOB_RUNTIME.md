@@ -19,6 +19,17 @@ describes the job-runtime schema/integrity migrations from here down. The "Relat
 #31" section immediately below is left unchanged as the historical record of what integration
 required; it is no longer a to-do, it is what was actually done.
 
+**FOUNDER RE-REVIEW ROUND (PR #36) — a fresh, independent review of this whole branch's actual
+diff (not just the design) found one BLOCKER (a stale worker could still mutate a job after
+losing its claim — no fencing token existed at all) plus several HIGH/MEDIUM findings. Every
+one of them is fixed on this branch, described in detail in the new "Founder re-review round
+(PR #36)" section below**, which supersedes several claims made further down in this document
+that are now stale (most importantly: the truthfulness contract described in "Runtime
+truthfulness contract" below IS now wired into `app/chat.py` — see that new section for exactly
+what it guarantees and what it still cannot). Everywhere below that still says "not yet wired
+into `app/chat.py`" is describing the state *before* this round; read the new section as the
+current, correct state.
+
 ## Why this exists
 
 **Goal, not yet a system-wide guarantee**: MainAI should never be able to claim it "started" or
@@ -33,13 +44,13 @@ This branch builds the *mechanism* for that guarantee — a durable job model, a
 claims and resumes it safely across restarts, and a Pydantic-level contract
 (`MainAIExecutionResponse`) that makes it a validation error to construct a job-backed response
 object without a real job ID behind it. **It is scoped to `/api/mainai/jobs` and its own
-`corpus_review` job type only.** The contract object is not yet called anywhere in
-`app/chat.py` or `app/agent_orchestration.py` — an ordinary chat reply or agent-orchestration
-response can still say "I'm working on it" in free text today, with nothing structurally
-stopping it. Wiring those paths through the contract is explicitly future work (see "Remaining
-work" below), not something this branch claims to have already done. Read every claim below
-about what "MainAI can never do" as scoped to the job-integrated paths this branch actually
-touches, not as a description of the system as a whole.
+`corpus_review` job type, plus `app/chat.py` as of the founder re-review round (PR #36) — see
+that section below.** `app/agent_orchestration.py` does not construct `MainAIExecutionResponse`
+objects; it was reviewed and found to already refuse completion-from-a-bare-200 via its own
+separate, pre-existing `AgentTask` state machine, so it was left unchanged rather than rewritten
+outside this PR's scope. Read every claim below about what "MainAI can never do" as scoped to
+the job-integrated and chat paths this branch actually touches, not as a description of the
+system as a whole.
 
 ## Scope boundaries (what this branch is, and is not)
 
@@ -50,10 +61,10 @@ touches, not as a description of the system as a whole.
   provider, produces reviewed-content *proposals* — never auto-approved knowledge.
 - A founder-only Job API (create/read/list/cancel/retry + an explicitly-separate admin
   cross-owner read).
-- The `MainAIExecutionResponse` contract object and `require_capability()` gate — the
-  mechanism a *future* conversational/agent layer would use to stay honest. This branch does
-  not yet wire that layer into `app/chat.py` or `app/agent_orchestration.py`; it only builds
-  the contract and proves it's enforceable.
+- The `MainAIExecutionResponse` contract object and `require_capability()` gate, wired into
+  `app/chat.py` as of the founder re-review round (PR #36) — see that section below for exactly
+  what this guarantees and what it does not. `app/agent_orchestration.py` does not construct
+  these objects; see the same section for why.
 
 **Is not:**
 - Not arbitrary terminal/shell execution. `CAPABILITY_MANIFEST` today contains exactly one
@@ -66,8 +77,9 @@ touches, not as a description of the system as a whole.
 - Not a second, competing admin/privilege tier. `GET /api/mainai/jobs/admin/all` is gated by
   the same `require_founder` dependency as every other route in this founder-only system —
   documented as an honest limitation below, not a real RBAC boundary.
-- Not wired into chat/agent-orchestration UI flows yet. The Jobs/Activity frontend view added
-  here is a standalone `/mainai/jobs` page for observing this job type specifically.
+- Not wired into the agent-orchestration flow (see above) — only `app/chat.py`. The
+  Jobs/Activity frontend view added here is a standalone `/mainai/jobs` page for observing this
+  job type specifically.
 
 ## Relationship to PR #31 — NOT mergeable in either order without integration work
 
@@ -254,9 +266,9 @@ database row, so an unknown capability can never leave even a trace row behind
 (`test_create_job_rejects_unknown_capability_before_creating_any_row` asserts a zero row count
 after the rejection).
 
-This contract is not yet wired into `app/chat.py`'s response path — that integration (making
-the conversational layer actually construct `MainAIExecutionResponse` objects instead of free
-text) is explicitly out of scope for this branch; see "Remaining work" below.
+This contract is now wired into `app/chat.py`'s response path (founder re-review round, PR #36)
+— see "Founder re-review round (PR #36)" below for exactly what that integration guarantees and
+what it does not.
 
 ## Worker: claim, lease, resume
 
@@ -330,8 +342,8 @@ exception text.
 | `GET ""` | List the caller's own jobs (paginated, RLS-scoped). |
 | `GET "/{job_id}"` | Job detail + its event history. 404 (never 403) for a job that exists but isn't the caller's — RLS makes it genuinely not exist from this session's point of view. |
 | `GET "/{job_id}/proposals"` | The job's proposals. |
-| `POST "/{job_id}/cancel"` | Idempotent cancel request. 409 if the job is already terminal. |
-| `POST "/{job_id}/retry"` | Retry a failed job within its retry budget. 409 if cancelled, completed, or budget exhausted — retry can **never** silently override a cancellation. |
+| `POST "/{job_id}/cancel"` | Idempotent cancel request. Rate-limited (`rate_limit_default_per_minute`). 409 if the job is already terminal. |
+| `POST "/{job_id}/retry"` | Retry a failed job within its retry budget. Rate-limited (`rate_limit_default_per_minute`). 409 if cancelled, completed, or budget exhausted — retry can **never** silently override a cancellation. |
 | `GET "/admin/all"` | Cross-owner read, bypasses RLS via the migration/superuser connection. See threat model below for why this is an honest limitation, not a real admin tier. |
 
 ## Security guarantees
@@ -443,11 +455,144 @@ need an actual admin-role check, not just "is this the founder." It is safe *tod
 because the founder is the sole account with any elevated access at all. This is flagged here
 explicitly as a known, accepted limitation — not something to silently outgrow later.
 
+## Founder re-review round (PR #36): lease fencing, idempotency, and truthfulness contract wiring
+
+A fresh, independent re-review of this branch's actual merged diff (not the design doc) found
+one BLOCKER and several HIGH/MEDIUM findings. All are fixed here, each with its own regression
+test; migration `0028` carries the schema changes.
+
+**BLOCKER — no lease fencing.** Before this round, every worker-driven write against a claimed
+job (`renew_mainai_job_lease`, `update_progress`, `mark_completed`/`failed`/`cancelled`,
+`record_claimed`) trusted only `worker_id` + `status = 'running'`. `worker_id` alone
+(`app/worker.py`'s `_worker_id()`, a hostname-or-configured string) can repeat across a process
+restart, so a worker whose lease had already expired and been reclaimed by someone else could
+still successfully renew, report progress, or mark the job completed/failed as if it still held
+the claim — directly racing the new claimant's writes. Fixed with a fencing token,
+`lease_generation` (migration `0028`, `mainai_jobs.lease_generation integer NOT NULL DEFAULT 0`):
+`claim_next_mainai_job()` bumps it by exactly 1 on every claim AND every reclaim, and every
+worker-driven write now goes through a single guarded UPDATE pattern
+(`app/rag/mainai_jobs_service.py::_guarded_job_write`) —
+`WHERE id = :job_id AND locked_by = :worker_id AND lease_generation = :lease_generation AND
+status = 'running'` — in the SAME statement as the write itself. Zero rowcount raises
+`JobLeaseLostError`, updating nothing; the caller (`app/rag/corpus_review_job.py`) stops
+immediately on that error and makes no further writes. Proven with a real two-worker race
+(`test_stale_worker_is_rejected_by_every_write_after_a_reclaim`): worker A claims, its lease is
+force-expired, worker B reclaims, and EVERY one of worker A's subsequent write attempts
+(renew/progress/record_document_reviewed/record_document_skipped/mark_completed/mark_failed/
+mark_cancelled) is rejected while worker B completes normally with exactly one `completed`
+event — run clean 20/20 times.
+
+**HIGH — `create_job()` was not safely idempotent under real concurrency.** The old
+select-then-insert had a classic TOCTOU race: two requests with the same `(owner_id,
+idempotency_key)` could both pass the SELECT before either committed its INSERT, and the loser
+got an unhandled `IntegrityError` instead of the existing job. Fixed with the same
+SAVEPOINT + real INSERT + catch-the-exact-constraint-violation + rollback-to-savepoint +
+fresh-SELECT pattern already established by `app/rag/memory_source.py`'s
+`get_or_create_memory_source_unit()`. Proven with two real threads and two real DB sessions
+(`test_create_job_concurrent_same_owner_and_key_is_race_safe`, clean 20/20): both calls
+succeed, both return the same `job_id`, exactly one row and one `created` event exist.
+
+**HIGH — the truthfulness contract existed but nothing actually used it.** Before this round,
+`MainAIExecutionResponse`/`CAPABILITY_MANIFEST` were built and tested in isolation; `app/
+chat.py`, the highest-traffic MainAI surface, never constructed one. A chat reply's free text
+could still say "I'm working on it in the background" with nothing structurally stopping it.
+Fixed with three layers, deliberately not relying on any single one:
+1. **Primary — the model is told the truth.** `chat.py`'s `SYSTEM_PROMPT` now explicitly states
+   that the reply IS the model's entire work on the request, that no background job or ongoing
+   process exists on this path, and that a real durable job must be started by the founder
+   through Jobb & Aktivitet, never claimed as already running.
+2. **Structural — `build_answer_response()`.** Every chat reply is now passed through this new
+   function before being persisted or returned; it constructs a real `MainAIExecutionResponse`
+   with `mode=answer, job_id=None` — the one and only shape a plain chat reply can ever
+   truthfully be — so `MainAIExecutionResponse`'s own Pydantic validator (job_id forbidden for
+   `answer`) is now a real, exercised guarantee about this call site, not an unused shape.
+3. **Secondary, explicitly not the only protection — `sanitize_unverified_execution_claims()`.**
+   A narrow, reviewed, closed-vocabulary pattern list (Swedish + English phrasings of "working
+   on it in the background" / "the job has started" / etc.) that appends — never rewrites — a
+   corrective `[MainAI-obs: ...]` notice the instant the model's own free text contains one of
+   those phrases despite (1). Deliberately not a general sentiment/intent classifier (unreviewable,
+   prone to both false positives and false negatives) and deliberately never the ONLY defense,
+   per the founder's explicit instruction against keyword-hack-only protection.
+
+Proven end to end through the real `/api/chat` HTTP endpoint, not just unit tests of the
+contract functions themselves:
+`test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real_endpoint` makes a
+fake provider return exactly such a claim and asserts both the HTTP response body and the
+persisted `Message` row carry the corrective notice;
+`test_ordinary_reply_without_an_execution_claim_is_left_untouched` proves normal replies are
+never modified.
+
+**What this now actually guarantees**: a chat reply can never be *structurally* classified as
+`execution_started`/`status`/`completed` (those require a real `job_id`, impossible to
+construct on this path); the model is told not to make unverified execution claims in free
+text; and if it does anyway, the reply is visibly corrected rather than silently forwarded.
+**What this does not (yet) guarantee**: `app/agent_orchestration.py`'s own agent-task loop was
+reviewed and found to already refuse to report completion from a bare HTTP 200 — it has its own
+pre-existing `AgentTask`/`AgentTaskEvent` state machine requiring recorded task results — so no
+change was made there; it was not rewritten to construct `MainAIExecutionResponse` objects
+itself, since that would be an unreviewed rewrite of a stable subsystem outside this PR's scope.
+A determined model could still phrase an execution claim in words this pattern list doesn't
+anticipate; the structural (2) and prompt-level (1) defenses are what actually bound the
+*classification* of the response, not the sanitizer's coverage of every possible phrasing.
+
+**MEDIUM — capability manifest was a static membership check, not runtime-aware.** Before this
+round, `require_capability()` only checked `job_type in CAPABILITY_MANIFEST` — a capability
+could report "available" with zero AI providers configured, only failing later when the worker
+actually tried to run it, creating a job that was certain to fail from the moment it was queued.
+Fixed with `get_capability_status()`/`CapabilityStatus`, distinguishing `implemented` (in code)
+from `configured` (a provider is actually usable — the same cheap, no-network-call
+`provider.is_configured()` check `app/providers/registry.py`'s `resolve_chat_chain()` already
+uses) from `currently_available` (both). `require_capability()` now fails closed with a
+machine-readable `reason` (`not_implemented` vs `not_configured`) BEFORE any job row is created,
+mapped to a 409 with that reason by `app/routers/mainai_jobs.py`.
+
+**MEDIUM — DB-level state invariants.** Migration `0028` adds four CHECK constraints:
+`progress_current <= progress_total` (when a total exists), a terminal status requires
+`completed_at` set and forbids it when non-terminal, `started_at` required once a job leaves
+`queued`, and `retry_count <= max_retries`. These caught a real, pre-existing bug during this
+round: `retry_job()` transitioned a job back to `queued` without resetting `completed_at` to
+`NULL`, which the new terminal-status constraint immediately rejected — fixed alongside adding
+the constraint, with `progress_current`/`progress_total`/`current_phase` also now reset on
+retry, fulfilling that function's own long-standing (previously unfulfilled) docstring claim.
+
+**MEDIUM — truthful corpus-review completion semantics.** Before this round, a document deleted
+mid-run, a document with no reviewable content, or a single document's provider failure could
+each distort "reviewed N of N" into a claim that was not quite true, and a provider failure for
+one document aborted the WHOLE job even though the other documents were never at fault. Fixed:
+`app/rag/corpus_review_job.py` now tracks reviewed/skipped-deleted/unavailable/provider-failed
+counts separately against the job's fixed snapshot total, writes a `document_skipped` event
+(migration `0028` adds this event type) with a closed-vocabulary `reason` for every
+non-reviewed outcome, and the completion message reports the real breakdown
+(`"Reviewed 1 of 3 document(s) ... 2 not reviewed (1 deleted, 1 failed)."`) instead of one
+number that blurs "actually reviewed" with "counted as done." A provider failure for one
+document is now recorded as that document's own skip and the loop continues; only a genuinely
+unexpected (non-provider, non-per-document) exception still fails the whole job via
+`mark_failed`. Proven with `test_run_corpus_review_job_mixed_outcomes_in_one_run` (three
+documents, three different outcomes in one run) and
+`test_run_corpus_review_job_fails_the_whole_job_on_a_genuinely_unexpected_error` (the other
+branch of that same split).
+
+**HIGH — account export omitted all MainAI job data.** `app/rag/account_export.py` now exports
+`mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`, owner-scoped, deterministically
+ordered, same convention as every other section — `EXPORT_SCHEMA_VERSION` bumped to `3`. Event
+`detail`/proposal `proposal_text` are exported as-is: every event type this table can contain
+is already restricted to a closed, safe vocabulary at write time (see `_PUBLIC_ERROR_MESSAGES`/
+`document_skipped`'s reasons above), so there is nothing left to sanitize on the way out.
+
+**LOW — rate limiting and pagination.** `POST /{job_id}/cancel` and `POST /{job_id}/retry` now
+carry the same `rate_limit_default_per_minute` limiter `POST ""` already had (neither had any
+before). The `/admin/jobs` frontend page now paginates both the founder's own list and the
+admin cross-owner list (20 rows/page, Föregående/Nästa), instead of fetching every row
+unbounded.
+
 ## Known limitations
 
-- The runtime-truthfulness contract (`MainAIExecutionResponse`) is built and tested in
-  isolation but not yet wired into `app/chat.py` or `app/agent_orchestration.py` — a
-  conversational response still is not *required* to go through it yet.
+- The runtime-truthfulness contract is now wired into `app/chat.py` (see "Founder re-review
+  round (PR #36)" above for exactly what that guarantees). `app/agent_orchestration.py` was
+  reviewed and found to already refuse completion-from-a-bare-200 via its own pre-existing
+  `AgentTask` state machine; it was deliberately not rewritten to construct
+  `MainAIExecutionResponse` objects itself in this round, to avoid an unreviewed rewrite of a
+  stable subsystem outside this PR's scope.
 - `/admin/all` is founder-gated, not role-gated (see threat model above).
 - **This branch is not yet mergeable against PR #31 in either order** without integration
   work (rebase + `down_revision` update) — see "Relationship to PR #31" above. No PR has been
@@ -470,8 +615,11 @@ explicitly as a known, accepted limitation — not something to silently outgrow
 
 ## Remaining work for later Agent Runtime / terminal execution / self-upgrade phases
 
-- Wire `MainAIExecutionResponse` into the actual chat/agent response path so a conversational
-  claim of "I'm working on it" is structurally required to carry a real `job_id`.
+- `app/chat.py` is now wired (see "Founder re-review round (PR #36)" above). A future pass
+  could extend the same structural wiring to `app/agent_orchestration.py` directly (constructing
+  `MainAIExecutionResponse` objects there too) rather than relying on its own separate, already-
+  reviewed state machine — not required for truthfulness today, but would unify both surfaces
+  under one contract object.
 - Expand `CAPABILITY_MANIFEST` deliberately, one capability at a time, each with its own job
   type, its own storage/lock story if it writes blobs, and its own test suite — never as a
   blanket unlock.

@@ -852,6 +852,42 @@ async def test_run_corpus_review_job_mixed_outcomes_in_one_run(db_session, super
 
 
 @pytest.mark.asyncio
+async def test_run_corpus_review_job_fails_the_whole_job_on_a_genuinely_unexpected_error(db_session, superuser_db, make_verified_user, monkeypatch):
+    """Self-review addition (founder re-review round, PR #36): unlike a ProviderError (one
+    document's outcome, job keeps going -- see the mixed-outcomes test above), a genuinely
+    unexpected exception (a real bug, not a per-document content/provider problem) must still
+    fail the WHOLE job via mark_failed, not be silently swallowed or misrecorded as a per-
+    document skip. This is the one branch of corpus_review_job.py's three-way except split that
+    had no dedicated regression test."""
+    import app.rag.corpus_review_job as corpus_review_job_module
+
+    async def _boom(db, messages, **kwargs):
+        raise RuntimeError("a real bug, not a provider or per-document problem")
+
+    monkeypatch.setattr(corpus_review_job_module, "chat_with_fallback", _boom)
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _make_chunk(db_session, user.id, doc.id)
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, user.id)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    job = superuser_db.get(MainAIJob, job.id)
+    assert job.status == MainAIJobStatus.failed
+    assert job.error_category == MainAIJobErrorCategory.unexpected
+    assert "a real bug" not in (job.public_message or "")  # never raw exception text
+
+    skip_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_job_events WHERE job_id = :j AND event_type = 'document_skipped'"), {"j": str(job.id)}
+    ).scalar()
+    assert skip_events == 0  # a whole-job failure is not recorded as a per-document skip
+
+    proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+    assert proposal_count == 0
+
+
+@pytest.mark.asyncio
 async def test_run_corpus_review_job_honors_cancel_requested_between_documents(db_session, superuser_db, make_verified_user, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok())
     user, _ = make_verified_user()
