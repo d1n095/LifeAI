@@ -6,7 +6,17 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-05, mot GitHubs PR-/check-runs-API
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-06, mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`, inte memorerat). **PR #36** (`claude/mainai-job-runtime-
+integration` → `claude/det-kommer-mer-879lcm`) är fortfarande **draft, öppen, INTE mergad**,
+`mergeable_state: clean`. Grundaren gjorde en fjärde, fristående granskningsrunda av PR #36:s
+faktiska diff efter Pass 38:s integration och gav en numrerad, severity-klassificerad
+åtgärdslista (BLOCKER: lease fencing; HIGH: idempotent create_job, chat.py-sanningskontrakt,
+kontoexport; MEDIUM: capability-manifest, DB-invarianter, corpus-review-sanningsenlighet; LOW:
+rate limiting, paginering) — alla åtgärdade, se **Pass 39** nedan för fullständig detalj. Ingen
+merge, deploy, produktionsmigration eller "Ready for review"-märkning har skett.
+
+**Tidigare rad, oförändrad:** Senast verifierat 2026-08-05, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`merge_pull_request`, inte memorerat).
 **PR #31 mergad** (`claude/s1a-memory-source-implementation` → `claude/det-kommer-mer-879lcm`),
 merge-commit `c141c38f913d585b63a202e16b980dc60599cf25`, efter grundarens uttryckliga
@@ -197,6 +207,114 @@ en bugg — fler commits per `advance()`-anrop är en förväntad avvägning fö
 
 Ingen merge, ingen deploy, ingen produktionsbackfill körd. `claude/mainai-job-runtime-foundation`
 ej rörd. Väntar på grundarens granskning av denna rundas fix.
+
+## Pass 39 (2026-08-06): PR #36 — grundarens fjärde granskningsrunda: BLOCKER (lease fencing), flera HIGH/MEDIUM/LOW, alla åtgärdade
+
+**Branch:** `claude/mainai-job-runtime-integration` (PR #36, fortfarande draft, INTE mergad).
+Efter Pass 38:s integration gjorde grundaren en fristående, fullständig omgranskning av HELA
+PR #36:s faktiska diff (inte bara designen) och gav en detaljerad, numrerad åtgärdslista med
+uttrycklig severity-klassificering: **#1 BLOCKER** (lease fencing saknades helt), **#2-4 HIGH**
+(idempotent `create_job()` var inte race-säker, sanningskontraktet var byggt men aldrig kopplat
+in i `app/chat.py`, kontoexporten saknade all MainAI-jobbdata), **#5-7 MEDIUM** (statiskt
+capability-manifest, inga DB-nivå-invarianter, corpus-review kunde ge en missvisande
+"granskade N av N"-slutsats), **#8 LOW** (ingen rate limit på cancel/retry, ingen paginering i
+`/admin/jobs`). Grundarens exakta ord: *"Vi bygger inte bara ett jobbsystem — vi kopplar det
+till den verkliga MainAI-ytan så den faktiskt slutar kunna ljuga om att arbete pågår eller är
+klart."*
+
+**#1 BLOCKER — lease fencing (åtgärdad).** Innan denna runda litade varje worker-driven
+skrivning (renew/progress/complete/fail/cancel) bara på `worker_id` + `status='running'` —
+`worker_id` ensamt (ett hostname-baserat, potentiellt återanvänt värde) kunde inte skilja en
+genuint förlegad körning från en legitimt omstartad worker som råkade återanvända samma
+identitet. En stale worker kunde alltså fortsätta förnya "sin" lease, rapportera förlopp, eller
+markera jobbet klart/misslyckat/avbrutet TROTS att en annan worker redan hade återclaimat
+jobbet efter att den ursprungliga leasen gått ut — en direkt race mot den nya ägarens skrivningar.
+Åtgärdad med en fencing-token, `lease_generation` (migration `0028`), som ökas med exakt 1 vid
+varje claim/reclaim och atomiskt återverifieras i SAMMA UPDATE-sats som varje efterföljande
+skrivning (`app/rag/mainai_jobs_service.py::_guarded_job_write`). Ett rowcount på noll kastar
+`JobLeaseLostError` — ingenting uppdateras, och anroparen (`corpus_review_job.py`) stoppar
+omedelbart. Bevisat med en verklig tvåworker-race
+(`test_stale_worker_is_rejected_by_every_write_after_a_reclaim`): worker A claimar, dess lease
+tvingas gå ut, worker B återclaimar, och VARJE efterföljande skrivförsök från worker A
+(renew/progress/proposal/checkpoint/complete/fail/cancel) avvisas medan worker B slutför
+normalt med exakt EN `completed`-händelse — körd ren 20/20 gånger.
+
+**#2 HIGH — idempotent `create_job()` (åtgärdad).** Den gamla select-sedan-insert-logiken hade
+ett klassiskt TOCTOU-race: två anrop med samma `(owner_id, idempotency_key)` kunde båda passera
+SELECT innan någon hunnit committa sin INSERT, och förloraren fick en ofångad `IntegrityError`
+istället för det redan skapade jobbet. Åtgärdad med samma SAVEPOINT + riktig INSERT + fånga den
+EXAKTA constraint-kollisionen + rollback-till-savepoint + färsk SELECT-mönster som redan
+etablerats av `app/rag/memory_source.py::get_or_create_memory_source_unit()`. Bevisat med två
+verkliga trådar och två verkliga DB-sessioner
+(`test_create_job_concurrent_same_owner_and_key_is_race_safe`), körd ren 20/20 gånger: båda
+anropen lyckas, båda får samma `job_id`, exakt en rad och en `created`-händelse.
+
+**#3 HIGH — sanningskontraktet kopplat in i `app/chat.py` (åtgärdad).** Innan denna runda
+existerade `MainAIExecutionResponse`/`CAPABILITY_MANIFEST` bara isolerat i sin egen modul och
+sina egna tester — den högtrafikerade chattytan använde dem aldrig. Åtgärdad med tre lager,
+avsiktligt inget ensamt: (1) `SYSTEM_PROMPT` säger nu uttryckligen till modellen att svaret ÄR
+hela dess arbete, inget bakgrundsjobb existerar; (2) varje svar går genom den nya
+`build_answer_response()`, som konstruerar ett riktigt `MainAIExecutionResponse` med
+`mode=answer, job_id=None` — den enda sanna formen ett vanligt chattsvar kan ha, vilket gör
+kontraktets egen Pydantic-validering till en verklig, utövad garanti; (3) en smal, granskad,
+sluten mönsterlista (`sanitize_unverified_execution_claims()`) lägger till (skriver aldrig om)
+ett rättande meddelande om modellens fritext ändå påstår obekräftat bakgrundsarbete —
+uttryckligen INTE den enda skyddsmekanismen, enligt grundarens explicita instruktion mot
+keyword-hack som ensamt skydd. Bevisat genom den RIKTIGA `/api/chat`-endpointen, inte bara
+kontraktsfunktionerna isolerat
+(`test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real_endpoint`,
+`test_ordinary_reply_without_an_execution_claim_is_left_untouched`).
+`app/agent_orchestration.py` granskades och konstaterades redan vägra rapportera klart bara för
+att ett API-anrop gav 200 — via sin egen, redan granskade `AgentTask`-tillståndsmaskin — och
+lämnades därför oförändrad, för att undvika en ogranskad omskrivning utanför denna PR:s scope.
+
+**#4 HIGH — kontoexport (åtgärdad).** `app/rag/account_export.py` exporterar nu
+`mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`, ägarscopat, deterministiskt ordnat —
+`EXPORT_SCHEMA_VERSION` höjd till `3`.
+
+**#5-7 MEDIUM (åtgärdade).** Runtime-medvetet capability-manifest
+(`get_capability_status()`/`CapabilityStatus`, skiljer `implemented`/`configured`/
+`currently_available`, fail-closed med maskinläsbar `reason`). Fyra DB-nivå-CHECK-villkor
+(migration `0028`) — som direkt fångade en verklig, redan existerande bugg:
+`retry_job()` nollställde aldrig `completed_at` vid återgång till `queued`, vilket det nya
+villkoret omedelbart avvisade. Sanningsenlig corpus-review-completion: separata räknare för
+granskat/raderat/otillgängligt/leverantörsfel mot jobbets fasta ögonblicksbildstotal, en ny
+`document_skipped`-händelse per icke-granskat utfall, och ett slutmeddelande som redovisar den
+verkliga fördelningen istället för ett tal som suddar ut "faktiskt granskat" med "räknat som
+klart". Ett leverantörsfel för ETT dokument avbryter inte längre hela jobbet.
+
+**#8 LOW (åtgärdade).** `POST /{job_id}/cancel` och `POST /{job_id}/retry` har nu samma
+rate limit som `POST ""` redan hade. `/admin/jobs`-sidan paginerar nu (20 rader/sida,
+Föregående/Nästa) istället för att hämta allt ogränsat.
+
+**Full re-verifiering på slutlig head (`6e11dc2` + denna runda):** migrationskedjan
+`0001`→`0028` uppgraderings-/nedgraderings-/uppgraderingsrundtripp verifierad från den verkliga
+`0025`-basen (inte bara en tom databas), exakt en Alembic-head. Lease fencing-racetestet körd
+20/20 gånger, den konkurrenta idempotens-testen 20/20 gånger, corpus-review-mixade-utfall-testen
+10/10 gånger, chat/kontrakt-testerna 10/10 gånger — alla rena. Privilegie-/RLS-sviterna
+(`test_rls_policy_registry.py`, `test_migration_roundtrip.py`, `test_account_erasure.py`,
+`tests/account/`) 108/108. Hela backendsviten kördes två gånger separat: första körningen
+**913 passed, 1 skipped, 1 failed** (`test_store_bytes_with_reference_lock_and_the_account_
+erasure_outbox_worker_never_race_unsafely` i `test_library_import.py` — en fil denna runda inte
+rört, `git diff --stat` mot den = tomt); bekräftad som en förbigående flaka genom 5 isolerade
+omkörningar (5/5 passed) OCH en andra fullständig svit-körning som gav **914 passed, 1 skipped,
+0 failed**. En egengranskningsfynd (LOW/informativt): `corpus_review_job.py`s tredelade
+exception-hantering (leverantörsfel → per-dokument-skip, lease-förlust → tyst stopp, allt annat
+→ hela jobbet misslyckas) saknade ett dedikerat test för den tredje grenen — åtgärdad med
+`test_run_corpus_review_job_fails_the_whole_job_on_a_genuinely_unexpected_error`. Frontend:
+`tsc --noEmit` rent, `npm run lint` rent, `npm run build` (Next.js 16.2.11, Turbopack) lyckades
+inklusive den nya pagineringen i `/admin/jobs`. `docs/MAINAI_JOB_RUNTIME.md` uppdaterad med en
+fullständig "Founder re-review round (PR #36)"-sektion och alla tidigare "inte kopplat in i
+chat.py ännu"-påståenden rättade.
+
+**Vad som INTE gjorts i denna runda** (ärligt, inte antaget): ingen ny E2E-testkörning utöver
+den befintliga Playwright-sviten (inga befintliga E2E-specar berör `/admin/jobs`- eller
+chat-flödena specifikt på ett sätt som denna runda ändrat). Ingen produktionsmigration, ingen
+deploy, ingen merge, ingen "Ready for review"-märkning. PR #36:s beskrivning uppdateras separat
+(se PR:n direkt) för att spegla hela denna runda.
+
+Ingen merge, ingen deploy, ingen produktionsmigration, ingen produktionsbackfill, ingen
+omstart. Väntar på grundarens granskning av denna rundas fix.
 
 ## Pass 38 (2026-08-06): `claude/mainai-job-runtime-integration` — den frysta job-runtime-branchen integrerad mot PR #31+#35, Alembic-kollisionen löst
 
