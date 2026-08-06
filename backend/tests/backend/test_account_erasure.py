@@ -24,6 +24,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.mainai_job import MainAIJobProposal
 from app.models.memory_source_unit import (
     DocumentSourceUnit,
     LifecycleStatus,
@@ -772,6 +773,127 @@ def test_export_account_data_includes_claims_linked_to_memory_source_id_and_lega
     finally:
         session.rollback()
         session.close()
+
+
+def test_export_account_data_includes_the_owners_full_mainai_job_history():
+    """Founder re-review round (PR #36): a real gap the review caught -- the export used to
+    omit mainai_jobs/mainai_job_events/mainai_job_proposals entirely, contradicting this same
+    module's own stated principle that an export omitting a person's job/provenance history is
+    not complete."""
+    from app.rag import mainai_jobs_service as service
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        doc = _make_document(session, owner.id)
+        _make_chunk(session, owner.id, doc.id)
+        _set_rls_user(session, owner.id)
+        job = service.create_job(
+            session, owner_id=owner.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder"
+        )
+        session.add(MainAIJobProposal(job_id=job.id, owner_id=owner.id, proposal_type="review_finding", proposal_text="Ett forslag."))
+        session.commit()
+
+        _set_rls_user(session, owner.id)
+        export = export_account_data(session, owner)
+
+        job_out = next(j for j in export["mainai_jobs"] if j["id"] == str(job.id))
+        assert job_out["job_type"] == "corpus_review"
+        assert job_out["status"] == "queued"
+
+        event_types = {e["event_type"] for e in export["mainai_job_events"] if e["job_id"] == str(job.id)}
+        assert "created" in event_types
+
+        proposal_out = next(p for p in export["mainai_job_proposals"] if p["job_id"] == str(job.id))
+        assert proposal_out["proposal_text"] == "Ett forslag."
+        assert proposal_out["status"] == "proposed"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_export_account_data_never_includes_another_owners_mainai_job_data():
+    from app.rag import mainai_jobs_service as service
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, email=f"export-job-iso-a-{uuid.uuid4().hex[:8]}@example.com")
+        other = _make_user(session, email=f"export-job-iso-b-{uuid.uuid4().hex[:8]}@example.com")
+        my_doc = _make_document(session, owner.id, title="mine")
+        other_doc = _make_document(session, other.id, title="not mine")
+        _make_chunk(session, owner.id, my_doc.id)
+        _make_chunk(session, other.id, other_doc.id)
+
+        _set_rls_user(session, owner.id)
+        my_job = service.create_job(
+            session, owner_id=owner.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(my_doc.id)}], created_by="founder"
+        )
+        _set_rls_user(session, other.id)
+        other_job = service.create_job(
+            session, owner_id=other.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(other_doc.id)}], created_by="founder"
+        )
+
+        _set_rls_user(session, owner.id)
+        export = export_account_data(session, owner)
+
+        job_ids = {j["id"] for j in export["mainai_jobs"]}
+        assert str(my_job.id) in job_ids
+        assert str(other_job.id) not in job_ids
+        assert all(e["job_id"] != str(other_job.id) for e in export["mainai_job_events"])
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_export_account_data_handles_empty_mainai_job_sections():
+    """A user with no MainAI jobs at all must get empty (not missing/erroring) sections."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        export = export_account_data(session, owner)
+        assert export["mainai_jobs"] == []
+        assert export["mainai_job_events"] == []
+        assert export["mainai_job_proposals"] == []
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_export_account_data_reflects_a_completed_jobs_full_state():
+    """Export after a job has actually reached a terminal state -- not just the freshly
+    created `queued` case the other tests above cover."""
+    from app.jobs.mainai_job_lease import claim_next_mainai_job
+    from app.rag import mainai_jobs_service as service
+
+    session = SessionLocal()
+    admin = sessionmaker(bind=migration_engine)()
+    try:
+        owner = _make_user(session)
+        doc = _make_document(session, owner.id)
+        _make_chunk(session, owner.id, doc.id)
+        _set_rls_user(session, owner.id)
+        job = service.create_job(
+            session, owner_id=owner.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder"
+        )
+        _, _, generation = claim_next_mainai_job(admin, "export-test-worker", 120)
+        _set_rls_user(session, owner.id)
+        fresh_job = service.get_job(session, job.id)
+        service.mark_completed(session, fresh_job, worker_id="export-test-worker", lease_generation=generation, public_message="Reviewed 1 of 1 document(s).")
+
+        _set_rls_user(session, owner.id)
+        export = export_account_data(session, owner)
+
+        job_out = next(j for j in export["mainai_jobs"] if j["id"] == str(job.id))
+        assert job_out["status"] == "completed"
+        assert job_out["completed_at"] is not None
+        assert job_out["public_message"] == "Reviewed 1 of 1 document(s)."
+        event_types = [e["event_type"] for e in export["mainai_job_events"] if e["job_id"] == str(job.id)]
+        assert "completed" in event_types
+    finally:
+        session.rollback()
+        session.close()
+        admin.close()
 
 
 def test_export_account_data_never_includes_another_owners_s1a_data():
