@@ -24,6 +24,19 @@ in the Library UI. A `purged` MemorySourceUnit's `content_text`/`content_hash` a
 app/models/memory_source_unit.py's `SnapshotStatus` docstring for why that would be a lie
 about what the system actually retains).
 
+Founder re-review round (PR #36): also exports `mainai_jobs`/`mainai_job_events`/
+`mainai_job_proposals` — a real gap the review caught. This module's OWN opening paragraph
+above already states the governing principle ("an export that omits a person's own claims and
+provenance history is not a complete personal-data export") and that principle applies exactly
+as much to a founder's MainAI job requests, cancel/retry activity, and AI-generated review
+proposals about their own documents as it did to knowledge_claims when Pass 26 added those.
+Event `detail` payloads are exported as-is, not re-sanitized here — every event type this
+table can ever contain is already restricted to a closed, safe vocabulary at WRITE time (see
+app/rag/mainai_jobs_service.py's `_PUBLIC_ERROR_MESSAGES`/`MainAIJobErrorCategory` and
+app/rag/corpus_review_job.py's `document_skipped` reasons); nothing ever writes a raw
+exception, a provider response body, or a credential into this table in the first place, so
+there is nothing left to strip on the way out.
+
 `export_schema_version` lets a future export format change be detected by whoever's reading
 an old export file, instead of silently reinterpreting a differently-shaped payload.
 `generated_at` timestamps the export itself, distinct from any row's own `created_at`.
@@ -42,11 +55,12 @@ from app.models.document import Document
 from app.models.import_job import ImportJob
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.mainai_job import MainAIJob, MainAIJobEvent, MainAIJobProposal
 from app.models.memory_source_unit import DocumentSourceUnit, MemorySourceLifecycleEvent, MemorySourceUnit
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 
-EXPORT_SCHEMA_VERSION = 2  # 1 = pre-S1A (account/conversations/knowledge only); 2 = + claims/S1A provenance
+EXPORT_SCHEMA_VERSION = 3  # 1 = pre-S1A; 2 = + claims/S1A provenance; 3 = + mainai_jobs/events/proposals
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -276,6 +290,69 @@ def export_account_data(db: Session, user: User, *, client_ip: str | None = None
         for c in claims
     ]
 
+    # MainAI job runtime (founder re-review round, PR #36): jobs, their full append-only event
+    # history, and every proposal — owner-scoped, deterministically ordered, same convention as
+    # every other section above.
+    mainai_jobs = db.query(MainAIJob).filter_by(owner_id=owner_id).order_by(MainAIJob.created_at, MainAIJob.id).all()
+    mainai_jobs_export = [
+        {
+            "id": str(j.id),
+            "job_type": j.job_type,
+            "status": j.status.value,
+            "created_at": _iso(j.created_at),
+            "started_at": _iso(j.started_at),
+            "last_heartbeat_at": _iso(j.last_heartbeat_at),
+            "completed_at": _iso(j.completed_at),
+            "progress_current": j.progress_current,
+            "progress_total": j.progress_total,
+            "current_phase": j.current_phase,
+            "public_message": j.public_message,
+            "error_category": j.error_category,
+            "retry_count": j.retry_count,
+            "max_retries": j.max_retries,
+            "input_refs": j.input_refs,
+            "output_refs": j.output_refs,
+            "provider": j.provider,
+            "model": j.model,
+            "cancel_requested": j.cancel_requested,
+            "cancel_acknowledged": j.cancel_acknowledged,
+            "idempotency_key": j.idempotency_key,
+            "created_by": j.created_by,
+        }
+        for j in mainai_jobs
+    ]
+
+    mainai_job_events = (
+        db.query(MainAIJobEvent).filter_by(owner_id=owner_id).order_by(MainAIJobEvent.created_at, MainAIJobEvent.id).all()
+    )
+    mainai_job_events_export = [
+        {
+            "id": str(e.id),
+            "job_id": str(e.job_id),
+            "event_type": e.event_type.value,
+            "detail": e.detail,
+            "created_at": _iso(e.created_at),
+        }
+        for e in mainai_job_events
+    ]
+
+    mainai_job_proposals = (
+        db.query(MainAIJobProposal).filter_by(owner_id=owner_id).order_by(MainAIJobProposal.created_at, MainAIJobProposal.id).all()
+    )
+    mainai_job_proposals_export = [
+        {
+            "id": str(p.id),
+            "job_id": str(p.job_id),
+            "source_document_id": str(p.source_document_id) if p.source_document_id else None,
+            "source_chunk_id": str(p.source_chunk_id) if p.source_chunk_id else None,
+            "proposal_type": p.proposal_type,
+            "proposal_text": p.proposal_text,
+            "status": p.status.value,
+            "created_at": _iso(p.created_at),
+        }
+        for p in mainai_job_proposals
+    ]
+
     export = {
         "export_schema_version": EXPORT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -294,6 +371,9 @@ def export_account_data(db: Session, user: User, *, client_ip: str | None = None
         "memory_source_units": memory_source_units_export,
         "document_source_units": document_source_units_export,
         "memory_source_lifecycle_events": lifecycle_events_export,
+        "mainai_jobs": mainai_jobs_export,
+        "mainai_job_events": mainai_job_events_export,
+        "mainai_job_proposals": mainai_job_proposals_export,
         "audit_log": [
             {
                 "action": a.action,

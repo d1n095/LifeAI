@@ -237,6 +237,69 @@ def test_embedding_failure_with_no_provider_at_all_returns_clean_failed_contract
     assert saved.content == "Fungerar du utan nyckel?"
 
 
+# --- H: the execution-truthfulness sanitizer fires through the real HTTP boundary ------------
+
+
+def test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real_endpoint(client, db_session, monkeypatch):
+    """Founder re-review round (PR #36), item #3 (fourth pass): the model itself is untrusted —
+    nothing stops an LLM from producing "jag arbetar med det i bakgrunden" as ordinary free
+    text. This proves app/mainai_runtime_contract.py's sanitize_unverified_execution_claims()
+    actually fires on the real /api/chat response body AND the persisted MessageModel row, not
+    just in the contract module's own unit tests (see test_mainai_jobs.py) -- and, per the
+    founder's HIGH-severity finding against the previous append-only version, that the false
+    claim itself is genuinely GONE from what the founder reads, not merely followed by a
+    disclaimer that leaves both the lie and the correction visible at once."""
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Visst! Jag arbetar med det i bakgrunden och återkommer snart."))
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Kan du granska alla dokument?"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_status"] == "succeeded"
+    assert "jag arbetar med det i bakgrunden" not in body["reply"].lower()
+    assert "jag återkommer" not in body["reply"].lower()
+    assert "MainAI" in body["reply"]  # a visible, honest MainAI correction still present
+
+    saved = db_session.query(MessageModel).filter_by(role=MessageRole.assistant).order_by(MessageModel.created_at.desc()).first()
+    assert saved is not None
+    assert "jag arbetar med det i bakgrunden" not in saved.content.lower()
+
+
+def test_unverified_execution_claim_via_english_phrasing_is_sanitized_through_the_real_endpoint(client, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("The job has started, I'll let you know when it's done."))
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Can you review everything?"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert "the job has started" not in body["reply"].lower()
+    assert "let you know when it's done" not in body["reply"].lower()
+
+
+def test_unverified_execution_claim_is_sanitized_through_the_retry_path_too(client, monkeypatch):
+    """_attempt_assistant_reply() is shared between the initial send and the retry endpoint —
+    this proves the sanitizer fires on BOTH, not just the first path tested above."""
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_missing_key)
+    csrf = _login(client)
+    sent = client.post("/api/chat", json={"message": "Granska mina dokument."}, headers={"X-CSRF-Token": csrf})
+    assert sent.status_code == 200, sent.text
+    user_message_id = sent.json()["user_message_id"]
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Jag övervakar situationen och hör av mig när det är klart."))
+    retried = client.post(f"/api/chat/messages/{user_message_id}/retry", headers={"X-CSRF-Token": csrf})
+    assert retried.status_code == 200, retried.text
+    reply = retried.json()["reply"]
+    assert "jag övervakar situationen" not in reply.lower()
+
+
+def test_ordinary_reply_without_an_execution_claim_is_left_untouched(client, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Här är svaret på din fråga."))
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Vad är klockan?"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["reply"] == "Här är svaret på din fråga."
+    assert "MainAI-obs" not in body["reply"]
+
+
 def test_retry_requires_founder_auth(client):
     res = client.post("/api/chat/messages/00000000-0000-0000-0000-000000000000/retry")
     assert res.status_code == 401

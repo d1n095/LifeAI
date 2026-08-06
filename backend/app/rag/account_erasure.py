@@ -189,6 +189,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.mainai_job import MainAIJob
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.refresh_token import RefreshToken
@@ -572,6 +573,20 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             ).delete(synchronize_session=False)
             db.query(Document).filter_by(uploaded_by=owner_id).delete(synchronize_session=False)
         db.query(ImportJob).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+
+        # --- MainAI Runtime Truthfulness and Durable Job Foundation (migrations 0026/0027,
+        # see docs/MAINAI_JOB_RUNTIME.md): mainai_job_events/mainai_job_proposals are
+        # append-only at the DB level — mainai_app has no DELETE privilege on them at all,
+        # only EXECUTE on this narrow SECURITY DEFINER function, which is the sole path that
+        # ever removes those rows. erase_own_mainai_job_children() takes NO owner argument —
+        # it derives the owner from this session's own app.current_user_id (already set to
+        # owner_id for the duration of this request), so there is no parameter this call site
+        # could ever get wrong or that a caller could point at a different user. Children
+        # first (their own composite FK requires the parent mainai_jobs row to still exist),
+        # THEN the parent below — never relying on the FK's ON DELETE CASCADE for this, same
+        # explicit-delete convention as every other table in this function.
+        db.execute(sa_text("SELECT erase_own_mainai_job_children()"))
+        db.query(MainAIJob).filter_by(owner_id=owner_id).delete(synchronize_session=False)
 
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
