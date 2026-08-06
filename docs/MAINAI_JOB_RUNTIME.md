@@ -3,6 +3,22 @@
 Branch: `claude/mainai-job-runtime-foundation` (based on `claude/det-kommer-mer-879lcm`,
 **not** on PR #31's still-unmerged S1A branch — see "Relationship to PR #31" below).
 
+**INTEGRATION NOTE (`claude/mainai-job-runtime-integration`): the integration this document's
+own "Relationship to PR #31" section calls for below has now been done.** PR #31 (S1A) and PR
+#35 (durable backfill-run reporting) are merged into `claude/det-kommer-mer-879lcm`, whose real
+Alembic head is `0025_memory_source_backfill_runs.py`. This branch's own two migrations were
+renumbered onto that head: `0025_mainai_jobs.py` → `0026_mainai_jobs.py` (`down_revision`
+changed from `0018` to `0025`) and `0026_mainai_job_integrity.py` → `0027_mainai_job_integrity.py`
+(`down_revision` changed from `0025` to `0026`) — no SQL changed in either file, only revision
+identity (see each file's own "INTEGRATION NOTE" in its docstring). The chain is linear,
+`0001` → `0027`, exactly one head, verified against the real merged schema (not just an empty
+database). **Every "migration 0025"/"migration 0026" reference in the rest of this document
+below is the ORIGINAL, pre-integration numbering** (accurate history of what was designed and
+reviewed under those names) — read "0025" as "0026" and "0026" as "0027" wherever this document
+describes the job-runtime schema/integrity migrations from here down. The "Relationship to PR
+#31" section immediately below is left unchanged as the historical record of what integration
+required; it is no longer a to-do, it is what was actually done.
+
 ## Why this exists
 
 **Goal, not yet a system-wide guarantee**: MainAI should never be able to claim it "started" or
