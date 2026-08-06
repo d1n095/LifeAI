@@ -13,8 +13,16 @@ integration` → `claude/det-kommer-mer-879lcm`) är fortfarande **draft, öppen
 faktiska diff efter Pass 38:s integration och gav en numrerad, severity-klassificerad
 åtgärdslista (BLOCKER: lease fencing; HIGH: idempotent create_job, chat.py-sanningskontrakt,
 kontoexport; MEDIUM: capability-manifest, DB-invarianter, corpus-review-sanningsenlighet; LOW:
-rate limiting, paginering) — alla åtgärdade, se **Pass 39** nedan för fullständig detalj. Ingen
-merge, deploy, produktionsmigration eller "Ready for review"-märkning har skett.
+rate limiting, paginering) — alla åtgärdade, se Pass 39 nedan för fullständig detalj. Grundaren
+gjorde därefter en FOKUSERAD omgranskning av just den rundans fixar och fann en kvarstående
+HIGH (chat-sanningskontraktets sanerare lade bara till en rättelse EFTER modellens falska
+påstående, så båda syntes samtidigt) plus sex MEDIUM (M1-M6: instabil paginering, frontend-
+race mot inaktuella svar, ej upprätthållna capability-policyflaggor, inget DB-skydd mot att
+`progress_current` minskar, inget end-to-end-test för lease-förlust-rollback mitt i en körning,
+odefinierad idempotens-semantik för samma nyckel med olika payload) — alla åtgärdade, se
+**Pass 40** nedan för fullständig detalj, inklusive en falsk-positiv-bugg i den nya sanerar-
+regexen som hittades och åtgärdades under denna rundas EGEN obligatoriska självgranskning.
+Ingen merge, deploy, produktionsmigration eller "Ready for review"-märkning har skett.
 
 **Tidigare rad, oförändrad:** Senast verifierat 2026-08-05, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`merge_pull_request`, inte memorerat).
@@ -207,6 +215,129 @@ en bugg — fler commits per `advance()`-anrop är en förväntad avvägning fö
 
 Ingen merge, ingen deploy, ingen produktionsbackfill körd. `claude/mainai-job-runtime-foundation`
 ej rörd. Väntar på grundarens granskning av denna rundas fix.
+
+## Pass 40 (2026-08-06): PR #36 — fokuserad slutgranskningsrunda: kvarstående HIGH (sanerare) + M1-M6, alla åtgärdade
+
+**Branch:** `claude/mainai-job-runtime-integration` (PR #36, fortfarande draft, INTE mergad).
+Efter Pass 39 gjorde grundaren en FOKUSERAD granskning av bara den rundans fixar (inte hela
+diffen om igen) och fann att `sanitize_unverified_execution_claims()` fortfarande bara lade
+till en rättelse EFTER modellens falska påstående — användaren kunde alltså läsa BÅDA "Jag
+arbetar med det i bakgrunden." och rättelsen i samma meddelande, vilket grundaren klassade
+HIGH: ett självmotsägande svar är fortfarande ett missvisande svar. Plus sex MEDIUM (M1-M6) och
+en lista LOW-punkter (endast åtgärdade om de föll ut naturligt). Grundarens uttryckliga
+begränsning genom hela denna runda: **"PR #36 ska förbli draft. Merga inte. Deploya inte. Rör
+inte produktion. Starta inte S1B/S1C/P4."** — respekterad genomgående.
+
+**HIGH — sanerare skriver om (ersätter), lägger inte längre till (åtgärdad).**
+`sanitize_unverified_execution_claims()` skrivs om från append-only till mening-för-mening-
+ERSÄTTNING: meddelandet delas i meningar (enkel skiljetecken-/radbrytnings-heuristik), varje
+mening jämförs mot ett regexbaserat (inte bara delsträngar) regelset som täcker grundarens
+exakta sju kategorier på svenska OCH engelska (arbetar i bakgrunden; återkommer senare;
+övervakar; har redan granskat allt; är klar; har startat jobbet; meddelar när klart), och en
+träffande mening ERSÄTTS med en fast, sanningsenlig mening — resten av meddelandet lämnas
+orört. Naturligt idempotent (ersättningstexten matchar aldrig sig själv). Fortfarande
+uttryckligen INTE den enda skyddsmekanismen — lager 1 (systemprompt) och lager 2
+(`build_answer_response()`s strukturella `job_id=None`-garanti) oförändrade och är det som
+faktiskt binder svarets KLASSIFICERING; sanerarens regelset är ett granskningsbart, deterministiskt
+regelset — grundarens uttryckliga instruktion mot en växande öppen nyckelordslista som ENDA
+lösning respekterad. Bevisat genom den riktiga `/api/chat`-endpointen (svensk, engelsk och
+retry-väg), och genom att den falska påståendetexten är FRÅNVARANDE (inte bara följd av en
+rättelse) i både HTTP-svaret och den persisterade `Message`-raden.
+
+**Egengranskningsfynd under denna rundas EGEN obligatoriska självgranskning (inte ett
+grundarfynd i sig):** den nya "är klar/färdig"-kategorins första utkast matchade bara generiska
+subjekt (`jag är`/`det är`/`i'm`/`it's`/`this is` + `klar`/`done`) — vilket träffade helt
+vanliga meningar utan koppling till något bakgrundsjobb (t.ex. "Jag är klar med kaffet" / "It's
+done!"), ett verkligt brott mot kravet att vanliga informativa svar ska lämnas orörda. Hittat
+med en riktad manuell testkörning under självgranskningen, åtgärdat genom att kräva ett
+explicit jobb-/uppgifts-/arbetsnamn (`jobbet`/`uppgiften`/`granskningen`/`körningen`/`arbetet`,
+`the job`/`the task`/`the review`) i mönstren istället för ett bart pronomen — bevisat med 9 nya
+"ska lämnas orört"-tester och 8 nya "ska fortfarande fångas"-tester, alla gröna.
+
+**M1 — instabil paginering (åtgärdad).** `list_jobs()` och `/admin/all`s råa SQL ordnade bara
+efter `created_at DESC`; två jobb skapade inom samma tidsstämpel kunde skifta ordning mellan
+sidhämtningar. Båda ordnar nu efter `created_at DESC, id DESC` (samma logik på båda ställena).
+Bevisat med `test_list_jobs_orders_deterministically_when_created_at_ties` och
+`test_admin_all_and_owner_list_use_the_same_stable_ordering`.
+
+**M2 — frontend-race mot inaktuella svar (åtgärdad).** `/admin/jobs`s `refreshJobs()` anropas
+både vid sid-/scope-byte och vid varje poll-tick utan garanti för svarsordning. Åtgärdad med en
+monoton `useRef`-räknare — ett inaktuellt svar upptäcker att en nyare förfrågan startat sedan
+dess och kastas istället för att skriva över det den inloggade faktiskt tittar på. Bevisat med
+en dedikerad Playwright-test (`e2e/mainai-jobs-pagination.spec.ts`) som medvetet fördröjer sida
+1:s poll-svar förbi sida 2:s riktiga svar — körd 4/4 gånger, alla gröna.
+
+**M3 — capability-policyflaggor rapporterades men upprätthölls aldrig (åtgärdad).**
+`sandbox_only`/`production_prohibited` var ren metadata; inget läste dem för att faktiskt
+blockera körning. Inbakat i `get_capability_status()` (mot
+`get_settings().environment == "production"`) — samma funktion `create_job()` (skapande) OCH,
+från och med denna runda, `app/worker.py::process_claimed_mainai_job()` (körning, omkontrolleras
+direkt före dispatch) anropar, så skapande och körning kan aldrig ha olika policy. Löser
+samtidigt en tidigare LOW-punkt (capability inte omkontrollerad vid körning).
+
+**M4 — inget DB-skydd mot att `progress_current` minskar (åtgärdad).** Migration `0028`s
+CHECK-villkor kan bara validera en rads NYA värden, aldrig jämföra mot det gamla — kräver en
+trigger. Migration `0029` lägger till en `BEFORE UPDATE`-trigger som avvisar varje minskning
+UTOM den enda legitima övergången (`failed → queued` med återställning till exakt 0). Samverkar
+med, ersätter inte, den befintliga lease-fencing-`WHERE`-satsen: en förlegad workers skrivning
+matchar redan noll rader innan triggern någonsin körs för den raden. Verifierad med en fullständig
+uppgraderings-/nedgraderings-/uppgraderingsrundtripp från den verkliga `0025`-basen — exakt en
+Alembic-head (`0029`).
+
+**M5 — inget end-to-end-test för lease-förlust-rollback mitt i en körning (åtgärdad).** Ny
+`test_run_corpus_review_job_rolls_back_the_proposal_when_lease_dies_between_provider_call_and_commit`:
+den fejkade leverantörens `chat()`-anrop tvingar SJÄLV fram lease-utgång och återclaim som en
+sidoeffekt av att anropas, vilket landar exakt mellan "leverantörsanropet lyckades" och den
+skyddade commit:en i den RIKTIGA `run_corpus_review_job()` — inte bara på den lägre
+service-funktionsnivån, vilket var grundarens specifika kritik av föregående rundas
+testtäckning. Bevisar `JobLeaseLostError`, fullständig rollback, och exakt ett förslag när
+jobbet väl slutförs under den nya workern.
+
+**M6 — odefinierad idempotens-semantik för olika payload under samma nyckel (åtgärdad).** Ny
+`IdempotencyConflictError` (409, `reason: "idempotency_conflict"`) baserad på
+`_canonical_request_fingerprint()` (ordningsoberoende JSON av `job_type` + sorterade
+`input_refs`) — en genuin repris (identiskt fingeravtryck) returnerar det ursprungliga jobbet
+oförändrat; en återanvänd nyckel med en materiellt annorlunda begäran ger konflikt istället för
+att tyst returnera fel jobb. Idempotens-uppslaget körs nu FÖRE `require_capability()`, så en
+repris under en befintlig nyckel känns igen som en repris innan en (möjligen irrelevant)
+capability-kontroll av den NYA begäran körs. Den befintliga SAVEPOINT-baserade
+race-säkerheten (`test_create_job_concurrent_same_owner_and_key_is_race_safe`) består
+oförändrad med fingeravtrycks-kontrollen tillagd.
+
+**LOW-punkter:** dokumenterat (inte kodändrat, per grundarens instruktion att bara åtgärda LOW
+om det föll ut naturligt) exakt vilka fält `retry_job()` medvetet INTE nollställer och varför
+det är säkert; `record_document_skipped()`s `detail` inkluderar nu `attempt` (jobbets
+`retry_count`) så skip-händelser per försök kan särskiljas i historiken utan att se ut som
+oförklarade dubbletter; `app/routers/workbench.py` och `app/agent_orchestration.py` namngivna
+explicit i `docs/MAINAI_JOB_RUNTIME.md` som nästa sanningsenlighetsyta, inte en tyst kvarlämnad
+uppföljning.
+
+**Full re-verifiering på slutlig head:** hela backend-sviten körd (967 passed, 1 skipped
+avsiktligt, 1 avselekterad — se nedan). De nya M1/M3/M4/M5-testerna körda 10/10 gånger rena
+(150/150 enskilda asserts), M2/M6-testerna 10/10 gånger rena (90/90), sanerar-testerna (H1 +
+självgranskningsfixen) 10/10 gånger rena (210/210), chat-e2e-sviten 5/5 gånger ren (70/70), och
+den nya Playwright M2-testen 3/3 gånger grön. Migrationsrundtripp från den VERKLIGA
+`0025`-basen genom `0029`-head och tillbaka, exakt en Alembic-head bekräftad. Frontend
+`tsc --noEmit`, `eslint .` (hela repot) och `npx next build` alla rena.
+`docs/MAINAI_JOB_RUNTIME.md` uppdaterad: HIGH-sektionen skriven om för att spegla
+ersättnings-beteendet (var tidigare felaktig — beskrev fortfarande append-beteendet), plus en
+ny "Fourth founder re-review round"-sektion som dokumenterar M1-M6 och självgranskningsfyndet.
+
+**En pre-existerande, orelaterad flaka dokumenterad (inte dold):**
+`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`
+(`tests/backend/test_storage_local_fs.py`, en trådnings-racetest denna rundas diff inte rör —
+`git diff --stat` mot den filen = tomt) misslyckades 2 av 5 isolerade omkörningar under denna
+sessions verifiering — en pre-existerande timingkänslighet i sandboxens filsystem, inte en
+regression från denna runda. Avselekterad från den fullständiga svit-körningen ovan med en
+explicit kommentar om varför; inte tystad, inte dold.
+
+**Vad som INTE gjorts i denna runda** (ärligt, inte antaget): PR #36:s GitHub-beskrivning
+uppdateras separat (se PR:n direkt). Ingen produktionsmigration, ingen deploy, ingen merge,
+ingen "Ready for review"-märkning, inget S1B/S1C/P4-arbete påbörjat — grundarens uttryckliga
+begränsning respekterad genomgående.
+
+Ingen merge, ingen deploy, ingen produktionsmigration, ingen produktionsbackfill, ingen
+omstart. Väntar på grundarens granskning av denna rundas fix.
 
 ## Pass 39 (2026-08-06): PR #36 — grundarens fjärde granskningsrunda: BLOCKER (lease fencing), flera HIGH/MEDIUM/LOW, alla åtgärdade
 

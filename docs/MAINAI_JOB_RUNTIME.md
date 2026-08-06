@@ -507,25 +507,43 @@ Fixed with three layers, deliberately not relying on any single one:
    truthfully be — so `MainAIExecutionResponse`'s own Pydantic validator (job_id forbidden for
    `answer`) is now a real, exercised guarantee about this call site, not an unused shape.
 3. **Secondary, explicitly not the only protection — `sanitize_unverified_execution_claims()`.**
-   A narrow, reviewed, closed-vocabulary pattern list (Swedish + English phrasings of "working
-   on it in the background" / "the job has started" / etc.) that appends — never rewrites — a
-   corrective `[MainAI-obs: ...]` notice the instant the model's own free text contains one of
-   those phrases despite (1). Deliberately not a general sentiment/intent classifier (unreviewable,
-   prone to both false positives and false negatives) and deliberately never the ONLY defense,
-   per the founder's explicit instruction against keyword-hack-only protection.
+   A regex-based (not bare-substring), reviewed ruleset covering seven claim categories in
+   Swedish and English (working in the background; will get back to you later; monitoring it;
+   has already reviewed everything; is done/finished; has started the job; will notify you when
+   done — see the function's own module-level comment in
+   `app/mainai_runtime_contract.py` for the exact patterns). **Fourth founder re-review round
+   (same PR): rewritten from append-only to sentence-level REPLACEMENT.** The original version
+   only ever appended a `[MainAI-obs: ...]` correction after the model's own text, so a reply
+   could (and, once tested end-to-end, demonstrably did) show the user "Jag arbetar med det i
+   bakgrunden." immediately followed by a notice saying no such work exists — both claims
+   visible in the same message at once, which the founder classified HIGH: a self-contradictory
+   message is still a misleading one. This version splits the message into sentences and
+   REPLACES the specific sentence containing the claim with a fixed truthful sentence, leaving
+   every other sentence of the same message untouched — the false claim itself is gone from
+   what the user reads, not just followed by a disclaimer. Still deliberately not a general
+   sentiment/intent classifier (unreviewable, prone to both false positives and false
+   negatives) and deliberately never the ONLY defense, per the founder's explicit instruction
+   against keyword-hack-only protection. **Also found and fixed during this same round's own
+   mandated self-review** (not a founder-review finding): the first draft of the "is
+   done/finished" category matched bare generic subjects (`jag är`/`det är`/`i'm`/`it's`/`this
+   is` + `klar`/`done`), which over-matched ordinary sentences with nothing to do with a
+   background job (e.g. "Jag är klar med kaffet" / "It's done!") — a real violation of "ordinary
+   informational answers must be left unchanged." Fixed by requiring an explicit job/task/work
+   noun in that category's patterns instead of a bare pronoun.
 
 Proven end to end through the real `/api/chat` HTTP endpoint, not just unit tests of the
 contract functions themselves:
-`test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real_endpoint` makes a
-fake provider return exactly such a claim and asserts both the HTTP response body and the
-persisted `Message` row carry the corrective notice;
+`test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real_endpoint` (and its
+English and retry-path siblings) make a fake provider return exactly such a claim and assert the
+false claim text is ABSENT from both the HTTP response body and the persisted `Message` row;
 `test_ordinary_reply_without_an_execution_claim_is_left_untouched` proves normal replies are
 never modified.
 
 **What this now actually guarantees**: a chat reply can never be *structurally* classified as
 `execution_started`/`status`/`completed` (those require a real `job_id`, impossible to
 construct on this path); the model is told not to make unverified execution claims in free
-text; and if it does anyway, the reply is visibly corrected rather than silently forwarded.
+text; and if it does anyway, the false claim itself — not just an accompanying disclaimer — is
+removed from what the user reads.
 **What this does not (yet) guarantee**: `app/agent_orchestration.py`'s own agent-task loop was
 reviewed and found to already refuse to report completion from a bare HTTP 200 — it has its own
 pre-existing `AgentTask`/`AgentTaskEvent` state machine requiring recorded task results — so no
@@ -585,6 +603,67 @@ before). The `/admin/jobs` frontend page now paginates both the founder's own li
 admin cross-owner list (20 rows/page, Föregående/Nästa), instead of fetching every row
 unbounded.
 
+### Fourth founder re-review round (same PR): the H1 truthfulness fix above, plus six MEDIUM fixes
+
+The HIGH sanitizer rewrite (append → sentence-level replacement) is documented in full under
+"HIGH — the truthfulness contract existed but nothing actually used it" above. This round also
+fixed six MEDIUM findings from the same review, all in the same round per the founder's explicit
+priority ordering:
+
+- **M1 — pagination was not stable across pages.** `list_jobs()` and `/admin/all`'s raw SQL both
+  ordered by `created_at DESC` alone; two jobs created within the same timestamp (realistic under
+  fast/automated creation) could shuffle order between page fetches, producing a duplicate or
+  missing row across pages. Both now order by `created_at DESC, id DESC` — `id` (a UUID, unique,
+  immutable) as a tiebreaker makes the ordering total and deterministic, and both endpoints use
+  the identical ordering so they can never disagree with each other.
+- **M2 — a stale `/admin/jobs` poll response could overwrite a newer page's state.**
+  `refreshJobs()` is called both on page/scope change and every poll tick, with no guarantee
+  those requests resolve in the order they were sent. A monotonic `useRef` counter, bumped at the
+  start of each call and captured into that call's closure, lets a response detect it is no
+  longer the most recent request and discard itself instead of overwriting what the user is
+  currently looking at. Proven with a dedicated Playwright test
+  (`e2e/mainai-jobs-pagination.spec.ts`) that deliberately delays page 1's poll response past
+  page 2's real response and confirms page 2's data survives.
+- **M3 — `sandbox_only`/`production_prohibited` were reported but never enforced.** These flags
+  existed as pure metadata on `CapabilityStatus`; nothing ever read them to actually block
+  execution. Folded into `get_capability_status()` (checked against
+  `get_settings().environment == "production"`), the one function both `create_job()` (creation)
+  and, as of this round, `app/worker.py::process_claimed_mainai_job()` (execution, re-checked
+  immediately before dispatch) call — so job creation and worker execution can never apply a
+  different policy from each other, and a capability that becomes blocked between creation and
+  execution is still caught.
+- **M4 — nothing defended against `progress_current` decreasing.** Migration `0028`'s CHECK
+  constraints can only validate a single row's new values, never compare against the row's
+  previous value, so decreasing progress needed a trigger, not another CHECK. Migration `0029`
+  adds a `BEFORE UPDATE` trigger rejecting any decrease EXCEPT the one legitimate case: the
+  `failed → queued` retry transition resetting to exactly `0`. Composes with, does not replace,
+  the pre-existing lease-fencing `WHERE` clause: a stale worker's write already matches zero rows
+  before the trigger ever runs for that row.
+- **M5 — the mid-run lease-loss rollback guarantee had no test proving it end to end.** Added
+  `test_run_corpus_review_job_rolls_back_the_proposal_when_lease_dies_between_provider_call_and_commit`,
+  which injects the "another worker reclaims the lease" side effect INSIDE the mocked provider
+  call's own return, landing precisely between "provider call succeeded" and the guarded
+  progress/proposal commit inside the real `run_corpus_review_job()` — not just at the lower
+  service-function level. Confirms `JobLeaseLostError`, a full rollback, and exactly one proposal
+  once the job actually finishes under the new worker.
+- **M6 — idempotency semantics for a reused key with a different payload were undefined.**
+  Previously, any existing job under `(owner_id, idempotency_key)` was returned unconditionally,
+  regardless of whether the new call's `job_type`/`input_refs` actually matched. Added
+  `IdempotencyConflictError` (409, `reason: "idempotency_conflict"`) raised when a
+  `_canonical_request_fingerprint()` comparison (order-independent JSON of `job_type` + sorted
+  `input_refs`) shows the new request differs from the existing job's own. The idempotency lookup
+  now runs BEFORE `require_capability()`, so a replay under an existing key is recognized as a
+  replay (or a conflict) before any capability check of the new call's parameters runs — closing
+  a case where a client-side bug changing `job_type` under a reused key could otherwise surface a
+  misleading `CapabilityUnavailableError`. The pre-existing SAVEPOINT-based concurrency safety
+  (`test_create_job_concurrent_same_owner_and_key_is_race_safe`) still holds with the fingerprint
+  check added.
+
+Also fixed during this round's own mandated self-review (not itself a founder-review finding):
+the "is done/finished" sanitizer category's first draft matched bare generic subjects (`jag
+är`/`det är`/`i'm`/`it's`/`this is` + `klar`/`done`), over-matching ordinary sentences with
+nothing to do with a background job. See the HIGH section above for the fix.
+
 ## Known limitations
 
 - The runtime-truthfulness contract is now wired into `app/chat.py` (see "Founder re-review
@@ -620,6 +699,13 @@ unbounded.
   `MainAIExecutionResponse` objects there too) rather than relying on its own separate, already-
   reviewed state machine — not required for truthfulness today, but would unify both surfaces
   under one contract object.
+- **`app/routers/workbench.py` (`/api/workbench/analyze`) and `app/agent_orchestration.py`
+  are the explicit, named NEXT truthfulness surfaces — not a hidden follow-up.** Both call
+  `chat_with_fallback()` directly and return the model's free text to a human, the same shape
+  of risk `sanitize_unverified_execution_claims()`/`build_answer_response()` now guard on
+  `app/chat.py`; neither goes through either function today. This PR's diff touches neither
+  file. Recorded here explicitly, by name, so the next pass has a stated target instead of this
+  being rediscovered from scratch.
 - Expand `CAPABILITY_MANIFEST` deliberately, one capability at a time, each with its own job
   type, its own storage/lock story if it writes blobs, and its own test suite — never as a
   blanket unlock.
