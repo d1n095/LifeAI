@@ -12,9 +12,12 @@ Grundaren körde därefter en fullt verifierad produktionsdeploy av den basen; p
 frisk och stabil. Ingen del av den här sessionen har rört VPS:en, deployen, eller kört någon
 backfill mot produktionsdata.
 
-**NY BRANCH: `claude/s1b-message-sequence-number` → PR #39 (öppen, INTE mergad).** Grenad från
-exakt `d5f37c2b798f7ae430a908037608d9c19e29cc70`, verifierat med `git ls-remote` innan branchen
-skapades — inte memorerat. Innehåller S1B:s fyra första steg (expand, dual-write, durabel
+**NY BRANCH: `claude/s1b-message-sequence-number` → PR #39 (draft, öppen, INTE mergad).** Grenad
+från exakt `d5f37c2b798f7ae430a908037608d9c19e29cc70`, verifierat med `git ls-remote` innan
+branchen skapades — inte memorerat. Full CI verifierad grön på headen (samtliga jobb `success`
+eller path-filtrerat `skipped`, inklusive det aggregerande `All required checks passed`).
+Blockerar ingen annan branch; blockeras inte av något. Kan mergas oberoende när grundaren
+godkänt den — och bör mergas FÖRE en framtida S1C-branch, som per §8 kräver S1B. Innehåller S1B:s fyra första steg (expand, dual-write, durabel
 historisk backfill, verifiering) enligt §4.8:s "Fasad migrationsplan" och §8:s byggordning.
 CONTRACT-steget ingår MEDVETET INTE. Se Pass 42 nedan för fullständig detalj, inklusive vad som
 uttryckligen INTE är gjort och vilken kvarstående risk som är känd men inte åtgärdad i den här
@@ -402,12 +405,33 @@ läser hade låtit en anropare tro att den begränsat jobbets omfång när den i
   testet är en ren filsystems-/trådrace med 250 iterationer utan någon databaskoppling alls, och
   de failande delmängderna varierade mellan körningar. Samma flaka noterades redan i Pass 37 och
   Pass 41.
+- **CI, verifierad mot GitHubs check-runs-API på den exakta headen (inte memorerad):** samtliga
+  jobb `success` eller `skipped` (VPS-/container-jobben är path-filtrerade och rörs inte av den
+  här diffen), inklusive `Backend — unit/integration tests`, `Backend — RLS & session-security
+  tests`, `Backend — account lifecycle & rate-limit tests`, `Backend — Alembic migration check`,
+  `Frontend — TypeScript & ESLint`, `Frontend — npm audit`, båda `Frontend — build`-varianterna,
+  båda E2E-jobben, samt det aggregerande **`All required checks passed`**. Noterat för framtida
+  sessioner: `Backend — unit/integration tests` tog ~20 minuter på den första körningen (mot
+  ~4 minuter lokalt) innan den blev grön — samma långsamma-runner-beteende Pass 38 dokumenterade,
+  inte en hängning.
 - **Latent testhygien-risk hittad och åtgärdad under samma undersökning:** testhjälparen som
   återskapar pre-0030-rader använde ett vanligt `SET session_replication_role = replica` på den
   poolade superuser-anslutningen. Ändrat till `SET LOCAL`, som är transaktionsscopat och
   återställs vid COMMIT oavsett vad som händer däremellan — så ett fel mitt i hjälparen aldrig
   kan lämna tillbaka en trigger-avstängd anslutning till SQLAlchemys pool för ett orelaterat
   senare test att ärva.
+- **Två ytterligare härdningar från sessionens egen självgranskning** (inga observerade fel —
+  strukturella luckor stängda innan de hann bli fel):
+  1. `_on_outcome`-closuren i jobbet definieras inuti loopen och LÄSTE `job`/`processed`/`total`
+     från omgivande scope. Sen bindning betyder att de slås upp vid ANROPSTID. Den anropas i
+     samma iteration idag, så värdena stämmer — men det är en egenskap hos den nuvarande
+     anropsordningen, inte hos koden. Alla tre binds nu som defaultargument, så en framtida
+     refaktorering som skjuter upp eller omordnar callbacken inte tyst kan börja rapportera fel
+     konversations progress.
+  2. Samtidighetstestet hade varken `statement_timeout`, daemon-trådar eller en
+     `is_alive()`-assertion. En tråd som fastnat på advisory-locket hade blockerat för alltid,
+     hållit pytest-processen vid liv efter sista testet, och förvandlat ett testfel till ett
+     helt CI-jobb som timeout:ar utan användbar signal. Alla tre utvägar är nu begränsade.
 
 ### Medvetet inkluderat, trots att det ligger nära scope-gränsen
 
