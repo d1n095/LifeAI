@@ -1342,6 +1342,7 @@ jobs:
               case "$1" in
                 --entrypoint) entrypoint="$2"; shift 2 ;;
                 --env-file|--rm) [ "$1" = "--env-file" ] && shift 2 || shift ;;
+                --add-host=*) shift ;;
                 run) shift ;;
                 *) if [ -z "$image" ] && [ -n "$entrypoint" ]; then image="$1"; shift; else cmd_args+=("$1"); shift; fi ;;
               esac
@@ -1374,6 +1375,7 @@ jobs:
               case "$1" in
                 --entrypoint) entrypoint="$2"; shift 2 ;;
                 --env-file|--rm) [ "$1" = "--env-file" ] && shift 2 || shift ;;
+                --add-host=*) shift ;;
                 run) shift ;;
                 *) cmd_args+=("$1"); shift ;;
               esac

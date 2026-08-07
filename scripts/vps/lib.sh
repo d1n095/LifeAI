@@ -192,11 +192,19 @@ check_no_duplicate_env_keys() {
 # assumption that the revision is that image's own `head`, just that it's SOMEWHERE in its
 # known history). `alembic show` exits non-zero with `ResolutionError` if the revision is
 # unknown to that image's migration scripts.
+#
+# --add-host=host.docker.internal:host-gateway on both `docker run` calls below: a bare
+# `docker run` (unlike the backend/worker services in docker-compose.vps.yml /
+# docker-compose.vps.ci.yml) gets none of Compose's own `extra_hosts:` configuration, so on
+# the CI test topology — where DATABASE_URL points at `host.docker.internal` (the runner's own
+# host-level Postgres, see docker-compose.vps.ci.yml's comment) — this container would
+# otherwise fail to resolve that hostname at all. Harmless on the real VPS, where DATABASE_URL
+# points at Supabase over the public internet and this mapping is simply never referenced.
 verify_rollback_target_knows_current_revision() {
     local target_image="$1" env_file="$2"
     local current_rev
 
-    current_rev=$(docker run --rm --env-file "$env_file" --entrypoint python "$target_image" -c '
+    current_rev=$(docker run --rm --add-host=host.docker.internal:host-gateway --env-file "$env_file" --entrypoint python "$target_image" -c '
 import os, sys
 import psycopg2
 try:
@@ -218,7 +226,7 @@ except Exception as exc:
     log_info "Current database Alembic revision: $current_rev"
     log_info "Verifying rollback target $target_image's own migration history includes $current_rev..."
 
-    if ! docker run --rm --env-file "$env_file" --entrypoint alembic "$target_image" show "$current_rev" &> /dev/null; then
+    if ! docker run --rm --add-host=host.docker.internal:host-gateway --env-file "$env_file" --entrypoint alembic "$target_image" show "$current_rev" &> /dev/null; then
         die "Refusing to roll back: rollback target image ($target_image) does not know about the database's current Alembic revision ($current_rev) in its own migration history. Starting it would run OLDER application code against a NEWER database schema. This must be resolved manually — see docs/VPS_OPERATIONS_RUNBOOK.md's rollback-after-schema-upgrade procedure (forward-migrate to a newer image, or a deliberate, reviewed 'alembic downgrade')."
     fi
 
