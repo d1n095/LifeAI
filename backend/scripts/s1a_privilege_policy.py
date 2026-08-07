@@ -32,6 +32,41 @@ partially-applied state by a crash or a policy violation midway through.
 
 APP_ROLE = "mainai_app"
 
+# Founder-reported production incident (VPS deploy of PR #36's merged base): `ensure_app_role.py`
+# and `apply_runtime_privileges.py` both run this policy's REVOKE/GRANT statements against the
+# SAME catalog rows (pg_class.relacl, pg_proc.proacl) on every container boot — and before this
+# fix, `backend/docker-entrypoint.sh` ran BOTH scripts unconditionally on every container that
+# shares the image, including the durable-worker container. Two concurrent transactions each
+# issuing REVOKE/GRANT against the same table/function can hit Postgres's
+# "tuple concurrently updated" error (a real, observed production failure — the worker
+# crash-looped on it) rather than cleanly blocking, because GRANT/REVOKE's catalog UPDATE
+# doesn't queue behind a session-level lock the way ordinary DML does.
+#
+# `acquire_privilege_boot_lock(cur)` below serializes every mutating call into this module via
+# a single, well-known Postgres advisory lock — `pg_advisory_xact_lock` blocks (rather than
+# erroring) until any other transaction currently mutating S1A/mainai_job_* privileges commits
+# or rolls back, and is automatically released at the end of the CALLING transaction (commit,
+# rollback, or connection loss) with no separate unlock call needed. This is defense in depth
+# for the case docker-entrypoint.sh's own fix (worker no longer runs the mutating path at all —
+# see RUN_PRIVILEGE_BOOT there) doesn't cover: multiple BACKEND replicas (or an old+new backend
+# briefly overlapping during a rolling deploy) still both running the real, mutating path.
+#
+# The two integers are arbitrary but fixed and documented (never derived from a hash, which
+# would risk an unintended collision with some other advisory lock this codebase or a future
+# one takes) — "LifeAI privilege boot", chosen once and never reused for anything else.
+PRIVILEGE_BOOT_ADVISORY_LOCK_KEY = (72197001, 1)
+
+
+def acquire_privilege_boot_lock(cur) -> None:
+    """Blocks until this transaction holds the exclusive privilege-boot advisory lock — call
+    this as the FIRST statement in any transaction that calls `apply_privilege_policy(...,
+    mutate=True)` (the default), before that transaction touches any catalog row this policy
+    manages. Never call this from a `mutate=False` (read-only, verification-only) caller: a
+    read-only transaction should never need to wait behind a writer, and PRIVILEGE_VERIFY_ONLY
+    callers (see apply_runtime_privileges.py) must stay lock-free by design so a stuck writer
+    can never make a read-only verifier hang too."""
+    cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", PRIVILEGE_BOOT_ADVISORY_LOCK_KEY)
+
 # (table, [privileges mainai_app should end up with]) — everything else (UPDATE, DELETE,
 # TRUNCATE, REFERENCES, TRIGGER) is revoked. lifecycle_events is SELECT-only: it's an
 # append-only audit trail written exclusively by the SECURITY DEFINER functions below, never
@@ -186,13 +221,24 @@ def s1a_objects_exist(cur) -> bool:
     return True
 
 
-def apply_privilege_policy(cur, *, expected_owner: str, require_complete: bool = True) -> list[str]:
+def apply_privilege_policy(
+    cur, *, expected_owner: str, require_complete: bool = True, mutate: bool = True
+) -> list[str]:
     """Applies deny-by-default/explicit-allow GRANT/REVOKE for mainai_app on the S1A
     tables/functions and the public schema's CREATE privilege, then re-verifies with real
     privilege/catalog queries. Returns a list of human-readable error strings (empty if
     everything matches policy exactly) — never raises for a policy mismatch itself, and
     never commits/rolls back; the caller's transaction does that based on whether this
     returns any errors.
+
+    `mutate` (default True): when False, every REVOKE/GRANT statement below is skipped
+    entirely — only the verification queries run, against whatever privilege state already
+    exists. This is the durable-worker container's read-only path (see
+    apply_runtime_privileges.py's `--verify-only`): the worker must never itself narrow or
+    widen mainai_app's privileges (that's the backend's job, exactly once), only confirm the
+    backend already left them correct, and fail closed (non-zero exit) if not. A caller with
+    `mutate=False` must NOT call `acquire_privilege_boot_lock()` first — a read-only verifier
+    must never block behind a writer's lock (see that function's own docstring).
 
     `expected_owner` is the role every protected table and function must be owned by —
     callers pass `SELECT current_user` from their own connection (the actual admin/migration
@@ -235,29 +281,30 @@ def apply_privilege_policy(cur, *, expected_owner: str, require_complete: bool =
             continue
         signatures[name] = sig
 
-    for table, allowed_privs in _PROTECTED_TABLES:
-        if table not in tables_present:
-            continue
-        cur.execute(f'REVOKE ALL ON TABLE public."{table}" FROM {APP_ROLE}')
-        # Pass 28: storage_deletion_tasks' allowed_privs is deliberately empty (zero direct
-        # privileges) -- `GRANT  ON TABLE ... TO role` (an empty privilege list) is invalid
-        # SQL, and REVOKE ALL above already leaves the role with nothing, so there is simply
-        # no GRANT statement to issue in that case.
-        if allowed_privs:
-            cur.execute(f'GRANT {", ".join(allowed_privs)} ON TABLE public."{table}" TO {APP_ROLE}')
+    if mutate:
+        for table, allowed_privs in _PROTECTED_TABLES:
+            if table not in tables_present:
+                continue
+            cur.execute(f'REVOKE ALL ON TABLE public."{table}" FROM {APP_ROLE}')
+            # Pass 28: storage_deletion_tasks' allowed_privs is deliberately empty (zero direct
+            # privileges) -- `GRANT  ON TABLE ... TO role` (an empty privilege list) is invalid
+            # SQL, and REVOKE ALL above already leaves the role with nothing, so there is simply
+            # no GRANT statement to issue in that case.
+            if allowed_privs:
+                cur.execute(f'GRANT {", ".join(allowed_privs)} ON TABLE public."{table}" TO {APP_ROLE}')
 
-    for name, grant_to_app, _requires_bypassrls, _expected_return_type, _expected_args in _FUNCTIONS:
-        sig = signatures.get(name)
-        if sig is None:
-            continue
-        cur.execute(f"REVOKE ALL ON FUNCTION {sig} FROM PUBLIC")
-        if grant_to_app:
-            cur.execute(f"GRANT EXECUTE ON FUNCTION {sig} TO {APP_ROLE}")
-        else:
-            cur.execute(f"REVOKE ALL ON FUNCTION {sig} FROM {APP_ROLE}")
+        for name, grant_to_app, _requires_bypassrls, _expected_return_type, _expected_args in _FUNCTIONS:
+            sig = signatures.get(name)
+            if sig is None:
+                continue
+            cur.execute(f"REVOKE ALL ON FUNCTION {sig} FROM PUBLIC")
+            if grant_to_app:
+                cur.execute(f"GRANT EXECUTE ON FUNCTION {sig} TO {APP_ROLE}")
+            else:
+                cur.execute(f"REVOKE ALL ON FUNCTION {sig} FROM {APP_ROLE}")
 
-    cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
-    cur.execute(f"REVOKE CREATE ON SCHEMA public FROM {APP_ROLE}")
+        cur.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+        cur.execute(f"REVOKE CREATE ON SCHEMA public FROM {APP_ROLE}")
 
     # --- verification: real privilege/catalog queries, not an assumption ---
     for table, allowed_privs in _PROTECTED_TABLES:

@@ -90,6 +90,12 @@ log_info "Rolling back to deployment $TARGET_TIMESTAMP:"
 log_info "  BACKEND_IMAGE=$TARGET_BACKEND"
 log_info "  FRONTEND_IMAGE=$TARGET_FRONTEND"
 
+log_info "Pulling rollback target $TARGET_BACKEND for the pre-flight Alembic-revision check..."
+run docker pull "$TARGET_BACKEND"
+
+log_info "Verifying $TARGET_BACKEND's own Alembic migration history covers the database's current revision..."
+verify_rollback_target_knows_current_revision "$TARGET_BACKEND" "$ENV_FILE"
+
 # In-place, line-targeted replacement — touches ONLY the BACKEND_IMAGE/FRONTEND_IMAGE lines,
 # never any other line in the secrets file (no secret value is ever read into this script's
 # own variables beyond these two non-secret image references).

@@ -55,6 +55,20 @@ never the durable, committed state for those specific tables. On a boot where th
 runs BEFORE `alembic upgrade head` first creates the S1A tables, there's nothing to narrow
 yet here; apply_runtime_privileges.py (run after the migration, see docker-entrypoint.sh)
 applies the same policy for the first time in that case.
+
+--derive-only (see docker-entrypoint.sh): the durable-worker container's path. Computes and
+writes `APP_DATABASE_URL` to $RENDER_ENV_FILE exactly as the full path below does, but touches
+NO database at all — no connection, no CREATE/ALTER ROLE, no GRANT, no privilege re-narrowing.
+Safe to run on every container unconditionally: deriving the connection string is pure string
+substitution from DATABASE_URL + MAINAI_APP_PASSWORD, identical on every container since both
+share the same admin DATABASE_URL and the same MAINAI_APP_PASSWORD. Founder-reported
+production incident (VPS hotfix): before this mode existed, the worker container ran the FULL
+mutating path unconditionally too (see docker-entrypoint.sh's history) — including its own
+GRANT ALL + S1A re-narrow transaction, in parallel with the backend container's own identical
+transaction, occasionally colliding on Postgres's "tuple concurrently updated" for the exact
+same catalog rows. Only the backend now ever runs the mutating path (also now behind
+`acquire_privilege_boot_lock()`, defending the remaining case of two backend replicas racing
+each other — see that function's docstring).
 """
 
 import os
@@ -68,7 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import psycopg2  # noqa: E402
 from psycopg2 import sql  # noqa: E402
 
-from s1a_privilege_policy import apply_privilege_policy  # noqa: E402
+from s1a_privilege_policy import acquire_privilege_boot_lock, apply_privilege_policy  # noqa: E402
 
 APP_ROLE = "mainai_app"
 
@@ -131,6 +145,35 @@ def _self_test_connection(app_database_url: str, *, attempts: int = 5, base_dela
     raise RuntimeError(f"Kunde inte ansluta som {APP_ROLE} efter {attempts} försök.") from last_exc
 
 
+def _derive_app_database_url(database_url: str, app_password: str) -> str:
+    """Pure computation, no I/O: the exact same `APP_DATABASE_URL` the full mutating path
+    below derives, from DATABASE_URL + MAINAI_APP_PASSWORD alone. Shared by both `main()`'s
+    full path and `--derive-only` so the two can never silently diverge."""
+    parts = urlsplit(database_url)
+    if not parts.hostname or not parts.username:
+        print(f"DATABASE_URL saknar host eller användarnamn: {database_url!r}", file=sys.stderr)
+        sys.exit(1)
+    app_username = _app_username(parts.username)
+    app_netloc = f"{quote(app_username, safe='.')}:{quote(app_password, safe='')}@{parts.hostname}:{parts.port or 5432}"
+    return urlunsplit((parts.scheme, app_netloc, parts.path, "", ""))
+
+
+def derive_only() -> None:
+    """--derive-only: the durable-worker container's path — see module docstring. Computes
+    APP_DATABASE_URL and writes it to $RENDER_ENV_FILE, touching no database at all."""
+    database_url = os.environ["DATABASE_URL"]
+    app_password = os.environ["MAINAI_APP_PASSWORD"]
+    env_file = os.environ.get("RENDER_ENV_FILE")
+
+    app_database_url = _derive_app_database_url(database_url, app_password)
+
+    if env_file:
+        with open(env_file, "a") as f:
+            f.write(f'export APP_DATABASE_URL="{app_database_url}"\n')
+
+    print(f"{APP_ROLE}: APP_DATABASE_URL härledd (--derive-only, ingen databasanslutning gjord).")
+
+
 def main() -> None:
     database_url = os.environ["DATABASE_URL"]
     app_password = os.environ["MAINAI_APP_PASSWORD"]
@@ -139,14 +182,7 @@ def main() -> None:
     # this specific deploy — never inferred, never a side effect of an ordinary restart.
     rotate_password = os.environ.get("MAINAI_APP_ROTATE_PASSWORD", "false").lower() == "true"
 
-    parts = urlsplit(database_url)
-    if not parts.hostname or not parts.username:
-        print(f"DATABASE_URL saknar host eller användarnamn: {database_url!r}", file=sys.stderr)
-        sys.exit(1)
-
-    app_username = _app_username(parts.username)
-    app_netloc = f"{quote(app_username, safe='.')}:{quote(app_password, safe='')}@{parts.hostname}:{parts.port or 5432}"
-    app_database_url = urlunsplit((parts.scheme, app_netloc, parts.path, "", ""))
+    app_database_url = _derive_app_database_url(database_url, app_password)
 
     password_changed = False
 
@@ -155,6 +191,13 @@ def main() -> None:
     committed = False
     try:
         with conn.cursor() as cur:
+            # Founder-reported production incident (VPS hotfix): see
+            # s1a_privilege_policy.acquire_privilege_boot_lock()'s own docstring for the exact
+            # "tuple concurrently updated" mechanism this closes. Must be the FIRST statement
+            # in this transaction, before anything below touches a catalog row this policy
+            # manages.
+            acquire_privilege_boot_lock(cur)
+
             # The connected role, not DATABASE_URL's username. Under Supabase's Session
             # Pooler (required on Render for IPv4 reachability — see docs/RENDER_DEPLOY.md),
             # the URL's username is a pooler login identity of the form
@@ -263,4 +306,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if "--derive-only" in sys.argv[1:]:
+        derive_only()
+    else:
+        main()
