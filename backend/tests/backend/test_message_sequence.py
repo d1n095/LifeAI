@@ -84,12 +84,15 @@ def _insert_unsequenced(superuser_db, conversation_id, *, content, created_at, m
     """Writes a message row the way one existed BEFORE migration 0030 — no ordinal at all.
 
     The trigger would otherwise assign one, so it is disabled for exactly this statement via
-    `session_replication_role = replica` (a session-local setting on the superuser connection,
-    reverted immediately). This is the only honest way to reproduce real pre-migration history
-    in a database where the migration has already run; nothing in the application ever does
-    this, and every test that uses it asserts on the backfill's handling of the result."""
+    `SET LOCAL session_replication_role = replica` on the superuser connection. `SET LOCAL`
+    (not a plain `SET`) is deliberate: it is scoped to this one transaction and reverts at the
+    COMMIT below no matter what happens in between, so a failure mid-helper can never return a
+    trigger-disabled connection to SQLAlchemy's pool for some unrelated later test to inherit.
+    This is the only honest way to reproduce real pre-migration history in a database where the
+    migration has already run; nothing in the application ever does this, and every test that
+    uses it asserts on the backfill's handling of the result."""
     message_id = message_id or uuid.uuid4()
-    superuser_db.execute(sa_text("SET session_replication_role = replica"))
+    superuser_db.execute(sa_text("SET LOCAL session_replication_role = replica"))
     superuser_db.execute(
         sa_text(
             "INSERT INTO messages (id, conversation_id, role, content, status, created_at, sequence_number) "
@@ -97,7 +100,6 @@ def _insert_unsequenced(superuser_db, conversation_id, *, content, created_at, m
         ),
         {"id": str(message_id), "cid": str(conversation_id), "content": content, "created_at": created_at},
     )
-    superuser_db.execute(sa_text("SET session_replication_role = DEFAULT"))
     superuser_db.commit()
     return message_id
 
@@ -507,7 +509,7 @@ def test_backfill_refuses_a_conflicting_conversation_without_writing_anything(db
     for i in range(3):
         _insert_unsequenced(superuser_db, conversation.id, content=f"h{i}", created_at=base + timedelta(minutes=i))
     # An ordinal of 2 with three unnumbered rows: 1..3 would collide.
-    superuser_db.execute(sa_text("SET session_replication_role = replica"))
+    superuser_db.execute(sa_text("SET LOCAL session_replication_role = replica"))
     superuser_db.execute(
         sa_text(
             "INSERT INTO messages (id, conversation_id, role, content, status, created_at, sequence_number) "
@@ -515,7 +517,6 @@ def test_backfill_refuses_a_conflicting_conversation_without_writing_anything(db
         ),
         {"id": str(uuid.uuid4()), "cid": str(conversation.id), "created_at": base + timedelta(hours=1)},
     )
-    superuser_db.execute(sa_text("SET session_replication_role = DEFAULT"))
     superuser_db.commit()
 
     _set_rls_user(db_session, owner.id)
@@ -832,7 +833,7 @@ async def test_the_job_skips_a_conflicting_conversation_and_still_numbers_the_re
     bad = _make_conversation(db_session, owner.id, title="trasig", created_at=base + timedelta(days=1))
     _insert_unsequenced(superuser_db, good.id, content="bra-1", created_at=base)
     _insert_unsequenced(superuser_db, bad.id, content="trasig-1", created_at=base)
-    superuser_db.execute(sa_text("SET session_replication_role = replica"))
+    superuser_db.execute(sa_text("SET LOCAL session_replication_role = replica"))
     superuser_db.execute(
         sa_text(
             "INSERT INTO messages (id, conversation_id, role, content, status, created_at, sequence_number) "
@@ -840,7 +841,6 @@ async def test_the_job_skips_a_conflicting_conversation_and_still_numbers_the_re
         ),
         {"id": str(uuid.uuid4()), "cid": str(bad.id), "created_at": base + timedelta(hours=1)},
     )
-    superuser_db.execute(sa_text("SET session_replication_role = DEFAULT"))
     superuser_db.commit()
 
     job = service.create_job(

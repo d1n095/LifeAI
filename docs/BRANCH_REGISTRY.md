@@ -387,13 +387,27 @@ läser hade låtit en anropare tro att den begränsat jobbets omfång när den i
   seedad med en användare, en konversation OCH — utöver vad CI själv gör — två riktiga
   `messages`-rader, sedan `upgrade head`. Båda meddelandena överlevde med
   `sequence_number = NULL`, exakt som avsett.
-- **Full backend-svit:** `tests/backend/` **945 passed, 1 failed, 1 skipped**;
-  `tests/security/` + `tests/account/` **70 passed, 0 failed**. Den enda failen är den redan
-  dokumenterade, pre-existerande `test_storage_local_fs.py`-flakan (samma som Pass 37 och Pass 41
-  noterade): den passerar 19/19 isolerat, `git diff` mot både `tests/backend/test_storage_local_fs.py`
-  och hela `app/storage/` är TOM i den här PR:en, och en andra full körning gav en ANNAN
-  uppsättning failer i samma fil (först 1, sedan 2) — vilket i sig visar att det är miljöberoende
-  timing, inte ett deterministiskt fel den här diffen orsakat.
+- **Full backend-svit:** `tests/backend/` **948 passed, 1 skipped, 0 failed** på en ren körning
+  (906 på basen + exakt de 42 nya — siffrorna går ihop); `tests/security/` + `tests/account/`
+  **70 passed, 0 failed**.
+- **`test_storage_local_fs.py`-flakan: bevisat pre-existerande, inte orsakad av den här diffen.**
+  Tre av sex fulla svitkörningar på branchen visade 1–2 failer i den filen, vilket är för mycket
+  för att viftas bort — så den avfärdades INTE som "känd flaka" utan mättes. Branchen checkades ut
+  bort, basen (`d5f37c2`) checkades ut, och HELA sviten kördes tre gånger DÄR: två rena
+  (906 passed), och en tredje med **exakt samma fail**
+  (`test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_completion`). Flakan
+  reproducerar alltså på basen utan en enda rad av den här PR:en inblandad. Kompletterande
+  belägg: filen passerar 19/19 isolerat, `git diff` mot både
+  `tests/backend/test_storage_local_fs.py` och hela `backend/app/storage/` är TOM i den här PR:en,
+  testet är en ren filsystems-/trådrace med 250 iterationer utan någon databaskoppling alls, och
+  de failande delmängderna varierade mellan körningar. Samma flaka noterades redan i Pass 37 och
+  Pass 41.
+- **Latent testhygien-risk hittad och åtgärdad under samma undersökning:** testhjälparen som
+  återskapar pre-0030-rader använde ett vanligt `SET session_replication_role = replica` på den
+  poolade superuser-anslutningen. Ändrat till `SET LOCAL`, som är transaktionsscopat och
+  återställs vid COMMIT oavsett vad som händer däremellan — så ett fel mitt i hjälparen aldrig
+  kan lämna tillbaka en trigger-avstängd anslutning till SQLAlchemys pool för ett orelaterat
+  senare test att ärva.
 
 ### Medvetet inkluderat, trots att det ligger nära scope-gränsen
 
