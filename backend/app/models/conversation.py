@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import DateTime, Enum, FetchedValue, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -55,3 +55,20 @@ class Message(Base):
     # app/providers/verification.py), never a raw exception string.
     error_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # S1B (migration 0030, docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.9): the total order
+    # `created_at` alone cannot provide — two messages written in the same microsecond, or
+    # across a non-monotonic clock, are otherwise unorderable. Assigned by the database, never
+    # by this class or by any caller: migration 0030's `messages_assign_sequence_number`
+    # BEFORE INSERT trigger fills it in per conversation, and a second trigger rejects any
+    # later attempt to change or clear an already-assigned value. `FetchedValue()` is what
+    # tells SQLAlchemy that (a) it must NOT send this column on INSERT and (b) it must read
+    # the trigger's result back via RETURNING, so a freshly-added Message object carries the
+    # real ordinal without an explicit refresh.
+    #
+    # Still `nullable=True` on purpose — this is the EXPAND half of the expand/contract plan.
+    # Historical rows stay NULL until the durable `message_sequence_backfill` job
+    # (app/rag/message_sequence_backfill.py) has numbered them; only then can the separate
+    # CONTRACT migration add NOT NULL. Read paths must therefore not assume it is set yet:
+    # `ORDER BY sequence_number` becomes correct for a conversation only once
+    # `count_unsequenced_messages()` reports 0 for it.
+    sequence_number: Mapped[int | None] = mapped_column(Integer, nullable=True, server_default=FetchedValue())

@@ -200,6 +200,16 @@ def create_job(
 
     if job_type == "corpus_review":
         _validate_input_refs(db, owner_id, input_refs)
+    elif job_type == "message_sequence_backfill":
+        # S1B: this job's scope is "every one of THIS owner's still-unnumbered messages",
+        # derived from the database at execution time (app/rag/message_sequence_backfill_job.py)
+        # — it takes no inputs at all. Non-empty input_refs are rejected rather than silently
+        # ignored: accepting refs the executor will never read would let a caller believe it had
+        # narrowed the job's scope when it had not, which is exactly the kind of quiet
+        # mismatch between what a job claims and what it does that the runtime-truthfulness
+        # contract exists to prevent.
+        if input_refs:
+            raise InvalidInputRefsError("message_sequence_backfill takes no input_refs — its scope is the whole owner's unnumbered message history.")
 
     savepoint = db.begin_nested()
     try:

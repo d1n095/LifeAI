@@ -128,7 +128,13 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             MessageModel.id != user_message.id,
             MessageModel.status == MessageStatus.succeeded,
         )
-        .order_by(MessageModel.created_at.asc())
+        # S1B (migration 0030, §4.9): `id` as a tiebreaker makes this a total order. It matters
+        # more here than anywhere else — this window is both the provider prompt's conversation
+        # history AND app/context/resolver.py's input, so a same-timestamp pair rendering in a
+        # different order between two calls could change the model's answer and the resolver's
+        # classification for reasons nothing could reproduce. Same tiebreaker the S1B backfill
+        # numbers by; still not `ORDER BY sequence_number` (EXPAND phase — see conversations.py).
+        .order_by(MessageModel.created_at.asc(), MessageModel.id.asc())
         .limit(20)
         .all()
     )

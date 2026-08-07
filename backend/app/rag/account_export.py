@@ -103,6 +103,12 @@ def export_account_data(db: Session, user: User, *, client_ip: str | None = None
                         "provider": m.provider,
                         "model": m.model,
                         "created_at": _iso(m.created_at),
+                        # S1B (migration 0030): the message's ordinal within its conversation.
+                        # Exported because this module's own rule is that an export reflects
+                        # what the system actually still holds — and null until the
+                        # `message_sequence_backfill` job has reached this conversation, which
+                        # is itself honest information about the row's current state.
+                        "sequence_number": m.sequence_number,
                     }
                     for m in messages
                 ],

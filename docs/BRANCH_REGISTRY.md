@@ -6,6 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #37 är MERGAD** (`claude/vps-worker-privilege-race-hotfix` → `claude/det-kommer-mer-879lcm`),
+merge-commit `d5f37c2b798f7ae430a908037608d9c19e29cc70` — som därmed är basgrenens nuvarande tip.
+Grundaren körde därefter en fullt verifierad produktionsdeploy av den basen; produktionen är
+frisk och stabil. Ingen del av den här sessionen har rört VPS:en, deployen, eller kört någon
+backfill mot produktionsdata.
+
+**NY BRANCH: `claude/s1b-message-sequence-number` → PR #39 (öppen, INTE mergad).** Grenad från
+exakt `d5f37c2b798f7ae430a908037608d9c19e29cc70`, verifierat med `git ls-remote` innan branchen
+skapades — inte memorerat. Innehåller S1B:s fyra första steg (expand, dual-write, durabel
+historisk backfill, verifiering) enligt §4.8:s "Fasad migrationsplan" och §8:s byggordning.
+CONTRACT-steget ingår MEDVETET INTE. Se Pass 42 nedan för fullständig detalj, inklusive vad som
+uttryckligen INTE är gjort och vilken kvarstående risk som är känd men inte åtgärdad i den här
+PR:en (`messages` saknar fortfarande egen RLS-policy — ett PRE-EXISTERANDE förhållande, inte
+något den här PR:en introducerar, och medvetet inte fixat här; se Pass 42:s riskavsnitt).
+
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-07, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat). **PR #36 är MERGAD**
 (`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit
@@ -195,6 +210,238 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 42 (2026-08-07): S1B — `messages.sequence_number`, expand + dual-write + durabel backfill + verifiering (CONTRACT medvetet utelämnat)
+
+**Branch:** `claude/s1b-message-sequence-number`, grenad från exakt
+`d5f37c2b798f7ae430a908037608d9c19e29cc70` (basgrenens verifierade tip efter PR #37:s och
+PR #38:s merger — SHA:n hämtad med `git ls-remote origin`, inte memorerad, innan branchen
+skapades). **PR #39**, öppen mot `claude/det-kommer-mer-879lcm`, INTE mergad.
+
+### Varför just det här steget valdes
+
+Innan något byggdes kontrollerades `docs/BRANCH_REGISTRY.md`, plandokumentets §8, och det
+faktiska git-/GitHub-läget. **Noll öppna PR:er** fanns (`mcp__github__list_pull_requests`,
+`state=open` → tom lista), och `claude/s1a-backfill-run-reporting` visade sig vara helt mergad
+(`git rev-list --left-right --count` → `48 0`) — alltså ingen risk för dubbelarbete mot något
+pågående.
+
+§8:s byggordning listar, efter det mergade S1A, fyra saker som inte är gjorda: **S1B**
+(oberoende spår), **S3** (`memory_processing_jobs`), **P4/P6** (stora paket), och **P7A**
+(fryst, inget separat beslut taget). Valet blev **S1B**, av tre skäl:
+
+1. **Det är det minsta steget som låser upp mest.** S1C kräver S1B; S2 kräver S1C; S5 kräver
+   S2. S1B är alltså rot i den enda kedja som leder till konversationer som förstklassig
+   minneskälla (§6.11). Ingenting annat i §8 blockeras av något S1B behöver. Det är precis
+   projektets egen regel "små verifierbara PR:er före stora omskrivningar".
+2. **S3 visade sig till stor del redan vara byggt, under ett annat namn.** §6.12:s
+   `memory_processing_jobs`-skiss skrevs innan `mainai_jobs`-runtimen (migrationerna 0026–0029,
+   PR #36) fanns. Den runtimen levererar redan owner-scopad durabel jobbrad, lease +
+   fencing-token, heartbeat, avbrytning, retry-budget, append-only händelsehistorik, auditlogg
+   och `job_type`-dispatch i `app/worker.py`. Att bygga S3 som en NY tabell hade varit att
+   bygga en andra parallell kö — exakt det mönster projektet upprepade gånger avvisat. §6.12
+   är därför uppdaterad i plandokumentet med den slutsatsen istället.
+3. **P4/P6 är fel storlek nu.** P4 är enligt §6.4 "det största paketet" (tre nya tabellfamiljer
+   + ny UI + relationsjämförelse). Att starta det utan att ordningsgrunden under
+   konversationsspåret finns hade betytt att bygga ovanpå en känd, dokumenterad brist.
+
+Verifierat att S1B inte redan var byggt innan en rad skrevs: `grep -rn "sequence_number"` över
+hela repot gav bara plandokumentets egna beskrivningar och en registerrad — noll kod, noll
+migration, noll test.
+
+### Problemet S1B löser
+
+`messages` har sedan baseline-schemat (`0001`) bara haft `created_at`, en tidszonslös
+`timestamp` satt klientsidan av SQLAlchemys `datetime.utcnow`-default. Två meddelanden skrivna
+inom samma mikrosekund — eller över en klocka som inte är monotont säker — går inte att ordna
+mot varandra alls. `ORDER BY created_at` är alltså INTE en total ordning, och varje konsument i
+kodbasen förutsatte tyst att den var det: `app/routers/conversations.py`s transkript, och
+`app/routers/chat.py`s `history`-fönster som matar BÅDE providerprompten OCH
+`app/context/resolver.py`. S1C (`message_source_units`) och S2 (`conversation_segments`, vars
+`start_message_id`/`end_message_id`-gränser bara betyder något mot en total ordning) kan inte
+byggas på det.
+
+### Vad som byggdes
+
+**Migration `0030_message_sequence_number` (EXPAND).** Nullable `integer`-kolumn,
+`ck_messages_sequence_number_positive`, partiellt unikt index
+`uq_messages_conversation_sequence_number` (kan skapas NU, medan alla befintliga rader är
+`NULL`, och ger ändå full unikhetsgaranti för varje rad som faktiskt har ett ordinal), samt
+`ix_messages_conversation_id` — som visade sig **saknas helt sedan `0001`**; varje läsväg mot
+`messages` har alltså varit en sekvensskanning. Indexet är ett direkt krav från triggern och
+backfillen nedan (båda aggregerar per konversation), inte en opportunistisk extra ändring.
+
+**Tilldelning som DATABASTRIGGER, inte som kod i `chat.py`.** `messages_assign_sequence_number`
+(`BEFORE INSERT`). Samma resonemang migration 0029 använde för sin egen trigger: en
+numreringsregel som bara lever i EN skrivare är bara så bra som varje FRAMTIDA skrivare som
+minns den — och det finns redan tre distinkta INSERT-vägar in i `messages` (användarmeddelandet,
+assistentens lyckade rad, assistentens misslyckade rad), med fler på väg i S1C/S2. Som trigger
+blir "varje meddelande i en konversation bär ett unikt ordinal" en egenskap hos TABELLEN, som
+ingen framtida skrivare, backfill eller testfixtur kan välja bort av misstag.
+
+**Formeln är `GREATEST(COALESCE(max(sequence_number), 0), count(*)) + 1`, inte `max + 1`.** Det
+här är PR:ens enda verkligt subtila designbeslut, och skälet är det fönster migrationen
+avsiktligt öppnar: mellan deploy och avslutad backfill kan en konversation innehålla gamla rader
+med `sequence_number IS NULL` bredvid nya numrerade. Med `max` ensamt hade det första nya
+meddelandet i en orörd 12-meddelandes-konversation numrerats 1, och backfillen hade sedan inte
+haft någonstans att placera de 12 historiska raderna utan att antingen kollidera eller skriva om
+ett redan utdelat ordinal (vilket immutabilitetstriggern förbjuder — med flit).
+`count(*)`-termen stänger det exakt: låt `N` vara antalet ännu onumrerade rader när triggern
+körs; formeln ger minst `numrerade + N + 1`, alltså strikt större än `N`, så varje
+trigger-tilldelat nummer ligger strikt ovanför det `1..N`-intervall backfillen senare delar ut.
+`N` kan bara minska (en ny rad numreras alltid av triggern; en rad lämnar den onumrerade mängden
+bara genom att numreras eller raderas), så det `N` backfillen faktiskt ser är ≤ varje tidigare
+tilldelnings `N`. Ingen kollision är alltså möjlig. `max`-termen behövs fortfarande för det
+vanliga fallet EFTER backfillen: om ett meddelande raderats får luckan finnas, men ett pensionerat
+ordinal får aldrig återanvändas.
+
+**`pg_advisory_xact_lock` per konversation (namespace `72197002`, medvetet skild från
+`72197001` som `s1a_privilege_policy.py`/`app/rls.py` använder).** Läs-sedan-skriv under READ
+COMMITTED är en klassisk TOCTOU: två samtidiga inserts i SAMMA konversation hade båda läst samma
+`max`/`count`. Låset serialiserar bara samtidiga inserts i samma konversation, släpps automatiskt
+vid transaktionsslut, och tas av backfillen på samma nyckel så en levande insert aldrig kan
+interfoliera med numreringen av sin egen konversation.
+
+**Immutabilitet, också som trigger.** `messages_deny_sequence_number_rewrite` avvisar varje
+UPDATE som ändrar ett redan tilldelat `sequence_number` (inklusive tillbaka till `NULL`) eller
+som flyttar ett meddelande till en annan `conversation_id`. Det är grundarens stående
+"derivat/versioner/revisionsmetadata får aldrig förstöras"-regel applicerad på det enda ställe
+där den faktiskt går att garantera: ett ordinal som S1C:s `message_source_units` och S2:s
+segmentgränser kommer att referera får inte kunna omnumreras i efterhand, och ett ordinal som
+betyder "position inom konversation X" slutar betyda något om raden kan flyttas till Y.
+`NULL → värde` är uttryckligen tillåtet — backfillens enda legitima övergång.
+
+**Durabel historisk backfill som ett riktigt `mainai_jobs`-jobb.**
+`app/rag/message_sequence_backfill.py` (numreringen) +
+`app/rag/message_sequence_backfill_job.py` (jobbet), nytt `job_type=message_sequence_backfill`,
+dispatchat av `app/worker.py`s befintliga poll-loop. Ingen ny kö, ingen ny tabell. Numreringen
+är deterministisk på `(created_at, id)` — `id` som tiebreaker just för att `created_at` ensamt
+inte är en total ordning, alltså exakt det problem S1B finns för; för historiska par med
+identisk tidsstämpel är resultatet därmed en KANONISK ordning, inte en återfunnen, vilket är
+dokumenterat rakt ut istället för bortförklarat.
+
+**Per-konversations-atomicitet, enligt Pass 37:s standard.** `backfill_conversation()`s
+`on_outcome`-callback anropas INUTI den ännu ocommittade transaktionen, precis den form
+grundaren i Pass 37 krävde av `memory_source_backfill.py` efter att ha avvisat "arbetet
+committade men körrapporten gjorde inte det" som ett sanningsfel, inte en acceptabel follow-up.
+Jobbets fencade progress-skrivning blir alltså durabel i SAMMA commit som numreringen den
+beskriver. En callback som kastar — särskilt `JobLeaseLostError` — propagerar med NOLL
+committat, inklusive själva numreringen, vilket är exakt rätt: en worker som förlorat sitt lease
+får inte skriva alls.
+
+**Fail-closed konflikthantering.** Före skrivning härleds `(onumrerade, minsta redan tilldelade
+ordinal)` INUTI låset, och en konversation där ett befintligt ordinal skulle hamna inom det
+`1..N` körningen ska dela ut lämnas HELT orörd, räknas, och rapporteras. Det tillståndet är
+onåbart så länge triggern varit på plats — det kontrolleras ändå, eftersom alternativet är en
+rå unique-violation som avbryter hela körningen, och eftersom en databas som ändå hamnat där är
+precis fallet där gissning vore värst.
+
+**Kapabilitet utan AI — och den distinktionen gjord strukturell.**
+`_CAPABILITY_PROVIDER_ROLE` mappar det nya `job_type`:t till ett explicit `None`, INTE till en
+saknad post. `None` betyder "granskat: den här kapabiliteten behöver ingen AI-provider alls", så
+den är tillgänglig även med noll providers konfigurerade; en kapabilitet som bara GLÖMTS bort ur
+dicten fail-closar fortfarande. Det är grundarens "systemet ska fungera utan AI där det
+arkitektoniskt går"-regel gjord verkställbar istället för aspirerad — att numrera grundarens
+egen meddelandehistorik får inte bli otillgängligt för att en modellnyckel saknas. Båda
+riktningarna testas.
+
+`_CAPABILITY_WRITE_PROFILE` säger `modifies_existing_data: True` för det nya jobbet (till
+skillnad från `corpus_review`) — sanningsenligt, eftersom det UPDATE:ar befintliga
+`messages`-rader, även om ändringen strikt är `NULL → ordinal` och triggern gör en överskrivning
+omöjlig på databasnivå. `create_job()` AVVISAR dessutom icke-tomma `input_refs` för det här
+jobbet (422) istället för att acceptera och ignorera dem: att ta emot refs exekveraren aldrig
+läser hade låtit en anropare tro att den begränsat jobbets omfång när den inte gjort det.
+
+### Filer
+
+- **Ny:** `backend/alembic/versions/0030_message_sequence_number.py`
+- **Ny:** `backend/app/rag/message_sequence_backfill.py`
+- **Ny:** `backend/app/rag/message_sequence_backfill_job.py`
+- **Ny:** `backend/tests/backend/test_message_sequence.py`
+- **Ändrad:** `backend/app/models/conversation.py` (kolumnen, `FetchedValue()` så ORM:en läser
+  triggerns resultat via RETURNING istället för att skicka `NULL` och behöva en extra refresh)
+- **Ändrad:** `backend/app/mainai_runtime_contract.py` (manifest + `None`-rollen + write-profil)
+- **Ändrad:** `backend/app/rag/mainai_jobs_service.py` (`input_refs`-avvisning för nya job_type)
+- **Ändrad:** `backend/app/worker.py` (dispatch)
+- **Ändrad:** `backend/app/routers/chat.py`, `backend/app/routers/conversations.py`
+  (`id` som deterministisk tiebreaker efter `created_at` — se "medvetet inkluderat" nedan)
+- **Ändrad:** `backend/app/rag/account_export.py` (`sequence_number` med i exporten)
+- **Dokument:** `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` (§4.8 S1B-status, §6.12
+  `memory_processing_jobs`-omvärderingen, §8), `docs/MAINAI_JOB_RUNTIME.md` (nytt job_type),
+  `docs/BRANCH_REGISTRY.md` (den här posten)
+
+### Verifiering
+
+- **`test_message_sequence.py`: 42 tester, alla gröna.** Täcker triggern, formelns invariant,
+  verklig samtidighet, immutabilitet, databasconstraints, backfillen (determinism,
+  idempotens, atomicitet, konfliktvägen, batchgränser, ägarisolering), och jobbet end-to-end
+  via den RIKTIGA `app/worker.py`-dispatchvägen (inte bara jobbfunktionen anropad direkt).
+- **Mutationstestat, inte bara "grönt".** Formeln byttes tillfälligt till `max + 1` → **3 tester
+  föll**. Advisory-locket togs tillfälligt bort ur triggern → **2 tester föll** (inklusive ett
+  deterministiskt låstest som håller samma nyckel öppen i en annan transaktion och visar att en
+  INSERT faktiskt blockerar till `statement_timeout`, inte ett tidsberoende race). Migrationen
+  återställdes byte-identiskt efteråt.
+- **Migrationsrundtripp:** `test_migration_roundtrip.py` 2/2 (både `downgrade -1`-rundturen och
+  hela kedjan `base → head`). `alembic heads` exakt en (`0030`).
+- **CI:ns egna migrationsjobb reproducerat lokalt, och skärpt:** databasen migrerad till `0002`,
+  seedad med en användare, en konversation OCH — utöver vad CI själv gör — två riktiga
+  `messages`-rader, sedan `upgrade head`. Båda meddelandena överlevde med
+  `sequence_number = NULL`, exakt som avsett.
+- **Full backend-svit:** `tests/backend/` **945 passed, 1 failed, 1 skipped**;
+  `tests/security/` + `tests/account/` **70 passed, 0 failed**. Den enda failen är den redan
+  dokumenterade, pre-existerande `test_storage_local_fs.py`-flakan (samma som Pass 37 och Pass 41
+  noterade): den passerar 19/19 isolerat, `git diff` mot både `tests/backend/test_storage_local_fs.py`
+  och hela `app/storage/` är TOM i den här PR:en, och en andra full körning gav en ANNAN
+  uppsättning failer i samma fil (först 1, sedan 2) — vilket i sig visar att det är miljöberoende
+  timing, inte ett deterministiskt fel den här diffen orsakat.
+
+### Medvetet inkluderat, trots att det ligger nära scope-gränsen
+
+`app/routers/chat.py` och `app/routers/conversations.py` fick `id` som tiebreaker efter
+`created_at`. Det är INTE en orelaterad "medan jag ändå var här"-fix: det är samma ordningskontrakt
+den här PR:en inför, och utan det hade transkriptet/promptfönstret kunnat visa en annan ordning än
+de ordinaler PR:en samtidigt skriver för samma rader. `app/rag/account_export.py` använde redan
+`(created_at, id)`. Ändringen bedöms ändå vara en granskningspunkt värd att peka ut uttryckligen
+snarare än att gömma i diffen.
+
+### Vad som UTTRYCKLIGEN INTE är gjort
+
+1. **CONTRACT-migrationen** (`SET NOT NULL` + riktigt `UNIQUE (conversation_id,
+   sequence_number)`-constraint). Får inte skrivas förrän backfillen faktiskt körts mot
+   produktionsdata och `count_unsequenced_messages()` rapporterar 0. Det är hela skälet till att
+   kolumnen levereras nullable.
+2. **Läsvägarna byter INTE till `ORDER BY sequence_number`.** Historiska rader är `NULL` tills
+   backfillen körts, så en sortering på ordinalet vore direkt fel just nu.
+3. **Ingen backfill har körts mot produktion.** Den här sessionen har ingen nätverksväg till
+   VPS:en och har inte försökt skaffa någon. Jobbet skapas av grundaren via det befintliga
+   `POST /api/mainai/jobs` när hen väljer det.
+4. **Ingen deploy, ingen migration mot produktion, ingen merge.** PR #39 lämnas öppen för
+   grundarens granskning.
+5. **Inget frontend-arbete.** `MessageOut` exponerar avsiktligt inte `sequence_number` — API:et
+   är oförändrat (`test_openapi_schema.py` grönt), så ingen frontend-ändring behövs eller görs.
+6. **`memory_processing_jobs` byggdes inte som egen tabell** — se skäl 2 i "Varför just det här
+   steget" och den nya noten i plandokumentets §6.12.
+
+### Känd, kvarstående risk — INTE åtgärdad här, medvetet
+
+**`messages` har ingen egen RLS-policy.** Tabellen saknar `owner_id` helt och är varken
+ENABLE:ad i `app/rls.py`s `RLS_STATEMENTS` eller representerad i `POLICY_DEFINITIONS`. Åtkomst
+gated av att varje router först slår upp den RLS-skyddade `conversations`-raden. Det är ett
+**pre-existerande** förhållande — den här PR:en introducerar det inte och ändrar det inte — men
+det upptäcktes under arbetet, och enligt `CLAUDE.md` ska en upptäckt risk synas i registret även
+när den inte löses direkt. Den här PR:ens egen kod följer exakt samma gräns med bälte och
+hängslen: kandidatlistan är en fråga mot `conversations` filtrerad på `user_id == owner_id` på
+en redan RLS-scopad session (det explicita filtret och RLS-policyn hindrar var för sig oberoende
+att en annan ägares konversation rörs), och varje meddelandenivåsats nycklas av ett
+`conversation_id` som kommit ur den listan. Ett test verifierar direkt att backfillen lämnar en
+annan ägares historik helt orörd. **Om `messages` ska få egen RLS bör det bli en EGEN branch och
+EGEN PR** — det är en trust-boundary-ändring som förtjänar sin egen granskning, inte något som
+smygs in i en S1B-diff.
+
+**Andrahandsrisk, dokumenterad i migrationen:** `downgrade()` slänger kolumnen och därmed varje
+tilldelat ordinal. Acceptabelt IDAG och bara idag — inget refererar ännu ett `sequence_number`,
+och numreringen är fullt återhärledbar (determinismen är bevisad av ett eget test). När S1C
+shippar upphör en downgrade förbi `0030` att vara en reversibel operation.
 
 ## Pass 37 (2026-08-05): PR #35 — grundarens tredje granskningsrunda: per-claim transaktionsatomicitet (HIGH), sista substantiella blockeraren löst
 

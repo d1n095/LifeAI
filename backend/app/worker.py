@@ -48,6 +48,7 @@ from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
 from app.rag.account_erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.rag.corpus_review_job import run_corpus_review_job
+from app.rag.message_sequence_backfill_job import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.rag.library_import import run_import_job
 from app.rag.mainai_jobs_service import mark_failed, record_claimed
 from app.request_context import current_user_id
@@ -122,7 +123,8 @@ async def process_claimed_mainai_job(
     db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, worker_id: str, lease_generation: int, lease_seconds: int
 ) -> None:
     """Dispatches an already-claimed `mainai_jobs` row to its job_type's own processing
-    function — today only `corpus_review` (app/rag/corpus_review_job.py). That function is
+    function — `corpus_review` (app/rag/corpus_review_job.py) and, as of S1B,
+    `message_sequence_backfill` (app/rag/message_sequence_backfill_job.py). Each function is
     responsible for its own terminal state transitions (completed/failed/cancelled) via
     app/rag/mainai_jobs_service.py; this wrapper exists only to catch anything that escapes
     it unexpectedly (a bug, not a designed failure path) and still leave the job in a
@@ -157,6 +159,11 @@ async def process_claimed_mainai_job(
         if job is not None and job.job_type == "corpus_review":
             record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
             await run_corpus_review_job(db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
+        elif job is not None and job.job_type == MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE:
+            record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
+            await run_message_sequence_backfill_job(
+                db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds
+            )
         elif job is not None:
             logger.error("Worker %s: mainai_job %s has unknown job_type '%s'.", worker_id, job_id, job.job_type)
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
