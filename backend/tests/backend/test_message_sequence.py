@@ -224,7 +224,13 @@ def test_repeated_inserts_during_the_unbackfilled_window_all_stay_above_the_rang
 
 def test_two_concurrent_inserts_into_one_conversation_never_share_an_ordinal(db_session, superuser_db, make_verified_user):
     """Two real threads, two real sessions, one conversation. Without the advisory lock both
-    would read the same max/count and compute the same next value."""
+    would read the same max/count and compute the same next value.
+
+    Every escape hatch here is bounded on purpose: `statement_timeout` so a thread that somehow
+    blocks on the lock forever raises instead of waiting, `daemon=True` so even a wedged thread
+    can never keep the pytest process (and with it a whole CI job) from exiting, and a
+    `t.is_alive()` assertion so "the thread never finished" fails loudly rather than passing
+    quietly because the row it was supposed to insert simply isn't there yet."""
     import threading
 
     from app.db import SessionLocal
@@ -239,6 +245,7 @@ def test_two_concurrent_inserts_into_one_conversation_never_share_an_ordinal(db_
         session = SessionLocal()
         try:
             _set_rls_user(session, owner.id)
+            session.execute(sa_text("SET LOCAL statement_timeout = '20s'"))
             session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content=label))
             barrier.wait(timeout=10)
             session.commit()
@@ -248,12 +255,13 @@ def test_two_concurrent_inserts_into_one_conversation_never_share_an_ordinal(db_
         finally:
             session.close()
 
-    threads = [threading.Thread(target=_insert, args=(f"t{i}",)) for i in range(2)]
+    threads = [threading.Thread(target=_insert, args=(f"t{i}",), daemon=True) for i in range(2)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=30)
+        t.join(timeout=60)
 
+    assert all(not t.is_alive() for t in threads), "a racing insert never finished — possible deadlock"
     assert not errors, errors
     numbers = sorted(n for _c, n in _sequences(superuser_db, conversation.id))
     assert numbers == [1, 2]
