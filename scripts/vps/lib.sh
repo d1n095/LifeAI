@@ -171,3 +171,64 @@ check_no_duplicate_env_keys() {
         die "Duplicate variable name(s) in $env_file (names only, not values): $(echo "$dupes" | tr '\n' ' ')— each key must appear exactly once. Remove the stale/duplicate line(s) before deploying; 'last line wins' semantics make it easy to silently deploy the wrong value otherwise."
     fi
 }
+
+# Founder-requested hotfix (VPS deploy of PR #36's merged base): a rollback must never start an
+# OLDER backend image whose own bundled Alembic migration history doesn't know about the
+# database's CURRENT revision. Concretely: deploy N ships a new migration and succeeds; deploy
+# N+1 fails for an unrelated reason (e.g. a network blip on the health check) and
+# deploy.sh auto-rolls-back to deploy N (fine — same schema). But an operator manually rolling
+# back FURTHER, past deploy N, to an image built BEFORE that migration existed, would start
+# application code that doesn't understand the now-forward-migrated schema — new columns/
+# tables/triggers the old ORM models and business logic were never written against. Refusing
+# this is the safe default; resolving it (forward-migrate to a newer image, or a deliberate,
+# DBA-reviewed `alembic downgrade`) is a manual decision, not something this script should ever
+# guess at.
+#
+# Reads the database's current `alembic_version` directly (via a throwaway container run from
+# the TARGET image — any correctly-built backend image has the psycopg2 this needs, and
+# reading `alembic_version` doesn't depend on which image's migration history is asked), then
+# asks the TARGET image's own `alembic show <revision>` whether it recognizes that revision at
+# all (a purely local check against that image's bundled `alembic/versions/` — no DB write, no
+# assumption that the revision is that image's own `head`, just that it's SOMEWHERE in its
+# known history). `alembic show` exits non-zero with `ResolutionError` if the revision is
+# unknown to that image's migration scripts.
+#
+# --add-host=host.docker.internal:host-gateway on both `docker run` calls below: a bare
+# `docker run` (unlike the backend/worker services in docker-compose.vps.yml /
+# docker-compose.vps.ci.yml) gets none of Compose's own `extra_hosts:` configuration, so on
+# the CI test topology — where DATABASE_URL points at `host.docker.internal` (the runner's own
+# host-level Postgres, see docker-compose.vps.ci.yml's comment) — this container would
+# otherwise fail to resolve that hostname at all. Harmless on the real VPS, where DATABASE_URL
+# points at Supabase over the public internet and this mapping is simply never referenced.
+verify_rollback_target_knows_current_revision() {
+    local target_image="$1" env_file="$2"
+    local current_rev
+
+    current_rev=$(docker run --rm --add-host=host.docker.internal:host-gateway --env-file "$env_file" --entrypoint python "$target_image" -c '
+import os, sys
+import psycopg2
+try:
+    conn = psycopg2.connect(os.environ["DATABASE_URL"], connect_timeout=10)
+    cur = conn.cursor()
+    cur.execute("SELECT version_num FROM alembic_version")
+    row = cur.fetchone()
+    if row is None:
+        print("ERROR: alembic_version table is empty", file=sys.stderr)
+        sys.exit(1)
+    print(row[0])
+except Exception as exc:
+    print(f"ERROR: {exc}", file=sys.stderr)
+    sys.exit(1)
+') || die "Could not read the current Alembic revision from the database (via $target_image) — refusing to roll back without knowing it. See docs/VPS_OPERATIONS_RUNBOOK.md."
+
+    [ -n "$current_rev" ] || die "Current Alembic revision came back empty — refusing to roll back."
+
+    log_info "Current database Alembic revision: $current_rev"
+    log_info "Verifying rollback target $target_image's own migration history includes $current_rev..."
+
+    if ! docker run --rm --add-host=host.docker.internal:host-gateway --env-file "$env_file" --entrypoint alembic "$target_image" show "$current_rev" &> /dev/null; then
+        die "Refusing to roll back: rollback target image ($target_image) does not know about the database's current Alembic revision ($current_rev) in its own migration history. Starting it would run OLDER application code against a NEWER database schema. This must be resolved manually — see docs/VPS_OPERATIONS_RUNBOOK.md's rollback-after-schema-upgrade procedure (forward-migrate to a newer image, or a deliberate, reviewed 'alembic downgrade')."
+    fi
+
+    log_info "Rollback target's migration history includes the current revision ($current_rev) — safe to proceed."
+}

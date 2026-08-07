@@ -307,8 +307,27 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
     statements above, so a policy violation rolls back any partial change rather than leaving
     the database in a half-applied state. require_complete=False logs a warning instead of
     raising, for a caller that wants a non-fatal diagnostic read of current state (e.g. a test
-    asserting on the returned drift) rather than enforcement."""
+    asserting on the returned drift) rather than enforcement.
+
+    Founder-reported production incident (VPS hotfix, same class of bug as
+    backend/scripts/s1a_privilege_policy.py's own `acquire_privilege_boot_lock`, see that
+    function's docstring for the full "tuple concurrently updated" mechanism): this function is
+    only ever called from `app/main.py`'s FastAPI startup handler, which the durable-worker
+    container never triggers (`app/worker.py` never imports `app.main` — see
+    `test_worker_module_never_imports_app_main` in tests/backend/test_rls_policy_registry.py),
+    so it does not race against the worker today. It COULD still race against ITSELF if two
+    backend replicas (or an old+new backend briefly overlapping during a rolling deploy) both
+    boot at once — the same `pg_advisory_xact_lock` key `apply_privilege_policy()`'s mutating
+    path acquires, so a second concurrent backend simply waits for the first's transaction to
+    finish rather than racing it on the same catalog rows. The exact two integers must stay in
+    sync with `PRIVILEGE_BOOT_ADVISORY_LOCK_KEY` in backend/scripts/s1a_privilege_policy.py —
+    duplicated here (not imported) because that script deliberately stays outside the `app`
+    package so it can run standalone, pre-boot, before `app` itself is fully importable."""
     with engine.begin() as conn:
+        # See docstring above — must stay (72197001, 1), identical to
+        # backend/scripts/s1a_privilege_policy.py's PRIVILEGE_BOOT_ADVISORY_LOCK_KEY.
+        conn.execute(text("SELECT pg_advisory_xact_lock(72197001, 1)"))
+
         expected_owner = conn.execute(text("SELECT current_user")).scalar()
 
         errors: list[str] = []

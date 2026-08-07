@@ -226,6 +226,15 @@ services:
       # See docker-entrypoint.sh: only `backend` runs `alembic upgrade head` on startup — the
       # worker shares its image but must not race it against the same database.
       RUN_MIGRATIONS: "false"
+      # Founder-reported production incident: only `backend` may MUTATE mainai_app's
+      # privileges (ensure_app_role.py's GRANT ALL + S1A re-narrow, apply_runtime_privileges.py's
+      # own REVOKE/GRANT) — the worker used to run the exact same mutating statements
+      # unconditionally too, racing backend's own on the same catalog rows and occasionally
+      # hitting Postgres's "tuple concurrently updated". RUN_PRIVILEGE_BOOT=false makes the
+      # worker derive APP_DATABASE_URL and verify the privilege state read-only instead (see
+      # backend/docker-entrypoint.sh) — it still fails closed if that state is wrong, it just
+      # never itself writes to it.
+      RUN_PRIVILEGE_BOOT: "false"
       REDIS_URL: redis://:${REDIS_PASSWORD:?sätt REDIS_PASSWORD i /etc/lifeai/lifeai.env}@redis:6379/0
     depends_on:
       redis:
@@ -236,7 +245,12 @@ services:
         # Not a functional dependency (the worker talks to Postgres/Redis/storage directly,
         # never to the backend container) — ordered after backend purely so the one
         # migration run (backend's own startup) has already completed before the worker's
-        # first poll cycle touches the schema.
+        # first poll cycle touches the schema. NOTE: this `depends_on: condition:
+        # service_healthy` gate only orders `docker compose up`/`start` — it is NOT re-checked
+        # by Docker's own `restart: unless-stopped` policy, which restarts backend and worker
+        # independently (e.g. after a host reboot or daemon restart), so the worker's
+        # RUN_PRIVILEGE_BOOT=false read-only verify path (with its own bounded retry — see
+        # apply_runtime_privileges.py) is the real safety net for that case, not this ordering.
         condition: service_healthy
     # No healthcheck: no HTTP server to probe. Operational health (worker reachable, last
     # heartbeat, queue depth, oldest pending job) is surfaced instead through the

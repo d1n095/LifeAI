@@ -7,7 +7,9 @@ with no policy, which is a silent default-deny (not a security hole, but a real 
 gap that this test exists to catch before it ships again for a new table).
 """
 
+import ast
 import re
+from pathlib import Path
 
 from app.rls import POLICY_DEFINITIONS, RLS_STATEMENTS
 
@@ -41,3 +43,34 @@ def test_policy_definitions_has_no_orphan_entries():
 
     orphans = policy_tables - enabled_tables
     assert not orphans, f"POLICY_DEFINITIONS references tables never ENABLEd in RLS_STATEMENTS: {sorted(orphans)}"
+
+
+def test_worker_module_never_imports_app_main():
+    """Founder-reported production incident (VPS hotfix): `app/main.py`'s FastAPI startup
+    handler calls `apply_rls()`/`apply_mainai_job_runtime_privileges()` — real, mutating
+    REVOKE/GRANT statements against the same catalog rows `apply_privilege_policy()` manages.
+    Those only ever fire when something actually runs the FastAPI app's lifespan (uvicorn, or
+    a test client) — NOT merely by importing `app.main`. `app/worker.py` (the durable-worker
+    container's entrypoint, `python -m app.worker`) must never import `app.main` at all, or it
+    would trigger that same mutating path a second time, racing the backend container's own
+    call to it. Checked via a static AST parse (not a runtime import, which would only prove
+    "importing app.worker doesn't ALSO import app.main today" for whatever happens to already
+    be imported/cached) so a future `import app.main` added anywhere in app/worker.py's own
+    module — even one that looks harmless — is caught here directly, not by accident."""
+    worker_path = Path(__file__).resolve().parent.parent.parent / "app" / "worker.py"
+    tree = ast.parse(worker_path.read_text())
+
+    imported_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_modules.add(node.module)
+
+    forbidden = {m for m in imported_modules if m == "app.main" or m.startswith("app.main.")}
+    assert not forbidden, (
+        f"app/worker.py imports {sorted(forbidden)} — this would trigger app.main's FastAPI "
+        "startup handler's own apply_rls()/apply_mainai_job_runtime_privileges() calls if "
+        "anything ever actually starts that app object from within the worker process, "
+        "reintroducing the exact privilege-mutation race this test guards against."
+    )

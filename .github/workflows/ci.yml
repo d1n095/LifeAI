@@ -1214,7 +1214,7 @@ jobs:
   vps-scripts-check:
     name: VPS bootstrap scripts — shellcheck + dry-run
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
     steps:
       - uses: actions/checkout@v4
 
@@ -1315,6 +1315,87 @@ jobs:
             exit 1
           fi
 
+      - name: Unit-test verify_rollback_target_knows_current_revision() (lib.sh)
+        # Founder-requested hotfix: rollback.sh must refuse to start a rollback-target backend
+        # image whose own bundled Alembic migration history doesn't know about the database's
+        # current revision (starting an older image against a newer, forward-migrated schema).
+        # Mocks `docker` as a shell function so this proves the function's OWN decision logic
+        # (query the DB's current revision via the target image, then ask that image's own
+        # `alembic show <revision>` whether it recognizes it) without needing a real Postgres
+        # or real GHCR images — no network, no Docker pull, deterministic.
+        working-directory: scripts/vps
+        run: |
+          source ./lib.sh
+
+          fake_env=$(mktemp)
+          echo "DATABASE_URL=postgresql://irrelevant/irrelevant" > "$fake_env"
+
+          # Case 1: the target image's `alembic show <rev>` succeeds (rev-1 is fake in ITS
+          # history) -- the current-revision query must succeed, and the function must NOT die.
+          docker() {
+            if [ "$1" = "pull" ]; then
+              return 0
+            fi
+            # docker run --rm --env-file <f> --entrypoint <ep> <image> <args...>
+            local entrypoint="" image="" cmd_args=()
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                --entrypoint) entrypoint="$2"; shift 2 ;;
+                --env-file|--rm) [ "$1" = "--env-file" ] && shift 2 || shift ;;
+                --add-host=*) shift ;;
+                run) shift ;;
+                *) if [ -z "$image" ] && [ -n "$entrypoint" ]; then image="$1"; shift; else cmd_args+=("$1"); shift; fi ;;
+              esac
+            done
+            if [ "$entrypoint" = "python" ]; then
+              echo "rev-1"
+              return 0
+            fi
+            if [ "$entrypoint" = "alembic" ] && [ "${cmd_args[0]}" = "show" ] && [ "${cmd_args[1]}" = "rev-1" ]; then
+              return 0
+            fi
+            return 1
+          }
+          export -f docker
+
+          if ! (verify_rollback_target_knows_current_revision "fake/backend@sha256:$(printf 'a%.0s' {1..64})" "$fake_env"); then
+            echo "FAIL: expected acceptance when the target image's alembic history knows the current revision"
+            exit 1
+          fi
+          echo "OK (accepted as expected): target image knows the current revision"
+
+          # Case 2: the target image's `alembic show <rev>` fails (ResolutionError) -- the
+          # function must die() and refuse, never silently proceed.
+          docker() {
+            if [ "$1" = "pull" ]; then
+              return 0
+            fi
+            local entrypoint="" cmd_args=()
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                --entrypoint) entrypoint="$2"; shift 2 ;;
+                --env-file|--rm) [ "$1" = "--env-file" ] && shift 2 || shift ;;
+                --add-host=*) shift ;;
+                run) shift ;;
+                *) cmd_args+=("$1"); shift ;;
+              esac
+            done
+            if [ "$entrypoint" = "python" ]; then
+              echo "rev-99-unknown-to-this-image"
+              return 0
+            fi
+            # alembic show fails: this image's migration history doesn't know rev-99-unknown-to-this-image
+            return 1
+          }
+          export -f docker
+
+          if (verify_rollback_target_knows_current_revision "fake/backend@sha256:$(printf 'b%.0s' {1..64})" "$fake_env") 2>/tmp/rollback-guard-err.txt; then
+            echo "FAIL: expected rejection when the target image's alembic history does NOT know the current revision"
+            exit 1
+          fi
+          echo "OK (rejected as expected): target image does not know the current revision"
+          grep -q "rev-99-unknown-to-this-image" /tmp/rollback-guard-err.txt
+
       - name: Run 00_preflight.sh for real (read-only, safe)
         working-directory: scripts/vps
         run: sudo ./00_preflight.sh --min-disk-gb 1 --min-mem-mb 100
@@ -1351,7 +1432,7 @@ jobs:
     # added temporarily so THIS branch's new round-trip/chat-citations/restart-survival/
     # provider-degradation steps actually run and can be confirmed green before merge — same
     # pattern as every prior branch in this list. Safe to remove once merged.
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1593,6 +1674,20 @@ jobs:
           [ "$run_migrations" = "false" ] || (echo "::error::worker's RUN_MIGRATIONS is '$run_migrations', expected 'false'" && exit 1)
           docker logs "$worker_cid" 2>&1 | grep -q "RUN_MIGRATIONS=false, hoppar" || (echo "::error::worker's logs don't show the migration-skip message" && exit 1)
           echo "Confirmed: worker skips alembic upgrade head on startup — only backend runs it."
+
+      - name: Verify only backend mutates mainai_app's privileges on startup, not worker
+        # Founder-reported production incident: before RUN_PRIVILEGE_BOOT existed, the worker
+        # ran the exact same mutating REVOKE/GRANT statements as the backend, concurrently,
+        # against the same catalog rows — occasionally hitting Postgres's "tuple concurrently
+        # updated" and crash-looping. Same pattern as the migrations check above, for the
+        # privilege-boot path instead.
+        run: |
+          worker_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q worker)
+          run_privilege_boot=$(docker exec "$worker_cid" printenv RUN_PRIVILEGE_BOOT || true)
+          [ "$run_privilege_boot" = "false" ] || (echo "::error::worker's RUN_PRIVILEGE_BOOT is '$run_privilege_boot', expected 'false'" && exit 1)
+          docker logs "$worker_cid" 2>&1 | grep -q "RUN_PRIVILEGE_BOOT=false, härleder APP_DATABASE_URL" || (echo "::error::worker's logs don't show the derive-only role message" && docker logs "$worker_cid" && exit 1)
+          docker logs "$worker_cid" 2>&1 | grep -q "RUN_PRIVILEGE_BOOT=false, verifierar privilege-state read-only" || (echo "::error::worker's logs don't show the verify-only privilege message" && docker logs "$worker_cid" && exit 1)
+          echo "Confirmed: worker only verifies mainai_app's privilege state read-only on startup — only backend mutates it."
 
       - name: Verify Caddy is the only container publishing anything to the host
         run: |
@@ -2165,7 +2260,7 @@ jobs:
     # (deploy/rollback verified against the real compose topology) actually runs and is
     # confirmed green on this branch before its PR — same pattern as vps-compose-verify
     # above. Safe to remove once merged — det-kommer-mer-879lcm is already in this list.
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
     services:
       postgres:
         image: pgvector/pgvector:pg16

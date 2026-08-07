@@ -6,23 +6,65 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-06, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`, inte memorerat). **PR #36** (`claude/mainai-job-runtime-
-integration` → `claude/det-kommer-mer-879lcm`) är fortfarande **draft, öppen, INTE mergad**,
-`mergeable_state: clean`. Grundaren gjorde en fjärde, fristående granskningsrunda av PR #36:s
-faktiska diff efter Pass 38:s integration och gav en numrerad, severity-klassificerad
-åtgärdslista (BLOCKER: lease fencing; HIGH: idempotent create_job, chat.py-sanningskontrakt,
-kontoexport; MEDIUM: capability-manifest, DB-invarianter, corpus-review-sanningsenlighet; LOW:
-rate limiting, paginering) — alla åtgärdade, se Pass 39 nedan för fullständig detalj. Grundaren
-gjorde därefter en FOKUSERAD omgranskning av just den rundans fixar och fann en kvarstående
-HIGH (chat-sanningskontraktets sanerare lade bara till en rättelse EFTER modellens falska
-påstående, så båda syntes samtidigt) plus sex MEDIUM (M1-M6: instabil paginering, frontend-
-race mot inaktuella svar, ej upprätthållna capability-policyflaggor, inget DB-skydd mot att
-`progress_current` minskar, inget end-to-end-test för lease-förlust-rollback mitt i en körning,
-odefinierad idempotens-semantik för samma nyckel med olika payload) — alla åtgärdade, se
-**Pass 40** nedan för fullständig detalj, inklusive en falsk-positiv-bugg i den nya sanerar-
-regexen som hittades och åtgärdades under denna rundas EGEN obligatoriska självgranskning.
-Ingen merge, deploy, produktionsmigration eller "Ready for review"-märkning har skett.
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-07, mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat). **PR #36 är MERGAD**
+(`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit
+`af4194ba1d913da56507f427c2af9d336138bf7e` (parents: `ceb6cb93b38cca69dd450eb5ce5a50632c197e8a`
+och `f6119b290d890495475245abe3a7e865c2b7d1a8` — en riktig tvåparent-merge, inte squash/rebase),
+efter grundarens uttryckliga merge-godkännande på den exakta head-SHA:n. `merged_by`: `d1n095`.
+Full förhandsverifiering (state open, draft→false, mergeable_state clean, alla CI-checkar
+gröna, 0 unresolved review threads, migrationsrundtripp `0025→0029→0025→0029` re-körd färskt)
+gjordes direkt innan merge. Se Pass 39/40 nedan för de två föregående granskningsrundornas
+fulla detalj (BLOCKER lease fencing + HIGH/MEDIUM/LOW; sedan en fokuserad omgranskning som
+fann kvarstående HIGH i chat-sanerarens append-vs-ersättning-beteende plus M1-M6).
+
+**PR #38 är MERGAD** (`claude/frontend-npm-audit-ghsa-5p4m-2wfm-xmqj` →
+`claude/det-kommer-mer-879lcm`), merge-commit `adddd2e85cb16ea9a73a92c135a90ff22b9d37ef`
+(parents: `af4194ba1d913da56507f427c2af9d336138bf7e` och
+`236aabb39bf56747221ac1a05ab530c5d4778b5f` — en riktig tvåparent-merge), efter grundarens
+uttryckliga merge-godkännande. Isolerad, enfils-fix (`frontend/package-lock.json`, 3 rader):
+`js-yaml` uppgraderad `4.3.0 → 4.3.1` (GHSA-5p4m-2wfm-xmqj, kvadratisk CPU-konsumtion i
+`!!omap`-upplösning), en transitiv dev-only-lint-dependency via `eslint > @eslint/eslintrc`
+vars egen deklarerade range (`^4.3.0`) redan tillät den patchade versionen — ingen
+`overrides`-post, ingen allowlist-ändring. Samma isolerings-mönster som PR #9 och
+`GHSA-rgw5-rvv9-x895`-fixen. Alla 18 CI-checkar gröna (en initial "Backend —
+unit/integration tests"-hängning på ~24 min visade sig vara en övergående CI-runner-flake,
+inte relaterad till diffen — cancel + rerun av just det jobbet gav ett rent resultat på
+~5 min).
+
+**Branch/PR: `claude/vps-worker-privilege-race-hotfix` → PR #37 (draft, öppen, MERGE-READY men
+INTE mergad ännu).** Grundaren försökte köra den faktiska VPS-produktionsdeployen av den
+mergade PR #36-basen; backend/frontend blev friska, men workern fastnade i en omstartsloop i
+`apply_runtime_privileges.py` med `psycopg2.errors.InternalError_: tuple concurrently updated`.
+Rotorsak: `ensure_app_role.py` och `apply_runtime_privileges.py` körde sina muterande
+REVOKE/GRANT-satser OVILLKORLIGT på VARJE container som delar backend-imagen — inklusive
+workern — som därmed kunde racea backend-containerns egna identiska satser mot samma
+katalograder efter en VPS-omstart där Composes `depends_on`-ordning inte gäller (det gäller
+bara `docker compose up`, inte Dockers egen `restart: unless-stopped`-policy). PR #37 fixar
+detta: en ny `RUN_PRIVILEGE_BOOT`-flagga (default true, satt till false för workern) gör att
+endast backend någonsin muterar `mainai_app`s privilegier; workern härleder `APP_DATABASE_URL`
+och verifierar privilege-tillståndet read-only istället (fail-closed om det är fel), plus en
+Postgres advisory lock (`acquire_privilege_boot_lock`) som skyddar mot två samtidiga
+backend-repliker, plus en ny `rollback.sh`-spärr som vägrar starta en äldre image vars egen
+Alembic-historik inte känner till databasens nuvarande revision. Se Pass 41 nedan för
+fullständig detalj. PR #37:s `npm audit`-check blockerades av GHSA-5p4m-2wfm-xmqj (orelaterad
+till hotfixen) tills PR #38 mergades — löst enligt samma "egen branch/PR"-mönster, inte fogad
+in i PR #37:s diff.
+
+Efter att PR #38 mergats uppdaterades PR #37 mot den nya basen: `git merge
+origin/claude/det-kommer-mer-879lcm` in i `claude/vps-worker-privilege-race-hotfix`, en riktig
+tvåparent-merge (`90b59559a6d61fbe8f62438d423b5cbf84ec3ada`, parents:
+`69ba90ba991173ed9294411917bdfa8a8988f587` och `adddd2e85cb16ea9a73a92c135a90ff22b9d37ef`),
+konfliktfri (endast `frontend/package-lock.json` ändrades av mergen — hotfixens egen kod
+orörd). PR #37:s nya head: `90b59559a6d61fbe8f62438d423b5cbf84ec3ada`, ny bas:
+`adddd2e85cb16ea9a73a92c135a90ff22b9d37ef`. Full relevant CI omkörd och grön på den nya
+headen: `Frontend — npm audit` (grön, tidigare blockeraren nu löst), `Backend —
+unit/integration tests` (inkl. privilege-race-regressionssviten), `VPS deploy.sh /
+rollback.sh — real deploy, failure, and rollback cycle`, `Strato VPS compose topology`,
+`VPS bootstrap scripts`, samtliga E2E-jobb, samt den aggregerande `All required checks
+passed`. 0 unresolved review threads. `mergeable_state: clean`. PR #37 är alltså nu
+merge-ready — men grundaren har uttryckligen bett att INTE mergea den ännu; det beslutet tas
+separat. Ingen deploy, migration eller backfill har utförts av denna session eller av PR #37.
 
 **Tidigare rad, oförändrad:** Senast verifierat 2026-08-05, mot GitHubs PR-/check-runs-API
 direkt (`mcp__github__pull_request_read`/`get_check_runs`/`merge_pull_request`, inte memorerat).
@@ -215,6 +257,106 @@ en bugg — fler commits per `advance()`-anrop är en förväntad avvägning fö
 
 Ingen merge, ingen deploy, ingen produktionsbackfill körd. `claude/mainai-job-runtime-foundation`
 ej rörd. Väntar på grundarens granskning av denna rundas fix.
+
+## Pass 41 (2026-08-06): PR #37 — VPS-produktionsincident: worker racear backend om mainai_app-privilegier
+
+**Branch:** `claude/vps-worker-privilege-race-hotfix` (PR #37, draft, öppen), grenad från den
+mergade PR #36-basen `af4194ba1d913da56507f427c2af9d336138bf7e`
+(`claude/det-kommer-mer-879lcm`).
+
+**Incidenten.** Grundaren körde den faktiska VPS-deployen av den mergade basen. Backend och
+frontend blev friska (`{"status":"ok"}` på extern `/api/health`, migration vid `0029`), men
+workern fastnade i en omstartsloop i `apply_runtime_privileges.py` med `psycopg2.errors.
+InternalError_: tuple concurrently updated`.
+
+**Rotorsak.** `backend/docker-entrypoint.sh` körde två muterande steg — `ensure_app_role.py`
+(rollprovisionering + ett brett `GRANT ALL` + S1A-omnarrowning, en transaktion) och
+`apply_runtime_privileges.py` (S1A-REVOKE/GRANT-omnarrowningen) — OVILLKORLIGT på VARJE
+container som delar backend-imagen, INKLUSIVE workern. Båda containrarna delar samma
+`MAINAI_APP_PASSWORD`/`DATABASE_URL`, så på varje omstart där båda containrarnas entrypoints
+startar ungefär samtidigt racear de varandras muterande REVOKE/GRANT-satser mot exakt samma
+katalograder (`pg_class.relacl`, `pg_proc.proacl`). `docker-compose.vps.yml`s `depends_on:
+condition: service_healthy` ordnar bara en explicit `docker compose up`/`start` — det
+omkontrolleras INTE av Dockers egen `restart: unless-stopped`-policy, som startar om backend
+och worker oberoende av varandra efter en VPS-omstart eller daemon-omstart. Det är exakt det
+fönstret incidenten träffade.
+
+**Fixen.**
+- **`RUN_PRIVILEGE_BOOT`** (ny, default `true`) i `backend/docker-entrypoint.sh`, satt till
+  `false` för `worker`-tjänsten i `docker-compose.vps.yml`. Styr BÅDE
+  rollprovisioneringssteget OCH `apply_runtime_privileges.py`s muterande väg — exakt EN
+  container (backend) får någonsin mutera `mainai_app`s privilegier.
+- **`ensure_app_role.py --derive-only`**: härleder `APP_DATABASE_URL` (ren stränglogik från
+  `DATABASE_URL` + `MAINAI_APP_PASSWORD` — ingen databasanslutning alls) för containrar som
+  aldrig får mutera rollen. Bevisat med ett test som gör att `psycopg2.connect` kastar om det
+  någonsin anropas.
+- **`apply_runtime_privileges.py --verify-only`**: kör bara den read-only halvan av samma
+  privilegiepolicy, i en riktig Postgres `READ ONLY`-transaktion, med en begränsad
+  om-försök-logik (workerns läsning kan legitimt köra samtidigt som backendens egen
+  förstagångsnarrowning vid en schema-uppgraderande deploy — om-försöken absorberar det
+  ordningsgapet istället för att behandla en övergående "inte narrowed än"-läsning som
+  ödesdiger). Fortfarande fail-closed (icke-noll exit, containern når aldrig `exec "$@"`) om
+  tillståndet den läser genuint är fel.
+- **`s1a_privilege_policy.apply_privilege_policy()`** får `mutate: bool = True` — varje
+  REVOKE/GRANT-sats hoppas över helt när `False`.
+- **`acquire_privilege_boot_lock()`**: ett Postgres advisory lock
+  (`pg_advisory_xact_lock(72197001, 1)`) som den muterande vägen tar FÖRST — försvar på djupet
+  utöver `RUN_PRIVILEGE_BOOT` för det kvarstående fallet: två backend-repliker (eller en
+  gammal+ny backend som kort överlappar under en rullande deploy) som båda kör den riktiga
+  muterande vägen. `app/rls.py`s `apply_mainai_job_runtime_privileges()` (den separata,
+  PR #36-introducerade mainai_job_*-privilegiepolicyn — anropas bara från `app.main`s
+  FastAPI-startup, bekräftat att workern aldrig triggar den via ett nytt strukturellt
+  AST-importtest) tar samma lock-nyckel.
+- **`scripts/vps/rollback.sh`**: vägrar starta en rollback-målimage vars egen bundlade
+  Alembic-migrationshistorik inte känner till databasens nuvarande revision — grundarens
+  uttryckliga krav att en rollback efter en schema-uppgradering aldrig ska kunna starta äldre
+  applikationskod mot ett framåtmigrerat schema. Ny `verify_rollback_target_knows_current_
+  revision()` i `lib.sh`.
+
+**Verifiering.**
+- Ny testfil `backend/tests/backend/test_privilege_boot_race_hotfix.py` (7 tester) mot den
+  riktiga lokala Postgres-testdatabasen (inga mockar — buggen var själv ett riktigt
+  Postgres-katalåslåsningsbeteende): `mutate=False` sänder noll REVOKE/GRANT; den read-only
+  verifieraren tar aldrig advisory-locket; den read-only verifieraren om-försöker och lyckas
+  när en samtidig muterande apply committar; **grundarens exakta krävda scenario** — två
+  samtidiga "backend-replika"-mutationer plus en samtidig "worker"-read-only-verifiering, alla
+  tre startande i samma ögonblick via en riktig `threading.Barrier` — inget `tuple concurrently
+  updated` (eller någon exception) någonstans, alla tre lyckas, sluttillståndet korrekt
+  narrowed; körd 5x isolerat, ren varje gång; `--derive-only` anropar aldrig `psycopg2.connect`
+  och beräknar byte-identiskt resultat mot den muterande vägens egen härledning; verifieraren
+  fail-closed:ar fortfarande vid genuint fel tillstånd.
+- Nytt strukturellt test `test_worker_module_never_imports_app_main` i
+  `test_rls_policy_registry.py` (AST-parsar `app/worker.py`).
+- Full backend-svit: 975 passed, 1 skipped (avsiktligt), 1 avselekterad (dokumenterad,
+  pre-existerande, orelaterad `test_storage_local_fs.py`-flaka).
+- Inga nya migrationer i denna PR; `alembic heads` fortfarande exakt en (`0029`).
+- Shellcheck rent på `lib.sh`/`rollback.sh`/`deploy.sh`/`docker-entrypoint.sh`.
+- `verify_rollback_target_knows_current_revision()` manuellt körd mot både accept- och
+  reject-scenariot med `docker` mockad som en shell-funktion; matchande CI-enhetstest i
+  `vps-scripts-check`-jobbet gör samma sak deterministiskt.
+- Denna branch lades till i `vps-scripts-check`/`vps-compose-verify`/
+  `vps-deploy-rollback-test`-jobbens branch-allowlists (annars grindade till en liten uppsättning
+  branchnamn) så den riktiga Docker Compose-topologin och rollback-skripttesterna faktiskt körs
+  på denna PR, inte bara vid merge. Nytt CI-check i `vps-compose-verify` bekräftar att workerns
+  `RUN_PRIVILEGE_BOOT` är `false` och att dess loggar visar derive-only/verify-only-meddelandena.
+
+**Vad som INTE gjorts:** ingen deploy, migration eller backfill av denna session eller av
+PR #37. Väntar på grundarens granskning och på att GitHub Actions CI (nu grindad in för denna
+branch) blir grön innan merge.
+
+**Uppdatering (2026-08-07): npm audit-blockeraren löst, PR #37 omdaterad och grön.** PR #37:s
+`Frontend — npm audit`-check blev röd på en ny, orelaterad advisory (GHSA-5p4m-2wfm-xmqj,
+`js-yaml`) — löst på egen isolerad branch/PR (#38, se toppsammanfattningen ovan), inte fogad in
+i PR #37:s diff. Efter att PR #38 mergats (merge-commit `adddd2e85cb16ea9a73a92c135a90ff22b9d37ef`)
+uppdaterades PR #37 mot den nya basen via en riktig `git merge` (inte rebase) —
+`90b59559a6d61fbe8f62438d423b5cbf84ec3ada`, konfliktfri, enda ändringen `frontend/
+package-lock.json`, hotfixens egen kod orörd. Full relevant CI omkörd på den nya headen och
+grön genomgående: `Frontend — npm audit`, `Backend — unit/integration tests` (inkl.
+privilege-race-regressionssviten), `VPS deploy.sh / rollback.sh — real deploy, failure, and
+rollback cycle`, `Strato VPS compose topology`, `VPS bootstrap scripts`, alla E2E-jobb, och den
+aggregerande `All required checks passed`. 0 unresolved review threads, `mergeable_state:
+clean`. PR #37 är alltså nu merge-ready på sin nya head — men grundaren har uttryckligen bett
+att INTE mergea den ännu; merge-beslutet tas separat.
 
 ## Pass 40 (2026-08-06): PR #36 — fokuserad slutgranskningsrunda: kvarstående HIGH (sanerare) + M1-M6, alla åtgärdade
 

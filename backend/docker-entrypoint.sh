@@ -6,6 +6,23 @@
 # is the one and only place `alembic upgrade head` runs in a container deploy.
 set -euo pipefail
 
+# RUN_PRIVILEGE_BOOT (default true): gates BOTH the role-provisioning/privilege-widening step
+# below AND apply_runtime_privileges.py's mutating narrow-down step. Founder-reported
+# production incident (VPS deploy): before this flag existed, ensure_app_role.py's mutating
+# GRANT ALL + S1A re-narrow AND apply_runtime_privileges.py's own REVOKE/GRANT ran
+# unconditionally on EVERY container sharing this image — including the durable-worker
+# container, which ran them concurrently with the backend container's own identical
+# statements against the same catalog rows (pg_class.relacl/pg_proc.proacl), occasionally
+# hitting Postgres's "tuple concurrently updated" and crash-looping the worker. Exactly ONE
+# container (the backend) should ever mutate mainai_app's privileges; docker-compose.vps.yml
+# sets RUN_PRIVILEGE_BOOT=false on the worker service. When false, the two steps below run
+# their read-only equivalents instead (--derive-only / --verify-only) — never zero-effect: the
+# worker still needs APP_DATABASE_URL and still fails closed if the privilege state it reads is
+# wrong, it just never itself writes to it. See backend/scripts/s1a_privilege_policy.py's
+# `acquire_privilege_boot_lock()` for the remaining defense-in-depth this flag doesn't cover
+# (two BACKEND replicas racing each other).
+RUN_PRIVILEGE_BOOT="${RUN_PRIVILEGE_BOOT:-true}"
+
 # On managed Postgres providers (e.g. Render) there's no docker-entrypoint-initdb.d hook to
 # create the restricted mainai_app role the way backend/db-init/01-app-role.sh does for local
 # Docker Compose — this does the equivalent, idempotently, via the admin connection
@@ -13,10 +30,15 @@ set -euo pipefail
 # it on the backend container (APP_DATABASE_URL is already set there directly), so this is a
 # no-op locally. See scripts/ensure_app_role.py and docs/RENDER_DEPLOY.md.
 if [ -n "${MAINAI_APP_PASSWORD:-}" ]; then
-  echo "Skapar/uppdaterar mainai_app-rollen..."
   export RENDER_ENV_FILE
   RENDER_ENV_FILE="$(mktemp)"
-  python scripts/ensure_app_role.py
+  if [ "$RUN_PRIVILEGE_BOOT" = "true" ]; then
+    echo "Skapar/uppdaterar mainai_app-rollen..."
+    python scripts/ensure_app_role.py
+  else
+    echo "RUN_PRIVILEGE_BOOT=false, härleder APP_DATABASE_URL utan att mutera rollen..."
+    python scripts/ensure_app_role.py --derive-only
+  fi
   # shellcheck disable=SC1090
   source "$RENDER_ENV_FILE"
   rm -f "$RENDER_ENV_FILE"
@@ -37,16 +59,19 @@ else
 fi
 
 # S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8): re-applies and verifies the narrowed
-# mainai_app privilege state on the memory-provenance tables/functions on EVERY boot of EVERY
-# container that reaches this line — NOT only inside the RUN_MIGRATIONS=true branch above.
-# ensure_app_role.py re-grants ALL PRIVILEGES to mainai_app unconditionally on every boot
-# (not just role creation, not just this container), which would silently undo a REVOKE that
-# only ran once at migration time. The durable-worker container sets RUN_MIGRATIONS=false and
-# skips `alembic upgrade head` (redundant against the same database — see the comment above),
-# but it still runs ensure_app_role.py and therefore still needs its own privilege state
-# re-narrowed on every restart; skipping this script there would leave mainai_app's
-# privileges wide open indefinitely after any worker-only restart.
-echo "Kör apply_runtime_privileges..."
-python scripts/apply_runtime_privileges.py
+# mainai_app privilege state on the memory-provenance tables/functions. Only the backend
+# (RUN_PRIVILEGE_BOOT=true) actually mutates; the worker verifies the SAME policy read-only
+# instead (see apply_runtime_privileges.py's `--verify-only` for the bounded retry this needs,
+# since the worker's read can legitimately run concurrently with the backend's own first-time
+# narrowing on a schema-upgrading deploy) — it still fails closed (non-zero exit, container
+# never reaches `exec "$@"` below) if the privilege state it reads is wrong, exactly like the
+# backend does for its own mutating path.
+if [ "$RUN_PRIVILEGE_BOOT" = "true" ]; then
+  echo "Kör apply_runtime_privileges..."
+  python scripts/apply_runtime_privileges.py
+else
+  echo "RUN_PRIVILEGE_BOOT=false, verifierar privilege-state read-only (apply_runtime_privileges.py --verify-only)..."
+  python scripts/apply_runtime_privileges.py --verify-only
+fi
 
 exec "$@"
