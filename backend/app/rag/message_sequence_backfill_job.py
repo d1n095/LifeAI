@@ -158,14 +158,25 @@ async def run_message_sequence_backfill_job(
         # The progress write and the numbering commit together — see backfill_conversation's
         # `on_outcome` docstring. `update_progress` deliberately does not commit; this
         # closure's writes ride along on the single commit backfill_conversation performs.
-        def _on_outcome(outcome: ConversationOutcome, _job: MainAIJob = job) -> None:
+        #
+        # `_job`/`_current`/`_total` are bound as defaults rather than closed over: this
+        # function is defined inside a loop, and a late-binding closure over `job`/`processed`/
+        # `total` would silently read whatever those hold at CALL time. It happens to be called
+        # within the same iteration today, so the values would agree — binding them here makes
+        # that a property of the code instead of a property of the current call ordering.
+        def _on_outcome(
+            outcome: ConversationOutcome,
+            _job: MainAIJob = job,
+            _current: int = processed + 1,
+            _total: int = total,
+        ) -> None:
             update_progress(
                 db,
                 _job,
                 worker_id=worker_id,
                 lease_generation=lease_generation,
-                current=processed + 1,
-                total=total,
+                current=_current,
+                total=_total,
                 phase="numbering",
             )
 
