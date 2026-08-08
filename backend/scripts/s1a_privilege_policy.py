@@ -1,5 +1,17 @@
-"""Shared least-privilege policy for the S1A memory-provenance tables/functions (migration
-0019, docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8).
+"""Shared least-privilege policy for `mainai_app`'s runtime table/function privileges.
+
+Two layers, applied together by the same callers, in the same transaction:
+
+1. A SCHEMA-WIDE floor (`_NEVER_GRANTED_TABLE_PRIVS`, Pass 30): `TRUNCATE`, `REFERENCES` and
+   `TRIGGER` are revoked from mainai_app on EVERY table in schema public — discovered
+   dynamically from `pg_tables`, never a hardcoded list, so a table a future migration adds is
+   covered the first time this runs after that migration without anyone remembering to update
+   this file. See `_NEVER_GRANTED_TABLE_PRIVS`' own comment for why none of the three is
+   reachable from application code, and for the PR #42 review finding that prompted it.
+2. The per-table/per-function S1A memory-provenance policy (migration 0019,
+   docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8) in `_PROTECTED_TABLES`/`_FUNCTIONS`, which
+   narrows a handful of specific tables further than the floor (down to SELECT-only, or to no
+   direct privileges at all).
 
 Applied by TWO callers, each owning its own connection/transaction, with DIFFERENT
 completeness requirements (Pass 24 — see `require_complete` on `apply_privilege_policy()`):
@@ -99,6 +111,55 @@ _PROTECTED_TABLES = [
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
 
+# Pass 30 — the schema-wide privilege floor. mainai_app must never hold ANY of these on ANY
+# table in schema public, whether or not that table appears in `_PROTECTED_TABLES` above.
+#
+# Origin: PR #42 (owner-scoped RLS on `messages`, migration 0031) shipped with a deliberately
+# deferred, non-blocking finding from its independent security review — mainai_app held
+# TRUNCATE on `messages`, and **Postgres RLS does not apply to TRUNCATE**. TRUNCATE is a
+# whole-table operation, not a row-scoped one: no `USING`/`WITH CHECK` clause is ever
+# consulted, so migration 0031's owner-scoping (and every other RLS policy in app/rls.py)
+# is simply not in the code path. A single `TRUNCATE messages` from a compromised request
+# path would have destroyed every owner's messages at once, with RLS fully enabled and
+# FORCEd, and no policy violated. The same review verified the finding was not specific to
+# `messages`: the identical blanket grant existed on `conversations`, `documents`,
+# `document_chunks` and every other table, as a project-wide consequence of the
+# `GRANT ALL PRIVILEGES ON ALL TABLES` pattern in ensure_app_role.py / db-init/01-app-role.sh.
+# Hence a floor over every table rather than a fix for one.
+#
+# Why all three are safe to remove — none is reachable from application code, and each was
+# granted only as collateral of `GRANT ALL`, never because a code path asked for it:
+#
+# - TRUNCATE: nothing in backend/app/ or backend/scripts/ issues one. Every bulk row removal
+#   the application performs is a row-scoped `DELETE` through SQLAlchemy (e.g. account
+#   erasure's `db.query(Message).filter(...).delete()` in app/rag/account_erasure.py, and
+#   `delete_document_chunks()` in app/rag/vector_store.py) — which stays subject to RLS,
+#   which is exactly the property that makes it safe and TRUNCATE unsafe. The one place the
+#   codebase truncates at all is the test fixture `_clean_tables` in backend/tests/conftest.py,
+#   and that runs on the ADMIN/migration connection (`settings.database_url`), never as
+#   mainai_app — so removing this does not affect the test suite either.
+# - REFERENCES: only ever needed to CREATE a foreign key constraint pointing AT the table.
+#   That is DDL, performed exclusively by Alembic through the admin/migration role (see
+#   backend/docker-entrypoint.sh's boot order); the runtime role additionally has no CREATE on
+#   schema public (revoked below), so it cannot create a table to reference from in the first
+#   place.
+# - TRIGGER: only ever needed to CREATE TRIGGER on the table. Also DDL, also Alembic-only —
+#   and actively dangerous to leave granted, because it is the one privilege here that lets a
+#   non-owner attach new behaviour to a table it does not own. Firing an EXISTING trigger
+#   never requires the DML-issuing role to hold TRIGGER (Postgres invokes trigger functions as
+#   part of the DML statement itself — the same reasoning already documented for
+#   `mainai_app_execute=False` in app/rls.py's `_MAINAI_JOB_FUNCTION_SPECS`), so revoking it
+#   cannot affect migration 0030's `messages_assign_sequence_number` sequencing triggers or
+#   migration 0019's `trg_msu_no_delete` guards.
+#
+# NOT included here, deliberately: SELECT/INSERT/UPDATE/DELETE. Those are genuinely used
+# across the user-data tables (messages alone needs all four — SELECT+INSERT in
+# app/routers/chat.py, UPDATE in app/rag/message_sequence_backfill.py's
+# `UPDATE messages m SET sequence_number = ...`, DELETE in app/rag/account_erasure.py), they
+# stay row-scoped under RLS, and narrowing them further is a per-table judgement that belongs
+# in `_PROTECTED_TABLES` with its own evidence — not in a blanket floor.
+_NEVER_GRANTED_TABLE_PRIVS = ["TRUNCATE", "REFERENCES", "TRIGGER"]
+
 # (function name, granted to mainai_app?, requires BYPASSRLS on its owner?, expected return
 # type, expected identity argument types) — resolved by name AND exact argument types (Pass
 # 25; see _resolve_function). The two owner-scoped functions enforce ownership themselves and
@@ -146,6 +207,46 @@ _FUNCTIONS = [
 def _table_exists(cur, table_name: str) -> bool:
     cur.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{table_name}",))
     return bool(cur.fetchone()[0])
+
+
+def _all_public_tables(cur) -> list[str]:
+    """Every ordinary table in schema public, read from the catalog at call time rather than
+    kept as a list in this file — the schema-wide floor must cover tables that migrations
+    added after this module was last edited, including `alembic_version` itself."""
+    cur.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename"
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
+def _default_acl_privileges(cur) -> set[str]:
+    """The privileges mainai_app is set to receive AUTOMATICALLY on tables created in schema
+    public from now on, read from `pg_default_acl` (the stored `ALTER DEFAULT PRIVILEGES`
+    state), not from any GRANT statement's text.
+
+    This is the half of the fix that is easy to get wrong, and was verified against a real
+    Postgres 16 rather than assumed: `ALTER DEFAULT PRIVILEGES ... GRANT` is ADDITIVE, not a
+    replacement. Re-issuing the historical `GRANT ALL PRIVILEGES ON TABLES` as a narrower
+    `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES` leaves the stored ACL entry at the full
+    `mainai_app=arwdDxt/<admin>` — measurably unchanged — so every table a FUTURE migration
+    creates would still arrive with TRUNCATE/REFERENCES/TRIGGER attached, silently undoing the
+    floor one migration later. Only an explicit `ALTER DEFAULT PRIVILEGES ... REVOKE TRUNCATE,
+    REFERENCES, TRIGGER ON TABLES FROM mainai_app` actually clears those bits (to
+    `mainai_app=arwd/<admin>`). An empty result here is correct and safe on a database where
+    no default-privilege grant was ever made — absence means new tables get nothing extra.
+
+    `aclexplode` is used rather than string-matching the `defaclacl` text so this reads the
+    same structured privilege names Postgres itself uses."""
+    cur.execute(
+        "SELECT DISTINCT a.privilege_type "
+        "FROM pg_default_acl d "
+        "JOIN pg_namespace n ON n.oid = d.defaclnamespace "
+        "CROSS JOIN LATERAL aclexplode(d.defaclacl) a "
+        "WHERE n.nspname = 'public' AND d.defaclobjtype = 'r' "
+        "  AND a.grantee = %s::regrole::oid",
+        (APP_ROLE,),
+    )
+    return {r[0] for r in cur.fetchall()}
 
 
 def _resolve_function(cur, name: str, expected_arg_types: tuple[str, ...]) -> tuple[str | None, list[str]]:
@@ -282,6 +383,23 @@ def apply_privilege_policy(
         signatures[name] = sig
 
     if mutate:
+        # --- Pass 30: the schema-wide floor, applied BEFORE the per-table S1A narrowing below
+        # (which is strictly tighter still, so the two never fight). Covers every table in
+        # public, including ones no migration in this repo has introduced yet.
+        never_granted_sql = ", ".join(_NEVER_GRANTED_TABLE_PRIVS)
+        for table in _all_public_tables(cur):
+            cur.execute(f'REVOKE {never_granted_sql} ON TABLE public."{table}" FROM {APP_ROLE}')
+
+        # Stop the SAME privileges from coming back automatically on tables that don't exist
+        # yet — see `_default_acl_privileges()` for why a narrower GRANT alone is measurably
+        # insufficient and this explicit REVOKE is required. Scoped `FOR ROLE {expected_owner}`
+        # (the role this connection actually authenticated as) for the same pooler reason
+        # ensure_app_role.py documents at its own ALTER DEFAULT PRIVILEGES call sites.
+        cur.execute(
+            f'ALTER DEFAULT PRIVILEGES FOR ROLE "{expected_owner}" IN SCHEMA public '
+            f"REVOKE {never_granted_sql} ON TABLES FROM {APP_ROLE}"
+        )
+
         for table, allowed_privs in _PROTECTED_TABLES:
             if table not in tables_present:
                 continue
@@ -307,6 +425,35 @@ def apply_privilege_policy(
         cur.execute(f"REVOKE CREATE ON SCHEMA public FROM {APP_ROLE}")
 
     # --- verification: real privilege/catalog queries, not an assumption ---
+
+    # Pass 30, the schema-wide floor. Runs in BOTH mutate and read-only (`mutate=False`,
+    # durable-worker `--verify-only`) modes: the worker must be able to fail closed on a
+    # database where TRUNCATE is still held, exactly as it already does for the S1A tables.
+    # `has_table_privilege` rather than information_schema.role_table_grants, for the same
+    # reason app/rls.py's `_effective_table_privileges` gives: the information_schema view
+    # only lists grants made DIRECTLY to the named grantee, so a privilege held INDIRECTLY via
+    # membership in another granted role would be invisible there while still letting
+    # mainai_app actually run the statement. has_table_privilege computes Postgres's real,
+    # effective answer, following the role-membership graph the way the server itself does.
+    for table in _all_public_tables(cur):
+        for priv in _NEVER_GRANTED_TABLE_PRIVS:
+            cur.execute("SELECT has_table_privilege(%s, %s, %s)", (APP_ROLE, f'public."{table}"', priv))
+            if cur.fetchone()[0]:
+                errors.append(
+                    f"{table}.{priv}: {APP_ROLE} still holds it — no table in schema public may "
+                    f"grant {APP_ROLE} any of {_NEVER_GRANTED_TABLE_PRIVS} (RLS does not apply to "
+                    f"TRUNCATE, and REFERENCES/TRIGGER are DDL-only privileges the runtime role "
+                    f"never uses)"
+                )
+
+    leaked_defaults = _default_acl_privileges(cur) & set(_NEVER_GRANTED_TABLE_PRIVS)
+    if leaked_defaults:
+        errors.append(
+            f"default privileges: tables created in schema public from now on would still grant "
+            f"{APP_ROLE} {sorted(leaked_defaults)} automatically (pg_default_acl) — the "
+            f"schema-wide floor would be silently undone by the next migration that adds a table"
+        )
+
     for table, allowed_privs in _PROTECTED_TABLES:
         if table not in tables_present:
             continue  # already reported above when require_complete

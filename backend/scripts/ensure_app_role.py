@@ -43,9 +43,13 @@ credential actually works through the pooler — retrying with backoff — befor
 success, instead of leaving that risk for app/main.py's own startup path (which, before this
 fix, had no such retry and took the whole process down on the first transient rejection).
 
-The `GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public` below runs on EVERY boot, including
-an ordinary restart on a database that's already past migration 0019 (S1A) — which would
-otherwise re-widen mainai_app's carefully narrowed privileges on the S1A tables/functions
+The broad table grant below runs on EVERY boot, including an ordinary restart on a database
+that's already past migration 0019 (S1A). Pass 30 narrowed it from `ALL PRIVILEGES` to
+`SELECT, INSERT, UPDATE, DELETE` (see that call site, and `_NEVER_GRANTED_TABLE_PRIVS` in
+s1a_privilege_policy.py: `ALL` also means TRUNCATE/REFERENCES/TRIGGER, none of which any
+runtime path uses, and TRUNCATE is not subject to RLS at all). It is still a broad grant
+across every table in the schema, and would still re-widen mainai_app's carefully narrowed
+privileges on the S1A tables/functions
 right back open, if only for the brief window until apply_runtime_privileges.py next runs
 (which, on a mid-deploy crash between this script and that one, might be never). This script
 therefore re-applies the SAME S1A privilege policy (backend/scripts/s1a_privilege_policy.py)
@@ -240,8 +244,16 @@ def main() -> None:
             cur.execute(
                 sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(APP_ROLE))
             )
+            # Pass 30: `SELECT, INSERT, UPDATE, DELETE`, never `ALL PRIVILEGES`. `ALL` on a
+            # table also means TRUNCATE, REFERENCES and TRIGGER — none of which any runtime
+            # code path uses, and TRUNCATE specifically is NOT subject to Row-Level Security
+            # (see `_NEVER_GRANTED_TABLE_PRIVS` in s1a_privilege_policy.py for the full
+            # finding). Narrowing the grant here is only half the fix and cannot stand alone:
+            # a database that has booted even once already has the wide `arwdDxt` ACL durably
+            # committed, and a GRANT never removes privileges. The policy call below is what
+            # actually REVOKEs them, on this and every future boot.
             cur.execute(
-                sql.SQL("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {}").format(
+                sql.SQL("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}").format(
                     sql.Identifier(APP_ROLE)
                 )
             )
@@ -253,10 +265,15 @@ def main() -> None:
             # So tables/sequences created by later `alembic upgrade head` runs (through the
             # admin role) are automatically granted to mainai_app too — matching
             # db-init/01-app-role.sh's behavior for local Docker Compose.
+            # Same narrowing as the direct grant above, for tables that don't exist yet. The
+            # matching `ALTER DEFAULT PRIVILEGES ... REVOKE TRUNCATE, REFERENCES, TRIGGER` that
+            # clears the legacy `arwdDxt` default-ACL entry on an already-deployed database
+            # lives in apply_privilege_policy() — see `_default_acl_privileges()` for the
+            # measured proof that this narrower GRANT alone does NOT replace it.
             cur.execute(
                 sql.SQL(
                     "ALTER DEFAULT PRIVILEGES FOR ROLE {admin} IN SCHEMA public "
-                    "GRANT ALL PRIVILEGES ON TABLES TO {app}"
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {app}"
                 ).format(admin=sql.Identifier(admin_role), app=sql.Identifier(APP_ROLE))
             )
             cur.execute(
