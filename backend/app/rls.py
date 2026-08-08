@@ -58,12 +58,45 @@ RLS_STATEMENTS = [
     "ALTER TABLE mainai_job_events FORCE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_job_proposals ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_job_proposals FORCE ROW LEVEL SECURITY",
+    # Message-level owner isolation (migration 0031) — the one owner-scoped table that had no
+    # policy of its own until then, flagged during S1B (docs/BRANCH_REGISTRY.md Pass 42) and
+    # deliberately fixed in its own change. Ownership is DERIVED from the conversation rather
+    # than stored on the row; see MESSAGES_ISOLATION_EXPR below and migration 0031's docstring
+    # for why there is no `messages.owner_id`. Also enabled directly in the migration itself;
+    # listed here too so this idempotent reapply path stays the single source of truth for
+    # every owner-scoped table, matching the rest of this list.
+    "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
 ]
+
+# `messages` is the one table here whose owner is not a column on the row itself: a message
+# belongs to whoever owns its conversation, and that fact is stated exactly once, in
+# `conversations.user_id`. Storing a second copy on `messages` would create something that can
+# drift; deriving it cannot. The uncorrelated `IN (SELECT ...)` form (rather than a correlated
+# EXISTS) is a measured choice, not a stylistic one — it plans at the no-RLS baseline on the
+# bulk owner-wide scans the backfill and account export perform, where EXISTS costs roughly
+# double. Both the full benchmark and the interaction with migration 0030's sequence-number
+# trigger are documented in migration 0031's docstring.
+#
+# Must stay character-identical to `_MESSAGES_ISOLATION_EXPR` in
+# alembic/versions/0031_messages_rls.py — the policy is created by that migration and merely
+# REPAIRED here, so a drift between the two would mean a rebuilt policy silently enforces a
+# different rule than the one a fresh database gets. tests/backend/test_rls_policy_registry.py
+# compares every live policy in pg_policies against this list to catch exactly that.
+MESSAGES_ISOLATION_EXPR = (
+    "conversation_id IN ("
+    "SELECT c.id FROM conversations c "
+    "WHERE c.user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid"
+    ")"
+)
 
 # One policy per table: rows are only visible/writable when they belong to the user bound
 # to the current request (set via `SET LOCAL app.current_user_id` in app/deps.py). Missing
 # `app.current_user_id` (e.g. a raw admin/migration connection) resolves to NULL, which never
-# matches — default-deny, not default-allow.
+# matches — default-deny, not default-allow. Most entries express "belongs to" as a literal
+# owner column on the row; `messages` (migration 0031) instead derives it from the owning
+# conversation, because that is where the fact is actually recorded — see
+# MESSAGES_ISOLATION_EXPR above.
 # NULLIF guards against a Postgres quirk: a custom GUC that was SET LOCAL and then reverted
 # (e.g. after a mid-request commit, before the next transaction's after_begin re-applies it)
 # reads back as '' rather than NULL. Casting '' straight to ::uuid would raise a DB error
@@ -158,6 +191,12 @@ POLICY_DEFINITIONS = [
         "table": "mainai_job_proposals",
         "name": "mainai_job_proposals_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "messages",
+        "name": "messages_isolation",
+        # The only DERIVED entry in this list — see MESSAGES_ISOLATION_EXPR above.
+        "expr": MESSAGES_ISOLATION_EXPR,
     },
 ]
 

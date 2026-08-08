@@ -134,9 +134,19 @@ def upgrade() -> None:
     # object must be schema-qualified explicitly -- `public.messages` below, not `messages`.
     # Neither function is SECURITY DEFINER: both only ever touch rows in the very conversation
     # the caller is already writing to, so they need no privilege the writer doesn't already
-    # hold. (`messages` carries no RLS policy of its own -- access is gated through the
-    # RLS-protected `conversations` row by every router, see app/routers/conversations.py --
-    # so the aggregate below is not RLS-filtered and the count is always the true one.)
+    # hold.
+    #
+    # AMENDED BY MIGRATION 0031. When this migration was written, `messages` carried no RLS
+    # policy of its own, so the aggregate below was not RLS-filtered at all. Migration 0031
+    # added `messages_isolation`, and because this function is NOT SECURITY DEFINER the
+    # aggregate IS policy-filtered from that point on. The count is still always the true one,
+    # for a stronger reason than "RLS does not apply": 0031's policy is keyed on the
+    # conversation, so for any one conversation either all of its message rows are visible or
+    # none are -- and the INSERT that fires this trigger must already have passed that policy's
+    # WITH CHECK on `NEW.conversation_id`, which proves the inserting session can see that
+    # conversation and therefore every existing message in it. A session that cannot is
+    # rejected before the aggregate ever runs. See migration 0031's docstring for the full
+    # argument and tests/backend/test_messages_rls.py for the assertion that pins it.
     op.execute("""
         CREATE FUNCTION messages_assign_sequence_number() RETURNS trigger AS $$
         DECLARE

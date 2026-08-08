@@ -39,14 +39,21 @@ that aborts the run, and because a database that somehow reached that state is e
 case where guessing would be worst. A conflicted conversation is left completely untouched and
 reported; it is never partially numbered and never renumbered.
 
-OWNER SCOPING. `messages` carries no RLS policy of its own — the whole codebase reaches it
-through the RLS-protected `conversations` row (app/routers/conversations.py). This module
-keeps that exact boundary: the candidate list is a query over `conversations` filtered by
-`user_id == owner_id` on an already RLS-scoped session (belt and braces — the explicit filter
-and the RLS policy each independently prevent touching another owner's conversation), and
-every message-level statement is keyed by a `conversation_id` that came out of that list. No
-statement here is ever scoped by `owner_id` on `messages` directly, because `messages` has no
-such column.
+OWNER SCOPING. `messages` has no `owner_id` column — a message belongs to whoever owns its
+conversation. As of migration 0031 the database enforces that directly: `messages_isolation`
+is an RLS policy whose predicate is "this row's `conversation_id` is one of the current user's
+conversations". This module was written before that policy existed and needs no change because
+of it, since it already respected the same boundary by hand: the candidate list is a query
+over `conversations` filtered by `user_id == owner_id` on an already RLS-scoped session, and
+every message-level statement is keyed by a `conversation_id` that came out of that list.
+
+What changed is how many independent things have to fail before another owner's history could
+be touched. There are now three: the explicit `user_id == owner_id` filter, the
+`conversations_isolation` policy, and — new — `messages_isolation` on the message rows
+themselves. Before 0031 the third did not exist, so a future statement here that forgot to key
+itself by an owner-verified conversation would have silently reached across accounts; now it
+returns zero rows instead. That is the difference between a bug and an incident, and it is
+why the policy exists rather than this docstring being considered sufficient.
 """
 
 import logging
