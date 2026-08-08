@@ -314,7 +314,14 @@ def test_messages_policy_is_in_the_registry_and_is_self_healing(db_session, make
     """apply_rls() must be able to recreate `messages_isolation` if it is ever dropped —
     the same guarantee every other table has. A table left FORCE-RLS with no policy is a
     silent, total default-deny, which is why tests/backend/test_rls_policy_registry.py checks
-    that the two lists cover each other; this test proves the repair actually runs."""
+    that the two lists cover each other; this test proves the repair actually runs.
+
+    The DROP is inside try/finally on purpose: this is the one test in the suite that removes a
+    security policy from the shared, session-scoped database. If an assertion between the DROP
+    and the repair failed, an unguarded version would leave `messages` FORCE-RLS with no policy
+    for every subsequent test in the session, turning one real failure into a cascade of
+    unrelated confusing ones. `apply_rls()` is idempotent, so running it in `finally` is safe
+    even on the path where the test body already called it."""
     assert any(p["table"] == "messages" and p["name"] == "messages_isolation" for p in POLICY_DEFINITIONS)
 
     owner, _ = make_verified_user()
@@ -323,21 +330,25 @@ def test_messages_policy_is_in_the_registry_and_is_self_healing(db_session, make
     _add_message(db_session, conversation.id, content="finns")
     db_session.commit()
 
-    with migration_engine.begin() as conn:
-        conn.execute(sa_text("DROP POLICY messages_isolation ON messages"))
-        remaining = conn.execute(
-            sa_text("SELECT count(*) FROM pg_policies WHERE tablename = 'messages'")
-        ).scalar_one()
-    assert remaining == 0
+    try:
+        with migration_engine.begin() as conn:
+            conn.execute(sa_text("DROP POLICY messages_isolation ON messages"))
+            remaining = conn.execute(
+                sa_text("SELECT count(*) FROM pg_policies WHERE tablename = 'messages'")
+            ).scalar_one()
+        assert remaining == 0
 
-    # With RLS still FORCEd and no policy at all, the owner now sees nothing — the availability
-    # gap the registry test exists to prevent shipping for a new table.
-    _set_rls_user(db_session, owner.id)
-    assert db_session.query(Message).all() == []
-    db_session.rollback()
+        # With RLS still FORCEd and no policy at all, the owner now sees nothing — the
+        # availability gap the registry test exists to prevent shipping for a new table.
+        _set_rls_user(db_session, owner.id)
+        assert db_session.query(Message).all() == []
+        db_session.rollback()
 
-    apply_rls(migration_engine)
+        apply_rls(migration_engine)
 
-    _set_rls_user(db_session, owner.id)
-    assert [m.content for m in db_session.query(Message).all()] == ["finns"]
-    db_session.rollback()
+        _set_rls_user(db_session, owner.id)
+        assert [m.content for m in db_session.query(Message).all()] == ["finns"]
+        db_session.rollback()
+    finally:
+        db_session.rollback()
+        apply_rls(migration_engine)
