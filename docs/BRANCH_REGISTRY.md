@@ -379,6 +379,15 @@ ens körs; en superuser-anslutning kringgår RLS helt, som förut. S1B:s kollisi
   blob-/trådrace-familj som `test_storage_local_fs.py`-flakan som Pass 37, 41 och 42 redan
   dokumenterat — inte orsakad av den här diffen, som inte rör vare sig `app/storage/` eller
   `app/rag/library_import.py`.
+- **Samma flaka slog också till i CI en gång, och det är avsiktligt inte "fixat" här.** Första
+  körningen av `Backend — unit/integration tests` på head `80a812a` blev röd med **exakt ett**
+  fallerande test — samma `test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_
+  worker_never_race_unsafely` (`1 failed, 957 passed, 1 skipped`). En omkörning av just det
+  jobbet blev grön, precis samma mönster som PR #38 dokumenterade. Att i stället ha "lagat"
+  ett orelaterat, pre-existerande flakigt test inne i den här diffen hade brutit
+  `CLAUDE.md`s PR #8/#9-regel; flakan hör till den egna uppföljnings-PR som redan är noterad
+  ovan. Detta står här så att en granskare som ser det röda första försöket i GitHubs
+  körhistorik vet vad det var.
 
 ### Testflytt som RLS gör nödvändig (och varför den är rätt, inte en eftergift)
 
