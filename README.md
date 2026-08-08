@@ -4,8 +4,14 @@ Lokal AI-plattform som samlar företagets kunskap, dokument, projekt och källko
 med ett leverantörsoberoende AI-lager (OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter
 eller en lokal modell via Ollama).
 
-Se `docs/ARCHITECTURE.md` för systemarkitektur, `docs/ROADMAP.md` för den generella fasindelade
-planen, `docs/MAINAI_0.1_PLAN.md`/`docs/STATUS.md` för den pågående MainAI 0.1-leveransen,
+**`docs/MAINAI_ARCHITECTURE.md` är det nuvarande, auktoritativa arkitekturdokumentet** — börja
+där för systemarkitekturen som den ser ut idag. `docs/ARCHITECTURE.md` beskriver det
+ursprungliga Fas 0-skelettet och är enligt `docs/MAINAI_ARCHITECTURE.md`s egen text delvis
+föråldrat (t.ex. är Qdrant sedan dess ersatt av pgvector); `docs/ROADMAP.md` och `docs/STATUS.md`
+är på samma sätt historiska ögonblicksbilder från Fas 0 — för aktuell status över pågående
+brancher/PR:er, se istället `docs/BRANCH_REGISTRY.md`, och för den fullständiga minnes-/
+projektförståelseplanen, se `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`. Se även
+`docs/MAINAI_0.1_PLAN.md` för den pågående MainAI 0.1-leveransen,
 **`docs/SECURITY_BLOCKERS.md` för kända säkerhetsuppgifter som måste lösas före
 produktionsdrift** (bl.a. en nödvändig Next.js-versionsuppgradering), `docs/RENDER_DEPLOY.md`
 för Render-Blueprintet (`render.yaml`) som driftsätter hela stacken (Postgres, Redis, backend,
