@@ -797,6 +797,43 @@ faktiskt håller.
   backfill → verifiering → contract (separat migration: `NOT NULL`+`UNIQUE`). `SET NOT NULL`
   kan inte ske i samma migration som lägger till kolumnen (backfillen hinner inte köra under
   migrationen). Helt oberoende av S1A.
+
+  **Status 2026-08-07 (PR för `claude/s1b-message-sequence-number`, se Pass 42 i
+  `docs/BRANCH_REGISTRY.md`):** de FYRA FÖRSTA stegen är byggda — expand, dual-write,
+  durabel historisk backfill, och verifieringsfunktionen. CONTRACT-steget är MEDVETET INTE
+  byggt och får inte byggas förrän backfillen faktiskt körts mot produktionsdata.
+  - **Expand** = migration `0030_message_sequence_number`: nullable `integer`-kolumn,
+    `ck_messages_sequence_number_positive`, partiellt unikt index
+    `uq_messages_conversation_sequence_number` (giltigt redan nu eftersom alla befintliga rader
+    är `NULL`), samt det tidigare helt saknade `ix_messages_conversation_id`.
+  - **Dual-write** = en `BEFORE INSERT`-trigger (`messages_assign_sequence_number`), INTE en
+    rad i `app/routers/chat.py`. Samma resonemang som migration 0029 använde för sin
+    trigger: en numreringsregel som bara lever i EN skrivare är bara så bra som varje FRAMTIDA
+    skrivare som minns den — och det finns redan tre INSERT-vägar in i `messages`. Formeln är
+    `GREATEST(max(sequence_number), count(*)) + 1` per konversation, inte `max + 1`:
+    `count`-termen är det som garanterar att ett nytt meddelande i en ÄNNU INTE backfillad
+    konversation alltid får ett nummer OVANFÖR det `1..N`-intervall backfillen senare delar
+    ut (bevis i migrationens egen docstring). Serialiseras med `pg_advisory_xact_lock` på en
+    per-konversationsnyckel (namespace `72197002`) som backfillen tar samma lås på.
+  - En andra trigger (`messages_deny_sequence_number_rewrite`) gör ett tilldelat ordinal
+    OFÖRÄNDERLIGT och förbjuder att ett meddelande flyttas till en annan konversation.
+    `NULL → värde` är den enda tillåtna övergången — backfillens egen.
+  - **Durabel backfill** = `app/rag/message_sequence_backfill.py` +
+    `app/rag/message_sequence_backfill_job.py`, körd som ett riktigt `mainai_jobs`-jobb
+    (`job_type=message_sequence_backfill`) på den befintliga workern. §6.12:s
+    `memory_processing_jobs`-skiss är alltså INTE byggd som en egen tabell — jobbruntimen från
+    PR #36 fanns inte när §6.12 skrevs, och att bygga en andra parallell kö för en backfill
+    vore precis det projektet upprepade gånger avvisat. Numreringen är deterministisk på
+    `(created_at, id)`, atomisk per konversation, och fail-closed vid konflikt.
+  - **Verifiering** = `count_unsequenced_messages()`. Den ska rapportera 0 mot verklig
+    produktionsdata innan CONTRACT-migrationen ens skrivs.
+  - **INTE byggt, medvetet:** CONTRACT-migrationen (`SET NOT NULL` + riktigt
+    `UNIQUE`-constraint), och omställningen av läsvägarna till `ORDER BY sequence_number`
+    (`app/routers/conversations.py`, `app/routers/chat.py`) — historiska rader är `NULL` tills
+    backfillen körts, så en läsväg som sorterar på ordinalet skulle vara fel just nu. Båda
+    läsvägarna fick däremot `id` som deterministisk tiebreaker efter `created_at`, samma
+    ordning backfillen numrerar i, så transkript, export och ordinaler är överens med varandra
+    redan under expand-fasen.
 - **S1C**: `message_source_units` + `knowledge_claim_evidence` + ägar-/konversationsintegritet
   + backfill Message→MemorySourceUnit. Kräver S1B. Ingen claim-extraktion från konversationer
   än — det kommer efter S1C.
@@ -1138,6 +1175,21 @@ till ett nytt:
   Båda körs som `memory_processing_jobs`-jobb (nedan), inte som obegränsade HTTP-anrop.
 
 ### 6.12 `memory_processing_jobs` — generell arbetskö för minnesbearbetning, inte `knowledge_import_jobs`
+
+> **2026-08-07-uppdatering (S1B, Pass 42):** det här avsnittet skrevs INNAN
+> `mainai_jobs`-runtimen (migrationerna 0026–0029, PR #36) fanns. Den runtimen levererar redan
+> exakt det §6.12 efterfrågar — owner-scopad durabel jobbrad, lease + fencing-token, heartbeat,
+> avbrytning, retry-budget, append-only händelsehistorik, auditlogg och admin-UI — och den
+> dispatchar redan på `job_type` i `app/worker.py`. S1B:s historiska backfill blev därför ett
+> nytt `job_type` (`message_sequence_backfill`) på DEN runtimen, inte en ny tabell. Att bygga
+> `memory_processing_jobs` som en andra parallell kö vore precis det "ad hoc parallell
+> mekanism"-mönster projektet upprepade gånger avvisat. Tabellskissen nedan står kvar som
+> historik över kravbilden — den beskriver INTE något som ska byggas som egen tabell nu.
+> Ett kvarstående, verkligt gap: `mainai_jobs` har ingen `payload`-kolumn och inget
+> `partial`-status. Ingen av S1B:s behov krävde dem (jobbet tar inga indata alls, och en
+> ofullständig körning rapporteras sanningsenligt i `public_message`), men ett framtida
+> `job_kind` som faktiskt behöver parametrar bör lägga till en `payload`-kolumn på
+> `mainai_jobs` — inte återuppliva en separat tabell.
 `knowledge_import_jobs` är uttryckligen fil-/ZIP-specifik (`source_filename`, `source_checksum`,
 `source_storage_key`, `file_results` per fil) — att lägga en `job_kind=conversation_backfill`
 där hade gett en massa irrelevanta nullable filfält i varje konversationsjobb. Istället, en ny,
@@ -1211,7 +1263,14 @@ S1A  memory_source_units + document_source_units + KnowledgeClaim.memory_source_
                                             se §4.8:s "Status: PR #30 kontra S1A-implementations-PR:n".
 S1B  messages.sequence_number: expand (nullable) → dual-write-kod → durable historisk
      backfill → verifiering → contract (separat migration: NOT NULL + UNIQUE)
-                                          ← egen PR, kräver S1A inte alls (oberoende spår)
+                                          ← egen PR, kräver S1A inte alls (oberoende spår).
+                                            EXPAND + DUAL-WRITE + BACKFILL + VERIFIERING är
+                                            BYGGDA (migration 0030, PR för
+                                            claude/s1b-message-sequence-number, Pass 42).
+                                            CONTRACT återstår och är GATED på att backfillen
+                                            faktiskt körts mot produktionsdata och att
+                                            count_unsequenced_messages() rapporterar 0 —
+                                            se §4.8:s S1B-statusavsnitt.
 S1C  message_source_units + knowledge_claim_evidence + ägar-/konversationsintegritet +
      backfill Message→MemorySourceUnit
                                           ← kräver S1B:s sequence_number klart, egen PR.

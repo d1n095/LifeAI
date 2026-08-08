@@ -331,6 +331,45 @@ Each document's finding becomes one `MainAIJobProposal` with `source_document_id
 `unexpected` — the job is marked failed with the matching safe category, never with the raw
 exception text.
 
+## `message_sequence_backfill`: the second job type (S1B) — and the first with no AI at all
+
+Added by S1B (migration `0030`, `app/rag/message_sequence_backfill_job.py`). It numbers the
+`messages` rows that predate migration 0030 — see
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.9 for why `messages.sequence_number` exists at
+all, and `app/rag/message_sequence_backfill.py` for the numbering rule.
+
+It is worth reading as the reference example for a NON-AI capability on this runtime, because
+it differs from `corpus_review` in three reviewed ways:
+
+1. **No provider dependency.** `_CAPABILITY_PROVIDER_ROLE["message_sequence_backfill"]` is an
+   explicit `None`, not a missing entry. `None` means "reviewed: this capability genuinely
+   needs no AI provider", so `get_capability_status()` reports it configured and available
+   even with zero providers set up. A capability simply *forgotten* from that dict still fails
+   closed, exactly as before — the two cases are deliberately distinguishable, and
+   `tests/backend/test_message_sequence.py` asserts both directions. This is the founder's
+   "the system must keep working without AI wherever architecturally possible" rule made
+   enforceable rather than aspirational: numbering the founder's own message history must not
+   become unavailable because a model key is missing.
+2. **It modifies existing rows**, which `corpus_review` never does. Its
+   `_CAPABILITY_WRITE_PROFILE` entry says `modifies_existing_data: True` and
+   `writes_new_records: False`, and that is reported to the founder rather than inferred. The
+   modification is strictly `NULL -> an ordinal`; migration 0030's
+   `messages_deny_sequence_number_rewrite` trigger makes overwriting an already-assigned
+   ordinal impossible at the database level, not merely unlikely in this module's code.
+3. **It takes no `input_refs`.** Its scope is "every one of this owner's still-unnumbered
+   messages", derived at execution time. `create_job()` REJECTS non-empty `input_refs` for
+   this job type (422) rather than accepting and ignoring them — accepting refs the executor
+   will never read would let a caller believe it had narrowed the job's scope when it had not,
+   which is precisely the kind of quiet mismatch between what a job claims and what it does
+   that the runtime-truthfulness contract exists to prevent.
+
+One conversation is one unit of work: the lease is renewed and `cancel_requested` re-checked
+before each, and the fenced progress write shares a transaction with the numbering it
+describes, so a worker that loses its lease mid-conversation writes nothing at all (not even
+the numbering). A run that stops at its `MAX_CONVERSATIONS_PER_RUN` cap, or that skipped a
+conversation as conflicting, says so in `public_message` together with exactly how much work
+remains — it never reports completion for work it did not do.
+
 ## Job API
 
 `app/routers/mainai_jobs.py`, `prefix="/api/mainai/jobs"`, every route gated by

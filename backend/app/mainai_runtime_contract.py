@@ -257,22 +257,42 @@ class CapabilityUnavailableError(Exception):
 # able to execute as a durable job. Adding a new job_type without adding it here is a bug,
 # not an oversight this module can auto-discover — see docs/MAINAI_JOB_RUNTIME.md's
 # "capability manifest" section for how a real new capability gets added.
-CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review"})
+CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review", "message_sequence_backfill"})
 
 # Which provider ROLE (see app/providers/registry.py's resolve_active) each capability's
 # actual execution depends on being configured. corpus_review calls chat_with_fallback(), i.e.
 # the "chat" role — a future capability with a different dependency gets its own entry here,
-# never inherits this one by default (fail-closed: an unmapped capability is treated as
-# unconfigured, see get_capability_status below).
-_CAPABILITY_PROVIDER_ROLE: dict[str, str] = {"corpus_review": "chat"}
+# never inherits this one by default (fail-closed: a capability MISSING from this dict is
+# treated as unconfigured, see get_capability_status below).
+#
+# An explicit `None` is NOT the same thing as a missing entry, and the difference is
+# load-bearing: `None` means "this capability was reviewed and genuinely depends on no AI
+# provider at all", which is the founder's standing "the system must keep working without AI
+# wherever that's architecturally possible" rule made enforceable. `message_sequence_backfill`
+# (S1B, app/rag/message_sequence_backfill.py) is pure SQL over rows that already exist —
+# numbering the founder's own message history must not become unavailable because no model key
+# happens to be configured. A capability simply forgotten from this dict still fails closed.
+_CAPABILITY_PROVIDER_ROLE: dict[str, str | None] = {"corpus_review": "chat", "message_sequence_backfill": None}
 
 # corpus_review only ever reads existing documents/document_chunks and writes NEW
 # mainai_job_proposals rows — it never modifies or deletes a founder's existing knowledge
 # (documents/knowledge_claims/memory_source_units). Recorded here, not inferred, so a future
 # capability that DOES modify existing data has to make that an explicit, reviewed choice
 # instead of silently inheriting corpus_review's read-mostly shape.
+#
+# message_sequence_backfill is exactly such a capability and says so: it UPDATEs existing
+# `messages` rows (NULL -> an ordinal). The modification is strictly additive in meaning and
+# migration 0030's `messages_deny_sequence_number_rewrite` trigger makes overwriting an
+# already-assigned ordinal impossible at the database level — but "modifies existing data" is
+# still the truthful answer, and this field is reported to the founder, so it is True.
 _CAPABILITY_WRITE_PROFILE: dict[str, dict] = {
     "corpus_review": {"modifies_existing_data": False, "writes_new_records": True, "sandbox_only": False, "production_prohibited": False},
+    "message_sequence_backfill": {
+        "modifies_existing_data": True,
+        "writes_new_records": False,
+        "sandbox_only": False,
+        "production_prohibited": False,
+    },
 }
 
 
@@ -325,14 +345,21 @@ def get_capability_status(db, capability: str) -> CapabilityStatus:
     from app.config import get_settings  # local import: this module stays DB/provider-free at import time
     from app.providers.registry import resolve_active
 
-    role = _CAPABILITY_PROVIDER_ROLE.get(capability)
+    # `capability not in the dict` (fail closed, stays unconfigured) is deliberately
+    # distinguished from `mapped to None` (reviewed as needing no provider at all, therefore
+    # always configured) — see _CAPABILITY_PROVIDER_ROLE's own comment. A missing entry must
+    # never be silently read as "no provider needed".
     configured = False
-    if role is not None:
-        try:
-            provider, _model = resolve_active(db, role=role)
-            configured = provider.is_configured()
-        except Exception:  # noqa: BLE001 - resolve_active/is_configured failing means "not configured", never a 500 here
-            configured = False
+    if capability in _CAPABILITY_PROVIDER_ROLE:
+        role = _CAPABILITY_PROVIDER_ROLE[capability]
+        if role is None:
+            configured = True
+        else:
+            try:
+                provider, _model = resolve_active(db, role=role)
+                configured = provider.is_configured()
+            except Exception:  # noqa: BLE001 - resolve_active/is_configured failing means "not configured", never a 500 here
+                configured = False
 
     profile = _CAPABILITY_WRITE_PROFILE.get(capability, {})
     sandbox_only = bool(profile.get("sandbox_only"))
