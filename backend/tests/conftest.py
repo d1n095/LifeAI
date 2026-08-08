@@ -79,9 +79,21 @@ def _test_database():
     db_conn.autocommit = True
     with db_conn.cursor() as cur:
         cur.execute(f"GRANT USAGE ON SCHEMA public TO {app_role}")
-        cur.execute(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {app_role}")
+        # SELECT, INSERT, UPDATE, DELETE — matching backend/db-init/01-app-role.sh and
+        # scripts/ensure_app_role.py exactly (this fixture's whole point is to reproduce the
+        # privileges the runtime role really has), NOT "ALL PRIVILEGES". `ALL` would hand the
+        # test suite's app-role sessions TRUNCATE/REFERENCES/TRIGGER that production
+        # deliberately withholds — see _NEVER_GRANTED_TABLE_PRIVS in
+        # backend/scripts/s1a_privilege_policy.py. Keeping this narrow is what makes the rest
+        # of the suite a real regression test for the privilege reduction: every chat,
+        # ingest, backfill, export and account-erasure test below now runs with exactly the
+        # privilege set production grants, so a path that genuinely needed one of the removed
+        # privileges fails here rather than in production.
+        cur.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {app_role}")
         cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {app_role}")
-        cur.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO {app_role}')
+        cur.execute(
+            f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {app_role}"
+        )
         cur.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO {app_role}')
     db_conn.close()
 
