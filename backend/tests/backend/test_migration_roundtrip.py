@@ -90,7 +90,34 @@ def _schema_snapshot() -> dict:
     CHECK constraints in more detail (full definition text, not just a name), but nothing
     before this covered composite FKs, UNIQUE constraints, or triggers at all, and migration
     0027 adds exactly those (a composite FK on each child table, a UNIQUE(id, owner_id) on
-    `mainai_jobs`, and append-only-enforcement triggers on both child tables)."""
+    `mainai_jobs`, and append-only-enforcement triggers on both child tables).
+
+    Pass 43, the same gap once more — this time for INDEXES and RLS. Migration 0031
+    (`messages` owner isolation) adds exactly one index and one row-level-security policy and
+    nothing else: no table, column, enum label, CHECK, named constraint, trigger or function.
+    Every fingerprint above is completely blind to that, so `downgrade -1` compared equal and
+    the "must actually change the schema" assertion below fired — the fifth time this test has
+    caught its own snapshot being narrower than the migration in front of it (0020, 0024,
+    0027, and now 0031). Worse than the failure itself: had the snapshot merely been narrow
+    without that guard, this test would have silently reported migration 0031's downgrade as
+    verified while checking nothing about it at all.
+
+    Two new fingerprints close it:
+      * `indexes:<table>` — every index's name AND its full `pg_indexes.indexdef` text, so a
+        migration that redefines an existing index (changing its columns, uniqueness, or
+        WHERE clause) is caught too, not just one that adds or drops a name. This also covers
+        migration 0030's partial unique index, which was previously invisible here.
+      * `rls:<table>` — whether row-level security is ENABLED and whether it is FORCEd, plus
+        every policy's name, command, permissive flag, roles, USING and WITH CHECK text. RLS
+        is a security boundary, so "the schema was restored exactly" has to mean the policies
+        came back with the same predicates — a downgrade/upgrade cycle that restored a policy
+        NAME while quietly widening its expression is precisely the failure that must not pass
+        as a clean round trip.
+
+    Both are keyed per table and built by iterating `tables`, so they contribute zero keys
+    once no application tables remain — preserving
+    test_full_migration_chain_downgrades_to_base_and_back_to_head's `after_downgrade == {}`
+    assertion, exactly like every fingerprint above."""
     migration_engine.dispose()  # drop pooled connections so the inspector sees the current schema, not a stale cached one
     inspector = inspect(migration_engine)
     tables = [t for t in inspector.get_table_names() if t != "alembic_version"]
@@ -110,6 +137,51 @@ def _schema_snapshot() -> dict:
         constraint_names.update(ck["name"] for ck in checks if ck.get("name"))
         if constraint_names:
             snapshot[f"constraints:{table}"] = frozenset(constraint_names)
+    with migration_engine.connect() as conn:
+        index_rows = conn.execute(
+            sa_text("SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = 'public'")
+        ).all()
+        policy_rows = conn.execute(
+            sa_text(
+                "SELECT tablename, policyname, cmd, permissive, roles::text, "
+                "       coalesce(qual, ''), coalesce(with_check, '') "
+                "FROM pg_policies WHERE schemaname = 'public'"
+            )
+        ).all()
+        rls_flag_rows = conn.execute(
+            sa_text(
+                "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity "
+                "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND c.relkind = 'r'"
+            )
+        ).all()
+
+    table_set = set(tables)
+
+    indexes_by_table: dict[str, set[tuple[str, str]]] = {}
+    for table_name, index_name, index_def in index_rows:
+        if table_name in table_set:
+            indexes_by_table.setdefault(table_name, set()).add((index_name, index_def))
+    for table_name, entries in indexes_by_table.items():
+        snapshot[f"indexes:{table_name}"] = frozenset(entries)
+
+    # RLS state is recorded for every application table, not only the ones that currently have
+    # a policy: "this table has RLS enabled and zero policies" (a silent, total default-deny)
+    # must be distinguishable from "this table has RLS enabled and its policy" — and from
+    # "RLS was never enabled here at all". A downgrade that dropped a policy but left FORCE in
+    # place would otherwise look identical to one that cleanly undid both.
+    policies_by_table: dict[str, set[tuple]] = {}
+    for row in policy_rows:
+        table_name = row[0]
+        if table_name in table_set:
+            policies_by_table.setdefault(table_name, set()).add(tuple(row[1:]))
+    for table_name, enabled, forced in rls_flag_rows:
+        if table_name not in table_set:
+            continue
+        if not enabled and not forced and table_name not in policies_by_table:
+            continue  # plain, never-RLS-enabled table — contributes nothing, same as above
+        snapshot[f"rls:{table_name}"] = (enabled, forced, frozenset(policies_by_table.get(table_name, ())))
+
     with migration_engine.connect() as conn:
         trigger_rows = conn.execute(
             sa_text("SELECT event_object_table, trigger_name FROM information_schema.triggers")

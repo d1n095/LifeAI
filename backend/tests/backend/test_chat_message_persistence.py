@@ -50,6 +50,28 @@ def _login(client) -> str:
     return res.json()["csrf_token"]
 
 
+def _latest_message(superuser_db, role: MessageRole) -> MessageModel | None:
+    """Reads back what the endpoint actually persisted, on the SUPERUSER connection.
+
+    These assertions used the restricted `db_session` fixture until migration 0031 gave
+    `messages` an RLS policy of its own. They cannot any more, and should not have: this
+    ad-hoc test session never goes through app/deps.py, so it has no `app.current_user_id`
+    bound, and a restricted read here now correctly returns nothing. That is not a change in
+    what the endpoint stores — the rows are there either way, as the superuser read below
+    proves — only in what an unscoped connection is permitted to see.
+
+    Using superuser_db is what conftest.py's own fixture docstring prescribes for exactly this
+    situation: verifying that a row genuinely exists is ambiguous on the restricted role,
+    because zero rows could mean "never written" or "written and hidden". Keeping these on
+    db_session would have meant weakening the policy to keep a test convenient."""
+    return (
+        superuser_db.query(MessageModel)
+        .filter_by(role=role)
+        .order_by(MessageModel.created_at.desc(), MessageModel.id.desc())
+        .first()
+    )
+
+
 def _fake_chat_ok(content: str = "Testsvar."):
     async def _chat(self, messages, model, **kwargs):
         return ChatResult(content=content, provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
@@ -82,7 +104,7 @@ def test_provider_succeeds_returns_full_contract(client, monkeypatch):
     assert body["assistant_message_id"] is not None
 
 
-def test_provider_fails_before_producing_output_saves_user_message(client, db_session, monkeypatch):
+def test_provider_fails_before_producing_output_saves_user_message(client, superuser_db, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_missing_key)
     csrf = _login(client)
     res = client.post("/api/chat", json={"message": "Ett meddelande som inte får försvinna."}, headers={"X-CSRF-Token": csrf})
@@ -102,7 +124,7 @@ def test_provider_fails_before_producing_output_saves_user_message(client, db_se
 
     # The actual fix: the user's message is genuinely in the database, not just in the
     # response body of this one request.
-    saved = db_session.query(MessageModel).filter_by(role=MessageRole.user).order_by(MessageModel.created_at.desc()).first()
+    saved = _latest_message(superuser_db, MessageRole.user)
     assert saved is not None
     assert saved.content == "Ett meddelande som inte får försvinna."
     assert saved.status == MessageStatus.succeeded  # the USER message itself always succeeded
@@ -141,7 +163,7 @@ def test_reload_confirms_user_message_remains_after_provider_failure(client, mon
 # --- D/F: retry never duplicates, and is idempotent once succeeded ---------------------------
 
 
-def test_retry_does_not_duplicate_the_user_message_and_can_eventually_succeed(client, db_session, monkeypatch):
+def test_retry_does_not_duplicate_the_user_message_and_can_eventually_succeed(client, superuser_db, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_missing_key)
     csrf = _login(client)
     sent = client.post("/api/chat", json={"message": "Fixa detta senare."}, headers={"X-CSRF-Token": csrf})
@@ -159,9 +181,9 @@ def test_retry_does_not_duplicate_the_user_message_and_can_eventually_succeed(cl
     assert retried_body["reply"] == "Nu funkar det."
     assert retried_body["user_message_id"] == user_message_id
 
-    user_rows = db_session.query(MessageModel).filter_by(id=user_message_id).all()
+    user_rows = superuser_db.query(MessageModel).filter_by(id=user_message_id).all()
     assert len(user_rows) == 1  # never duplicated
-    assistant_rows = db_session.query(MessageModel).filter_by(in_reply_to_id=user_message_id).all()
+    assistant_rows = superuser_db.query(MessageModel).filter_by(in_reply_to_id=user_message_id).all()
     assert len(assistant_rows) == 1  # updated in place, not a second row
     assert assistant_rows[0].status == MessageStatus.succeeded
 
@@ -216,7 +238,7 @@ def test_embedding_failure_degrades_to_ungrounded_reply_when_chat_still_works(cl
     assert body["sources"] == []
 
 
-def test_embedding_failure_with_no_provider_at_all_returns_clean_failed_contract(client, db_session, monkeypatch):
+def test_embedding_failure_with_no_provider_at_all_returns_clean_failed_contract(client, superuser_db, monkeypatch):
     # The exact incident: no provider configured (or none reachable) for EITHER role. Before
     # the fix, retrieve_context()'s ProviderError propagated out of _attempt_assistant_reply()
     # unhandled, past chat_with_fallback()'s own try/except (never reached), producing a raw
@@ -232,7 +254,7 @@ def test_embedding_failure_with_no_provider_at_all_returns_clean_failed_contract
     assert body["error_category"] == "unreachable"
     assert body["retryable"] is True
 
-    saved = db_session.query(MessageModel).filter_by(role=MessageRole.user).order_by(MessageModel.created_at.desc()).first()
+    saved = _latest_message(superuser_db, MessageRole.user)
     assert saved is not None
     assert saved.content == "Fungerar du utan nyckel?"
 
@@ -240,7 +262,7 @@ def test_embedding_failure_with_no_provider_at_all_returns_clean_failed_contract
 # --- H: the execution-truthfulness sanitizer fires through the real HTTP boundary ------------
 
 
-def test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real_endpoint(client, db_session, monkeypatch):
+def test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real_endpoint(client, superuser_db, monkeypatch):
     """Founder re-review round (PR #36), item #3 (fourth pass): the model itself is untrusted —
     nothing stops an LLM from producing "jag arbetar med det i bakgrunden" as ordinary free
     text. This proves app/mainai_runtime_contract.py's sanitize_unverified_execution_claims()
@@ -259,7 +281,7 @@ def test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real
     assert "jag återkommer" not in body["reply"].lower()
     assert "MainAI" in body["reply"]  # a visible, honest MainAI correction still present
 
-    saved = db_session.query(MessageModel).filter_by(role=MessageRole.assistant).order_by(MessageModel.created_at.desc()).first()
+    saved = _latest_message(superuser_db, MessageRole.assistant)
     assert saved is not None
     assert "jag arbetar med det i bakgrunden" not in saved.content.lower()
 
