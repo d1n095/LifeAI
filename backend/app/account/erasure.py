@@ -200,7 +200,7 @@ from app.models.user import User
 from app.rag.blob_references import acquire_owner_erasure_lock, acquire_storage_key_lock, storage_key_still_referenced
 from app.storage import StorageError, get_storage
 
-logger = logging.getLogger("mainai.rag.account_erasure")
+logger = logging.getLogger("mainai.account.erasure")
 
 ERASURE_REASON = "account_erasure"
 
