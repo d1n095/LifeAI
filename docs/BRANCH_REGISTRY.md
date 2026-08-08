@@ -12,19 +12,22 @@ Grundaren körde därefter en fullt verifierad produktionsdeploy av den basen; p
 frisk och stabil. Ingen del av den här sessionen har rört VPS:en, deployen, eller kört någon
 backfill mot produktionsdata.
 
-**NY BRANCH: `claude/s1b-message-sequence-number` → PR #39 (draft, öppen, INTE mergad).** Grenad
-från exakt `d5f37c2b798f7ae430a908037608d9c19e29cc70`, verifierat med `git ls-remote` innan
-branchen skapades — inte memorerat. Full CI verifierad grön på headen (samtliga jobb `success`
-eller path-filtrerat `skipped`, inklusive det aggregerande `All required checks passed`).
-Blockerar ingen annan branch; blockeras inte av något. Kan mergas oberoende när grundaren
-godkänt den — och bör mergas FÖRE en framtida S1C-branch, som per §8 kräver S1B. Innehåller S1B:s fyra första steg (expand, dual-write, durabel
-historisk backfill, verifiering) enligt §4.8:s "Fasad migrationsplan" och §8:s byggordning.
-CONTRACT-steget ingår MEDVETET INTE. Se Pass 42 nedan för fullständig detalj, inklusive vad som
-uttryckligen INTE är gjort och vilken kvarstående risk som är känd men inte åtgärdad i den här
-PR:en (`messages` saknar fortfarande egen RLS-policy — ett PRE-EXISTERANDE förhållande, inte
-något den här PR:en introducerar, och medvetet inte fixat här; se Pass 42:s riskavsnitt).
+**PR #39 är MERGAD** (`claude/s1b-message-sequence-number` → `claude/det-kommer-mer-879lcm`),
+merge-commit `37162c4496026e1d2e9364e9e1ee4720f570ed7f` (parents:
+`d5f37c2b798f7ae430a908037608d9c19e29cc70` och `294878b4d387d25e3bd69dd6946dde104eeee5d7` — en
+riktig tvåparent-merge), efter grundarens uttryckliga merge-godkännande på den exakta
+head-SHA:n. `merged_by`: `d1n095`. Basgrenens nuvarande tip är `37162c4496026e1d2e9364e9e1ee4720f570ed7f`.
+Full förhandsverifiering (head oförändrad, base `claude/det-kommer-mer-879lcm`, alla 18
+CI-checkar gröna, migrationsformelns invariant, advisory-lock-korrekthet, ägarisolering,
+lease/fencing/cancel-semantik, ingen read path bytt för tidigt, CONTRACT genuint exkluderad,
+downgrade-risk dokumenterad, exakt en Alembic-head, 0 unresolved review threads) gjordes
+direkt innan merge — se Pass 42 nedan för full detalj. S1B finns nu i huvudlinjen.
+**Produktionssteget (migration 0030 mot produktion, sedan `message_sequence_backfill`-jobbet)
+väntar** tills server-/domänsituationen är tillbaka eller grundaren medvetet väljer ett annat
+sätt att nå VPS:en — ingen del av denna session har rört VPS:en eller kört någon backfill mot
+produktionsdata.
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-07, mot GitHubs PR-API direkt
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-08, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat). **PR #36 är MERGAD**
 (`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit
 `af4194ba1d913da56507f427c2af9d336138bf7e` (parents: `ceb6cb93b38cca69dd450eb5ce5a50632c197e8a`
