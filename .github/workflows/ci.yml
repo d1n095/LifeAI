@@ -366,9 +366,9 @@ jobs:
           psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_e2e;"
           psql -h localhost -U postgres -d lifeos_e2e -c "
             GRANT USAGE ON SCHEMA public TO mainai_app;
-            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
             GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
-            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
             ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;
           "
       - run: alembic upgrade head
@@ -376,7 +376,7 @@ jobs:
 
       # Mirrors backend/docker-entrypoint.sh's real boot order (ensure_app_role ->
       # alembic upgrade head -> apply_runtime_privileges -> start app). Without this step,
-      # the "GRANT ALL PRIVILEGES ON ALL TABLES" above never narrows mainai_app, but it also
+      # the broad table grant above never narrows mainai_app, but it also
       # never GRANTs EXECUTE on the S1A SECURITY DEFINER functions (erase_owner_memory,
       # transition_own_memory_source, storage_key_still_referenced_global) — those functions
       # REVOKE EXECUTE FROM PUBLIC in their own migrations, so only this policy script's
@@ -537,9 +537,9 @@ jobs:
           psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_proxy_e2e;"
           psql -h localhost -U postgres -d lifeos_proxy_e2e -c "
             GRANT USAGE ON SCHEMA public TO mainai_app;
-            GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
             GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
-            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
             ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;
           "
       - run: alembic upgrade head

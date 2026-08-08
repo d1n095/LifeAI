@@ -27,15 +27,27 @@ väntar** tills server-/domänsituationen är tillbaka eller grundaren medvetet 
 sätt att nå VPS:en — ingen del av denna session har rört VPS:en eller kört någon backfill mot
 produktionsdata.
 
-**ÖPPEN PR: #42** (`claude/messages-rls-owner-isolation` → `claude/det-kommer-mer-879lcm`),
-grenad från exakt `e3234b501510882e3fb4c8ab1aeb9fb593080836` — basgrenens tip, verifierad med
-`git ls-remote origin` och bekräftad innehålla PR #39, #40 och #41. Ger `messages` en egen
-RLS-policy (migration 0031), den risk Pass 42 flaggade och uttryckligen sköt till en egen
-branch/PR. **Fristående** — beror inte på någon annan branch, blockerar ingen, väntar inte på
-något beroende. **Bör mergas innan S1C påbörjas** (S1C är det första som skannar `messages` i
-bulk). Kräver INGEN produktion, ingen VPS, ingen migration mot produktion och ingen backfill:
-policyn härleder ägaren ur `conversations` och är korrekt oavsett om `sequence_number` är
-NULL, ifylld eller halvvägs. Se Pass 43 nedan för full detalj. INTE mergad.
+**PR #42 är MERGAD** (`claude/messages-rls-owner-isolation` → `claude/det-kommer-mer-879lcm`),
+merge-commit `45c2dec0b6a3557f96d45bf7beb5650490d40c3b`, head vid merge
+`dd93d96a1c45ae41a59b621b0d8d2659804f0148`, `merged_by`: `d1n095`, `merged_at`
+2026-08-08T12:10:09Z. Verifierat 2026-08-08 mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`, `state: closed`, `merged: true`) och mot `git ls-remote
+origin` — inte memorerat. Gav `messages` en egen RLS-policy (migration 0031), den risk Pass 42
+flaggade och uttryckligen sköt till en egen branch/PR. Basgrenens nuvarande tip är därmed
+`45c2dec0b6a3557f96d45bf7beb5650490d40c3b`. Se Pass 43 nedan för full detalj.
+**Produktionssteget är fortfarande inte taget** — ingen del av PR #42 eller PR #43 har rört
+VPS:en, deployen eller kört någon backfill mot produktionsdata.
+
+**ÖPPEN PR: #43** (`claude/least-privilege-revoke-truncate` → `claude/det-kommer-mer-879lcm`),
+grenad från exakt `45c2dec0b6a3557f96d45bf7beb5650490d40c3b` (basgrenens tip, verifierad med
+`git ls-remote origin` INNAN branchen skapades). Tar hand om det enda medvetet uppskjutna,
+icke-blockerande fyndet från PR #42:s oberoende säkerhetsgranskning: `mainai_app` hade
+`TRUNCATE` på `messages`, och **RLS gäller inte för TRUNCATE**. **Fristående** — beror inte på
+någon annan branch, blockerar ingen, väntar inte på något beroende. Kräver INGEN produktion,
+ingen VPS, ingen migration mot produktion och ingen backfill; ingen migration alls läggs till
+(se Pass 44 för varför det vore fel i det här repot). **Bör mergas innan S1C påbörjas**, av
+samma skäl som PR #42: S1C är det första som skannar `messages` i bulk. Se Pass 44 nedan för
+full detalj. INTE mergad.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-08, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat). **PR #36 är MERGAD**
@@ -226,6 +238,155 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 44 (2026-08-08): `mainai_app` fråntas TRUNCATE/REFERENCES/TRIGGER schemabrett — PR #42:s uppskjutna säkerhetsfynd
+
+**Branch:** `claude/least-privilege-revoke-truncate`, grenad från exakt
+`45c2dec0b6a3557f96d45bf7beb5650490d40c3b` (basgrenens verifierade tip — SHA:n hämtad med
+`git ls-remote origin` INNAN branchen skapades, inte memorerad; det är också PR #42:s
+merge-commit). **PR #43**, öppen mot `claude/det-kommer-mer-879lcm`, INTE mergad.
+
+### Fyndet
+
+PR #42:s oberoende säkerhetsgranskning lämnade efter sig ett medvetet uppskjutet,
+icke-blockerande fynd: runtime-rollen `mainai_app` hade `TRUNCATE` på `messages` — och
+**Postgres RLS gäller inte för TRUNCATE**. TRUNCATE är en heltabellsoperation; ingen
+`USING`/`WITH CHECK` utvärderas någonsin, så migration 0031:s alldeles nya ägarisolering låg
+helt utanför kodvägen. En enda `TRUNCATE messages` från en komprometterad request-väg hade
+raderat samtliga ägares meddelanden på en gång, med RLS både `enabled` och `forced`, utan att
+bryta mot en enda policy.
+
+Granskningen konstaterade också att fyndet **inte var specifikt för `messages`**: samma
+blanka grant fanns identiskt på `conversations`, `documents`, `document_chunks` och alla
+andra tabeller, som en projektbred konsekvens av `GRANT ALL PRIVILEGES ON ALL TABLES` i
+`ensure_app_role.py` / `db-init/01-app-role.sh`.
+
+Det här korrigerar också en formulering i PR #42:s egen beskrivning (punkt 6 under "Vad som
+uttryckligen INTE är gjort"): *"Ingen privilegie-omsmalning på `messages` — runtime-rollen ska
+legitimt kunna uppdatera och radera meddelanderader, så det finns ingen överflödig privilegie
+att återkalla."* Första halvan är korrekt och står fast — alla fyra DML-privilegier används
+genuint. Andra halvan var för snäv: `ALL` innebar också TRUNCATE/REFERENCES/TRIGGER, som
+ingen kodväg använder.
+
+### Mätt läge FÖRE (inte härlett ur GRANT-satser)
+
+Mot en riktig lokal Postgres 16.13 med hela migrationshistoriken (t.o.m. 0031) applicerad,
+mätt med `has_table_privilege` per (tabell, privilegie): `mainai_app` hade **samtliga sju
+privilegier på samtliga 39 tabeller** i schema public — inklusive `messages`,
+`conversations`, `documents`, `document_chunks` och `alembic_version`. Efter att den
+befintliga boot-policyn körts smalnades endast de fyra S1A-tabellerna; de övriga 35 behöll
+alla sju.
+
+### Vad som ändrades
+
+**Ingen migration.** Det här repot lägger medvetet aldrig literal `GRANT`/`REVOKE` som nämner
+`mainai_app` i en migration (utförligt dokumenterat i 0019, 0020, 0021, 0022, 0027, 0030):
+rollen finns inte nödvändigtvis på en färsk CI-databas, och en REVOKE som körs en gång vid
+migrationstillfället undanröjs tyst av nästa boots `GRANT ALL` (Pass 12:s
+boot-persistensincident). Rätt mekanism är den befintliga boot-policyn, som är idempotent och
+körs om vid varje containerstart.
+
+1. **`backend/scripts/s1a_privilege_policy.py`** — ny schemabred golvregel
+   `_NEVER_GRANTED_TABLE_PRIVS = ["TRUNCATE", "REFERENCES", "TRIGGER"]`, som både **tillämpas**
+   och **verifieras** mot varje tabell i `pg_tables` (dynamiskt uppslagen, aldrig en hårdkodad
+   lista — en tabell som en framtida migration lägger till täcks första gången detta körs
+   efteråt, utan att någon behöver komma ihåg att uppdatera filen). Verifieringen körs i BÅDE
+   muterande och read-only-läge, så durable-workerns `--verify-only` kan fela stängt.
+2. **`ensure_app_role.py` / `db-init/01-app-role.sh`** — slutar ge `ALL PRIVILEGES` på tabeller
+   överhuvudtaget; ger `SELECT, INSERT, UPDATE, DELETE`. (`ALL PRIVILEGES ON ALL SEQUENCES`
+   lämnas medvetet orört — en sekvens har inga TRUNCATE/REFERENCES/TRIGGER, och `nextval()`
+   behöver den.)
+3. **`.github/workflows/ci.yml`** — båda Playwright-E2E-jobben provisionerar `mainai_app`
+   själva och gjorde det med `GRANT ALL`; smalnade till samma fyra DML-privilegier, så E2E
+   inte längre kör med en privilegieform produktionen saknar.
+4. **`backend/tests/conftest.py`** — samma omsmalning. Det är detta som gör **hela den
+   befintliga sviten** till regressionstestet för ändringen: varje chat-, ingest-, backfill-,
+   export- och kontoraderingstest kör nu med exakt produktionens privilegieuppsättning.
+
+### Varför just dessa tre, och varför inte DML
+
+- **TRUNCATE** — ingenting i `backend/app/` eller `backend/scripts/` utfärdar en enda. All
+  bulkradering sker som radscopad `DELETE` via SQLAlchemy (`app/rag/account_erasure.py`,
+  `delete_document_chunks()` i `app/rag/vector_store.py`), vilket förblir RLS-filtrerat. Den
+  enda TRUNCATE som finns i repot är testfixturen `_clean_tables`, som kör på
+  **admin-anslutningen**, aldrig som `mainai_app`.
+- **REFERENCES / TRIGGER** — rena DDL-privilegier, används uteslutande av Alembic via
+  admin-rollen. Att avfyra en BEFINTLIG trigger kräver aldrig att den DML-utfärdande rollen
+  har TRIGGER, så 0030:s sekvensnumreringstriggrar och 0019:s `trg_msu_no_delete`-vakter
+  påverkas inte.
+- **SELECT/INSERT/UPDATE/DELETE behålls medvetet** — alla fyra används genuint på
+  användardatatabellerna. Enbart `messages` behöver alla fyra: SELECT/INSERT i
+  `app/routers/chat.py`, UPDATE i `app/rag/message_sequence_backfill.py`s
+  `UPDATE messages m SET sequence_number = ...`, DELETE i `app/rag/account_erasure.py`.
+
+### Den halva som är lätt att göra kosmetisk — MÄTT, inte antaget
+
+`ALTER DEFAULT PRIVILEGES ... GRANT` är **additiv**, inte ersättande. Att skriva om det
+historiska `GRANT ALL PRIVILEGES ON TABLES` till ett smalare fyra-privilegiers-GRANT lämnar
+den lagrade ACL-posten kvar på fulla `mainai_app=arwdDxt/lifeos` — mätt oförändrad — så varje
+tabell en FRAMTIDA migration skapar hade fortfarande fått TRUNCATE med sig, och golvet hade
+tyst rivits en migration senare. Endast en explicit `ALTER DEFAULT PRIVILEGES ... REVOKE
+TRUNCATE, REFERENCES, TRIGGER ON TABLES FROM mainai_app` nollar bitarna (till
+`mainai_app=arwd/lifeos`). Bevisat genom att skapa en genuint ny tabell som migrationsrollen
+efteråt och mäta vad `mainai_app` faktiskt ärvde. Samma sak gäller befintliga databaser: en
+GRANT tar aldrig bort privilegier, så varje redan deployad databas behåller sin vida ACL tills
+något REVOKE:ar den — därför krävs BÅDA halvorna, och därför räcker det inte att bara ändra
+bootstrap-skripten.
+
+### Verifiering
+
+- **Uppmätt läge EFTER:** samtliga 39 tabeller har `TRUNCATE/REFERENCES/TRIGGER = nej`;
+  `messages`, `conversations`, `documents`, `document_chunks` behåller exakt de fyra
+  DML-privilegierna; S1A-tabellernas egen, snävare omsmalning är bevarad oförändrad
+  (`memory_source_units`/`document_source_units` SELECT+INSERT,
+  `memory_source_lifecycle_events` SELECT, `storage_deletion_tasks` inga alls).
+- **Mutationstest mot den RIKTIGA runtime-rollen:** `TRUNCATE messages` som `mainai_app` ger
+  `ERROR: permission denied for table messages`, medan `SELECT count(*) FROM messages` på
+  samma anslutning fungerar.
+- **Hela boot-sekvensen körd mot en "legacy"-formad databas** (dvs. en som redan fått
+  `GRANT ALL`): `ensure_app_role.py` → `alembic upgrade head` → `apply_runtime_privileges.py`
+  → `--verify-only`. TRUNCATE var borta redan **efter steg 1**, dvs. i samma transaktion som
+  den breda granten — så ett deploy-krasch mellan skripten lämnar det aldrig öppet.
+- **Fail-closed bevisat:** efter ett medvetet `GRANT TRUNCATE ON messages TO mainai_app`
+  rapporterar `--verify-only` exakt fel rad och avslutar med **exit code 1** (workern når
+  aldrig `exec "$@"`); nästa muterande boot självläker tillståndet.
+- **17 nya/ändrade testfiler → 14 nya tester**, alla gröna, skrivna i
+  `test_rls_policy_registry.py`s etablerade stil (påståenden mot Postgres egen levande
+  katalog, aldrig mot GRANT-satsers text).
+- **Mutationstestad testsvit:** med conftest tillfälligt återställd till `GRANT ALL` föll
+  **6 av 14** tester, inklusive mutationstestet på alla fyra namngivna tabellerna (TRUNCATE
+  lyckades) — testerna är alltså inte vakuöst gröna. Återställdes därefter.
+- **Fulla sviter lokalt:** `tests/backend/` **971 passed, 1 skipped**; `tests/security/`
+  **29 passed**; `tests/account/` **48 passed**.
+- **Känd, pre-existerande flaka (INTE orsakad av den här diffen):**
+  `test_storage_local_fs.py::test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`
+  — samma blob-/trådrace-familj som Pass 37, 41, 42 och 43 redan dokumenterat. Verifierat
+  genom att stasha hela diffen och köra om sviten på den orörda basen `45c2dec`, där **två**
+  tester ur samma fil föll (`956 passed, 2 failed`) mot **ett** på den här branchen. Testet
+  är ren filsystem-/trådkapplöpning (`tmp_path`, `LocalFilesystemStorage`, fcntl-lås) och rör
+  varken Postgres, `mainai_app` eller något privilegie; det passerar i isolerad körning.
+
+### EXPAND/CONTRACT-resonemang (explicit, inte antaget)
+
+Det här är en privilegieändring, inte en data- eller schemaändring, och den är
+**enstegssäker i båda riktningarna under en rullande deploy**: ingen kodväg som är i drift i
+dag använder något av de tre privilegierna, så en gammal container beter sig identiskt mot en
+omsmalnad databas, och en ny container mot en ännu inte omsmalnad. Ingen expand/contract-delning
+behövs, och ingen CONTRACT-migration införs.
+
+### Medvetet INTE gjort
+
+1. **Ingen RLS-semantik ändrad** — noll `CREATE POLICY` tillagd, borttagen eller ändrad;
+   migration 0031:s policyer är orörda.
+2. **Ingen migration tillagd** (se ovan för varför det vore fel mönster här).
+3. **Ingen deploy, ingen VPS-kontakt, ingen produktionsmigration, ingen
+   `message_sequence_backfill`-körning, ingen CONTRACT-migration, inget S1C-arbete.**
+4. **Ingen ytterligare DML-omsmalning per tabell.** T.ex. hittades ingen kodväg som gör
+   `UPDATE` på `document_chunks`, men att ta bort den kräver uttömmande bevis per tabell och
+   har verklig regressionsrisk — det hör hemma i en egen branch/PR med egna mutationstester,
+   enligt `CLAUDE.md`s isoleringsprincip. Posten står kvar under "Risk för dubbelarbete"
+   nedan tills den är avgjord.
+5. **Ingen merge.**
 
 ## Pass 43 (2026-08-08): `messages` får egen RLS-policy (migration 0031) — den risk Pass 42 flaggade men medvetet inte löste
 
@@ -3658,6 +3819,18 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Rekommenderad merge-ordning (nuläge)
 
+**Aktuellt läge 2026-08-08 (verifierat mot GitHubs PR-API, `state: open`-listning):** exakt
+**en** öppen PR finns — **PR #43** (`claude/least-privilege-revoke-truncate`). Den är
+fristående, blockeras inte av något och blockerar inget. Den enda ordningsrekommendationen är
+att den, liksom PR #42, **bör mergas innan S1C påbörjas** (S1C är det första som skannar
+`messages` i bulk, och privilegiegolvet är billigast att verifiera innan bulkskannarna finns).
+Ingen ombasering behövs: den är grenad från basgrenens nuvarande tip
+`45c2dec0b6a3557f96d45bf7beb5650490d40c3b`.
+
+Listan nedan är den historiska ordningen och behålls som spårbarhet — punkterna 4 och 5 nedan
+speglar ett äldre läge (PR #31 är sedan länge mergad, se Pass 35) och ska läsas som historik,
+inte som nuläge.
+
 1. ~~PR #9~~, ~~#11~~, ~~#10~~, ~~#7~~, ~~#8~~, ~~#14~~, ~~#13~~, ~~#16~~, ~~#17~~, ~~#18~~,
    ~~#19~~, ~~#22~~, ~~#23~~, ~~#24~~, ~~#25~~, ~~#27~~, ~~#28~~, ~~#29~~, ~~#30~~ — samtliga
    mergade i huvudgrenen (se Pass 4/5/7/10-25-avsnitten ovan). ~~PR #4~~, ~~PR #6~~, ~~PR #26~~
@@ -3761,6 +3934,23 @@ Ingen känd, aktiv risk för dubbelarbete just nu. P7A:s bas är föråldrad (se
 branchen är fryst, så ingen aktiv utvecklingsrisk finns förrän ett beslut tas att återuppta
 den — vid det laget måste den ombaseras mot huvudgrenens då-aktuella tip, inte mot P2:s
 gamla tip.
+
+### Öppna uppföljningsposter (står kvar tills de är lösta)
+
+- **Per-tabell DML-omsmalning av `mainai_app` (från Pass 44).** Pass 44 tog bort
+  TRUNCATE/REFERENCES/TRIGGER schemabrett, men behöll SELECT/INSERT/UPDATE/DELETE överallt.
+  Under kartläggningen hittades ingen kodväg som gör `UPDATE` på `document_chunks`, och flera
+  tabeller (t.ex. `alembic_version`) har sannolikt inget behov av full DML alls från
+  runtime-rollen. Att ta bort dem kräver uttömmande bevis per tabell plus mutationstester och
+  har verklig regressionsrisk — därför medvetet INTE gjort i PR #43, enligt `CLAUDE.md`s
+  isoleringsprincip. Egen branch/PR när det tas upp. **Överlappar med `_PROTECTED_TABLES` i
+  `backend/scripts/s1a_privilege_policy.py`** — bygg vidare där, skapa ingen konkurrerande
+  mekanism.
+- **Det tyst trasiga testidiomet `try: commit(); assert False; except Exception: rollback()`**
+  (från Pass 43) — två pre-existerande förekomster kvar i
+  `tests/security/test_rls_isolation.py` (`test_cannot_write_document_for_another_user`,
+  `test_cannot_write_document_chunk_for_another_user`). Egen, liten PR som kan mutationstestas
+  för sig. Inte rörd av PR #43.
 
 Innan en ny branch/implementation påbörjas: jämför dess tilltänkta scope mot ALLA rader i
 tabellerna ovan, inte bara den senaste. Om något överlappar, uppdatera det här avsnittet

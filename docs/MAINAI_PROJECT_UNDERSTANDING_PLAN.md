@@ -656,6 +656,55 @@ Det här skrivs in i den kanoniska designen HÄR, men implementeras (det faktisk
 kopplingen i `docker-entrypoint.sh`, motsvarigheten i `db-init/`) i S1A:s
 implementations-PR tillsammans med migrationen — inte i det här design-only-PR:et.
 
+##### Schemabrett privilegiegolv: `mainai_app` får ALDRIG TRUNCATE/REFERENCES/TRIGGER (Pass 44)
+
+Allt ovan beskriver en **per-tabell**-modell för de S1A-skyddade proveniens-tabellerna. Den
+lämnade en projektbred lucka som PR #42:s oberoende säkerhetsgranskning hittade och medvetet
+sköt till en egen PR (#43): eftersom `ensure_app_role.py`/`db-init/01-app-role.sh` beviljade
+`GRANT ALL PRIVILEGES ON ALL TABLES`, höll `mainai_app` **samtliga sju tabellprivilegier på
+samtliga tabeller** som inte stod med i den per-tabell-listan — inklusive `messages`,
+`conversations`, `documents` och `document_chunks`.
+
+Det farliga av dem är `TRUNCATE`, och skälet är principiellt, inte gradskillnad:
+
+> **Postgres RLS gäller inte för `TRUNCATE`.** `TRUNCATE` är en heltabellsoperation, inte en
+> radscopad — ingen `USING`- eller `WITH CHECK`-klausul utvärderas någonsin. En RLS-policy,
+> hur korrekt och `FORCE`:ad den än är, ligger helt utanför kodvägen.
+
+Det innebär att hela §4.8:s och `app/rls.py`s ägarisolering kunde kringgås av en enda sats,
+utan att någon policy bröts. `REFERENCES` och `TRIGGER` är rena DDL-privilegier som endast
+Alembic (admin-rollen) använder; `TRIGGER` är dessutom det enda privilegiet här som låter en
+icke-ägare koppla nytt beteende till en tabell den inte äger.
+
+**Kanonisk regel, från och med nu:** `mainai_app` håller aldrig `TRUNCATE`, `REFERENCES` eller
+`TRIGGER` på NÅGON tabell i schema `public`. Golvet ligger i
+`_NEVER_GRANTED_TABLE_PRIVS` (`backend/scripts/s1a_privilege_policy.py`), tillämpas och
+verifieras vid varje boot av samma två anropare som redan kör per-tabell-policyn, och slår upp
+tabellerna **dynamiskt ur `pg_tables`** — inte ur en hårdkodad lista, så en tabell som en
+framtida migration inför täcks automatiskt utan att någon behöver komma ihåg det. Den
+per-tabell-modellen ovan ligger kvar och är strikt snävare där den gäller; de två lagren
+konkurrerar inte.
+
+Två konsekvenser som är lätta att missa, båda uppmätta mot en riktig Postgres 16 snarare än
+antagna:
+
+1. **Att bara smalna själva GRANT-satsen är verkningslöst på en befintlig databas.** En
+   `GRANT` tar aldrig bort privilegier, så varje redan deployad databas behåller sin vida ACL
+   tills något uttryckligen `REVOKE`:ar den. Därför måste boot-policyn REVOKE:a, inte bara
+   bootstrap-skripten grant:a smalare.
+2. **`ALTER DEFAULT PRIVILEGES ... GRANT` är additiv, inte ersättande.** Att skriva om det
+   historiska `GRANT ALL PRIVILEGES ON TABLES` till ett smalare fyra-privilegiers-GRANT lämnar
+   den lagrade ACL-posten på fulla `arwdDxt` — mätt oförändrad — så varje tabell en FRAMTIDA
+   migration skapar hade fortfarande fått TRUNCATE med sig och rivit golvet en migration
+   senare. Endast en explicit `ALTER DEFAULT PRIVILEGES ... REVOKE TRUNCATE, REFERENCES,
+   TRIGGER ON TABLES FROM mainai_app` nollar bitarna.
+
+`SELECT/INSERT/UPDATE/DELETE` behålls medvetet på användardatatabellerna — alla fyra används
+av riktiga kodvägar (enbart `messages` behöver alla fyra: chatt-routern, S1B:s
+sekvensbackfill, och kontoraderingen) och förblir radscopade under RLS, vilket är precis den
+egenskap `TRUNCATE` saknade. Ytterligare per-tabell-omsmalning av DML är en egen, senare
+fråga (se `docs/BRANCH_REGISTRY.md`, "Öppna uppföljningsposter").
+
 #### Livscykel — `transition_own_memory_source()`, den enda skrivvägen för `mainai_app`
 
 ```
