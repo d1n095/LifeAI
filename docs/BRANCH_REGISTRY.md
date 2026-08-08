@@ -379,15 +379,28 @@ ens körs; en superuser-anslutning kringgår RLS helt, som förut. S1B:s kollisi
   blob-/trådrace-familj som `test_storage_local_fs.py`-flakan som Pass 37, 41 och 42 redan
   dokumenterat — inte orsakad av den här diffen, som inte rör vare sig `app/storage/` eller
   `app/rag/library_import.py`.
-- **Samma flaka slog också till i CI en gång, och det är avsiktligt inte "fixat" här.** Första
-  körningen av `Backend — unit/integration tests` på head `80a812a` blev röd med **exakt ett**
-  fallerande test — samma `test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_
-  worker_never_race_unsafely` (`1 failed, 957 passed, 1 skipped`). En omkörning av just det
-  jobbet blev grön, precis samma mönster som PR #38 dokumenterade. Att i stället ha "lagat"
-  ett orelaterat, pre-existerande flakigt test inne i den här diffen hade brutit
-  `CLAUDE.md`s PR #8/#9-regel; flakan hör till den egna uppföljnings-PR som redan är noterad
-  ovan. Detta står här så att en granskare som ser det röda första försöket i GitHubs
-  körhistorik vet vad det var.
+- **Samma flaka slog också till i CI, på BÅDA de två sista headen, och är avsiktligt inte
+  "fixad" här.** Första körningen av `Backend — unit/integration tests` blev röd på head
+  `80a812a` OCH på head `3821942`, båda gångerna med **exakt ett** fallerande test — samma
+  `test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_never_race_
+  unsafely` (`1 failed, 957 passed, 1 skipped` i båda). En omkörning av just det jobbet blev
+  grön i båda fallen, samma mönster som PR #38 dokumenterade. Att två förstaförsök i rad blev
+  röda är för mycket för att viftas bort, så det MÄTTES i stället för att antas:
+  - Assertionen är `assert get_storage().exists(storage_key) is True` i en ren
+    filsystems-/trådkapplöpning mellan `attempt_storage_deletion_task()` och
+    `_store_bytes_with_reference_lock()` över `storage_deletion_tasks` och en blob på disk.
+    **Ingen `messages`-rad, ingen konversation och ingen RLS-policy är inblandad någonstans i
+    den vägen** — och den här diffen rör varken `app/storage/` eller `app/rag/library_import.py`.
+  - Testet kördes **20 gånger isolerat på den här branchen (1 röd)** och **20 gånger isolerat
+    på den PRISTINA basen `e3234b5` (0 röda)**. Basen är dock bevisligen INTE immun: den
+    fallerade på exakt samma test både i sessionens allra första fulla baslinjekörning (helt
+    utan den här diffen) och i en tidigare omgång om 6 isolerade körningar (1 röd). Båda
+    sidor flakar alltså i några få procent lokalt, och oftare på CI:s betydligt mer belastade
+    runners — vilket är precis vad en tidsberoende trådkapplöpning förväntas göra.
+  - Att i stället ha "lagat" ett orelaterat, pre-existerande flakigt test inne i den här
+    diffen hade brutit `CLAUDE.md`s PR #8/#9-regel. Flakan hör till den egna uppföljnings-PR
+    som redan är noterad ovan. Detta står här så att en granskare som ser de röda
+    förstaförsöken i GitHubs körhistorik vet exakt vad de var.
 
 ### Testflytt som RLS gör nödvändig (och varför den är rätt, inte en eftergift)
 
