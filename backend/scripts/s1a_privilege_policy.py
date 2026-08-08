@@ -2,7 +2,7 @@
 
 Two layers, applied together by the same callers, in the same transaction:
 
-1. A SCHEMA-WIDE floor (`_NEVER_GRANTED_TABLE_PRIVS`, Pass 30): `TRUNCATE`, `REFERENCES` and
+1. A SCHEMA-WIDE floor (`_NEVER_GRANTED_TABLE_PRIVS`, Pass 44): `TRUNCATE`, `REFERENCES` and
    `TRIGGER` are revoked from mainai_app on EVERY table in schema public — discovered
    dynamically from `pg_tables`, never a hardcoded list, so a table a future migration adds is
    covered the first time this runs after that migration without anyone remembering to update
@@ -111,7 +111,7 @@ _PROTECTED_TABLES = [
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
 
-# Pass 30 — the schema-wide privilege floor. mainai_app must never hold ANY of these on ANY
+# Pass 44 — the schema-wide privilege floor. mainai_app must never hold ANY of these on ANY
 # table in schema public, whether or not that table appears in `_PROTECTED_TABLES` above.
 #
 # Origin: PR #42 (owner-scoped RLS on `messages`, migration 0031) shipped with a deliberately
@@ -383,7 +383,7 @@ def apply_privilege_policy(
         signatures[name] = sig
 
     if mutate:
-        # --- Pass 30: the schema-wide floor, applied BEFORE the per-table S1A narrowing below
+        # --- Pass 44: the schema-wide floor, applied BEFORE the per-table S1A narrowing below
         # (which is strictly tighter still, so the two never fight). Covers every table in
         # public, including ones no migration in this repo has introduced yet.
         never_granted_sql = ", ".join(_NEVER_GRANTED_TABLE_PRIVS)
@@ -426,7 +426,7 @@ def apply_privilege_policy(
 
     # --- verification: real privilege/catalog queries, not an assumption ---
 
-    # Pass 30, the schema-wide floor. Runs in BOTH mutate and read-only (`mutate=False`,
+    # Pass 44, the schema-wide floor. Runs in BOTH mutate and read-only (`mutate=False`,
     # durable-worker `--verify-only`) modes: the worker must be able to fail closed on a
     # database where TRUNCATE is still held, exactly as it already does for the S1A tables.
     # `has_table_privilege` rather than information_schema.role_table_grants, for the same

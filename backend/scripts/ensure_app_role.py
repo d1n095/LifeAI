@@ -44,7 +44,7 @@ success, instead of leaving that risk for app/main.py's own startup path (which,
 fix, had no such retry and took the whole process down on the first transient rejection).
 
 The broad table grant below runs on EVERY boot, including an ordinary restart on a database
-that's already past migration 0019 (S1A). Pass 30 narrowed it from `ALL PRIVILEGES` to
+that's already past migration 0019 (S1A). Pass 44 narrowed it from `ALL PRIVILEGES` to
 `SELECT, INSERT, UPDATE, DELETE` (see that call site, and `_NEVER_GRANTED_TABLE_PRIVS` in
 s1a_privilege_policy.py: `ALL` also means TRUNCATE/REFERENCES/TRIGGER, none of which any
 runtime path uses, and TRUNCATE is not subject to RLS at all). It is still a broad grant
@@ -244,7 +244,7 @@ def main() -> None:
             cur.execute(
                 sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(APP_ROLE))
             )
-            # Pass 30: `SELECT, INSERT, UPDATE, DELETE`, never `ALL PRIVILEGES`. `ALL` on a
+            # Pass 44: `SELECT, INSERT, UPDATE, DELETE`, never `ALL PRIVILEGES`. `ALL` on a
             # table also means TRUNCATE, REFERENCES and TRIGGER — none of which any runtime
             # code path uses, and TRUNCATE specifically is NOT subject to Row-Level Security
             # (see `_NEVER_GRANTED_TABLE_PRIVS` in s1a_privilege_policy.py for the full
