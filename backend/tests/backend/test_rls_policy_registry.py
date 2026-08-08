@@ -11,6 +11,9 @@ import ast
 import re
 from pathlib import Path
 
+from sqlalchemy import text
+
+from app.db import migration_engine
 from app.rls import POLICY_DEFINITIONS, RLS_STATEMENTS
 
 _ENABLE_RE = re.compile(r"^ALTER TABLE (\w+) ENABLE ROW LEVEL SECURITY$")
@@ -43,6 +46,86 @@ def test_policy_definitions_has_no_orphan_entries():
 
     orphans = policy_tables - enabled_tables
     assert not orphans, f"POLICY_DEFINITIONS references tables never ENABLEd in RLS_STATEMENTS: {sorted(orphans)}"
+
+
+def test_live_policies_match_policy_definitions_exactly():
+    """The OTHER drift direction, and the one migration 0031 makes materially dangerous: every
+    policy is written twice — once by the migration that creates it on a fresh database, and
+    once in POLICY_DEFINITIONS, which app/rls.py's boot loop uses to REPAIR it if it goes
+    missing. That loop keys on the policy NAME only: if a policy with the right name already
+    exists it is left alone, whatever its expression says. So two different rules under one
+    name would never be noticed — a database built by migration would enforce one thing, and
+    the same database after a repair would enforce another.
+
+    That was survivable while every expression was the same one-line `owner_id = <uid>`
+    comparison. `messages_isolation` (migration 0031) is a subquery over `conversations`, and
+    it is the one policy where a silently divergent repair could widen access rather than
+    merely differ.
+
+    Compares against Postgres's own normalized form rather than the raw strings: the live
+    policy is read from pg_policies, then POLICY_DEFINITIONS' expression is fed through
+    CREATE POLICY on the same table and read back the same way, so formatting, whitespace and
+    parenthesization can never make an identical rule look different (or vice versa). The
+    probe policy is created and dropped inside a transaction that is always rolled back, so
+    this test never leaves a policy behind even if it fails partway through."""
+    mismatches: list[str] = []
+    with migration_engine.connect() as conn:
+        # Opened before the first statement so SQLAlchemy's autobegin doesn't claim the
+        # connection first — everything below, including the probe policies, is rolled back.
+        transaction = conn.begin()
+        try:
+            live = {
+                (row.tablename, row.policyname): row
+                for row in conn.execute(
+                    text("SELECT tablename, policyname, qual, with_check FROM pg_policies WHERE schemaname = 'public'")
+                ).all()
+            }
+
+            for policy in POLICY_DEFINITIONS:
+                key = (policy["table"], policy["name"])
+                actual = live.get(key)
+                if actual is None:
+                    mismatches.append(
+                        f"{policy['table']}.{policy['name']}: declared in POLICY_DEFINITIONS but not present in "
+                        "pg_policies after a real migration run"
+                    )
+                    continue
+
+                conn.execute(
+                    text(
+                        f"CREATE POLICY __drift_probe ON {policy['table']} "
+                        f"USING ({policy['expr']}) WITH CHECK ({policy['expr']})"
+                    )
+                )
+                probe = conn.execute(
+                    text(
+                        "SELECT qual, with_check FROM pg_policies WHERE schemaname = 'public' "
+                        "AND tablename = :t AND policyname = '__drift_probe'"
+                    ),
+                    {"t": policy["table"]},
+                ).one()
+                conn.execute(text(f"DROP POLICY __drift_probe ON {policy['table']}"))
+
+                if probe.qual != actual.qual:
+                    mismatches.append(
+                        f"{policy['table']}.{policy['name']} USING differs:\n"
+                        f"    migration/live : {actual.qual}\n"
+                        f"    POLICY_DEFINITIONS: {probe.qual}"
+                    )
+                if probe.with_check != actual.with_check:
+                    mismatches.append(
+                        f"{policy['table']}.{policy['name']} WITH CHECK differs:\n"
+                        f"    migration/live : {actual.with_check}\n"
+                        f"    POLICY_DEFINITIONS: {probe.with_check}"
+                    )
+        finally:
+            transaction.rollback()
+
+    assert not mismatches, (
+        "app/rls.py's POLICY_DEFINITIONS has drifted from the policies the migrations actually "
+        "create — a repaired policy would enforce a different rule than a freshly migrated "
+        "database:\n" + "\n".join(mismatches)
+    )
 
 
 def test_worker_module_never_imports_app_main():

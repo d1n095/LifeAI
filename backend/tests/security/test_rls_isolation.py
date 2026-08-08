@@ -3,10 +3,12 @@ runtime role (mainai_app) and session-variable mechanism the app itself uses (se
 app/db.py's after_begin listener and app/deps.py's SET LOCAL) — not through the HTTP API,
 so a bug in a router can't accidentally mask an RLS bug or vice versa."""
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 
 from app.config import get_settings
-from app.models.conversation import Conversation
+from app.models.conversation import Conversation, Message, MessageRole
 from app.models.document import Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
@@ -313,3 +315,173 @@ def test_user_never_reads_another_users_source_relationships(db_session, make_ve
     visible_to_a = db_session.query(SourceRelationship).all()
     assert len(visible_to_a) == 1
     assert visible_to_a[0].relationship_type == RelationshipType.supersedes
+
+
+# --- Message-level owner isolation (migration 0031) -----------------------------------------
+# `messages` was the last table holding directly personal content with no policy of its own;
+# until 0031, isolation of a founder's conversation history rested entirely on every router
+# remembering to look up the RLS-protected `conversations` row first. These tests exercise the
+# database's own enforcement, deliberately WITHOUT going through any router, so a correct
+# router can never be what makes them pass. Ownership here is DERIVED from the conversation
+# rather than stored on the row — see app/rls.py's MESSAGES_ISOLATION_EXPR.
+
+
+def _make_conversation(session, owner_id, title="Samtal") -> Conversation:
+    _set_rls_user(session, owner_id)
+    conversation = Conversation(user_id=owner_id, title=title)
+    session.add(conversation)
+    session.commit()
+    return conversation
+
+
+def test_user_never_reads_another_users_messages(db_session, make_verified_user):
+    """The read direction: the leak this policy exists to prevent."""
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    conversation_a = _make_conversation(db_session, user_a.id, "A:s samtal")
+    conversation_b = _make_conversation(db_session, user_b.id, "B:s samtal")
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(Message(conversation_id=conversation_a.id, role=MessageRole.user, content="A:s hemlighet"))
+    db_session.commit()
+
+    _set_rls_user(db_session, user_b.id)
+    db_session.add(Message(conversation_id=conversation_b.id, role=MessageRole.user, content="B:s hemlighet"))
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    assert [m.content for m in db_session.query(Message).all()] == ["A:s hemlighet"]
+
+    _set_rls_user(db_session, user_b.id)
+    assert [m.content for m in db_session.query(Message).all()] == ["B:s hemlighet"]
+
+
+def test_user_cannot_read_another_users_messages_even_by_exact_conversation_id(db_session, make_verified_user):
+    """Knowing the target conversation's UUID must not help. This is the shape a forgotten
+    `JOIN conversations` in some future bulk query (S1C's backfill, S2's segmentation) would
+    produce — the query is well-formed and names a real conversation, it simply belongs to
+    somebody else. Before 0031 this returned the other account's messages."""
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    conversation_b = _make_conversation(db_session, user_b.id, "B:s samtal")
+    _set_rls_user(db_session, user_b.id)
+    db_session.add(Message(conversation_id=conversation_b.id, role=MessageRole.user, content="B:s hemlighet"))
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    assert db_session.query(Message).filter_by(conversation_id=conversation_b.id).all() == []
+
+
+def test_cannot_write_a_message_into_another_users_conversation(db_session, make_verified_user):
+    """The write direction, which had NO database-level defense at all before 0031: a session
+    acting as user_a inserting a row into user_b's conversation. WITH CHECK must reject it.
+
+    Deliberately NOT written as `try: commit(); assert False; except Exception: rollback()`.
+    That idiom appears elsewhere in this file and is silently broken: `assert False` raises
+    AssertionError, which `except Exception` then catches, so the test passes whether or not
+    the write was rejected. Verified during the 0031 work by removing the policy entirely —
+    every other message test in this file failed, and the write test written that way still
+    passed. See docs/BRANCH_REGISTRY.md's Pass 43 note; the pre-existing occurrences are
+    recorded there for their own fix rather than being changed in this diff."""
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    conversation_b = _make_conversation(db_session, user_b.id, "B:s samtal")
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(
+        Message(conversation_id=conversation_b.id, role=MessageRole.user, content="ska aldrig lyckas skrivas")
+    )
+    with pytest.raises(ProgrammingError, match="row-level security policy"):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_cannot_update_another_users_message(db_session, superuser_db, make_verified_user):
+    """UPDATE is filtered by USING before WITH CHECK is ever reached: a row the session cannot
+    see cannot be modified, so the statement matches nothing rather than rewriting history."""
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    conversation_b = _make_conversation(db_session, user_b.id, "B:s samtal")
+
+    _set_rls_user(db_session, user_b.id)
+    message = Message(conversation_id=conversation_b.id, role=MessageRole.user, content="original")
+    db_session.add(message)
+    db_session.commit()
+    message_id = message.id
+
+    _set_rls_user(db_session, user_a.id)
+    result = db_session.execute(
+        text("UPDATE messages SET content = 'manipulerad' WHERE id = :id"), {"id": str(message_id)}
+    )
+    db_session.commit()
+    assert result.rowcount == 0
+
+    # Verified through the superuser connection, not the restricted one: a restricted-session
+    # read here would be ambiguous between "unchanged" and "hidden by the very policy under
+    # test" (see conftest.py's superuser_db docstring).
+    assert (
+        superuser_db.execute(text("SELECT content FROM messages WHERE id = :id"), {"id": str(message_id)}).scalar_one()
+        == "original"
+    )
+
+
+def test_cannot_delete_another_users_message(db_session, superuser_db, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    conversation_b = _make_conversation(db_session, user_b.id, "B:s samtal")
+
+    _set_rls_user(db_session, user_b.id)
+    message = Message(conversation_id=conversation_b.id, role=MessageRole.user, content="behalls")
+    db_session.add(message)
+    db_session.commit()
+    message_id = message.id
+
+    _set_rls_user(db_session, user_a.id)
+    result = db_session.execute(text("DELETE FROM messages WHERE id = :id"), {"id": str(message_id)})
+    db_session.commit()
+    assert result.rowcount == 0
+
+    assert (
+        superuser_db.execute(
+            text("SELECT count(*) FROM messages WHERE id = :id"), {"id": str(message_id)}
+        ).scalar_one()
+        == 1
+    )
+
+
+def test_messages_are_invisible_with_no_session_variable_set(db_session, superuser_db, make_verified_user):
+    """Default-deny, matching every other policy in this file: a connection with no
+    app.current_user_id (a raw admin/maintenance session, or a pooled connection whose
+    SET LOCAL was reverted by a mid-request commit) resolves the subquery to nothing and
+    therefore matches no row — rather than seeing everything."""
+    user, _ = make_verified_user()
+    conversation = _make_conversation(db_session, user.id)
+
+    _set_rls_user(db_session, user.id)
+    db_session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="privat"))
+    db_session.commit()
+
+    # The row genuinely exists...
+    assert superuser_db.execute(text("SELECT count(*) FROM messages")).scalar_one() == 1
+
+    # ...but the commit above ended the transaction SET LOCAL was scoped to, and this raw test
+    # session has no per-request contextvar for app/db.py's after_begin listener to re-apply.
+    assert db_session.query(Message).all() == []
+
+
+def test_an_empty_session_variable_denies_instead_of_erroring(db_session, make_verified_user):
+    """The NULLIF guard, on the derived policy specifically: a GUC that was SET LOCAL and then
+    reverted reads back as '' rather than NULL, and casting '' straight to ::uuid would raise a
+    database error instead of correctly matching no rows."""
+    user, _ = make_verified_user()
+    conversation = _make_conversation(db_session, user.id)
+
+    _set_rls_user(db_session, user.id)
+    db_session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="privat"))
+    db_session.commit()
+
+    db_session.execute(text("SET LOCAL app.current_user_id = ''"))
+    assert db_session.query(Message).all() == []
+    db_session.rollback()
