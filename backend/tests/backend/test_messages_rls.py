@@ -13,7 +13,7 @@ on, which is where the real risk in this change lives:
   B. The S1B backfill (app/rag/message_sequence_backfill.py) reads and UPDATEs `messages` in
      bulk. It must keep working unchanged, and must still leave other owners untouched.
   C. The delete paths (app/routers/conversations.py's delete_conversation, and
-     app/rag/account_erasure.py) delete messages via the restricted role. Both delete messages
+     app/account/erasure.py) delete messages via the restricted role. Both delete messages
      BEFORE the owning conversation — an ordering that is now load-bearing, because the policy
      resolves through that conversation row. `delete_conversation` is covered below;
      account erasure is already covered end-to-end, through the real HTTP path and verified on

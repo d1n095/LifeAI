@@ -97,11 +97,11 @@ from app.storage.base import StoredBlob
 
 logger = logging.getLogger("mainai.rag.blob_references")
 
-# Pass 31: the SAME privileged admin/migration connection app/rag/account_erasure.py's own
+# Pass 31: the SAME privileged admin/migration connection app/account/erasure.py's own
 # `_MaintenanceSession` and app/worker.py's `_ClaimSession` already use for
 # `storage_deletion_tasks` -- a second, independently-defined sessionmaker bound to the same
 # engine (matching the established convention of NOT sharing one across modules, see
-# account_erasure.py's own module-level comment on its `_MaintenanceSession`), never the
+# erasure.py's own module-level comment on its `_MaintenanceSession`), never the
 # ordinary request-scoped `mainai_app` session, which has ZERO direct privileges on this
 # table for ANY reason value (see migration 0024's module docstring).
 _MaintenanceSession = sessionmaker(bind=migration_engine)
@@ -206,7 +206,7 @@ def acquire_storage_key_lock(db: Session, storage_key: str) -> None:
 
 
 def acquire_owner_erasure_lock(db: Session, owner_id: uuid.UUID) -> None:
-    """Account erasure (app/rag/account_erasure.py), Pass 26: a transaction-scoped advisory
+    """Account erasure (app/account/erasure.py), Pass 26: a transaction-scoped advisory
     lock scoped to ONE owner, closing a real TOCTOU race a founder review caught between
     account erasure and a concurrent upload for the SAME owner. `POST /api/library/import`
     (app/routers/library.py) durably writes a blob to disk via `storage.write_stream()`

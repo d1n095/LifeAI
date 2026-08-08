@@ -18,7 +18,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.source_relationship import RelationshipType, SourceRelationship
 from app.models.usage import UsageLog
 from app.models.user import User, UserRole
-from app.rag.account_export import export_account_data
+from app.account.export import export_account_data
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 
@@ -386,7 +386,7 @@ def test_delete_account_usage_log_survives_anonymized(client, superuser_db, make
 
 def test_delete_account_returns_409_while_an_import_job_is_actively_running(client, superuser_db, make_verified_user):
     """Pass 27: erase_account_data() refuses to proceed while a worker is actively processing
-    an import job for this owner (see app/rag/account_erasure.py's blob-write-path audit) --
+    an import job for this owner (see app/account/erasure.py's blob-write-path audit) --
     the router maps that refusal to 409, not the generic 500 an unexpected failure gets, and
     the account must genuinely survive untouched."""
     user, password = make_verified_user(email="blockedbyimport@example.com")
