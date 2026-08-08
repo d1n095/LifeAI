@@ -838,6 +838,48 @@ faktiskt håller.
   + backfill Message→MemorySourceUnit. Kräver S1B. Ingen claim-extraktion från konversationer
   än — det kommer efter S1C.
 
+##### `messages` RLS — egen ägarisolering (migration 0031, Pass 43)
+
+Ett eget, litet steg mellan S1B och S1C, byggt på egen branch och egen PR precis som Pass 42
+sa att det borde bli. **Det är INTE en del av S1B och inte en del av S1C** — det rör varken
+`sequence_number`, dess nullability, CONTRACT-migrationen eller någon ny tabell, och det är
+korrekt oavsett om backfillen körts mot produktion, körs senare, eller aldrig körs.
+
+**Problemet.** `messages` var den sista tabellen med direkt personligt innehåll utan egen
+RLS-policy. Isoleringen vilade helt på en konvention: varje router slår först upp den
+RLS-skyddade `conversations`-raden och rör `messages` först därefter. Konventionen följdes
+korrekt av alla fem DB-vägar som finns idag — men den var en egenskap hos fem anropsplatser,
+inte hos tabellen. Ett glömt `JOIN conversations` i en framtida bulkfråga (och både S1C:s
+backfill och S2:s segmenteringspass kommer att skanna `messages` i bulk) var före 0031 en tyst
+läsning över ägargränsen; efter 0031 ger den noll rader. Att fela stängt är en bugg; att fela
+öppet är en incident.
+
+**Lösningen: HÄRLEDD ägare, inte en denormaliserad `owner_id`-kolumn.** Policyn är
+`conversation_id IN (SELECT c.id FROM conversations c WHERE c.user_id = <uid>)`. Två skäl:
+en andra kopia av ägarfaktumet kan driva isär från `conversations.user_id`, en härledning kan
+inte; och en ny kolumn hade krävt ännu en expand/backfill/contract-kedja som inte gick att
+slutföra utan en produktionsbackfill. Den härledda policyn är korrekt i samma ögonblick den
+skapas, på varje rad som redan finns. Uncorrelated `IN` (inte korrelerad `EXISTS`) är ett
+MÄTT val — se migrationens docstring för mätserien; `IN` planerar på no-RLS-nivå för de
+bulkskanningar backfillen och kontoexporten gör, `EXISTS` kostar ungefär dubbelt.
+
+**Den subtila konsekvensen — samspelet med 0030:s tilldelningstrigger.**
+`messages_assign_sequence_number()` är inte SECURITY DEFINER, så dess aggregat över
+`public.messages` blev RLS-filtrerat i och med 0031. Räkningen är ändå fortfarande sann, av ett
+STARKARE skäl än "RLS gäller inte": policyns synlighetsenhet är KONVERSATIONEN, så för en
+given konversation är antingen alla dess meddelanderader synliga eller ingen — och den INSERT
+som utlöste triggern måste själv ha passerat WITH CHECK på samma konversation, vilket bevisar
+att sessionen ser den och därmed alla dess befintliga meddelanden. En session som inte äger
+konversationen avvisas innan aggregatet ens körs. S1B:s kollisionsfrihetsbevis är alltså
+bevarat — och det är fastspikat av test, inte lämnat som resonemang
+(`tests/backend/test_messages_rls.py`, mutationstestat: en policy som kan dölja onumrerade
+rader i samma konversation ger `assert 1 == 4`, alltså exakt den kollision beviset utesluter).
+
+Migration 0031 lägger också till `ix_conversations_user_id`, som saknats sedan `0001`: policyns
+subquery filtrerar `conversations` på `user_id` vid varje sats som rör `messages`. Det är ett
+direkt krav från predikatet, i exakt samma mening som `ix_messages_conversation_id` var ett
+direkt krav från 0030:s trigger.
+
 #### Status: PR #30 (design) kontra S1A-implementations-PR:n (senare, separat)
 
 PR #30 är design-only och innehåller ingen kod — det den här sektionen (§4.8) beskriver är
@@ -1233,6 +1275,7 @@ istället för att köra arbetet inline, en gång den här tabellen finns.
 | **Kostnads-/latensdrift** | P3:s klassificering läggs i SAMMA anrop som befintlig claim-extraktion; P4:s relationsjämförelse gated bakom en billig embedding-försil, inte varje-mot-varje |
 | **Datamodellsprawl** | Byggs i de åtta separata paketen (P1–P6, P7A, P7B) i §8-ordning, inte en jättemigration |
 | **RLS-glapp på nya tabeller** | Samma `FORCE ROW LEVEL SECURITY`-mönster som alla åtta befintliga FKS/STEG-tabeller redan följer — en explicit checklisterad granskningspunkt per migration |
+| **RLS-glapp på BEFINTLIGA tabeller** (inte bara nya) | `messages` visade att mönstret ovan bara någonsin tillämpats på tabeller som var nya när regeln skrevs: `messages` fanns sedan `0001` och fick aldrig en egen policy, utan skyddades av att varje router kom ihåg att gå via `conversations`. Stängt av migration 0031 (§4.8). Generaliseringen: en tabell utan `owner_id` är inte automatiskt "inte ägarscopad" — den kan ha en HÄRLEDD ägare, och då ska policyn härleda den i databasen istället för att förlita sig på anropsordning i applikationskoden |
 | **Zip-bomb via nästlad zip** | Delad, inte per-nivå, total byte-budget över alla nästlade nivåer (P2) |
 
 ---
@@ -1271,6 +1314,15 @@ S1B  messages.sequence_number: expand (nullable) → dual-write-kod → durable 
                                             faktiskt körts mot produktionsdata och att
                                             count_unsequenced_messages() rapporterar 0 —
                                             se §4.8:s S1B-statusavsnitt.
+S1B-RLS  messages egen RLS-policy (migration 0031)
+                                          ← KLAR (byggd, egen branch/PR, se Pass 43 i
+                                            docs/BRANCH_REGISTRY.md). Litet, fristående
+                                            säkerhetssteg — INTE en del av S1B eller S1C, och
+                                            INTE gated på produktionsbackfillen: policyn
+                                            härleder ägaren ur `conversations` och är korrekt
+                                            oavsett om `sequence_number` är NULL, ifylld eller
+                                            halvvägs. Bör granskas/mergas FÖRE S1C, som är
+                                            det första som skannar `messages` i bulk.
 S1C  message_source_units + knowledge_claim_evidence + ägar-/konversationsintegritet +
      backfill Message→MemorySourceUnit
                                           ← kräver S1B:s sequence_number klart, egen PR.

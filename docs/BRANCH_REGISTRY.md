@@ -27,6 +27,16 @@ väntar** tills server-/domänsituationen är tillbaka eller grundaren medvetet 
 sätt att nå VPS:en — ingen del av denna session har rört VPS:en eller kört någon backfill mot
 produktionsdata.
 
+**ÖPPEN PR: #42** (`claude/messages-rls-owner-isolation` → `claude/det-kommer-mer-879lcm`),
+grenad från exakt `e3234b501510882e3fb4c8ab1aeb9fb593080836` — basgrenens tip, verifierad med
+`git ls-remote origin` och bekräftad innehålla PR #39, #40 och #41. Ger `messages` en egen
+RLS-policy (migration 0031), den risk Pass 42 flaggade och uttryckligen sköt till en egen
+branch/PR. **Fristående** — beror inte på någon annan branch, blockerar ingen, väntar inte på
+något beroende. **Bör mergas innan S1C påbörjas** (S1C är det första som skannar `messages` i
+bulk). Kräver INGEN produktion, ingen VPS, ingen migration mot produktion och ingen backfill:
+policyn härleder ägaren ur `conversations` och är korrekt oavsett om `sequence_number` är
+NULL, ifylld eller halvvägs. Se Pass 43 nedan för full detalj. INTE mergad.
+
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-08, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat). **PR #36 är MERGAD**
 (`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit
@@ -216,6 +226,214 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 43 (2026-08-08): `messages` får egen RLS-policy (migration 0031) — den risk Pass 42 flaggade men medvetet inte löste
+
+**Branch:** `claude/messages-rls-owner-isolation`, grenad från exakt
+`e3234b501510882e3fb4c8ab1aeb9fb593080836` (basgrenens verifierade tip — SHA:n hämtad med
+`git ls-remote origin` innan branchen skapades, inte memorerad, och verifierad att innehålla
+PR #39, #40 OCH #41 via `git merge-base --is-ancestor`). **PR #42**, öppen mot
+`claude/det-kommer-mer-879lcm`, INTE mergad.
+
+### Varför just det här steget valdes
+
+Kontroll före en rad skrevs: `mcp__github__list_pull_requests` med `state=open` gav **tom
+lista** — noll öppna PR:er, alltså ingen risk för dubbelarbete mot något pågående. §8:s
+byggordning gicks igenom mot vad som faktiskt återstår.
+
+Valet blev `messages`-RLS, som är **den enda punkt i hela registret som en tidigare session
+uttryckligen skrivit ut som "bör bli en EGEN branch och EGEN PR"** (Pass 42:s "Känd,
+kvarstående risk", nedan). Det är alltså inte en ny idé den här sessionen hittade på, utan
+exakt det öppna arbetsobjekt föregående pass lämnade efter sig.
+
+Skälen att det är rätt steg NU, och inte ett av alternativen:
+1. **Det är helt oberoende av produktionsbackfill-grinden.** Policyn handlar om ÄGARSKAP, inte
+   om ordning. Den härleder ägaren ur `conversations.user_id` och är korrekt oavsett om
+   `messages.sequence_number` är helt NULL, helt ifylld, eller halvvägs — alltså också i en
+   värld där backfillen körs långt senare eller aldrig. Ingen produktion, ingen VPS, ingen
+   migration mot produktion, ingen backfill behövs för att verifiera den; allt är verifierat
+   mot lokal/CI-Postgres.
+2. **Det bör mergas FÖRE S1C.** S1C:s `message_source_units`-backfill är det första som
+   kommer att skanna `messages` i bulk. Att införa policyn efter att bulkskannarna redan finns
+   är att införa den när den är dyrast att verifiera.
+3. **S1C och CONTRACT var uteslutna** (båda gated på en produktionsbackfill som inte körts),
+   **S3 är i praktiken redan byggt** som `mainai_jobs` (Pass 42:s slutsats, §6.12), **P7A är
+   fryst** utan separat beslut, och **P4/P6 har fel storlek** för ett fristående steg.
+
+### Problemet
+
+`messages` var den sista tabellen med direkt personligt innehåll som saknade egen RLS-policy.
+Den saknar `owner_id` helt och fanns varken i `app/rls.py`s `RLS_STATEMENTS` eller i
+`POLICY_DEFINITIONS`. Isoleringen vilade på en konvention: varje router slår först upp den
+RLS-skyddade `conversations`-raden och rör `messages` först därefter.
+
+Konventionen följdes korrekt av alla fem DB-vägar som finns i dag (`app/routers/chat.py`,
+`app/routers/conversations.py`, `app/rag/account_export.py`, `app/rag/account_erasure.py`,
+`app/rag/message_sequence_backfill.py`) — det verifierades genom att läsa dem, inte antas.
+Problemet var aldrig att den var trasig, utan att den var en egenskap hos fem anropsplatser i
+stället för hos tabellen, och därmed bara så bra som varje FRAMTIDA skrivare som minns den.
+Exakt samma argument som migration 0030 använde för att göra sekvensnumreringen till en
+trigger, och 0027 för att göra jobbtabellerna append-only.
+
+### Vad som byggdes
+
+**Migration `0031_messages_rls`.** `ENABLE` + `FORCE ROW LEVEL SECURITY` och policyn
+`messages_isolation`, med `conversation_id IN (SELECT c.id FROM conversations c WHERE
+c.user_id = <uid>)` som både `USING` och `WITH CHECK`.
+
+**HÄRLEDD ägare, medvetet INGEN denormaliserad `messages.owner_id`.** Två skäl, i den
+ordningen: (1) en andra kopia av ägarfaktumet kan driva isär från `conversations.user_id`,
+en härledning kan inte — meddelandets ägare ÄR konversationens ägare, och en kolumn hade
+kodat en härledning som data; (2) en ny kolumn hade krävt ännu en
+expand/dual-write/backfill/contract-kedja av precis den form S1B fortfarande står mitt i, och
+den hade inte kunnat slutföras utan en produktionsbackfill — alltså direkt in i den grind det
+här steget valdes för att undvika. Den härledda policyn är korrekt i samma ögonblick den
+skapas, på varje rad som redan finns.
+
+**Uttrycksformen är MÄTT, inte gissad.** Korrelerad `EXISTS` och okorrelerad `IN` jämfördes på
+lokal Postgres 16 med 240 000 meddelanden över 4 000 konversationer och 20 ägare, varm cache,
+fyra repetitioner var:
+
+| fråga | ingen RLS | A (`EXISTS`) | B (`IN`) |
+|---|---|---|---|
+| enskilt transkript (60 rader) | ~0,44 ms | ~0,65 ms | ~0,65 ms |
+| ägarbred skanning (12 000 rader) | ~22 ms | ~46 ms | ~26 ms |
+
+Postgres kompilerar båda till en hashad SubPlan, men B planerar på no-RLS-nivå för de
+bulkskanningar backfillen och kontoexporten faktiskt gör, medan A kostar ungefär dubbelt.
+B installerades. (Den första mätningen av den ägarbreda frågan visade 3,3 s — kall cache, inte
+ett planproblem; det verifierades genom omkörning i stället för att rapporteras som ett fynd.)
+
+**`ix_conversations_user_id`** ingår, och saknades sedan `0001`. Policyns subquery filtrerar
+`conversations` på `user_id` vid varje sats som rör `messages` — ett direkt krav från
+predikatet som införs här, i exakt samma mening som `ix_messages_conversation_id` var ett
+direkt krav från 0030:s trigger, inte en opportunistisk "medan jag ändå var här"-ändring.
+
+**Samspelet med 0030:s tilldelningstrigger — PR:ens enda verkligt subtila del.**
+`messages_assign_sequence_number()` aggregerar `GREATEST(COALESCE(max(sequence_number), 0),
+count(*)) + 1` över `public.messages` och är INTE SECURITY DEFINER, så dess aggregat blev
+RLS-filtrerat i och med den här migrationen. Migration 0030:s egen kommentar sa uttryckligen
+att aggregatet INTE var RLS-filtrerat och att räkningen därför alltid var den sanna — den
+meningen slutar vara sann här, och är därför **rättad på plats i 0030** i stället för att
+lämnas kvar som en tyst lögn i koden.
+
+Räkningen är ändå fortfarande den sanna, av ett STARKARE skäl: policyns synlighetsenhet är
+KONVERSATIONEN, så för en given konversation är antingen alla dess meddelanderader synliga
+eller ingen — och den INSERT som utlöste triggern måste själv ha passerat `WITH CHECK` på
+samma `NEW.conversation_id`, vilket bevisar att sessionen ser konversationen och därmed alla
+dess befintliga meddelanden. En session som inte äger konversationen avvisas innan aggregatet
+ens körs; en superuser-anslutning kringgår RLS helt, som förut. S1B:s kollisionsfrihetsbevis
+är alltså bevarat — och det lämnas inte som resonemang utan spikas av test.
+
+### Filer
+
+- **Ny:** `backend/alembic/versions/0031_messages_rls.py`
+- **Ny:** `backend/tests/backend/test_messages_rls.py`
+- **Ändrad:** `backend/app/rls.py` (`RLS_STATEMENTS`, `POLICY_DEFINITIONS`, ny
+  `MESSAGES_ISOLATION_EXPR` som enda sanningskälla för uttrycket)
+- **Ändrad:** `backend/alembic/versions/0030_message_sequence_number.py` (ENDAST den kommentar
+  som den här migrationen gör osann — ingen funktionell ändring, ingen ändring av 0030:s SQL)
+- **Ändrad:** `backend/app/rag/message_sequence_backfill.py` (modulens "OWNER SCOPING"-avsnitt,
+  som påstod att `messages` saknar RLS-policy — ingen kodändring, modulen behövde ingen)
+- **Ändrad:** `backend/tests/security/test_rls_isolation.py` (7 nya meddelandetester)
+- **Ändrad:** `backend/tests/backend/test_rls_policy_registry.py` (nytt drift-test, se nedan)
+- **Ändrad:** `backend/tests/backend/test_chat_message_persistence.py` (4 tester läser nu
+  tillbaka via `superuser_db` i stället för den RLS-scopade `db_session` — se nedan)
+- **Dokument:** `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` (§4.8 nytt underavsnitt, §7 ny
+  riskrad, §8 ny rad i byggordningen), `docs/BRANCH_REGISTRY.md` (den här posten)
+
+### Verifiering
+
+- **`test_messages_rls.py`: 9 tester**, `test_rls_isolation.py`: **7 nya** (18 totalt i filen),
+  `test_rls_policy_registry.py`: **1 nytt** (4 totalt). Alla gröna.
+- **Mutationstestat i tre oberoende riktningar — inte bara "grönt":**
+  1. **Policyn togs bort ur migrationen** → **8 tester föll** (alla sju
+     isoleringstesterna plus skrivtestet i `test_messages_rls.py`).
+  2. **Policyn ändrades så att den kan dölja ONUMRERADE rader i samma konversation**
+     (`sequence_number IS NOT NULL AND ...`) → `test_the_formula_invariant_still_holds_under_
+     rls` föll med **`assert 1 == 4`**, alltså exakt den ordinalkollision 0030:s bevis
+     utesluter, och backfilltestet föll med det. Det är beviset för att testet verkligen
+     spikar S1B:s invariant och inte bara råkar passera.
+  3. **`app/rls.py`s uttryck ändrades så att det tyst vidgades** (`c.user_id IS NOT NULL`)
+     medan migrationen lämnades orörd → det nya drift-testet föll.
+  Migrationen och `app/rls.py` återställdes **byte-identiskt** efteråt (verifierat med `diff`).
+- **Nytt drift-test (`test_live_policies_match_policy_definitions_exactly`).** Varje policy
+  skrivs numera på TVÅ ställen: i migrationen som skapar den, och i `POLICY_DEFINITIONS` som
+  `apply_rls()` REPARERAR den från. Reparationsloopen nycklar bara på policyns NAMN — finns
+  namnet lämnas policyn orörd oavsett vad dess uttryck säger. Två olika regler under ett namn
+  hade alltså aldrig upptäckts. Det var uthärdligt när varje uttryck var samma
+  `owner_id = <uid>`-jämförelse; `messages_isolation` är en subquery, och den enda policy där
+  en tyst avvikande reparation kunde VIDGA åtkomst i stället för att bara skilja sig. Testet
+  jämför mot Postgres egen normaliserade form (live-policyn ur `pg_policies` kontra
+  `POLICY_DEFINITIONS`-uttrycket matat genom `CREATE POLICY` och utläst likadant), så
+  formatering aldrig kan få en identisk regel att se olik ut. **Alla 18 policyer matchar
+  exakt, noll drift, noll föräldralösa** — mätt, inte antaget.
+- **Migrationsrundtripp:** `test_migration_roundtrip.py` grönt (både `downgrade -1`-rundturen
+  och hela kedjan `base → head`), `alembic heads` exakt en (`0031`).
+- **Full backend-svit:** se sifferjämförelsen i "Testflytt" nedan.
+- **Den kända, PRE-EXISTERANDE flakan bekräftad igen och mätt, inte bortviftad.** Basens egen
+  körning (före en rad av den här diffen) gav `1017 passed, 1 skipped, 1 failed` — failen var
+  `test_library_import.py::test_store_bytes_with_reference_lock_and_the_account_erasure_
+  outbox_worker_never_race_unsafely`. Den kördes därefter **6 gånger isolerat på den PRISTINA
+  basen med den här sessionens ändringar stashade**: 5 gröna, 1 röd. Alltså samma
+  blob-/trådrace-familj som `test_storage_local_fs.py`-flakan som Pass 37, 41 och 42 redan
+  dokumenterat — inte orsakad av den här diffen, som inte rör vare sig `app/storage/` eller
+  `app/rag/library_import.py`.
+
+### Testflytt som RLS gör nödvändig (och varför den är rätt, inte en eftergift)
+
+Fyra tester i `test_chat_message_persistence.py` läste tillbaka sparade meddelanden via
+`db_session` — den RLS-scopade runtime-rollen — efter ett HTTP-anrop. Den sessionen går aldrig
+genom `app/deps.py` och har därför inget `app.current_user_id` bundet, så en sådan läsning ger
+nu korrekt noll rader. De läser i stället via `superuser_db`.
+
+Det är precis vad `conftest.py`s egen `superuser_db`-docstring föreskriver för den här
+situationen: på den restriktiva rollen är "noll rader" tvetydigt mellan "aldrig skrivet" och
+"skrivet men dolt", vilket är en falsk grön, inte en äkta. Att i stället ha försvagat policyn
+för att behålla ett bekvämt test hade varit att låta testet bestämma säkerhetsmodellen.
+Ingenting i vad endpointen SPARAR har ändrats — vilket superuser-läsningen i samma test
+bevisar; bara vad en oscopad anslutning får se.
+
+### Fynd som INTE åtgärdas här — egen branch och egen PR, enligt `CLAUDE.md`
+
+**Testidiomet `try: commit(); assert False, "..."; except Exception: rollback()` är tyst
+trasigt.** `assert False` kastar `AssertionError`, som `except Exception` sedan fångar — testet
+passerar alltså oavsett om skrivningen avvisades eller inte. Det upptäcktes empiriskt i den här
+sessionen: när policyn togs bort i mutationstest 1 föll alla andra meddelandetester, men
+skrivtestet som var skrivet med det idiomet passerade fortfarande.
+
+Den här PR:ens EGNA tester är omskrivna till `pytest.raises(...)` och kan inte längre svälja sin
+egen assertion. De PRE-EXISTERANDE förekomsterna är INTE ändrade i den här diffen:
+
+- `backend/tests/security/test_rls_isolation.py::test_cannot_write_document_for_another_user`
+- `backend/tests/security/test_rls_isolation.py::test_cannot_write_document_chunk_for_another_user`
+
+Båda är i dag sannolikt korrekta i sak (RLS avvisar skrivningarna) — men de skulle inte MÄRKA
+om det slutade gälla, vilket är hela deras syfte. De hör hemma i en egen, liten PR som kan
+mutationstestas för sig, inte hopblandade med en trust-boundary-ändring. **Posten står kvar
+här tills den är löst**, enligt `CLAUDE.md`s regel om upptäckta risker.
+
+### Vad som UTTRYCKLIGEN INTE är gjort
+
+1. **Ingen `messages.owner_id`-kolumn, ingen backfill av något slag.**
+2. **Inget rör S1B:s `sequence_number`**, dess nullability, dess triggerlogik eller
+   CONTRACT-migrationen. Den enda 0030-ändringen är en kommentarsrättelse.
+3. **Ingen deploy, ingen migration mot produktion, ingen produktionsbackfill, ingen VPS-kontakt.**
+   Den här sessionen har inte försökt nå VPS:en. Produktionssteget för S1B väntar oförändrat.
+4. **Ingen merge.** PR #42 lämnas öppen för grundarens granskning.
+5. **Inget frontend-arbete och ingen API-ändring** — ingen router, fråga eller svarsform är
+   ändrad; migrationen får databasen att upprätthålla vad koden redan gjorde.
+6. **Ingen privilegie-omsmalning på `messages`** (mönstret 0027 använder för jobbtabellerna).
+   Meddelanderader ska legitimt kunna uppdateras och raderas av runtime-rollen — backfillen
+   numrerar dem, `delete_conversation` och kontoradering tar bort dem — så det finns ingen
+   överflödig privilegie att återkalla här.
+
+### Beroenden och merge-ordning
+
+Branchen är **fristående** och beror inte på någon annan öppen branch (det fanns inga öppna
+PR:er när den skapades). Den rör inga filer som S1B:s redan mergade arbete äger funktionellt.
+**Rekommenderad ordning: mergas före S1C påbörjas**, av skäl 2 ovan. Den blockerar ingenting
+annat och väntar inte på något beroende.
 
 ## Pass 42 (2026-08-07): S1B — `messages.sequence_number`, expand + dual-write + durabel backfill + verifiering (CONTRACT medvetet utelämnat)
 
@@ -478,6 +696,12 @@ att en annan ägares konversation rörs), och varje meddelandenivåsats nycklas 
 annan ägares historik helt orörd. **Om `messages` ska få egen RLS bör det bli en EGEN branch och
 EGEN PR** — det är en trust-boundary-ändring som förtjänar sin egen granskning, inte något som
 smygs in i en S1B-diff.
+
+> **ÅTGÄRDAD i Pass 43 (2026-08-08), precis som den här posten föreskrev:** egen branch
+> (`claude/messages-rls-owner-isolation`), egen PR (#42), egen migration (`0031_messages_rls`).
+> `messages` har nu `ENABLE`+`FORCE ROW LEVEL SECURITY` och policyn `messages_isolation`, med
+> ägaren HÄRLEDD ur `conversations` i stället för lagrad i en ny `owner_id`-kolumn. Se Pass 43
+> ovan. Risken kvarstår som post här för spårbarhet, men är inte längre öppen.
 
 **Andrahandsrisk, dokumenterad i migrationen:** `downgrade()` slänger kolumnen och därmed varje
 tilldelat ordinal. Acceptabelt IDAG och bara idag — inget refererar ännu ett `sequence_number`,
