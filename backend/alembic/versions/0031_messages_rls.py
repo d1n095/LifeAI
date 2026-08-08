@@ -82,6 +82,17 @@ FAIL-CLOSED IN EVERY DIRECTION.
   * The policy's subquery requires the runtime role to hold SELECT on `conversations`, which
     it already does and needs anyway to read a conversation at all.
 
+WHY THIS POLICY DOES NOT PIN `search_path`, unlike every function migrations 0019/0027/0030
+create. A reviewer used to that discipline should expect the question. The reason those
+functions must pin it is that a plpgsql function BODY is stored as text and its relation names
+are resolved at CALL time, so an attacker-controlled schema earlier in `search_path` (Postgres
+always checks the session's temp schema first) could shadow `public.messages`. A policy
+expression is not text: `CREATE POLICY` parses it once and stores a node tree in which
+`conversations` is already resolved to that table's OID. It is therefore immune to
+search_path shadowing by construction, and there is nothing to pin. Verified rather than
+assumed — renaming `conversations` makes `pg_policies.qual` deparse to the NEW name, which is
+only possible if the stored reference is the OID and not the original text.
+
 INTERACTION WITH MIGRATION 0030'S ASSIGNMENT TRIGGER — the one genuinely subtle consequence,
 and the reason this migration is not a two-line change.
 
