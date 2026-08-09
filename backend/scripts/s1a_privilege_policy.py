@@ -154,7 +154,7 @@ _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFEREN
 #
 # NOT included here, deliberately: SELECT/INSERT/UPDATE/DELETE. Those are genuinely used
 # across the user-data tables (messages alone needs all four — SELECT+INSERT in
-# app/routers/chat.py, UPDATE in app/rag/message_sequence_backfill.py's
+# app/routers/chat.py, UPDATE in app/rag/backfill/message_sequence.py's
 # `UPDATE messages m SET sequence_number = ...`, DELETE in app/account/erasure.py), they
 # stay row-scoped under RLS, and narrowing them further is a per-table judgement that belongs
 # in `_PROTECTED_TABLES` with its own evidence — not in a blanket floor.

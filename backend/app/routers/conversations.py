@@ -29,7 +29,7 @@ def get_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)):
         # S1B (migration 0030, docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.9): `created_at`
         # alone is not a total order, so two messages sharing a timestamp could render in
         # either order between two loads of the same transcript. `id` is the SAME deterministic
-        # tiebreaker app/rag/message_sequence_backfill.py numbers by and app/rag/
+        # tiebreaker app/rag/backfill/message_sequence.py numbers by and app/rag/
         # account_export.py already exported by — so the transcript, the export and the
         # assigned ordinals agree with each other, instead of this one path disagreeing with
         # the ordinals being written for it. Deliberately still not `ORDER BY sequence_number`:

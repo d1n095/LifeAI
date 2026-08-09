@@ -867,7 +867,7 @@ faktiskt håller.
   - En andra trigger (`messages_deny_sequence_number_rewrite`) gör ett tilldelat ordinal
     OFÖRÄNDERLIGT och förbjuder att ett meddelande flyttas till en annan konversation.
     `NULL → värde` är den enda tillåtna övergången — backfillens egen.
-  - **Durabel backfill** = `app/rag/message_sequence_backfill.py` +
+  - **Durabel backfill** = `app/rag/backfill/message_sequence.py` +
     `app/jobs/handlers/message_sequence_backfill.py`, körd som ett riktigt `mainai_jobs`-jobb
     (`job_type=message_sequence_backfill`) på den befintliga workern. §6.12:s
     `memory_processing_jobs`-skiss är alltså INTE byggd som en egen tabell — jobbruntimen från

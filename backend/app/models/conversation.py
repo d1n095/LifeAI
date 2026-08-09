@@ -67,7 +67,7 @@ class Message(Base):
     #
     # Still `nullable=True` on purpose — this is the EXPAND half of the expand/contract plan.
     # Historical rows stay NULL until the durable `message_sequence_backfill` job
-    # (app/rag/message_sequence_backfill.py) has numbered them; only then can the separate
+    # (app/rag/backfill/message_sequence.py) has numbered them; only then can the separate
     # CONTRACT migration add NOT NULL. Read paths must therefore not assume it is set yet:
     # `ORDER BY sequence_number` becomes correct for a conversation only once
     # `count_unsequenced_messages()` reports 0 for it.

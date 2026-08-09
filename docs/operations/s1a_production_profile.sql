@@ -2,7 +2,7 @@
 --
 -- Purpose: profile how many `knowledge_claims` rows are still S1A backfill candidates
 -- (memory_source_id IS NULL) and how they'd resolve under
--- backend/app/rag/memory_source_backfill.py::_resolve_locator(), BEFORE any real backfill
+-- backend/app/rag/backfill/memory_source.py::_resolve_locator(), BEFORE any real backfill
 -- run. See docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8.
 --
 -- This is operator documentation, not application code or a migration. It is never imported,

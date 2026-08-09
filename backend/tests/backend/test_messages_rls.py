@@ -10,7 +10,7 @@ on, which is where the real risk in this change lives:
      moment 0031 shipped. If the policy could ever hide a row from that aggregate, the trigger
      would under-count and hand out an ordinal that collides with an existing one — silently
      corrupting the invariant all of S1B rests on. These tests assert it cannot.
-  B. The S1B backfill (app/rag/message_sequence_backfill.py) reads and UPDATEs `messages` in
+  B. The S1B backfill (app/rag/backfill/message_sequence.py) reads and UPDATEs `messages` in
      bulk. It must keep working unchanged, and must still leave other owners untouched.
   C. The delete paths (app/routers/conversations.py's delete_conversation, and
      app/account/erasure.py) delete messages via the restricted role. Both delete messages
@@ -36,7 +36,7 @@ from sqlalchemy.exc import DBAPIError, ProgrammingError
 
 from app.db import migration_engine
 from app.models.conversation import Conversation, Message, MessageRole
-from app.rag.message_sequence_backfill import (
+from app.rag.backfill.message_sequence import (
     backfill_message_sequence_numbers,
     candidate_conversation_ids,
     count_unsequenced_messages,

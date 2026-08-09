@@ -42,7 +42,7 @@ RLS_STATEMENTS = [
     "ALTER TABLE memory_source_lifecycle_events ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE memory_source_lifecycle_events FORCE ROW LEVEL SECURITY",
     # Durable production backfill-run reporting (migration 0025) — see app/models/
-    # memory_source_backfill_run.py and app/rag/memory_source_backfill_run.py. Also enabled
+    # memory_source_backfill_run.py and app/rag/backfill/memory_source_run.py. Also enabled
     # directly in the migration itself; listed here too so this idempotent reapply path stays
     # the single source of truth for every owner-scoped table, matching the rest of this list.
     "ALTER TABLE memory_source_backfill_runs ENABLE ROW LEVEL SECURITY",

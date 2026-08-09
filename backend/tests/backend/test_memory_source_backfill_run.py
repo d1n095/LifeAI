@@ -1,5 +1,5 @@
 """Durable production backfill-run reporting (migration 0025, docs/MAINAI_PROJECT_UNDERSTANDING_
-PLAN.md §4.8) — app/rag/memory_source_backfill_run.py. Real local Postgres, RLS exercised for
+PLAN.md §4.8) — app/rag/backfill/memory_source_run.py. Real local Postgres, RLS exercised for
 real, same pattern as tests/backend/test_memory_source_backfill.py.
 """
 
@@ -17,7 +17,7 @@ from app.models.knowledge_claim import KnowledgeClaim
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.memory_source_unit import MemorySourceUnit
 from app.models.user import User, UserRole
-from app.rag.memory_source_backfill_run import (
+from app.rag.backfill.memory_source_run import (
     BackfillRunBusy,
     BackfillRunNotAdvanceable,
     advance_backfill_run,
@@ -332,7 +332,7 @@ def test_advance_backfill_run_top_level_exception_marks_run_failed(monkeypatch):
         def _boom(*args, **kwargs):
             raise RuntimeError("simulated crash mid-batch")
 
-        import app.rag.memory_source_backfill_run as run_module
+        import app.rag.backfill.memory_source_run as run_module
 
         # Patch the NAME as bound inside run_module's own namespace (a `from x import y`
         # creates a separate binding there) — patching the source module's attribute alone
@@ -435,7 +435,7 @@ def test_concurrent_advance_calls_on_same_run_second_is_rejected_not_lost(monkey
     finally:
         setup_session.close()
 
-    import app.rag.memory_source_backfill_run as run_module
+    import app.rag.backfill.memory_source_run as run_module
 
     real_backfill = run_module.backfill_memory_source_units
     started = threading.Event()
@@ -518,7 +518,7 @@ def test_advance_vs_cancel_race_second_caller_is_rejected(monkeypatch):
     finally:
         setup_session.close()
 
-    import app.rag.memory_source_backfill_run as run_module
+    import app.rag.backfill.memory_source_run as run_module
 
     real_backfill = run_module.backfill_memory_source_units
     started = threading.Event()
@@ -717,7 +717,7 @@ def test_error_summary_never_contains_raw_exception_text(monkeypatch):
         def _boom(*args, **kwargs):
             raise RuntimeError(sensitive_marker)
 
-        import app.rag.memory_source_backfill_run as run_module
+        import app.rag.backfill.memory_source_run as run_module
 
         monkeypatch.setattr(run_module, "backfill_memory_source_units", _boom)
 
@@ -793,7 +793,7 @@ def test_crash_between_two_claims_in_same_batch_leaves_run_at_exactly_first_clai
 
         run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real, batch_size=10)
 
-        import app.rag.memory_source_backfill as backfill_module
+        import app.rag.backfill.memory_source as backfill_module
 
         real_resolve_locator = backfill_module._resolve_locator
         calls = {"n": 0}
@@ -850,7 +850,7 @@ def test_crash_after_memory_source_unit_created_before_claim_linked_leaves_nothi
 
         run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real)
 
-        import app.rag.memory_source_backfill as backfill_module
+        import app.rag.backfill.memory_source as backfill_module
 
         real_get_or_create = backfill_module.get_or_create_memory_source_unit
 
@@ -901,7 +901,7 @@ def test_crash_after_claim_linked_before_run_counters_updated_leaves_nothing_dur
 
         run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real)
 
-        import app.rag.memory_source_backfill_run as run_module
+        import app.rag.backfill.memory_source_run as run_module
 
         real_make_on_claim_outcome = run_module._make_on_claim_outcome
 
@@ -946,7 +946,7 @@ def test_crash_after_counters_updated_before_cursor_committed_leaves_nothing_dur
 
         run = create_or_resume_backfill_run(session, owner_id, mode=BackfillRunMode.real)
 
-        import app.rag.memory_source_backfill_run as run_module
+        import app.rag.backfill.memory_source_run as run_module
 
         def _crashes_after_mutation_before_flush(run_arg, *, old, claim_id):
             # By this point (_assert_monotonic's own call site, inside _on_claim_outcome) both
@@ -1002,7 +1002,7 @@ def test_db_check_constraint_rejects_processed_count_not_matching_outcome_sum():
 def test_assert_monotonic_raises_on_decreased_counter():
     """Direct unit-level check of the service-layer monotonicity tripwire (point 6): a counter
     that decreases relative to its pre-mutation value must raise, naming the offending field."""
-    from app.rag.memory_source_backfill_run import _assert_monotonic
+    from app.rag.backfill.memory_source_run import _assert_monotonic
 
     session = SessionLocal()
     try:
@@ -1031,7 +1031,7 @@ def test_assert_monotonic_raises_on_cursor_moving_backward():
     that moves backward relative to its pre-mutation value must raise."""
     from datetime import datetime, timedelta, timezone
 
-    from app.rag.memory_source_backfill_run import _assert_monotonic
+    from app.rag.backfill.memory_source_run import _assert_monotonic
 
     session = SessionLocal()
     try:

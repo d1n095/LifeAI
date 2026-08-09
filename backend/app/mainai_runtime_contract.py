@@ -269,7 +269,7 @@ CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review", "message_seque
 # load-bearing: `None` means "this capability was reviewed and genuinely depends on no AI
 # provider at all", which is the founder's standing "the system must keep working without AI
 # wherever that's architecturally possible" rule made enforceable. `message_sequence_backfill`
-# (S1B, app/rag/message_sequence_backfill.py) is pure SQL over rows that already exist —
+# (S1B, app/rag/backfill/message_sequence.py) is pure SQL over rows that already exist —
 # numbering the founder's own message history must not become unavailable because no model key
 # happens to be configured. A capability simply forgotten from this dict still fails closed.
 _CAPABILITY_PROVIDER_ROLE: dict[str, str | None] = {"corpus_review": "chat", "message_sequence_backfill": None}

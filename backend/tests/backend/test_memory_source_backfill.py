@@ -1,5 +1,5 @@
 """S1A deterministic backfill (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, phase 2) —
-app/rag/memory_source_backfill.py. Real local Postgres, RLS exercised for real, same pattern
+app/rag/backfill/memory_source.py. Real local Postgres, RLS exercised for real, same pattern
 as tests/backend/test_memory_source_units.py and tests/backend/test_claims.py.
 """
 
@@ -15,7 +15,7 @@ from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.memory_source_unit import DocumentSourceUnit, MemorySourceUnit, SnapshotStatus, SourceKind
 from app.models.user import User, UserRole
-from app.rag.memory_source_backfill import backfill_memory_source_units
+from app.rag.backfill.memory_source import backfill_memory_source_units
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 

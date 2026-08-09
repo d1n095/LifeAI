@@ -1,5 +1,5 @@
 """S1B — `messages.sequence_number` (migration 0030, app/models/conversation.py,
-app/rag/message_sequence_backfill.py, app/jobs/handlers/message_sequence_backfill.py).
+app/rag/backfill/message_sequence.py, app/jobs/handlers/message_sequence_backfill.py).
 See docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.9 and §8's S1B line.
 
 Covers, in order:
@@ -45,7 +45,7 @@ from app.mainai_runtime_contract import (
 )
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
-from app.rag.message_sequence_backfill import (
+from app.rag.backfill.message_sequence import (
     MESSAGE_SEQUENCE_ADVISORY_LOCK_NAMESPACE,
     backfill_conversation,
     backfill_message_sequence_numbers,

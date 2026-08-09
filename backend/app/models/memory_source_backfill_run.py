@@ -11,7 +11,7 @@ from app.db import Base
 
 class BackfillRunMode(str, enum.Enum):
     """`dry_run` resolves and tallies every candidate exactly as a real run would, but never
-    writes `memory_source_id` (see app/rag/memory_source_backfill.py's dry_run docstring).
+    writes `memory_source_id` (see app/rag/backfill/memory_source.py's dry_run docstring).
     `real` actually links claims. A run row's mode is fixed at creation — never changed in
     place, so the durable record can never blur a rehearsal with a real run."""
 
@@ -36,7 +36,7 @@ class BackfillRunStatus(str, enum.Enum):
 
 class MemorySourceBackfillRun(Base):
     """Durable production backfill-run record (migration 0025) — the last blocker
-    app/rag/memory_source_backfill.py's own module docstring names before that module's
+    app/rag/backfill/memory_source.py's own module docstring names before that module's
     backfill_memory_source_units() may ever be run against production. See that migration's
     module docstring for the full design rationale (cursor semantics, snapshot counters,
     completion-truthfulness rule, why this table is NOT in backend/scripts/
@@ -95,11 +95,11 @@ class MemorySourceBackfillRun(Base):
 class MemorySourceBackfillFailure(Base):
     """One row per claim that failed to resolve or link during a specific run — a queryable,
     durable claim-level failure log (migration 0025). `reason` is the exact structural failure
-    string app/rag/memory_source_backfill.py's `_resolve_locator()`/`_apply()` already produce
+    string app/rag/backfill/memory_source.py's `_resolve_locator()`/`_apply()` already produce
     (document/chunk/version/owner ids only — NEVER `KnowledgeClaim.claim_text`). Unique on
     (run_id, claim_id): a claim re-considered within the SAME run never produces a duplicate
     row for that run (attempt_count increments instead — see
-    app/rag/memory_source_backfill_run.py's record_failure())."""
+    app/rag/backfill/memory_source_run.py's record_failure())."""
 
     __tablename__ = "memory_source_backfill_failures"
     __table_args__ = (
