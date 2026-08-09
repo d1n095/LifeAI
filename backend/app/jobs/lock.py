@@ -53,7 +53,7 @@ class JobLock:
 
     Never permanent: every lock is set with a lease TTL (`lease_seconds`). There is no code
     path that sets a lock without an expiry — a crashed or hung worker's lock always expires
-    on its own, so a job can never be stuck behind a lock forever (see test_job_lock.py's
+    on its own, so a job can never be stuck behind a lock forever (see tests/backend/jobs/test_job_lock.py's
     "abandoned lock can be reacquired after its lease expires" test).
     """
 
