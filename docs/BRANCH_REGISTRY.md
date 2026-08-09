@@ -394,6 +394,18 @@ passed). Samma blob-/trådrace-familj (`fcntl.flock()`, `LocalFilesystemStorage`
 41, 42, 43 och 45 redan dokumenterat i det här registret — `local_fs.py`s enda ändring i den
 här PR:n är kommentarer, ingen funktionell kod rördes.
 
+**CI:s första körning på PR #46 (`31297148937`) råkade själv ut för exakt samma flaka**, i sin
+egen `test_storage_local_fs.py`-variant: `Backend — unit/integration tests` föll med `1 failed,
+971 passed, 1 skipped` — den enda fallerande var
+`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`, samma dokumenterade
+blob-/fcntl.flock()-trådrace. `mcp__github__actions_run_trigger`s `rerun_failed_jobs` kördes om
+just det jobbet (samma mönster som Pass 42 redan etablerat för denna exakta testfamilj);
+omkörningen blev grön (`972 passed, 1 skipped, 0 failed`), och samtliga 18 checkar i workflown
+(`31297148937`) står som `completed` — 14 `success`, 4 `skipped` (de branch-gated VPS-/
+combined-container-jobben, korrekt inaktiva på den här branchen), 0 `failure`, 0 kvarvarande
+`in_progress`. Verifierat direkt mot GitHubs Actions-API (`get_check_runs`/`get_workflow_job`),
+inte antaget.
+
 **Nästa steg i städningen:** ej specificerat av den här sessionen — nästa MOVE/RENAME-steg
 väntar på grundarens fortsatta godkännande, en branch/PR i taget, per `CLAUDE.md`s
 grundprincip.
