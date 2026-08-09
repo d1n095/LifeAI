@@ -76,14 +76,20 @@ opportunistiskt. Steg 2 av samma founder-godkända, flerstegs repo-städning:
 ren MOVE/RENAME. Se Pass 46 nedan för full detalj. **Basgrenens nuvarande tip är därmed
 `bf74a05e6f4773bd59904dafe84aa5beae808347`.**
 
-**ÖPPEN PR: #47** (`claude/move-mainai-jobs-runtime` → `claude/det-kommer-mer-879lcm`), grenad
-från exakt `bf74a05e6f4773bd59904dafe84aa5beae808347` (basgrenens tip, verifierad med `git
-ls-remote origin` INNAN branchen skapades). Steg 3 av samma founder-godkända, flerstegs
-repo-städning: `backend/app/rag/{mainai_jobs_service,corpus_review_job,message_sequence_backfill_job}.py`
+**PR #47 är MERGAD** (`claude/move-mainai-jobs-runtime` → `claude/det-kommer-mer-879lcm`),
+grenad från exakt `bf74a05e6f4773bd59904dafe84aa5beae808347` (basgrenens tip vid grening,
+verifierad med `git ls-remote origin` INNAN branchen skapades), merge-commit
+`7a7cbb4e4cabf834d4ec5f64d4f4d48d9e9b172d`, `merged_by`: `d1n095`, `merged_at`
+2026-08-09T07:17:39Z. Verifierat mot GitHubs PR-API direkt (`mcp__github__pull_request_read`,
+`state: closed`, `merged: true`), inte memorerat — denna rad var stale (skriven FÖRE mergen, från
+PR #47:s egen branch, som förstås inte kan dokumentera sin egen framtida merge) tills den här
+sessionen korrigerade den, per `CLAUDE.md`s regel att göra det INNAN man fortsätter, inte
+opportunistiskt. Steg 3 av samma founder-godkända, flerstegs repo-städning:
+`backend/app/rag/{mainai_jobs_service,corpus_review_job,message_sequence_backfill_job}.py`
 → `backend/app/jobs/service.py` + `backend/app/jobs/handlers/{corpus_review,message_sequence_backfill}.py`,
 ren MOVE/RENAME, inget annat — den hittills mest högriskiga flytten i städningsserien
 (job-runtimen med lease/fencing/cancel/retry-semantik). Se Pass 47 nedan för full detalj.
-INTE mergad.
+**Basgrenens nuvarande tip är därmed `7a7cbb4e4cabf834d4ec5f64d4f4d48d9e9b172d`.**
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
