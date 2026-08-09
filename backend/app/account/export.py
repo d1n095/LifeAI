@@ -1,7 +1,7 @@
 """Personal-data export domain service (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, PR
 #31's Pass 26 account-integration slice) — the ONE place `app/routers/account.py`'s
 `GET /api/account/export` delegates to, matching the shared-domain-service pattern already
-established for source purging (app/rag/source_purge.py).
+established for source purging (app/storage/purge.py).
 
 Pass 26 closes a real gap a founder review caught: the export used to say, in its own module
 docstring, that "claims and generated analyses have no backing table yet" — stale since STEG
@@ -72,7 +72,7 @@ def export_account_data(db: Session, user: User, *, client_ip: str | None = None
     `account_data_exported` audit entry once the export object has been successfully
     assembled, and returns the export dict. Every section is filtered by `owner_id`/
     `uploaded_by`/`user_id` == `user.id` explicitly, not left to RLS alone — matching
-    app/rag/source_purge.py's convention that a bug disabling RLS must still fail closed
+    app/storage/purge.py's convention that a bug disabling RLS must still fail closed
     rather than silently widening what a query returns.
 
     Raises whatever the underlying queries raise (never partially writes the audit entry for

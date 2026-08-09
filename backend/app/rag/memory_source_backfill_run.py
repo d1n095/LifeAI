@@ -76,7 +76,7 @@ logger = logging.getLogger("mainai.rag.memory_source_backfill_run")
 # doesn't override batch_size gets identical per-call sizing to the underlying function.
 DEFAULT_RUN_BATCH_SIZE = 50
 
-# Distinct from app/rag/blob_references.py's hashtextextended seeds 0/1 (a completely
+# Distinct from app/storage/references.py's hashtextextended seeds 0/1 (a completely
 # different lock domain, keyed by storage key text, not run id) — kept separate purely so the
 # two domains are trivially distinguishable by inspection, even though a collision between
 # them was already astronomically unlikely (different `key` text entirely).

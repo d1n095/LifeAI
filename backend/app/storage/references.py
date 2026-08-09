@@ -1,7 +1,7 @@
 """Canonical blob-reference policy (Pass 22, cross-owner-hardened in Pass 23): the ONE place
 that decides whether a content-addressed storage_key is still needed by anything in the
 system, and the ONE place that serializes a check-then-act sequence against it. Shared by
-app/routers/library.py's upload-finalization path and app/rag/source_purge.py's
+app/routers/library.py's upload-finalization path and app/storage/purge.py's
 retry_source_blob_purge() (phase B).
 
 Why this had to become a shared module rather than staying app/rag/library_import.py's
@@ -95,7 +95,7 @@ from app.db import migration_engine
 from app.storage import StorageBackend, StorageError
 from app.storage.base import StoredBlob
 
-logger = logging.getLogger("mainai.rag.blob_references")
+logger = logging.getLogger("mainai.storage.references")
 
 # Pass 31: the SAME privileged admin/migration connection app/account/erasure.py's own
 # `_MaintenanceSession` and app/worker.py's `_ClaimSession` already use for
@@ -164,7 +164,7 @@ KNOWN_STORAGE_WRITE_PATHS: tuple[tuple[str, str, str], ...] = (
         "specifically, via delete_if_unreferenced() below.",
     ),
     (
-        "rag/blob_references.py",
+        "storage/references.py",
         "store_content_with_reference_lock",
         "acquire_storage_key_lock() taken AFTER write_stream() returns (structurally cannot "
         "be taken any earlier -- the key isn't known until the bytes are fully hashed), the "

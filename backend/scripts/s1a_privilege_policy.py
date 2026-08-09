@@ -172,7 +172,7 @@ _NEVER_GRANTED_TABLE_PRIVS = ["TRUNCATE", "REFERENCES", "TRIGGER"]
 # Unlike the two owner-scoped functions above, it has no per-caller ownership check (it must
 # see EVERY owner's live Document/ImportJob rows to correctly answer whether a
 # content-addressed, globally-shared blob is still referenced by anyone at all — see
-# app/rag/blob_references.py's module docstring for the cross-owner RLS gap this closes).
+# app/storage/references.py's module docstring for the cross-owner RLS gap this closes).
 # Unlike the two admin-only functions above, mainai_app DOES need EXECUTE on it: it's called
 # from an ordinary owner-scoped request (source purge, blob upload), not an admin-only path.
 # It stays safe to expose to mainai_app anyway because it returns nothing but a boolean —
@@ -258,7 +258,7 @@ def _resolve_function(cur, name: str, expected_arg_types: tuple[str, ...]) -> tu
     application's actual `(text)` call) would have been silently accepted as long as it was
     the only overload present and still SECURITY DEFINER, boolean-returning, correctly owned,
     and correctly granted — every check downstream of the lookup would pass while
-    `blob_references.py`'s actual `SELECT public.storage_key_still_referenced_global(:key)`
+    `references.py`'s actual `SELECT public.storage_key_still_referenced_global(:key)`
     call broke at runtime, resolving to a function this policy never actually verified.
 
     Returns `(signature_or_None, errors)`:

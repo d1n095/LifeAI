@@ -15,7 +15,7 @@ founder review found between this function and `app/account/erasure.py`'s
 `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1)`: Postgres MVCC meant this
 query's own SELECT ran against whatever snapshot was visible when it started, with NO
 coordination against a concurrent erasure for the SAME owner. `erase_account_data()` acquires
-`acquire_owner_erasure_lock()` (app/rag/blob_references.py) before inventorying that owner's
+`acquire_owner_erasure_lock()` (app/storage/references.py) before inventorying that owner's
 `Document`/`ImportJob` storage keys — but a `pending` ImportJob a worker was ABOUT to claim
 could still slip through the gap: claim's SELECT could see the row as claimable BEFORE
 erasure's DELETE of it commits, letting a worker start extracting/writing NEW blobs for an
@@ -58,7 +58,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.import_job import CLAIMABLE_IMPORT_JOB_STATUSES
-from app.rag.blob_references import acquire_owner_erasure_lock
+from app.storage.references import acquire_owner_erasure_lock
 
 _CANDIDATE_SQL = text("""
     SELECT id, owner_id FROM knowledge_import_jobs

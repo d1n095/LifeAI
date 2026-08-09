@@ -37,13 +37,13 @@ from app.models.document import (
 from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
-from app.rag.blob_references import acquire_storage_key_lock, storage_key_still_referenced
 from app.rag.claims import extract_claims_for_document
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
 from app.rag import media_import
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
 from app.storage import StorageBackend, StorageError, get_storage
+from app.storage.references import acquire_storage_key_lock, storage_key_still_referenced
 
 logger = logging.getLogger("mainai.rag.library_import")
 
@@ -160,7 +160,7 @@ def _store_bytes(storage: StorageBackend, content: bytes, *, max_bytes: int):
 
 def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, content: bytes, *, max_bytes: int):
     """Pass 32 (a seventh founder review round): wraps `_store_bytes()` with the SAME
-    lock+verify+republish protocol `app/rag/blob_references.py`'s
+    lock+verify+republish protocol `app/storage/references.py`'s
     `store_content_with_reference_lock()` already provides for Project Memory's writers (Pass
     31) — see that function's docstring for the write-before-reference race this closes, and
     this module's own module docstring / `_import_one_file`'s call site for why `_store_bytes`
@@ -183,7 +183,7 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
 
     Pass 32 (an eighth founder review round): uses `storage.verify(expected_sha256=...,
     expected_size=...)`, not `storage.exists()` — see `store_content_with_reference_lock()`'s
-    (app/rag/blob_references.py) matching docstring update for why `exists()` alone can't tell
+    (app/storage/references.py) matching docstring update for why `exists()` alone can't tell
     a genuinely-published blob apart from a same-path file whose bytes don't actually match
     this content's hash."""
     blob = _store_bytes(storage, content, max_bytes=max_bytes)
@@ -214,14 +214,14 @@ def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | No
     different documents (or a pending ImportJob's raw upload) with byte-identical content
     already share one physical file, so the reference check is a live DB query, not a
     maintained counter that could drift. Pass 22: the reference check itself now lives in
-    app/rag/blob_references.py::storage_key_still_referenced() — a live Document.storage_key
+    app/storage/references.py::storage_key_still_referenced() — a live Document.storage_key
     row was always checked here, but a pending/running/resumable ImportJob.source_storage_key
     was not, which let a source purge physically delete a blob a not-yet-processed import job
     still needed (see that module's docstring for the full incident and the fix). Returns the
     DeletionStatus to persist on the caller's Document row: `purged` (removed, or nothing to
     remove), `pending` (still referenced elsewhere — correct to leave the file in place),
     `failed` (a real I/O error, surfaced distinctly rather than silently retried forever).
-    Callers with a real storage_key must hold app.rag.blob_references.acquire_storage_key_lock
+    Callers with a real storage_key must hold app.storage.references.acquire_storage_key_lock
     for this call — this function itself does no locking."""
     if storage_key is None:
         return DeletionStatus.purged

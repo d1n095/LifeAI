@@ -75,7 +75,7 @@ Pass 22, two further founder-review fixes on top of the above:
 1. **The blob-reference check itself was incomplete.** `maybe_purge_blob()` (still the shared
    function both phase B here and this module call) used to check only live `Document
    .storage_key` rows — never `ImportJob.source_storage_key`, the RAW upload a pending/running/
-   resumable import job still needs to read. See app/rag/blob_references.py's module docstring
+   resumable import job still needs to read. See app/storage/references.py's module docstring
    for the full incident and the now-canonical `storage_key_still_referenced()` policy both
    this module and the upload endpoint (`POST /api/library/import`, app/routers/library.py)
    share. That module also owns `acquire_storage_key_lock()` — a transaction-scoped Postgres
@@ -102,11 +102,11 @@ from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.memory_source_unit import DocumentSourceUnit, LifecycleStatus, MemorySourceUnit
-from app.rag.blob_references import acquire_storage_key_lock
 from app.rag.library_import import maybe_purge_blob
 from app.storage import get_storage
+from app.storage.references import acquire_storage_key_lock
 
-logger = logging.getLogger("mainai.rag.source_purge")
+logger = logging.getLogger("mainai.storage.purge")
 
 PURGE_REASON = "source_deleted"
 
@@ -306,7 +306,7 @@ def retry_source_blob_purge(db: Session, document_id: uuid.UUID, owner_id: uuid.
     soft-deleted document owned by owner_id (never a live, not-yet-purged one — call
     purge_source() for that).
 
-    Pass 22: acquires app.rag.blob_references.acquire_storage_key_lock() for the document's
+    Pass 22: acquires app.storage.references.acquire_storage_key_lock() for the document's
     storage_key BEFORE checking whether anything still references it — the same lock POST
     /api/library/import takes around its own blob-finalization + ImportJob-commit sequence,
     closing the TOCTOU race a founder review found (see that module's docstring for the full
@@ -329,7 +329,7 @@ def retry_source_blob_purge(db: Session, document_id: uuid.UUID, owner_id: uuid.
     storage = get_storage()
     if document.storage_key is not None:
         # Held for the rest of this transaction (released at the db.commit() below) — see
-        # this function's docstring and app/rag/blob_references.py's module docstring for the
+        # this function's docstring and app/storage/references.py's module docstring for the
         # race this closes.
         acquire_storage_key_lock(db, document.storage_key)
     document.deletion_status = maybe_purge_blob(db, storage, document.storage_key)

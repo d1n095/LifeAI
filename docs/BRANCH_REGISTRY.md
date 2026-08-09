@@ -55,14 +55,23 @@ till grundaren, inte som ett committat dokument — detta var det enda kodnära 
 granskningen som bedömdes tillräckligt riskfritt för att öppnas som egen PR direkt).
 **Basgrenens nuvarande tip är därmed `d8658452682973e4617187a6a8fa817a27afa2db`.**
 
-**ÖPPEN PR: #45** (`claude/move-account-erasure-export` → `claude/det-kommer-mer-879lcm`),
-grenad från exakt `d8658452682973e4617187a6a8fa817a27afa2db` (basgrenens tip, verifierad med
-`git ls-remote origin` INNAN branchen skapades). Steg 1 av samma founder-godkända, flerstegs
-repo-städning strukturaudien ovan föreslog: ren MOVE/RENAME, inget annat. Se Pass 45 nedan för
-full detalj. INTE mergad.
+**PR #45 är MERGAD** (`claude/move-account-erasure-export` → `claude/det-kommer-mer-879lcm`),
+merge-commit `11f3951363ffc85b6068e7c8b452f628fa774e73`, `merged_by`: `d1n095`. Verifierat mot
+GitHubs PR-API direkt (`mcp__github__pull_request_read`, `state: closed`, `merged: true`),
+inte memorerat. Steg 1 av samma founder-godkända, flerstegs repo-städning strukturaudien ovan
+föreslog: `backend/app/rag/{account_erasure,account_export}.py` →
+`backend/app/account/{erasure,export}.py`, ren MOVE/RENAME. Se Pass 45 nedan för full detalj.
+**Basgrenens nuvarande tip är därmed `11f3951363ffc85b6068e7c8b452f628fa774e73`.**
 
-**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-08, mot GitHubs PR-API direkt
-(`mcp__github__pull_request_read`/`merge_pull_request`, inte memorerat). **PR #36 är MERGAD**
+**ÖPPEN PR: #46** (`claude/move-blob-refs-source-purge` → `claude/det-kommer-mer-879lcm`),
+grenad från exakt `11f3951363ffc85b6068e7c8b452f628fa774e73` (basgrenens tip, verifierad med
+`git ls-remote origin` INNAN branchen skapades). Steg 2 av samma founder-godkända, flerstegs
+repo-städning: `backend/app/rag/{blob_references,source_purge}.py` →
+`backend/app/storage/{references,purge}.py`, ren MOVE/RENAME, inget annat. Se Pass 46 nedan
+för full detalj. INTE mergad.
+
+**Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
 (`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit
 `af4194ba1d913da56507f427c2af9d336138bf7e` (parents: `ceb6cb93b38cca69dd450eb5ce5a50632c197e8a`
 och `f6119b290d890495475245abe3a7e865c2b7d1a8` — en riktig tvåparent-merge, inte squash/rebase),
@@ -250,6 +259,156 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 46 (2026-08-09): `backend/app/rag/{blob_references,source_purge}.py` → `backend/app/storage/{references,purge}.py` — steg 2 av den founder-godkända repo-städningen, ren MOVE/RENAME
+
+**Branch:** `claude/move-blob-refs-source-purge`, grenad från exakt
+`11f3951363ffc85b6068e7c8b452f628fa774e73` (basgrenens verifierade tip efter PR #45 — SHA:n
+hämtad med `git ls-remote origin` INNAN branchen skapades, inte memorerad; det är också PR
+#45:s merge-commit). **PR #46**, öppen mot `claude/det-kommer-mer-879lcm`, INTE mergad.
+
+Steg 2 av samma founder-godkända, flerstegs repo-städning som Pass 45 (steg 1). Samma ramning:
+"en sådan PR ska se tråkig ut: filer flyttade, imports uppdaterade, tester gröna. Ingen 'låt
+oss refaktorera lite på köpet'." Ingen affärslogik, inga DB-frågor, ingen RLS/
+privilegiesemantik och ingen migration ändrad.
+
+**`backend/app/storage/` fanns redan** (verifierat, inte antaget) — `base.py` (den abstrakta
+`StorageBackend`-gränssnittsklassen: `write_stream`/`open_read`/`exists`/`delete`/`verify`,
+plus `StoredBlob`/`StorageError`-familjen) och `local_fs.py` (den enda konkreta
+implementationen, `LocalFilesystemStorage`). De två flyttade filerna konkurrerar INTE med
+detta — `references.py` (f.d. `blob_references.py`) importerade redan `StorageBackend`/
+`StorageError`/`StoredBlob` från `app.storage`/`app.storage.base` FÖRE flytten, och `purge.py`
+(f.d. `source_purge.py`) importerade redan `get_storage()`. Båda filerna är alltså
+konceptuellt konsumenter av `base.py`s `StorageBackend`-gränssnitt (policy-/orkestreringslager
+ovanpå det, inte en konkurrerande lagringsmekanism) — flytten in i samma paket gör den
+relationen strukturellt synlig i stället för att bara vara sant genom en `app.rag`-import.
+`app/storage/__init__.py`s befintliga re-exportlista (`StorageBackend`, `StorageError`,
+`StorageIntegrityError`, `StoredBlob`, `LocalFilesystemStorage`, `get_storage`) lämnades
+MEDVETET orörd — att lägga till `references.py`/`purge.py`s publika funktioner där hade varit
+ett re-export-designbeslut utöver en ren flytt, inte krävt av uppgiften.
+
+**Namngivning** (uppgiftens uttryckliga krav: undvik kollision/förvirrande nästan-dubblett mot
+`base.py`/`local_fs.py`): `blob_references.py` → `references.py`, `source_purge.py` →
+`purge.py`. Korta, substantiviska modulnamn som redan matchar paketets egen konvention
+(`base`, `local_fs`) — `storage`-prefixet i de gamla filnamnen blev överflödigt inuti sitt eget
+paket, och ingendera kolliderar med eller är en nästan-dubblett av `base`/`local_fs`.
+
+**Vad som flyttade (git mv, historik bevarad):**
+- `backend/app/rag/blob_references.py` → `backend/app/storage/references.py`
+- `backend/app/rag/source_purge.py` → `backend/app/storage/purge.py`
+
+**Ömsesidig import — uppgiftens egen premiss verifierad, inte antagen:** uppgiftsbeskrivningen
+antog att de två filerna importerar varandra. Verifierat med grep INNAN flytten: det stämmer
+INTE — endast `source_purge.py` importerade `blob_references.py`
+(`from app.rag.blob_references import acquire_storage_key_lock`); det omvända fanns aldrig,
+bara docstring-/kommentarsmeningar som nämner det andra modulnamnet. Ingen cirkulär import
+existerade före flytten, och ingen introducerades av den. Båda flyttades ändå i samma commit
+(samma försiktighetsprincip som om de hade varit ömsesidiga) för att undvika ett mellanläge
+där den ena pekar på den nya sökvägen och den andra fortfarande på den gamla.
+
+**Självreferenser inuti de flyttade filerna uppdaterade:** `references.py`s egen
+`KNOWN_STORAGE_WRITE_PATHS`-registerpost för sig själv (`"rag/blob_references.py"` →
+`"storage/references.py"`, raden `store_content_with_reference_lock`-posten), samt
+`logger`-namnen (`mainai.rag.blob_references` → `mainai.storage.references`,
+`mainai.rag.source_purge` → `mainai.storage.purge` — samma `mainai.<paket>.<modul>`-konvention
+Pass 45 redan etablerade för `mainai.account.erasure`). `purge.py`s enda import av
+`references.py` (`from app.rag.blob_references import acquire_storage_key_lock` →
+`from app.storage.references import acquire_storage_key_lock`) uppdaterad; dess import av
+`app.rag.library_import` (som INTE flyttar) lämnad orörd.
+
+**Alla imports uppdaterade** (grep-verifierat, noll kvarvarande `app.rag.blob_references`/
+`app.rag.source_purge` i kod/tester/skript), samt omplacerade till alfabetisk plats i varje
+importblock där det var meningsfullt:
+- `backend/app/jobs/lease.py`, `backend/app/project_memory.py`,
+  `backend/app/rag/library_import.py`, `backend/app/routers/documents.py`,
+  `backend/app/routers/library.py` (multi-line-importblocket för `acquire_owner_erasure_lock`/
+  `acquire_storage_key_lock`/`delete_if_unreferenced`/`get_storage_cleanup_ops_status`),
+  `backend/app/account/erasure.py`.
+
+**AST/sträng-literal-testreferenser uppdaterade** (`backend/tests/backend/test_source_purge.py`,
+den riktiga AST-baserade `storage.delete()`-allowlist-testet, `test_every_direct_storage_
+delete_call_site_is_on_the_known_allowlist`): `ALLOWED_CALL_SITES`-tupeln
+`("rag/blob_references.py", "delete_if_unreferenced")` → `("storage/references.py",
+"delete_if_unreferenced")` — annars hade det testet fallerat på riktigt, inte kosmetiskt,
+eftersom det jämför mot AST-skannade faktiska filsökvägar under `app/`. Samma fils
+`test_every_storage_write_stream_reference_is_on_the_known_write_path_registry` (jämför mot
+`references.py`s egen `KNOWN_STORAGE_WRITE_PATHS`, importerad live — täcks automatiskt av
+självreferensuppdateringen ovan). `logger`-sträng-literalen i
+`test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_log`
+(`caplog.at_level(..., logger="mainai.rag.blob_references")` →
+`"mainai.storage.references"`), samt de dynamiska importsatserna `import app.rag.source_purge
+as source_purge_module` → `import app.storage.purge as source_purge_module` och `from app.rag
+import blob_references as br` → `from app.storage import references as br`.
+
+**Övriga testreferenser uppdaterade** (imports + levande kommentarer/docstrings, INTE
+testfilernas egna namn — `test_source_purge.py` byter INTE namn, dess tester täcker nu
+`app/storage/purge.py`+`app/storage/references.py`, precis som `test_account_erasure.py`
+sedan Pass 45 täcker `app/account/erasure.py`):
+`backend/tests/backend/test_source_purge.py` (importblocket, plus ~14 kommentar-/docstring-
+träffar), `test_library_routes.py`, `test_project_memory.py`, `test_account_erasure.py`,
+`test_library_import.py` (inkl. en dynamisk `from app.rag.blob_references import
+enqueue_rejected_upload_cleanup_task` inuti en testfunktion).
+
+**Levande kodkommentarer/docstrings uppdaterade** i övrig aktivt underhållen kod (INTE
+historiska loggposter): `app/jobs/mainai_job_lease.py`, `app/models/import_job.py`,
+`app/models/storage_deletion_task.py`, `app/schemas.py`, `app/audit.py`,
+`app/rag/memory_source_backfill_run.py`, `app/storage/local_fs.py` (tre träffar — denna fil
+LÅG redan i `app/storage/`, bara dess kommentarers pekare till den då-externa
+`blob_references.py` uppdaterades), `backend/scripts/s1a_privilege_policy.py`,
+`app/account/export.py` samt ytterligare kommentarer i `app/account/erasure.py`.
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` (ett kodexempel i S1A-designavsnittet, rad ~780 —
+den fullständiga funktionssökvägen `app/rag/source_purge.py::purge_source(...)` → `app/storage/
+purge.py::purge_source(...)`; detta är ett levande arkitekturdokument, inte en Pass-N-historik,
+så det uppdateras).
+
+**Medvetet INTE ändrat — historiskt narrativ, inte en trasig pekare:** Alembic-migrationerna
+0020/0021/0023/0024s prosakommentarer som nämner `app/rag/blob_references.py`/
+`source_purge.py`, samt detta registrets egna Pass 1–45-poster (inklusive Pass 45s egen text
+om `blob_references.py`, som var korrekt VID DET TILLFÄLLET). Samma disciplin Pass 45 redan
+etablerade för migrationer och tidigare Pass-poster. `PURGE_REASON = "source_deleted"` och
+`"source_purged"`-revisionsaktionssträngen (DB-lagrade, CHECK-constraint-styrda värden) rördes
+INTE — det är data, inte modulsökvägar. Testfilernas egna referenser till varandras FILNAMN
+(t.ex. "se `tests/backend/test_source_purge.py`s Pass 30-sektion") rördes INTE — inga testfiler
+bytte namn i den här PR:n.
+
+**Ingen import-cykel eller annan risk upptäckt** (se avsnittet om ömsesidig import ovan — den
+antagna cirkulariteten fanns aldrig). `python -c "import app.main"` lyckas; hela FastAPI-appens
+importgraf löser sig identiskt.
+
+**Tester (riktiga, körda lokalt mot Postgres 16 + Redis, inte antagna):**
+`tests/backend/test_source_purge.py` **66 passed** (inkl. båda AST-drifttesterna och
+`KNOWN_STORAGE_KEY_COLUMNS`-drifttestet). Fullsviten `tests/backend/` **972 passed, 1 skipped,
+0 failed**. `tests/security/` + `tests/account/` **77 passed** (samma 29+48-uppdelning som Pass
+45 rapporterade). `python -c "import app.main"`: OK. `ruff check` på samtliga 22 ändrade
+Python-filer: rent, förutom 10 st förbefintliga F401/F841-varningar (bl.a. `app/routers/
+library.py`, `app/rag/library_import.py`, `test_account_erasure.py`, `test_library_import.py`)
+— verifierat byte-identiska på basgrenens filer FÖRE den här branchens ändringar (git stash +
+omkörning), alltså varken introducerade eller fixade här (opportunistisk fix, hade brutit mot
+isoleringsprincipen).
+
+**Känd, pre-existerande flaka (INTE orsakad av den här diffen):**
+`test_library_import.py::test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_
+worker_never_race_unsafely` föll en gång i en kombinerad körning av fyra testfiler, men
+passerade både isolerat och i en identisk omkörning av samma fyra filer direkt efteråt (174
+passed). Samma blob-/trådrace-familj (`fcntl.flock()`, `LocalFilesystemStorage`) som Pass 37,
+41, 42, 43 och 45 redan dokumenterat i det här registret — `local_fs.py`s enda ändring i den
+här PR:n är kommentarer, ingen funktionell kod rördes.
+
+**CI:s första körning på PR #46 (`31297148937`) råkade själv ut för exakt samma flaka**, i sin
+egen `test_storage_local_fs.py`-variant: `Backend — unit/integration tests` föll med `1 failed,
+971 passed, 1 skipped` — den enda fallerande var
+`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`, samma dokumenterade
+blob-/fcntl.flock()-trådrace. `mcp__github__actions_run_trigger`s `rerun_failed_jobs` kördes om
+just det jobbet (samma mönster som Pass 42 redan etablerat för denna exakta testfamilj);
+omkörningen blev grön (`972 passed, 1 skipped, 0 failed`), och samtliga 18 checkar i workflown
+(`31297148937`) står som `completed` — 14 `success`, 4 `skipped` (de branch-gated VPS-/
+combined-container-jobben, korrekt inaktiva på den här branchen), 0 `failure`, 0 kvarvarande
+`in_progress`. Verifierat direkt mot GitHubs Actions-API (`get_check_runs`/`get_workflow_job`),
+inte antaget.
+
+**Nästa steg i städningen:** ej specificerat av den här sessionen — nästa MOVE/RENAME-steg
+väntar på grundarens fortsatta godkännande, en branch/PR i taget, per `CLAUDE.md`s
+grundprincip.
 
 ## Pass 45 (2026-08-08): `backend/app/rag/{account_erasure,account_export}.py` → `backend/app/account/{erasure,export}.py` — steg 1 av den founder-godkända repo-städningen, ren MOVE/RENAME
 
@@ -3910,12 +4069,12 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Rekommenderad merge-ordning (nuläge)
 
-**Aktuellt läge 2026-08-08 (verifierat mot GitHubs PR-API, `state: open`-listning):** PR #43
-och PR #44 är båda mergade (se sammanfattningen högst upp i det här dokumentet). Exakt **en**
-öppen PR finns nu — **PR #45** (`claude/move-account-erasure-export`, se Pass 45 nedan). Den
-är fristående (ren MOVE/RENAME, steg 1 av den founder-godkända repo-städningen), blockeras
+**Aktuellt läge 2026-08-09 (verifierat mot GitHubs PR-API, `state: open`-listning):** PR #43,
+PR #44 och PR #45 är alla mergade (se sammanfattningen högst upp i det här dokumentet). Exakt
+**en** öppen PR finns nu — **PR #46** (`claude/move-blob-refs-source-purge`, se Pass 46 nedan).
+Den är fristående (ren MOVE/RENAME, steg 2 av den founder-godkända repo-städningen), blockeras
 inte av något och blockerar inget annat pågående arbete. Ingen ombasering behövs: den är
-grenad från basgrenens nuvarande tip `d8658452682973e4617187a6a8fa817a27afa2db`.
+grenad från basgrenens nuvarande tip `11f3951363ffc85b6068e7c8b452f628fa774e73`.
 
 Listan nedan är den historiska ordningen och behålls som spårbarhet — punkterna 4 och 5 nedan
 speglar ett äldre läge (PR #31 är sedan länge mergad, se Pass 35) och ska läsas som historik,
@@ -3947,11 +4106,14 @@ inte som nuläge.
   exakta head-SHA:n `15986a7` — inget tekniskt eller CI-villkor återstår (se Pass 34).
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något öppet PR.
-- **PR #45 (`claude/move-account-erasure-export`) blockerar ingenting och blockeras av
-  ingenting.** Ren MOVE/RENAME (`backend/app/rag/account_erasure.py` →
-  `backend/app/account/erasure.py`, `backend/app/rag/account_export.py` →
-  `backend/app/account/export.py`), steg 1 av den founder-godkända, flerstegs repo-städningen.
-  Se Pass 45 nedan.
+- **PR #45 (`claude/move-account-erasure-export`) är mergad** (merge-commit
+  `11f3951363ffc85b6068e7c8b452f628fa774e73`, basgrenens nuvarande tip). Blockerade ingenting
+  och blockerades av ingenting. Se Pass 45 nedan.
+- **PR #46 (`claude/move-blob-refs-source-purge`) blockerar ingenting och blockeras av
+  ingenting.** Ren MOVE/RENAME (`backend/app/rag/blob_references.py` →
+  `backend/app/storage/references.py`, `backend/app/rag/source_purge.py` →
+  `backend/app/storage/purge.py`), steg 2 av den founder-godkända, flerstegs repo-städningen.
+  Se Pass 46 nedan.
 
 ## Kvarstår efter PR #28:s merge (2026-07-28)
 
@@ -4071,6 +4233,7 @@ tillåtelse (destruktiv åtgärd, se säkerhetsprotokollet):
 `claude/p2-zip-hardening-plan` (PR #8, mergad),
 `claude/least-privilege-revoke-truncate` (PR #43, mergad),
 `claude/repo-structure-audit-readme-doc-pointers` (PR #44, mergad),
+`claude/move-account-erasure-export` (PR #45, mergad),
 `claude/mainai-memory-loop-v1` (PR #13, mergad).
 
 ## Subsumerade i den aktiva kedjan (inte längre fristående)

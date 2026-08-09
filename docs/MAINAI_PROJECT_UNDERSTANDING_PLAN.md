@@ -777,7 +777,7 @@ en helt separat implementation utan `deleted_at`, utan blob-purge, och (dess ege
 medger det) med en känd olöst multi-uploader-brist. Med S1A:s FK:er (`document_source_units.
 document_id` utan `ON DELETE`-åtgärd) skulle den rutten dessutom blockeras rakt av (FK-brott).
 S1A:s PR extraherar purge-logiken ovan till en delad funktion (t.ex.
-`app/rag/source_purge.py::purge_source(db, document_id, owner_id, request)`), och BÅDA
+`app/storage/purge.py::purge_source(db, document_id, owner_id, request)`), och BÅDA
 rutterna anropar den — `documents.py`s `delete_document` blir en tunn wrapper, inte en egen
 parallell implementation. Det här är en avsiktlig beteendeförändring för den äldre rutten
 (den får nu samma soft-delete+blob-purge+minnespurge som Library redan har, inte bara en

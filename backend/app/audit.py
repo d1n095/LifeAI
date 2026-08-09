@@ -23,7 +23,7 @@ def record_audit(
     `request`/`ip_address` are mutually exclusive ways to record the client address:
     `request` (the ordinary router-handler case) extracts it the same way every existing
     caller already relies on; `ip_address` lets a DOMAIN-LAYER caller (one with no FastAPI
-    Request object at all, e.g. app/rag/source_purge.py) pass an already-extracted, neutral
+    Request object at all, e.g. app/storage/purge.py) pass an already-extracted, neutral
     string instead — the router extracts it, the domain service never imports fastapi.
 
     `commit=False` (Pass 22) adds this row to the session WITHOUT committing — for a caller

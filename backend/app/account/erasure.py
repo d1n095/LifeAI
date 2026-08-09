@@ -1,7 +1,7 @@
 """Account erasure domain service (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, PR #31's
 Pass 26 account-integration slice) — the ONE place `app/routers/account.py`'s
 `DELETE /api/account` delegates to, matching the shared-domain-service pattern established for
-source purging (app/rag/source_purge.py).
+source purging (app/storage/purge.py).
 
 Three real gaps a founder review found in the PRE-Pass-26 account deletion:
 
@@ -9,10 +9,10 @@ Three real gaps a founder review found in the PRE-Pass-26 account deletion:
    (migration 0019) existed, but nothing invoked it — worse, the old `delete_account` deleted
    `documents` directly, which `document_source_units.document_id`'s plain-RESTRICT FK (no
    `ON DELETE` action) would reject outright the moment ANY `memory_source_units` row existed
-   for the account, the same gap app/rag/source_purge.py's own module docstring already
+   for the account, the same gap app/storage/purge.py's own module docstring already
    documents for single-source deletion. `erase_account_data()` below calls
    `erase_owner_memory()` BEFORE any document/chunk/version row is touched — the same ordering
-   requirement source_purge.py's purge-before-chunk-delete already established, just at
+   requirement purge.py's purge-before-chunk-delete already established, just at
    account scope instead of single-document scope. No direct Python `DELETE`/`UPDATE` against
    `knowledge_claims`/`memory_source_units`/`document_source_units` — those tables' own
    triggers (`trg_msu_no_delete`/`trg_dsu_no_delete`, migration 0019) reject anything that
@@ -27,14 +27,14 @@ Three real gaps a founder review found in the PRE-Pass-26 account deletion:
    rows are deleted, in the SAME transaction as the rest of the erasure — see that migration's
    module docstring for why a durable record (not just an in-memory best-effort attempt) is
    required. `erase_account_data()` makes one immediate best-effort deletion attempt right
-   after its own commit succeeds (mirroring source_purge.py's Phase A/Phase B split); anything
+   after its own commit succeeds (mirroring purge.py's Phase A/Phase B split); anything
    left `pending`/`failed` is retried later by app/worker.py, across ALL owners' tasks — see
    that module's `_retry_storage_deletion_tasks`.
 
 3. **The `account_deleted` audit entry was written by the ROUTER, in a SEPARATE commit, AFTER
    the main erasure transaction had already committed** (`record_audit`'s default
    `commit=True`) — the exact same class of bug Pass 22 already fixed for
-   `source_purged` (see source_purge.py's module docstring). A failure in that second commit
+   `source_purged` (see purge.py's module docstring). A failure in that second commit
    meant an HTTP caller could see a 500 for an account that had, in fact, already been
    permanently, durably erased. Fixed by writing the audit row here, inside the SAME
    transaction (`record_audit(..., commit=False)`), with `user_id=None` (the account no longer
@@ -46,10 +46,10 @@ failure anywhere in that sequence — including inserting a `storage_deletion_ta
 `erase_owner_memory()` itself raising — rolls back the ENTIRE erasure. `storage.delete()` is
 NEVER called before that transaction commits (see item 2 above) — the exact same "physical
 delete must never precede the DB commit that makes it safe" discipline
-app/rag/source_purge.py's module docstring already establishes for single-source purges.
+app/storage/purge.py's module docstring already establishes for single-source purges.
 
 Pass 26 also closes a race a founder review found between account erasure and a CONCURRENT
-upload for the SAME owner: `acquire_owner_erasure_lock()` (app/rag/blob_references.py) is
+upload for the SAME owner: `acquire_owner_erasure_lock()` (app/storage/references.py) is
 held for this whole transaction, and `POST /api/library/import` (app/routers/library.py)
 takes the SAME lock, as the very first thing it does, before `storage.write_stream()` even
 runs — see that lock function's own docstring for the full race and why acquiring it
@@ -197,8 +197,8 @@ from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
 from app.models.user import User
-from app.rag.blob_references import acquire_owner_erasure_lock, acquire_storage_key_lock, storage_key_still_referenced
 from app.storage import StorageError, get_storage
+from app.storage.references import acquire_owner_erasure_lock, acquire_storage_key_lock, storage_key_still_referenced
 
 logger = logging.getLogger("mainai.account.erasure")
 
@@ -310,7 +310,7 @@ class AccountErasureResult:
 
 def attempt_storage_deletion_task(db: Session, task: StorageDeletionTask) -> None:
     """Attempts ONE storage_deletion_task: acquires the SAME storage-key-scoped advisory lock
-    app/rag/source_purge.py's `retry_source_blob_purge()` and the upload endpoint already
+    app/storage/purge.py's `retry_source_blob_purge()` and the upload endpoint already
     share (closing the same TOCTOU race described there), re-checks the global, cross-owner
     reference policy (`storage_key_still_referenced()` / migration 0020's
     `storage_key_still_referenced_global()`), and commits this task's OWN terminal status in
@@ -443,7 +443,7 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
     request as genuinely coming from `user` themselves; it never re-checks a password.
 
     `client_ip` is a plain string, not a fastapi.Request — the router extracts it (same
-    convention as app/rag/source_purge.py) so this domain-layer module never imports fastapi.
+    convention as app/storage/purge.py) so this domain-layer module never imports fastapi.
     """
     owner_id = user.id
     operation_id = uuid.uuid4()

@@ -52,8 +52,8 @@ from app.project_memory import (
     resolve_note,
     retrieve_relevant_context,
 )
-from app.rag.blob_references import acquire_storage_key_lock, delete_if_unreferenced, store_content_with_reference_lock
 from app.storage import StorageError, get_storage
+from app.storage.references import acquire_storage_key_lock, delete_if_unreferenced, store_content_with_reference_lock
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
@@ -71,7 +71,7 @@ def _load_apply_runtime_privileges():
 @pytest.fixture(autouse=True, scope="module")
 def _narrow_privileges_before_this_module():
     """Pass 31: ingest_doc()/ingest_system_map()/create_checkpoint() now call
-    storage_key_still_referenced_global() (via app/rag/blob_references.py's
+    storage_key_still_referenced_global() (via app/storage/references.py's
     store_content_with_reference_lock()), which mainai_app is only granted EXECUTE on via
     apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy -- never
     automatically by tests/conftest.py's _test_database fixture's own blanket table/sequence
@@ -910,7 +910,7 @@ def test_ingest_system_map_stores_durably_and_records_counts(db_session, tmp_pat
 # content-addressed storage backend the Life Library upload path uses, but never took
 # acquire_storage_key_lock() before committing their ProjectSource/ProjectCheckpoint row --
 # the exact same "bytes exist before any DB row protects them" race Pass 22 already closed for
-# uploads, left open here. Fixed via app/rag/blob_references.py's
+# uploads, left open here. Fixed via app/storage/references.py's
 # store_content_with_reference_lock(). Tests below are the founder's own lettering (A: a
 # ProjectSource write vs. concurrent purge/delete; B: same for ProjectCheckpoint -- covered
 # together by the ingest_doc()-based race test since both writers share the identical

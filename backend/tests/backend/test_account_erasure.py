@@ -44,11 +44,11 @@ from app.account.erasure import (
     erase_account_data,
 )
 from app.account.export import EXPORT_SCHEMA_VERSION, export_account_data
-from app.rag.blob_references import acquire_owner_erasure_lock
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 from app.storage import StorageError, get_storage
+from app.storage.references import acquire_owner_erasure_lock
 
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
 
@@ -434,7 +434,7 @@ def test_erase_account_data_purges_an_unshared_blob_immediately():
 def test_erase_account_data_retains_a_blob_still_referenced_by_another_owner():
     """The core cross-owner guarantee: owner A's erasure must NOT physically delete a blob
     owner B's still-live Document depends on — storage_key_still_referenced_global() (migration
-    0020) is what the task-attempt logic defers to, exactly like source_purge.py's Phase B."""
+    0020) is what the task-attempt logic defers to, exactly like purge.py's Phase B."""
     session = SessionLocal()
     try:
         owner_a = _make_user(session, email=f"erase-shared-a-{uuid.uuid4().hex[:8]}@example.com")
@@ -558,7 +558,7 @@ def test_erase_account_data_retains_a_blob_still_referenced_by_a_project_checkpo
 def test_erase_account_data_never_calls_storage_delete_before_the_db_transaction_commits(monkeypatch):
     """Forces the DB phase to fail AFTER a storage_deletion_tasks row is queued but before
     commit — the blob must still be fully intact afterward, proving no physical delete can
-    ever happen ahead of a successful commit (mirrors app/rag/source_purge.py's own guarantee
+    ever happen ahead of a successful commit (mirrors app/storage/purge.py's own guarantee
     for single-source purges)."""
     from sqlalchemy.orm import Session as SASession
 

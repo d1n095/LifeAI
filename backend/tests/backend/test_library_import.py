@@ -24,9 +24,9 @@ from app.db import SessionLocal
 from app.models.document import ActiveTruthStatus, Document, IndexStatus, KnowledgeClassification
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
-from app.rag.blob_references import acquire_storage_key_lock, delete_if_unreferenced
 from app.rag.library_import import _store_bytes_with_reference_lock, run_import_job
 from app.storage import StorageError, get_storage
+from app.storage.references import acquire_storage_key_lock, delete_if_unreferenced
 
 EMBEDDING_DIM = get_settings().embedding_dim
 
@@ -43,7 +43,7 @@ def _load_apply_runtime_privileges():
 @pytest.fixture(autouse=True, scope="module")
 def _narrow_privileges_before_this_module():
     """Pass 32: _store_bytes_with_reference_lock() now calls storage_key_still_referenced_
-    global() (via app/rag/blob_references.py's delete_if_unreferenced()/
+    global() (via app/storage/references.py's delete_if_unreferenced()/
     storage_key_still_referenced()), which mainai_app is only granted EXECUTE on via
     apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy -- never
     automatically by tests/conftest.py's _test_database fixture's own blanket table/sequence
@@ -839,7 +839,7 @@ async def test_resume_claim_extraction_crash_after_flush_rolls_back_cleanly(db_s
 #
 # _store_bytes() durably writes the worker's per-file blob BEFORE the surrounding Document
 # row's storage_key is set and committed -- a founder review pointed out this was a genuine,
-# registered-but-unfixed gap in KNOWN_STORAGE_WRITE_PATHS (app/rag/blob_references.py):
+# registered-but-unfixed gap in KNOWN_STORAGE_WRITE_PATHS (app/storage/references.py):
 # registering a writer as "known but still unsafe" prevents drift, but not data corruption.
 # Fixed via _store_bytes_with_reference_lock() (same file), which wraps _store_bytes() in the
 # same lock+verify+republish protocol store_content_with_reference_lock() already provides for
@@ -942,7 +942,7 @@ def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_n
     from app.db import migration_engine
     from app.models.storage_deletion_task import StorageDeletionTask
     from app.account.erasure import attempt_storage_deletion_task
-    from app.rag.blob_references import enqueue_rejected_upload_cleanup_task
+    from app.storage.references import enqueue_rejected_upload_cleanup_task
 
     _AdminSession = sessionmaker(bind=migration_engine)
 
