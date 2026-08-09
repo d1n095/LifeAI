@@ -120,15 +120,42 @@ founder-godkända, flerstegs repo-städning: `backend/scripts/` omorganiserad ef
 Se Pass 49 nedan för full detalj. **Basgrenens nuvarande tip är därmed
 `ecce648cef4793bcbade1cf6cef8fd76811ae207`.**
 
-**PR #50** (denna session), `claude/tests-backend-providers-reorg` →
-`claude/det-kommer-mer-879lcm`, grenad från exakt `ecce648cef4793bcbade1cf6cef8fd76811ae207`
-(basgrenens tip vid grening). Steg 6 av städningen — teststrukturen: en read-only mappning av
-hela `backend/tests/backend/` (44 kvarvarande filer) föreslår 6 domängrupper (`providers/`,
-`storage/`, `jobs/`, `rag/`, `chat/`, `core/`), men denna PR implementerar medvetet bara EN,
-den lägst-riskiga gruppen — `test_chat_fallback_logging.py`, `test_gemini_provider.py`,
+**PR #50 är MERGAD** (`claude/tests-backend-providers-reorg` →
+`claude/det-kommer-mer-879lcm`), grenad från exakt `ecce648cef4793bcbade1cf6cef8fd76811ae207`
+(basgrenens tip vid grening), merge-commit `a0e530040e90af782f2044bd369665f1b17280fb`
+(parents `ecce648cef4793bcbade1cf6cef8fd76811ae207` och `e54d20a7e4eafd6ba7e6df6cd2d6969f2467bcb8`
+— en riktig tvåparent-merge), `merged_by`: `d1n095`. Verifierat mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`, `state: closed`, `merged: true`), inte memorerat. Steg 6
+av städningen — teststrukturen: en read-only mappning av hela `backend/tests/backend/` (44
+kvarvarande filer) föreslog 6 domängrupper (`providers/`, `storage/`, `jobs/`, `rag/`,
+`chat/`, `core/`), men PR #50 implementerade medvetet bara EN, den lägst-riskiga gruppen —
+`test_chat_fallback_logging.py`, `test_gemini_provider.py`,
 `test_provider_placeholder_secrets.py`, `test_provider_verification.py` →
 `backend/tests/backend/providers/` — ren MOVE/RENAME, ingen testlogik ändrad. Se Pass 50
-nedan för full detalj.
+nedan för full detalj. **Basgrenens nuvarande tip är därmed
+`a0e530040e90af782f2044bd369665f1b17280fb`** (verifierad direkt med `git ls-remote origin
+refs/heads/claude/det-kommer-mer-879lcm` innan denna sessions arbete påbörjades, inte
+memorerad).
+
+**NATTPASS (2026-08-09):** en flerstegs, sekventiell fortsättning av teststruktur-städningen
+genom de återstående grupperna Pass 50 föreslog men inte implementerade — EN separat,
+oberoende PR per grupp, var och en grenad från samma oförändrade
+`a0e530040e90af782f2044bd369665f1b17280fb` (INTE staplade på varandra), ingen mergad av
+agenten själv. **PR #51** (`storage/`), **PR #52** (`jobs/`, avvek på två filer),
+**PR #53** (`rag/`, avvek på två filer — och avslöjade att Pass 50:s `chat/`-förslag
+INNEHÖLL två filer som i verkligheten är `rag/`-domän: se nedan). **PR #54 (denna
+session)**, `claude/tests-chat-reorg` → `claude/det-kommer-mer-879lcm`, grenad från exakt
+`a0e530040e90af782f2044bd369665f1b17280fb` (verifierad omedelbart innan grening, oförändrad
+sedan PR #51/#52/#53:s grening). `chat/`-gruppen: 5 av Pass 50:s 7 föreslagna filer bekräftade
+och flyttade — `test_chat_context_status.py`, `test_chat_message_persistence.py`,
+`test_chat_source_grounding.py`, `test_message_sequence.py`, `test_messages_rls.py` →
+`backend/tests/backend/chat/`. **Två av Pass 50:s 7 föreslagna filer avvek MEDVETET:**
+`test_trust_engine.py` (importerar uteslutande `app.rag.trust` — ren `rag/`-domän, borde ha
+ingått i PR #53 men missades i den PR:ns egen mappning) och `test_search_failure_boundary.py`
+(testar `GET /api/library/search/hybrid` och `app.rag.vector_store.hybrid_search` — också
+`rag/`-domän, inte `chat/`). Båda lämnade orörda; flaggade som en KORRIGERING till PR #53:s
+`rag/`-mappning för en liten separat uppföljnings-PR, inte tvingade in i den här PR:n vars
+egen scope redan är `chat/`. Se Pass 51 nedan för full detalj.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
@@ -319,6 +346,104 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 51 (2026-08-09): `backend/tests/backend/chat/` — steg 10 av den founder-godkända repo-städningen (teststrukturen, NATTPASS), `chat/`-gruppen, ingen merge
+
+**Bakgrund — NATTPASS-protokoll:** samma flerstegs nattinstruktion som PR #51/#52/#53:s egna
+Pass 51-poster beskriver. Nummerkrocken är förväntad och harmlös.
+
+**Branch:** `claude/tests-chat-reorg`, grenad från exakt
+`a0e530040e90af782f2044bd369665f1b17280fb` (basgrenens tip efter PR #50 — SHA:n hämtad med
+`git ls-remote origin refs/heads/claude/det-kommer-mer-879lcm` omedelbart innan branchen
+skapades, oförändrad sedan PR #51/#52/#53:s egen grening tidigare samma nattpass).
+
+**Domängräns annorlunda än `storage/`/`jobs/`/`rag/`:** de tre föregående grupperna speglar
+en bokstavlig `app/`-underkatalog (`app/storage/`, `app/jobs/`, `app/rag/`). Det finns INGEN
+`app/chat/`-katalog — "chat" är en funktionsbaserad, inte en paketbaserad, gruppering
+(tester som täcker `app/routers/chat.py` + `app/models/conversation.py` + `messages`-tabellen,
+vars stödjande logik sprider sig över flera `app/`-paket). Det här kräver mer domänbedömning
+än ett rent import-match, samma typ av resonemang som redan användes för
+`test_library_routes.py` i PR #53.
+
+**Read-only mappning innan flytten — samtliga 7 av Pass 50:s föreslagna kandidatfiler
+granskade, inte återanvänt blint:**
+- `test_chat_context_status.py`: docstring säger uttryckligen "drives the real /api/chat
+  endpoint end to end", testar `app/rag/context_status.py`s klassificering GENOM chattens
+  eget HTTP-lager. **Bekräftad chat/-domän** (funktionell, inte importbaserad — samma
+  resonemang som `test_library_routes.py`).
+- `test_chat_message_persistence.py`: docstring "MainAI chat — message persistence /
+  failure-boundary fix", drivs via `/api/chat`. **Bekräftad.**
+- `test_chat_source_grounding.py`: docstring "API-level tests for DEL 6 (källgrundad
+  MainAI-chatt) — drives the real /api/chat endpoint". **Bekräftad**, även om toppnivå-
+  importerna bara är modeller (document/chunk/source_relationship) — testets FUNKTION är
+  chattens källgrundning, inte en fristående modelltest.
+- `test_message_sequence.py`: S1B, `messages.sequence_number` — importerar
+  `app.jobs.service`, `app.jobs.handlers.message_sequence_backfill`,
+  `app.rag.backfill.message_sequence`, men handlar fundamentalt om `messages`-tabellens
+  (chattens data) ordningsinvariant, dokumenterat i egen docstring som en S1B-funktion kopplad
+  till `app/models/conversation.py`. **Bekräftad chat/-domän** (data-integritet för chatt,
+  trots att stödimplementationen spänner över `jobs/`/`rag/backfill/`).
+- `test_messages_rls.py`: RLS-policy specifikt för `messages`-tabellen (migration 0031).
+  **Bekräftad**, samma resonemang som ovan — `messages` ÄR chattens data.
+- `test_trust_engine.py`: docstring "Unit tests for app/rag/trust.py" — importerar
+  UTESLUTANDE `app.rag.trust`, `app.models.document`, `app.models.source_relationship`.
+  **INGEN chat-specifik import eller funktion** — det här är en ren `app/rag/trust.py`-
+  enhetstest som råkade hamna i Pass 50:s `chat/`-lista, förmodligen för att `trust.py`
+  backar chattens källgrundning konceptuellt. **AVVIKER MEDVETET — lämnad orörd.** Detta är
+  en KORRIGERING till PR #53:s (`rag/`) egen mappning, som missade den här filen. Flaggad som
+  en känd uppföljning: filen borde flyttas till `tests/backend/rag/` i en liten separat PR,
+  antingen efter PR #53 mergas eller som en fristående korrigerings-PR — INTE tvingad in i
+  den här `chat/`-PR:n vars egen scope inte inkluderar den.
+- `test_search_failure_boundary.py`: docstring "PR B — search failure boundary ... GET
+  /api/library/search/hybrid ... See app/rag/vector_store.py's hybrid_search(vector=None) and
+  app/routers/library.py's search_library()". **INGEN chat-koppling alls** — det här är ett
+  `app/routers/library.py`/`app.rag.vector_store`-test, samma domän som `rag/`-gruppens
+  `test_library_routes.py`. **AVVIKER MEDVETET — lämnad orörd,** samma
+  korrigeringsbehandling som `test_trust_engine.py` ovan.
+
+Ingen `tests/backend/`-nivå `conftest.py`, inga fil-specifika markörer kopplade till
+katalogdjup. Repo-brett grep efter alla 7 bara-filnamnen gav noll CI-/infrastrukturträffar.
+
+**Vad som flyttade (git mv, historik bevarad) — endast de fem bekräftade filerna:**
+`test_chat_context_status.py`, `test_chat_message_persistence.py`,
+`test_chat_source_grounding.py`, `test_message_sequence.py`, `test_messages_rls.py` →
+`backend/tests/backend/chat/`. Ny `backend/tests/backend/chat/__init__.py` (tom), samma
+konvention som `providers/`/`storage/`/`jobs/`/`rag/`.
+
+**Samma hardcoded-path-fynd som tidigare grupper, i en fil:** `test_message_sequence.py`
+lokaliserar `alembic/versions/0030_message_sequence_number.py` via `Path(__file__).resolve()
+.parent.parent.parent` (3 nivåer). Fixat till 4 `.parent`-anrop, verifierat med
+`test_advisory_lock_key_matches_the_migration` (som faktiskt läser den filen) — PASSED, samt
+manuell sökvägsupplösning.
+
+**Levande kommentar-/docstring-kryssreferenser uppdaterade:** `test_workbench.py` (stannar
+kvar, pekar på en flyttad fil), `test_messages_rls.py`s egen självreferens till
+`test_message_sequence.py`, samt fyra levande arkitektur-/referensdokument (INTE Pass-N-
+historik): `docs/MAINAI_JOB_RUNTIME.md`, `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md` (två träffar),
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`, `docs/KNOWLEDGE_IMPORT_SECURITY.md`. **Medvetet
+INTE rört:** Alembic-migrationerna `0030_message_sequence_number.py` och
+`0031_messages_rls.py`s prosakommentarer (historiskt narrativ, samma disciplin som
+tidigare).
+
+**Verifiering (riktig, körd lokalt mot Postgres 16 + Redis, inte antagen):**
+- `pytest tests/backend/ --collect-only -q`: **973 tester**, identiskt på basen och den nya
+  headen.
+- `pytest tests/backend/chat/ -q`: **83 passed** — inklusive
+  `test_advisory_lock_key_matches_the_migration` (sökvägsberoende, PASSED efter fixen).
+- `pytest tests/backend/ -q` (hela svepet): **972 passed, 1 skipped, 0 failed** — inget
+  flaka-utslag denna körning.
+- `pytest tests/security/ tests/account/ -q`: **77 passed** — inga regressioner.
+- Migrationer körda rent till head (`0031`), `apply_runtime_privileges.py`: "privilege state
+  verified correct" på en färsk testdatabas.
+- `python -c "import app.main"`: OK.
+- `ruff check` på samtliga ändrade filer: pre-existerande fynd på rader denna PR INTE rörde
+  (verifierat rad-för-rad) — inga nya, inte fixade här.
+
+**Behavior-neutral bekräftat:** noll ändringar i testlogik, assertions, fixtures eller
+markörer. Filflytt + en nödvändig `.parent`-tillägg + levande kommentar-/
+docstring-kryssreferenser (inkl. fyra arkitekturdokument) + en ny tom `__init__.py` + två
+dokumenterade korrigeringsfynd till PR #53:s `rag/`-mappning (inte tvingade in i den här
+PR:n).
 
 ## Pass 50 (2026-08-09): `backend/tests/backend/providers/` — steg 6 av den founder-godkända repo-städningen (teststrukturen), read-only mappning av HELA `tests/backend/` + EN liten första flytt, ingen merge
 

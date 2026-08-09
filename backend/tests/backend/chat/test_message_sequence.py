@@ -652,7 +652,7 @@ def test_advisory_lock_key_matches_the_migration(db_session):
     from pathlib import Path
 
     migration = (
-        Path(__file__).resolve().parent.parent.parent / "alembic" / "versions" / "0030_message_sequence_number.py"
+        Path(__file__).resolve().parent.parent.parent.parent / "alembic" / "versions" / "0030_message_sequence_number.py"
     ).read_text(encoding="utf-8")
     assert f"pg_advisory_xact_lock({MESSAGE_SEQUENCE_ADVISORY_LOCK_NAMESPACE}," in migration
 

@@ -346,7 +346,7 @@ it differs from `corpus_review` in three reviewed ways:
    needs no AI provider", so `get_capability_status()` reports it configured and available
    even with zero providers set up. A capability simply *forgotten* from that dict still fails
    closed, exactly as before — the two cases are deliberately distinguishable, and
-   `tests/backend/test_message_sequence.py` asserts both directions. This is the founder's
+   `tests/backend/chat/test_message_sequence.py` asserts both directions. This is the founder's
    "the system must keep working without AI wherever architecturally possible" rule made
    enforceable rather than aspirational: numbering the founder's own message history must not
    become unavailable because a model key is missing.

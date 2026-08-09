@@ -1,5 +1,5 @@
 """API-level tests for DEL 9 (Founder Workbench, app/routers/workbench.py). Same fake
-chat+embedding provider pattern as test_chat_source_grounding.py — a deterministic fake
+chat+embedding provider pattern as tests/backend/chat/test_chat_source_grounding.py — a deterministic fake
 response with an explicit KRITIK/ALTERNATIV: marker so the conclusion/critique split can be
 asserted on directly, never a real AI key."""
 

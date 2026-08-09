@@ -93,7 +93,7 @@ svaret (strukturell, inte NLP-baserad detektion — dokumenterad begränsning).
 systemprompten. `app/routers/chat.py` kopplar ihop detta med källhänvisningar i svaret
 (`active_truth_status` per `SourceRef`) och länkar i UI:t direkt till exakt källa i
 biblioteket (`frontend/app/(shell)/chat/page.tsx`). 8 dedikerade tester i
-`test_chat_source_grounding.py` täcker: en träff, historisk källa som tak:ar konfidens,
+`tests/backend/chat/test_chat_source_grounding.py` täcker: en träff, historisk källa som tak:ar konfidens,
 omtvistad källa, motstridiga källor, ingen falsk konflikt utan relation, raderad källa
 används aldrig, isolation mellan användare, och den faktiska system-prompt-texten (inte bara
 svarsfältet) verifieras innehålla varningen.
@@ -179,7 +179,7 @@ som migration 0005 redan etablerade för Postgres-enums).
    isolation är grunden allt annat vilar på).
 2. `app/rag/zip_import.py` + `test_zip_import_security.py` (säkerhetskritiskt, litet och
    fristående).
-3. `app/rag/trust.py` + `test_chat_source_grounding.py` (den centrala "ljug aldrig om vad en
+3. `app/rag/trust.py` + `tests/backend/chat/test_chat_source_grounding.py` (den centrala "ljug aldrig om vad en
    källa säger"-garantin).
 4. `app/routers/library.py` + `app/routers/workbench.py` (API-ytan).
 5. `frontend/e2e/founder-knowledge-studio.spec.ts` (bevis på att helheten faktiskt fungerar).
