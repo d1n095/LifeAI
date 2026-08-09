@@ -38,15 +38,27 @@ flaggade och uttryckligen sköt till en egen branch/PR. Basgrenens nuvarande tip
 **Produktionssteget är fortfarande inte taget** — ingen del av PR #42 eller PR #43 har rört
 VPS:en, deployen eller kört någon backfill mot produktionsdata.
 
-**ÖPPEN PR: #43** (`claude/least-privilege-revoke-truncate` → `claude/det-kommer-mer-879lcm`),
-grenad från exakt `45c2dec0b6a3557f96d45bf7beb5650490d40c3b` (basgrenens tip, verifierad med
-`git ls-remote origin` INNAN branchen skapades). Tar hand om det enda medvetet uppskjutna,
+**PR #43 är MERGAD** (`claude/least-privilege-revoke-truncate` → `claude/det-kommer-mer-879lcm`),
+merge-commit `de31288b01ecb0a9918f9baaedd2a8ca74a7fdb4`, `merged_by`: `d1n095`, `merged_at`
+2026-08-08T19:24:12Z. Verifierat mot GitHubs PR-API direkt (`mcp__github__pull_request_read`,
+`state: closed`, `merged: true`), inte memorerat. Tog hand om det enda medvetet uppskjutna,
 icke-blockerande fyndet från PR #42:s oberoende säkerhetsgranskning: `mainai_app` hade
-`TRUNCATE` på `messages`, och **RLS gäller inte för TRUNCATE**. **Fristående** — beror inte på
-någon annan branch, blockerar ingen, väntar inte på något beroende. Kräver INGEN produktion,
-ingen VPS, ingen migration mot produktion och ingen backfill; ingen migration alls läggs till
-(se Pass 44 för varför det vore fel i det här repot). **Bör mergas innan S1C påbörjas**, av
-samma skäl som PR #42: S1C är det första som skannar `messages` i bulk. Se Pass 44 nedan för
+`TRUNCATE` på `messages` (och identiskt på 34 andra tabeller), och **RLS gäller inte för
+TRUNCATE**. Se Pass 44 nedan för full detalj.
+
+**PR #44 är MERGAD** (`claude/repo-structure-audit-readme-doc-pointers` →
+`claude/det-kommer-mer-879lcm`), merge-commit `d8658452682973e4617187a6a8fa817a27afa2db`,
+`merged_by`: `d1n095`, `merged_at` 2026-08-08T19:52:24Z. Docs-only (`README.md`s pekare till
+`docs/MAINAI_ARCHITECTURE.md`/`docs/BRANCH_REGISTRY.md`/`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`),
+sidofynd från en fristående, read-only Repository Structure & Naming Audit (levererad direkt
+till grundaren, inte som ett committat dokument — detta var det enda kodnära fyndet ur den
+granskningen som bedömdes tillräckligt riskfritt för att öppnas som egen PR direkt).
+**Basgrenens nuvarande tip är därmed `d8658452682973e4617187a6a8fa817a27afa2db`.**
+
+**ÖPPEN PR: #45** (`claude/move-account-erasure-export` → `claude/det-kommer-mer-879lcm`),
+grenad från exakt `d8658452682973e4617187a6a8fa817a27afa2db` (basgrenens tip, verifierad med
+`git ls-remote origin` INNAN branchen skapades). Steg 1 av samma founder-godkända, flerstegs
+repo-städning strukturaudien ovan föreslog: ren MOVE/RENAME, inget annat. Se Pass 45 nedan för
 full detalj. INTE mergad.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-08, mot GitHubs PR-API direkt
@@ -238,6 +250,85 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 45 (2026-08-08): `backend/app/rag/{account_erasure,account_export}.py` → `backend/app/account/{erasure,export}.py` — steg 1 av den founder-godkända repo-städningen, ren MOVE/RENAME
+
+**Branch:** `claude/move-account-erasure-export`, grenad från exakt
+`d8658452682973e4617187a6a8fa817a27afa2db` (basgrenens verifierade tip efter PR #43+#44 — SHA:n
+hämtad med `git ls-remote origin` INNAN branchen skapades, inte memorerad; det är också PR
+#44:s merge-commit). **PR #45**, öppen mot `claude/det-kommer-mer-879lcm`, INTE mergad.
+
+Steg 1 av den fristående, read-only Repository Structure & Naming Audit grundaren redan
+godkänt (levererad direkt till grundaren, inte som ett committat dokument — PR #44 var
+granskningens enda kodnära sidofynd). Grundarens egen ramning för hela städningen: "en sådan
+PR ska se tråkig ut: filer flyttade, imports uppdaterade, tester gröna. Ingen 'låt oss
+refaktorera lite på köpet'." Den här PR:n är just det — ingen affärslogik, inga DB-frågor,
+ingen RLS/privilegiesemantik och ingen migration ändrad.
+
+**Vad som flyttade (git mv, historik bevarad):**
+- `backend/app/rag/account_erasure.py` → `backend/app/account/erasure.py`
+- `backend/app/rag/account_export.py` → `backend/app/account/export.py`
+- Nytt, tomt `backend/app/account/__init__.py` (samma konvention som `app/rag/__init__.py`/
+  `app/jobs/__init__.py` — tjänstelagerpaket utan re-exports).
+
+`backend/app/account/` fanns inte sedan tidigare (verifierat, inte antaget) — ingen kollision,
+ingen konkurrerande mekanism att bygga vidare på istället. Ingen av de två filerna importerar
+den andra, och ingen har en relativ import — bara `from app.rag.blob_references import ...`
+(absolut, opåverkad av flytten) — så flytten krävde noll importomskrivning INUTI filerna
+själva, bara en `logger`-namnbyte (`mainai.rag.account_erasure` → `mainai.account.erasure`,
+följer samma `mainai.<paket>.<modul>`-konvention som `mainai.rag.source_purge`/
+`mainai.rag.library_import` redan använder; ingen kod eller test asserterade på det gamla
+loggernamnet, verifierat med grep). `ERASURE_REASON = "account_erasure"` (en CHECK-
+constraint-styrd DB-lagrad sträng, migration 0021/0024) rördes INTE — det är data, inte en
+modulsökväg.
+
+**Alla imports uppdaterade (grep-verifierat, noll kvarvarande `app.rag.account_erasure`/
+`app.rag.account_export` i kod/tester/skript):**
+- `backend/app/routers/account.py` (kontorouterns tjänstelager-import — oförändrat beteende)
+- `backend/app/worker.py` (flyttad till alfabetisk plats i importblocket)
+- `backend/tests/backend/test_account_erasure.py` (7 import-/dynamiska import-satser)
+- `backend/tests/backend/test_source_purge.py` (inkl. `ALLOWED_CALL_SITES`-tupeln i den
+  riktiga AST-baserade `storage.delete()`-allowlist-testet — relativ sökväg `rag/account_
+  erasure.py` → `account/erasure.py`, annars hade det testet fallerat på riktigt, inte kosmetiskt)
+- `backend/tests/backend/test_library_import.py`, `backend/tests/account/test_account_deletion.py`
+
+**Levande kodkommentarer/docstrings uppdaterade** (samma sökvägspekare, men i aktivt
+underhållen kod — INTE historiska loggposter): `app/jobs/lease.py`,
+`app/models/storage_deletion_task.py`, `app/rag/blob_references.py`,
+`backend/scripts/s1a_privilege_policy.py`, samt kommentarer i `test_messages_rls.py`,
+`test_runtime_table_privileges.py`, `test_memory_source_units.py`, `test_account_deletion.py`.
+
+**Medvetet INTE ändrat — historiskt narrativ, inte en trasig pekare:** Alembic-migrationerna
+0021/0022/0024/0030/0031s prosakommentarer som nämner `app/rag/account_erasure.py`/
+`account_export.py`, samt detta registrets egna Pass 14–44-poster. Samma disciplin det här
+registret redan uttryckligen dokumenterar för migrationer ("ändra aldrig en redan levererad
+migration i efterhand", se Pass 31 ovan) gäller lika mycket textkommentarer i dem — och en
+Pass-logg är per definition en tidsstämplad beskrivning av vad som var sant VID DET
+TILLFÄLLET; att skriva om Pass 26 till att säga `app/account/erasure.py` vore att förfalska
+historiken, inte att rätta en trasig pekare. `docs/MAINAI_JOB_RUNTIME.md`s enda träff (rad
+632) sitter på samma sätt inuti ett daterat "Founder re-review round"-narrativ och lämnades
+därför också orört. Funktionsnamnet `enqueue_account_erasure_storage_task` (SQL-funktion,
+migration 0022) och DB-värdet `StorageDeletionReason.account_erasure`/`ERASURE_REASON` är
+data/identifierare, inte modulsökvägar — rördes aldrig.
+
+**Ingen import-cykel eller annan risk upptäckt.** `app/routers/account.py` importerar redan
+`app.account.erasure`/`app.account.export` direkt (inget `app/rag/__init__.py`-re-export att
+uppdatera — filen är tom). `python -c "import app.main"` lyckas; hela FastAPI-appens
+importgraf löser sig identiskt.
+
+**Tester (riktiga, körda lokalt mot Postgres 16 + Redis, inte antagna):**
+`tests/backend/test_account_erasure.py` **56 passed**, `tests/account/` (hela svit, inkl.
+`test_account_deletion.py`) **48 passed**, `tests/security/` **29 passed**. Fullsviten
+`tests/backend/` kördes också i sin helhet (se PR-beskrivningen för exakt antal). `ruff
+check` på samtliga ändrade filer: rent, förutom 10 st förbefintliga E402-varningar i
+`app/routers/account.py` (modulnivå-`logger`-raden placerad före resten av imports) —
+verifierat identiskt närvarande på basgrenens `account.py` FÖRE den här branchens ändringar,
+alltså inte introducerat här och inte fixat här (opportunistisk fix, hade brutit mot
+isoleringsprincipen).
+
+**Nästa steg i städningen:** ej specificerat av den här sessionen — nästa MOVE/RENAME-steg
+väntar på grundarens fortsatta godkännande, en branch/PR i taget, per `CLAUDE.md`s
+grundprincip.
 
 ## Pass 44 (2026-08-08): `mainai_app` fråntas TRUNCATE/REFERENCES/TRIGGER schemabrett — PR #42:s uppskjutna säkerhetsfynd
 
@@ -3819,13 +3910,12 @@ Avsnitten nedan skiljer uttryckligen på "väntar på ett beroende" (rör INTE b
 
 ## Rekommenderad merge-ordning (nuläge)
 
-**Aktuellt läge 2026-08-08 (verifierat mot GitHubs PR-API, `state: open`-listning):** exakt
-**en** öppen PR finns — **PR #43** (`claude/least-privilege-revoke-truncate`). Den är
-fristående, blockeras inte av något och blockerar inget. Den enda ordningsrekommendationen är
-att den, liksom PR #42, **bör mergas innan S1C påbörjas** (S1C är det första som skannar
-`messages` i bulk, och privilegiegolvet är billigast att verifiera innan bulkskannarna finns).
-Ingen ombasering behövs: den är grenad från basgrenens nuvarande tip
-`45c2dec0b6a3557f96d45bf7beb5650490d40c3b`.
+**Aktuellt läge 2026-08-08 (verifierat mot GitHubs PR-API, `state: open`-listning):** PR #43
+och PR #44 är båda mergade (se sammanfattningen högst upp i det här dokumentet). Exakt **en**
+öppen PR finns nu — **PR #45** (`claude/move-account-erasure-export`, se Pass 45 nedan). Den
+är fristående (ren MOVE/RENAME, steg 1 av den founder-godkända repo-städningen), blockeras
+inte av något och blockerar inget annat pågående arbete. Ingen ombasering behövs: den är
+grenad från basgrenens nuvarande tip `d8658452682973e4617187a6a8fa817a27afa2db`.
 
 Listan nedan är den historiska ordningen och behålls som spårbarhet — punkterna 4 och 5 nedan
 speglar ett äldre läge (PR #31 är sedan länge mergad, se Pass 35) och ska läsas som historik,
@@ -3857,6 +3947,11 @@ inte som nuläge.
   exakta head-SHA:n `15986a7` — inget tekniskt eller CI-villkor återstår (se Pass 34).
 - **P7A:s egen aktivering blockeras** av både ett uttryckligt beslut och en ombasering (se
   ovan) — inte av något öppet PR.
+- **PR #45 (`claude/move-account-erasure-export`) blockerar ingenting och blockeras av
+  ingenting.** Ren MOVE/RENAME (`backend/app/rag/account_erasure.py` →
+  `backend/app/account/erasure.py`, `backend/app/rag/account_export.py` →
+  `backend/app/account/export.py`), steg 1 av den founder-godkända, flerstegs repo-städningen.
+  Se Pass 45 nedan.
 
 ## Kvarstår efter PR #28:s merge (2026-07-28)
 
@@ -3974,6 +4069,8 @@ tillåtelse (destruktiv åtgärd, se säkerhetsprotokollet):
 `claude/life-library-durable-worker-merged` (PR #14, mergad — bar PR #6 + P1 in i huvudgrenen),
 `claude/founder-knowledge-studio-v1` (PR #7's head, subsumerad via PR #14),
 `claude/p2-zip-hardening-plan` (PR #8, mergad),
+`claude/least-privilege-revoke-truncate` (PR #43, mergad),
+`claude/repo-structure-audit-readme-doc-pointers` (PR #44, mergad),
 `claude/mainai-memory-loop-v1` (PR #13, mergad).
 
 ## Subsumerade i den aktiva kedjan (inte längre fristående)

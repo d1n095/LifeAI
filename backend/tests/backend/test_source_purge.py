@@ -32,7 +32,7 @@ from app.models.memory_source_unit import (
 from app.models.project_memory import ProjectCheckpoint, ProjectSource
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.user import User, UserRole
-from app.rag.account_erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
+from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.rag.blob_references import (
     KNOWN_STORAGE_WRITE_PATHS,
     DeleteIfUnreferencedOutcome,
@@ -1726,9 +1726,9 @@ def test_every_direct_storage_delete_call_site_is_on_the_known_allowlist():
         # (documented in its own docstring); gated by storage_key_still_referenced() just
         # above the delete() call.
         ("rag/library_import.py", "maybe_purge_blob"),
-        # Same pattern, inside app/rag/account_erasure.py's own claim/lease-protected task
+        # Same pattern, inside app/account/erasure.py's own claim/lease-protected task
         # processing -- gated by storage_key_still_referenced() just above.
-        ("rag/account_erasure.py", "attempt_storage_deletion_task"),
+        ("account/erasure.py", "attempt_storage_deletion_task"),
         # The canonical, self-contained helper itself (Pass 30) -- acquires the lock and
         # performs the reference check internally; this IS the sanctioned call site every
         # other caller with no existing DB row should route through.
@@ -1955,7 +1955,7 @@ def test_repeated_storage_error_backs_off_and_is_not_immediately_reclaimed(super
     claimed_ids = claim_storage_deletion_tasks(superuser_db, limit=10)
     task = superuser_db.get(StorageDeletionTask, claimed_ids[0])
 
-    import app.rag.account_erasure as account_erasure_module
+    import app.account.erasure as account_erasure_module
 
     original_get_storage = account_erasure_module.get_storage
     account_erasure_module.get_storage = lambda: _AlwaysBrokenStorage()

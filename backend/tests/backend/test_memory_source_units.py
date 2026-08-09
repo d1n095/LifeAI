@@ -1169,11 +1169,11 @@ def test_mainai_app_privileges_are_exactly_least_privilege_no_truncate_reference
         # Pass 27 tightened this from SELECT+INSERT+UPDATE to INSERT-only; Pass 28 tightens it
         # again to ZERO direct privileges -- a founder review found INSERT alone was still
         # dangerous (indirect access to a privileged physical-delete operation with no
-        # ownership check, see app/rag/account_erasure.py's and migration 0022's docstrings).
+        # ownership check, see app/account/erasure.py's and migration 0022's docstrings).
         # The ONLY way an ordinary session may create a row now is the
         # enqueue_account_erasure_storage_task() SECURITY DEFINER function (checked separately
         # below) -- reading/claiming/updating still runs exclusively on the privileged
-        # maintenance session (app/rag/account_erasure.py's _MaintenanceSession /
+        # maintenance session (app/account/erasure.py's _MaintenanceSession /
         # app/worker.py's _ClaimSession), unchanged from Pass 27.
         "storage_deletion_tasks": {"SELECT": False, "INSERT": False, "UPDATE": False, "DELETE": False, "TRUNCATE": False, "REFERENCES": False, "TRIGGER": False},
     }

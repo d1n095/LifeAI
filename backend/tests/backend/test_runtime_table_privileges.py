@@ -118,7 +118,7 @@ def test_named_user_data_tables_keep_exactly_the_four_dml_privileges(table):
     real code path — SELECT/INSERT in app/routers/chat.py (messages, conversations) and
     app/rag/vector_store.py (document_chunks), UPDATE in
     app/rag/message_sequence_backfill.py's `UPDATE messages m SET sequence_number = ...`,
-    DELETE in app/rag/account_erasure.py's per-owner erasure. Those stay row-scoped under RLS,
+    DELETE in app/account/erasure.py's per-owner erasure. Those stay row-scoped under RLS,
     which is exactly what TRUNCATE would have bypassed."""
     with migration_engine.connect() as conn:
         held = {

@@ -1,4 +1,4 @@
-"""app/rag/account_erasure.py::erase_account_data() and app/rag/account_export.py::
+"""app/account/erasure.py::erase_account_data() and app/account/export.py::
 export_account_data() — Pass 26 (PR #31's account export/erasure S1A integration slice).
 Real local Postgres (RLS included), same pattern as tests/backend/test_source_purge.py.
 """
@@ -35,7 +35,7 @@ from app.models.memory_source_unit import (
 from app.models.project_memory import ProjectCheckpoint, ProjectSource
 from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
 from app.models.user import User, UserRole
-from app.rag.account_erasure import (
+from app.account.erasure import (
     AccountErasureBlockedError,
     AccountErasureResult,
     attempt_pending_storage_deletions_for_operation,
@@ -43,7 +43,7 @@ from app.rag.account_erasure import (
     claim_storage_deletion_tasks,
     erase_account_data,
 )
-from app.rag.account_export import EXPORT_SCHEMA_VERSION, export_account_data
+from app.account.export import EXPORT_SCHEMA_VERSION, export_account_data
 from app.rag.blob_references import acquire_owner_erasure_lock
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
 from app.request_context import current_user_id as current_user_id_var
@@ -53,7 +53,7 @@ from app.storage import StorageError, get_storage
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
 
 # Pass 27: storage_deletion_tasks grants mainai_app INSERT only -- every read/update against
-# it in these tests (mirroring app/rag/account_erasure.py's own _MaintenanceSession /
+# it in these tests (mirroring app/account/erasure.py's own _MaintenanceSession /
 # app/worker.py's _ClaimSession) must go through this privileged connection instead of the
 # ordinary SessionLocal() the rest of this file uses.
 _AdminSession = sessionmaker(bind=migration_engine)
@@ -315,7 +315,7 @@ def test_erase_account_data_rolls_back_everything_when_a_storage_deletion_task_i
     Postgres error) must roll back the ENTIRE erasure — S1A memory, documents, and the User
     row all survive, exactly as if nothing had been attempted. Pass 28: this call is now a
     `SELECT enqueue_account_erasure_storage_task(...)` (SECURITY DEFINER function), not a
-    plain ORM insert (see app/rag/account_erasure.py's module docstring) — the failure is
+    plain ORM insert (see app/account/erasure.py's module docstring) — the failure is
     simulated by intercepting exactly that statement text on the real session's `execute`,
     not by breaking the ORM model."""
     from sqlalchemy.orm import Session as SASession
@@ -607,7 +607,7 @@ def test_attempt_storage_deletion_task_marks_a_real_storage_error_as_failed_and_
         session.add(task)
         session.commit()
 
-        import app.rag.account_erasure as account_erasure_module
+        import app.account.erasure as account_erasure_module
 
         real_storage = get_storage()
 
@@ -966,7 +966,7 @@ def test_export_account_data_failure_produces_no_audit_entry(monkeypatch):
     """If assembling the export raises partway through, no `account_data_exported` audit row
     may exist afterward -- a failed export must never look, in the audit trail, like data was
     actually returned to the caller."""
-    import app.rag.account_export as account_export_module
+    import app.account.export as account_export_module
 
     session = SessionLocal()
     try:
@@ -1147,7 +1147,7 @@ def test_erasure_winning_the_owner_lock_race_leaves_nothing_for_claim_next_job_t
     described, now proven closed. Also proves the pending job's storage_key was correctly
     swept into the deletion inventory (no orphan left behind), and a second deadlock-timeout
     proof via the same bounded-join pattern as the test above."""
-    import app.rag.account_erasure as account_erasure_module
+    import app.account.erasure as account_erasure_module
 
     session = SessionLocal()
     try:
@@ -1253,7 +1253,7 @@ def test_mainai_app_session_cannot_update_storage_deletion_tasks():
 
 def test_mainai_app_session_cannot_insert_directly_into_storage_deletion_tasks():
     """Pass 28: the one privilege Pass 27 still left mainai_app with (INSERT) is now revoked
-    too -- see app/rag/account_erasure.py's module docstring for why plain INSERT access was
+    too -- see app/account/erasure.py's module docstring for why plain INSERT access was
     itself dangerous (indirect access to a privileged physical-delete operation with no
     ownership check). The ONLY way an ordinary session may create a task row now is the
     enqueue_account_erasure_storage_task() SECURITY DEFINER function, exercised in the
@@ -1423,7 +1423,7 @@ def test_enqueue_account_erasure_storage_task_denies_an_arbitrary_unreferenced_k
 
 def test_enqueue_account_erasure_storage_task_denies_a_project_memory_storage_key():
     """app/project_memory.py's ProjectSource/ProjectCheckpoint blobs are founder-wide project
-    state, never a per-user Document/ImportJob (see account_erasure.py's blob-write-path
+    state, never a per-user Document/ImportJob (see erasure.py's blob-write-path
     audit) -- their storage_keys must be just as unenqueueable as any other unowned key, even
     though a real file exists on disk for them."""
     session = SessionLocal()
@@ -1678,7 +1678,7 @@ def test_attempt_pending_storage_deletions_for_operation_tries_a_permanently_fai
     forever, an unbounded busy loop inside a single HTTP request. Proven here by counting
     real storage.delete() calls: a permanently-broken storage backend must be tried exactly
     once per task, never looped on."""
-    import app.rag.account_erasure as account_erasure_module
+    import app.account.erasure as account_erasure_module
 
     delete_calls: list[str] = []
 
@@ -1720,7 +1720,7 @@ def test_attempt_pending_storage_deletions_for_operation_never_reclaims_a_task_t
     """Direct proof of the fix's actual mechanism: claim_storage_deletion_tasks is called
     with include_failed=False, so a task that transitions pending -> failed mid-call can
     never be seen again by the SAME call, regardless of how many tasks exist."""
-    import app.rag.account_erasure as account_erasure_module
+    import app.account.erasure as account_erasure_module
 
     real_claim = account_erasure_module.claim_storage_deletion_tasks
     seen_include_failed: list[bool] = []

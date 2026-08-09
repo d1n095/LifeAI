@@ -132,7 +132,7 @@ _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFEREN
 #
 # - TRUNCATE: nothing in backend/app/ or backend/scripts/ issues one. Every bulk row removal
 #   the application performs is a row-scoped `DELETE` through SQLAlchemy (e.g. account
-#   erasure's `db.query(Message).filter(...).delete()` in app/rag/account_erasure.py, and
+#   erasure's `db.query(Message).filter(...).delete()` in app/account/erasure.py, and
 #   `delete_document_chunks()` in app/rag/vector_store.py) — which stays subject to RLS,
 #   which is exactly the property that makes it safe and TRUNCATE unsafe. The one place the
 #   codebase truncates at all is the test fixture `_clean_tables` in backend/tests/conftest.py,
@@ -155,7 +155,7 @@ _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFEREN
 # NOT included here, deliberately: SELECT/INSERT/UPDATE/DELETE. Those are genuinely used
 # across the user-data tables (messages alone needs all four — SELECT+INSERT in
 # app/routers/chat.py, UPDATE in app/rag/message_sequence_backfill.py's
-# `UPDATE messages m SET sequence_number = ...`, DELETE in app/rag/account_erasure.py), they
+# `UPDATE messages m SET sequence_number = ...`, DELETE in app/account/erasure.py), they
 # stay row-scoped under RLS, and narrowing them further is a per-table judgement that belongs
 # in `_PROTECTED_TABLES` with its own evidence — not in a blanket floor.
 _NEVER_GRANTED_TABLE_PRIVS = ["TRUNCATE", "REFERENCES", "TRIGGER"]

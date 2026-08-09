@@ -941,7 +941,7 @@ def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_n
 
     from app.db import migration_engine
     from app.models.storage_deletion_task import StorageDeletionTask
-    from app.rag.account_erasure import attempt_storage_deletion_task
+    from app.account.erasure import attempt_storage_deletion_task
     from app.rag.blob_references import enqueue_rejected_upload_cleanup_task
 
     _AdminSession = sessionmaker(bind=migration_engine)

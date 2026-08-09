@@ -11,8 +11,8 @@ from app.db import get_db
 from app.deps import get_current_user
 from app.limiter import limiter
 from app.models.user import User
-from app.rag.account_erasure import AccountErasureBlockedError, erase_account_data
-from app.rag.account_export import export_account_data
+from app.account.erasure import AccountErasureBlockedError, erase_account_data
+from app.account.export import export_account_data
 from app.schemas import DeleteAccountIn
 from app.security import verify_password
 
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/api/account", tags=["account"])
 @router.get("/export")
 def export_account(request: Request, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Thin wrapper: authenticates (via get_current_user), extracts neutral request metadata,
-    and delegates the entire export to app/rag/account_export.py's export_account_data() — see
+    and delegates the entire export to app/account/export.py's export_account_data() — see
     that module's docstring for exactly what's included and why. No export-building logic
     lives here."""
     client_ip = request.client.host if request.client else None
@@ -46,7 +46,7 @@ def delete_account(
     error-to-HTTP mapping, and cookie clearing are the ONLY things that happen here — the
     entire erasure sequence (S1A memory erasure, personal/shared data cleanup, durable
     storage-deletion tasks, the atomic transaction, the best-effort blob-deletion attempt) is
-    app/rag/account_erasure.py's erase_account_data(). No duplicated erasure logic lives in
+    app/account/erasure.py's erase_account_data(). No duplicated erasure logic lives in
     this router."""
     if not verify_password(payload.password, user.password_hash):
         record_audit(db, user_id=user.id, action="account_deletion_failed_password", request=request)

@@ -33,6 +33,7 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.jobs.heartbeat import record_worker_heartbeat
@@ -46,7 +47,6 @@ from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
-from app.rag.account_erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.rag.corpus_review_job import run_corpus_review_job
 from app.rag.message_sequence_backfill_job import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.rag.library_import import run_import_job
@@ -292,7 +292,7 @@ class Worker:
         )
 
     def _retry_storage_deletion_tasks(self, db: Session) -> None:
-        """Pass 26 (account erasure — see app/rag/account_erasure.py's module docstring): the
+        """Pass 26 (account erasure — see app/account/erasure.py's module docstring): the
         "avgränsad maintenance-runner" that finishes any `storage_deletion_tasks` row an
         account erasure's own immediate best-effort attempt left `pending`/`failed` (a
         process crash between that erasure's DB commit and its best-effort attempt, or a

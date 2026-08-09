@@ -10,7 +10,7 @@ this job row at a time" — that's what this file's two functions together guara
 
 Pass 28 (PR #31's account-erasure slice, second founder review round) redesigned
 `claim_next_job()` into a two-phase, owner-locked claim to close a real orphan-blob race a
-founder review found between this function and `app/rag/account_erasure.py`'s
+founder review found between this function and `app/account/erasure.py`'s
 `erase_account_data()`. The OLD implementation was a single, unlocked
 `UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1)`: Postgres MVCC meant this
 query's own SELECT ran against whatever snapshot was visible when it started, with NO
@@ -93,7 +93,7 @@ def claim_next_job(
     owner_id)`, or None if nothing is claimable right now.
 
     See this module's docstring for the Pass 28 two-phase, owner-locked redesign and exactly
-    which orphan-blob race it closes against `app/rag/account_erasure.py`'s
+    which orphan-blob race it closes against `app/account/erasure.py`'s
     `erase_account_data()`."""
     claimable_statuses = [s.value for s in CLAIMABLE_IMPORT_JOB_STATUSES]
     for _ in range(max_attempts):
