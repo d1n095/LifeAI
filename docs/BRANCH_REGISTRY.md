@@ -445,6 +445,23 @@ docstring-kryssreferenser (inkl. fyra arkitekturdokument) + en ny tom `__init__.
 dokumenterade korrigeringsfynd till PR #53:s `rag/`-mappning (inte tvingade in i den här
 PR:n).
 
+**CI:s första körning på PR #54 (workflow-run `31334288929`) råkade ut för den redan
+dokumenterade `test_storage_local_fs.py`-flakan:** `Backend — unit/integration tests` föll
+med exakt ETT fallerande test,
+`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk` — samma
+`fcntl.flock()`/`LocalFilesystemStorage`-trådracefamilj Pass 37/41/42/43/45/46 redan
+dokumenterat i det här registret (PR #46:s CI råkade ut för EXAKT samma test på sin första
+körning också, löst identiskt). `git diff` mot basen bekräftar att PR #54:s diff INTE rör
+`app/storage/` eller `test_storage_local_fs.py` alls (denna PR flyttar bara `chat/`-filer).
+Isolerad lokal upprepning (4 körningar): **3 av 4 fallerade** — en högre andel än tidigare
+observerat för den här exakta flakan, men SAMMA test, SAMMA assertion
+(`get_storage().exists(storage_key) is True`/blob saknas på disk), SAMMA rotorsak — inte ett
+nytt eller annorlunda fel. Löst per PR #46:s etablerade mönster:
+`mcp__github__actions_run_trigger`s `rerun_failed_jobs` kördes om på workflow-run
+`31334288929`; omkörningen blev grön (`ALL_COMPLETE`, `NO_FAILURES`, `mergeable_state:
+clean`). Inte "fixad" i den här PR:n — utanför scope, samma disciplin som alla tidigare
+gånger den här flakan setts.
+
 ## Pass 50 (2026-08-09): `backend/tests/backend/providers/` — steg 6 av den founder-godkända repo-städningen (teststrukturen), read-only mappning av HELA `tests/backend/` + EN liten första flytt, ingen merge
 
 **Bakgrund — agentöverlämning:** Denna PR skulle ursprungligen byggas av en bakgrundsagent
