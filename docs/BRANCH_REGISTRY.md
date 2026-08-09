@@ -106,9 +106,29 @@ memory_source_run}.py`, ren MOVE/RENAME av backfill-affärslogiken (INTE job-ork
 Pass 47 redan flyttade till `app/jobs/handlers/`, som lämnades orörd). Se Pass 48 nedan för
 full detalj. **Basgrenens nuvarande tip är därmed `2eaf3844a2cbd5b9b6d83a29651ff237f805f867`.**
 
-**PR #49** (denna session), `claude/scripts-reorg-backend-boot-ci` →
-`claude/det-kommer-mer-879lcm`, steg 5 av städningen: reorganiserar `backend/scripts/` av
-ansvar. Se Pass 49 nedan för full detalj.
+**PR #49 är MERGAD** (`claude/scripts-reorg-backend-boot-ci` → `claude/det-kommer-mer-879lcm`),
+grenad från exakt `2eaf3844a2cbd5b9b6d83a29651ff237f805f867` (basgrenens tip vid grening,
+verifierad med `git ls-remote origin` INNAN branchen skapades), merge-commit
+`ecce648cef4793bcbade1cf6cef8fd76811ae207`, `merged_by`: `d1n095`. Verifierat mot GitHubs
+PR-API direkt (`mcp__github__pull_request_read`, `state: closed`, `merged: true`), inte
+memorerat — denna rad var stale (skriven FÖRE mergen, från PR #49:s egen branch, som förstås
+inte kan dokumentera sin egen framtida merge) tills den här sessionen korrigerade den, per
+`CLAUDE.md`s regel att göra det INNAN man fortsätter, inte opportunistiskt. Steg 5 av samma
+founder-godkända, flerstegs repo-städning: `backend/scripts/` omorganiserad efter ansvar
+(`ensure_app_role.py`/`apply_runtime_privileges.py`/`s1a_privilege_policy.py` →
+`backend/scripts/security/`, `run_e2e_backend.py` → `backend/scripts/ci/`), ren MOVE/RENAME.
+Se Pass 49 nedan för full detalj. **Basgrenens nuvarande tip är därmed
+`ecce648cef4793bcbade1cf6cef8fd76811ae207`.**
+
+**PR #50** (denna session), `claude/tests-backend-providers-reorg` →
+`claude/det-kommer-mer-879lcm`, grenad från exakt `ecce648cef4793bcbade1cf6cef8fd76811ae207`
+(basgrenens tip vid grening). Steg 6 av städningen — teststrukturen: en read-only mappning av
+hela `backend/tests/backend/` (44 kvarvarande filer) föreslår 6 domängrupper (`providers/`,
+`storage/`, `jobs/`, `rag/`, `chat/`, `core/`), men denna PR implementerar medvetet bara EN,
+den lägst-riskiga gruppen — `test_chat_fallback_logging.py`, `test_gemini_provider.py`,
+`test_provider_placeholder_secrets.py`, `test_provider_verification.py` →
+`backend/tests/backend/providers/` — ren MOVE/RENAME, ingen testlogik ändrad. Se Pass 50
+nedan för full detalj.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
@@ -299,6 +319,117 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 50 (2026-08-09): `backend/tests/backend/providers/` — steg 6 av den founder-godkända repo-städningen (teststrukturen), read-only mappning av HELA `tests/backend/` + EN liten första flytt, ingen merge
+
+**Bakgrund — agentöverlämning:** Denna PR skulle ursprungligen byggas av en bakgrundsagent
+enligt grundarens exakta instruktion (read-only mappning, föreslå 4-6 grupper, implementera
+EN liten lågrisk-flytt, pytest collection före/efter, separat PR, ingen merge). Agenten
+gjorde en del av arbetet (de fyra filflyttarna nedan + två docstring-fixar) men blev sedan
+overksam — `ListAgents` visade "No reachable agents", senaste filaktivitet var 76+ minuter
+gammal utan commit/push, inga körande processer. Grundaren gav en uttrycklig
+statuskontroll-instruktion; efter att ha bekräftat att agenten var död (inte bara i en
+idle/poll-loop) togs arbetet över direkt från den befintliga worktreen/branchen, med allt
+redan gjort arbete bevarat — enligt grundarens egen instruktion, ingen ny parallell agent
+startades.
+
+**Branch:** `claude/tests-backend-providers-reorg`, grenad från exakt
+`ecce648cef4793bcbade1cf6cef8fd76811ae207` (basgrenens tip efter PR #49, samma SHA som denna
+worktree faktiskt stod på — verifierad med `git status --porcelain=2 --branch` innan
+fortsatt arbete).
+
+**Read-only mappning av `backend/tests/backend/`:** 44 kvarvarande testfiler (utöver de 4
+som redan flyttats i denna PR) kartlagda och grupperade efter samma domänprincip som
+`app/`-strukturen (`app/account/`, `app/storage/`, `app/jobs/`, `app/rag/backfill/`) redan
+etablerat. Föreslagen full målstruktur (INTE implementerad i denna PR, utom `providers/`):
+
+- **`providers/`** (implementerad i denna PR): `test_chat_fallback_logging.py`,
+  `test_gemini_provider.py`, `test_provider_placeholder_secrets.py`,
+  `test_provider_verification.py` — leverantörsdispatch, nyckelvalidering, verifieringscache.
+- **`storage/`** (spegel av `app/storage/`): `test_storage_local_fs.py`, `test_source_purge.py`.
+- **`jobs/`** (spegel av `app/jobs/`): `test_mainai_jobs.py`, `test_job_lock.py`,
+  `test_job_retry.py`, `test_cleanup_job.py`, `test_worker.py`, `test_worker_heartbeat.py`,
+  `test_agent_orchestration.py`.
+- **`rag/`** (spegel av `app/rag/`, inkl. `app/rag/backfill/`): `test_claims.py`,
+  `test_chunking.py`, `test_memory_source_units.py`, `test_memory_source_backfill.py`,
+  `test_memory_source_backfill_run.py`, `test_project_memory.py`, `test_library_import.py`,
+  `test_library_routes.py`, `test_media_import.py`, `test_zip_import_security.py`,
+  `test_zip_import_capacity.py`, `test_context_resolver.py`.
+- **`chat/`**: `test_chat_context_status.py`, `test_chat_message_persistence.py`,
+  `test_chat_source_grounding.py`, `test_message_sequence.py`, `test_messages_rls.py`,
+  `test_search_failure_boundary.py`, `test_trust_engine.py`.
+- **`core/`** (infrastruktur/gränssnitt utan en egen domänmapp i `app/`):
+  `test_config_contract.py`, `test_db_retry.py`, `test_email_smtp_mode.py`,
+  `test_email_utils.py`, `test_ensure_app_role.py`, `test_error_disclosure.py`,
+  `test_migration_roundtrip.py`, `test_openapi_schema.py`, `test_password_policy.py`,
+  `test_performance_measurement.py`, `test_privilege_boot_race_hotfix.py`,
+  `test_rls_policy_registry.py`, `test_runtime_table_privileges.py`,
+  `test_security_tokens.py`, `test_smoke.py`, `test_startup_checks.py`,
+  `test_account_erasure.py` (**), `test_workbench.py`.
+
+(**) `test_account_erasure.py` testar `app/account/erasure.py`, så den kan höra hemma i en
+framtida `account/`-grupp istället för `core/` — flaggad här som en öppen fråga för nästa
+teststruktur-PR snarare än avgjord i denna, eftersom denna PR inte rör den filen.
+
+Denna gruppering är ett FÖRSLAG för framtida, separata PR:er i samma stil som denna — inte
+ett åtagande om exakta gruppgränser. `tests/backend/` förblir top-level (ingen `tests/backend/
+core/`-till-`tests/core/`-flytt föreslås), enligt grundarens uttryckliga instruktion.
+
+**Denna PR:s faktiska diff — steg 1 (`providers/`), ren MOVE/RENAME:**
+- `backend/tests/backend/test_chat_fallback_logging.py` →
+  `backend/tests/backend/providers/test_chat_fallback_logging.py` (`git mv`, R100)
+- `backend/tests/backend/test_gemini_provider.py` →
+  `backend/tests/backend/providers/test_gemini_provider.py` (`git mv`, R100)
+- `backend/tests/backend/test_provider_placeholder_secrets.py` →
+  `backend/tests/backend/providers/test_provider_placeholder_secrets.py` (`git mv`, R100)
+- `backend/tests/backend/test_provider_verification.py` →
+  `backend/tests/backend/providers/test_provider_verification.py` (`git mv`, R100)
+- Ny `backend/tests/backend/providers/__init__.py` (tom) — matchar den befintliga
+  konventionen: `tests/__init__.py`, `tests/account/__init__.py`, `tests/backend/__init__.py`
+  och `tests/security/__init__.py` finns redan, så varje testpaketnivå har en. `backend/
+  pytest.ini` har ingen `--import-mode`-inställning (default `prepend`), vilket kräver
+  `__init__.py` för att undvika modulnamnskrockar mellan katalogen — samma skäl som redan
+  gäller för de befintliga paketen.
+- Två docstring-only kryssreferenser uppdaterade till den nya sökvägen (ingen testlogik,
+  ingen assertion, inget fixture-beteende ändrat): `test_chat_context_status.py`s
+  `test_raw_http_provider_error_never_500s_or_leaks_secret` (kommentar pekade på
+  `test_chat_fallback_logging.py`) och `test_media_import.py`s
+  `test_worker_crash_mid_media_embedding_is_resumed_to_indexed_before_job_completes`
+  (kommentar pekade på `test_provider_verification.py`).
+- Repo-brett grep (`.py`/`.yml`/`.yaml`/`.md`, exklusive den nya `providers/`-platsen) efter
+  de fyra bara-filnamnen hittade INGA fler levande referenser — bara två historiska träffar i
+  detta registrets egna Pass 30/31-narrativ ("Omverifiering: riktat regressionssvep"-block),
+  vilket enligt denna seriens etablerade princip INTE ska redigeras (historisk logg, inte en
+  levande pekare).
+- Inga AST/sträng-literal-baserade `ALLOWED_CALL_SITES`-liknande sökvägsreferenser till dessa
+  fyra filer hittades (till skillnad från PR #46:s `test_source_purge.py`-fynd) — de fyra
+  provider-testfilerna refererar inte sig själva via sökvägssträngar någon annanstans.
+
+**Verifiering:**
+- `pytest tests/backend/ --collect-only -q`: **973 tester** på både basen
+  (`ecce648cef4793bcbade1cf6cef8fd76811ae207`, körd i en separat `git worktree`) och den nya
+  headen — identiskt antal, inga tester tappade, duplicerade eller odetekterbara.
+- `pytest tests/backend/providers/ -q`: **85 passed** (den flyttade gruppens egna tester, mot
+  en riktig migrerad Postgres 16 + Redis, inte mockad DB).
+- `pytest tests/backend/ -q` (hela svepet, 973 samlade minus 1 explicit skippad
+  kapacitetstest): **971 passed, 1 failed, 1 skipped.** Det enda felet,
+  `test_storage_local_fs.py::test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_completion`,
+  är i en fil den här PR:n INTE rör (`git diff`/`git status` bekräftar noll ändringar i
+  `test_storage_local_fs.py`) — samma kända, redan dokumenterade `fcntl.flock()`-relaterade
+  trådracingflake som slagit till i PR #43/#46/#47/#48:s CI-körningar. Reproducerades INTE i
+  tre upprepade isolerade körningar av exakt samma test (`1 passed` varje gång) — konsekvent
+  med en last-/samtidighetskänslig flake, inte ett verkligt regressionsfel från denna PR:s
+  diff. Inte "fixad" som en del av denna PR, enligt seriens etablerade scope-isoleringsregel.
+- `pytest tests/security/ tests/account/ -q`: **77 passed** — inga regressioner i de
+  angränsande svit-erna.
+- Migrationer körda rent till head (`0031`, senast tillagda: owner-scoped RLS för
+  `messages`), `apply_runtime_privileges.py --verify-only`: "privilege state verified
+  correct" — inga privilegieregressioner.
+
+**Behavior-neutral bekräftat:** noll ändringar i testlogik, assertions, fixtures eller
+markörer. Enbart filflytt (`git mv`, R100 — 100 % likhet, historik/blame bevarad) + två
+docstring-only kryssreferenser + en ny tom `__init__.py` som redan matchar den befintliga
+paketkonventionen.
 
 ## Pass 49 (2026-08-09): `backend/scripts/` omorganiserad efter ansvar — steg 5 av den founder-godkända repo-städningen, ren MOVE/RENAME, uttryckligen den högriskigaste flytten hittills (Docker/CI/boot-sekvens-sökvägar, inte bara Python-imports)
 
