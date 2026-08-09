@@ -3,7 +3,7 @@ import { FRONTEND_URL } from "../playwright.config";
 
 // The baseline end-to-end flow: unauthenticated redirect, login (wrong then right password),
 // chat round-trip against the real backend (with only the outbound AI-provider call faked —
-// see backend/scripts/run_e2e_backend.py), conversation history, admin usage view,
+// see backend/scripts/ci/run_e2e_backend.py), conversation history, admin usage view,
 // responsive layout, and logout. Uses the bootstrap admin account (pre-verified — see
 // app/bootstrap.py), not a self-registered one.
 const FOUNDER_EMAIL = "founder@lifeos.local";

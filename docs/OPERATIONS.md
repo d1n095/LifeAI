@@ -254,7 +254,7 @@ ovan.
 
 ### Backend startar inte: `role "postgres.<project-ref>" does not exist`
 
-Verifierat fel 2026-07-19, fixat i `backend/scripts/ensure_app_role.py`. Uppstår vid
+Verifierat fel 2026-07-19, fixat i `backend/scripts/security/ensure_app_role.py`. Uppstår vid
 `ALTER DEFAULT PRIVILEGES` när `DATABASE_URL` pekar på Supabases **Session pooler** — dess
 anslutningssträng har ett användarnamn av formen `postgres.<project-ref>`, en
 pooler-inloggningsidentitet, inte ett riktigt Postgres-rollnamn (den faktiska rollen, oftast

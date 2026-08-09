@@ -30,7 +30,7 @@ from app.storage.references import acquire_storage_key_lock, delete_if_unreferen
 
 EMBEDDING_DIM = get_settings().embedding_dim
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():

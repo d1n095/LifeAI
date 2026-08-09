@@ -58,7 +58,7 @@ from app.storage.references import acquire_storage_key_lock, delete_if_unreferen
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():

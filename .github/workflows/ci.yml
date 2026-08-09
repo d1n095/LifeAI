@@ -385,7 +385,7 @@ jobs:
       # SECURITY DEFINER call any Playwright spec reaches.
       - name: Apply S1A runtime privilege policy
         working-directory: backend
-        run: python scripts/apply_runtime_privileges.py
+        run: python scripts/security/apply_runtime_privileges.py
 
       # No NEXT_PUBLIC_API_URL — same-origin proxy mode, matching every real deployment (see
       # frontend/lib/api.ts's comment on that var and playwright.config.ts's webServer entry,
@@ -406,7 +406,7 @@ jobs:
           RATE_LIMIT_RESET_PASSWORD_PER_MINUTE: "1000"
           RATE_LIMIT_VERIFY_EMAIL_PER_MINUTE: "1000"
         run: |
-          nohup python scripts/run_e2e_backend.py > backend.log 2>&1 &
+          nohup python scripts/ci/run_e2e_backend.py > backend.log 2>&1 &
           echo $! > backend.pid
           for i in $(seq 1 30); do
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
@@ -425,7 +425,7 @@ jobs:
         working-directory: backend
         run: |
           python -c "import redis; redis.from_url('redis://localhost:6379/0').flushdb()"
-          nohup python scripts/run_e2e_backend.py > backend-ratelimit.log 2>&1 &
+          nohup python scripts/ci/run_e2e_backend.py > backend-ratelimit.log 2>&1 &
           echo $! > backend.pid
           for i in $(seq 1 30); do
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
@@ -560,7 +560,7 @@ jobs:
       - name: Start backend
         working-directory: backend
         run: |
-          nohup python scripts/run_e2e_backend.py > backend.log 2>&1 &
+          nohup python scripts/ci/run_e2e_backend.py > backend.log 2>&1 &
           echo $! > backend.pid
           for i in $(seq 1 30); do
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
@@ -657,7 +657,7 @@ jobs:
       # ENVIRONMENT is deliberately left unset (defaults to "development") in every docker run
       # below, not "production" — app/main.py's _check_smtp_configured() fail-closed gate
       # requires a real SMTP_HOST whenever ENVIRONMENT=production, which would defeat the point
-      # of E2E_MOCK_MODE's dev-email-log fake (see backend/scripts/run_e2e_backend.py).
+      # of E2E_MOCK_MODE's dev-email-log fake (see backend/scripts/ci/run_e2e_backend.py).
       # Everything else this job verifies (loopback isolation, proxy, signals, crash-linkage,
       # CSRF/cookie/auth logic) is unaffected by this flag. A bash comment MUST NOT be placed
       # inside a backslash-continued docker run flag list below (a `#` there prematurely
@@ -893,7 +893,7 @@ jobs:
         run: docker rm -f lifeai-d lifeai-d-timeout || true
 
       # ---- Container E: Supabase Session Pooler auth hardening — proves
-      # backend/scripts/ensure_app_role.py's two fixes against the REAL image. Verified
+      # backend/scripts/security/ensure_app_role.py's two fixes against the REAL image. Verified
       # production incident: the pre-fix script ran ALTER ROLE ... PASSWORD unconditionally
       # on every boot, which risked a transient "password authentication failed" the next
       # time mainai_app connected while Supabase's Session Pooler (Supavisor) auth cache

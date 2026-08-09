@@ -62,7 +62,7 @@ EMBEDDING_DIM = get_settings().embedding_dim
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():
@@ -76,7 +76,7 @@ def _load_apply_runtime_privileges():
 def _apply_full_privilege_policy_before_this_module():
     """test_account_deletion_removes_mainai_job_data (section N below) exercises the real
     DELETE /api/account endpoint, whose erase_account_data() calls BOTH erase_owner_memory()
-    (S1A, governed by scripts/s1a_privilege_policy.py via apply_runtime_privileges.py — same
+    (S1A, governed by scripts/security/s1a_privilege_policy.py via apply_runtime_privileges.py — same
     as tests/backend/test_account_erasure.py's identical fixture) AND
     erase_own_mainai_job_children() (governed separately by app/rls.py's
     apply_mainai_job_runtime_privileges()). conftest.py's session-scoped `_test_database`
@@ -1635,7 +1635,7 @@ def test_apply_mainai_job_runtime_privileges_detects_mainai_app_as_table_owner(s
         # ALTER TABLE ... OWNER TO rewrites relacl as a side effect (confirmed empirically:
         # ownership round-tripping through mainai_app wipes out its own SELECT/INSERT grants,
         # not just the privileges this test is deliberately probing) — re-grant ALL first,
-        # mirroring scripts/ensure_app_role.py's real blanket boot-time grant, before letting
+        # mirroring scripts/security/ensure_app_role.py's real blanket boot-time grant, before letting
         # the policy narrow it back down, or this cleanup would leave mainai_app with zero
         # privileges on this table for the rest of the test session.
         superuser_db.execute(sa_text(f"ALTER TABLE mainai_job_events OWNER TO {expected_owner}"))
@@ -1700,7 +1700,7 @@ def test_apply_mainai_job_runtime_privileges_rolls_back_the_enforce_phase_too_on
 
 
 def test_apply_mainai_job_runtime_privileges_survives_reboots_blanket_grant_all(superuser_db):
-    """scripts/ensure_app_role.py unconditionally re-grants ALL PRIVILEGES to mainai_app on
+    """scripts/security/ensure_app_role.py unconditionally re-grants ALL PRIVILEGES to mainai_app on
     every container boot, before this policy ever runs (see that script's docstring and the
     Pass 12 incident in docs/BRANCH_REGISTRY.md) — this proves the policy converges back to
     the exact intended privilege set even starting from that worst-case over-grant, matching

@@ -22,7 +22,7 @@ radera materialet`
 
 Bevisat av `frontend/e2e/founder-knowledge-studio.spec.ts`, som kör hela kedjan mot den
 riktiga backenden (endast AI-providerns chat/embed-anrop och e-post är fejkade — se
-`backend/scripts/run_e2e_backend.py`). Grönt i senaste fulla E2E-regressionskörning
+`backend/scripts/ci/run_e2e_backend.py`). Grönt i senaste fulla E2E-regressionskörning
 tillsammans med `auth.spec.ts`, `security.spec.ts`, `account.spec.ts`, `shell-pages.spec.ts`.
 
 ## Datamodell (DEL 1)

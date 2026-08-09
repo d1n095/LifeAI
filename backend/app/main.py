@@ -69,7 +69,7 @@ def on_startup():
     # Both DB touches below go through call_with_db_retry (app/db.py): verified production
     # incident, 2026-07-20 — this was the ONE unprotected first-ever connection to
     # APP_DATABASE_URL in the whole boot sequence, and a brief Supabase Session Pooler
-    # auth-cache propagation lag right after backend/scripts/ensure_app_role.py provisioned
+    # auth-cache propagation lag right after backend/scripts/security/ensure_app_role.py provisioned
     # the role killed the entire process here ("Application startup failed. Exiting."), even
     # though the exact same credential worked moments later. ensure_app_role.py now also
     # retries its own self-test connection, so this is defense in depth, not the only guard.

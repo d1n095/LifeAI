@@ -43,7 +43,7 @@ export default defineConfig({
       // real deployment (Docker Compose, the combined Render container) actually works, so
       // this build must NOT set NEXT_PUBLIC_API_URL (see frontend/lib/api.ts's comment on
       // that var). E2E_INTERNAL_API_URL overrides where the proxy forwards to; defaults to
-      // where backend/scripts/run_e2e_backend.py listens.
+      // where backend/scripts/ci/run_e2e_backend.py listens.
       env: { INTERNAL_API_URL: process.env.E2E_INTERNAL_API_URL || "http://127.0.0.1:8010" },
     },
     {

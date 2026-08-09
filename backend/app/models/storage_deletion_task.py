@@ -57,7 +57,7 @@ class StorageDeletionTask(Base):
     # updated_at below) back via an `INSERT ... RETURNING` clause immediately after insert —
     # but PostgreSQL requires SELECT privilege on any column named in a RETURNING clause, on
     # top of INSERT itself. mainai_app now has INSERT ONLY on this table (see
-    # backend/scripts/s1a_privilege_policy.py) — the ordinary account-erasure INSERT path
+    # backend/scripts/security/s1a_privilege_policy.py) — the ordinary account-erasure INSERT path
     # would otherwise fail with "permission denied" the moment it tried to insert a row at
     # all, purely because of this eager-fetch, not because of anything the caller actually
     # asked to read. Disabled here since nothing in this codebase reads a freshly-inserted

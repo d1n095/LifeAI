@@ -91,15 +91,24 @@ ren MOVE/RENAME, inget annat — den hittills mest högriskiga flytten i städni
 (job-runtimen med lease/fencing/cancel/retry-semantik). Se Pass 47 nedan för full detalj.
 **Basgrenens nuvarande tip är därmed `7a7cbb4e4cabf834d4ec5f64d4f4d48d9e9b172d`.**
 
-**ÖPPEN PR: #48** (`claude/backfill-consolidate-app-rag-backfill` →
+**PR #48 är MERGAD** (`claude/backfill-consolidate-app-rag-backfill` →
 `claude/det-kommer-mer-879lcm`), grenad från exakt `7a7cbb4e4cabf834d4ec5f64d4f4d48d9e9b172d`
-(basgrenens tip, verifierad med `git ls-remote origin` INNAN branchen skapades), head
-`ca11be67ea309cecf087af0cf58a46e101f155a8`. Steg 4 av samma founder-godkända, flerstegs
-repo-städning: `backend/app/rag/{message_sequence_backfill,memory_source_backfill,
+(basgrenens tip vid grening, verifierad med `git ls-remote origin` INNAN branchen skapades),
+merge-commit `2eaf3844a2cbd5b9b6d83a29651ff237f805f867`, `merged_by`: `d1n095`, `merged_at`
+2026-08-09T11:22:13Z. Verifierat mot GitHubs PR-API direkt (`mcp__github__pull_request_read`,
+`state: closed`, `merged: true`), inte memorerat — denna rad var stale (skriven FÖRE mergen,
+från PR #48:s egen branch, som förstås inte kan dokumentera sin egen framtida merge) tills den
+här sessionen korrigerade den, per `CLAUDE.md`s regel att göra det INNAN man fortsätter, inte
+opportunistiskt. Steg 4 av samma founder-godkända, flerstegs repo-städning:
+`backend/app/rag/{message_sequence_backfill,memory_source_backfill,
 memory_source_backfill_run}.py` → `backend/app/rag/backfill/{message_sequence,memory_source,
 memory_source_run}.py`, ren MOVE/RENAME av backfill-affärslogiken (INTE job-orkestreringen
 Pass 47 redan flyttade till `app/jobs/handlers/`, som lämnades orörd). Se Pass 48 nedan för
-full detalj. INTE mergad.
+full detalj. **Basgrenens nuvarande tip är därmed `2eaf3844a2cbd5b9b6d83a29651ff237f805f867`.**
+
+**PR #49** (denna session), `claude/scripts-reorg-backend-boot-ci` →
+`claude/det-kommer-mer-879lcm`, steg 5 av städningen: reorganiserar `backend/scripts/` av
+ansvar. Se Pass 49 nedan för full detalj.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
@@ -290,6 +299,193 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 49 (2026-08-09): `backend/scripts/` omorganiserad efter ansvar — steg 5 av den founder-godkända repo-städningen, ren MOVE/RENAME, uttryckligen den högriskigaste flytten hittills (Docker/CI/boot-sekvens-sökvägar, inte bara Python-imports)
+
+**Branch:** `claude/scripts-reorg-backend-boot-ci`, grenad från exakt
+`2eaf3844a2cbd5b9b6d83a29651ff237f805f867` (basgrenens verifierade tip efter PR #48 — SHA:n
+hämtad med `git ls-remote origin refs/heads/claude/det-kommer-mer-879lcm` INNAN branchen
+skapades, inte memorerad; det är också PR #48:s merge-commit, verifierat mot GitHubs PR-API
+direkt, `state: closed`, `merged: true`, `merged_at` 2026-08-09T11:22:13Z). **PR #49**, öppen
+mot `claude/det-kommer-mer-879lcm`.
+
+Steg 5 av samma founder-godkända, flerstegs repo-städning som PR #45-48. Till skillnad från de
+fyra föregående stegen (rena Python-import-flyttar utan skal-/container-/CI-sökvägspåverkan)
+är det här steget grundaren uttryckligen flaggade som högriskigast hittills, eftersom
+`backend/scripts/` innehåller filer som anropas av `docker-entrypoint.sh` (boot-sekvensen),
+`.github/workflows/ci.yml` och `scripts/entrypoint-combined.sh` (root-nivåns Render
+Free-entrypoint) via råa, icke-kompilatorkontrollerade sökvägssträngar — en trasig sökväg där
+hade bara synts vid containerboot, inte vid `import`-tid.
+
+**Fullständig kartläggning innan flytten** (steg 1, per uppgiftens krav): kontrollerade
+faktiskt katalog­innehåll (`find backend/scripts -type f`) mot grundarens fyra kandidatfiler —
+matchade exakt, inga extra eller saknade filer. Läste `docker-entrypoint.sh` i sin helhet
+(WORKDIR `/app`, `COPY . .` från `backend/` — så `scripts/X.py`-anrop däri är relativt `/app`
+= `backend/`), `backend/Dockerfile`, `Dockerfile.combined` (`COPY backend/ ./backend/` →
+samma layout), `scripts/entrypoint-combined.sh` (kör `cd /app/backend && ... ./docker-
+entrypoint.sh "${BACKEND_CMD[@]}"`, så `scripts/run_e2e_backend.py` däri är OCKSÅ relativt
+`backend/`), alla tre `docker-compose*.yml`, hela `.github/workflows/ci.yml` (grep varje
+`.yml`/`.yaml`, inte bara `ci.yml` — `build-images.yml` hade inga träffar), `render.yaml`, och
+grep:ade hela `backend/`-trädet efter `from scripts`/`import scripts`/dynamiska
+`importlib.util.spec_from_file_location(...)`-laddningar i tester.
+
+**Kritiskt fynd som avgjorde målstrukturen:** `ensure_app_role.py` och
+`apply_runtime_privileges.py` gör båda `sys.path.insert(0, str(Path(__file__).resolve()
+.parent))` följt av `from s1a_privilege_policy import ...` — ett rent syskon-import (samma
+katalog, inte paketrelativt). Det betyder att `s1a_privilege_policy.py` MÅSTE ligga i EXAKT
+samma katalog som båda de andra två för att importen ska fortsätta fungera utan att själva
+importmekanismen ändras — och att ändra den mekanismen (t.ex. lägga till ytterligare en
+`sys.path.insert`) hade varit en beteendepåverkande kodändring i redan verifierad
+boot-/säkerhetskritisk kod, exakt det den här städningsserien uttryckligen inte ska göra
+("ingen refaktorering på köpet"). Grundarens egna kandidatförslag (`ensure_app_role.py` →
+`boot/`, `apply_runtime_privileges.py` → `boot/` ELLER `security/`, `s1a_privilege_policy.py`
+→ `security/` ELLER `policy/`) hade, om `ensure_app_role.py` och `apply_runtime_privileges.py`
+lagts i olika kataloger än `s1a_privilege_policy.py`, brutit den här importen. Lösningen:
+placera alla tre tillsammans i EN katalog. Namnvalet `security/` (inte `boot/`) följer
+grundarens egen överlappande föreslagna placering för de två andra ("`security/` ELLER
+`policy/`" för policyn, "`boot/` ELLER `security/`" för privilege-appliceringen) — de tre
+filerna är ALLA fundamentalt om mainai_app:s databas-privilegie-/rollsäkerhet, inte bara
+"något som råkar köras vid boot" (åtskilt från t.ex. en hypotetisk hälsokontroll-script som
+också körs vid boot men inte har med säkerhet att göra).
+
+**Vad som flyttade (git mv, historik bevarad):**
+- `backend/scripts/ensure_app_role.py` → `backend/scripts/security/ensure_app_role.py`
+- `backend/scripts/apply_runtime_privileges.py` → `backend/scripts/security/apply_runtime_privileges.py`
+- `backend/scripts/s1a_privilege_policy.py` → `backend/scripts/security/s1a_privilege_policy.py`
+- `backend/scripts/run_e2e_backend.py` → `backend/scripts/ci/run_e2e_backend.py`
+
+**Klassificering (per uppgiftens krav, inte gissad från filnamn):**
+- `ensure_app_role.py`, `apply_runtime_privileges.py`: (a) fristående boot-tids-skript,
+  anropade direkt av `docker-entrypoint.sh` med CLI-flaggor (`--derive-only`, `--verify-only`)
+  — INTE importerade av `app`-paketet.
+- `s1a_privilege_policy.py`: (b) delad policy-/bibliotekskod, importerad av BÅDA ovanstående
+  (syskon-import) OCH direkt av 8 testfiler via `importlib.util.spec_from_file_location`.
+- `run_e2e_backend.py`: (c) CI/E2E-testhärnesskript, anropat av `.github/workflows/ci.yml`
+  (tre jobb) och `scripts/entrypoint-combined.sh` (Render Free-imaget, `E2E_MOCK_MODE=true`)
+  — aldrig importerat av annan kod, självständigt (egen `sys.path.insert`-baserad `app`-import
+  via `BACKEND_ROOT`).
+
+**Nödvändig, beteendebevarande kodändring i `run_e2e_backend.py` (INTE valfri, INTE
+opportunistisk):** filen beräknar `BACKEND_ROOT = os.path.dirname(os.path.dirname(...))`
+(två nivåer upp) för att lägga `backend/` på `sys.path` så `from app.config import
+get_settings` m.fl. fungerar. Vid den gamla platsen (`backend/scripts/run_e2e_backend.py`)
+gav två `dirname()`-anrop `backend/`. Vid den NYA platsen (`backend/scripts/ci/
+run_e2e_backend.py`, en nivå djupare) hade två `dirname()`-anrop felaktigt gett
+`backend/scripts/` istället — en tyst importfel-risk som bara synts vid körning. Fixat till
+TRE `dirname()`-anrop, verifierat manuellt (`os.path.dirname` x3 från den nya filens
+`__file__)` → exakt `backend/`) samt genom en riktig `run_e2e_backend.py`-relevant
+importkontroll. Ingen annan skriptlogik ändrad.
+
+**`ensure_app_role.py`/`apply_runtime_privileges.py` behövde INGEN kodändring** utöver
+flytten själv — deras `sys.path.insert(0, str(Path(__file__).resolve().parent))` pekar redan
+korrekt på skriptets EGEN katalog oavsett djup, och `s1a_privilege_policy.py` ligger kvar som
+exakt syskon i samma `security/`-katalog. Verifierat genom att faktiskt ladda alla tre moduler
+via `importlib.util.spec_from_file_location` från den nya platsen — inga importfel.
+
+**Varje Docker-/CI-/skal-referens uppdaterad (grep-verifierat, noll kvarvarande gamla
+sökvägar i levande kod/kommentarer, se listan nedan för exakta filer+rader):**
+- `backend/docker-entrypoint.sh` (rad 21, 31, 37, 40, 71, 74 — fyra faktiska
+  `python scripts/...`-anrop plus två kommentarpekare)
+- `.github/workflows/ci.yml` (rad 388: `apply_runtime_privileges.py`; rad 409, 428, 563:
+  `run_e2e_backend.py`; rad 660, 896: kommentarpekare)
+- `scripts/entrypoint-combined.sh` (rad 51 kommentar, rad 57 faktiskt `BACKEND_CMD`-anrop —
+  root-nivåns Render Free-entrypoint, `E2E_MOCK_MODE=true`-vägen)
+- `render.yaml` (rad 60, 63, 67 — kommentarer om `ensure_app_role.py`s Supabase-poolerbeteende)
+- `docker-compose.vps.yml` (rad 143 — kommentar)
+- `backend/Dockerfile` (rad 31 — kommentar)
+- `backend/db-init/01-app-role.sh` (kommentarpekare till `s1a_privilege_policy.py`)
+- Levande kodkommentarer/docstrings i `app/main.py`, `app/rls.py`, `app/account/erasure.py`,
+  `app/models/storage_deletion_task.py`, `app/storage/references.py`, samt skriptens EGNA
+  självrefererande kommentarer (`ensure_app_role.py` → `s1a_privilege_policy.py`,
+  `apply_runtime_privileges.py` → `s1a_privilege_policy.py`)
+- 12 testfilers hårdkodade `Path(...) / "scripts" / "X.py"`-konstruktioner (nu `/ "security" /
+  X.py`) i `test_source_purge.py`, `test_library_routes.py`, `test_project_memory.py`,
+  `test_memory_source_units.py`, `test_runtime_table_privileges.py`, `test_mainai_jobs.py`,
+  `test_ensure_app_role.py`, `test_account_erasure.py`, `test_library_import.py`,
+  `test_account_deletion.py`, plus `test_privilege_boot_race_hotfix.py`s katalogkonstant
+  `SCRIPTS_DIR` (nu pekande på `scripts/security/`) — samt kommentarpekare i `test_db_retry.py`,
+  `test_founder_only.py`, `conftest.py`
+- `frontend/e2e/{auth,founder-knowledge-studio,founder-knowledge-studio-media,
+  library-upload-queue}.spec.ts`, `frontend/e2e/helpers.ts`, `frontend/playwright.config.ts`
+  (kommentarpekare till `run_e2e_backend.py`s nya plats)
+- Levande docs (INTE historiskt narrativ): `README.md`, `docs/MAINAI_ARCHITECTURE.md`
+  (inklusive katalogträdet, som nu visar `scripts/security/` och `scripts/ci/` separat),
+  `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`, `docs/MAINAI_JOB_RUNTIME.md`,
+  `docs/OPERATIONS.md`, `docs/RENDER_DEPLOY.md`, `docs/VPS_DOCKER_HARDENING.md`,
+  `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`
+
+**Medvetet INTE ändrat — historiskt narrativ, inte en trasig pekare** (samma disciplin PR
+#45-48 redan etablerat): Alembic-migrationernas prosakommentarer (0004, 0019, 0020, 0021,
+0022, 0023, 0025, 0030 — 8 filer, verifierat att de fortfarande nämner de GAMLA sökvägarna,
+precis som de gjorde innan denna flytt och innan PR #45-48s egna flyttar), `docs/
+BRANCH_REGISTRY.md`s egna Pass 1-48-poster (endast toppsammanfattningen uppdaterad, se
+nedan), samt `docs/NIGHT_SHIFT_HANDOVER_2026-07-20.md` (daterat, arkivmässigt narrativ).
+
+**`docs/BRANCH_REGISTRY.md`s egen toppsammanfattning var stale** (visade "ÖPPEN PR: #48...
+INTE mergad" trots att #48 redan var mergad in i basen den här branchen grenades från,
+verifierat mot GitHubs PR-API: `state: closed`, `merged: true`, `merged_at`
+2026-08-09T11:22:13Z, merge-commit `2eaf3844a2cbd5b9b6d83a29651ff237f805f867`) — korrigerad i
+en egen commit på den här branchen, per `CLAUDE.md`s regel att göra det INNAN man fortsätter,
+samma precedent PR #46/#47/#48 satte.
+
+**Verifiering (körd på riktigt, inte antagen):**
+- `shellcheck` på `backend/docker-entrypoint.sh` (rent, exit 0) och `scripts/entrypoint-
+  combined.sh` (samma SC2317-info-varningar som fanns på basgrenens fil FÖRE den här
+  branchens ändringar, byte-för-byte identiska — verifierat genom att köra `shellcheck` på
+  `git show <bas-SHA>:scripts/entrypoint-combined.sh` separat och jämföra) och `backend/
+  db-init/01-app-role.sh` (rent, exit 0). Inte del av `vps-scripts-check`-jobbet (det
+  jobbet täcker bara `scripts/vps/*.sh`) — extra grundlighet utöver vad CI redan kräver.
+- `bash -n` på samtliga tre ändrade skalskript: rent.
+- `python -c "import app.main"`: OK (i en riktig venv med `requirements.txt` installerat).
+- Alla tre flyttade moduler (`ensure_app_role`, `apply_runtime_privileges`,
+  `s1a_privilege_policy`) laddade explicit via `importlib.util.spec_from_file_location` från
+  sina NYA platser: inga importfel — bevisar syskon-importen fortfarande fungerar.
+- **`ensure_app_role.py` körd på riktigt** från sin nya plats mot en riktig, färsk Postgres
+  16-databas (lokal cluster, port 5433, `pgvector`-extension installerad): idempotent
+  rollhantering fungerade identiskt (`mainai_app-rollen finns redan — lösenordet ändras
+  INTE`), skrev korrekt `APP_DATABASE_URL` till `$RENDER_ENV_FILE`.
+- **`apply_runtime_privileges.py` körd på riktigt, BÅDA lägena**, från sin nya plats mot en
+  fullt migrerad (`alembic upgrade head`, alla 31 migrationer) scratch-databas: muterande
+  läge → `privilege state verified correct`; `--verify-only` → samma. **Fail-closed-kontraktet
+  verifierat oförändrat**: manuellt korrumperad `memory_source_units.SELECT`-behörighet fick
+  `--verify-only` att korrekt misslyckas efter 8 avgränsade omförsök (`exit=1`,
+  `privilege state does NOT match policy after all retries`), och muterande läge reparerade
+  den korrekt igen (`exit=0`) — identiskt med det dokumenterade beteendet före flytten.
+- **Fullständig, riktig boot-sekvens körd via det FAKTISKA `docker-entrypoint.sh`-skriptet**
+  (inte bara dess enskilda steg), två gånger: (1) backend-läge (`RUN_PRIVILEGE_BOOT=true`,
+  `RUN_MIGRATIONS=true`) — `ensure_app_role.py` → `alembic upgrade head` (alla 31
+  migrationer) → `apply_runtime_privileges.py` → `exec "$@"` nått, exit 0; (2) worker-läge
+  (`RUN_PRIVILEGE_BOOT=false`, `RUN_MIGRATIONS=false`) — `ensure_app_role.py --derive-only`
+  → migrationer överhoppade → `apply_runtime_privileges.py --verify-only` → `exec "$@"` nått,
+  exit 0. Detta är den viktigaste enskilda verifieringen för det här steget (en trasig
+  `docker-entrypoint.sh`-sökväg hade annars bara synts vid containerboot).
+- **Riktig worker-boot** (`python -m app.worker`) mot den migrerade scratch-databasen: ren
+  uppstart (`Worker vm startar...`) och graciös SIGTERM-avstängning (`Worker vm avslutas
+  (graciös avstängning).`), noll importfel.
+- **Riktig backend-boot** (`uvicorn app.main:app`) mot samma scratch-databas: `Application
+  startup complete` → graciös `Application shutdown complete`, noll importfel.
+- **Riktig Docker-imagebygge/körning är blockerad i den här sessionens sandlåda** (ingen
+  `dockerd` tillgänglig — samma redan dokumenterade begränsning som Pass 6 noterade: "Lokal
+  `docker build` av de riktiga bilderna är blockerad i den här sessionens sandlåda"). All
+  boot-sekvensverifiering ovan gjordes därför direkt mot det riktiga skriptet/den riktiga
+  processen (inte simulerad), men inte inuti en riktig container — den riktiga
+  Docker-baserade verifieringen (`combined-container-verify`, `build-images.yml`) sker via
+  den riktiga CI-körningen efter push, pollad tills den slutförs (se nedan).
+- **Fullständig lokal testsvit, riktig Postgres 16 + Redis:** `tests/backend/`: **972 passed,
+  1 skipped** (den avsiktligt skippade `test_zip_import_capacity.py`-kapacitetstestet, `RUN_
+  CAPACITY_TEST=1` krävs — INGA fel denna körning, till skillnad från Pass 45-48s
+  dokumenterade `fcntl.flock()`-trådrace-flaka, som inte triggade den här gången).
+  `tests/security/` + `tests/account/`: **77 passed** (29+48, samma uppdelning som Pass
+  45-48). Riktade körningar av alla direkt berörda testfiler (`test_ensure_app_role.py`: 9
+  passed; `test_privilege_boot_race_hotfix.py` + `test_runtime_table_privileges.py`: 21
+  passed; övriga 8 direkt berörda filer: 426 passed) gjordes också separat innan fullsviten.
+- `ruff check --select F,E9` på samtliga 21 ändrade Python-filer: 14 fynd, samtliga
+  verifierat byte-identiska mot basgrenens filer FÖRE den här branchens ändringar (F401/F811/
+  F841 i testfiler, inga nya) — samma disciplin Pass 45-48 etablerade.
+
+**Nästa steg i städningen:** ej specificerat av den här sessionen — nästa MOVE/RENAME-steg
+väntar på grundarens fortsatta godkännande, en branch/PR i taget, per `CLAUDE.md`s
+grundprincip.
 
 ## Pass 48 (2026-08-09): `backend/app/rag/{message_sequence_backfill,memory_source_backfill,memory_source_backfill_run}.py` → `backend/app/rag/backfill/...` — steg 4 av den founder-godkända repo-städningen, ren MOVE/RENAME av backfill-affärslogiken
 

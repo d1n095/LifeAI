@@ -235,7 +235,7 @@ def apply_rls(engine: Engine) -> None:
 # during integration from the frozen branch's own 0026 — see 0027_mainai_job_integrity.py's
 # integration note) depend on
 # mainai_app NOT holding UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER on them — but
-# scripts/ensure_app_role.py unconditionally re-runs `GRANT ALL PRIVILEGES ON ALL TABLES IN
+# scripts/security/ensure_app_role.py unconditionally re-runs `GRANT ALL PRIVILEGES ON ALL TABLES IN
 # SCHEMA public TO mainai_app` on EVERY container boot, before Alembic even runs (see that
 # script's docstring, and the Pass 12 boot-persistence incident in docs/BRANCH_REGISTRY.md
 # for the exact same class of bug: a REVOKE applied once, at migration time, is silently
@@ -301,7 +301,7 @@ def _effective_table_privileges(conn, role: str, table: str) -> set[str]:
 def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: bool = True) -> None:
     """Applies AND verifies mainai_app's exact runtime privileges on the mainai_job_*
     integrity objects (migration 0027) — call this AFTER apply_rls() on every startup (see
-    app/main.py), after both Alembic and scripts/ensure_app_role.py have already run (this
+    app/main.py), after both Alembic and scripts/security/ensure_app_role.py have already run (this
     function assumes migration 0027's tables/functions already exist; it does not create
     them — that's the migration's job, and deliberately does not reference the mainai_app
     role at all, so it stays portable to a bare database — see that migration's docstring).
@@ -318,7 +318,7 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
     1. Determine `expected_owner` from `current_user` on this connection. Refuses outright if
        that resolves to `mainai_app` itself — the restricted runtime role can never legitimately
        be the connection this function verifies migration output against.
-    2. Enforce: idempotently REVOKE the excess table privileges scripts/ensure_app_role.py's
+    2. Enforce: idempotently REVOKE the excess table privileges scripts/security/ensure_app_role.py's
        blanket ALL-PRIVILEGES grant left behind, and GRANT EXECUTE on the one function
        mainai_app is actually meant to call.
     3. Verify, against Postgres's own catalogs (not just "did step 2's statements not error"):
@@ -349,7 +349,7 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
     asserting on the returned drift) rather than enforcement.
 
     Founder-reported production incident (VPS hotfix, same class of bug as
-    backend/scripts/s1a_privilege_policy.py's own `acquire_privilege_boot_lock`, see that
+    backend/scripts/security/s1a_privilege_policy.py's own `acquire_privilege_boot_lock`, see that
     function's docstring for the full "tuple concurrently updated" mechanism): this function is
     only ever called from `app/main.py`'s FastAPI startup handler, which the durable-worker
     container never triggers (`app/worker.py` never imports `app.main` — see
@@ -359,12 +359,12 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
     boot at once — the same `pg_advisory_xact_lock` key `apply_privilege_policy()`'s mutating
     path acquires, so a second concurrent backend simply waits for the first's transaction to
     finish rather than racing it on the same catalog rows. The exact two integers must stay in
-    sync with `PRIVILEGE_BOOT_ADVISORY_LOCK_KEY` in backend/scripts/s1a_privilege_policy.py —
+    sync with `PRIVILEGE_BOOT_ADVISORY_LOCK_KEY` in backend/scripts/security/s1a_privilege_policy.py —
     duplicated here (not imported) because that script deliberately stays outside the `app`
     package so it can run standalone, pre-boot, before `app` itself is fully importable."""
     with engine.begin() as conn:
         # See docstring above — must stay (72197001, 1), identical to
-        # backend/scripts/s1a_privilege_policy.py's PRIVILEGE_BOOT_ADVISORY_LOCK_KEY.
+        # backend/scripts/security/s1a_privilege_policy.py's PRIVILEGE_BOOT_ADVISORY_LOCK_KEY.
         conn.execute(text("SELECT pg_advisory_xact_lock(72197001, 1)"))
 
         expected_owner = conn.execute(text("SELECT current_user")).scalar()

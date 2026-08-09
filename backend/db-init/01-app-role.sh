@@ -25,7 +25,7 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     -- and TRUNCATE is not subject to Row-Level Security at all (it is a whole-table
     -- operation, so no RLS policy is ever consulted) -- which would have let the runtime
     -- role wipe every owner's rows out of an RLS-protected table in one statement. See
-    -- _NEVER_GRANTED_TABLE_PRIVS in backend/scripts/s1a_privilege_policy.py, which enforces
+    -- _NEVER_GRANTED_TABLE_PRIVS in backend/scripts/security/s1a_privilege_policy.py, which enforces
     -- and re-verifies the same floor on every boot for databases provisioned before this.
     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
     GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;

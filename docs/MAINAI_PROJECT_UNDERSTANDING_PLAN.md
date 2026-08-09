@@ -496,7 +496,7 @@ helst på samma databasanslutning kan sätta samma markör själv, så påståen
 funktion kan skriva vore strukturellt falskt.
 
 Repot har redan den riktiga lösningen på plats, inte som en ny mekanism S1A måste uppfinna:
-`backend/scripts/ensure_app_role.py`/`backend/db-init/01-app-role.sh` visar att applikationen
+`backend/scripts/security/ensure_app_role.py`/`backend/db-init/01-app-role.sh` visar att applikationen
 ALDRIG kör runtime-frågor som samma roll som äger tabellerna. Migrationer körs som
 admin/superuser-rollen (`settings.database_url`, `migration_engine` i `app/db.py`) — den
 rollen äger tabellerna. All runtime-trafik (allt `app/routers/*.py` gör) körs istället som den
@@ -678,7 +678,7 @@ icke-ägare koppla nytt beteende till en tabell den inte äger.
 
 **Kanonisk regel, från och med nu:** `mainai_app` håller aldrig `TRUNCATE`, `REFERENCES` eller
 `TRIGGER` på NÅGON tabell i schema `public`. Golvet ligger i
-`_NEVER_GRANTED_TABLE_PRIVS` (`backend/scripts/s1a_privilege_policy.py`), tillämpas och
+`_NEVER_GRANTED_TABLE_PRIVS` (`backend/scripts/security/s1a_privilege_policy.py`), tillämpas och
 verifieras vid varje boot av samma två anropare som redan kör per-tabell-policyn, och slår upp
 tabellerna **dynamiskt ur `pg_tables`** — inte ur en hårdkodad lista, så en tabell som en
 framtida migration inför täcks automatiskt utan att någon behöver komma ihåg det. Den

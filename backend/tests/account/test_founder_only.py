@@ -153,7 +153,7 @@ def test_founder_can_log_in_and_use_the_whole_system(client):
     # require_founder gate on those two routes is still exercised (the dependency runs
     # before the route body does), just via the 403 side in
     # test_non_founder_denied_every_protected_route above and via frontend/e2e/auth.spec.ts's
-    # real chat round-trip (against a faked provider — see backend/scripts/run_e2e_backend.py).
+    # real chat round-trip (against a faked provider — see backend/scripts/ci/run_e2e_backend.py).
     project_res = client.post(
         "/api/projects", json={"name": "founder-only smoke test", "status": "active"}, headers={"X-CSRF-Token": csrf}
     )

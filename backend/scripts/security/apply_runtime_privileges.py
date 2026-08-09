@@ -19,7 +19,7 @@ unconditional re-GRANT ALL runs on that container too, so skipping this script t
 leave mainai_app's privileges wide open indefinitely after any worker-only restart.
 
 The actual policy (which tables/functions, which exact privileges, how ownership/BYPASSRLS/
-search_path are verified) lives in backend/scripts/s1a_privilege_policy.py — the SAME module
+search_path are verified) lives in backend/scripts/security/s1a_privilege_policy.py — the SAME module
 ensure_app_role.py also calls, immediately after its own broad GRANT ALL, whenever the S1A
 objects already exist. This script exists for the complementary case: the very deploy that
 creates the S1A objects for the first time, where ensure_app_role.py runs BEFORE the

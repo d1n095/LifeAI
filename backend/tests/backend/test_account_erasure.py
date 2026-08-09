@@ -50,7 +50,7 @@ from app.security import hash_password
 from app.storage import StorageError, get_storage
 from app.storage.references import acquire_owner_erasure_lock
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 # Pass 27: storage_deletion_tasks grants mainai_app INSERT only -- every read/update against
 # it in these tests (mirroring app/account/erasure.py's own _MaintenanceSession /
@@ -75,7 +75,7 @@ def _narrow_privileges_before_this_module():
     Integration (mainai-job-runtime): erase_account_data() now ALSO calls
     erase_own_mainai_job_children() (migration 0027) — a completely separate SECURITY DEFINER
     function governed by app/rls.py's apply_mainai_job_runtime_privileges(), not by
-    scripts/s1a_privilege_policy.py above. Production's real boot sequence (app/main.py's
+    scripts/security/s1a_privilege_policy.py above. Production's real boot sequence (app/main.py's
     on_startup) always calls both; this fixture must too, or mainai_app has no EXECUTE on
     erase_own_mainai_job_children() in this module's tests and every erase_account_data() call
     here fails with a permission error before any of its own assertions can run."""
@@ -1277,7 +1277,7 @@ def test_mainai_app_session_cannot_insert_directly_into_storage_deletion_tasks()
 
 def test_public_lacks_execute_on_enqueue_account_erasure_storage_task():
     """No role should be able to call this function purely by connecting as PUBLIC -- only
-    mainai_app, via the explicit grant in backend/scripts/s1a_privilege_policy.py, exactly
+    mainai_app, via the explicit grant in backend/scripts/security/s1a_privilege_policy.py, exactly
     like every other S1A SECURITY DEFINER function (migration 0019's module docstring)."""
     session = SessionLocal()
     try:

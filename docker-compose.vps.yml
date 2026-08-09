@@ -140,7 +140,7 @@ services:
     cap_drop:
       - ALL
     # /tmp and the uploads volume are the only things this app writes to at runtime.
-    # scripts/ensure_app_role.py hands its freshly-derived APP_DATABASE_URL back to
+    # scripts/security/ensure_app_role.py hands its freshly-derived APP_DATABASE_URL back to
     # docker-entrypoint.sh via a mktemp() file (see that script's module docstring).
     # Everything else besides the durable-worker package's original-file storage (schema,
     # RLS, session state) is already in Postgres, not the container filesystem.

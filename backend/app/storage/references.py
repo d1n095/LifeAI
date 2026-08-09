@@ -53,7 +53,7 @@ delegates entirely to `storage_key_still_referenced_global(text) RETURNS boolean
 0020) -- a narrow, SECURITY DEFINER SQL function owned by the admin/migration role (which
 genuinely has BYPASSRLS, externally verified by apply_runtime_privileges.py, never assumed),
 `SET search_path = pg_catalog`, every relation `public.`-qualified, granted EXECUTE ONLY to
-mainai_app (never PUBLIC) via backend/scripts/s1a_privilege_policy.py. It implements the
+mainai_app (never PUBLIC) via backend/scripts/security/s1a_privilege_policy.py. It implements the
 EXACT SAME policy described above, just able to see every owner's rows -- and returns nothing
 but a boolean: no owner id, job id, or document detail ever crosses back into the calling
 (possibly cross-owner-relative-to-that-data) request. See that migration's module docstring
@@ -566,7 +566,7 @@ def get_storage_cleanup_ops_status(db: Session) -> StorageCleanupOpsStatus:
         AuditLog query for login-failure rate limiting; audit_log was never narrowed the way
         storage_deletion_tasks was).
       - `storage_deletion_tasks` is NOT (Pass 27/28: mainai_app has ZERO direct privileges on
-        it, for any reason -- see backend/scripts/s1a_privilege_policy.py). Reads it via the
+        it, for any reason -- see backend/scripts/security/s1a_privilege_policy.py). Reads it via the
         SAME privileged `_MaintenanceSession` this module already uses for durable-task writes.
 
     Degradation policy (documented here since there is no UI/API to acknowledge or resolve

@@ -18,7 +18,7 @@ set -euo pipefail
 # sets RUN_PRIVILEGE_BOOT=false on the worker service. When false, the two steps below run
 # their read-only equivalents instead (--derive-only / --verify-only) — never zero-effect: the
 # worker still needs APP_DATABASE_URL and still fails closed if the privilege state it reads is
-# wrong, it just never itself writes to it. See backend/scripts/s1a_privilege_policy.py's
+# wrong, it just never itself writes to it. See backend/scripts/security/s1a_privilege_policy.py's
 # `acquire_privilege_boot_lock()` for the remaining defense-in-depth this flag doesn't cover
 # (two BACKEND replicas racing each other).
 RUN_PRIVILEGE_BOOT="${RUN_PRIVILEGE_BOOT:-true}"
@@ -28,16 +28,16 @@ RUN_PRIVILEGE_BOOT="${RUN_PRIVILEGE_BOOT:-true}"
 # Docker Compose — this does the equivalent, idempotently, via the admin connection
 # (DATABASE_URL). Only runs when MAINAI_APP_PASSWORD is set; local Docker Compose never sets
 # it on the backend container (APP_DATABASE_URL is already set there directly), so this is a
-# no-op locally. See scripts/ensure_app_role.py and docs/RENDER_DEPLOY.md.
+# no-op locally. See scripts/security/ensure_app_role.py and docs/RENDER_DEPLOY.md.
 if [ -n "${MAINAI_APP_PASSWORD:-}" ]; then
   export RENDER_ENV_FILE
   RENDER_ENV_FILE="$(mktemp)"
   if [ "$RUN_PRIVILEGE_BOOT" = "true" ]; then
     echo "Skapar/uppdaterar mainai_app-rollen..."
-    python scripts/ensure_app_role.py
+    python scripts/security/ensure_app_role.py
   else
     echo "RUN_PRIVILEGE_BOOT=false, härleder APP_DATABASE_URL utan att mutera rollen..."
-    python scripts/ensure_app_role.py --derive-only
+    python scripts/security/ensure_app_role.py --derive-only
   fi
   # shellcheck disable=SC1090
   source "$RENDER_ENV_FILE"
@@ -68,10 +68,10 @@ fi
 # backend does for its own mutating path.
 if [ "$RUN_PRIVILEGE_BOOT" = "true" ]; then
   echo "Kör apply_runtime_privileges..."
-  python scripts/apply_runtime_privileges.py
+  python scripts/security/apply_runtime_privileges.py
 else
   echo "RUN_PRIVILEGE_BOOT=false, verifierar privilege-state read-only (apply_runtime_privileges.py --verify-only)..."
-  python scripts/apply_runtime_privileges.py --verify-only
+  python scripts/security/apply_runtime_privileges.py --verify-only
 fi
 
 exec "$@"

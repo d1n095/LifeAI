@@ -12,7 +12,11 @@ import json
 import os
 import sys
 
-BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Was `dirname(dirname(...))` (two levels) when this file lived at backend/scripts/ directly;
+# now backend/scripts/ci/, one level deeper, so one more dirname() to still land on backend/ —
+# this must keep resolving to the backend/ directory (where the `app` package lives) exactly
+# like before the move, not a functional change, just preserving the same target after the move.
+BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, BACKEND_ROOT)
 
 EMAIL_LOG_PATH = os.environ.get("E2E_EMAIL_LOG_PATH", os.path.join(BACKEND_ROOT, "e2e_test_emails.jsonl"))

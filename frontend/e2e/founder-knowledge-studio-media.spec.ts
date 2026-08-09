@@ -3,7 +3,7 @@ import { FRONTEND_URL } from "../playwright.config";
 import { loginViaUi } from "./helpers";
 
 // STEG 12/13: audio/video import v1 + its UI. Uploads a real .mp3 through the real
-// security-validated pipeline against the real E2E backend (scripts/run_e2e_backend.py fakes
+// security-validated pipeline against the real E2E backend (scripts/ci/run_e2e_backend.py fakes
 // only the chat/embedding provider calls — app/providers/transcription.py's
 // MockTranscriptionProvider is never faked, it's already offline/deterministic by design, so
 // this exercises the genuine STEG 12 pipeline end to end).

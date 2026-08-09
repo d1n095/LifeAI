@@ -180,7 +180,7 @@ render.yaml           # Render Blueprint (Postgres, Redis, backend, frontend) �
   — kräver Postgres och Redis nåbara via `DATABASE_URL`/`APP_DATABASE_URL`/`REDIS_URL`
   (testerna skapar och migrerar en egen engångsdatabas, se `tests/conftest.py`).
 - **E2E** (`frontend/e2e/`, Playwright): `npx playwright test` — kräver en riktig körande
-  backend (`python backend/scripts/run_e2e_backend.py`, som fejkar utgående AI- och
+  backend (`python backend/scripts/ci/run_e2e_backend.py`, som fejkar utgående AI- och
   e-postanrop men kör allt annat på riktigt) samt att `npx playwright install --with-deps
   chromium` körts en gång.
 - **CI** (`.github/workflows/ci.yml`) kör allt detta automatiskt på varje push/PR — se

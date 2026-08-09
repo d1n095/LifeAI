@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import type { APIResponse, BrowserContext, Page } from "@playwright/test";
 
-// Must match backend/scripts/run_e2e_backend.py's default E2E_EMAIL_LOG_PATH.
+// Must match backend/scripts/ci/run_e2e_backend.py's default E2E_EMAIL_LOG_PATH.
 const EMAIL_LOG_PATH =
   process.env.E2E_EMAIL_LOG_PATH || path.resolve(__dirname, "../../backend/e2e_test_emails.jsonl");
 

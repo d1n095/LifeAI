@@ -47,7 +47,7 @@ from app.storage.references import (
     storage_key_still_referenced,
 )
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():
@@ -2095,7 +2095,7 @@ def test_apply_runtime_privileges_verifies_return_type_and_language():
 
     from app.config import get_settings as _get_settings
 
-    policy_path = _Path(__file__).resolve().parent.parent.parent / "scripts" / "s1a_privilege_policy.py"
+    policy_path = _Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "s1a_privilege_policy.py"
     spec = importlib.util.spec_from_file_location("s1a_privilege_policy_wrongtype", policy_path)
     policy_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(policy_module)
@@ -2138,7 +2138,7 @@ def test_apply_runtime_privileges_verifies_return_type_and_language():
 
 
 def _load_policy_module(name: str):
-    policy_path = Path(__file__).resolve().parent.parent.parent / "scripts" / "s1a_privilege_policy.py"
+    policy_path = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "s1a_privilege_policy.py"
     spec = importlib.util.spec_from_file_location(name, policy_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

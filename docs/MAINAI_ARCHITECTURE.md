@@ -58,7 +58,7 @@ finns redan i grundarkitekturen, inte som ett separat säkerhetstillägg.
    icke-kringgåbara sista linjen. Se §9.
 6. **Determinism i test, inte i produktion.** All extern I/O (AI-leverantörer, e-post) är
    utbytbar bakom ett interface specifikt så att CI kan köra hela systemet deterministiskt
-   utan externa beroenden (`backend/scripts/run_e2e_backend.py`) — produktionskoden självt
+   utan externa beroenden (`backend/scripts/ci/run_e2e_backend.py`) — produktionskoden självt
    gör aldrig antaganden om att vara i testläge.
 7. **MainAI är systemets intelligens, inte en extern tjänst.** Se nästa avsnitt — detta är
    inte en teknisk detalj utan den princip som avgör hur alla andra avsnitt ska tolkas.
@@ -226,7 +226,8 @@ LifeAI/
 │   │   └── main.py            # App-uppstart, middleware, startup-checks (SMTP-tvång m.m.)
 │   ├── alembic/versions/      # Enda sanningskällan för schemat — ALDRIG create_all i produktion
 │   ├── db-init/               # Lokal Docker Compose-rollprovisionering (mainai_app-rollen)
-│   ├── scripts/                # ensure_app_role.py (Render), run_e2e_backend.py (CI-determinism)
+│   ├── scripts/security/       # ensure_app_role.py (Render), apply_runtime_privileges.py, s1a_privilege_policy.py
+│   ├── scripts/ci/             # run_e2e_backend.py (CI-determinism)
 │   └── tests/{backend,security,account}/  # pytest, tre svit-kategorier — se docs/OPERATIONS.md
 ├── frontend/
 │   ├── app/                   # Next.js App Router — en route per sida, api/[...path] är proxyn
@@ -528,7 +529,7 @@ kontext (nivå 3-minne) + konversationshistorik (nivå 1-minne) + användarens f
 på ETT ställe (`app/routers/chat.py`) — inte dupliceras per leverantör, eftersom
 leverantörerna delar samma `Message`-format via `LLMProvider`-interfacet.
 
-**Determinism i test:** `backend/scripts/run_e2e_backend.py` byter ut `OpenAIProvider.chat`/
+**Determinism i test:** `backend/scripts/ci/run_e2e_backend.py` byter ut `OpenAIProvider.chat`/
 `.embed` med deterministiska fejkfunktioner via monkey-patching av samma klassmetoder resten
 av systemet anropar — CI:s E2E-svit (och den nya `combined-container-verify`-CI-jobbet, se
 `docs/RENDER_DEPLOY.md`) kör alltså den RIKTIGA orkestreringslogiken (fallback, kostnadsloggning,

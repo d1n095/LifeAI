@@ -28,7 +28,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Dedicated, unprivileged, non-login system user — this container never needs a real shell
 # login and never needs to be root for anything it actually does (bind ports 8000, connect
-# out to Postgres/Redis, read its own files, write to /tmp for scripts/ensure_app_role.py's
+# out to Postgres/Redis, read its own files, write to /tmp for scripts/security/ensure_app_role.py's
 # mktemp handoff file). Running as root inside the container buys nothing here and only
 # matters if a future vulnerability in a dependency ever allows code execution — root inside
 # a container is not a full sandbox escape by itself, but it removes one layer an attacker
