@@ -280,8 +280,7 @@ PR #32 INTE ska mergas utan uttryckligt godkännande.
 **Branch:** `claude/move-mainai-jobs-runtime`, grenad från exakt
 `bf74a05e6f4773bd59904dafe84aa5beae808347` (basgrenens verifierade tip efter PR #46 — SHA:n
 hämtad med `git ls-remote origin` INNAN branchen skapades, inte memorerad; det är också PR
-#46:s merge-commit). **PR #47**, öppen mot `claude/det-kommer-mer-879lcm`, head
-`b66e9265b5c0b24b15c1eb00669bd2dbd1348f35`, INTE mergad.
+#46:s merge-commit). **PR #47**, öppen mot `claude/det-kommer-mer-879lcm`, INTE mergad.
 
 Steg 3 av samma founder-godkända, flerstegs repo-städning som Pass 45 (steg 1,
 `app/account/`) och Pass 46 (steg 2, `app/storage/`). Samma ramning: "en sådan PR ska se
