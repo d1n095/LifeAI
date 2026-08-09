@@ -202,7 +202,7 @@ def create_job(
         _validate_input_refs(db, owner_id, input_refs)
     elif job_type == "message_sequence_backfill":
         # S1B: this job's scope is "every one of THIS owner's still-unnumbered messages",
-        # derived from the database at execution time (app/rag/message_sequence_backfill_job.py)
+        # derived from the database at execution time (app/jobs/handlers/message_sequence_backfill.py)
         # — it takes no inputs at all. Non-empty input_refs are rejected rather than silently
         # ignored: accepting refs the executor will never read would let a caller believe it had
         # narrowed the job's scope when it had not, which is exactly the kind of quiet
@@ -307,7 +307,7 @@ def list_job_events(db: Session, job_id: uuid.UUID, *, limit: int = 200) -> list
 
 def request_cancel(db: Session, job_id: uuid.UUID, *, requested_by: uuid.UUID, request=None) -> MainAIJob:
     """Sets cancel_requested only — the actual transition to `cancelled` happens inside the
-    job's own processing loop (app/rag/corpus_review_job.py), between batches, so a job is
+    job's own processing loop (app/jobs/handlers/corpus_review.py), between batches, so a job is
     never killed mid-write. Idempotent: calling this twice on an already-cancel-requested job
     is a no-op, not an error."""
     job = get_job(db, job_id)
@@ -328,7 +328,7 @@ def retry_job(db: Session, job_id: uuid.UUID, *, requested_by: uuid.UUID, reques
     RETRYABLE_MAINAI_JOB_STATUSES's own docstring) within its retry budget can be retried.
     Resets progress fields so the corpus_review loop restarts its batch scan from the top —
     safe because it is itself idempotent per already-produced proposal (see
-    app/rag/corpus_review_job.py).
+    app/jobs/handlers/corpus_review.py).
 
     Documented, deliberate scope of what this DOES and does NOT reset (founder re-review
     round, PR #36, fourth pass): `started_at`, `locked_by`, `lease_expires_at`,
@@ -358,7 +358,7 @@ def retry_job(db: Session, job_id: uuid.UUID, *, requested_by: uuid.UUID, reques
     # the DB level now (a real gap this constraint caught: this line was missing before the
     # founder re-review round added that CHECK). progress_current/progress_total/current_phase
     # reset too, matching this function's own long-standing docstring claim ("resets progress
-    # fields") that the code itself didn't actually do -- corpus_review_job.py recomputes them
+    # fields") that the code itself didn't actually do -- corpus_review.py recomputes them
     # from scratch on its next run regardless, but leaving stale "3/5"-style progress visible
     # on a `queued` job between the retry and the next claim would be misleading in the admin
     # UI (app/routers/mainai_jobs.py's GET /jobs, frontend/app/(shell)/admin/jobs/page.tsx).
@@ -415,7 +415,7 @@ def mark_failed(db: Session, job: MainAIJob, *, worker_id: str, lease_generation
     """`error_category` is the ONLY thing derived from the real failure — public_message
     always comes from the fixed _PUBLIC_ERROR_MESSAGES table above, never from the exception
     itself. Callers are expected to log the real exception separately (see
-    app/rag/corpus_review_job.py) — this function only ever persists the safe category."""
+    app/jobs/handlers/corpus_review.py) — this function only ever persists the safe category."""
     _guarded_job_write(
         db,
         job.id,
@@ -462,7 +462,7 @@ def update_progress(
 ) -> None:
     """Called between batches by the job's own processing loop. Deliberately does NOT commit
     — the caller's own batch transaction decides the commit boundary (see
-    app/rag/corpus_review_job.py), so progress is only ever durable together with the work it
+    app/jobs/handlers/corpus_review.py), so progress is only ever durable together with the work it
     describes, never ahead of it.
 
     Requires and re-verifies (worker_id, lease_generation) via the same fencing gate as every
@@ -501,7 +501,7 @@ def record_document_reviewed(
     model: str,
     proposal_output_ref: dict,
 ) -> None:
-    """One successful per-document `corpus_review` outcome (app/rag/corpus_review_job.py):
+    """One successful per-document `corpus_review` outcome (app/jobs/handlers/corpus_review.py):
     progress advances, provider/model attribution updates, and the new proposal's reference is
     appended to `output_refs` — all in the SAME fencing-guarded UPDATE (`output_refs || ...`
     is Postgres's own jsonb array-concatenation operator, evaluated inside the guarded
@@ -546,7 +546,7 @@ def record_document_skipped(
 ) -> None:
     """One per-document `corpus_review` outcome that was NOT a successful review — deleted
     mid-run, no reviewable content, or a provider failure specific to this one document (see
-    corpus_review_job.py's three call sites for the exact `reason` values; migration 0028
+    corpus_review.py's three call sites for the exact `reason` values; migration 0028
     added `document_skipped` to mainai_job_events' allowed event types for exactly this).
     Verifies the caller's fencing token via the same guarded gate as every other worker-driven
     write (a harmless self-assignment as the SET clause, matching record_claimed's reasoning

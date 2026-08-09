@@ -780,7 +780,7 @@ def test_export_account_data_includes_the_owners_full_mainai_job_history():
     omit mainai_jobs/mainai_job_events/mainai_job_proposals entirely, contradicting this same
     module's own stated principle that an export omitting a person's job/provenance history is
     not complete."""
-    from app.rag import mainai_jobs_service as service
+    from app.jobs import service
 
     session = SessionLocal()
     try:
@@ -813,7 +813,7 @@ def test_export_account_data_includes_the_owners_full_mainai_job_history():
 
 
 def test_export_account_data_never_includes_another_owners_mainai_job_data():
-    from app.rag import mainai_jobs_service as service
+    from app.jobs import service
 
     session = SessionLocal()
     try:
@@ -863,8 +863,8 @@ def test_export_account_data_handles_empty_mainai_job_sections():
 def test_export_account_data_reflects_a_completed_jobs_full_state():
     """Export after a job has actually reached a terminal state -- not just the freshly
     created `queued` case the other tests above cover."""
+    from app.jobs import service
     from app.jobs.mainai_job_lease import claim_next_mainai_job
-    from app.rag import mainai_jobs_service as service
 
     session = SessionLocal()
     admin = sessionmaker(bind=migration_engine)()

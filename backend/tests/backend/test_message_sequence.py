@@ -1,5 +1,5 @@
 """S1B — `messages.sequence_number` (migration 0030, app/models/conversation.py,
-app/rag/message_sequence_backfill.py, app/rag/message_sequence_backfill_job.py).
+app/rag/message_sequence_backfill.py, app/jobs/handlers/message_sequence_backfill.py).
 See docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.9 and §8's S1B line.
 
 Covers, in order:
@@ -32,6 +32,11 @@ import pytest
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from app.jobs import service
+from app.jobs.handlers.message_sequence_backfill import (
+    MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE,
+    run_message_sequence_backfill_job,
+)
 from app.mainai_runtime_contract import (
     CAPABILITY_MANIFEST,
     CapabilityUnavailableError,
@@ -40,7 +45,6 @@ from app.mainai_runtime_contract import (
 )
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
-from app.rag import mainai_jobs_service as service
 from app.rag.message_sequence_backfill import (
     MESSAGE_SEQUENCE_ADVISORY_LOCK_NAMESPACE,
     backfill_conversation,
@@ -48,10 +52,6 @@ from app.rag.message_sequence_backfill import (
     candidate_conversation_ids,
     count_conversations_with_unsequenced_messages,
     count_unsequenced_messages,
-)
-from app.rag.message_sequence_backfill_job import (
-    MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE,
-    run_message_sequence_backfill_job,
 )
 from app.request_context import current_user_id as current_user_id_var
 
@@ -871,7 +871,7 @@ async def test_the_job_skips_a_conflicting_conversation_and_still_numbers_the_re
 
 @pytest.mark.asyncio
 async def test_a_second_job_run_resumes_where_a_capped_one_left_off(db_session, superuser_db, make_verified_user, monkeypatch):
-    import app.rag.message_sequence_backfill_job as job_module
+    import app.jobs.handlers.message_sequence_backfill as job_module
 
     monkeypatch.setattr(job_module, "MAX_CONVERSATIONS_PER_RUN", 1)
 

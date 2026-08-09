@@ -36,10 +36,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
+from app.jobs.handlers.corpus_review import run_corpus_review_job
+from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
+from app.jobs.service import mark_failed, record_claimed
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
@@ -47,10 +50,7 @@ from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
-from app.rag.corpus_review_job import run_corpus_review_job
-from app.rag.message_sequence_backfill_job import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.rag.library_import import run_import_job
-from app.rag.mainai_jobs_service import mark_failed, record_claimed
 from app.request_context import current_user_id
 from app.rag.zip_import import ZipSecurityError
 
@@ -123,10 +123,10 @@ async def process_claimed_mainai_job(
     db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, worker_id: str, lease_generation: int, lease_seconds: int
 ) -> None:
     """Dispatches an already-claimed `mainai_jobs` row to its job_type's own processing
-    function — `corpus_review` (app/rag/corpus_review_job.py) and, as of S1B,
-    `message_sequence_backfill` (app/rag/message_sequence_backfill_job.py). Each function is
+    function — `corpus_review` (app/jobs/handlers/corpus_review.py) and, as of S1B,
+    `message_sequence_backfill` (app/jobs/handlers/message_sequence_backfill.py). Each function is
     responsible for its own terminal state transitions (completed/failed/cancelled) via
-    app/rag/mainai_jobs_service.py; this wrapper exists only to catch anything that escapes
+    app/jobs/service.py; this wrapper exists only to catch anything that escapes
     it unexpectedly (a bug, not a designed failure path) and still leave the job in a
     terminal, truthful state rather than stuck `running` forever with a dead claim.
 
@@ -140,7 +140,7 @@ async def process_claimed_mainai_job(
 
     Founder re-review round (PR #36), fourth pass: `require_capability()` is re-checked here,
     immediately before dispatch, using the exact same central policy function
-    `app/rag/mainai_jobs_service.py`'s create_job() calls at creation time — a capability that
+    `app/jobs/service.py`'s create_job() calls at creation time — a capability that
     became unconfigured, or is now `production_prohibited`/`sandbox_only` in the CURRENT
     environment, since this job was created is caught here too, not just at creation. A job
     that fails this check is marked `failed` with `capability_unavailable`, never silently

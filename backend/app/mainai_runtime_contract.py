@@ -12,11 +12,11 @@ This module owns two things:
   2. `CAPABILITY_MANIFEST` + `require_capability()` — a fixed, reviewed list of capabilities
      MainAI's runtime may currently claim to have. `require_capability()` raises
      `CapabilityUnavailableError` (mapped to `MainAIJobErrorCategory.capability_unavailable`
-     by app/rag/mainai_jobs_service.py) for anything not on the list — "fail closed when the
+     by app/jobs/service.py) for anything not on the list — "fail closed when the
      requested capability is unavailable" from the founder's own spec, not a soft warning.
 
 Nothing in this module talks to the database — it is a pure contract layer, deliberately
-small and easy to audit on its own, imported by app/rag/mainai_jobs_service.py (which DOES
+small and easy to audit on its own, imported by app/jobs/service.py (which DOES
 talk to the database) and by app/routers/mainai_jobs.py (which builds the actual HTTP
 responses). Kept separate from app/schemas.py's per-domain Pydantic blocks because this one
 encodes a cross-cutting SAFETY RULE, not a single endpoint's request/response shape.
@@ -232,7 +232,7 @@ class MainAIExecutionResponse(BaseModel):
 
 class CapabilityUnavailableError(Exception):
     """Raised by require_capability() for anything not currently available. Callers must treat
-    this as a hard failure (see app/rag/mainai_jobs_service.py's create_job, which maps it
+    this as a hard failure (see app/jobs/service.py's create_job, which maps it
     straight to MainAIJobErrorCategory.capability_unavailable) — never silently degrade to a
     partial or best-effort execution.
 
@@ -393,7 +393,7 @@ def require_capability(db, capability: str) -> None:
     """Fail closed: raises CapabilityUnavailableError unless `capability` is implemented,
     currently configured to run, AND not blocked by its own sandbox_only/production_prohibited
     policy in the current environment. This is the ONE central policy function — called both by
-    `app/rag/mainai_jobs_service.py`'s create_job (job creation) AND, as of the founder
+    `app/jobs/service.py`'s create_job (job creation) AND, as of the founder
     re-review round's fourth pass, `app/worker.py`'s process_claimed_mainai_job (job execution,
     re-checked immediately before dispatch) — so a capability that becomes unconfigured or
     newly production-prohibited between a job's creation and its actual execution is caught at

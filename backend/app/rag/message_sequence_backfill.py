@@ -125,7 +125,7 @@ def count_unsequenced_messages(db: Session, owner_id: uuid.UUID) -> int:
 
 
 def count_conversations_with_unsequenced_messages(db: Session, owner_id: uuid.UUID) -> int:
-    """Progress denominator for the durable job (app/rag/message_sequence_backfill_job.py).
+    """Progress denominator for the durable job (app/jobs/handlers/message_sequence_backfill.py).
     A point-in-time count, not a promise: a conversation created after this is read is simply
     not part of this run's snapshot total — new messages are numbered by migration 0030's
     trigger at insert time and never need backfilling at all, so the snapshot can only ever

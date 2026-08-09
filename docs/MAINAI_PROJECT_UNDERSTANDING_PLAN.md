@@ -868,7 +868,7 @@ faktiskt håller.
     OFÖRÄNDERLIGT och förbjuder att ett meddelande flyttas till en annan konversation.
     `NULL → värde` är den enda tillåtna övergången — backfillens egen.
   - **Durabel backfill** = `app/rag/message_sequence_backfill.py` +
-    `app/rag/message_sequence_backfill_job.py`, körd som ett riktigt `mainai_jobs`-jobb
+    `app/jobs/handlers/message_sequence_backfill.py`, körd som ett riktigt `mainai_jobs`-jobb
     (`job_type=message_sequence_backfill`) på den befintliga workern. §6.12:s
     `memory_processing_jobs`-skiss är alltså INTE byggd som en egen tabell — jobbruntimen från
     PR #36 fanns inte när §6.12 skrevs, och att bygga en andra parallell kö för en backfill

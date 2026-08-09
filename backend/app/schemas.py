@@ -817,7 +817,7 @@ class BackfillRunOut(BaseModel):
 class MainAIJobCreateIn(BaseModel):
     job_type: str
     # [{"type": "document", "id": "<uuid>"}, ...] — validated against the caller's own
-    # documents by app/rag/mainai_jobs_service.py's create_job, never trusted as-is.
+    # documents by app/jobs/service.py's create_job, never trusted as-is.
     input_refs: list[dict]
     idempotency_key: str | None = None
 

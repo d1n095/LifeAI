@@ -3,7 +3,7 @@
 uses for `knowledge_import_jobs`, reimplemented against this table's own columns rather than
 imported, since the two tables share no columns and `claim_next_job()`'s two-phase
 owner-erasure-lock coordination (see that module's docstring) does not apply here: a
-`corpus_review` job (app/rag/corpus_review_job.py) only ever READS existing
+`corpus_review` job (app/jobs/handlers/corpus_review.py) only ever READS existing
 documents/document_chunks, it never writes a storage blob, so there is no
 write-before-reference race for a concurrent account erasure to lose. A future MainAI job type
 that DOES write storage would need to take `acquire_storage_key_lock`/
@@ -23,7 +23,7 @@ tell a genuinely stale execution (this worker's OWN earlier claim, now reclaimed
 else) from a legitimately restarted one. `lease_generation` is the fencing token that closes
 this: `claim_next_mainai_job()` bumps it by exactly 1 on every claim AND every reclaim, and
 `renew_mainai_job_lease()` below (plus every worker-driven mutation in
-app/rag/mainai_jobs_service.py) requires the caller to present the EXACT generation it was
+app/jobs/service.py) requires the caller to present the EXACT generation it was
 handed at claim time, atomically re-verified against the row's current value on every write —
 not just checked once and trusted for the rest of the job's run."""
 
@@ -56,7 +56,7 @@ _CLAIM_SQL = text("""
 
 class JobLeaseLostError(Exception):
     """Raised by renew_mainai_job_lease() (and by every worker-driven mutation in
-    app/rag/mainai_jobs_service.py that shares this same fencing check) when the caller's
+    app/jobs/service.py that shares this same fencing check) when the caller's
     (worker_id, lease_generation) no longer matches the job's current claim — the job was
     reclaimed by another worker (this worker's lease already expired) or is no longer
     `running` at all. The caller MUST stop all further work on this job immediately; nothing
@@ -98,7 +98,7 @@ def claim_next_mainai_job(db: Session, worker_id: str, lease_seconds: int) -> tu
 
 def renew_mainai_job_lease(db: Session, job_id: uuid.UUID, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
     """Heartbeat: extends the lease and records last_heartbeat_at — called periodically by
-    the job's own processing loop (app/rag/corpus_review_job.py) between batches, exactly like
+    the job's own processing loop (app/jobs/handlers/corpus_review.py) between batches, exactly like
     ImportJob's renew_lease (app/jobs/lease.py). Does NOT commit — the caller's own batch
     transaction boundary decides when this becomes durable, so a heartbeat is never
     observable before the progress it describes actually is.

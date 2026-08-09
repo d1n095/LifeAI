@@ -63,12 +63,27 @@ föreslog: `backend/app/rag/{account_erasure,account_export}.py` →
 `backend/app/account/{erasure,export}.py`, ren MOVE/RENAME. Se Pass 45 nedan för full detalj.
 **Basgrenens nuvarande tip är därmed `11f3951363ffc85b6068e7c8b452f628fa774e73`.**
 
-**ÖPPEN PR: #46** (`claude/move-blob-refs-source-purge` → `claude/det-kommer-mer-879lcm`),
-grenad från exakt `11f3951363ffc85b6068e7c8b452f628fa774e73` (basgrenens tip, verifierad med
-`git ls-remote origin` INNAN branchen skapades). Steg 2 av samma founder-godkända, flerstegs
-repo-städning: `backend/app/rag/{blob_references,source_purge}.py` →
-`backend/app/storage/{references,purge}.py`, ren MOVE/RENAME, inget annat. Se Pass 46 nedan
-för full detalj. INTE mergad.
+**PR #46 är MERGAD** (`claude/move-blob-refs-source-purge` → `claude/det-kommer-mer-879lcm`),
+grenad från exakt `11f3951363ffc85b6068e7c8b452f628fa774e73` (basgrenens tip vid grening,
+verifierad med `git ls-remote origin` INNAN branchen skapades), merge-commit
+`bf74a05e6f4773bd59904dafe84aa5beae808347`, `merged_by`: `d1n095`, `merged_at`
+2026-08-09T06:09:42Z. Verifierat mot GitHubs PR-API direkt (`mcp__github__pull_request_read`,
+`state: closed`, `merged: true`), inte memorerat — denna rad var stale (skriven FÖRE mergen,
+från PR #46:s egen branch, som förstås inte kan dokumentera sin egen framtida merge) tills den
+här sessionen korrigerade den, per `CLAUDE.md`s regel att göra det INNAN man fortsätter, inte
+opportunistiskt. Steg 2 av samma founder-godkända, flerstegs repo-städning:
+`backend/app/rag/{blob_references,source_purge}.py` → `backend/app/storage/{references,purge}.py`,
+ren MOVE/RENAME. Se Pass 46 nedan för full detalj. **Basgrenens nuvarande tip är därmed
+`bf74a05e6f4773bd59904dafe84aa5beae808347`.**
+
+**ÖPPEN PR: #47** (`claude/move-mainai-jobs-runtime` → `claude/det-kommer-mer-879lcm`), grenad
+från exakt `bf74a05e6f4773bd59904dafe84aa5beae808347` (basgrenens tip, verifierad med `git
+ls-remote origin` INNAN branchen skapades). Steg 3 av samma founder-godkända, flerstegs
+repo-städning: `backend/app/rag/{mainai_jobs_service,corpus_review_job,message_sequence_backfill_job}.py`
+→ `backend/app/jobs/service.py` + `backend/app/jobs/handlers/{corpus_review,message_sequence_backfill}.py`,
+ren MOVE/RENAME, inget annat — den hittills mest högriskiga flytten i städningsserien
+(job-runtimen med lease/fencing/cancel/retry-semantik). Se Pass 47 nedan för full detalj.
+INTE mergad.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
@@ -259,6 +274,206 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 47 (2026-08-09): `backend/app/rag/{mainai_jobs_service,corpus_review_job,message_sequence_backfill_job}.py` → `backend/app/jobs/...` — steg 3 av den founder-godkända repo-städningen, ren MOVE/RENAME av job-runtimen
+
+**Branch:** `claude/move-mainai-jobs-runtime`, grenad från exakt
+`bf74a05e6f4773bd59904dafe84aa5beae808347` (basgrenens verifierade tip efter PR #46 — SHA:n
+hämtad med `git ls-remote origin` INNAN branchen skapades, inte memorerad; det är också PR
+#46:s merge-commit). **PR #47**, öppen mot `claude/det-kommer-mer-879lcm`, INTE mergad.
+
+Steg 3 av samma founder-godkända, flerstegs repo-städning som Pass 45 (steg 1,
+`app/account/`) och Pass 46 (steg 2, `app/storage/`). Samma ramning: "en sådan PR ska se
+tråkig ut: filer flyttade, imports uppdaterade, tester gröna. Ingen 'låt oss refaktorera lite
+på köpet'." Ingen affärslogik, ingen DB-fråga, ingen lease/fencing/cancel-semantik, ingen
+migration ändrad. Detta är den hittills mest högriskiga flytten i städningsserien — job-
+runtimen med lease/fencing/cancel/retry-semantik, DB-nivå-invarianter och worker-dispatch —
+vilket krävde djupare verifiering (se nedan) än Pass 45/46.
+
+**Kartlagt innan flytten (inte antaget), inklusive `app/jobs/`s faktiska nuvarande skepnad:**
+`backend/app/jobs/` innehöll redan `lease.py` (claim/lease för `knowledge_import_jobs`),
+`lock.py` (Redis-baserat distribuerat lås), `heartbeat.py` (process-nivå worker-heartbeat),
+`retry.py` (backoff-policy) och `mainai_job_lease.py` (claim/lease för `mainai_jobs`, redan
+liggande DIREKT i `app/jobs/`, inte i en undermapp). `service.py` läggs alltså på samma nivå
+som `mainai_job_lease.py` — konsekvent med den redan etablerade konventionen, inte ett nytt
+mönster. De två jobbtyps-processloopsarna grupperades i en NY `handlers/`-undermapp
+(`backend/app/jobs/handlers/__init__.py`, tomt, samma konvention som `app/jobs/__init__.py`),
+eftersom de är job_type-specifika processorer — strukturellt skilda från den delade
+`service.py`-domäntjänsten och lease-primitiverna. Ingen namnkollision hittades: `handlers/`
+fanns inte sedan tidigare någonstans i repot.
+
+**En avsiktlig avvikelse värd att dokumentera:** `app/jobs/handlers/message_sequence_backfill.py`
+delar basnamn med den KVARBLIVANDE `app/rag/message_sequence_backfill.py` (den rena SQL-
+numreringslogiken — `candidate_conversation_ids`, `backfill_conversation`, m.fl. — som INTE
+flyttar, eftersom den inte har med job-runtimen i sig att göra: inget lease, ingen cancel,
+inget provider-anrop, bara SQL över `messages`-raderna). Detta är INTE en namnkollision
+(olika paket: `app.jobs.handlers.message_sequence_backfill` vs
+`app.rag.message_sequence_backfill` — olika importvägar, ingen krock), utan en avsiktlig
+separation som redan fanns implicit för `corpus_review_job.py` (som ALDRIG hade en
+motsvarande icke-job-modul att dela namn med) — handler-modulen ORKESTRERAR jobbet
+(lease/cancel/progress/worker-dispatch), business-logic-modulen GÖR själva arbetet
+(SQL-numrering respektive dokumentläsning). Verifierat att `test_message_sequence.py` redan
+importerar BÅDA modulerna sida vid sida utan förvirring (den ena för
+`run_message_sequence_backfill_job`, den andra för `backfill_conversation` m.fl.) — flytten
+gör den relationen tydligare, inte otydligare.
+
+**Grundarens föreslagna riktning följdes SOM DEN VAR, inte avvikit ifrån:** router
+(`backend/app/routers/mainai_jobs.py`) och modell (`backend/app/models/mainai_job.py`) rörda
+INTE — exakt samma mönster Pass 45 (`app/account/`) och Pass 46 (`app/storage/`) redan
+etablerat: routers/modeller stannar i sina befintliga toppnivåpaket, service-/domänlogik
+flyttar in i domänpaketet. Kartläggningen bekräftade att det här är den naturliga strukturen
+— ingen namnkollision inuti `app/jobs/`, ingen anledning att låta handlarna existera som
+enfilslösning istället för en undermapp, inget annat som motiverade avvikelse.
+
+**Vad som flyttade (git mv, historik bevarad):**
+- `backend/app/rag/mainai_jobs_service.py` → `backend/app/jobs/service.py`
+- `backend/app/rag/corpus_review_job.py` → `backend/app/jobs/handlers/corpus_review.py`
+- `backend/app/rag/message_sequence_backfill_job.py` → `backend/app/jobs/handlers/message_sequence_backfill.py`
+- Nytt, tomt `backend/app/jobs/handlers/__init__.py`
+
+**Referenser uppdaterade** (grep-verifierat, noll kvarvarande `app.rag.mainai_jobs_service`/
+`app.rag.corpus_review_job`/`app.rag.message_sequence_backfill_job` — som dotted imports OCH
+som sträng-/kommentarfragment — i kod, tester eller levande docs efteråt):
+
+**Worker dispatch** (`backend/app/worker.py`, det viktigaste anropsstället eftersom det är
+job-type-till-handler-mappningen): `from app.rag.corpus_review_job import
+run_corpus_review_job` → `from app.jobs.handlers.corpus_review import run_corpus_review_job`;
+`from app.rag.message_sequence_backfill_job import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE,
+run_message_sequence_backfill_job` → `from app.jobs.handlers.message_sequence_backfill import
+...`; `from app.rag.mainai_jobs_service import mark_failed, record_claimed` → `from
+app.jobs.service import mark_failed, record_claimed`. Importblocket omplacerat till
+alfabetisk ordning för de nya `app.jobs.*`-raderna (samma disciplin Pass 46 etablerade),
+utan att röra den redan icke-alfabetiska ordningen på andra, oberörda rader (`app.rag.zip_import`
+placerad sist av äldre skäl — inte den här PR:ns scope att fixa). Dispatch-LOGIKEN själv
+(`job.job_type == "corpus_review"` / `== MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE`) och
+funktionsnamnen (`run_corpus_review_job`, `run_message_sequence_backfill_job`) är
+OFÖRÄNDRADE — bara importvägarna.
+
+**Router** (`backend/app/routers/mainai_jobs.py`): `from app.rag import mainai_jobs_service
+as service` → `from app.jobs import service`, samt modulens docstring-pekare.
+
+**Handler-imports** (de flyttade filerna själva, mot varandra och mot `service.py`):
+`corpus_review.py`/`message_sequence_backfill.py` importerar nu `from app.jobs.service import
+...` istället för `from app.rag.mainai_jobs_service import ...`; `service.py` självt hade
+INGEN self-import att uppdatera (nämner aldrig sitt eget gamla modulnamn). `app/jobs/
+mainai_job_lease.py` (rörs inte, ligger redan i `app/jobs/`) fick sina docstring-pekare till
+`app/rag/mainai_jobs_service.py`/`app/rag/corpus_review_job.py` uppdaterade.
+
+**Testimports/dynamiska referenser:** `backend/tests/backend/test_account_erasure.py` (3 st
+`from app.rag import mainai_jobs_service as service` → `from app.jobs import service`, samt
+en lokal importordning fixad i samma veva). `backend/tests/backend/test_mainai_jobs.py`
+(modulens docstring-pekare, toppnivåimportblocket, plus en dynamisk `import
+app.rag.corpus_review_job as corpus_review_job_module` → `import
+app.jobs.handlers.corpus_review as corpus_review_job_module` — ALIASNAMNET lämnat orört, samma
+precedent Pass 46 redan etablerade för `source_purge_module`; samt ~7 bara-filnamn-kommentarer
+`corpus_review_job.py` → `corpus_review.py`, aldrig testfunktionsnamnen själva —
+`test_run_corpus_review_job_*` behåller sina namn eftersom `run_corpus_review_job` som
+funktion ALDRIG bytte namn, bara modul). `backend/tests/backend/test_message_sequence.py`
+(modulens docstring-pekare, toppnivåimportblocket, plus en dynamisk `import
+app.rag.message_sequence_backfill_job as job_module` → `import
+app.jobs.handlers.message_sequence_backfill as job_module`, aliasnamnet orört).
+
+**Levande kommentarer/docstrings uppdaterade** i övrig aktivt underhållen kod (INTE
+historiska loggposter): `app/models/mainai_job.py` (8 träffar), `app/mainai_runtime_contract.py`
+(4 träffar), `app/schemas.py`, `app/account/export.py`, `app/rag/message_sequence_backfill.py`
+(den KVARBLIVANDE filen — bara dess docstring-pekare till job-modulen uppdaterad, ingen
+funktionell rad). `docs/MAINAI_JOB_RUNTIME.md`: de icke-daterade, nutids-beskrivande
+arkitekturavsnitten ("Worker: claim, lease, resume", "`corpus_review`: the first real job
+type", "`message_sequence_backfill`: the second job type") uppdaterade (3 träffar).
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` (§4.8/S1B-kodexemplet, 1 träff — samma "levande
+arkitekturdokument"-motivering Pass 46 redan etablerade för den filen).
+
+**Medvetet INTE ändrat — historiskt narrativ, inte en trasig pekare:** Alembic-migrationerna
+0026/0028/0029s prosakommentarer som nämner de gamla sökvägarna. Detta registrets egna Pass
+1–46-poster (inklusive Pass 45/46s egen text om filerna, som var korrekt VID DET TILLFÄLLET).
+**`docs/MAINAI_JOB_RUNTIME.md`s daterade "Founder re-review round (PR #36)"-avsnitt (rad
+~497–705)** — 3 kvarvarande sökvägsträffar där (`_guarded_job_write`-cite:et, en
+`corpus_review_job.py`-referens i BLOCKER-stycket, en till i den truthful-completion-
+semantics-MEDIUM-punkten) lämnade MEDVETET orörda: exakt samma disciplin PR #45 redan
+etablerade för just det avsnittet i just det dokumentet (PR #45:s egen beskrivning nämner
+detta explicit — avsnittet beskriver vad en SPECIFIK, tidigare granskningsrunda hittade och
+fixade vid den tidpunkten, inte den nuvarande filstrukturen; att skriva om det vore att låtsas
+en historisk händelse beskrevs med sökvägar den inte faktiskt hade då). Testfunktionsnamnen
+(`test_run_corpus_review_job_*` m.fl.) rördes INTE — de är verkliga, oförändrade
+funktionsnamn, inte trasiga sökvägar. `job_type`-strängkonstanterna som skrivs till/läses från
+databasen (`"corpus_review"`, `"message_sequence_backfill"`,
+`CAPABILITY_MANIFEST`-medlemmarna) är data, INTE modulsökvägar, och rördes inte.
+
+**Import-cykel/dynamisk-import-risk:** ingen upptäckt. `service.py` importerar
+`app.jobs.mainai_job_lease` (för `JobLeaseLostError`); `mainai_job_lease.py` importerar bara
+`app.models.mainai_job` — ingen cirkularitet mellan `service.py` och `mainai_job_lease.py`.
+Handlarna importerar `service.py` och `mainai_job_lease.py`, aldrig tvärtom. `python -c
+"import app.main"` lyckas; hela FastAPI-appens importgraf löser sig identiskt.
+
+**Tester (riktiga, körda lokalt mot Postgres 16 + Redis, inte antagna):**
+`tests/backend/test_mainai_jobs.py` **140 passed** (61 av dem — filtrerat på
+lease/fenc/cancel/renew/progress/claim — lease-/fencing-/cancel-/progress-relaterade).
+`tests/backend/test_message_sequence.py` **42 passed** (8 job-end-to-end-tester, inklusive
+`test_a_job_whose_lease_was_stolen_writes_nothing_at_all`). `tests/backend/test_account_erasure.py`
+**56 passed**. Fullsviten `tests/backend/` **972 passed, 1 skipped, 0 failed** (en första
+körning gav 2 failures i `tests/backend/test_storage_local_fs.py`
+— `test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk` och
+`test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_completion` — samma
+redan dokumenterade `fcntl.flock()`-trådrace-flaka från Pass 37/41/42/43/45/46; isolerad
+körning av den filen gav 19/19, och en andra fullsviteskörning gav rent 972/972 utan någon
+kodändring mellan körningarna, vilket bekräftar det som den kända flakan, inte en regression
+— den här PR:n rör aldrig `app/storage/local_fs.py`). `tests/security/` + `tests/account/`
+**77 passed** (samma 29+48-uppdelning som Pass 45/46). `python -c "import app.main"`: OK.
+
+**Worker-boot mot RIKTIG process, inte bara statisk import** (uppgiftens uttryckliga krav
+givet job-runtime-risken): en engångs scratch-databas migrerades (`alembic upgrade head`,
+0001→0031), fick `mainai_app`-rollens vanliga tabellrättigheter, och `apply_rls()` +
+`apply_mainai_job_runtime_privileges()` kördes mot den (samma boot-sekvens
+`docker-entrypoint.sh` kör). `python -m app.worker` startades sedan som en RIKTIG process mot
+den databasen + en riktig Redis (`SIGTERM` efter ~7s för att avsluta grant): loggade `Worker
+vm startar (poll_interval=1.0s, lease=120s, concurrency=1).` vid start, pollade tyst i ~7s
+(förväntat — tom kö, och pollningsloopen loggar bara vid claim/fel, inte varje tomt varv), och
+avslutade rent med `Worker vm avslutas (graciös avstängning).` vid SIGTERM. Noll importfel,
+noll exceptions, noll traceback.
+
+**Job-dispatch-registret verifierat:** `process_claimed_mainai_job` (den RIKTIGA
+worker-dispatchfunktionen i `app/worker.py`, inte bara handler-funktionerna anropade direkt)
+körs end-to-end i BÅDA `test_mainai_jobs.py` (rad ~2000, `test_worker_dispatches_...`-familjen)
+och `test_message_sequence.py` (rad ~914, `test_the_worker_dispatches_this_job_type`) — och
+båda paketen passerade. Bevisar att BÅDA kända `job_type`:erna
+(`CAPABILITY_MANIFEST = frozenset({"corpus_review", "message_sequence_backfill"})` —
+uttömmande, verifierat mot `app/mainai_runtime_contract.py`, inga andra jobtyper existerar
+någonstans i kodbasen) fortfarande löser till rätt handlerfunktion efter flytten, via den
+riktiga dispatch-vägen, inte bara genom att anropa handler-funktionerna isolerat.
+
+**`ruff check` på samtliga 18 ändrade Python-filer:** rent förutom 8 st förbefintliga
+F401/F841-varningar (`test_account_erasure.py`: `create_engine`, `record_audit`,
+`LifecycleStatus`, `document`, `owner_id` — 5 st; `test_mainai_jobs.py`: `MainAIJobEvent`,
+`job`, `fresh_job` — 3 st) — verifierat BYTE-IDENTISKA på basgrenens filer FÖRE den här
+branchens ändringar (`git stash` + omkörning gav exakt samma 8 varningar, samma platser
+förutom en +2-radförskjutning från de tillagda importraderna), alltså varken introducerade
+eller fixade här (opportunistisk fix hade brutit mot isoleringsprincipen).
+
+**Diffen är strukturell/beteendeneutral — diff-stat-argumentet:** `git diff --stat -M` visar
+18 filer ändrade, +88/-73 rader, TRE av dem med `similarity index 97–98%` och explicita
+`rename from`/`rename to`-header (git-detekterad ren flytt). Varje enskild hunk i de tre
+flyttade filerna är antingen en importrad eller en docstring-/kommentarsträng som pekar på den
+nya sökvägen — noll ändringar av SQL, `_guarded_job_write`s WHERE-klausul,
+`lease_generation`-hanteringen, `claim_next_mainai_job`s claim-predikat, eller någon
+funktionssignatur. Verifierat genom manuell diff-läsning av samtliga tre `rename from/to`-block
+(inte bara diff-stat), inte bara antaget från similarity-procenten.
+
+**Basverifiering:** grenad från exakt `bf74a05e6f4773bd59904dafe84aa5beae808347` (basgrenens
+tip, PR #46:s merge-commit), hämtad med `git ls-remote origin` INNAN branchen skapades.
+
+**Medvetet INTE gjort / hittat men inte fixat här:**
+- Detta registrets egen top-sammanfattning var stale (visade "ÖPPEN PR: #46 ... INTE mergad"
+  trots att PR #46 redan var mergad in i den exakta bas den här branchen grenades från) —
+  korrigerad i en egen doc-commit på den här branchen, per `CLAUDE.md`s regel att göra det
+  INNAN man fortsätter, inte opportunistiskt efteråt.
+- `app/worker.py`s importblock hade redan en icke-alfabetisk placering av
+  `app.rag.zip_import` (sist, efter `app.request_context`) FÖRE den här branchen — inte rört,
+  inte den här PR:ns scope.
+- Inga andra orelaterade fynd upptäcktes under arbetets gång.
+
+**Nästa steg i städningen:** ej specificerat av den här sessionen — nästa MOVE/RENAME-steg
+väntar på grundarens fortsatta godkännande, en branch/PR i taget, per `CLAUDE.md`s
+grundprincip.
 
 ## Pass 46 (2026-08-09): `backend/app/rag/{blob_references,source_purge}.py` → `backend/app/storage/{references,purge}.py` — steg 2 av den founder-godkända repo-städningen, ren MOVE/RENAME
 

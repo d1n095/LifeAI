@@ -16,7 +16,7 @@ from app.db import Base
 
 class MainAIJobStatus(str, enum.Enum):
     """A job's current lifecycle state. `paused` is reachable only via an explicit cancel
-    request honored between batches (see app/rag/corpus_review_job.py) — there is no
+    request honored between batches (see app/jobs/handlers/corpus_review.py) — there is no
     automatic pause. `queued`/`running` are the only claimable states (see
     CLAIMABLE_MAINAI_JOB_STATUSES below); every other state is terminal or requires an
     explicit retry to leave."""
@@ -37,7 +37,7 @@ CLAIMABLE_MAINAI_JOB_STATUSES = frozenset({MainAIJobStatus.queued})
 
 # A job can only ever be retried out of a genuinely terminal, non-cancelled state — retrying a
 # `cancelled` job would silently override the founder's own cancellation, which
-# app/rag/mainai_jobs_service.py's retry_job() treats as a hard error, not a no-op.
+# app/jobs/service.py's retry_job() treats as a hard error, not a no-op.
 RETRYABLE_MAINAI_JOB_STATUSES = frozenset({MainAIJobStatus.failed})
 
 # A cancel request is only meaningful while a job could still do further work.
@@ -60,10 +60,10 @@ class MainAIJobEventType(str, enum.Enum):
     cancelled = "cancelled"
     retry_scheduled = "retry_scheduled"
     # migration 0028 (founder re-review round, PR #36): one per-document outcome that was
-    # NOT a successful review — corpus_review_job.py records this instead of silently folding
+    # NOT a successful review — corpus_review.py records this instead of silently folding
     # "deleted mid-run" / "no reviewable content" / "provider failed for this one document"
     # into a bare progress-count increment. `detail` always carries a closed-vocabulary
-    # `reason` (see corpus_review_job.py's _SkipReason), never raw exception text.
+    # `reason` (see corpus_review.py's _SkipReason), never raw exception text.
     document_skipped = "document_skipped"
 
 
@@ -78,7 +78,7 @@ class MainAIJob(Base):
 
     `public_message` is a bounded-length (varchar(500)), human-safe status string only —
     never raw exception text, a stack trace, or any internal identifier that could leak
-    implementation detail; see app/rag/mainai_jobs_service.py's `_PUBLIC_ERROR_MESSAGES` for
+    implementation detail; see app/jobs/service.py's `_PUBLIC_ERROR_MESSAGES` for
     the fixed, reviewed mapping from `error_category` to what a caller actually sees.
     `error_category` is a small, closed vocabulary (see MainAIJobErrorCategory below), not a
     free-text field, for the same reason.
@@ -122,7 +122,7 @@ class MainAIJob(Base):
     # alone is not a safe fencing key -- app/worker.py's _worker_id() can return the SAME
     # value across a process restart (hostname-based), so a worker_id-only check can't tell a
     # genuinely stale execution from a legitimately restarted one reusing that identity. Every
-    # worker-driven mutation of a claimed job (app/rag/mainai_jobs_service.py) must present
+    # worker-driven mutation of a claimed job (app/jobs/service.py) must present
     # BOTH worker_id and this exact generation number, or it is rejected with
     # JobLeaseLostError -- see that module's docstring for the full incident this closes.
     lease_generation: Mapped[int] = mapped_column(Integer, default=0)
@@ -159,7 +159,7 @@ class MainAIJobEvent(Base):
 
 
 class MainAIJobProposal(Base):
-    """One extracted proposal from a `corpus_review` job (app/rag/corpus_review_job.py) —
+    """One extracted proposal from a `corpus_review` job (app/jobs/handlers/corpus_review.py) —
     deliberately NOT a KnowledgeClaim (see migration 0025's module docstring): nothing in this
     codebase auto-promotes a row here into founder-approved truth. `source_chunk_id` is
     nullable because a document with no chunks yet (see app/models/document.py) can still be
@@ -184,7 +184,7 @@ class MainAIJobProposal(Base):
 
 class MainAIJobErrorCategory(str, enum.Enum):
     """Closed vocabulary for MainAIJob.error_category — a small, reviewed set safe to show
-    (via a fixed public-message mapping, see app/rag/mainai_jobs_service.py) directly to a
+    (via a fixed public-message mapping, see app/jobs/service.py) directly to a
     caller, never the underlying exception itself."""
 
     transient_io = "transient_io"
