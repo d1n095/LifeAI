@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 # P2 kapacitetstest (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.7,
-# tests/backend/test_zip_import_capacity.py): 2500 filer i 2 nästlingsnivåer genom HELA den
+# tests/backend/rag/test_zip_import_capacity.py): 2500 filer i 2 nästlingsnivåer genom HELA den
 # riktiga pipelinen (run_import_job, riktig Postgres, riktig storage, mockad men strukturellt
 # realistisk leverantör) tog 447.7s (179.1 ms/fil), toppminne 175 MB RSS. Kostnaden är
 # DB-rundresorna per fil (ett db.commit() per fil, worker_concurrency=1), inte

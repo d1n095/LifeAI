@@ -39,7 +39,7 @@ simply skips whatever the first worker already has locked and picks up the next 
 and a crash between two claims loses at most the in-flight one (retried next run, still a
 valid NULL-memory_source_id candidate). `get_or_create_memory_source_unit` itself is the
 proven-safe primitive for the source-unit half of that atomicity (see its own module
-docstring and tests/backend/test_memory_source_units.py's real concurrent-lock-wait test).
+docstring and tests/backend/rag/test_memory_source_units.py's real concurrent-lock-wait test).
 
 Production execution — durable run tracking now exists (app/rag/backfill/memory_source_run.py,
 migration 0025), closing the gap this docstring used to describe. This module's own
@@ -311,7 +311,7 @@ def backfill_memory_source_units(
     about to commit for that claim, so the caller can make a durable run's reporting state
     (`MemorySourceBackfillRun` counters/cursor, `MemorySourceBackfillFailure` rows) commit
     ATOMICALLY with the claim itself. `None` (the default) preserves this function's original,
-    standalone behavior exactly — used by tests/backend/test_memory_source_backfill.py, which
+    standalone behavior exactly — used by tests/backend/rag/test_memory_source_backfill.py, which
     calls this function directly with no durable run involved at all. Only
     app/rag/backfill/memory_source_run.py's `advance_backfill_run()` passes a real callback.
     """

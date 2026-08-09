@@ -185,7 +185,7 @@ KNOWN_STORAGE_WRITE_PATHS: tuple[tuple[str, str, str], ...] = (
         "same acquire_storage_key_lock()+verify+republish protocol store_content_with_"
         "reference_lock() already provides for Project Memory -- the caller (_import_one_file) "
         "sets Document.storage_key and commits while still holding that lock. Verified by "
-        "tests/backend/test_library_import.py's Pass 32 section.",
+        "tests/backend/rag/test_library_import.py's Pass 32 section.",
     ),
 )
 

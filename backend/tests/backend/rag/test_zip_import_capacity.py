@@ -8,7 +8,7 @@ MAX_FILES=500 default can be confirmed or revised from real numbers instead of a
 Skipped by default (it takes tens of seconds to minutes and is not something every CI run or
 `pytest tests/` invocation should pay for). Run explicitly with:
 
-    RUN_CAPACITY_TEST=1 python -m pytest tests/backend/test_zip_import_capacity.py -v -s
+    RUN_CAPACITY_TEST=1 python -m pytest tests/backend/rag/test_zip_import_capacity.py -v -s
 """
 
 import io

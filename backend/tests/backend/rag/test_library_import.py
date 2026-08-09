@@ -30,7 +30,7 @@ from app.storage.references import acquire_storage_key_lock, delete_if_unreferen
 
 EMBEDDING_DIM = get_settings().embedding_dim
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():
@@ -48,7 +48,7 @@ def _narrow_privileges_before_this_module():
     apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy -- never
     automatically by tests/conftest.py's _test_database fixture's own blanket table/sequence
     GRANT ALL. Same fixture, same rationale, as tests/backend/test_project_memory.py's and
-    test_library_routes.py's identical ones (added there in Pass 30/31 for the same reason);
+    tests/backend/rag/test_library_routes.py's identical ones (added there in Pass 30/31 for the same reason);
     this file never needed it before this pass, since _store_bytes() used to call
     storage.write_stream() directly with no reference check at all."""
     module = _load_apply_runtime_privileges()
@@ -68,7 +68,7 @@ def _fake_embedding_provider(monkeypatch):
 
     # Import now also runs claim extraction (app/rag/claims.py, STEG 10) right after
     # indexing, which calls the chat provider too — see the identical comment in
-    # test_library_routes.py's fixture for why this mock is required here as well.
+    # tests/backend/rag/test_library_routes.py's fixture for why this mock is required here as well.
     async def _fake_chat(self, messages, model, **kwargs):
         return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
 
@@ -600,7 +600,7 @@ async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
 
 
 # --- P2: nested ZIP provenance and encrypted-entry wiring through the real pipeline ---
-# See tests/backend/test_zip_import_security.py for the exhaustive zip_import.py-level
+# See tests/backend/rag/test_zip_import_security.py for the exhaustive zip_import.py-level
 # coverage of nesting/budget/encryption itself; these confirm the result actually reaches
 # ImportJob.file_results, KnowledgeVersion.raw_metadata and job-level counts correctly.
 

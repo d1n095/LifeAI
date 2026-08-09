@@ -1,5 +1,5 @@
 """API-level tests for app/routers/library.py — Founder Knowledge Studio v1. Drives the
-real HTTP surface (TestClient), not the orchestrator directly (see test_library_import.py
+real HTTP surface (TestClient), not the orchestrator directly (see tests/backend/rag/test_library_import.py
 for that), so route wiring, auth/CSRF, request validation and response shaping are all
 exercised together, the same way a real client would hit them."""
 
@@ -16,7 +16,7 @@ import pytest
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():

@@ -1,6 +1,6 @@
 """Durable production backfill-run reporting (migration 0025, docs/MAINAI_PROJECT_UNDERSTANDING_
 PLAN.md §4.8) — app/rag/backfill/memory_source_run.py. Real local Postgres, RLS exercised for
-real, same pattern as tests/backend/test_memory_source_backfill.py.
+real, same pattern as tests/backend/rag/test_memory_source_backfill.py.
 """
 
 import threading
@@ -35,7 +35,7 @@ def _set_rls_user(session, owner_id) -> None:
     # Both halves matter: the contextvar is what app/db.py's after_begin listener re-applies
     # SET LOCAL from on every NEW transaction (needed here since backfill_memory_source_units
     # commits/rolls back per-claim, starting fresh transactions mid-call) — see
-    # tests/backend/test_memory_source_backfill.py's identical helper.
+    # tests/backend/rag/test_memory_source_backfill.py's identical helper.
     current_user_id_var.set(str(owner_id))
     session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
 

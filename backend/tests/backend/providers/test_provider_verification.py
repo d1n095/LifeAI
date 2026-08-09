@@ -16,7 +16,7 @@ tests. Covers, in order:
 
 No real network call is ever made — every provider call in this file is monkeypatched at the
 provider-method or httpx.AsyncClient level, exactly like the rest of the suite (see
-test_library_import.py's module docstring)."""
+tests/backend/rag/test_library_import.py's module docstring)."""
 
 import io
 import uuid

@@ -1218,7 +1218,7 @@ def test_erasure_winning_the_owner_lock_race_leaves_nothing_for_claim_next_job_t
 # --- storage_deletion_tasks: privilege boundary (Pass 28, founder review round 3) -----------
 #
 # The table-wide catalog checks (mainai_app has ZERO direct privileges) live in
-# tests/backend/test_memory_source_units.py::test_mainai_app_privileges_are_exactly_least_
+# tests/backend/rag/test_memory_source_units.py::test_mainai_app_privileges_are_exactly_least_
 # privilege_no_truncate_references_trigger and ::test_apply_runtime_privileges_survives_a_
 # second_boot (both extended in Pass 28 to cover storage_deletion_tasks' now-empty privilege
 # set and enqueue_account_erasure_storage_task's EXECUTE grant). The tests below prove the

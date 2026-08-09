@@ -173,7 +173,7 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
     Deliberately calls `_store_bytes()` itself (not `store_content_with_reference_lock()`
     directly) rather than duplicating its logic inline, so existing tests that monkeypatch
     `li._store_bytes` to observe the pipeline's granular status transitions (see
-    tests/backend/test_library_import.py) continue to observe the real write — Python resolves
+    tests/backend/rag/test_library_import.py) continue to observe the real write — Python resolves
     the bare `_store_bytes(...)` call below against this module's current global at call time,
     so a monkeypatched replacement is still picked up correctly.
 
