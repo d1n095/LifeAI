@@ -244,7 +244,7 @@ def test_raw_http_provider_error_never_500s_or_leaks_secret(client, monkeypatch,
     ProviderError) — chat.py's original `except ProviderError` alone did not catch this,
     reaching this function as an unhandled exception. The URL embedded in httpx's default
     exception message is exactly how a live key/secret has leaked into a log line before (see
-    test_chat_fallback_logging.py) — proves neither failure mode survives here."""
+    tests/backend/providers/test_chat_fallback_logging.py) — proves neither failure mode survives here."""
 
     async def _broken_embed(self, texts, model, **kwargs):
         request = httpx.Request("POST", f"https://api.openai.com/v1/embeddings?key={FAKE_SECRET}")

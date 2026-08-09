@@ -337,7 +337,7 @@ async def test_media_import_never_makes_the_placeholder_transcript_look_like_rea
 async def test_worker_crash_mid_media_embedding_is_resumed_to_indexed_before_job_completes(
     db_session, superuser_db, make_verified_user, monkeypatch
 ):
-    """Mirrors test_provider_verification.py's equivalent text-pipeline test: a REAL worker
+    """Mirrors tests/backend/providers/test_provider_verification.py's equivalent text-pipeline test: a REAL worker
     process crash (a BaseException that is deliberately NOT an Exception subclass, caught by
     nothing) mid the real chunk-embedding call for an MP3. Proves the reclaimed job resumes the
     SAME Document row through the MEDIA pipeline (not text extraction), reaches `indexed` with
