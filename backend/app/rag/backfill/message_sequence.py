@@ -19,7 +19,7 @@ ATOMICITY AND CONCURRENCY. One conversation is one unit of work, numbered in a s
 `UPDATE ... FROM (SELECT row_number() ...)` statement and committed on its own. That means:
   * A crash mid-run loses at most the in-flight conversation, and re-running simply finds it
     again (`sequence_number IS NULL` is itself the restart marker — no cursor is needed, and
-    unlike app/rag/memory_source_backfill_run.py's dry-run mode there is nothing here that
+    unlike app/rag/backfill/memory_source_run.py's dry-run mode there is nothing here that
     writes nothing and could therefore double-count on resume).
   * A conversation is never left half-numbered: the whole `1..N` assignment is one statement
     inside one transaction, so either every historical row in it gets an ordinal or none does.
@@ -75,7 +75,7 @@ logger = logging.getLogger("mainai.message_sequence_backfill")
 MESSAGE_SEQUENCE_ADVISORY_LOCK_NAMESPACE = 72197002
 
 # How many CONVERSATIONS one backfill_message_sequence_numbers() call will process. Bounded by
-# default for the same reason app/rag/memory_source_backfill.py's BACKFILL_BATCH_SIZE is: an
+# default for the same reason app/rag/backfill/memory_source.py's BACKFILL_BATCH_SIZE is: an
 # unbounded "process everything" default is what lets a runaway loop stay invisible instead of
 # surfacing after one bounded call.
 BACKFILL_BATCH_SIZE = 25
@@ -204,7 +204,7 @@ def backfill_conversation(
     would make the `1..N` assignment collide with an ordinal that already exists.
 
     `on_outcome` is invoked INSIDE this function's still-uncommitted transaction, immediately
-    before the commit — the same shape Pass 37 imposed on app/rag/memory_source_backfill.py's
+    before the commit — the same shape Pass 37 imposed on app/rag/backfill/memory_source.py's
     `on_claim_outcome` after the founder rejected "the work committed but the run report did
     not" as a truthfulness failure, not an acceptable follow-up. Whatever the callback writes
     (the durable job's progress and its `progress_updated` event, in this module's one real
@@ -271,7 +271,7 @@ def backfill_message_sequence_numbers(
     the rest of a founder's history. Pass it back in via `exclude_conversation_ids` on the next
     call so a bounded batch is not spent re-discovering it."""
     if batch_size <= 0:
-        # The exact class of bug Pass 19 found in app/rag/memory_source_backfill.py (a
+        # The exact class of bug Pass 19 found in app/rag/backfill/memory_source.py (a
         # non-positive batch size turning a bounded call into an unbounded/no-op loop) —
         # rejected explicitly rather than silently coerced.
         raise ValueError(f"batch_size must be positive, got {batch_size}")

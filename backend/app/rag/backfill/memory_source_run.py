@@ -1,5 +1,5 @@
 """Durable production backfill-run reporting (migration 0025) wrapping
-app/rag/memory_source_backfill.py::backfill_memory_source_units() — the last blocker that
+app/rag/backfill/memory_source.py::backfill_memory_source_units() — the last blocker that
 module's own docstring named before it may ever be run against production. See migration
 0025's module docstring for the full table-design rationale (cursor semantics, snapshot
 counters, the "no fabricated completion claims" rule).
@@ -67,12 +67,12 @@ from sqlalchemy.orm import Session
 from app.db import engine
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.knowledge_claim import KnowledgeClaim
-from app.rag.memory_source_backfill import ClaimOutcomeDelta, MemorySourceBackfillResult, _apply_cursor, backfill_memory_source_units
+from app.rag.backfill.memory_source import ClaimOutcomeDelta, MemorySourceBackfillResult, _apply_cursor, backfill_memory_source_units
 
-logger = logging.getLogger("mainai.rag.memory_source_backfill_run")
+logger = logging.getLogger("mainai.rag.backfill.memory_source_run")
 
 # One bounded batch per advance() call — see module docstring. Matches
-# app/rag/memory_source_backfill.py's own BACKFILL_BATCH_SIZE as the default so a caller that
+# app/rag/backfill/memory_source.py's own BACKFILL_BATCH_SIZE as the default so a caller that
 # doesn't override batch_size gets identical per-call sizing to the underlying function.
 DEFAULT_RUN_BATCH_SIZE = 50
 
@@ -102,7 +102,7 @@ class BackfillRunBusy(RuntimeError):
 @contextlib.contextmanager
 def _run_lock(run_id: uuid.UUID):
     """Serializes advance_backfill_run()/cancel_backfill_run() for ONE run across the whole
-    call, including the internal per-claim commits app/rag/memory_source_backfill.py's
+    call, including the internal per-claim commits app/rag/backfill/memory_source.py's
     `_apply()` performs on the same session (see module docstring for why a plain `FOR UPDATE`
     can't do this alone). Session-level advisory lock (`pg_try_advisory_lock`/
     `pg_advisory_unlock`, NOT the transaction-scoped `_xact_lock` variant), acquired and
@@ -135,7 +135,7 @@ def _run_lock(run_id: uuid.UUID):
 def _safe_error_summary(exc: Exception) -> str:
     """Type name only — never `str(exc)`. A raw exception message can carry SQL text, bound
     parameters, or other backend internals (e.g. an IntegrityError SQLAlchemy didn't hide
-    parameters for); matches the discipline app/rag/memory_source_backfill.py's own per-claim
+    parameters for); matches the discipline app/rag/backfill/memory_source.py's own per-claim
     "unexpected error" path already uses for exactly this reason. Length-bounded defensively —
     the type name itself is always short, but this keeps the field bounded even if a future
     caller changes what's passed in here."""
@@ -152,7 +152,7 @@ def _real_candidates_remain(db: Session, owner_id: uuid.UUID, after: tuple[datet
     row lock, so it correctly reports True even while every remaining candidate is locked.
 
     MUST apply the same `after` cursor filter `_apply()` itself uses (`_apply_cursor`,
-    imported from app/rag/memory_source_backfill.py — not reimplemented, so this can never
+    imported from app/rag/backfill/memory_source.py — not reimplemented, so this can never
     silently disagree with what the batch actually considered reachable). A claim this run has
     already considered and permanently excluded via cursor advancement (e.g. a structural
     resolution failure — see memory_source_backfill.py's `_apply()`) still has
@@ -258,7 +258,7 @@ def record_failure(db: Session, run: MemorySourceBackfillRun, claim_id: uuid.UUI
     re-considered within the SAME run increments `attempt_count` instead of duplicating a row
     (unique on `(run_id, claim_id)`, migration 0025). `reason` must never be
     `KnowledgeClaim.claim_text` — only the structural failure strings
-    app/rag/memory_source_backfill.py's `_resolve_locator()`/`_apply()` already produce
+    app/rag/backfill/memory_source.py's `_resolve_locator()`/`_apply()` already produce
     (document/chunk/version/owner ids)."""
     savepoint = db.begin_nested()
     try:

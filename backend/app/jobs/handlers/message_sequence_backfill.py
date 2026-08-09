@@ -11,7 +11,7 @@ runtime, and building a second, parallel queue for one backfill would be exactly
 parallel mechanism" the project has repeatedly refused.
 
 DIFFERENT IN ONE IMPORTANT WAY FROM `corpus_review`. This capability calls no provider and
-needs no AI at all (see app/rag/message_sequence_backfill.py — pure SQL over existing rows),
+needs no AI at all (see app/rag/backfill/message_sequence.py — pure SQL over existing rows),
 which is why `_CAPABILITY_PROVIDER_ROLE` maps it to `None` rather than to `"chat"`. Numbering
 the founder's own message history must not become unavailable because a model key is missing;
 that is the "keep working without AI wherever architecturally possible" rule applied to a
@@ -43,7 +43,7 @@ from sqlalchemy.orm import Session
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
-from app.rag.message_sequence_backfill import (
+from app.rag.backfill.message_sequence import (
     ConversationOutcome,
     candidate_conversation_ids,
     backfill_conversation,

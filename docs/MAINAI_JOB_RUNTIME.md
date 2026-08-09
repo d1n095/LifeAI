@@ -336,7 +336,7 @@ exception text.
 Added by S1B (migration `0030`, `app/jobs/handlers/message_sequence_backfill.py`). It numbers the
 `messages` rows that predate migration 0030 — see
 `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.9 for why `messages.sequence_number` exists at
-all, and `app/rag/message_sequence_backfill.py` for the numbering rule.
+all, and `app/rag/backfill/message_sequence.py` for the numbering rule.
 
 It is worth reading as the reference example for a NON-AI capability on this runtime, because
 it differs from `corpus_review` in three reviewed ways:

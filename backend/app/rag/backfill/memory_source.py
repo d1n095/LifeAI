@@ -41,7 +41,7 @@ valid NULL-memory_source_id candidate). `get_or_create_memory_source_unit` itsel
 proven-safe primitive for the source-unit half of that atomicity (see its own module
 docstring and tests/backend/test_memory_source_units.py's real concurrent-lock-wait test).
 
-Production execution — durable run tracking now exists (app/rag/memory_source_backfill_run.py,
+Production execution — durable run tracking now exists (app/rag/backfill/memory_source_run.py,
 migration 0025), closing the gap this docstring used to describe. This module's own
 `MemorySourceBackfillResult` and `logger.warning`/`logger.exception` calls were never a durable
 enough progress/failure record for a real production backfill across a whole owner base on
@@ -107,14 +107,14 @@ class MemorySourceBackfillResult:
     # not affected by candidates_total/chunk_backed/etc., which only describe THIS call's work.
     already_done: int = 0
     # The newest (created_at, id) pair actually considered (in any outcome) by this call —
-    # None if candidates_total is 0. app/rag/memory_source_backfill_run.py's durable run
+    # None if candidates_total is 0. app/rag/backfill/memory_source_run.py's durable run
     # tracking persists this as a resumable checkpoint (see its own module docstring for why
     # both dry_run and real mode need it, not just dry_run).
     last_seen_created_at: datetime | None = None
     last_seen_id: uuid.UUID | None = None
     # One (claim_id, reason) entry per skipped/failed claim in THIS call — `reason` is always
     # the exact structural failure string `_resolve_locator()`/`_apply()` already log, NEVER
-    # `KnowledgeClaim.claim_text`. app/rag/memory_source_backfill_run.py's durable run
+    # `KnowledgeClaim.claim_text`. app/rag/backfill/memory_source_run.py's durable run
     # tracking persists these into `memory_source_backfill_failures`.
     failures: list[tuple[uuid.UUID, str]] = field(default_factory=list)
 
@@ -128,7 +128,7 @@ class _ResolutionFailure:
 class ClaimOutcomeDelta:
     """Founder review round 3 (HIGH — transaction atomicity): one claim's contribution to a
     durable run's reporting state, handed to an optional `on_claim_outcome` callback so the
-    caller (app/rag/memory_source_backfill_run.py's `advance_backfill_run()`) can apply it to
+    caller (app/rag/backfill/memory_source_run.py's `advance_backfill_run()`) can apply it to
     `MemorySourceBackfillRun` and flush/upsert `MemorySourceBackfillFailure` WITHIN the exact
     same transaction `_apply()`/`_dry_run()` commits for that claim — see `backfill_memory_
     source_units()`'s own docstring for why this must never be split into a separate, later
@@ -313,7 +313,7 @@ def backfill_memory_source_units(
     ATOMICALLY with the claim itself. `None` (the default) preserves this function's original,
     standalone behavior exactly — used by tests/backend/test_memory_source_backfill.py, which
     calls this function directly with no durable run involved at all. Only
-    app/rag/memory_source_backfill_run.py's `advance_backfill_run()` passes a real callback.
+    app/rag/backfill/memory_source_run.py's `advance_backfill_run()` passes a real callback.
     """
     if batch_size <= 0:
         raise ValueError(f"batch_size must be a positive integer, got {batch_size!r}")

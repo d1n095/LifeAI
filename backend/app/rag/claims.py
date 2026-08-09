@@ -29,7 +29,7 @@ from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_so
 class ClaimExtractionIntegrityError(RuntimeError):
     """Raised when extract_claims_for_document's own owner_id/document_id/version_id
     arguments don't structurally line up -- fails closed BEFORE any provider call or write,
-    same principle as app/rag/memory_source_backfill.py's _ResolutionFailure. The real
+    same principle as app/rag/backfill/memory_source.py's _ResolutionFailure. The real
     library_import.py call sites always pass a genuinely matching triple today, but this
     function must not silently trust that forever: a future caller passing a mismatched
     version_id must never have its claims/MemorySourceUnit attributed to the wrong owner or

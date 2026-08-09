@@ -16,7 +16,7 @@ from app.providers.registry import get_provider, provider_names
 from app.providers.verification import latest_check, verify_now
 from app.models.memory_source_backfill_run import BackfillRunMode, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.rag.claims import backfill_claim_types
-from app.rag.memory_source_backfill_run import (
+from app.rag.backfill.memory_source_run import (
     BackfillRunBusy,
     BackfillRunNotAdvanceable,
     advance_backfill_run,
@@ -275,10 +275,10 @@ def create_backfill_run(
     body: BackfillRunCreateIn, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)
 ):
     """S1A durable production backfill-run reporting (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md
-    §4.8, PR #31's own memory_source_backfill.py module docstring — the last blocker that
+    §4.8, PR #31's own memory_source.py module docstring — the last blocker that
     named before a real production backfill run). Creates a new run, or returns the caller's
     existing active (pending/running) run if one already exists (idempotent — see
-    app/rag/memory_source_backfill_run.py's create_or_resume_backfill_run() docstring).
+    app/rag/backfill/memory_source_run.py's create_or_resume_backfill_run() docstring).
 
     This endpoint only CREATES/RESUMES the durable run row — it performs no backfill work
     itself. Call POST .../runs/{run_id}/advance to actually do bounded work, exactly one
@@ -306,7 +306,7 @@ def advance_backfill_run_endpoint(
     run_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)
 ):
     """Performs exactly ONE bounded batch of work for `run_id` and returns its updated durable
-    status — see app/rag/memory_source_backfill_run.py's advance_backfill_run() docstring for
+    status — see app/rag/backfill/memory_source_run.py's advance_backfill_run() docstring for
     why this is bounded to one batch per call (no unbounded loop held open inside a request).
     A caller driving a run to completion calls this repeatedly until `status` is no longer
     `running`/`pending`."""
