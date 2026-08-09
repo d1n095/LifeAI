@@ -296,7 +296,7 @@ architecture" instruction. On a successful mainai claim, `process_claimed_mainai
    leaves the job in a terminal, truthful state (`mark_failed(..., unexpected)`) rather than
    stuck `running` forever with a dead claim.
 
-**Restart safety**: `corpus_review_job.py` processes one document per unit of work, commits
+**Restart safety**: `app/jobs/handlers/corpus_review.py` processes one document per unit of work, commits
 progress + a proposal (or a per-item failure event) together after each document, checks
 `cancel_requested` and renews the lease before every document, and resumes correctly after a
 crash by querying already-created `MainAIJobProposal.source_document_id` values for that job
@@ -317,7 +317,7 @@ next poll reclaims it (`test_claim_next_mainai_job_reclaims_an_expired_lease`).
 
 ## `corpus_review`: the first real job type
 
-`app/rag/corpus_review_job.py` receives existing, already-indexed `Document` references
+`app/jobs/handlers/corpus_review.py` receives existing, already-indexed `Document` references
 (never duplicates or re-imports files), concatenates their `DocumentChunk` text (bounded to
 8000 characters per document — `_MAX_REVIEW_CHARS`), and calls
 `app.providers.registry.chat_with_fallback()` — the **same real provider-fallback call**
@@ -333,7 +333,7 @@ exception text.
 
 ## `message_sequence_backfill`: the second job type (S1B) — and the first with no AI at all
 
-Added by S1B (migration `0030`, `app/rag/message_sequence_backfill_job.py`). It numbers the
+Added by S1B (migration `0030`, `app/jobs/handlers/message_sequence_backfill.py`). It numbers the
 `messages` rows that predate migration 0030 — see
 `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.9 for why `messages.sequence_number` exists at
 all, and `app/rag/message_sequence_backfill.py` for the numbering rule.

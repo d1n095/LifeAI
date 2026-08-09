@@ -1,6 +1,6 @@
 """MainAI Runtime Truthfulness and Durable Job Foundation — see migration 0025,
-app/models/mainai_job.py, app/mainai_runtime_contract.py, app/rag/mainai_jobs_service.py,
-app/rag/corpus_review_job.py, app/jobs/mainai_job_lease.py, app/routers/mainai_jobs.py.
+app/models/mainai_job.py, app/mainai_runtime_contract.py, app/jobs/service.py,
+app/jobs/handlers/corpus_review.py, app/jobs/mainai_job_lease.py, app/routers/mainai_jobs.py.
 
 Covers, in order:
   A. MainAIExecutionResponse's own validator — the core truthfulness contract.
@@ -28,6 +28,8 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.config import get_settings
+from app.jobs import service
+from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job, renew_mainai_job_lease
 from app.mainai_runtime_contract import (
     CAPABILITY_MANIFEST,
@@ -54,8 +56,6 @@ from app.models.mainai_job import (
 )
 from app.providers.base import ChatResult, ProviderError
 from app.providers.openai_provider import OpenAIProvider
-from app.rag import mainai_jobs_service as service
-from app.rag.corpus_review_job import run_corpus_review_job
 from app.request_context import current_user_id as current_user_id_var
 
 EMBEDDING_DIM = get_settings().embedding_dim
@@ -572,7 +572,7 @@ def _claim(db, job_id) -> tuple[str, int]:
     """Test helper: claims `job_id` on the superuser connection (matching real usage — the
     worker always claims on migration_engine, see app/worker.py's _ClaimSession) and returns
     (worker_id, lease_generation) for callers that need to exercise a fencing-guarded
-    mark_*/update_progress/record_* call the way corpus_review_job.py actually would, instead
+    mark_*/update_progress/record_* call the way corpus_review.py actually would, instead
     of calling those functions against a job that was never really claimed."""
     from sqlalchemy.orm import sessionmaker
 
@@ -870,7 +870,7 @@ async def test_run_corpus_review_job_records_a_per_document_skip_on_provider_err
     safe error_category, never raw exception text) and the job still reaches `completed`,
     honestly reporting that document as not reviewed in the completion message. Mixed outcomes
     within a single run (some documents reviewed, some provider-failed) are the expected case,
-    not a systemic failure — see corpus_review_job.py's module docstring."""
+    not a systemic failure — see corpus_review.py's module docstring."""
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_permanent_error())
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
@@ -963,9 +963,9 @@ async def test_run_corpus_review_job_fails_the_whole_job_on_a_genuinely_unexpect
     document's outcome, job keeps going -- see the mixed-outcomes test above), a genuinely
     unexpected exception (a real bug, not a per-document content/provider problem) must still
     fail the WHOLE job via mark_failed, not be silently swallowed or misrecorded as a per-
-    document skip. This is the one branch of corpus_review_job.py's three-way except split that
+    document skip. This is the one branch of corpus_review.py's three-way except split that
     had no dedicated regression test."""
-    import app.rag.corpus_review_job as corpus_review_job_module
+    import app.jobs.handlers.corpus_review as corpus_review_job_module
 
     async def _boom(db, messages, **kwargs):
         raise RuntimeError("a real bug, not a provider or per-document problem")
@@ -1760,7 +1760,7 @@ def test_stale_worker_is_rejected_by_every_write_after_a_reclaim(db_session, sup
     from sqlalchemy.orm import sessionmaker
 
     from app.db import migration_engine
-    from app.rag.mainai_jobs_service import record_document_reviewed, record_document_skipped
+    from app.jobs.service import record_document_reviewed, record_document_skipped
 
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
@@ -1780,7 +1780,7 @@ def test_stale_worker_is_rejected_by_every_write_after_a_reclaim(db_session, sup
     finally:
         admin.close()
 
-    # Worker A -- unaware it lost the lease, exactly as corpus_review_job.py's real code path
+    # Worker A -- unaware it lost the lease, exactly as corpus_review.py's real code path
     # behaves -- now attempts every kind of write this module fences. ALL must be rejected.
     _set_rls_user(db_session, user.id)
     stale_job = service.get_job(db_session, job_id)
@@ -2121,7 +2121,7 @@ async def test_run_corpus_review_job_rolls_back_the_proposal_when_lease_dies_bet
         await run_corpus_review_job(db_session, job_id, user.id, worker_id="worker-a", lease_generation=generation_a, lease_seconds=120)
 
         # Worker A's proposal must never have landed -- the guarded commit inside
-        # record_document_reviewed() failed (lease already reclaimed) and corpus_review_job.py
+        # record_document_reviewed() failed (lease already reclaimed) and corpus_review.py
         # rolled back the whole in-flight transaction, discarding the added-but-uncommitted
         # MainAIJobProposal along with it.
         proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job_id)}).scalar()

@@ -32,8 +32,8 @@ as much to a founder's MainAI job requests, cancel/retry activity, and AI-genera
 proposals about their own documents as it did to knowledge_claims when Pass 26 added those.
 Event `detail` payloads are exported as-is, not re-sanitized here — every event type this
 table can ever contain is already restricted to a closed, safe vocabulary at WRITE time (see
-app/rag/mainai_jobs_service.py's `_PUBLIC_ERROR_MESSAGES`/`MainAIJobErrorCategory` and
-app/rag/corpus_review_job.py's `document_skipped` reasons); nothing ever writes a raw
+app/jobs/service.py's `_PUBLIC_ERROR_MESSAGES`/`MainAIJobErrorCategory` and
+app/jobs/handlers/corpus_review.py's `document_skipped` reasons); nothing ever writes a raw
 exception, a provider response body, or a credential into this table in the first place, so
 there is nothing left to strip on the way out.
 

@@ -1,5 +1,5 @@
 """MainAI Runtime Truthfulness and Durable Job Foundation — the Job API (see migration 0025,
-app/models/mainai_job.py, app/rag/mainai_jobs_service.py). Every endpoint requires
+app/models/mainai_job.py, app/jobs/service.py). Every endpoint requires
 `require_founder` (this system is founder-only today — see app/deps.py) and operates through
 the ordinary RLS-scoped session, so owner isolation is enforced by Postgres itself, not
 re-derived here (see app/rls.py's `mainai_jobs_isolation`/`mainai_job_events_isolation`/
@@ -23,10 +23,10 @@ from app.deps import require_founder
 from app.limiter import limiter
 from app.config import get_settings
 from app.db import get_db, migration_engine
+from app.jobs import service
 from app.mainai_runtime_contract import CapabilityUnavailableError
 from app.models.mainai_job import MainAIJobProposal
 from app.models.user import User
-from app.rag import mainai_jobs_service as service
 from app.schemas import (
     MainAIJobCreateIn,
     MainAIJobDetailOut,
