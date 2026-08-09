@@ -80,7 +80,7 @@ def import_job_still_needs_raw_blob(status: ImportJobStatus, blocked_count: int)
     """True if an ImportJob in this status (with this blocked_count) could still be resumed by
     the worker reading its own raw uploaded blob directly — the single Python source of truth
     for the policy migration 0020's storage_key_still_referenced_global() SQL and
-    app/rag/blob_references.py's module docstring both describe. A status-drift test compares
+    app/storage/references.py's module docstring both describe. A status-drift test compares
     this function's real decision against the SQL function's real decision for every
     ImportJobStatus value, so the two can never silently drift apart without a test failing."""
     return status in DIRECTLY_RESUMABLE_IMPORT_JOB_STATUSES or _import_job_partial_still_blocked(status, blocked_count)

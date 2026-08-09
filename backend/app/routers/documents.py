@@ -11,8 +11,8 @@ from app.models.document import Document, DocumentSource
 from app.models.user import User
 from app.rag.extract import extract_text
 from app.rag.ingest import index_document
-from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
 from app.schemas import DocumentOut
+from app.storage.purge import SourcePurgeNotFoundError, purge_source
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 
@@ -86,7 +86,7 @@ def _index_in_background(document_id: uuid.UUID, text_content: str) -> None:
 
 @router.delete("/{document_id}")
 def delete_document(document_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
-    """Thin wrapper delegating to the shared app/rag/source_purge.py::purge_source() service
+    """Thin wrapper delegating to the shared app/storage/purge.py::purge_source() service
     — see that module's docstring. INTENTIONAL behavior change from the old hard `db.delete
     (document)` (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8's "En gemensam purge-tjänst"):
     migration 0019's `document_source_units.document_id` FK (no `ON DELETE` action) would

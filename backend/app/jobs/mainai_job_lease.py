@@ -8,7 +8,7 @@ documents/document_chunks, it never writes a storage blob, so there is no
 write-before-reference race for a concurrent account erasure to lose. A future MainAI job type
 that DOES write storage would need to take `acquire_storage_key_lock`/
 `acquire_owner_erasure_lock` itself, exactly like every other blob writer in this codebase
-(app/rag/blob_references.py's KNOWN_STORAGE_WRITE_PATHS) — nothing here exempts it.
+(app/storage/references.py's KNOWN_STORAGE_WRITE_PATHS) — nothing here exempts it.
 
 Simple, single-phase claim (no owner lock) is safe here specifically because this table never
 races a blob write: the only invariant that matters is "at most one worker holds this job row

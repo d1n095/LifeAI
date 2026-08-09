@@ -29,7 +29,7 @@ def _load_apply_runtime_privileges():
 @pytest.fixture(autouse=True, scope="module")
 def _narrow_privileges_before_this_module():
     """Pass 30: the empty-upload path now calls storage_key_still_referenced_global() (via
-    app/rag/blob_references.py's delete_if_unreferenced()), which mainai_app is only granted
+    app/storage/references.py's delete_if_unreferenced()), which mainai_app is only granted
     EXECUTE on via apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy --
     never automatically by tests/conftest.py's _test_database fixture's own blanket table/
     sequence GRANT ALL (function EXECUTE grants are a separate privilege class Postgres
@@ -658,9 +658,9 @@ def test_source_detail_segments_stay_empty_for_a_text_source(client):
 # canonical check-then-act protocol as every other physical blob delete -- content-addressing
 # means every empty upload shares the exact same storage_key, so an ungated delete here could
 # destroy a completely unrelated, already-live reference sharing that key (see
-# app/rag/blob_references.py's delete_if_unreferenced() module docstring for the full incident).
+# app/storage/references.py's delete_if_unreferenced() module docstring for the full incident).
 # Tests A-D below are the founder's own lettering; E/F (the race and StorageError cases) live in
-# tests/backend/test_source_purge.py's Pass 30 section, at the blob_references.py function level
+# tests/backend/test_source_purge.py's Pass 30 section, at the references.py function level
 # rather than through the full HTTP stack.
 
 
@@ -781,7 +781,7 @@ def test_empty_upload_never_creates_an_import_job(client, superuser_db):
 
 # --- Pass 32 blocker 1 (an eighth founder review round): storage_orphan_risk in ops-status ---
 #
-# _record_storage_orphan_risk_audit() (app/rag/blob_references.py) writes a durable AuditLog
+# _record_storage_orphan_risk_audit() (app/storage/references.py) writes a durable AuditLog
 # row, but nothing ever read it back -- founder ops-status still only showed worker/queue
 # health, with zero signal that a blob may need a manual storage sweep. GET /api/library/
 # ops/status now also surfaces get_storage_cleanup_ops_status()'s aggregated view. Test A

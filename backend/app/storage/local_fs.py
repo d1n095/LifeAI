@@ -19,7 +19,7 @@ which has a real TOCTOU against a concurrent `delete()`'s `unlink()`: if the che
 "already exists" but a concurrent delete removes it a moment later, this method skips writing
 its OWN tmp file to `final_path` at all (believing an existing copy already covers it) and
 returns a `StoredBlob` whose `storage_key` no longer resolves to anything on disk. The
-DB-level advisory lock (`app/rag/blob_references.py::acquire_storage_key_lock`) cannot close
+DB-level advisory lock (`app/storage/references.py::acquire_storage_key_lock`) cannot close
 this: content-addressing means the key isn't even known until the bytes are fully hashed, so
 callers structurally cannot take that lock before `write_stream()` runs, and this race is
 entirely BETWEEN two raw filesystem calls, never touching the database at all.
@@ -40,12 +40,12 @@ is real and required an actual OS-level mutual-exclusion primitive, not another 
 interleave for the same shard anymore — see `_key_lock()`'s docstring for why it locks per
 two-hex-character shard (the same directory sharding blobs already use) rather than per exact
 sha256, and why the lock files are never deleted. This is a SEPARATE, narrower lock than
-`app/rag/blob_references.py::acquire_storage_key_lock()` (a DB advisory lock): this one
+`app/storage/references.py::acquire_storage_key_lock()` (a DB advisory lock): this one
 protects raw filesystem publish/unlink from each other; the DB lock protects the
 reference-check + DB-commit decision from a concurrent physical delete. Both are still
 necessary — a legitimate delete can still fully complete in the gap between a persistent
 writer's `write_stream()` return and that same writer's own later DB-lock acquisition, which
-is exactly why every persistent writer (`app/rag/blob_references.py::
+is exactly why every persistent writer (`app/storage/references.py::
 store_content_with_reference_lock()`, `app/rag/library_import.py::
 _store_bytes_with_reference_lock()`) must hold the DB lock from verification through the
 reference commit, not just rely on this filesystem lock."""

@@ -17,7 +17,7 @@ class StorageDeletionReason(str, enum.Enum):
 
     account_erasure = "account_erasure"
     # Pass 31: a rejected (e.g. empty) upload whose confirmed-unreferenced physical blob failed
-    # to delete immediately -- see app/rag/blob_references.py's
+    # to delete immediately -- see app/storage/references.py's
     # enqueue_rejected_upload_cleanup_task() for how this reason's tasks are created, and
     # migration 0024's module docstring for the incident this closes.
     rejected_upload_cleanup = "rejected_upload_cleanup"

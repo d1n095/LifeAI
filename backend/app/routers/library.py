@@ -24,18 +24,18 @@ from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.providers.registry import resolve_active
 from app.providers.verification import classify_provider_exception
-from app.rag.blob_references import (
+from app.rag.library_import import maybe_purge_blob
+from app.rag.trust import assess_claim_confidence
+from app.rag.vector_store import hybrid_search
+from app.storage import get_storage
+from app.storage.base import StorageError, StorageSizeLimitExceeded
+from app.storage.purge import SourcePurgeNotFoundError, purge_source
+from app.storage.references import (
     acquire_owner_erasure_lock,
     acquire_storage_key_lock,
     delete_if_unreferenced,
     get_storage_cleanup_ops_status,
 )
-from app.rag.library_import import maybe_purge_blob
-from app.rag.source_purge import SourcePurgeNotFoundError, purge_source
-from app.rag.trust import assess_claim_confidence
-from app.rag.vector_store import hybrid_search
-from app.storage import get_storage
-from app.storage.base import StorageError, StorageSizeLimitExceeded
 from app.schemas import (
     DeleteConfirmIn,
     ImportJobOut,
@@ -124,7 +124,7 @@ async def import_package(
     extraction/indexing work asynchronously from here on, so this request never blocks on
     that (see app/rag/library_import.py's module docstring for the full architecture).
 
-    Pass 26: acquires the owner-scoped erasure advisory lock (see app/rag/blob_references.py's
+    Pass 26: acquires the owner-scoped erasure advisory lock (see app/storage/references.py's
     acquire_owner_erasure_lock docstring for the full race this closes against a concurrent
     DELETE /api/account) as the VERY FIRST thing this handler does — before anything else,
     including `storage.write_stream()` below, which is exactly what makes the lock effective:
@@ -163,7 +163,7 @@ async def import_package(
     if blob.size_bytes == 0:
         # Pass 30 (a fourth founder review round): a bare `storage.delete()` here used to
         # bypass the canonical check-then-act protocol entirely -- see
-        # app/rag/blob_references.py's delete_if_unreferenced() for the full incident this
+        # app/storage/references.py's delete_if_unreferenced() for the full incident this
         # closes. Content-addressing means EVERY empty upload shares the exact same
         # storage_key, so an ungated delete here could physically destroy an unrelated,
         # already-live reference (a Document, an ImportJob, or founder-wide Project Memory)
@@ -214,7 +214,7 @@ async def import_package(
     # key, and physically delete it before the ImportJob row below is even created. Acquiring
     # the SAME storage_key-scoped advisory lock retry_source_blob_purge() takes closes that
     # race: whichever side gets here first fully commits or rolls back before the other's own
-    # check can run (see app/rag/blob_references.py's module docstring). The lock is
+    # check can run (see app/storage/references.py's module docstring). The lock is
     # transaction-scoped — released automatically at this request's eventual commit below (or
     # at rollback, if the HTTPException just below fires).
     acquire_storage_key_lock(db, blob.storage_key)
@@ -429,7 +429,7 @@ def delete_source(
     user: User = Depends(require_founder),
 ):
     """Thin wrapper: validates the request (confirmation required) and delegates all actual
-    deletion/purge logic to the shared app/rag/source_purge.py::purge_source() service — see
+    deletion/purge logic to the shared app/storage/purge.py::purge_source() service — see
     that module's docstring for the full behavior (soft delete, chunk purge, S1A memory-source
     purge, blob release, source_purged audit entry — all one atomic commit as of Pass 22). The
     still-live older `DELETE /api/documents/{id}` (app/routers/documents.py) calls the exact

@@ -41,8 +41,8 @@ from app.models.project_memory import (
     ProjectSource,
     SideIssueClassification,
 )
-from app.rag.blob_references import store_content_with_reference_lock
 from app.storage import get_storage
+from app.storage.references import store_content_with_reference_lock
 
 MAX_BRIEF_BYTES = 2 * 1024 * 1024  # a resumption brief is text; 2MB is already generous
 MAX_DOC_BYTES = 10 * 1024 * 1024  # a governing doc is text; 10MB is already generous
@@ -202,7 +202,7 @@ def ingest_doc(db: Session, *, relative_path: str, ingested_by: str) -> ProjectS
     storage = get_storage()
     # Pass 31 (a sixth founder review round): acquires the storage-key lock and re-verifies
     # the blob still exists BEFORE this function's own db.commit() below -- see
-    # app/rag/blob_references.py's store_content_with_reference_lock() docstring for the
+    # app/storage/references.py's store_content_with_reference_lock() docstring for the
     # write-before-reference race this closes (the same shape Pass 22 already closed for the
     # Life Library upload path, previously left open here).
     blob = store_content_with_reference_lock(db, storage, content, max_bytes=MAX_DOC_BYTES)

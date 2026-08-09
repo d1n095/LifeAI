@@ -1,4 +1,4 @@
-"""app/rag/source_purge.py::purge_source() — the shared purge service both
+"""app/storage/purge.py::purge_source() — the shared purge service both
 app/routers/library.py's delete_source and the older app/routers/documents.py's
 delete_document call. Real local Postgres (RLS included), same pattern as
 tests/backend/test_memory_source_units.py. HTTP-level "both routes share one service" checks
@@ -33,7 +33,12 @@ from app.models.project_memory import ProjectCheckpoint, ProjectSource
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.user import User, UserRole
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
-from app.rag.blob_references import (
+from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+from app.request_context import current_user_id as current_user_id_var
+from app.security import hash_password
+from app.storage import StorageError, get_storage
+from app.storage.purge import PURGE_REASON, SourcePurgeNotFoundError, purge_source, retry_source_blob_purge
+from app.storage.references import (
     KNOWN_STORAGE_WRITE_PATHS,
     DeleteIfUnreferencedOutcome,
     acquire_storage_key_lock,
@@ -41,11 +46,6 @@ from app.rag.blob_references import (
     enqueue_rejected_upload_cleanup_task,
     storage_key_still_referenced,
 )
-from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
-from app.rag.source_purge import PURGE_REASON, SourcePurgeNotFoundError, purge_source, retry_source_blob_purge
-from app.request_context import current_user_id as current_user_id_var
-from app.security import hash_password
-from app.storage import StorageError, get_storage
 
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
 
@@ -550,7 +550,7 @@ def test_purge_source_blob_failure_leaves_retryable_deletion_status(monkeypatch)
 
 
 # --- Pass 21: two-phase blob purge (DB commit vs. physical file delete are NOT one atomic
-# unit -- see app/rag/source_purge.py's module docstring for the bug this fixes) -----------
+# unit -- see app/storage/purge.py's module docstring for the bug this fixes) -----------
 
 
 def test_phase_a_db_commit_failure_leaves_blob_untouched_and_never_calls_storage_delete():
@@ -742,7 +742,7 @@ def test_both_http_routes_use_the_same_purge_service(client, superuser_db):
 
 # --- Pass 22: ImportJob is also a physical blob reference ---------------------------------------
 #
-# app/rag/blob_references.py::storage_key_still_referenced() -- shared by maybe_purge_blob()
+# app/storage/references.py::storage_key_still_referenced() -- shared by maybe_purge_blob()
 # (app/rag/library_import.py, called from retry_source_blob_purge()) -- now checks
 # ImportJob.source_storage_key, not just live Document.storage_key rows. A founder review
 # caught the gap: a pending/running/resumable ImportJob's raw upload used to be treated as an
@@ -947,7 +947,7 @@ def test_zip_raw_blob_and_document_blob_are_separate_content_addressed_keys():
 def test_maybe_purge_blob_delegates_to_the_shared_reference_policy(monkeypatch):
     """Proves app/rag/library_import.py::maybe_purge_blob() does not maintain its own,
     duplicated reference-check logic -- it calls the one canonical
-    storage_key_still_referenced() app/rag/blob_references.py owns, which both
+    storage_key_still_referenced() app/storage/references.py owns, which both
     retry_source_blob_purge() (phase B) and POST /api/library/import (the upload path) share."""
     import app.rag.library_import as library_import_module
 
@@ -1034,12 +1034,12 @@ def test_storage_key_lock_serializes_upload_and_purge_so_a_committed_import_job_
 def test_forced_audit_failure_rolls_back_the_entire_phase_a_purge(monkeypatch):
     """The audit row is no longer written by a separate, later commit in the router -- it's
     added to the session as PART of phase A, right before phase A's own single commit (see
-    source_purge.py's purge_source()). A failure recording it must therefore roll back
+    purge.py's purge_source()). A failure recording it must therefore roll back
     everything else phase A did too, exactly like any other phase A failure (Pass 21's
     test_phase_a_db_commit_failure_leaves_blob_untouched_and_never_calls_storage_delete proved
     the general case; this proves the audit write specifically is inside that same
     all-or-nothing boundary, not bolted on after it)."""
-    import app.rag.source_purge as source_purge_module
+    import app.storage.purge as source_purge_module
     from app.storage.local_fs import LocalFilesystemStorage
 
     session = SessionLocal()
@@ -1421,14 +1421,14 @@ def test_storage_key_still_referenced_global_returns_false_once_every_domain_has
 
 
 def test_known_storage_key_columns_registry_matches_the_sql_functions_real_behavior():
-    """Pass 29 drift-prevention: iterates `app.rag.blob_references.KNOWN_STORAGE_KEY_COLUMNS`
+    """Pass 29 drift-prevention: iterates `app.storage.references.KNOWN_STORAGE_KEY_COLUMNS`
     -- the canonical, hand-maintained list of every table.column that can hold a live
     reference into the shared content-addressed storage backend -- and proves
     `storage_key_still_referenced_global()` actually protects EVERY one of them, not just the
     ones a human remembers to test by hand. A future storage_key-shaped column added to the
     registry without a matching SQL-function update fails this test immediately, rather than
     silently reopening the exact cross-domain orphan-blob gap Pass 29 closed."""
-    from app.rag.blob_references import KNOWN_STORAGE_KEY_COLUMNS
+    from app.storage.references import KNOWN_STORAGE_KEY_COLUMNS
 
     session = SessionLocal()
     try:
@@ -1481,7 +1481,7 @@ def test_known_storage_key_columns_registry_matches_the_sql_functions_real_behav
 
 # --- Pass 30 (a fourth founder review round): delete_if_unreferenced() -- the canonical,
 # self-contained check-then-act delete for a blob with no durable DB row yet (see app/rag/
-# blob_references.py's own docstring for the empty-upload incident this closes). Tests E/F
+# references.py's own docstring for the empty-upload incident this closes). Tests E/F
 # below are the founder's own lettering (A-D live in tests/backend/test_library_routes.py's
 # Pass 30 section, exercised through the real HTTP endpoint).
 
@@ -1507,7 +1507,7 @@ def test_delete_if_unreferenced_race_against_a_concurrent_reference_commit_never
     filesystem calls themselves). Closing that would mean restructuring write_stream() itself
     (e.g. hashing to a value BEFORE deciding whether to write, then holding the storage-key
     lock across the existence-check-and-rename) -- a real architectural change to the
-    SAME-SHAPED protocol `app/rag/source_purge.py`'s already-shipped, previously-reviewed
+    SAME-SHAPED protocol `app/storage/purge.py`'s already-shipped, previously-reviewed
     Phase B relies on too, not something specific to this pass's `delete_if_unreferenced()`.
     Out of scope for "close the empty-upload direct-delete bypass"; flagged for its own
     review. The test below instead proves the narrower, well-defined guarantee THIS pass
@@ -1650,7 +1650,7 @@ def test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_log_and_
     uses an independent session/commit, not the caller's `db`)."""
     import logging
 
-    from app.rag import blob_references as br
+    from app.storage import references as br
 
     storage_key = _store_real_blob(b"pass 32 test: both the delete and the enqueue fail")
 
@@ -1665,7 +1665,7 @@ def test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_log_and_
 
     session = SessionLocal()
     try:
-        with caplog.at_level(logging.CRITICAL, logger="mainai.rag.blob_references"):
+        with caplog.at_level(logging.CRITICAL, logger="mainai.storage.references"):
             outcome = delete_if_unreferenced(session, _AlwaysBrokenStorage(), storage_key)  # must not raise
 
         assert outcome == DeleteIfUnreferencedOutcome.failed_not_queued
@@ -1705,7 +1705,7 @@ def test_every_direct_storage_delete_call_site_is_on_the_known_allowlist():
     referenced_global()/delete_if_unreferenced() can only ever protect a physical delete that
     actually GOES THROUGH the canonical check-then-act protocol -- neither can protect a
     `storage.delete(...)` call that bypasses them entirely, exactly like app/routers/
-    library.py's empty-upload path used to (see app/rag/blob_references.py's
+    library.py's empty-upload path used to (see app/storage/references.py's
     delete_if_unreferenced() docstring for that incident). This walks the AST of every .py
     file under app/ and finds every call of the shape `storage.delete(...)` -- the exact
     naming convention every real call site in this codebase already uses for a
@@ -1732,7 +1732,7 @@ def test_every_direct_storage_delete_call_site_is_on_the_known_allowlist():
         # The canonical, self-contained helper itself (Pass 30) -- acquires the lock and
         # performs the reference check internally; this IS the sanctioned call site every
         # other caller with no existing DB row should route through.
-        ("rag/blob_references.py", "delete_if_unreferenced"),
+        ("storage/references.py", "delete_if_unreferenced"),
     }
 
     class _FunctionTrackingVisitor(ast.NodeVisitor):
@@ -1782,7 +1782,7 @@ def test_every_storage_write_stream_reference_is_on_the_known_write_path_registr
     call sites. This closes the third gap -- every `.write_stream` reference in app/ (a direct
     call like `storage.write_stream(...)`, OR a bound method passed as a higher-order
     callable, e.g. `run_in_threadpool(storage.write_stream, ...)`) must be a documented entry
-    in KNOWN_STORAGE_WRITE_PATHS (app/rag/blob_references.py), which records each writer's
+    in KNOWN_STORAGE_WRITE_PATHS (app/storage/references.py), which records each writer's
     lock protocol (or the explicit, flagged absence of one). A new persistent writer added
     anywhere in the backend fails this test immediately instead of silently joining the
     storage layer with an undocumented, unreviewed locking story."""
@@ -2128,7 +2128,7 @@ def test_apply_runtime_privileges_verifies_return_type_and_language():
 # `storage_key_still_referenced_global(integer)` instead of the application's real `(text)`
 # call) could pass every other check -- SECURITY DEFINER, boolean return, correct owner,
 # correct grants -- while being an entirely different function than the one
-# blob_references.py actually calls, which would only break at runtime.
+# references.py actually calls, which would only break at runtime.
 #
 # These tests exercise `s1a_privilege_policy._resolve_function()`'s exact-signature logic in
 # isolation, against a throwaway scratch function (never a real S1A object), all inside a
@@ -2294,7 +2294,7 @@ def test_resolve_function_finds_the_right_signature_but_still_catches_security_i
 #
 # storage_key_still_referenced_global() (migration 0020) hardcodes the same string literals
 # as app.models.document.RESUMABLE_INDEX_STATUSES and the same ImportJobStatus rules
-# blob_references.py's module docstring documents -- there is structurally no way for a SQL
+# references.py's module docstring documents -- there is structurally no way for a SQL
 # function to import a Python frozenset, so the two lists can only be kept in sync by hand.
 # These tests exhaustively compare the SQL function's real, observed behavior against the
 # Python contract for EVERY enum value that exists today, so that adding a new IndexStatus or
