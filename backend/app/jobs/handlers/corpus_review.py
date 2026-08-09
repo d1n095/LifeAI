@@ -21,7 +21,7 @@ delayed by more than one document's processing time.
 
 Lease fencing (migration 0028, founder re-review round on PR #36): every write this loop makes
 against the claimed job — heartbeat, progress, a reviewed outcome, a skipped outcome, or a
-terminal status — goes through app/rag/mainai_jobs_service.py's fencing-guarded functions,
+terminal status — goes through app/jobs/service.py's fencing-guarded functions,
 passing the exact (worker_id, lease_generation) this run was claimed with. The instant any of
 those calls raises JobLeaseLostError, this function stops immediately and returns without
 making any further writes — a different worker has legitimately reclaimed this job (this
@@ -51,12 +51,12 @@ from sqlalchemy.orm import Session
 
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.retry import is_transient_error
+from app.jobs.service import mark_cancelled, mark_completed, mark_failed, record_document_reviewed, record_document_skipped, update_progress
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobProposal, MainAIJobStatus
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
-from app.rag.mainai_jobs_service import mark_cancelled, mark_completed, mark_failed, record_document_reviewed, record_document_skipped, update_progress
 
 logger = logging.getLogger("mainai.jobs.corpus_review")
 

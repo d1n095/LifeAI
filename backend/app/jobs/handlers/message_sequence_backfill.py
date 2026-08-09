@@ -28,7 +28,7 @@ touched by any statement in this path.
 RESTART / LEASE / CANCEL SEMANTICS. One conversation is one unit of work. `cancel_requested` is
 checked and the lease renewed before each one, so a cancel or a stale-lease reclaim is never
 delayed by more than a single conversation's numbering. Every write against the claimed job
-goes through app/rag/mainai_jobs_service.py's fencing-guarded helpers with this run's exact
+goes through app/jobs/service.py's fencing-guarded helpers with this run's exact
 (worker_id, lease_generation), and the progress write happens INSIDE the same transaction as
 the numbering it describes (see backfill_conversation's `on_outcome`), so a lease lost
 mid-conversation rolls the numbering back with it instead of leaving a write behind from a
@@ -41,8 +41,8 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
+from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
-from app.rag.mainai_jobs_service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.rag.message_sequence_backfill import (
     ConversationOutcome,
     candidate_conversation_ids,
@@ -83,7 +83,7 @@ async def run_message_sequence_backfill_job(
         return
 
     # Snapshot total, fixed once at the top of this run — the same honesty rule
-    # corpus_review_job.py states for its own `total`: this is the size of the work THIS run
+    # corpus_review.py states for its own `total`: this is the size of the work THIS run
     # set out to do, not a live count. It can only shrink (every new message is numbered by
     # migration 0030's trigger and never enters this set), so it is a safe denominator.
     total = count_conversations_with_unsequenced_messages(db, owner_id)
