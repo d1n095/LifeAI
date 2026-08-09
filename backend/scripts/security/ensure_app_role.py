@@ -52,7 +52,7 @@ across every table in the schema, and would still re-widen mainai_app's carefull
 privileges on the S1A tables/functions
 right back open, if only for the brief window until apply_runtime_privileges.py next runs
 (which, on a mid-deploy crash between this script and that one, might be never). This script
-therefore re-applies the SAME S1A privilege policy (backend/scripts/s1a_privilege_policy.py)
+therefore re-applies the SAME S1A privilege policy (backend/scripts/security/s1a_privilege_policy.py)
 immediately afterward, in the SAME transaction, whenever the S1A objects already exist — the
 transaction only commits if that re-narrowing verifies clean, so the wide-open GRANT above is
 never the durable, committed state for those specific tables. On a boot where this script

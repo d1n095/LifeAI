@@ -31,7 +31,7 @@ produktionslinjen på Render.
 
 ## Vad varje container faktiskt skriver till (grund för `read_only: true`)
 
-- **Backend**: enda skrivningen vid körning är `scripts/ensure_app_role.py`s `mktemp()`-fil
+- **Backend**: enda skrivningen vid körning är `scripts/security/ensure_app_role.py`s `mktemp()`-fil
   (som `docker-entrypoint.sh` sedan `source`:ar) — allt annat state ligger i Postgres, inte i
   containerns filsystem. Verifierat genom att grepa hela `backend/app/` och `backend/scripts/`
   efter `open(..., "w"/"a")`/`mkdir`/`tempfile`-användning utanför test-bara verktyg

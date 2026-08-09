@@ -7,7 +7,7 @@ import { loginViaUi } from "./helpers";
 // lagra -> extrahera -> indexera -> visa i bibliotek -> söka -> fråga MainAI -> få
 // källhänvisat svar -> öppna källan -> fortsätta samtalet -> radera materialet.
 //
-// Runs against the real backend (scripts/run_e2e_backend.py) — only the AI-provider chat/
+// Runs against the real backend (scripts/ci/run_e2e_backend.py) — only the AI-provider chat/
 // embed calls and outbound email are faked, everything else (import security, chunking,
 // pgvector storage, RLS, the real Library UI, the real chat retrieval path) is the genuine
 // application code. fake_search now prefers real search results when the founder's library

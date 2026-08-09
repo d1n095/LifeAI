@@ -58,8 +58,8 @@ from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "apply_runtime_privileges.py"
-_ENSURE_APP_ROLE_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "ensure_app_role.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+_ENSURE_APP_ROLE_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "ensure_app_role.py"
 _BACKEND_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
 

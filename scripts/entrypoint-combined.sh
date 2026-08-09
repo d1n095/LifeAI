@@ -48,13 +48,13 @@ trap 'exit 130' INT    # 128+2  — conventional exit code for SIGINT (Ctrl-C, i
 
 # E2E_MOCK_MODE (unset/false in every real deployment — set only by
 # .github/workflows/ci.yml's combined-container-verify job) swaps the real uvicorn command for
-# backend/scripts/run_e2e_backend.py, which fakes only the outbound AI-provider and email
+# backend/scripts/ci/run_e2e_backend.py, which fakes only the outbound AI-provider and email
 # calls (see that file) so registration/verification/chat E2E runs are deterministic and need
 # neither real OpenAI network access nor a real SMTP server. Everything else — role
 # provisioning, Alembic migrations, auth, cookies, CSRF, RLS, rate limiting — is still the
 # genuine application code, unchanged by this flag.
 if [ "${E2E_MOCK_MODE:-false}" = "true" ]; then
-  BACKEND_CMD=(python scripts/run_e2e_backend.py)
+  BACKEND_CMD=(python scripts/ci/run_e2e_backend.py)
 else
   BACKEND_CMD=(uvicorn app.main:app --host 127.0.0.1 --port 8000 \
     --proxy-headers --forwarded-allow-ips=127.0.0.1)

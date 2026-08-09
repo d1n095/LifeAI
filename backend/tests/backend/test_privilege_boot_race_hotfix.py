@@ -4,7 +4,7 @@ container crash-looped in `apply_runtime_privileges.py` with
 mutating REVOKE/GRANT statements as the backend container, concurrently, against the same
 catalog rows (pg_class.relacl / pg_proc.proacl). Fixed by making the worker's own boot path
 read-only (see backend/docker-entrypoint.sh's RUN_PRIVILEGE_BOOT, backend/scripts/
-ensure_app_role.py's `--derive-only`, backend/scripts/apply_runtime_privileges.py's
+ensure_app_role.py's `--derive-only`, backend/scripts/security/apply_runtime_privileges.py's
 `--verify-only`), plus a Postgres advisory lock (`acquire_privilege_boot_lock()`) serializing
 any remaining concurrent MUTATORS (e.g. two backend replicas overlapping during a rolling
 deploy).
@@ -24,7 +24,7 @@ import pytest
 
 from app.config import get_settings
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "scripts" / "security"
 
 
 def _load_module(name: str):

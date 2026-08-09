@@ -2,7 +2,7 @@
 wrapper used around app/main.py's startup-time DB touches.
 
 Verified production incident, 2026-07-20: a Supabase Session Pooler auth-cache propagation
-lag right after backend/scripts/ensure_app_role.py provisioned or changed the mainai_app
+lag right after backend/scripts/security/ensure_app_role.py provisioned or changed the mainai_app
 role's password made the FIRST connection app/main.py's on_startup() ever made fail with
 "password authentication failed" — with no retry anywhere in that path, that took the whole
 uvicorn process down ("Application startup failed. Exiting.") even though the exact same

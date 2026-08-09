@@ -778,7 +778,7 @@ and correctly shaped after the round trip.
 A second, independent bug found in this migration's first draft, alongside the cross-owner
 vulnerability above: it issued `GRANT`/`REVOKE ... TO/FROM mainai_app` directly, which fails
 with `role "mainai_app" does not exist` on a bare database that runs `alembic upgrade head`
-before `scripts/ensure_app_role.py` has ever provisioned that role — a scenario PR #31's own
+before `scripts/security/ensure_app_role.py` has ever provisioned that role — a scenario PR #31's own
 migrations are already careful to avoid. Fixed by removing every `mainai_app`-specific
 statement from the migration; the only privilege statements it still issues are `REVOKE ALL
 ... FROM PUBLIC` on the functions it creates, which needs no named role to exist (`PUBLIC` is

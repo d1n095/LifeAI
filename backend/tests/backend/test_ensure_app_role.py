@@ -1,4 +1,4 @@
-"""Regression coverage for backend/scripts/ensure_app_role.py.
+"""Regression coverage for backend/scripts/security/ensure_app_role.py.
 
 Not part of the `app` package (it's a standalone pre-boot script, see
 docker-entrypoint.sh), so it's loaded directly from its file path rather than imported
@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import psycopg2
 
-SCRIPT_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "ensure_app_role.py"
+SCRIPT_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "ensure_app_role.py"
 
 
 def _load_module():

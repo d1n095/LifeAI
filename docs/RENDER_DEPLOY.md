@@ -147,7 +147,7 @@ verkningsfull: en superuser/ägarroll kringgår RLS per definition.
 Supabase stödjer inte att montera ett Postgres-init-skript (det
 `backend/db-init/01-app-role.sh` gör lokalt via Docker Compose), så samma mekanism som i den
 tidigare arkitekturen används: vid varje containerstart (`backend/docker-entrypoint.sh`, innan
-`alembic upgrade head`) körs `backend/scripts/ensure_app_role.py`, som ansluter med
+`alembic upgrade head`) körs `backend/scripts/security/ensure_app_role.py`, som ansluter med
 `DATABASE_URL` (admin-rollen) och idempotent skapar/uppdaterar `mainai_app`-rollen. Skriptet
 skriver den fullständiga `APP_DATABASE_URL` till en tillfällig fil som entrypoint-skriptet
 `source`:ar innan `uvicorn` startar.
@@ -174,7 +174,7 @@ pooler-inloggningsidentitet, inte ett riktigt Postgres-rollnamn. Kod som antar a
 ROLE <användarnamn>`) kraschar med `psycopg2.errors.UndefinedObject: role
 "postgres.<project-ref>" does not exist`, eftersom poolern mappar den identiteten till den
 faktiska rollen (`postgres`) internt — ingen roll med det pooler-namnet finns i `pg_roles`.
-`backend/scripts/ensure_app_role.py` frågar numera `SELECT current_user` för att få den
+`backend/scripts/security/ensure_app_role.py` frågar numera `SELECT current_user` för att få den
 faktiska anslutna rollen istället för att anta att URL-användarnamnet är rollnamnet — se
 skriptets kommentarer och `backend/tests/backend/test_ensure_app_role.py` för regressionstestet.
 
@@ -237,7 +237,7 @@ hälsokontroller, `✓ Ready in 0ms` från Next.js) fram till den externa SIGTER
 alltså en förväntad, sekundär konsekvens av det första kraschade försöket, inte ett eget fel
 att fixa i containern — att förhindra den första kraschen (nedan) förhindrar hela kedjan.
 
-**Fix, i `backend/scripts/ensure_app_role.py`:**
+**Fix, i `backend/scripts/security/ensure_app_role.py`:**
 1. Lösenordet ändras nu bara när rollen skapas för första gången, eller när
    `MAINAI_APP_ROTATE_PASSWORD=true` är explicit satt för just den deployen — aldrig som en
    bieffekt av en vanlig omstart. Se miljövariabeltabellen nedan.

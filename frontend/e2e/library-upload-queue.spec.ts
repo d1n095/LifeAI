@@ -8,7 +8,7 @@ import { loginViaUi } from "./helpers";
 // one file could be picked at a time, uploads were sequential and reset on navigation, and
 // each page had its own bespoke delete state) and now pass against the fix.
 //
-// Runs against the real backend (scripts/run_e2e_backend.py) for the golden-path/consolidation
+// Runs against the real backend (scripts/ci/run_e2e_backend.py) for the golden-path/consolidation
 // checks; the concurrency-limit, partial-failure, retry and delete-error checks use
 // page.route() to get deterministic, real HTTP responses without depending on backend timing
 // (same convention as shell-pages.spec.ts).

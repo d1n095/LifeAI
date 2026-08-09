@@ -1,6 +1,6 @@
 """Coverage for the schema-wide privilege floor: `mainai_app` must hold NONE of
 TRUNCATE/REFERENCES/TRIGGER on ANY table in schema public
-(`_NEVER_GRANTED_TABLE_PRIVS` in backend/scripts/s1a_privilege_policy.py).
+(`_NEVER_GRANTED_TABLE_PRIVS` in backend/scripts/security/s1a_privilege_policy.py).
 
 Origin — PR #42's independent security review, deferred there as explicitly non-blocking:
 migration 0031 gave `messages` owner-scoped RLS, but `mainai_app` still held TRUNCATE on it,
@@ -34,7 +34,7 @@ from app.config import get_settings
 from app.db import migration_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
-POLICY_PATH = BACKEND_ROOT / "scripts" / "s1a_privilege_policy.py"
+POLICY_PATH = BACKEND_ROOT / "scripts" / "security" / "s1a_privilege_policy.py"
 
 # The four tables PR #42's review named explicitly. The floor covers every table in the
 # schema, but these are the ones whose user data made the finding worth acting on, so they get
@@ -325,7 +325,7 @@ def test_no_bootstrap_path_grants_all_privileges_on_tables():
     present — a sequence's privilege set (USAGE/SELECT/UPDATE) has no TRUNCATE/REFERENCES/
     TRIGGER in it and is genuinely needed for `nextval()`."""
     python_sources = [
-        BACKEND_ROOT / "scripts" / "ensure_app_role.py",
+        BACKEND_ROOT / "scripts" / "security" / "ensure_app_role.py",
         BACKEND_ROOT / "tests" / "conftest.py",
     ]
     # .github/workflows/ci.yml provisions mainai_app itself for the two Playwright E2E jobs

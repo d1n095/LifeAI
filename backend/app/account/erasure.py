@@ -61,7 +61,7 @@ grant the ordinary, request-scoped `mainai_app` role SELECT+INSERT+UPDATE on the
 meaning any request session (not just this module's own code) could technically read every
 account's pending erasure operation ids/storage keys, or rewrite any task's status. Fixed on
 two fronts:
-  - `backend/scripts/s1a_privilege_policy.py` now grants `mainai_app` INSERT ONLY on this
+  - `backend/scripts/security/s1a_privilege_policy.py` now grants `mainai_app` INSERT ONLY on this
     table — the account-erasure transaction below still runs on the ordinary per-request
     session, but it only ever needs to CREATE task rows, never read or update them back.
   - `attempt_pending_storage_deletions_for_operation()` no longer accepts the caller's
@@ -142,7 +142,7 @@ Pass 28 (a third founder review) closed three more real gaps:
    maliciously- or accidentally-queued arbitrary key could destroy with zero trace, since the
    worker's own reference check (`storage_key_still_referenced_global()`, migration 0020) only
    ever looks at `documents`/`knowledge_import_jobs`. Fixed by `mainai_app` getting ZERO direct
-   privileges on `storage_deletion_tasks` at all (see `backend/scripts/s1a_privilege_policy.py`)
+   privileges on `storage_deletion_tasks` at all (see `backend/scripts/security/s1a_privilege_policy.py`)
    and a new SECURITY DEFINER function, `enqueue_account_erasure_storage_task()` (migration
    0022), the ONLY way an ordinary session may create a task row — it re-derives the caller
    from `app.current_user_id`, explicitly re-verifies `p_storage_key` belongs to that caller via
