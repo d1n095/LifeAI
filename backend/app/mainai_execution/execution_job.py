@@ -33,7 +33,7 @@ import logging
 import subprocess
 import uuid
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -101,6 +101,26 @@ async def _handle_read_only_audit(db: Session, task: MainAITask) -> dict:
     return {"summary": result.content, "provider": result.provider, "model": result.model}
 
 
+def _validate_repo_edit_file_path(path_value: object) -> str:
+    """Hardening pass finding (P0): `path_value` is AI-proposed, untrusted content (the code
+    agent's own response, itself derived from a possibly hallucinated or prompt-injected
+    task description) that becomes the right-hand operand of `repo_root / path_value` in
+    `_handle_repo_edit()` below. The previous check here only rejected `..` segments --
+    verify.py's validate_targeted_tests_target() (which this call site's own comment used to
+    claim mirrored) additionally rejects ABSOLUTE paths, and that check was missing here. This
+    was not a lesser gap: pathlib's `/` operator silently DISCARDS the left operand entirely
+    when the right operand is absolute (`Path("/repo/root") / "/etc/cron.d/x" ==
+    Path("/etc/cron.d/x")`, not an error) -- so an absolute AI-proposed path was a genuine
+    arbitrary-file-WRITE primitive onto the executor host's filesystem, wherever the mainai
+    worker process has write access, with no `..` involved at all."""
+    if not isinstance(path_value, str) or not path_value:
+        raise TaskExecutionError(f"Code agent file entry 'path' must be a non-empty string, got {path_value!r}.")
+    path = PurePosixPath(path_value)
+    if path.is_absolute() or ".." in path.parts:
+        raise TaskExecutionError(f"Refusing an absolute or '..'-escaping file path from the code agent: {path_value!r}")
+    return path_value
+
+
 def _parse_code_agent_response(raw: str) -> dict:
     import json
 
@@ -119,8 +139,7 @@ def _parse_code_agent_response(raw: str) -> dict:
     for f in parsed["files"]:
         if not isinstance(f, dict) or "path" not in f or "content" not in f:
             raise TaskExecutionError(f"Malformed file entry in code agent response: {f!r}")
-        if ".." in Path(f["path"]).parts:
-            raise TaskExecutionError(f"Refusing a path containing '..': {f['path']!r}")
+        _validate_repo_edit_file_path(f["path"])
     return parsed
 
 
@@ -129,10 +148,17 @@ async def _handle_repo_edit(db: Session, task: MainAITask) -> dict:
     result, _attempted = await chat_with_fallback(db, messages)
     parsed = _parse_code_agent_response(result.content)
 
-    repo_root = _repo_root()
+    repo_root = _repo_root().resolve()
     previous_contents: dict[str, str | None] = {}
     for file in parsed["files"]:
-        abs_path = repo_root / file["path"]
+        # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
+        # resolves symlinks too, so a pre-existing symlink inside the repo tree pointing outside
+        # it (a separate, lower-likelihood attack surface -- would require a malicious symlink
+        # already merged into the repo, not just a malicious AI response) still can't be used to
+        # escape repo_root via a syntactically clean relative path.
+        abs_path = (repo_root / file["path"]).resolve()
+        if abs_path != repo_root and repo_root not in abs_path.parents:
+            raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
         previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])

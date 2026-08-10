@@ -732,6 +732,215 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     assert "branch" in completed_event["work_result"]
 
 
+# ---------------------------------------------------------------- E'. repo_edit absolute-path attack
+#
+# Hardening pass finding (P0): pathlib's `/` operator silently DISCARDS the left operand when
+# the right operand is absolute -- `repo_root / "/etc/cron.d/x" == Path("/etc/cron.d/x")`, not
+# an error. The pre-fix `_parse_code_agent_response()` only rejected '..' in an AI-proposed
+# file path, never an absolute one, making a repo_edit task's code-agent response an arbitrary-
+# file-WRITE primitive onto the executor host's filesystem. See
+# app/mainai_execution/execution_job.py's `_validate_repo_edit_file_path()` for the fix.
+
+
+def test_parse_code_agent_response_rejects_an_absolute_file_path(db_session):
+    from app.mainai_execution.execution_job import TaskExecutionError, _parse_code_agent_response
+
+    raw = '{"files": [{"path": "/etc/cron.d/mainai-pwned", "content": "* * * * * root touch /tmp/pwned"}], "commit_message": "x"}'
+    with pytest.raises(TaskExecutionError, match="absolute"):
+        _parse_code_agent_response(raw)
+
+
+def test_parse_code_agent_response_still_accepts_a_safe_relative_path(db_session):
+    from app.mainai_execution.execution_job import _parse_code_agent_response
+
+    raw = '{"files": [{"path": "backend/app/x.py", "content": "x = 1\\n"}], "commit_message": "x"}'
+    parsed = _parse_code_agent_response(raw)
+    assert parsed["files"][0]["path"] == "backend/app/x.py"
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_never_writes_outside_the_repo_and_never_completes(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """The full end-to-end proof: a code-agent response proposing an absolute path must not
+    write ANYTHING at that path, and the task must land on retryable_failed (attempts remain),
+    never completed -- matching how every other TaskExecutionError-raising handler failure is
+    already treated (see test_run_task_execution_job_verification_failure_never_completes_the_task
+    for the sibling verification-failure case)."""
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    victim = tmp_path.parent / f"mainai_absolute_write_poc_{uuid.uuid4().hex}.txt"
+    assert not victim.exists()
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat('{"files": [{"path": "' + str(victim) + '", "content": "PWNED"}], "commit_message": "x"}'),
+    )
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    try:
+        assert not victim.exists(), "the absolute-path write must never have happened"
+    finally:
+        if victim.exists():
+            victim.unlink()
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed
+    assert task.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_repo_edit_with_a_symlink_escape_never_writes_outside_the_repo(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """Defense in depth: even a syntactically clean relative path (no '..', not absolute) must
+    not be able to escape repo_root via a symlink already present in the checked-out tree --
+    _handle_repo_edit()'s resolve()-based confinement check (beyond
+    _validate_repo_edit_file_path()'s own syntactic checks) is what catches this."""
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    outside = tmp_path.parent / f"mainai_symlink_escape_target_{uuid.uuid4().hex}"
+    outside.mkdir()
+    (tmp_path / "escape_hatch").symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat('{"files": [{"path": "escape_hatch/pwned.txt", "content": "PWNED"}], "commit_message": "x"}'),
+    )
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    try:
+        assert not (outside / "pwned.txt").exists(), "the symlink-escape write must never have happened"
+    finally:
+        for p in outside.glob("*"):
+            p.unlink()
+        outside.rmdir()
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed
+
+
+@pytest.mark.asyncio
+async def test_mutation_disabling_the_syntactic_path_guard_alone_is_still_caught_by_the_resolve_confinement_check(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """Mutation test: proves the two guards are genuinely INDEPENDENT layers, not one guard
+    dressed up as two. With _validate_repo_edit_file_path() disabled entirely (simulating that
+    guard being accidentally removed or broken in a future change), the absolute path still
+    reaches _handle_repo_edit() -- and its own separate resolve()-and-compare confinement check
+    must still block the write on its own."""
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(execution_job, "_validate_repo_edit_file_path", lambda path_value: path_value)  # mutation: guard #1 disabled
+    victim = tmp_path.parent / f"mainai_mutation_poc_{uuid.uuid4().hex}.txt"
+    assert not victim.exists()
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat('{"files": [{"path": "' + str(victim) + '", "content": "PWNED"}], "commit_message": "x"}'),
+    )
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    try:
+        assert not victim.exists(), "guard #2 (resolve-confinement in _handle_repo_edit) must independently block this even with guard #1 disabled"
+    finally:
+        if victim.exists():
+            victim.unlink()
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed
+
+
+def test_record_engineering_lesson_for_the_repo_edit_absolute_path_write_fix(db_session, owner_id):
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "_handle_repo_edit()'s file-write path only rejected '..' in an AI-proposed file "
+            "path, never an absolute one. pathlib's `/` operator silently DISCARDS the left "
+            "operand when the right operand is absolute -- `repo_root / '/etc/cron.d/x'` "
+            "returns exactly '/etc/cron.d/x', not an error -- so a hallucinated or prompt-"
+            "injected absolute path in a repo_edit task's code-agent response was an arbitrary-"
+            "file-WRITE primitive onto the executor host's filesystem, wherever the mainai "
+            "worker process has write access."
+        ),
+        root_cause=(
+            "verify.py's validate_targeted_tests_target() (a READ/subprocess-argv path) had "
+            "already been given both the '..' AND absolute-path checks earlier in this "
+            "hardening pass, and its own docstring incorrectly asserted the WRITE path in "
+            "_parse_code_agent_response() already matched -- it did not; only the '..' check "
+            "existed there. Fixing one call site's path-validation gap does not verify a "
+            "sibling call site actually has the same protection -- it has to be checked "
+            "directly, the same generalization gap already named in the crash-matrix point I "
+            "engineering lesson."
+        ),
+        affected_component="app.mainai_execution.execution_job._handle_repo_edit",
+        severity=EngineeringLessonSeverity.critical,
+        evidence=(
+            "Reproduced directly: _parse_code_agent_response() accepted a file entry with "
+            "path='/tmp/...' before the fix, and Path('/repo/root') / '/etc/cron.d/x' was "
+            "confirmed to evaluate to Path('/etc/cron.d/x') via the Python pathlib docs' own "
+            "documented (not a bug) semantics."
+        ),
+        fix=(
+            "Added _validate_repo_edit_file_path() (rejects absolute AND '..' paths, mirroring "
+            "validate_targeted_tests_target()) at parse time, PLUS a second, independent "
+            "resolve()-and-compare confinement check in _handle_repo_edit() itself for defense "
+            "in depth against symlink escapes -- proven independent via a mutation test that "
+            "disables the first guard alone and confirms the second still blocks the write."
+        ),
+        general_rule=(
+            "Any code path that joins a caller-controlled path segment onto a trusted base "
+            "directory with pathlib's `/` operator must explicitly reject absolute segments -- "
+            "the operator's own semantics silently discard the base for an absolute right-hand "
+            "side, which is very unlikely to be what the author intended and is not visible "
+            "from reading the join expression alone. Grep every `_root / <ai_or_user_input>` "
+            "or `base_dir / <external_value>` join site in the codebase for this exact shape."
+        ),
+        applies_to=["repo_edit", "path_traversal", "arbitrary_file_write", "subprocess_repo_edit_attack"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.1 hardening pass (post-PR #57) -- subprocess/repo_edit attack, absolute-path arbitrary write",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test="tests/backend/test_mainai_execution_executor.py::test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_never_writes_outside_the_repo_and_never_completes",
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["arbitrary_file_write"])
+    assert any(item.id == lesson.id for item in found)
+
+
 @pytest.mark.asyncio
 async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exists_from_a_prior_uncheckpointed_push(db_session, owner_id, monkeypatch):
     """Crash matrix finding H (hardening pass): run_task_execution_job() checkpoints
