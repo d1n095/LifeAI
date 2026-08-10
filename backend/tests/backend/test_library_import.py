@@ -310,7 +310,7 @@ async def test_manifest_checksum_mismatch_rejects_that_file_only(db_session, mak
 @pytest.fixture(autouse=True)
 def _fast_backoff(monkeypatch):
     """Keeps retry tests fast — the backoff POLICY itself is unit-tested for real timing in
-    test_job_retry.py; here only the RETRY BEHAVIOR (does it retry, how many times, does it
+    tests/backend/jobs/test_job_retry.py; here only the RETRY BEHAVIOR (does it retry, how many times, does it
     give up) matters."""
     monkeypatch.setattr("app.worker.compute_backoff_seconds", lambda attempt: 0.01)
 
@@ -529,7 +529,7 @@ async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
 ):
     """The "two concurrent workers/import attempts" scenario STEG 11 explicitly asks to be
     tested, at the job-orchestration level (not just the lock primitive in isolation, see
-    test_job_lock.py) — two jobs sharing the same source_checksum, run concurrently, must
+    tests/backend/jobs/test_job_lock.py) — two jobs sharing the same source_checksum, run concurrently, must
     not both proceed to do the actual import work.
 
     The module-level _fake_embedding_provider fixture returns instantly with no real
