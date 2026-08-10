@@ -8,7 +8,6 @@ and its result is what actually gates whether a task may become `completed`
 
 import dataclasses
 import subprocess
-import uuid
 from pathlib import PurePosixPath
 
 from app.models.mainai_execution import MainAITask

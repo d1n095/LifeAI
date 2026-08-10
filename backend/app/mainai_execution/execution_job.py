@@ -54,7 +54,6 @@ from app.mainai_execution.verify import (
     verify_task,
 )
 from app.models.mainai_execution import (
-    RETRYABLE_MAINAI_TASK_STATUSES,
     MainAIGoal,
     MainAITask,
     MainAITaskEvent,
