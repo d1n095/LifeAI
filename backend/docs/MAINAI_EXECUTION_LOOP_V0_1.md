@@ -152,6 +152,12 @@ Named explicitly rather than silently left implicit:
   `KnowledgeClaim`'s `assess_claim_confidence()`) — two contradictory lessons can both sit
   `active` with nothing flagging the contradiction. Documented explicitly in
   `EngineeringLessonConfidence`'s own docstring.
+- **`lookup_lessons()` returns every active lesson matching `applies_to_any`, uncapped.**
+  Hardening pass, performance/bounds review: the query itself is GIN-indexed (migration 0032's
+  `ix_engineering_lessons_applies_to`), so it's not a full scan, but there is no `LIMIT` on the
+  result set. Not practically relevant at V0.1's scale — lessons are created deliberately by
+  hardening passes, not at per-task-execution volume — but would need one if the lesson corpus
+  ever grew into the thousands.
 - **Captured subprocess stdout/stderr (`stdout_tail`/`stderr_tail` on `run_tests`/verification
   evidence) is not secret-scanned or redacted before being stored as durable
   `MainAITaskEvent.detail`.** If a test file (including one an AI-authored `repo_edit` just
