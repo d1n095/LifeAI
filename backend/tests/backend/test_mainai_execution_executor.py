@@ -506,6 +506,141 @@ def test_verify_task_fails_when_the_targeted_test_fails(tmp_path):
     assert result.steps[0].detail["returncode"] != 0
 
 
+def test_verify_task_treats_a_subprocess_timeout_as_a_failed_step_not_an_uncaught_exception(tmp_path):
+    """Hardening pass finding (P1): subprocess.run(..., timeout=...) raises TimeoutExpired, a
+    THIRD exception shape neither VerificationStepError (malformed plan) nor a normal
+    passed/failed VerificationStepResult. Before the fix, this propagated straight out of
+    verify_task() past every except clause built for it -- run_task_execution_job()'s own
+    `except (TaskExecutionError, VerificationStepError, GitHubClientError)` does not include
+    it -- landing at app/worker.py's generic handler, which can mark the mainai_jobs row failed
+    but has no way to reach the MainAITask itself. The task was left stuck at `running`
+    forever: not retryable, not cancellable (see executor.py's cancel_task() docstring), only
+    ever visible as TaskLiveness.dead with nothing acting on that classification. A timeout
+    must be an ordinary failed VerificationStepResult, exactly like a real assertion failure."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_slow.py").write_text("import time\ndef test_slow():\n    time.sleep(5)\n")
+
+    result = verify_task(_FakeTask([{"kind": "targeted_tests", "target": "tests/test_slow.py", "timeout_seconds": 1}]), cwd=str(tmp_path))
+
+    assert result.passed is False
+    assert result.steps[0].passed is False
+    assert result.steps[0].detail["error"] == "timeout"
+
+
+def test_run_pytest_treats_a_subprocess_timeout_as_a_failed_result_not_an_uncaught_exception(tmp_path):
+    """Same fix, sibling call site: execution_job.py's _run_pytest() is run_tests' own PRIMARY
+    work (not verification), used directly by _handle_run_tests() -- had the identical
+    TimeoutExpired gap."""
+    from app.mainai_execution.execution_job import _run_pytest
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_slow.py").write_text("import time\ndef test_slow():\n    time.sleep(5)\n")
+
+    result = _run_pytest("tests/test_slow.py", cwd=tmp_path, timeout_seconds=1)
+
+    assert result["passed"] is False
+    assert result["error"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_run_tests_with_a_subprocess_timeout_never_leaves_the_task_stuck_running(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """The full end-to-end proof, mutation-test style: reproduces the pre-fix bug directly by
+    calling the REAL, unmocked timeout path through the full run_task_execution_job() job entry
+    point (a real subprocess, a real 1-second timeout, no faking) and confirms the task reaches
+    retryable_failed -- never left at `running` (which is what happened before this fix)."""
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    (tmp_path / "backend" / "tests" / "test_slow.py").write_text("import time\ndef test_slow():\n    time.sleep(5)\n")
+    # _handle_run_tests() doesn't forward a step's own 'timeout_seconds' to _run_pytest() (it
+    # always uses the 300s default) -- force a 1s timeout here so the test doesn't have to wait
+    # 300s for the real default to trigger. Not itself the bug under test here.
+    real_run_pytest = execution_job._run_pytest
+    monkeypatch.setattr(execution_job, "_run_pytest", lambda target, *, cwd, timeout_seconds=300: real_run_pytest(target, cwd=cwd, timeout_seconds=1))
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(
+        db_session,
+        goal,
+        task_type="run_tests",
+        verification_plan=[{"kind": "targeted_tests", "target": "tests/test_slow.py"}],
+    )
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    job = superuser_db.get(MainAIJob, job.id)
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed, "a subprocess timeout must never leave the task stuck at running"
+    assert job.status == MainAIJobStatus.completed
+
+
+def test_record_engineering_lesson_for_the_subprocess_timeout_task_stuck_running_fix(db_session, owner_id):
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "subprocess.run(..., timeout=...) raises subprocess.TimeoutExpired, which was not "
+            "caught anywhere between the two real pytest subprocess call sites "
+            "(_run_targeted_tests() in verify.py, _run_pytest() in execution_job.py) and "
+            "run_task_execution_job()'s own except tuple (TaskExecutionError, "
+            "VerificationStepError, GitHubClientError). A timed-out subprocess propagated all "
+            "the way to app/worker.py's generic `except Exception`, which marks the mainai_jobs "
+            "row failed but has no way to reach the MainAITask -- _finalize_task_outcome() is "
+            "only ever called from inside run_task_execution_job()'s own try/except. The task "
+            "was left stuck at `running` forever: not retryable (retry_task() rejects "
+            "non-retryable statuses), not cancellable (cancel_task() deliberately excludes "
+            "`running`), correctly classified as TaskLiveness.dead by liveness.py but with "
+            "nothing downstream ever acting on that classification by design."
+        ),
+        root_cause=(
+            "Two subprocess call sites each had a bare `subprocess.run(..., timeout=...)` with "
+            "no try/except for the one exception type a timeout specifically raises -- both "
+            "sites already correctly handled a non-zero returncode (an ordinary test failure) "
+            "but neither handled the DIFFERENT exception-shaped failure mode a timeout produces."
+        ),
+        affected_component="app.mainai_execution.verify._run_targeted_tests, app.mainai_execution.execution_job._run_pytest",
+        severity=EngineeringLessonSeverity.high,
+        evidence=(
+            "Reproduced end to end with a real subprocess (a test file that sleeps 5s against a "
+            "1s timeout) through the full run_task_execution_job() entry point -- pre-fix, this "
+            "raised uncaught; post-fix, the task cleanly reaches retryable_failed."
+        ),
+        fix=(
+            "Both call sites now catch subprocess.TimeoutExpired and return an ordinary FAILED "
+            "result (VerificationStepResult(passed=False, ...) / {'passed': False, ...}) "
+            "instead of letting the exception propagate -- routing a timeout through the exact "
+            "same attempts-remaining retry/failed logic every other test failure already uses."
+        ),
+        general_rule=(
+            "Every real subprocess call with a timeout= argument needs an explicit "
+            "except subprocess.TimeoutExpired alongside its normal returncode handling -- a "
+            "timeout is a DIFFERENT failure shape (an exception) than an ordinary failure (a "
+            "non-zero returncode), and any except tuple built by enumerating 'the exceptions "
+            "this code path can raise' from the ordinary-failure case alone will miss it. This "
+            "applies to every subprocess.run(..., timeout=...) call in the codebase, not just "
+            "these two."
+        ),
+        applies_to=["subprocess", "timeout", "run_tests", "verification", "task_stuck_running", "subprocess_repo_edit_attack"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.1 hardening pass (post-PR #57) -- subprocess/repo_edit attack, timeout/kill handling",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test="tests/backend/test_mainai_execution_executor.py::test_run_task_execution_job_run_tests_with_a_subprocess_timeout_never_leaves_the_task_stuck_running",
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["task_stuck_running"])
+    assert any(item.id == lesson.id for item in found)
+
+
 def test_verify_task_raises_for_an_unknown_step_kind():
     with pytest.raises(VerificationStepError):
         verify_task(_FakeTask([{"kind": "run_a_magic_wand"}]), cwd=".")

@@ -14,6 +14,22 @@ from pathlib import PurePosixPath
 from app.models.mainai_execution import MainAITask
 
 
+def decode_subprocess_output(value: str | bytes | None) -> str:
+    """subprocess.TimeoutExpired's own `.stdout`/`.stderr` are NOT reliably `str` even when
+    the original subprocess.run() call passed `text=True` -- observed directly (not merely
+    theoretical): a real `python -m pytest` subprocess killed by a timeout can hand back
+    `.stderr` as raw `bytes` while `.stdout` is `None`, an inconsistency `subprocess.run`'s own
+    non-timeout return value never exhibits. Both must be normalized before storage (jsonb
+    columns reject bytes) or the crash this whole fix exists to prevent -- an uncaught
+    exception leaving a task stuck at `running` -- would resurface one level deeper, INSIDE the
+    fix meant to close it."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 class VerificationStepError(Exception):
     """Raised for a structurally invalid verification_plan entry (unknown kind, missing
     field) — never silently skipped or treated as a pass."""
@@ -64,13 +80,40 @@ class VerificationResult:
 
 def _run_targeted_tests(step: dict, *, cwd: str) -> VerificationStepResult:
     target = validate_targeted_tests_target(step.get("target"))
-    result = subprocess.run(
-        ["python", "-m", "pytest", "-q", target],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=step.get("timeout_seconds", 300),
-    )
+    timeout_seconds = step.get("timeout_seconds", 300)
+    try:
+        result = subprocess.run(
+            ["python", "-m", "pytest", "-q", target],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Hardening pass finding (P1): subprocess.run(..., timeout=...) raises
+        # TimeoutExpired -- NOT a VerificationStepError, and not caught anywhere between here
+        # and run_task_execution_job()'s except tuple. Left uncaught, this propagated all the
+        # way to app/worker.py's generic `except Exception`, which marks the mainai_jobs row
+        # failed but has no way to reach the MainAITask itself (_finalize_task_outcome() is
+        # only ever called from inside run_task_execution_job()'s own try/except) -- the task
+        # was left stuck at `running` forever: not retryable (retry_task() only accepts
+        # RETRYABLE_MAINAI_TASK_STATUSES), not cancellable (cancel_task() deliberately excludes
+        # `running` -- see executor.py's cancel_task() docstring), correctly detected as `dead`
+        # by liveness.task_liveness() but with nothing downstream ever acting on that (by
+        # design -- see that module's own docstring). Treating a timeout as an ordinary FAILED
+        # verification step (not an exception) routes it through the exact same
+        # attempts-remaining retry/failed logic every other test failure already uses.
+        return VerificationStepResult(
+            kind="targeted_tests",
+            passed=False,
+            detail={
+                "target": target,
+                "error": "timeout",
+                "timeout_seconds": timeout_seconds,
+                "stdout_tail": decode_subprocess_output(exc.stdout)[-4000:],
+                "stderr_tail": decode_subprocess_output(exc.stderr)[-2000:],
+            },
+        )
     passed = result.returncode == 0
     # stdout/stderr truncated -- this is stored as durable evidence (MainAITaskEvent.detail,
     # jsonb), never an unbounded blob.

@@ -45,7 +45,14 @@ from app.jobs.service import mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.executor import task_for_job
 from app.mainai_execution.graph import recompute_task_readiness
-from app.mainai_execution.verify import VerificationResult, VerificationStepError, VerificationStepResult, validate_targeted_tests_target, verify_task
+from app.mainai_execution.verify import (
+    VerificationResult,
+    VerificationStepError,
+    VerificationStepResult,
+    decode_subprocess_output,
+    validate_targeted_tests_target,
+    verify_task,
+)
 from app.models.mainai_execution import (
     RETRYABLE_MAINAI_TASK_STATUSES,
     MainAIGoal,
@@ -178,9 +185,29 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     argv element -- validated with the SAME check verify.py's own targeted_tests step uses
     (validate_targeted_tests_target()), so a `..`-escaping or absolute target can never reach
     this subprocess call, matching the discipline _parse_code_agent_response() already applies
-    to AI-proposed file WRITE paths in _handle_repo_edit() above."""
+    to AI-proposed file WRITE paths in _handle_repo_edit() above.
+
+    Hardening pass finding (P1, sibling of verify.py's identical fix): subprocess.run(...,
+    timeout=...) raises TimeoutExpired, not returns a returncode -- left uncaught, this
+    propagated past _handle_run_tests()'s own `except VerificationStepError` (wrong exception
+    type) and run_task_execution_job()'s `except (TaskExecutionError, VerificationStepError,
+    GitHubClientError)` (also wrong type), landing at app/worker.py's generic handler, which
+    can only mark the JOB failed -- the TASK itself was left stuck at `running` forever, with
+    no retry or cancel path (see verify.py's own fix for the full consequence chain). Treated
+    as an ordinary failed result here too, for the same reason."""
     validate_targeted_tests_target(target)
-    result = subprocess.run(["python", "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+    try:
+        result = subprocess.run(["python", "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "target": target,
+            "returncode": None,
+            "passed": False,
+            "error": "timeout",
+            "timeout_seconds": timeout_seconds,
+            "stdout_tail": decode_subprocess_output(exc.stdout)[-4000:],
+            "stderr_tail": decode_subprocess_output(exc.stderr)[-2000:],
+        }
     return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
 
 
