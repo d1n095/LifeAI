@@ -3,7 +3,7 @@ app/rag/media_import.py, and the full import pipeline wired through
 app/rag/library_import.py. Runs against real local Postgres (RLS included); the
 transcription provider is monkeypatched with real, deterministic segment data for the
 integration tests (the exact same pattern this codebase already uses for
-OpenAIProvider.chat/.embed — see test_library_import.py's _fake_chat/_fake_embed), never a
+OpenAIProvider.chat/.embed — see tests/backend/rag/test_library_import.py's _fake_chat/_fake_embed), never a
 real network call."""
 
 import pytest
@@ -71,7 +71,7 @@ def _make_job(db_session, owner_id, raw: bytes = b"", filename: str = "test.mp3"
     """Durable-worker package: run_import_job() reads the original from app/storage/ via
     ImportJob.source_storage_key rather than taking raw bytes directly — this helper does the
     storage write a real POST /api/library/import would already have done (see
-    test_library_import.py's identical helper)."""
+    tests/backend/rag/test_library_import.py's identical helper)."""
     from app.models.import_job import ImportJob, ImportJobStatus
 
     _set_rls_user(db_session, owner_id)

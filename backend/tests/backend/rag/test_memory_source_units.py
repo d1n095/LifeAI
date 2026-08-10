@@ -1,6 +1,6 @@
 """S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, migration 0019) — schema/trigger/
 privilege/lifecycle coverage for memory_source_units/document_source_units/
-memory_source_lifecycle_events. Real local Postgres, mirroring tests/backend/test_claims.py's
+memory_source_lifecycle_events. Real local Postgres, mirroring tests/backend/rag/test_claims.py's
 pattern (RLS is exercised for real, not mocked).
 
 Not covered here (separate, later commits per the S1A/S1B/S1C plan and this PR's own
@@ -58,9 +58,9 @@ from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
-_ENSURE_APP_ROLE_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "ensure_app_role.py"
-_BACKEND_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+_ENSURE_APP_ROLE_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "ensure_app_role.py"
+_BACKEND_ROOT = str(Path(__file__).resolve().parent.parent.parent.parent)
 
 
 def _load_apply_runtime_privileges():
@@ -1249,7 +1249,7 @@ def test_worker_container_reboot_still_narrows_privileges_via_docker_entrypoint(
     logic) with RUN_MIGRATIONS=false and asserts privileges end up narrowed anyway."""
     settings = get_settings()
     engine = create_engine(settings.database_url)
-    entrypoint = Path(__file__).resolve().parent.parent.parent / "docker-entrypoint.sh"
+    entrypoint = Path(__file__).resolve().parent.parent.parent.parent / "docker-entrypoint.sh"
     try:
         with engine.begin() as conn:
             # Simulates ensure_app_role.py's unconditional re-grant on an ordinary restart,

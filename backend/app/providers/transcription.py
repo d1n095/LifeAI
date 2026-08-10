@@ -12,7 +12,7 @@ what a real deployment gets today, and it is honest about that in the transcript
 for a real, unrecognized audio/video file (see its docstring). Tests get deterministic,
 meaningful multi-segment transcripts by monkeypatching `.transcribe()` directly — the exact
 same pattern already used for `OpenAIProvider.chat`/`.embed` throughout this codebase (see
-e.g. tests/backend/test_library_import.py's `_fake_chat`/`_fake_embed`) — not by a separate
+e.g. tests/backend/rag/test_library_import.py's `_fake_chat`/`_fake_embed`) — not by a separate
 "fake provider" class.
 """
 

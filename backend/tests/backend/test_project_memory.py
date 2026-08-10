@@ -75,7 +75,7 @@ def _narrow_privileges_before_this_module():
     store_content_with_reference_lock()), which mainai_app is only granted EXECUTE on via
     apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy -- never
     automatically by tests/conftest.py's _test_database fixture's own blanket table/sequence
-    GRANT ALL. Same fixture, same rationale, as tests/backend/test_library_routes.py's
+    GRANT ALL. Same fixture, same rationale, as tests/backend/rag/test_library_routes.py's
     identical one (added there in Pass 30 for the same reason); this file never needed it
     before this pass, since these three functions used to call storage.write_stream()
     directly with no reference check at all."""
