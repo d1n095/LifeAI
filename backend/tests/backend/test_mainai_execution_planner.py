@@ -23,6 +23,14 @@ Covers, in order:
      and an empty tasks array are all rejected as PlanValidationError, never silently
      coerced.
 
+  I. State-machine mutation matrix (hardening pass): direct raw-SQL writes that attempt to
+     violate migration 0032's `mainai_tasks` CHECK constraints, proving those constraints are
+     genuinely enforced by Postgres against a real violating write -- not just present in the
+     migration SQL and trusted by convention (see _mark_terminal()'s own docstring above,
+     which documents the convention every application code path already follows; this section
+     proves the DB itself refuses to accept a write that breaks it, e.g. from a future bug in
+     application code that forgets the convention).
+
 Real local Postgres (RLS included)."""
 
 import uuid
@@ -567,3 +575,54 @@ async def test_propose_plan_via_ai_rejects_an_unknown_risk_level(db_session, own
 
     with pytest.raises(planner.PlanValidationError):
         await planner.propose_plan_via_ai(db_session, goal=goal)
+
+
+# ---------------------------------------------------------------- I. state-machine mutation matrix
+#
+# Hardening pass: proving migration 0032's mainai_tasks CHECK constraints genuinely reject a
+# violating write at the database level, not just document a convention application code
+# happens to follow. Each test attempts the exact mutation the constraint exists to forbid,
+# via raw SQL bypassing every ORM-level guard, and expects Postgres itself to refuse it.
+
+
+def _one_task(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(db_session, goal=goal, rationale="r", tasks=[PlannedTaskSpec(description="t", task_type="read_only_audit")], created_by="test")
+    db_session.commit()
+    return db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+
+
+def test_ck_completed_at_matches_terminal_status_rejects_completed_without_completed_at(db_session, owner_id):
+    from sqlalchemy.exc import IntegrityError
+
+    task = _one_task(db_session, owner_id)
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(sa_text("UPDATE mainai_tasks SET status = 'completed' WHERE id = :id"), {"id": str(task.id)})
+    db_session.rollback()
+
+
+def test_ck_completed_at_matches_terminal_status_rejects_completed_at_set_on_a_non_terminal_status(db_session, owner_id):
+    """The reverse direction of the same constraint: a still-`ready` task can never carry a
+    non-NULL completed_at either -- otherwise a report/UI reading `completed_at IS NOT NULL`
+    as a proxy for "done" could be fooled by a task that never actually reached a terminal
+    status."""
+    from sqlalchemy.exc import IntegrityError
+
+    task = _one_task(db_session, owner_id)
+    assert task.status == MainAITaskStatus.ready
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(sa_text("UPDATE mainai_tasks SET completed_at = now() WHERE id = :id"), {"id": str(task.id)})
+    db_session.rollback()
+
+
+def test_ck_attempts_within_budget_rejects_attempts_exceeding_max_attempts(db_session, owner_id):
+    from sqlalchemy.exc import IntegrityError
+
+    task = _one_task(db_session, owner_id)
+    assert task.max_attempts == 3
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(sa_text("UPDATE mainai_tasks SET attempts = max_attempts + 1 WHERE id = :id"), {"id": str(task.id)})
+    db_session.rollback()

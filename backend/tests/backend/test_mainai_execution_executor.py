@@ -583,6 +583,50 @@ async def test_run_task_execution_job_read_only_audit_success_path(db_session, s
 
 
 @pytest.mark.asyncio
+async def test_mark_completed_called_twice_for_the_same_lease_generation_never_produces_a_duplicate_terminal_event(
+    db_session, superuser_db, owner_id, monkeypatch
+):
+    """State-machine mutation matrix (hardening pass): 'duplicate terminal events'. Simulates
+    two racing runners believing they both still hold the SAME job lease (worker_id AND
+    lease_generation identical) after run_task_execution_job() has already legitimately
+    finalized the task -- e.g. a worker process that stalled right after its own mark_completed
+    call landed, then resumed and replayed the same finalization logic. _guarded_job_write()'s
+    fencing WHERE clause (`... AND lease_generation = :lease_generation AND status = 'running'`)
+    is a compare-and-swap on job status, not just identity: once the first call has already
+    moved status away from 'running', a second call with the IDENTICAL (worker_id,
+    lease_generation) still finds zero matching rows and must raise JobLeaseLostError -- proving
+    a second _finalize_task_outcome() call (which is only ever reached after mark_completed
+    succeeds -- see run_task_execution_job()) is structurally unreachable, so exactly one
+    `completed` MainAITaskEvent can ever be recorded for a single real attempt."""
+    from app.jobs.mainai_job_lease import JobLeaseLostError
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("Analysen visar inga problem."))
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="read_only_audit", verification_plan=[])
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    job = superuser_db.get(MainAIJob, job.id)
+    assert job.status == MainAIJobStatus.completed
+
+    with pytest.raises(JobLeaseLostError):
+        service.mark_completed(superuser_db, job, worker_id="worker-1", lease_generation=generation)
+    superuser_db.rollback()
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.completed
+    completed_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :id AND event_type = 'completed'"), {"id": str(task.id)}
+    ).scalar()
+    assert completed_events == 1
+
+
+@pytest.mark.asyncio
 async def test_run_task_execution_job_verification_failure_never_completes_the_task(db_session, superuser_db, owner_id, monkeypatch, tmp_path):
     """Demo-2-in-miniature: the founder's explicit requirement that a task must NEVER become
     `completed` just because the underlying mainai_jobs attempt finished running. A dependent
