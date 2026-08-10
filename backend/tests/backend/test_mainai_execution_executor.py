@@ -30,6 +30,8 @@ from datetime import datetime
 import pytest
 from sqlalchemy import text as sa_text
 
+from app.config import get_settings
+from app.integrations.github_client import GitHubClientError
 from app.jobs import service
 from app.jobs.mainai_job_lease import claim_next_mainai_job
 from app.mainai_execution import executor, lessons, planner
@@ -684,6 +686,143 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     ).scalar_one()
     assert completed_event["work_result"]["proposed"] is True
     assert "branch" in completed_event["work_result"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exists_from_a_prior_uncheckpointed_push(db_session, owner_id, monkeypatch):
+    """Crash matrix finding H (hardening pass): run_task_execution_job() checkpoints
+    _finalize_repo_edit()'s result under step='finalized' specifically so a crash AFTER a real
+    GitHub push succeeds but BEFORE that checkpoint commits doesn't push a second time -- but on
+    resume (no 'finalized' checkpoint found), _finalize_repo_edit() used to run again from
+    scratch: re-read base_sha from base_branch (unchanged by the first push), see the task
+    branch already existed and swallow that as 'fine, commit on top' -- then build the new
+    commit on the STALE base_sha instead of the branch's actual current tip. GitHub's real
+    fast-forward-only update_ref() correctly rejected that non-fast-forward update, and the
+    task ended up permanently `failed` even though the first attempt's push had already
+    durably succeeded. Reproduced here with a stateful fake GitHubClient modeling exactly that:
+    call _finalize_repo_edit() twice for the SAME task/work_result (simulating dispatch, then a
+    crash before the checkpoint, then a resume) -- both calls must succeed, and the second must
+    build on the first's real result, never on the stale original base."""
+    from app.integrations.github_client import GitHubClient
+    from app.mainai_execution.execution_job import _finalize_repo_edit
+
+    settings = get_settings()  # @lru_cache'd singleton -- the same object execution_job.py's own get_settings() call returns
+    monkeypatch.setattr(settings, "github_write_enabled", True)
+    monkeypatch.setattr(settings, "github_token", "fake-token-never-real")
+    monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
+
+    refs: dict[str, str] = {"claude/det-kommer-mer-879lcm": "base-sha-0"}
+    commit_parents: dict[str, str] = {"base-sha-0": None}
+    calls: list[str] = []
+
+    async def _fake_get_ref(self, branch):
+        calls.append(f"get_ref:{branch}")
+        if branch not in refs:
+            raise GitHubClientError(f"404: no such branch {branch}")
+        return refs[branch]
+
+    async def _fake_create_branch(self, *, new_branch, from_sha):
+        calls.append(f"create_branch:{new_branch}:{from_sha}")
+        if new_branch in refs:
+            raise GitHubClientError("422: Reference already exists")
+        refs[new_branch] = from_sha
+
+    async def _fake_commit_multiple_files(self, *, branch, base_sha, files, message):
+        calls.append(f"commit:{branch}:{base_sha}")
+        current_tip = refs.get(branch)
+        if current_tip is not None and current_tip != base_sha:
+            # The real, fast-forward-only failure this test exists to prove never happens on
+            # a correct resume: the new commit's parent (base_sha) is not the branch's actual
+            # current HEAD.
+            raise GitHubClientError("422: Update is not a fast forward")
+        new_sha = f"commit-{len(commit_parents)}"
+        commit_parents[new_sha] = base_sha
+        refs[branch] = new_sha
+        return {"commit_sha": new_sha, "tree_sha": f"tree-{new_sha}", "blob_shas": {f["path"]: f"blob-{new_sha}" for f in files}}
+
+    monkeypatch.setattr(GitHubClient, "get_ref", _fake_get_ref)
+    monkeypatch.setattr(GitHubClient, "create_branch", _fake_create_branch)
+    monkeypatch.setattr(GitHubClient, "commit_multiple_files", _fake_commit_multiple_files)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="repo_edit")
+    work_result = {"files": [{"path": "backend/app/x.py", "content": "x = 1\n"}], "commit_message": "test edit"}
+
+    first = await _finalize_repo_edit(db_session, task, work_result)
+    assert first["proposed"] is False
+    branch = first["branch"]
+    assert refs[branch] == first["commit_sha"]
+
+    # Simulates the crash: no checkpoint was recorded for `first`'s result, so
+    # run_task_execution_job() would call _finalize_repo_edit() again on resume.
+    second = await _finalize_repo_edit(db_session, task, work_result)
+    assert second["proposed"] is False
+    assert second["commit_sha"] != first["commit_sha"], "a real second commit is created (not perfectly idempotent, but must succeed)"
+    assert refs[branch] == second["commit_sha"]
+    # The critical assertion: the second commit's parent is the FIRST commit (a true
+    # fast-forward), never the original, stale base_branch sha.
+    assert commit_parents[second["commit_sha"]] == first["commit_sha"]
+
+
+def test_record_engineering_lesson_for_the_finalize_repo_edit_resume_fix(db_session, owner_id):
+    """MAINAI V0.1 hardening pass (post-PR #57): engineering learning loop, mandatory for a P1
+    finding. Crash matrix point H ('after GitHub commit before durable checkpoint') found a
+    real truthfulness bug in _finalize_repo_edit()'s resume path."""
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "A crash between _finalize_repo_edit()'s real GitHub push succeeding and "
+            "run_task_execution_job()'s 'finalized' checkpoint commit landing meant a resume "
+            "re-ran _finalize_repo_edit() from scratch: it re-read base_sha from the shared "
+            "base_branch (unchanged by the first push), saw the task's own branch already "
+            "existed, and built the new commit on the STALE base_sha instead of the branch's "
+            "real current tip. GitHub's fast-forward-only update_ref() correctly rejected the "
+            "non-fast-forward update, but the resulting GitHubClientError landed the task on "
+            "retryable_failed/failed -- even though the first attempt's push had already "
+            "durably succeeded. A task could end up permanently `failed` in the final report "
+            "while the real code change sat live on its branch the whole time."
+        ),
+        root_cause=(
+            "_finalize_repo_edit() always recomputed base_sha from base_branch and treated "
+            "'branch already exists' purely as a signal to skip create_branch(), never as a "
+            "signal that base_sha itself might now be stale relative to that branch's own "
+            "history."
+        ),
+        affected_component="app.mainai_execution.execution_job._finalize_repo_edit",
+        severity=EngineeringLessonSeverity.high,
+        evidence=(
+            "Reproduced with a stateful fake GitHubClient modeling the real fast-forward-only "
+            "update_ref() semantics: calling _finalize_repo_edit() twice for the same task "
+            "(simulating dispatch, then a crash before the checkpoint, then a resume) with the "
+            "pre-fix code raised GitHubClientError on the second call via a genuine "
+            "non-fast-forward rejection."
+        ),
+        fix=(
+            "_finalize_repo_edit() now tries get_ref(branch) FIRST -- if the task's own branch "
+            "already exists (a resume), base_sha becomes its real current tip, and the new "
+            "commit is built on top of that (a true fast-forward) instead of the original, "
+            "stale base_branch sha. A genuinely first attempt (branch doesn't exist, a real "
+            "404/GitHubClientError) still creates it from base_branch as before."
+        ),
+        general_rule=(
+            "A resumable side effect against an external system with its own consistency "
+            "rules (here: Git's fast-forward requirement) must re-derive its 'base' state from "
+            "that system's OWN current state on resume, never from a value captured before the "
+            "side effect it is checkpointing might have already happened -- 'the branch already "
+            "exists' is a signal to re-read reality, not just a reason to skip one step."
+        ),
+        applies_to=["repo_edit", "github_client", "checkpoint", "crash_matrix"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.1 hardening pass (post-PR #57) -- crash matrix point H, _finalize_repo_edit resume fix",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test="tests/backend/test_mainai_execution_executor.py::test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exists_from_a_prior_uncheckpointed_push",
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["repo_edit"])
+    assert any(item.id == lesson.id for item in found)
 
 
 @pytest.mark.asyncio

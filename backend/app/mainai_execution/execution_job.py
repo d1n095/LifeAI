@@ -209,7 +209,32 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
 async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) -> dict:
     """Only called once verify_task() has already passed (see run_task_execution_job()) --
     the actual GitHub push, gated behind github_write_enabled exactly like
-    app/agent_orchestration.py's own prepare_github_pr()."""
+    app/agent_orchestration.py's own prepare_github_pr().
+
+    Crash-matrix finding (P1, hardening pass): run_task_execution_job() checkpoints this
+    function's result under step="finalized" specifically so a crash AFTER a real GitHub push
+    succeeds but BEFORE that checkpoint commits doesn't push a second time on resume -- but the
+    original version of this function still had a bug for exactly that crash window. On resume,
+    with no "finalized" checkpoint found, this function ran again from scratch: it re-read
+    `base_sha` from `base_branch` (unchanged by the first push, which only ever touches the
+    TASK's own branch), found the task branch already existed (from the successful first push)
+    and swallowed that as "a retry, fine, commit on top" -- but then built the new commit on
+    top of the STALE `base_sha` instead of the branch's actual current tip. GitHub's real
+    fast-forward-only update_ref() correctly rejected that (the new commit's parent wasn't the
+    branch's current HEAD) and raised GitHubClientError -- which run_task_execution_job()'s own
+    outer handler catches and turns into `retryable_failed`/`failed`, even though the FIRST
+    attempt's push had already durably succeeded. A task could end up permanently `failed` in
+    the final report while the real code change sat live on its branch the whole time.
+
+    Fixed by checking whether `branch` ALREADY exists first (`get_ref(branch)` -- a real 404
+    raises GitHubClientError exactly like a missing ref should) and, if so, building the new
+    commit on top of ITS current tip instead of blindly recomputing from `base_branch`. A
+    genuinely first attempt (branch doesn't exist yet) still creates it from `base_branch` as
+    before. This does not make the whole operation perfectly idempotent (a resume after a
+    successful-but-uncheckpointed push still creates one extra, redundant commit with the same
+    file contents on top of the first) -- but it always succeeds and the task's final state is
+    truthful, which is what actually matters here; a byte-for-byte duplicate-content detection
+    to avoid even that redundant commit is out of scope for V0.1."""
     settings = get_settings()
     branch = f"claude/mainai-task-{task.id}"
     base_branch = "claude/det-kommer-mer-879lcm"
@@ -218,11 +243,11 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
         return {"branch": branch, "base_branch": base_branch, "proposed": True, "files": [f["path"] for f in work_result["files"]]}
 
     client = get_github_client()
-    base_sha = await client.get_ref(base_branch)
     try:
-        await client.create_branch(new_branch=branch, from_sha=base_sha)
+        base_sha = await client.get_ref(branch)  # already exists -- a resume after a prior push, build on its real current tip
     except GitHubClientError:
-        pass  # branch already exists (a retry of this task) -- commit_multiple_files still applies on top of it
+        base_sha = await client.get_ref(base_branch)
+        await client.create_branch(new_branch=branch, from_sha=base_sha)
     commit_result = await client.commit_multiple_files(
         branch=branch, base_sha=base_sha, files=[{"path": f["path"], "content": f["content"]} for f in work_result["files"]], message=work_result["commit_message"]
     )
