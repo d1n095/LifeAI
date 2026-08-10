@@ -242,6 +242,28 @@ Branch Registry-numrering, denna topp-sammanfattning) gjordes direkt efter PR #5
 se rapporten i sessionens slutmeddelande. Inget nytt arbete påbörjades efter detta, per
 grundarens uttryckliga instruktion.
 
+**`claude/mainai-execution-loop-v0-1` — MainAI Execution Loop V0.1, öppen mot
+`claude/det-kommer-mer-879lcm` (bas-tip vid grening: `a2d30357b1ae3c43678c37e5a93df850a49eb884`,
+verifierad med `git ls-remote origin` innan branchen skapades). Byggd på grundarens uttryckliga
+instruktion (NÄSTA HUVUDSTEG — MAINAI EXECUTION LOOP V0), sedan uppdaterat arbetssätt (fortsätt
+löpande utan att stanna vid varje checkpoint, förutom vid verkliga blockerare/
+säkerhetsfrågor/approval-krävande actions). Bygger den första fullständiga
+GOAL → PLAN → DURABLE TASKS → EXECUTOR → CHECKPOINT/VERIFY → APPROVAL GATE → FINAL REPORT-loopen
+ovanpå den REDAN BEFINTLIGA `mainai_jobs`-runtimen (migration 0025-0029) — ingen ny
+kö/lease/heartbeat-mekanism byggdes. Nytt: migration 0032 (`mainai_goals/mainai_plans/
+mainai_tasks/mainai_task_dependencies/mainai_task_events/mainai_checkpoints/
+engineering_lessons`), `app/mainai_execution/*` (planner/graph/executor/approval/verify/
+checkpoint/liveness/final_report/lessons/execution_job), en riktig GitHub multi-file-commit
+via Git Data API (ersätter den tidigare stubben i `agent_orchestration.py`), en autonom
+auto-advance-tick i `app/worker.py`, minimal founder-API (`app/routers/mainai_execution.py`)
+och minimal founder-UI (`frontend/app/(shell)/admin/mainai-execution/`), samt
+`backend/docs/MAINAI_EXECUTION_LOOP_V0_1.md` (REAL/STUBBED/LIMITED/NOT IMPLEMENTED,
+säkerhets-/durability-/godkännande-/verifierings-/lesson-modeller, alla fyra demoresultat,
+explicit coverage-matris, V0.2-kandidater). Se den doc-filen för den fullständiga, ärliga
+statusen. **INTE MERGAD** — väntar på grundarens granskning av PR. Ingen del av denna branch har
+rört merge till mainline, deploy, VPS, produktion, prod-migration, prod-backfill, CONTRACT
+eller S1C.
+
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
 (`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit
