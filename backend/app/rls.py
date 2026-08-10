@@ -275,6 +275,36 @@ _MAINAI_JOB_FUNCTION_SPECS = [
     {"name": "mainai_job_proposals_guard_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
 ]
 
+# Same lockdown as _MAINAI_JOB_EVENT_TABLE_ALLOWED_PRIVILEGES above, applied to the MainAI
+# Execution Loop V0.1 (migration 0032) append-only tables — both are guarded by an identical
+# BEFORE UPDATE/DELETE trigger (deny UPDATE unconditionally, deny DELETE unless
+# app.mainai_execution_erasure_in_progress is set). `mainai_goals`/`mainai_plans`/
+# `mainai_tasks`/`mainai_task_dependencies` are deliberately NOT locked down here — they are
+# ordinary mutable tables (guarded by the service layer's own composite-owner-FK/status-machine
+# checks, not a DB trigger), so they keep whatever baseline CRUD
+# scripts/security/ensure_app_role.py's blanket grant already provides, same as `mainai_jobs`
+# itself.
+_MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
+_MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
+
+# All tables migration 0032 created, for the ownership-drift check below — same reasoning as
+# _MAINAI_JOB_TABLES.
+_MAINAI_EXECUTION_TABLES = (
+    "mainai_goals",
+    "mainai_plans",
+    "mainai_tasks",
+    "mainai_task_dependencies",
+    "mainai_task_events",
+    "mainai_checkpoints",
+    "engineering_lessons",
+)
+
+_MAINAI_EXECUTION_FUNCTION_SPECS = [
+    {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "mainai_task_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
+    {"name": "mainai_checkpoints_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
+]
+
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
 # has_table_privilege() rather than filtered from information_schema.role_table_grants: the
 # information_schema view only lists grants made *directly* to the named grantee (or to
@@ -473,6 +503,137 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
 
         if errors:
             message = "mainai job runtime privilege policy violated:\n" + "\n".join(f"  - {e}" for e in errors)
+            if require_complete:
+                raise RuntimeError(message)
+            logger.warning(message)
+
+
+def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool = True) -> None:
+    """Applies AND verifies mainai_app's exact runtime privileges on the MainAI Execution Loop
+    V0.1 objects (migration 0032) — same three-phase enforce-then-verify shape as
+    apply_mainai_job_runtime_privileges() above (see that function's docstring for the full
+    rationale; not repeated here). Call this AFTER apply_mainai_job_runtime_privileges() on
+    every startup (see app/main.py) — same advisory lock key, so the two calls never race each
+    other or themselves across concurrent backend replicas.
+
+    Deliberately a SEPARATE function/lock-scoped transaction from
+    apply_mainai_job_runtime_privileges() rather than folded into it: these are two genuinely
+    different migrations' objects (0027 vs 0032), and keeping them separate means a future
+    change to one policy's verification logic can never accidentally widen or narrow the
+    other's blast radius."""
+    with engine.begin() as conn:
+        # Same advisory lock key as apply_mainai_job_runtime_privileges() — see that function's
+        # docstring for why a shared key across both is correct (they must never race each
+        # other, and Postgres advisory locks are re-entrant within the same session/transaction
+        # scope is not required here since these run as two separate calls, never nested).
+        conn.execute(text("SELECT pg_advisory_xact_lock(72197001, 1)"))
+
+        expected_owner = conn.execute(text("SELECT current_user")).scalar()
+
+        errors: list[str] = []
+
+        if expected_owner == "mainai_app":
+            errors.append(
+                "the connection this policy is verifying migration output against is itself "
+                "authenticated as mainai_app — refusing to treat the restricted runtime role "
+                "as the trusted migration/admin owner"
+            )
+            message = "mainai execution loop privilege policy violated:\n" + "\n".join(f"  - {e}" for e in errors)
+            if require_complete:
+                raise RuntimeError(message)
+            logger.warning(message)
+            return
+
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_task_events FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_checkpoints FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
+
+        for table in _MAINAI_EXECUTION_TABLES:
+            owner = conn.execute(
+                text("SELECT tableowner FROM pg_tables WHERE schemaname = 'public' AND tablename = :t"),
+                {"t": table},
+            ).scalar()
+            if owner != expected_owner:
+                errors.append(f"{table}: owned by '{owner}', expected the migration/admin role '{expected_owner}'")
+            if owner == "mainai_app":
+                errors.append(f"{table}: must never be owned by mainai_app")
+
+        for table, allowed in (
+            ("mainai_task_events", _MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES),
+            ("mainai_checkpoints", _MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES),
+        ):
+            granted = _effective_table_privileges(conn, "mainai_app", table)
+            if granted != allowed:
+                errors.append(f"{table}: mainai_app effective privileges are {sorted(granted)}, expected exactly {sorted(allowed)}")
+
+        for spec in _MAINAI_EXECUTION_FUNCTION_SPECS:
+            name = spec["name"]
+            rows = conn.execute(
+                text(
+                    "SELECT p.oid, pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_args, "
+                    "       pg_catalog.format_type(p.prorettype, NULL) AS rettype, p.prosecdef, "
+                    "       p.proconfig, p.proowner::regrole::text AS owner, l.lanname "
+                    "FROM pg_proc p JOIN pg_language l ON p.prolang = l.oid "
+                    "WHERE p.proname = :name AND p.pronamespace = 'public'::regnamespace"
+                ),
+                {"name": name},
+            ).all()
+            if len(rows) != 1:
+                errors.append(f"{name}: expected exactly 1 overload in the public schema, found {len(rows)}")
+                continue
+
+            row = rows[0]
+            if row.identity_args != spec["identity_args"]:
+                errors.append(f"{name}: expected signature '({spec['identity_args']})', found '({row.identity_args})'")
+            if row.rettype != spec["return_type"]:
+                errors.append(f"{name}: expected return type '{spec['return_type']}', found '{row.rettype}'")
+            if not row.prosecdef:
+                errors.append(f"{name}: expected SECURITY DEFINER, not set")
+            if row.lanname != "plpgsql":
+                errors.append(f"{name}: expected language plpgsql, found '{row.lanname}'")
+            if not row.proconfig or "search_path=pg_catalog" not in row.proconfig:
+                errors.append(f"{name}: expected search_path=pg_catalog, found {row.proconfig}")
+            if row.owner != expected_owner:
+                errors.append(f"{name}: owned by '{row.owner}', expected the migration/admin role '{expected_owner}'")
+            if row.owner == "mainai_app":
+                errors.append(f"{name}: must never be owned by mainai_app")
+
+            role_priv = conn.execute(
+                text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = :owner"),
+                {"owner": row.owner},
+            ).first()
+            if role_priv is None or not (role_priv.rolsuper or role_priv.rolbypassrls):
+                errors.append(
+                    f"{name}: owner '{row.owner}' has neither SUPERUSER nor BYPASSRLS — a SECURITY "
+                    "DEFINER function meant to operate under FORCE RLS must be owned by a role that "
+                    "can actually do so"
+                )
+
+            public_has_execute = conn.execute(
+                text(
+                    "SELECT 1 FROM information_schema.routine_privileges "
+                    "WHERE routine_schema = 'public' AND routine_name = :name "
+                    "AND privilege_type = 'EXECUTE' AND grantee = 'PUBLIC'"
+                ),
+                {"name": name},
+            ).first()
+            if public_has_execute:
+                errors.append(f"{name}: PUBLIC must never hold EXECUTE")
+
+            mainai_app_has_execute = bool(
+                conn.execute(
+                    text("SELECT has_function_privilege('mainai_app', :oid, 'EXECUTE')"),
+                    {"oid": row.oid},
+                ).scalar()
+            )
+            if mainai_app_has_execute != spec["mainai_app_execute"]:
+                errors.append(
+                    f"{name}: mainai_app effective EXECUTE is {mainai_app_has_execute}, "
+                    f"expected {spec['mainai_app_execute']}"
+                )
+
+        if errors:
+            message = "mainai execution loop privilege policy violated:\n" + "\n".join(f"  - {e}" for e in errors)
             if require_complete:
                 raise RuntimeError(message)
             logger.warning(message)
