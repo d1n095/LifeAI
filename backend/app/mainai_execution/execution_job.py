@@ -402,23 +402,40 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         db.rollback()
         job = db.get(MainAIJob, job_id)
         task = db.get(MainAITask, task.id)
+        # Crash-matrix finding (P1, found by testing a REAL crash point rather than reasoning
+        # about it): mark_failed()/mark_completed() (app/jobs/service.py) each end with their
+        # OWN real db.commit() -- the same "shared helper commits internally" shape that
+        # dispatch_ready_task()/create_job() already had to be fixed for earlier in this
+        # hardening pass. Calling mark_failed() BEFORE _finalize_task_outcome() meant the JOB
+        # became durably `failed` (a TERMINAL mainai_jobs status -- claim_next_mainai_job()
+        # only ever reclaims `queued` or `running`-with-expired-lease rows, never a terminal
+        # one) before the TASK's own outcome was ever made durable. A crash in that exact gap
+        # left the task stuck at `running` PERMANENTLY: not retryable, not cancellable, and --
+        # unlike the job's own stale-lease reclaim path -- there is no mechanism that ever
+        # revisits a task whose job already reached a terminal status. Fixed the same way as
+        # the dispatch/create_job race: the task's own finalization is flushed (not committed)
+        # FIRST, and the shared helper's own commit is called LAST, so it becomes the ONE
+        # atomic commit for both effects -- a crash before it loses nothing durable (the job
+        # is still `running`, correctly reclaimable and resumable from its existing
+        # checkpoints); a crash after it has nothing left to lose.
+        _finalize_task_outcome(db, task, passed=False, evidence={"error": str(exc)})
         try:
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
         except JobLeaseLostError:
             logger.warning("task_execution job %s: lease lost while recording failure.", job_id)
+            db.rollback()
             return
-        _finalize_task_outcome(db, task, passed=False, evidence={"error": str(exc)})
-        db.commit()
         return
 
+    # Crash-matrix finding (P1) -- see the identical fix and full explanation in the except
+    # block above; same reordering, same reasoning, applied to the success path.
+    _finalize_task_outcome(db, task, passed=verification.passed, evidence={**verification.evidence(), "work_result": work_result})
     try:
         mark_completed(db, job, worker_id=worker_id, lease_generation=lease_generation, public_message="Task attempt completed; see task status for the verified outcome.")
     except JobLeaseLostError:
         logger.warning("task_execution job %s: lease lost while recording completion.", job_id)
+        db.rollback()
         return
-
-    _finalize_task_outcome(db, task, passed=verification.passed, evidence={**verification.evidence(), "work_result": work_result})
-    db.commit()
 
 
 def _finalize_task_outcome(db: Session, task: MainAITask, *, passed: bool, evidence: dict) -> None:

@@ -718,6 +718,72 @@ async def test_run_task_execution_job_read_only_audit_success_path(db_session, s
 
 
 @pytest.mark.asyncio
+async def test_run_task_execution_job_crash_right_after_mark_completed_never_leaves_a_contradictory_state(
+    db_session, superuser_db, owner_id, monkeypatch
+):
+    """Crash-matrix finding (P1, found by testing a real crash point rather than reasoning
+    about the code): mark_completed()/mark_failed() (app/jobs/service.py) each end with their
+    OWN real db.commit() -- the same 'shared helper commits internally' shape already fixed
+    once this hardening pass for dispatch_ready_task()/create_job(). The ORIGINAL order here
+    called mark_completed() (durable, TERMINAL mainai_jobs status -- claim_next_mainai_job()
+    never reclaims a terminal job) BEFORE _finalize_task_outcome() (the task's own outcome).
+    A crash right after mark_completed()'s own commit landed -- but before
+    _finalize_task_outcome()'s effects were committed -- left the task stuck at `running`
+    PERMANENTLY while the job showed `completed`: not retryable (retry_task() rejects
+    non-retryable statuses), not cancellable (cancel_task() deliberately excludes `running`),
+    and unlike a job whose lease merely expires, a job that already reached a terminal status
+    is never revisited by anything.
+
+    Fixed by reordering: _finalize_task_outcome() (flush-only, no commit of its own) now runs
+    FIRST, so mark_completed()'s own commit becomes the ONE atomic commit for both effects.
+    This test calls THROUGH to the real mark_completed() (so its real commit genuinely
+    happens) and only simulates the crash immediately AFTER it returns -- the harshest point
+    that still lets mark_completed's own work land for real -- then asserts the one invariant
+    that must never break: the job and task can never disagree about whether the work is
+    done. With the reordering, by the time mark_completed's real commit can happen, the
+    task's own finalization was already sitting in the SAME uncommitted transaction, so that
+    one commit makes both durable together; there is no point left where 'crash right after
+    mark_completed' can still catch the task not-yet-finalized."""
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("Analysen visar inga problem."))
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="read_only_audit", verification_plan=[])
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+
+    real_mark_completed = execution_job.mark_completed
+
+    def _mark_completed_then_crash(*args, **kwargs):
+        real_mark_completed(*args, **kwargs)  # the REAL write + the REAL internal db.commit() happen here
+        raise RuntimeError("simulated process crash immediately after mark_completed()'s own commit")
+
+    # execution_job.py imported mark_completed by name (`from app.jobs.service import
+    # mark_completed`), so the name to patch is execution_job's own, not app.jobs.service's.
+    monkeypatch.setattr(execution_job, "mark_completed", _mark_completed_then_crash)
+
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+    db_session.rollback()  # nothing further ever gets committed after a real crash
+
+    fresh_job = superuser_db.get(MainAIJob, job.id)
+    fresh_task = superuser_db.get(MainAITask, task.id)
+    assert not (fresh_job.status == MainAIJobStatus.completed and fresh_task.status == MainAITaskStatus.running), (
+        "contradictory state: job shows completed but task was never finalized -- exactly the pre-fix orphaning bug"
+    )
+    # With the fix, mark_completed's real commit is the LAST write in the operation, so by
+    # the time it lands, the task's own finalization (flushed earlier in the SAME
+    # transaction) lands with it -- both durable together.
+    assert fresh_job.status == MainAIJobStatus.completed
+    assert fresh_task.status == MainAITaskStatus.completed
+    assert fresh_task.completed_at is not None
+
+
+@pytest.mark.asyncio
 async def test_mark_completed_called_twice_for_the_same_lease_generation_never_produces_a_duplicate_terminal_event(
     db_session, superuser_db, owner_id, monkeypatch
 ):
@@ -816,6 +882,48 @@ async def test_run_task_execution_job_verification_failure_never_completes_the_t
 
     dependent = superuser_db.get(MainAITask, dependent.id)
     assert dependent.status == MainAITaskStatus.pending  # not falsely blocked; not falsely promoted
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_crash_right_after_mark_failed_never_leaves_a_contradictory_state(db_session, superuser_db, owner_id, monkeypatch):
+    """Crash-matrix finding (P1), failure-path sibling of the mark_completed test above: the
+    `except (TaskExecutionError, ...)` branch has the IDENTICAL 'shared helper commits
+    internally' shape, just with mark_failed() instead of mark_completed() -- a genuinely
+    separate code path (reached when a handler raises, e.g. a run_tests task with no
+    targeted_tests entries in its verification_plan, not when verification merely fails), so
+    fixing the success path does not automatically prove the failure path was fixed too. Same
+    call-through-then-crash technique, same invariant: job and task must never disagree about
+    whether the attempt finished."""
+    from app.mainai_execution import execution_job
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="run_tests", verification_plan=[])  # empty plan -> _handle_run_tests raises TaskExecutionError
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+
+    real_mark_failed = execution_job.mark_failed
+
+    def _mark_failed_then_crash(*args, **kwargs):
+        real_mark_failed(*args, **kwargs)  # the REAL write + the REAL internal db.commit() happen here
+        raise RuntimeError("simulated process crash immediately after mark_failed()'s own commit")
+
+    monkeypatch.setattr(execution_job, "mark_failed", _mark_failed_then_crash)
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+    db_session.rollback()
+
+    fresh_job = superuser_db.get(MainAIJob, job.id)
+    fresh_task = superuser_db.get(MainAITask, task.id)
+    assert not (fresh_job.status == MainAIJobStatus.failed and fresh_task.status == MainAITaskStatus.running), (
+        "contradictory state: job shows failed but task was never finalized -- the same orphaning bug on the failure path"
+    )
+    assert fresh_job.status == MainAIJobStatus.failed
+    assert fresh_task.status == MainAITaskStatus.retryable_failed
+    assert fresh_task.attempts == 1
 
 
 @pytest.mark.asyncio
@@ -1218,6 +1326,69 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
     assert second["pull_request_number"] == 42
 
     assert create_calls["n"] == 1, "create_pull_request() must never be called twice for the same head/base"
+
+
+def test_record_engineering_lesson_for_the_mark_completed_mark_failed_finalize_ordering_fix(db_session, owner_id):
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "mark_completed()/mark_failed() (app/jobs/service.py) each end with their own "
+            "REAL db.commit(). run_task_execution_job() called one of them BEFORE "
+            "_finalize_task_outcome() (which only flushes, never commits). A crash right "
+            "after mark_completed()'s/mark_failed()'s own commit landed -- but before "
+            "_finalize_task_outcome()'s effects were ever committed -- left the mainai_jobs "
+            "row durably TERMINAL (completed/failed) while the MainAITask stayed `running` "
+            "forever: not retryable, not cancellable, and never revisited by anything, since "
+            "claim_next_mainai_job() only ever reclaims queued or running-with-expired-lease "
+            "rows, never a terminal one."
+        ),
+        root_cause=(
+            "Same 'shared helper commits internally, called mid-critical-section of another "
+            "operation' shape already found and fixed once this hardening pass for "
+            "dispatch_ready_task()/create_job() -- but that earlier fix was never checked "
+            "against this SIBLING call site with the identical shape, even though it sits at "
+            "the very end of the same function. Found only by testing a real crash point "
+            "(calling through to the real mark_completed(), then simulating the crash "
+            "immediately after its real commit) rather than by re-reading the code."
+        ),
+        affected_component="app.mainai_execution.execution_job.run_task_execution_job",
+        severity=EngineeringLessonSeverity.high,
+        evidence=(
+            "Reverting the fix (mark_completed/mark_failed called before _finalize_task_outcome) "
+            "made a mutation test go genuinely red: job durably `completed`/`failed`, task "
+            "durably still `running` -- a real, reproducible orphaning bug, not theoretical."
+        ),
+        fix=(
+            "Reordered both the success and failure paths in run_task_execution_job(): "
+            "_finalize_task_outcome() (flush-only) now runs FIRST, so mark_completed()'s/"
+            "mark_failed()'s own commit becomes the ONE atomic commit for both effects -- a "
+            "crash before it loses nothing durable (job stays running, resumable via existing "
+            "checkpoints); a crash after it has nothing left to lose."
+        ),
+        general_rule=(
+            "Any shared helper that ends with its own db.commit() must be the LAST write in "
+            "a multi-step operation, never called mid-operation -- and this must be checked "
+            "at EVERY call site of that helper, not just the one where it was first found. "
+            "This is the third time in this same hardening pass that exact shape recurred "
+            "(dispatch_ready_task/create_job, then here) -- treat 'grep every call site of "
+            "every commit-ending helper' as a standing checklist item for future passes, not "
+            "a one-off fix."
+        ),
+        applies_to=["crash_matrix", "mark_completed", "mark_failed", "commit_ordering", "task_stuck_running"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.1 hardening pass (post-PR #57) -- crash matrix, mark_completed/mark_failed vs _finalize_task_outcome ordering",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test=(
+            "tests/backend/test_mainai_execution_executor.py::"
+            "test_run_task_execution_job_crash_right_after_mark_completed_never_leaves_a_contradictory_state"
+        ),
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["commit_ordering"])
+    assert any(item.id == lesson.id for item in found)
 
 
 def test_record_engineering_lesson_for_the_handle_open_pr_resume_fix(db_session, owner_id):
