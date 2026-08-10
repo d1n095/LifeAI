@@ -213,20 +213,34 @@ orörda; flaggade som en KORRIGERING till PR #53:s (då redan mergade) `rag/`-ma
 korrigeringen genomfördes av PR #56 (se nedan). Se Pass 54 nedan för full detalj.
 **Basgrenens tip blev därmed `984543614ec509b2309f1ebbd28874fd8580dad9`.**
 
-**PR #56 (denna session)**, `claude/tests-rag-correction-batch2` →
-`claude/det-kommer-mer-879lcm`, integreras nu mot den aktuella basgrenens tip ovan
-(ursprungligen grenad från `a0e530040e90af782f2044bd369665f1b17280fb`, samma oförändrade tip
-som PR #51–#54 vid NATTPASS-grening — oberoende av PR #53:s branch, inte staplad; konflikten
-mot de under tiden mergade registerposterna löses lokalt vid integrationstillfället, per
-grundarens uttryckliga instruktion om unik, sekventiell Pass-numrering). En riktad
-korrigering: fyra filer som nattens audit (§ovan) bekräftade är `rag/`-domän men som Pass 50
-ursprungligen (fel) placerade i `core/`-förslaget — `test_trust_engine.py` (`app.rag.trust`),
-`test_search_failure_boundary.py` (`app.rag.vector_store`/`app.routers.library`),
-`test_error_disclosure.py` (uteslutande `/api/library`, INTE ett app-brett test som namnet
-antyder), `test_performance_measurement.py` (`app.rag.library_import`/`retrieve`/
-`vector_store`) — alla fyra → `backend/tests/backend/rag/`. Se Pass 56 nedan (denna posts
-Pass-sektion, omnumrerad från "Pass 51" på PR #56:s egen branch — se Bakgrund-stycket i den
-posten) för full detalj.
+**PR #56 ÄR MERGAD** (`claude/tests-rag-correction-batch2` → `claude/det-kommer-mer-879lcm`),
+merge-commit `a2d30357b1ae3c43678c37e5a93df850a49eb884` (parents
+`984543614ec509b2309f1ebbd28874fd8580dad9` och `ddab227ab298a963e790a4ef08db976e2e9aff30` —
+en riktig tvåparent-merge), `merged_by`: `d1n095`. Verifierat mot GitHubs PR-API direkt
+(`mcp__github__pull_request_read`, `state: closed`, `merged: true`) och `git ls-remote origin
+refs/heads/claude/det-kommer-mer-879lcm`, inte memorerat. Grenad ursprungligen från exakt
+`a0e530040e90af782f2044bd369665f1b17280fb`, samma oförändrade tip som PR #51–#54 vid
+NATTPASS-grening — oberoende av PR #53:s branch, inte staplad; konflikten mot de under tiden
+mergade registerposterna löstes lokalt vid integrationstillfället, per grundarens
+uttryckliga instruktion om unik, sekventiell Pass-numrering. Steg 11 av städningen —
+teststrukturen: en riktad korrigering, fyra filer som nattens audit (§ovan) bekräftade är
+`rag/`-domän men som Pass 50 ursprungligen (fel) placerade i `core/`-förslaget —
+`test_trust_engine.py` (`app.rag.trust`), `test_search_failure_boundary.py`
+(`app.rag.vector_store`/`app.routers.library`), `test_error_disclosure.py` (uteslutande
+`/api/library`, INTE ett app-brett test som namnet antyder), `test_performance_measurement.py`
+(`app.rag.library_import`/`retrieve`/`vector_store`) — alla fyra → `backend/tests/backend/rag/`.
+Se Pass 56 nedan (denna posts Pass-sektion, omnumrerad från "Pass 51" på PR #56:s egen
+branch — se Bakgrund-stycket i den posten) för full detalj. **Basgrenens tip blev därmed
+`a2d30357b1ae3c43678c37e5a93df850a49eb884`.**
+
+**NATTPASS-integrationen (#55 → #51 → #52 → #53 → #54 → #56) är därmed KLAR.** Samtliga sex
+PR:er i den founder-godkända sekventiella mergeordningen är mergade med riktiga
+tvåparent-mergecommits, verifierade mot GitHubs PR-API och `git ls-remote` efter varje steg.
+En slutverifiering av den fullt integrerade mainline (pytest collection = 973,
+`providers/`/`storage/`/`jobs/`/`rag/`/`chat/`, repo-brett stale-path-svep,
+Branch Registry-numrering, denna topp-sammanfattning) gjordes direkt efter PR #56:s merge —
+se rapporten i sessionens slutmeddelande. Inget nytt arbete påbörjades efter detta, per
+grundarens uttryckliga instruktion.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
