@@ -25,19 +25,20 @@ Real local Postgres (RLS included). Only the LLM provider is faked, never the DB
 local filesystem/subprocess verification path."""
 
 import uuid
+from datetime import datetime
 
 import pytest
 from sqlalchemy import text as sa_text
 
 from app.jobs import service
 from app.jobs.mainai_job_lease import claim_next_mainai_job
-from app.mainai_execution import executor, planner
+from app.mainai_execution import executor, lessons, planner
 from app.mainai_execution.approval import ApprovalRequiredError, grant_task_approval
 from app.mainai_execution.execution_job import run_task_execution_job
 from app.mainai_execution.executor import TaskNotRetryableError
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.mainai_execution.verify import VerificationStepError, verify_task
-from app.models.mainai_execution import MainAITask, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_execution import EngineeringLessonSeverity, MainAITask, MainAITaskEventType, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
@@ -244,6 +245,232 @@ def test_cancel_task_rejects_an_already_terminal_task(db_session, owner_id):
 
     with pytest.raises(executor.TaskNotCancellableError):
         executor.cancel_task(db_session, task=task, cancelled_by="founder")
+
+
+# ---------------------------------------------------------------- B2. concurrency (hardening pass)
+
+
+def test_dispatch_ready_task_concurrent_same_task_never_double_dispatches(db_session, superuser_db, owner_id):
+    """Hardening pass finding (P1): the original dispatch_ready_task() read `task.status` in
+    Python and then unconditionally mutated it with no locking -- two real callers racing the
+    SAME `ready` task (e.g. two auto-advance ticks in two worker processes) could both pass the
+    in-memory check and both create a `mainai_jobs` row / `dispatched` event / attempts++ for
+    what must be exactly one real dispatch. Fixed by `_lock_task()` (`SELECT ... FOR UPDATE` +
+    `populate_existing=True`) as the first line of dispatch_ready_task() -- the loser blocks on
+    the row lock until the winner commits, then re-checks status against the FRESH row and
+    cleanly raises ValueError instead of creating a second, orphaned job. Same real-thread,
+    real-two-session pattern as test_mainai_jobs.py's
+    test_create_job_concurrent_same_owner_and_key_is_race_safe."""
+    import threading
+
+    from app.db import SessionLocal
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal)
+    task_id = task.id
+    goal_id = goal.id
+
+    results: list[uuid.UUID] = []
+    errors: list[str] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _worker():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            t = session.get(MainAITask, task_id)
+            g = session.get(type(goal), goal_id)
+            barrier.wait()
+            job = executor.dispatch_ready_task(session, task=t, goal=g, dispatched_by="race-worker")
+            session.commit()
+            results.append(job.id)
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below, not swallowed
+            session.rollback()
+            errors.append(repr(exc))
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=_worker), threading.Thread(target=_worker)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(results) == 1, f"exactly one caller must win the dispatch, got results={results} errors={errors}"
+    assert len(errors) == 1 and "not 'ready'" in errors[0], f"the loser must cleanly raise ValueError, got: {errors}"
+
+    job_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(owner_id)}).scalar()
+    assert job_count == 1, "no orphaned second mainai_jobs row from the losing caller"
+
+    dispatched_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'dispatched'"), {"t": str(task_id)}
+    ).scalar()
+    assert dispatched_events == 1, "exactly one 'dispatched' event, not one per racing caller"
+
+    final_task = superuser_db.get(MainAITask, task_id)
+    assert final_task.attempts == 1, "attempts must not be double-incremented by the race"
+    assert final_task.status == MainAITaskStatus.running
+
+
+def test_cancel_task_concurrent_with_dispatch_never_produces_a_contradictory_state(db_session, superuser_db, owner_id):
+    """Hardening pass finding (P1), same root cause as the dispatch/dispatch race above but
+    between two DIFFERENT transitions: a founder cancelling a task at the exact moment an
+    auto-advance tick dispatches it. Without `_lock_task()` in cancel_task() too, both could
+    succeed in-memory and leave the task simultaneously `cancelled` (dependents blocked) and
+    `running` (a real mainai_jobs row in flight) depending on write order -- a state no code
+    path is designed to reconcile. With the lock, whichever transaction commits first wins and
+    the second cleanly raises (TaskNotCancellableError or ValueError) against the fresh row."""
+    import threading
+
+    from app.db import SessionLocal
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal)
+    task_id = task.id
+    goal_id = goal.id
+
+    outcomes: list[str] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _dispatch():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            t = session.get(MainAITask, task_id)
+            g = session.get(type(goal), goal_id)
+            barrier.wait()
+            executor.dispatch_ready_task(session, task=t, goal=g, dispatched_by="race-worker")
+            session.commit()
+            outcomes.append("dispatch_ok")
+        except Exception:  # noqa: BLE001 - either outcome is acceptable, contradiction is not
+            session.rollback()
+            outcomes.append("dispatch_failed")
+        finally:
+            session.close()
+
+    def _cancel():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            t = session.get(MainAITask, task_id)
+            barrier.wait()
+            executor.cancel_task(session, task=t, cancelled_by="founder")
+            session.commit()
+            outcomes.append("cancel_ok")
+        except Exception:  # noqa: BLE001 - either outcome is acceptable, contradiction is not
+            session.rollback()
+            outcomes.append("cancel_failed")
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=_dispatch), threading.Thread(target=_cancel)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert set(outcomes) in ({"dispatch_ok", "cancel_failed"}, {"cancel_ok", "dispatch_failed"}), (
+        f"exactly one side must win, never both: {outcomes}"
+    )
+
+    final_task = superuser_db.get(MainAITask, task_id)
+    if "dispatch_ok" in outcomes:
+        assert final_task.status == MainAITaskStatus.running
+        job_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(owner_id)}).scalar()
+        assert job_count == 1
+    else:
+        assert final_task.status == MainAITaskStatus.cancelled
+        job_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(owner_id)}).scalar()
+        assert job_count == 0, "the cancel winner must mean NO job was ever created for this task"
+
+
+def test_record_engineering_lesson_for_the_dispatch_race_and_commit_ordering_fix(db_session, owner_id):
+    """MAINAI V0.1 hardening pass (post-PR #57): engineering learning loop, mandatory for a
+    P1 finding. Root cause was TWO-LAYERED and only the second layer showed up under real
+    concurrency testing (not by inspection) -- see this module's own two concurrent tests
+    above and dispatch_ready_task()'s own docstring for the full account:
+
+      1. dispatch_ready_task()/retry_task()/cancel_task() checked `task.status` in Python and
+         then unconditionally mutated it, with no row lock -- two real callers racing the same
+         task could both pass the check.
+      2. Locking alone was NOT enough: mainai_jobs_service.create_job() ends with a real
+         `db.commit()` (needed for its own SAVEPOINT-based idempotency to be safe), and calling
+         it in the MIDDLE of dispatch_ready_task() released the task's row lock mid-critical-
+         section AND left a real, durable job with no task-side state (status/attempts/event)
+         if the process crashed in the gap right after.
+
+    Fixed by (a) `_lock_task()` -- SELECT ... FOR UPDATE with populate_existing=True -- as the
+    first statement of every task-state transition, and (b) reordering dispatch_ready_task() so
+    every task-side write that decides "can this task be dispatched again" happens BEFORE
+    create_job() is called, using a pre-generated job_id, so create_job()'s own commit is the
+    ONE atomic commit for the whole race-critical operation."""
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "Two concurrent callers of dispatch_ready_task() (e.g. two auto-advance ticks in "
+            "different worker processes, or a founder double-clicking an API action) racing "
+            "the SAME `ready` MainAITask could both pass the in-memory status check and both "
+            "dispatch it -- duplicate mainai_jobs rows / duplicate 'dispatched' events / a lost "
+            "update between cancel and dispatch. A row lock alone did not fully close this: "
+            "mainai_jobs_service.create_job() ends with a real db.commit(), so calling it "
+            "mid-critical-section released the lock AND left a real job durably created before "
+            "the task's own status/attempts/event existed -- a crash in that gap would leave a "
+            "job nothing owns."
+        ),
+        root_cause=(
+            "Task-state transitions read `task.status` and then unconditionally mutated it with "
+            "no locking. Separately, the shared create_job() helper's own atomicity contract "
+            "(a full commit at the end, required for its SAVEPOINT-based idempotency to be "
+            "safe under real concurrency) was violated by a caller that invoked it in the "
+            "middle of a larger multi-row operation instead of last."
+        ),
+        affected_component="app.mainai_execution.executor / app.jobs.service.create_job",
+        severity=EngineeringLessonSeverity.high,
+        evidence=(
+            "Found and proven by real two-thread, two-session concurrency tests against local "
+            "Postgres during the V0.1 hardening pass, not by code inspection -- the first fix "
+            "attempt (row lock only, task mutations after create_job()) still failed "
+            "test_dispatch_ready_task_concurrent_same_task_never_double_dispatches with both "
+            "callers returning the SAME job id."
+        ),
+        fix=(
+            "_lock_task() (SELECT ... FOR UPDATE + populate_existing=True) as the first "
+            "statement of dispatch_ready_task()/retry_task()/cancel_task(). "
+            "dispatch_ready_task() now writes status/started_at/attempts/the dispatched event "
+            "BEFORE calling create_job(), using a pre-generated job_id (create_job() now "
+            "accepts one explicitly for exactly this reason) -- create_job()'s own commit is "
+            "the ONE atomic commit for the whole operation, holding the lock continuously "
+            "until it. task.mainai_job_id (a real FK, so it cannot be set before the job row "
+            "exists) is written in a second statement right after, safe without a lock because "
+            "task.status is already durably 'running' by then."
+        ),
+        general_rule=(
+            "A shared helper that ends with its own commit (create_job(), or any function with "
+            "the same SAVEPOINT+commit idempotency shape) can NEVER be called in the middle of "
+            "another function's row-locked critical section -- its commit silently ends that "
+            "transaction and releases the lock early. Reorder so every write that must be "
+            "atomic with the helper's own effect happens BEFORE it, and treat the helper's "
+            "return as the last step, not a middle one."
+        ),
+        applies_to=["task_execution", "mainai_jobs", "dispatch_ready_task", "row_locking", "create_job"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.1 hardening pass (post-PR #57) -- dispatch/retry/cancel concurrency + commit-ordering fix",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test=(
+            "tests/backend/test_mainai_execution_executor.py::"
+            "test_dispatch_ready_task_concurrent_same_task_never_double_dispatches and "
+            "test_cancel_task_concurrent_with_dispatch_never_produces_a_contradictory_state"
+        ),
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    assert lesson.severity == EngineeringLessonSeverity.high
+    assert lesson.source_type == "branch_registry_pass"
+
+    found = lessons.lookup_lessons(db_session, applies_to_any=["task_execution"])
+    assert any(item.id == lesson.id for item in found)
 
 
 # ---------------------------------------------------------------- C. verify_task

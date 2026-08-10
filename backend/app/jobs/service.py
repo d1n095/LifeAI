@@ -142,12 +142,21 @@ def _validate_input_refs(db: Session, owner_id: uuid.UUID, input_refs: list[dict
             raise InvalidInputRefsError(f"Document {doc_id} has status '{doc.status.value}', not 'indexed' — not yet reviewable.")
 
 
-def _validate_task_execution_input_refs(db: Session, owner_id: uuid.UUID, input_refs: list[dict]) -> None:
+def _validate_task_execution_input_refs(db: Session, owner_id: uuid.UUID, input_refs: list[dict], *, expect_claimed: bool = False) -> None:
     """task_execution's own contract (MainAI Execution Loop V0.1,
     app/mainai_execution/executor.py): exactly one `{"type": "mainai_task", "id": "..."}` ref,
-    pointing at a real MainAITask this owner's own RLS scope can see, that is currently
-    `ready` — a task in any other status (already running, blocked, completed, ...) is not a
-    valid dispatch target."""
+    pointing at a real MainAITask this owner's own RLS scope can see.
+
+    `expect_claimed`: dispatch_ready_task() (the ONLY code path that ever passes `job_id` to
+    create_job(), which is what sets this) now locks the task and transitions it to `running`
+    itself BEFORE calling create_job() -- see that function's own docstring for why (its own
+    call to create_job() would otherwise release the lock and durably create the job before
+    any of the task's own state existed). By the time THIS validation runs, in that one call
+    path, the task is therefore correctly `running`, not `ready` -- checking for `ready` there
+    would reject the exact call path it should be defending. Every OTHER caller (there are
+    none today, but this stays the real contract for any future direct create_job() call with
+    job_type='task_execution') still must pass a genuinely `ready` task -- that path has not
+    already done its own authoritative locked check, so this is the only check it gets."""
     from app.models.mainai_execution import MainAITask, MainAITaskStatus  # local import: avoids a hard app.jobs -> app.mainai_execution dependency for callers that never touch task_execution
 
     if len(input_refs) != 1:
@@ -162,8 +171,9 @@ def _validate_task_execution_input_refs(db: Session, owner_id: uuid.UUID, input_
     task = db.execute(select(MainAITask).where(MainAITask.id == task_id, MainAITask.owner_id == owner_id)).scalar_one_or_none()
     if task is None:
         raise InvalidInputRefsError(f"MainAITask {task_id} not found or not owned by this account.")
-    if task.status != MainAITaskStatus.ready:
-        raise InvalidInputRefsError(f"MainAITask {task_id} has status '{task.status.value}', not 'ready' — not a valid dispatch target.")
+    expected = MainAITaskStatus.running if expect_claimed else MainAITaskStatus.ready
+    if task.status != expected:
+        raise InvalidInputRefsError(f"MainAITask {task_id} has status '{task.status.value}', not '{expected.value}' — not a valid dispatch target.")
 
 
 def create_job(
@@ -174,11 +184,27 @@ def create_job(
     input_refs: list[dict],
     created_by: str,
     idempotency_key: str | None = None,
+    job_id: uuid.UUID | None = None,
     request=None,
 ) -> MainAIJob:
     """Fails closed (CapabilityUnavailableError) before creating any row if job_type is not
     on CAPABILITY_MANIFEST — the founder's explicit requirement, enforced here so no router
     or future caller can bypass it by calling this function directly.
+
+    `job_id`: hardening pass finding (P1, MainAI Execution Loop V0.1) — this function ends
+    with a real `db.commit()` (see below), which is exactly what makes its own idempotency
+    SAVEPOINT safe, but also means ANY caller that needs other writes (e.g. a row lock's
+    critical section, or a sibling row that must reference this job's id) to land in the SAME
+    atomic commit as job creation cannot let this function pick the id itself — by the time it
+    returns a fresh id, that commit has ALREADY happened, so anything the caller adds after
+    the call is a separate, non-atomic follow-up transaction (and, for a caller relying on a
+    row lock across the whole operation, this function's own commit silently releases that
+    lock mid-critical-section). Passing a pre-generated `job_id` lets a caller like
+    app/mainai_execution/executor.py's dispatch_ready_task() write everything that must become
+    durable together (task status, attempts, mainai_job_id, the dispatched event) BEFORE
+    calling this function, so this function's own commit is the ONE atomic commit for the
+    whole operation, and the row lock is held continuously until that same commit. See that
+    function's own docstring for the concurrency/crash-durability story this closes.
 
     Idempotent per (owner_id, idempotency_key): a second call with the same key for the same
     owner returns the ORIGINAL job unchanged (no new row, no new event) — regardless of
@@ -241,11 +267,11 @@ def create_job(
         # check above) — never more than one, since a task_execution job is always the
         # execution unit for exactly one task, and never fewer, since a task_execution job
         # with no task to execute has nothing to do.
-        _validate_task_execution_input_refs(db, owner_id, input_refs)
+        _validate_task_execution_input_refs(db, owner_id, input_refs, expect_claimed=job_id is not None)
 
     savepoint = db.begin_nested()
     try:
-        job = MainAIJob(
+        job_kwargs = dict(
             owner_id=owner_id,
             job_type=job_type,
             status=MainAIJobStatus.queued,
@@ -254,6 +280,9 @@ def create_job(
             created_by=created_by,
             idempotency_key=idempotency_key,
         )
+        if job_id is not None:
+            job_kwargs["id"] = job_id
+        job = MainAIJob(**job_kwargs)
         db.add(job)
         db.flush()  # job.id is needed for the event row below
         _record_event(db, job, MainAIJobEventType.created, {"job_type": job_type, "input_refs": input_refs})
@@ -289,6 +318,21 @@ def create_job(
                 f"idempotency_key '{idempotency_key}' was already used for a different request "
                 f"(job {existing.id}, job_type '{existing.job_type}')."
             ) from exc
+        if job_id is not None and existing.id != job_id:
+            # A caller that pre-generated `job_id` (see this function's own docstring) did so
+            # specifically so a sibling row it already wrote in THIS same transaction (e.g.
+            # MainAITask.mainai_job_id) could reference it correctly. If the idempotency
+            # collision resolves to a DIFFERENT job than the one the caller already wrote
+            # references to, that sibling row is now silently wrong and no amount of retrying
+            # fixes it -- surfacing this loudly is far safer than returning a job whose id the
+            # caller's own already-flushed writes do not agree with. Given idempotency_key
+            # already encodes the caller's own monotonically-increasing attempt counter (see
+            # dispatch_ready_task()), this should be unreachable in practice; treating it as a
+            # hard error rather than silently "fixing up" the mismatch is deliberate.
+            raise IdempotencyConflictError(
+                f"idempotency_key '{idempotency_key}' already resolved to job {existing.id}, "
+                f"but the caller had already committed sibling writes referencing job_id {job_id}."
+            )
         return existing
 
     db.commit()
