@@ -45,7 +45,7 @@ from app.jobs.service import mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.executor import task_for_job
 from app.mainai_execution.graph import recompute_task_readiness
-from app.mainai_execution.verify import VerificationStepError, verify_task
+from app.mainai_execution.verify import VerificationResult, VerificationStepError, VerificationStepResult, verify_task
 from app.models.mainai_execution import (
     RETRYABLE_MAINAI_TASK_STATUSES,
     MainAIGoal,
@@ -162,7 +162,10 @@ def _handle_run_tests(task: MainAITask) -> dict:
 def _find_repo_edit_branch(db: Session, *, goal_id: uuid.UUID) -> dict | None:
     """The branch/commit a sibling repo_edit task in this goal already produced -- open_pr's
     handler looks this up rather than the planner needing to pass it explicitly, since it
-    doesn't exist until the repo_edit task actually completes."""
+    doesn't exist until the repo_edit task actually completes. A repo_edit's own `completed`
+    event detail is `{**verification.evidence(), "work_result": {...branch, base_branch,
+    files, ...}}` (see _finalize_task_outcome()) -- "branch" lives inside `work_result`, never
+    at the top level of the event detail itself."""
     events = db.execute(
         select(MainAITaskEvent)
         .join(MainAITask, MainAITask.id == MainAITaskEvent.task_id)
@@ -170,8 +173,9 @@ def _find_repo_edit_branch(db: Session, *, goal_id: uuid.UUID) -> dict | None:
         .order_by(MainAITaskEvent.created_at.desc())
     ).scalars().all()
     for event in events:
-        if "branch" in event.detail:
-            return event.detail
+        work_result = event.detail.get("work_result", {})
+        if "branch" in work_result:
+            return work_result
     return None
 
 
@@ -262,7 +266,17 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="work_result", data={"work_result": work_result})
             db.commit()
 
-        verification = verify_task(task, cwd=str(_backend_root()))
+        if task.task_type == "run_tests":
+            # run_tests' own primary work IS its verification. Re-derive the VerificationResult
+            # directly from the real pytest outcomes already captured in work_result rather
+            # than also calling verify_task() -- which would independently re-run the exact
+            # same targets from task.verification_plan a second time (correctly catching a
+            # failure either way, since both read the same plan, but doubling every run_tests
+            # task's real subprocess pytest cost for no benefit).
+            steps = [VerificationStepResult(kind="targeted_tests", passed=r["passed"], detail=r) for r in work_result["results"]]
+            verification = VerificationResult(passed=all(s.passed for s in steps), steps=steps)
+        else:
+            verification = verify_task(task, cwd=str(_backend_root()))
 
         if verification.passed and task.task_type == "repo_edit":
             # Same resume discipline for the GitHub push itself -- once github_write_enabled is

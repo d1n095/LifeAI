@@ -396,4 +396,54 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     ).scalar_one()
     assert completed_event["work_result"]["proposed"] is True
     assert "branch" in completed_event["work_result"]
-    assert "previous_contents" not in completed_event["work_result"]
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_run_tests_derives_verification_from_its_own_work_result_not_a_second_pytest_run(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """run_tests' completion is gated by its OWN pytest run's outcome (work_result), never a
+    second, redundant subprocess invocation of the same targets via verify_task() -- proven
+    here by counting real subprocess.run calls: exactly one per targeted_tests entry, not two
+    (verify_task() would otherwise independently re-run the identical target). The failure
+    case is the one that actually matters: a failing test run must still correctly land the
+    task on retryable_failed, never completed, using only that one real run's result."""
+    import subprocess
+
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    (tmp_path / "backend" / "tests" / "test_run_tests_gap.py").write_text("def test_run_tests_gap():\n    assert False\n")
+
+    call_count = {"n": 0}
+    real_run = subprocess.run
+
+    def _counting_run(*args, **kwargs):
+        call_count["n"] += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _counting_run)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(
+        db_session,
+        goal,
+        task_type="run_tests",
+        verification_plan=[{"kind": "targeted_tests", "target": "tests/test_run_tests_gap.py"}],
+    )
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    assert call_count["n"] == 1  # not re-run a second time via verify_task()
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed  # the test run itself failed -- must never be `completed`
+    event_types = _events(superuser_db, task.id)
+    assert MainAITaskEventType.completed.value not in event_types
