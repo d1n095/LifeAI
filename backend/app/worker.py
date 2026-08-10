@@ -43,6 +43,7 @@ from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
+from app.mainai_execution.execution_job import run_task_execution_job
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
@@ -164,6 +165,9 @@ async def process_claimed_mainai_job(
             await run_message_sequence_backfill_job(
                 db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds
             )
+        elif job is not None and job.job_type == "task_execution":
+            record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
+            await run_task_execution_job(db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
         elif job is not None:
             logger.error("Worker %s: mainai_job %s has unknown job_type '%s'.", worker_id, job_id, job.job_type)
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)

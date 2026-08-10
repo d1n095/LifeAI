@@ -142,6 +142,30 @@ def _validate_input_refs(db: Session, owner_id: uuid.UUID, input_refs: list[dict
             raise InvalidInputRefsError(f"Document {doc_id} has status '{doc.status.value}', not 'indexed' — not yet reviewable.")
 
 
+def _validate_task_execution_input_refs(db: Session, owner_id: uuid.UUID, input_refs: list[dict]) -> None:
+    """task_execution's own contract (MainAI Execution Loop V0.1,
+    app/mainai_execution/executor.py): exactly one `{"type": "mainai_task", "id": "..."}` ref,
+    pointing at a real MainAITask this owner's own RLS scope can see, that is currently
+    `ready` — a task in any other status (already running, blocked, completed, ...) is not a
+    valid dispatch target."""
+    from app.models.mainai_execution import MainAITask, MainAITaskStatus  # local import: avoids a hard app.jobs -> app.mainai_execution dependency for callers that never touch task_execution
+
+    if len(input_refs) != 1:
+        raise InvalidInputRefsError(f"task_execution requires exactly one input_ref, got {len(input_refs)}.")
+    ref = input_refs[0]
+    if not isinstance(ref, dict) or ref.get("type") != "mainai_task" or not ref.get("id"):
+        raise InvalidInputRefsError(f"Invalid input_ref (expected {{'type': 'mainai_task', 'id': ...}}): {ref!r}")
+    try:
+        task_id = uuid.UUID(str(ref["id"]))
+    except ValueError as exc:
+        raise InvalidInputRefsError(f"Invalid mainai_task id in input_refs: {ref['id']!r}") from exc
+    task = db.execute(select(MainAITask).where(MainAITask.id == task_id, MainAITask.owner_id == owner_id)).scalar_one_or_none()
+    if task is None:
+        raise InvalidInputRefsError(f"MainAITask {task_id} not found or not owned by this account.")
+    if task.status != MainAITaskStatus.ready:
+        raise InvalidInputRefsError(f"MainAITask {task_id} has status '{task.status.value}', not 'ready' — not a valid dispatch target.")
+
+
 def create_job(
     db: Session,
     *,
@@ -210,6 +234,14 @@ def create_job(
         # contract exists to prevent.
         if input_refs:
             raise InvalidInputRefsError("message_sequence_backfill takes no input_refs — its scope is the whole owner's unnumbered message history.")
+    elif job_type == "task_execution":
+        # MainAI Execution Loop V0.1 (app/mainai_execution/executor.py): exactly one
+        # {"type": "mainai_task", "id": "..."} ref, pointing at a real, owner-visible
+        # MainAITask row (RLS-enforced by the query itself, same as corpus_review's document
+        # check above) — never more than one, since a task_execution job is always the
+        # execution unit for exactly one task, and never fewer, since a task_execution job
+        # with no task to execute has nothing to do.
+        _validate_task_execution_input_refs(db, owner_id, input_refs)
 
     savepoint = db.begin_nested()
     try:

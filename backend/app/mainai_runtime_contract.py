@@ -257,7 +257,7 @@ class CapabilityUnavailableError(Exception):
 # able to execute as a durable job. Adding a new job_type without adding it here is a bug,
 # not an oversight this module can auto-discover — see docs/MAINAI_JOB_RUNTIME.md's
 # "capability manifest" section for how a real new capability gets added.
-CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review", "message_sequence_backfill"})
+CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review", "message_sequence_backfill", "task_execution"})
 
 # Which provider ROLE (see app/providers/registry.py's resolve_active) each capability's
 # actual execution depends on being configured. corpus_review calls chat_with_fallback(), i.e.
@@ -272,7 +272,18 @@ CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review", "message_seque
 # (S1B, app/rag/backfill/message_sequence.py) is pure SQL over rows that already exist —
 # numbering the founder's own message history must not become unavailable because no model key
 # happens to be configured. A capability simply forgotten from this dict still fails closed.
-_CAPABILITY_PROVIDER_ROLE: dict[str, str | None] = {"corpus_review": "chat", "message_sequence_backfill": None}
+#
+# `task_execution` (MainAI Execution Loop V0.1, app/mainai_execution/execution_job.py) depends
+# on "chat" for its two AI-backed task_types (`repo_edit`'s code-agent call, `read_only_audit`'s
+# analysis call) — `run_tests`/`open_pr` need no provider at all, but the capability-level
+# check reports the typical/primary dependency, same convention corpus_review already sets;
+# require_capability() is re-checked per-dispatch (app/worker.py) so an unconfigured provider
+# is caught even for a task whose OWN task_type wouldn't have needed it.
+_CAPABILITY_PROVIDER_ROLE: dict[str, str | None] = {
+    "corpus_review": "chat",
+    "message_sequence_backfill": None,
+    "task_execution": "chat",
+}
 
 # corpus_review only ever reads existing documents/document_chunks and writes NEW
 # mainai_job_proposals rows — it never modifies or deletes a founder's existing knowledge
@@ -285,6 +296,14 @@ _CAPABILITY_PROVIDER_ROLE: dict[str, str | None] = {"corpus_review": "chat", "me
 # migration 0030's `messages_deny_sequence_number_rewrite` trigger makes overwriting an
 # already-assigned ordinal impossible at the database level — but "modifies existing data" is
 # still the truthful answer, and this field is reported to the founder, so it is True.
+#
+# task_execution: `modifies_existing_data`/`writes_new_records` describe MainAI's OWN
+# database state (mainai_tasks/mainai_task_events/mainai_checkpoints — new rows, no existing
+# document/claim/memory row is ever touched). Whether a given task_execution job also touches
+# the EXTERNAL GitHub repo is a separate, per-task question governed by the approval gate
+# (app/mainai_execution/approval.py) and MainAITask.approval_required — never merge/deploy/
+# production capable at all (see KNOWN_TASK_TYPES in app/mainai_execution/planner.py: no such
+# task_type exists for the planner to even propose).
 _CAPABILITY_WRITE_PROFILE: dict[str, dict] = {
     "corpus_review": {"modifies_existing_data": False, "writes_new_records": True, "sandbox_only": False, "production_prohibited": False},
     "message_sequence_backfill": {
@@ -293,6 +312,7 @@ _CAPABILITY_WRITE_PROFILE: dict[str, dict] = {
         "sandbox_only": False,
         "production_prohibited": False,
     },
+    "task_execution": {"modifies_existing_data": False, "writes_new_records": True, "sandbox_only": False, "production_prohibited": False},
 }
 
 

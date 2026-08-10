@@ -1,0 +1,311 @@
+"""Entry point app/worker.py's poll loop calls once a `task_execution` mainai_jobs row has
+been claimed — the actual EXECUTOR of the MainAI Execution Loop V0.1. Mirrors
+app/jobs/handlers/corpus_review.py's shape exactly: same signature, same lease-fencing
+discipline (every write goes through app/jobs/service.py's guarded functions, a
+JobLeaseLostError stops this function immediately with no further writes), same restart-safe
+"progress is only ever durable together with the work it describes" rule.
+
+Per-task_type handlers (`_HANDLERS`) do the REAL work:
+  - read_only_audit: a real chat_with_fallback() analysis call (same provider chain
+    app/agent_orchestration.py's dispatch_task() already uses) — no repo writes.
+  - repo_edit: a real chat_with_fallback() code-agent call asking for full-file replacement
+    content for a small, explicitly scoped set of files (never a diff to parse/apply — see
+    app/integrations/github_client.py's commit_multiple_files() docstring for why), applied
+    to the LOCAL checkout first (this backend container's own repo tree — see _repo_root())
+    so verify_task() (app/mainai_execution/verify.py) can actually run tests against the new
+    content before anything is pushed anywhere.
+  - run_tests: runs the exact same local-test mechanism verify.py's targeted_tests step uses,
+    as the task's own primary work (for a task whose whole point IS "prove the suite is
+    green", not a side effect of verifying some other change).
+  - open_pr: opens the real PR for a goal's already-verified repo_edit (looks up the branch
+    the repo_edit task recorded on its own `completed` event — see _find_repo_edit_branch()).
+
+GitHub writes (branch creation, the real multi-file commit, PR creation) only ever happen
+when `settings.github_write_enabled` is True (default False) — same gate
+app/agent_orchestration.py already uses; with it off, repo_edit/open_pr still do everything
+up to and including local verification, and record a PROPOSAL (computed branch name, file
+contents, commit message / PR title+body) as evidence, never touching the network. This is
+what "close the stub gap" means in V0.1: the capability is real and independently testable
+(tests/backend/test_github_client.py, tests/backend/test_mainai_execution_executor.py), not
+that it defaults to pushing to a live repo."""
+
+import logging
+import subprocess
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.integrations.github_client import GitHubClientError, get_github_client
+from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
+from app.jobs.service import mark_completed, mark_failed, update_progress
+from app.mainai_execution.executor import task_for_job
+from app.mainai_execution.graph import recompute_task_readiness
+from app.mainai_execution.verify import VerificationStepError, verify_task
+from app.models.mainai_execution import (
+    RETRYABLE_MAINAI_TASK_STATUSES,
+    MainAIGoal,
+    MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
+from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
+from app.providers.base import Message
+from app.providers.registry import chat_with_fallback
+
+logger = logging.getLogger("mainai.execution")
+
+
+def _repo_root() -> Path:
+    """This file lives at <repo>/backend/app/mainai_execution/execution_job.py -- three
+    parents up is the repo root, the same directory GitHub paths in a task's
+    verification_plan/commit are relative to."""
+    return Path(__file__).resolve().parents[3]
+
+
+def _backend_root() -> Path:
+    return _repo_root() / "backend"
+
+
+class TaskExecutionError(Exception):
+    """Raised by a task_type handler for a genuine execution failure (provider error,
+    malformed AI response, filesystem error) -- distinct from a verification FAILURE (which is
+    not an exception; see verify_task()'s return value), and always caught by
+    run_task_execution_job() and turned into a truthful mark_failed()/retryable_failed
+    outcome, never left to crash the worker."""
+
+
+READ_ONLY_AUDIT_SYSTEM_PROMPT = (
+    "Du är MainAI:s read-only audit-agent. Du får en beskrivning av vad som ska granskas. "
+    "Svara med en kort, konkret sammanfattning av vad du hittar (max 500 ord) -- inga "
+    "kodändringar, inga förslag på commits, bara analys."
+)
+
+CODE_AGENT_SYSTEM_PROMPT = (
+    "Du är MainAI:s kodagent. Du får ett litet, avgränsat uppdrag. Svara ENDAST med ett "
+    "JSON-objekt på formen {\"files\": [{\"path\": \"relative/path/from/repo/root.py\", "
+    "\"content\": \"...hela filens NYA fullständiga innehåll...\"}], \"commit_message\": "
+    "\"...\"}. Ändra ALDRIG fler filer än vad uppdraget kräver. `content` är filens KOMPLETTA "
+    "nya innehåll, aldrig en diff eller ett utdrag."
+)
+
+
+async def _handle_read_only_audit(db: Session, task: MainAITask) -> dict:
+    messages = [Message(role="system", content=READ_ONLY_AUDIT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
+    result, _attempted = await chat_with_fallback(db, messages)
+    return {"summary": result.content, "provider": result.provider, "model": result.model}
+
+
+def _parse_code_agent_response(raw: str) -> dict:
+    import json
+
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1]
+        if text.startswith("json"):
+            text = text[len("json") :]
+        text = text.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise TaskExecutionError(f"Code agent response was not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("files"), list) or not parsed["files"]:
+        raise TaskExecutionError("Code agent response must be an object with a non-empty 'files' array.")
+    for f in parsed["files"]:
+        if not isinstance(f, dict) or "path" not in f or "content" not in f:
+            raise TaskExecutionError(f"Malformed file entry in code agent response: {f!r}")
+        if ".." in Path(f["path"]).parts:
+            raise TaskExecutionError(f"Refusing a path containing '..': {f['path']!r}")
+    return parsed
+
+
+async def _handle_repo_edit(db: Session, task: MainAITask) -> dict:
+    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
+    result, _attempted = await chat_with_fallback(db, messages)
+    parsed = _parse_code_agent_response(result.content)
+
+    repo_root = _repo_root()
+    previous_contents: dict[str, str | None] = {}
+    for file in parsed["files"]:
+        abs_path = repo_root / file["path"]
+        previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_text(file["content"])
+
+    return {
+        "files": parsed["files"],
+        "commit_message": parsed.get("commit_message", task.description[:200]),
+        "previous_contents": previous_contents,
+        "provider": result.provider,
+        "model": result.model,
+    }
+
+
+def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
+    result = subprocess.run(["python", "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+    return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
+
+
+def _handle_run_tests(task: MainAITask) -> dict:
+    targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
+    if not targets:
+        raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
+    results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
+    return {"results": results}
+
+
+def _find_repo_edit_branch(db: Session, *, goal_id: uuid.UUID) -> dict | None:
+    """The branch/commit a sibling repo_edit task in this goal already produced -- open_pr's
+    handler looks this up rather than the planner needing to pass it explicitly, since it
+    doesn't exist until the repo_edit task actually completes."""
+    events = db.execute(
+        select(MainAITaskEvent)
+        .join(MainAITask, MainAITask.id == MainAITaskEvent.task_id)
+        .where(MainAITask.goal_id == goal_id, MainAITaskEvent.event_type == MainAITaskEventType.completed)
+        .order_by(MainAITaskEvent.created_at.desc())
+    ).scalars().all()
+    for event in events:
+        if "branch" in event.detail:
+            return event.detail
+    return None
+
+
+async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> dict:
+    settings = get_settings()
+    edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
+    if edit_info is None:
+        raise TaskExecutionError("open_pr task found no completed repo_edit sibling with a recorded branch to open a PR for.")
+
+    title = f"MainAI: {goal.title}"[:250]
+    body = f"Automatiskt genererad av MainAI Execution Loop V0.1 för mål: {goal.title}\n\n{goal.original_instruction}"
+
+    if not settings.github_write_enabled:
+        return {"proposed": True, "title": title, "body": body, "head": edit_info["branch"], "base": edit_info.get("base_branch", "main")}
+
+    client = get_github_client()
+    pr = await client.create_pull_request(title=title, body=body, head=edit_info["branch"], base=edit_info.get("base_branch", "main"))
+    return {"proposed": False, "pull_request_number": pr.get("number"), "pull_request_url": pr.get("html_url")}
+
+
+async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) -> dict:
+    """Only called once verify_task() has already passed (see run_task_execution_job()) --
+    the actual GitHub push, gated behind github_write_enabled exactly like
+    app/agent_orchestration.py's own prepare_github_pr()."""
+    settings = get_settings()
+    branch = f"claude/mainai-task-{task.id}"
+    base_branch = "claude/det-kommer-mer-879lcm"
+
+    if not settings.github_write_enabled:
+        return {"branch": branch, "base_branch": base_branch, "proposed": True, "files": [f["path"] for f in work_result["files"]]}
+
+    client = get_github_client()
+    base_sha = await client.get_ref(base_branch)
+    try:
+        await client.create_branch(new_branch=branch, from_sha=base_sha)
+    except GitHubClientError:
+        pass  # branch already exists (a retry of this task) -- commit_multiple_files still applies on top of it
+    commit_result = await client.commit_multiple_files(
+        branch=branch, base_sha=base_sha, files=[{"path": f["path"], "content": f["content"]} for f in work_result["files"]], message=work_result["commit_message"]
+    )
+    return {"branch": branch, "base_branch": base_branch, "proposed": False, **commit_result}
+
+
+async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, *, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
+    """`db` must already be scoped to `owner_id`'s RLS context (app/worker.py's
+    _set_mainai_job_rls_owner) before this is called, exactly like run_corpus_review_job()."""
+    job = db.get(MainAIJob, job_id)
+    if job is None:
+        return
+    task = task_for_job(db, job)
+    if task is None:
+        mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
+        return
+    goal = db.get(MainAIGoal, task.goal_id)
+
+    try:
+        renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
+        update_progress(db, job, worker_id=worker_id, lease_generation=lease_generation, current=0, total=1, phase=task.task_type)
+        db.commit()
+    except JobLeaseLostError:
+        logger.warning("task_execution job %s: lease lost before dispatch.", job_id)
+        return
+
+    db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.verification_started, detail={}))
+    db.commit()
+
+    try:
+        if task.task_type == "read_only_audit":
+            work_result = await _handle_read_only_audit(db, task)
+        elif task.task_type == "repo_edit":
+            work_result = await _handle_repo_edit(db, task)
+        elif task.task_type == "run_tests":
+            work_result = _handle_run_tests(task)
+        elif task.task_type == "open_pr":
+            work_result = await _handle_open_pr(db, task, goal)
+        else:
+            raise TaskExecutionError(f"Unknown task_type '{task.task_type}'.")
+
+        verification = verify_task(task, cwd=str(_backend_root()))
+
+        if verification.passed and task.task_type == "repo_edit":
+            finalize_info = await _finalize_repo_edit(db, task, work_result)
+            work_result = {**work_result, **finalize_info}
+            del work_result["previous_contents"]  # not durable evidence -- was only needed transiently for a future diff/rollback view
+
+    except (TaskExecutionError, VerificationStepError, GitHubClientError) as exc:
+        logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
+        db.rollback()
+        job = db.get(MainAIJob, job_id)
+        task = db.get(MainAITask, task.id)
+        try:
+            mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
+        except JobLeaseLostError:
+            logger.warning("task_execution job %s: lease lost while recording failure.", job_id)
+            return
+        _finalize_task_outcome(db, task, passed=False, evidence={"error": str(exc)})
+        db.commit()
+        return
+
+    try:
+        mark_completed(db, job, worker_id=worker_id, lease_generation=lease_generation, public_message="Task attempt completed; see task status for the verified outcome.")
+    except JobLeaseLostError:
+        logger.warning("task_execution job %s: lease lost while recording completion.", job_id)
+        return
+
+    _finalize_task_outcome(db, task, passed=verification.passed, evidence={**verification.evidence(), "work_result": work_result})
+    db.commit()
+
+
+def _finalize_task_outcome(db: Session, task: MainAITask, *, passed: bool, evidence: dict) -> None:
+    """THE completion gate — a task becomes `completed` if and only if verification passed
+    (or genuinely had nothing to verify). A failed verification never produces `completed`: it
+    produces `retryable_failed` (if attempts remain) or `failed` (attempts exhausted), and
+    downstream tasks are re-evaluated via recompute_task_readiness() so a task depending on
+    this one is correctly moved to `blocked`, never left silently `pending`."""
+    db.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=task.owner_id,
+            event_type=MainAITaskEventType.verification_passed if passed else MainAITaskEventType.verification_failed,
+            detail=evidence,
+        )
+    )
+
+    if passed:
+        task.status = MainAITaskStatus.completed
+        task.completed_at = datetime.utcnow()
+        db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.completed, detail=evidence))
+    else:
+        if task.attempts < task.max_attempts:
+            task.status = MainAITaskStatus.retryable_failed
+        else:
+            task.status = MainAITaskStatus.failed
+            task.completed_at = datetime.utcnow()
+        db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.failed, detail=evidence))
+
+    db.flush()
+    recompute_task_readiness(db, goal_id=task.goal_id)
