@@ -152,6 +152,13 @@ Named explicitly rather than silently left implicit:
   `KnowledgeClaim`'s `assess_claim_confidence()`) — two contradictory lessons can both sit
   `active` with nothing flagging the contradiction. Documented explicitly in
   `EngineeringLessonConfidence`'s own docstring.
+- **Captured subprocess stdout/stderr (`stdout_tail`/`stderr_tail` on `run_tests`/verification
+  evidence) is not secret-scanned or redacted before being stored as durable
+  `MainAITaskEvent.detail`.** If a test file (including one an AI-authored `repo_edit` just
+  wrote) prints an environment variable or other sensitive value, that value is captured
+  verbatim (truncated to the last 4000/2000 chars) and persisted. Mitigated, not eliminated, by
+  the same owner-scoped RLS every other execution-loop table already has — only the task's own
+  owner (or the founder) can read it — but there is no scrubbing of the content itself.
 
 ## SECURITY INVARIANTS
 
@@ -172,6 +179,18 @@ Named explicitly rather than silently left implicit:
 - The API is founder-only (`require_founder`) with the exact same dependency every other
   founder router already uses; owner isolation for goal/task rows is enforced by Postgres RLS
   through the ordinary session, never re-derived in application code.
+- **Every AI-proposed path is validated before it can reach a filesystem write or a subprocess
+  argv** — never trusted just because the plan/response parsed as well-formed JSON: a
+  `targeted_tests` verification target is rejected if absolute or containing `..`
+  (`validate_targeted_tests_target()`, enforced at plan-creation time AND at both real execution
+  call sites), and a `repo_edit` task's code-agent-proposed file path is rejected the same way
+  (`_validate_repo_edit_file_path()`), with a second, independent `resolve()`-and-compare
+  confinement check in `_handle_repo_edit()` itself as defense in depth against a symlink
+  already present in the checked-out tree. Hardening-pass finding: the file-write path was, for
+  a time, missing the absolute-path half of this check — an AI-proposed absolute path was a
+  genuine arbitrary-file-write primitive onto the executor host, since `Path("/repo/root") /
+  "/etc/x"` evaluates to `Path("/etc/x")`, not an error (pathlib's own documented `/` semantics
+  for an absolute right-hand operand). Fixed; see `docs/BRANCH_REGISTRY.md`.
 
 ## DURABILITY INVARIANTS
 

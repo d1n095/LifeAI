@@ -264,6 +264,49 @@ statusen. **INTE MERGAD** — väntar på grundarens granskning av PR. Ingen del
 rört merge till mainline, deploy, VPS, produktion, prod-migration, prod-backfill, CONTRACT
 eller S1C.
 
+**PR #57 — pågående hardening-/attack-pass (grundarens uttryckliga "Apple-like version model":
+frys scope, attackera hela versionen, fixa allt som hittas, regressionstesta, fånga
+engineering lessons, full slutverifiering, ENDAST DÄREFTER grundargranskning för merge).
+Aktuell head: `e9ee9eb`. Verdict just nu: **NOT MERGE-READY** (explicit, upprepad grundare-
+bekräftad bedömning — passet är inte klart, inte ett problem i sig). Ingen merge, ingen V0.2,
+ingen deploy/VPS/produktion under passet.**
+
+Fynd hittills (root cause → fix → regressionstest → ev. mutationstest → engineering lesson för
+varje, se resp. commit):
+- **P1** — concurrency-race i `dispatch_ready_task()`/`create_job()`-commit-ordning (commit
+  `ed96666`).
+- **P1** — AI-styrd path traversal i `targeted_tests`-mål, både vid plan-skapande och vid
+  körning (commit `42da682`).
+- **P1** — crash-fönster mellan lyckad GitHub-push och durable checkpoint i `repo_edit`
+  (crash matrix H, commit `8539471`).
+- **P1** — samma mönster, sedan hittat i `open_pr`:s eget crash-fönster (crash matrix I,
+  commit `692c9d7`) — visar att en fix för ETT anropsställe inte automatiskt skyddar ett
+  syskon-anropsställe med samma form.
+- **P0 (kritisk)** — `_handle_repo_edit()` saknade absolut-sökvägskontroll: en AI-föreslagen
+  absolut sökväg var en riktig godtycklig filskrivningsprimitiv på executor-hostens
+  filsystem (pathlib's `/`-operator kastar bort basen för en absolut högersida). Verifierad
+  som en genuint exploaterbar bugg (regressionstesterna skrev faktiskt utanför sandlådan med
+  fixen borttagen), fixad med två oberoende lager + mutationstest (commit `cf61c96`).
+- **P1** — `subprocess.TimeoutExpired` från de riktiga pytest-subprocessanropen fångades
+  ingenstans, vilket lämnade en task permanent fast i `running` (varken retry- eller
+  cancel-bar) vid en subprocess-timeout (commit `e9ee9eb`).
+- RLS/cross-owner-attack (samtliga sex nya V0.1-tabeller, guessed UUID, cross-owner FK) och
+  privilege-attack (TRUNCATE/REFERENCES/TRIGGER, default privileges) genomförda utan nya fynd
+  — befintliga skydd höll (commit `1d727ac` + befintlig `test_runtime_table_privileges.py`).
+- State-machine mutation matrix: DB CHECK-constraints (`ck_mainai_tasks_
+  completed_at_matches_terminal_status`, `ck_mainai_tasks_attempts_within_budget`) och
+  lease-fencingens skydd mot dubbla terminal-events verifierade direkt mot en riktig
+  brytningsförsök — höll, ingen fix behövdes (commit `b70986b`).
+
+Kvarstående enligt grundarens 10-punktslista: fullständig systematisk genomgång av
+crash-matrisens övriga punkter A-G (analytiskt granskade, inte färskt om-testade denna pass),
+resterande mutationstester för test-quality-punkten (bypass verification/disable fencing/
+remove owner filter/remove checkpoint/duplicate dispatch), static/dependency/secret-scan,
+performance/bounds-mätning, en systematisk documentation-drift-genomgång (två poster redan
+tillagda i `docs/MAINAI_EXECUTION_LOOP_V0_1.md`s KNOWN RISKS/SECURITY INVARIANTS för de två
+senaste fynden), och slutligen full slutverifieringssvit + slutrapport med explicit
+MERGE-READY/NOT MERGE-READY-verdict.
+
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
 (`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit
