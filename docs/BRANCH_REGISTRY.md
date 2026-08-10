@@ -120,15 +120,41 @@ founder-godkända, flerstegs repo-städning: `backend/scripts/` omorganiserad ef
 Se Pass 49 nedan för full detalj. **Basgrenens nuvarande tip är därmed
 `ecce648cef4793bcbade1cf6cef8fd76811ae207`.**
 
-**PR #50** (denna session), `claude/tests-backend-providers-reorg` →
-`claude/det-kommer-mer-879lcm`, grenad från exakt `ecce648cef4793bcbade1cf6cef8fd76811ae207`
-(basgrenens tip vid grening). Steg 6 av städningen — teststrukturen: en read-only mappning av
-hela `backend/tests/backend/` (44 kvarvarande filer) föreslår 6 domängrupper (`providers/`,
-`storage/`, `jobs/`, `rag/`, `chat/`, `core/`), men denna PR implementerar medvetet bara EN,
-den lägst-riskiga gruppen — `test_chat_fallback_logging.py`, `test_gemini_provider.py`,
-`test_provider_placeholder_secrets.py`, `test_provider_verification.py` →
-`backend/tests/backend/providers/` — ren MOVE/RENAME, ingen testlogik ändrad. Se Pass 50
-nedan för full detalj.
+**PR #50 är MERGAD** (`claude/tests-backend-providers-reorg` →
+`claude/det-kommer-mer-879lcm`), grenad från exakt `ecce648cef4793bcbade1cf6cef8fd76811ae207`
+(basgrenens tip vid grening), merge-commit `a0e530040e90af782f2044bd369665f1b17280fb`, `merged_by`:
+`d1n095`. Verifierat mot GitHubs PR-API direkt, inte memorerat. Steg 6 av städningen —
+teststrukturen. Se Pass 50 nedan för full detalj. **Basgrenens nuvarande tip är därmed
+`a0e530040e90af782f2044bd369665f1b17280fb`.**
+
+**NATTPASS (2026-08-09/10):** flerstegs, sekventiell fortsättning av teststruktur-städningen.
+**PR #51** (`storage/`), **PR #52** (`jobs/`), **PR #53** (`rag/`, 10 filer — se anmärkning
+nedan om två filer den missade), **PR #54** (`chat/`, hittade dessutom att Pass 50:s
+`chat/`-förslag innehöll två filer som egentligen är `rag/`-domän:
+`test_trust_engine.py`/`test_search_failure_boundary.py`). Efter dessa fyra gjordes en djup
+read-only audit av alla 24 kvarvarande `tests/backend/`-filer (fullständig klassificering,
+cross-reference-karta, post-merge-konfliktanalys, stale-path-svep, app/- och docs/-
+strukturfynd, en verklig root-cause-utredning av `test_storage_local_fs.py`-flakan, och ett
+agent-liveness-designutkast) — resultatet: `core/` som samlingsnamn är fel modell; se Pass
+51-posten för `claude/tests-rag-correction-batch2` nedan och de två uppföljnings-PR:erna den
+producerade.
+
+**PR #55 (denna session)**, `claude/docs-stale-job-runtime-paths` →
+`claude/det-kommer-mer-879lcm`, grenad från exakt `a0e530040e90af782f2044bd369665f1b17280fb`.
+Trivial, isolerad doc-only-fix: tre föråldrade `app/rag/`-sökvägar i
+`docs/MAINAI_JOB_RUNTIME.md` (kvar sedan PR #45/#47, aldrig uppdaterade) korrigerade till
+`app/jobs/service.py`, `app/jobs/handlers/corpus_review.py`, `app/account/export.py`. Noll
+kod-/teständringar. Funnen under nattens stale-path-audit.
+
+**PR #56 (denna session)**, `claude/tests-rag-correction-batch2` →
+`claude/det-kommer-mer-879lcm`, grenad från exakt `a0e530040e90af782f2044bd369665f1b17280fb`
+(oberoende av PR #53 — inte staplad). En riktad korrigering: fyra filer som natten audit
+(§ovan) bekräftade är `rag/`-domän men som Pass 50 ursprungligen (fel) placerade i
+`core/`-förslaget — `test_trust_engine.py` (`app.rag.trust`),
+`test_search_failure_boundary.py` (`app.rag.vector_store`/`app.routers.library`),
+`test_error_disclosure.py` (uteslutande `/api/library`, INTE ett app-brett test som namnet
+antyder), `test_performance_measurement.py` (`app.rag.library_import`/`retrieve`/
+`vector_store`) — alla fyra → `backend/tests/backend/rag/`. Se Pass 51 nedan för full detalj.
 
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
@@ -319,6 +345,71 @@ enligt grundarens instruktion: vänta på FÄRSK granskning av Pass 31:s ändrin
 fortsätter längre — grundaren var explicit att detta INTE är ett godkännande att gå vidare
 till produktionsprofil/merge/deploy/produktionsbackfill/P4/P6/Admin reboot-knapp, och att
 PR #32 INTE ska mergas utan uttryckligt godkännande.
+
+## Pass 51 (2026-08-09/10): NATTPASS fortsättningsfas — djup audit + `rag/`-korrigering (PR #56) + doc-stale-fix (PR #55), ingen merge
+
+**Bakgrund:** efter PR #51–#54 (storage/jobs/rag/chat, alla klara/gröna/oberoende) gav
+grundaren en uttrycklig fortsättningsinstruktion: nattpasset var INTE klart bara för att de
+fyra föreslagna grupperna var avklarade. Resten av natten användes till (1) en djup read-only
+audit av alla 24 kvarvarande `tests/backend/`-filer, (2) en fullständig
+cross-reference-/konflikt-/stale-path-kartläggning för #51–#54, (3) read-only struktur-fynd i
+`backend/app/` och `docs/`, (4) en verklig root-cause-utredning av
+`test_storage_local_fs.py`-flakan, (5) ett agent-liveness-designutkast, och (6) två små,
+säkra, helt isolerade uppföljnings-PR:er som föll ut direkt ur fynden. Full rapport levererad
+som en Artifact (publicerad, inte committad — separat från detta register).
+
+**Huvudfynd — `core/` var fel modell:** de 24 återstående filerna faller INTE i en enda
+resthög. Fyra hör faktiskt till `rag/` (två redan flaggade av PR #54, två nya funna ikväll:
+`test_error_disclosure.py` testar uteslutande `/api/library`, `test_performance_measurement.py`
+mäter `app.rag.library_import`/`retrieve`/`vector_store`). En (`test_account_erasure.py`) hör
+hemma i den REDAN EXISTERANDE toppnivåmappen `tests/account/` (6 filer sedan tidigare, samma
+domän, annat lager). Sex säkerhets-/RLS-filer hör hemma i den REDAN EXISTERANDE toppnivåmappen
+`tests/security/` (2 filer sedan tidigare). Sju är en genuint ny plattforms-/bootstrap-domän
+(föreslaget namn: `tests/backend/infrastructure/`). Sex saknar naturlig syskongrupp och bör
+stanna som bara filer. Ingen ny `core/`-mapp rekommenderas.
+
+**PR #55 — `claude/docs-stale-job-runtime-paths`:** trivial, doc-only, 4 rader i
+`docs/MAINAI_JOB_RUNTIME.md` (tre föråldrade `app/rag/`-sökvägar kvar sedan PR #45/#47).
+Verifierat: `git diff --stat` exakt 4 rader/1 fil, ingen kod/testlogik rörd, repo-brett grep
+bekräftar noll kvarvarande stale referenser till de fem gamla `app/rag/`-sökvägarna i det
+dokumentet. Grenad från exakt `a0e530040e90af782f2044bd369665f1b17280fb`, helt oberoende av
+#51–#54 (rör bara den här filen).
+
+**PR #56 — `claude/tests-rag-correction-batch2`:** grenad från exakt
+`a0e530040e90af782f2044bd369665f1b17280fb` (INTE staplad på PR #53 — samma oberoende-princip
+som hela natten). Flyttar de fyra `rag/`-korrigeringsfilerna:
+- `test_trust_engine.py` (`app.rag.trust` uteslutande)
+- `test_search_failure_boundary.py` (`app.rag.vector_store`, `app.routers.library`)
+- `test_error_disclosure.py` (bara `/api/library`-routen, trots ett namn som antyder app-brett)
+- `test_performance_measurement.py` (`app.rag.library_import`/`retrieve`/`vector_store`)
+
+→ `backend/tests/backend/rag/` (`git mv`, ny `tests/backend/rag/__init__.py` eftersom denna
+branch är oberoende av PR #53:s egen, som redan har en). Ingen av de fyra hade
+`Path(__file__)`-baserade hardcoded paths (verifierat, ingen fix behövdes). Levande
+kryssreferenser uppdaterade: `test_performance_measurement.py`s egen körinstruktion
+(docstring) och `docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md`s rad 151 (levande arkitekturdokument,
+samma princip som Pass 46 etablerade).
+
+**Verifiering (PR #56):**
+- `pytest tests/backend/ --collect-only -q`: **973 tester**, identiskt.
+- `pytest tests/backend/rag/ -q`: **22 passed**.
+- `pytest tests/backend/ -q`: **971 passed, 1 skipped, 1 failed** — felet var
+  `test_storage_local_fs.py::test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`,
+  samma redan dokumenterade flaka (se root-cause-utredningen i nattens Artifact-rapport: ett
+  check-after-unlock-race i TESTETS EGEN efterhandskontroll, inte en bugg i
+  `local_fs.py` — bekräftat genom att läsa hela `_key_lock()`/`_publish()`-implementationen
+  och båda de kända flakande testernas exakta trådlogik rad för rad). `git diff` bekräftar att
+  PR #56 INTE rör `app/storage/` eller `test_storage_local_fs.py` alls. Isolerad omkörning:
+  **1/1 passed.**
+- `pytest tests/security/ tests/account/ -q`: **77 passed**.
+- Migrationer rent till head (`0031`), `apply_runtime_privileges.py`: privilege state
+  verified correct.
+- `ruff check`: 1 pre-existerande fynd (`F401` oanvänd `uuid`-import i
+  `test_performance_measurement.py`, rad 14) — INTE på raden denna PR ändrade (rad 9), inte
+  fixad här per seriens scope-isoleringsprincip.
+
+**Behavior-neutral bekräftat:** ren filflytt + två levande kryssreferens-uppdateringar + en ny
+tom `__init__.py`. Ingen testlogik, ingen assertion, inga fixtures ändrade.
 
 ## Pass 50 (2026-08-09): `backend/tests/backend/providers/` — steg 6 av den founder-godkända repo-städningen (teststrukturen), read-only mappning av HELA `tests/backend/` + EN liten första flytt, ingen merge
 
