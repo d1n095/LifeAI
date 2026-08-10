@@ -846,7 +846,7 @@ async def test_resume_claim_extraction_crash_after_flush_rolls_back_cleanly(db_s
 # Project Memory (Pass 31). Tests below are the founder's own lettering (F -- no deadlocks --
 # is proven implicitly by every threaded test below completing without timing out; G -- the
 # write-path registry no longer describing any persistent writer as NO LOCK -- is covered by
-# tests/backend/test_source_purge.py's existing write-path-registry drift test, unchanged by
+# tests/backend/storage/test_source_purge.py's existing write-path-registry drift test, unchanged by
 # this pass except for this one entry's description).
 
 
@@ -1061,7 +1061,7 @@ async def test_two_concurrent_jobs_uploading_identical_content_both_succeed_with
 # fresh lettering for this blocker, applied to library_import.py's own persistent-writer helper
 # (Test B, the Project Memory equivalent, lives in test_project_memory.py); E (concurrent
 # writers never accept a corrupt existing blob) and F (delete/write race stays deadlock-free)
-# are covered by test_storage_local_fs.py's existing concurrency tests, since this blocker's
+# are covered by tests/backend/storage/test_storage_local_fs.py's existing concurrency tests, since this blocker's
 # fix added no new locking -- only a hash check inside an already-locked critical section.
 
 
