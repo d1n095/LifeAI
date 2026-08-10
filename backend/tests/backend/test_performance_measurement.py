@@ -1,6 +1,6 @@
 """DEL 14 (prestanda/kostnad): local, real measurements against the Founder Knowledge Studio
 pipeline — real Postgres/pgvector, a deterministic fake embedding provider (never a real AI
-key, same pattern as test_library_import.py). Not a strict pass/fail benchmark suite: the
+key, same pattern as tests/backend/rag/test_library_import.py). Not a strict pass/fail benchmark suite: the
 actual safety mechanism is the hard limits already enforced and tested in
 app/rag/zip_import.py (MAX_FILES, MAX_TOTAL_UNCOMPRESSED_BYTES, ...) — this file's job is to
 put real numbers next to those limits and act as a light regression guard (a large
@@ -74,7 +74,7 @@ def _make_job(db_session, owner_id, raw: bytes, filename: str) -> ImportJob:
     """Durable-worker package: run_import_job() reads the original from app/storage/ via
     ImportJob.source_storage_key rather than taking raw bytes directly — this helper does the
     storage write a real POST /api/library/import would already have done (see
-    test_library_import.py's identical helper)."""
+    tests/backend/rag/test_library_import.py's identical helper)."""
     from sqlalchemy import text
 
     db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})

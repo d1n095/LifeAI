@@ -55,7 +55,7 @@ total/enskild okomprimerad storlek (200 MB / 25 MB), zip-bomb-skydd i två obero
 (metadata-kvot + strömmande hård byte-gräns), exekverbara filer ignoreras, magic-byte-
 verifiering för PDF/DOCX (extensionen litas aldrig på ensam), manifest.json valideras,
 checksummor verifieras. 22 säkerhetstester i
-`backend/tests/backend/test_zip_import_security.py`, ett per attackklass.
+`backend/tests/backend/rag/test_zip_import_security.py`, ett per attackklass.
 
 ## Extraktion och indexering (DEL 3)
 

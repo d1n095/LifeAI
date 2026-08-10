@@ -30,7 +30,7 @@ from app.storage.references import acquire_storage_key_lock, delete_if_unreferen
 
 EMBEDDING_DIM = get_settings().embedding_dim
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():
@@ -48,7 +48,7 @@ def _narrow_privileges_before_this_module():
     apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy -- never
     automatically by tests/conftest.py's _test_database fixture's own blanket table/sequence
     GRANT ALL. Same fixture, same rationale, as tests/backend/test_project_memory.py's and
-    test_library_routes.py's identical ones (added there in Pass 30/31 for the same reason);
+    tests/backend/rag/test_library_routes.py's identical ones (added there in Pass 30/31 for the same reason);
     this file never needed it before this pass, since _store_bytes() used to call
     storage.write_stream() directly with no reference check at all."""
     module = _load_apply_runtime_privileges()
@@ -68,7 +68,7 @@ def _fake_embedding_provider(monkeypatch):
 
     # Import now also runs claim extraction (app/rag/claims.py, STEG 10) right after
     # indexing, which calls the chat provider too — see the identical comment in
-    # test_library_routes.py's fixture for why this mock is required here as well.
+    # tests/backend/rag/test_library_routes.py's fixture for why this mock is required here as well.
     async def _fake_chat(self, messages, model, **kwargs):
         return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
 
@@ -310,7 +310,7 @@ async def test_manifest_checksum_mismatch_rejects_that_file_only(db_session, mak
 @pytest.fixture(autouse=True)
 def _fast_backoff(monkeypatch):
     """Keeps retry tests fast — the backoff POLICY itself is unit-tested for real timing in
-    test_job_retry.py; here only the RETRY BEHAVIOR (does it retry, how many times, does it
+    tests/backend/jobs/test_job_retry.py; here only the RETRY BEHAVIOR (does it retry, how many times, does it
     give up) matters."""
     monkeypatch.setattr("app.worker.compute_backoff_seconds", lambda attempt: 0.01)
 
@@ -529,7 +529,7 @@ async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
 ):
     """The "two concurrent workers/import attempts" scenario STEG 11 explicitly asks to be
     tested, at the job-orchestration level (not just the lock primitive in isolation, see
-    test_job_lock.py) — two jobs sharing the same source_checksum, run concurrently, must
+    tests/backend/jobs/test_job_lock.py) — two jobs sharing the same source_checksum, run concurrently, must
     not both proceed to do the actual import work.
 
     The module-level _fake_embedding_provider fixture returns instantly with no real
@@ -600,7 +600,7 @@ async def test_concurrent_duplicate_import_is_protected_by_the_distributed_lock(
 
 
 # --- P2: nested ZIP provenance and encrypted-entry wiring through the real pipeline ---
-# See tests/backend/test_zip_import_security.py for the exhaustive zip_import.py-level
+# See tests/backend/rag/test_zip_import_security.py for the exhaustive zip_import.py-level
 # coverage of nesting/budget/encryption itself; these confirm the result actually reaches
 # ImportJob.file_results, KnowledgeVersion.raw_metadata and job-level counts correctly.
 
@@ -846,7 +846,7 @@ async def test_resume_claim_extraction_crash_after_flush_rolls_back_cleanly(db_s
 # Project Memory (Pass 31). Tests below are the founder's own lettering (F -- no deadlocks --
 # is proven implicitly by every threaded test below completing without timing out; G -- the
 # write-path registry no longer describing any persistent writer as NO LOCK -- is covered by
-# tests/backend/test_source_purge.py's existing write-path-registry drift test, unchanged by
+# tests/backend/storage/test_source_purge.py's existing write-path-registry drift test, unchanged by
 # this pass except for this one entry's description).
 
 
@@ -1061,7 +1061,7 @@ async def test_two_concurrent_jobs_uploading_identical_content_both_succeed_with
 # fresh lettering for this blocker, applied to library_import.py's own persistent-writer helper
 # (Test B, the Project Memory equivalent, lives in test_project_memory.py); E (concurrent
 # writers never accept a corrupt existing blob) and F (delete/write race stays deadlock-free)
-# are covered by test_storage_local_fs.py's existing concurrency tests, since this blocker's
+# are covered by tests/backend/storage/test_storage_local_fs.py's existing concurrency tests, since this blocker's
 # fix added no new locking -- only a hash check inside an already-locked critical section.
 
 

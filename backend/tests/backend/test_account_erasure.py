@@ -1,6 +1,6 @@
 """app/account/erasure.py::erase_account_data() and app/account/export.py::
 export_account_data() — Pass 26 (PR #31's account export/erasure S1A integration slice).
-Real local Postgres (RLS included), same pattern as tests/backend/test_source_purge.py.
+Real local Postgres (RLS included), same pattern as tests/backend/storage/test_source_purge.py.
 """
 
 import importlib.util
@@ -70,7 +70,7 @@ def _load_apply_runtime_privileges():
 def _narrow_privileges_before_this_module():
     """erase_account_data() calls erase_owner_memory(), which mainai_app is only granted
     EXECUTE on via apply_runtime_privileges.py/ensure_app_role.py's shared privilege policy —
-    same rationale as tests/backend/test_source_purge.py's identical fixture.
+    same rationale as tests/backend/storage/test_source_purge.py's identical fixture.
 
     Integration (mainai-job-runtime): erase_account_data() now ALSO calls
     erase_own_mainai_job_children() (migration 0027) — a completely separate SECURITY DEFINER
@@ -474,7 +474,7 @@ def test_erase_account_data_retains_a_blob_still_referenced_by_another_owner():
 # so a byte-identical upload from an ordinary account could share a storage_key with Project
 # Memory content, and that account's own erasure would previously have physically deleted the
 # shared blob out from under Project Memory (migration 0023 fixes the SQL function itself; see
-# test_source_purge.py's Pass 29 section for the direct SQL-function tests C/D). Tests A/B
+# tests/backend/storage/test_source_purge.py's Pass 29 section for the direct SQL-function tests C/D). Tests A/B
 # below are the founder's own lettering: the end-to-end proof through a REAL erase_account_data()
 # call, not just the SQL function in isolation.
 
@@ -1218,7 +1218,7 @@ def test_erasure_winning_the_owner_lock_race_leaves_nothing_for_claim_next_job_t
 # --- storage_deletion_tasks: privilege boundary (Pass 28, founder review round 3) -----------
 #
 # The table-wide catalog checks (mainai_app has ZERO direct privileges) live in
-# tests/backend/test_memory_source_units.py::test_mainai_app_privileges_are_exactly_least_
+# tests/backend/rag/test_memory_source_units.py::test_mainai_app_privileges_are_exactly_least_
 # privilege_no_truncate_references_trigger and ::test_apply_runtime_privileges_survives_a_
 # second_boot (both extended in Pass 28 to cover storage_deletion_tasks' now-empty privilege
 # set and enqueue_account_erasure_storage_task's EXECUTE grant). The tests below prove the

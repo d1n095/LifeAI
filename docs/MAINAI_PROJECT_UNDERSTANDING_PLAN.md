@@ -1687,7 +1687,7 @@ rapporteras med siffror, samma stil som PR #6:s resursmätning):
 
 #### 10.7.1 Resultat (kört, inte gissat)
 
-`tests/backend/test_zip_import_capacity.py::test_capacity_2500_files_through_the_real_import_pipeline`
+`tests/backend/rag/test_zip_import_capacity.py::test_capacity_2500_files_through_the_real_import_pipeline`
 (körs explicit via `RUN_CAPACITY_TEST=1`, inte del av standardsviten — se filens egen
 docstring för varför):
 
@@ -1695,7 +1695,7 @@ docstring för varför):
   totalt (realistiskt för textdokument, inte en byte-tung stress-test).
 - **Väg:** den riktiga `run_import_job()` — riktig Postgres (inkl. RLS), riktig
   lagringsbackend, mockad men strukturellt realistisk embedding-/chattleverantör (samma mock
-  som resten av `test_library_import.py` använder) — inte `zip_import.py` isolerat.
+  som resten av `tests/backend/rag/test_library_import.py` använder) — inte `zip_import.py` isolerat.
 - **Mätt tid:** 447,7 s totalt, 179,1 ms/fil.
 - **Mätt minne:** 11,3 MB Python-heap-topp (tracemalloc), 175,0 MB processens RSS-vattenmärke
   (oförändrat före/efter — ingen minnesläcka över 2 500 filer).

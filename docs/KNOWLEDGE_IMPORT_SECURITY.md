@@ -40,7 +40,7 @@ checksummaverifiering och textextraktion) om/när en sådan tjänst godkänns.
 | Hot | Kontroll | Var |
 |---|---|---|
 | En raderad källas innehåll dyker ändå upp i sökning/chatt | `search()`/`hybrid_search()` joinar `Document` explicit och filtrerar `deleted_at IS NULL` på SQL-nivå, inte bara i UI:t — verifierad som en RIKTIG bugg denna session (fanns inte innan Founder Knowledge Studio v1:s soft delete existerade) | `app/rag/vector_store.py` |
-| Cross-router-läcka: raderat via ett API, ändå synligt via ett annat | `app/routers/documents.py`s äldre `list_documents()` saknade samma filter — hittad och fixad via E2E-test, regressionstest tillagt | `documents.py`, `tests/backend/test_library_routes.py` |
+| Cross-router-läcka: raderat via ett API, ändå synligt via ett annat | `app/routers/documents.py`s äldre `list_documents()` saknade samma filter — hittad och fixad via E2E-test, regressionstest tillagt | `documents.py`, `tests/backend/rag/test_library_routes.py` |
 | En användares material läcker till en annan (isolation) | RLS `FORCE ROW LEVEL SECURITY` på `documents`/`document_chunks`/`knowledge_versions`/`knowledge_import_jobs`/`source_relationships`, plus explicit `owner_id`-filter i Python-koden som defense-in-depth (inte den enda gränsen — se `upsert_chunks()`s docstring) | `app/rls.py`, alla RAG-moduler |
 | Projekt-läcka mellan projekt trots samma ägare | `project_id`-filter i `search()`/`hybrid_search()`/`retrieve_context()`, testat explicit | `vector_store.py`, `test_workbench.py` |
 | Överdriven kontextstorlek (kostnad/prompt-injektion via massiva chunkar) | `top_k=5` (chatt/workbench) resp. begränsad `CHUNK_PREVIEW_LENGTH` i UI — hindrar inte fullständigt men begränsar blast radius | `chat.py`, `workbench.py`, `library.py` |
