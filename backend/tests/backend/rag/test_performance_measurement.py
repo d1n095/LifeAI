@@ -6,7 +6,7 @@ app/rag/zip_import.py (MAX_FILES, MAX_TOTAL_UNCOMPRESSED_BYTES, ...) — this fi
 put real numbers next to those limits and act as a light regression guard (a large
 unexplained slowdown fails the test) rather than to define the limits themselves.
 
-Run with `-s` to see the printed numbers: pytest tests/backend/test_performance_measurement.py -s
+Run with `-s` to see the printed numbers: pytest tests/backend/rag/test_performance_measurement.py -s
 """
 
 import io

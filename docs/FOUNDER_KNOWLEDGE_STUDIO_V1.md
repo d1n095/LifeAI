@@ -148,7 +148,7 @@ knowledge-studio/founder-knowledge-studio-media/library-workbench-mobile).
 - **STEG 14** — full vertikal 12-stegsverifiering som även täcker ljud/video. Inte påbörjad;
   medvetet nedprioriterad tills produktionsstarten på Render är löst (se handover-dokumentets
   "Exakt nästa steg").
-- **DEL 14** — lätt lokal mätning genomförd (`backend/tests/backend/test_performance_measurement.py`,
+- **DEL 14** — lätt lokal mätning genomförd (`backend/tests/backend/rag/test_performance_measurement.py`,
   kör med `-s` för att se siffrorna), inte en fullständig instrumenterad produktionsmätning.
   Ett syntetiskt paket (10 filer × 20 stycken) lokalt mot riktig Postgres/pgvector med en
   deterministisk fejk-embedding gav: import 0,244s totalt (~0,024s/fil), 10 chunkar (1
