@@ -16,6 +16,7 @@ import uuid
 import pytest
 from sqlalchemy import text as sa_text
 
+from app.mainai_execution import checkpoint as checkpoint_module
 from app.mainai_execution import planner
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import MainAITask, MainAITaskStatus
@@ -243,3 +244,118 @@ def test_api_a_founder_cannot_see_another_owners_goal(client, db_session, make_v
 
     res = client.get(f"/api/mainai/execution/goals/{other_goal.id}")
     assert res.status_code == 404
+
+
+def test_cross_owner_rls_isolation_holds_for_every_new_v0_1_table_through_the_real_runtime_role(db_session, superuser_db, make_verified_user):
+    """Hardening pass, RLS/cross-owner attack section: `db_session` is bound to the real
+    restricted `mainai_app` runtime role (see conftest.py's own fixture docstring), never the
+    superuser -- exactly the founder's own explicit requirement ("runtime role, inte admin").
+    Covers all six new V0.1 tables (mainai_goals, mainai_plans, mainai_tasks,
+    mainai_task_dependencies, mainai_task_events, mainai_checkpoints): owner A creates a real
+    goal/plan/two dependent tasks/an event/a checkpoint; owner B (same runtime role, different
+    RLS context) must see NONE of it via SELECT, and a targeted UPDATE/DELETE by owner B
+    against owner A's own row ids must affect exactly zero rows (RLS silently filters the
+    WHERE target out of existence, not a 403/error -- consistent with this app's existing
+    404-not-403 convention). mainai_task_events/mainai_checkpoints additionally get their
+    OWNER'S OWN UPDATE/DELETE attempt tested (not just cross-owner) since those two tables are
+    append-only for everyone, enforced by both a revoked GRANT and a deny-mutation trigger."""
+    owner_a, _ = make_verified_user()
+    owner_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, owner_a.id)
+    goal = planner.create_goal(db_session, owner_id=owner_a.id, title="owner A's goal", original_instruction="x", created_by="test")
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="two dependent tasks",
+        tasks=[PlannedTaskSpec(description="first", task_type="read_only_audit"), PlannedTaskSpec(description="second", task_type="read_only_audit", depends_on=[0])],
+        created_by="test",
+    )
+    db_session.commit()
+    plan = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).first().plan_id
+    task1, task2 = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+    task1_id, task2_id, plan_id, goal_id = task1.id, task2.id, plan, goal.id
+
+    checkpoint = checkpoint_module.record_checkpoint(db_session, task=task1, goal=goal, job_id=uuid.uuid4(), step="work_result", data={"x": 1})
+    checkpoint_id = checkpoint.id
+    event_id = db_session.execute(
+        sa_text("SELECT id FROM mainai_task_events WHERE task_id = :t ORDER BY created_at LIMIT 1"), {"t": str(task1_id)}
+    ).scalar_one()
+    db_session.commit()
+
+    # --- owner B: SELECT must see nothing of owner A's rows ---------------------------------
+    _set_rls_user(db_session, owner_b.id)
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_goals WHERE id = :id"), {"id": str(goal_id)}).scalar() == 0
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_plans WHERE id = :id"), {"id": str(plan_id)}).scalar() == 0
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_tasks WHERE id IN (:a, :b)"), {"a": str(task1_id), "b": str(task2_id)}).scalar() == 0
+    assert (
+        db_session.execute(
+            sa_text("SELECT count(*) FROM mainai_task_dependencies WHERE task_id = :t"), {"t": str(task2_id)}
+        ).scalar()
+        == 0
+    )
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_task_events WHERE id = :id"), {"id": str(event_id)}).scalar() == 0
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_checkpoints WHERE id = :id"), {"id": str(checkpoint_id)}).scalar() == 0
+    # A guessed/random UUID fares no differently -- confirms the above isn't just "this
+    # specific id happens to not match", it's genuine owner-scoped filtering.
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_tasks WHERE id = :id"), {"id": str(uuid.uuid4())}).scalar() == 0
+
+    # --- owner B: a targeted UPDATE/DELETE against owner A's row ids affects zero rows ------
+    r = db_session.execute(sa_text("UPDATE mainai_goals SET title = 'hijacked' WHERE id = :id"), {"id": str(goal_id)})
+    assert r.rowcount == 0
+    r = db_session.execute(sa_text("UPDATE mainai_tasks SET status = 'cancelled' WHERE id = :id"), {"id": str(task1_id)})
+    assert r.rowcount == 0
+    r = db_session.execute(sa_text("DELETE FROM mainai_tasks WHERE id = :id"), {"id": str(task1_id)})
+    assert r.rowcount == 0
+    db_session.rollback()
+
+    # --- append-only tables: even the TRUE OWNER cannot mutate/delete an event/checkpoint ---
+    _set_rls_user(db_session, owner_a.id)
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("UPDATE mainai_task_events SET event_type = 'completed' WHERE id = :id"), {"id": str(event_id)})
+    db_session.rollback()
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("DELETE FROM mainai_task_events WHERE id = :id"), {"id": str(event_id)})
+    db_session.rollback()
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("UPDATE mainai_checkpoints SET step = 'tampered' WHERE id = :id"), {"id": str(checkpoint_id)})
+    db_session.rollback()
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("DELETE FROM mainai_checkpoints WHERE id = :id"), {"id": str(checkpoint_id)})
+    db_session.rollback()
+
+    # --- confirm via the superuser connection that nothing above actually got mutated -------
+    assert superuser_db.execute(sa_text("SELECT title FROM mainai_goals WHERE id = :id"), {"id": str(goal_id)}).scalar_one() == "owner A's goal"
+    assert superuser_db.execute(sa_text("SELECT status FROM mainai_tasks WHERE id = :id"), {"id": str(task1_id)}).scalar_one() == "ready"
+    assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_task_events WHERE id = :id"), {"id": str(event_id)}).scalar() == 1
+    assert superuser_db.execute(sa_text("SELECT count(*) FROM mainai_checkpoints WHERE id = :id"), {"id": str(checkpoint_id)}).scalar() == 1
+
+
+def test_cross_owner_composite_fk_blocks_a_task_dependency_row_claiming_the_wrong_owner(db_session, make_verified_user):
+    """mainai_task_dependencies' composite FKs (task_id, owner_id) REFERENCES mainai_tasks (id,
+    owner_id) mean a cross-owner dependency row is structurally impossible to insert, not just
+    RLS-filtered after the fact -- verified directly here rather than assumed from reading the
+    migration."""
+    from sqlalchemy.exc import IntegrityError
+
+    owner_a, _ = make_verified_user()
+    owner_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, owner_a.id)
+    goal_a = planner.create_goal(db_session, owner_id=owner_a.id, title="A", original_instruction="x", created_by="test")
+    planner.create_plan(db_session, goal=goal_a, rationale="r", tasks=[PlannedTaskSpec(description="a-task", task_type="read_only_audit")], created_by="test")
+    db_session.commit()
+    task_a = db_session.query(MainAITask).filter(MainAITask.goal_id == goal_a.id).one()
+
+    _set_rls_user(db_session, owner_b.id)
+    goal_b = planner.create_goal(db_session, owner_id=owner_b.id, title="B", original_instruction="x", created_by="test")
+    planner.create_plan(db_session, goal=goal_b, rationale="r", tasks=[PlannedTaskSpec(description="b-task", task_type="read_only_audit")], created_by="test")
+    db_session.commit()
+    task_b = db_session.query(MainAITask).filter(MainAITask.goal_id == goal_b.id).one()
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            sa_text("INSERT INTO mainai_task_dependencies (task_id, depends_on_task_id, owner_id, created_at) VALUES (:t, :d, :o, now())"),
+            {"t": str(task_b.id), "d": str(task_a.id), "o": str(owner_b.id)},
+        )
+    db_session.rollback()
