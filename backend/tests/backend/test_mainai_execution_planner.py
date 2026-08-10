@@ -31,9 +31,10 @@ from datetime import datetime
 import pytest
 from sqlalchemy import text as sa_text
 
-from app.mainai_execution import graph, planner
+from app.mainai_execution import graph, lessons, planner
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import (
+    EngineeringLessonSeverity,
     MainAIGoalStatus,
     MainAIPlanStatus,
     MainAITask,
@@ -173,6 +174,125 @@ def test_create_plan_rejects_out_of_range_depends_on(db_session, owner_id):
         )
     db_session.rollback()
     assert db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).count() == 0
+
+
+@pytest.mark.parametrize("bad_target", ["../../../etc/passwd", "tests/../../secrets.py", "/etc/passwd", "..", "tests/.."])
+def test_create_plan_rejects_a_path_traversing_or_absolute_targeted_tests_target(db_session, owner_id, bad_target):
+    """Hardening pass finding (P1): verification_plan is AI-proposed content
+    (propose_plan_via_ai()) that ultimately becomes a real `python -m pytest` subprocess
+    argument (verify.py / execution_job.py) -- a hallucinated or prompt-injected plan pointing
+    a `targeted_tests` step outside the repo must be rejected at PLAN time, fail-closed, same
+    as an unknown task_type or an out-of-range depends_on index above."""
+    goal = _goal(db_session, owner_id)
+    with pytest.raises(planner.PlanValidationError):
+        planner.create_plan(
+            db_session,
+            goal=goal,
+            rationale="unsafe verification target",
+            tasks=[PlannedTaskSpec(description="run tests", task_type="run_tests", verification_plan=[{"kind": "targeted_tests", "target": bad_target}])],
+            created_by="test",
+        )
+    db_session.rollback()
+    assert db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).count() == 0
+
+
+def test_create_plan_rejects_a_malformed_verification_plan_entry(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    with pytest.raises(planner.PlanValidationError):
+        planner.create_plan(
+            db_session,
+            goal=goal,
+            rationale="malformed step",
+            tasks=[PlannedTaskSpec(description="run tests", task_type="run_tests", verification_plan=[{"no_kind_field": True}])],
+            created_by="test",
+        )
+    db_session.rollback()
+    assert db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).count() == 0
+
+
+def test_create_plan_accepts_a_safe_relative_targeted_tests_target(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="safe verification target",
+        tasks=[
+            PlannedTaskSpec(
+                description="run tests", task_type="run_tests", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_something.py"}]
+            )
+        ],
+        created_by="test",
+    )
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    assert task.verification_plan == [{"kind": "targeted_tests", "target": "tests/backend/test_something.py"}]
+
+
+def test_record_engineering_lesson_for_the_targeted_tests_path_traversal_fix(db_session, owner_id):
+    """MAINAI V0.1 hardening pass (post-PR #57): engineering learning loop, mandatory for a
+    P1 finding. `verification_plan`'s `targeted_tests.target` is AI-proposed content
+    (propose_plan_via_ai() -- untrusted input) that becomes a real `python -m pytest`
+    subprocess argument in TWO call sites (verify.py's verify_task(), execution_job.py's
+    run_tests handler). Neither create_plan() nor either execution call site validated it --
+    an absolute path or a `..`-escaping relative path would have let a hallucinated or
+    prompt-injected plan point verification at an arbitrary file on the executor's own
+    filesystem, which pytest would then import and execute. `_handle_repo_edit()`'s own
+    AI-proposed file-WRITE path already refused `..` for exactly this class of risk
+    (_parse_code_agent_response()) -- this had been missed for verification targets."""
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "A `targeted_tests` verification_plan step's `target` field (AI-proposed, via "
+            "propose_plan_via_ai()) was never validated for path safety before becoming an "
+            "argv element to a real `python -m pytest` subprocess call in verify.py's "
+            "verify_task() and execution_job.py's run_tests handler -- an absolute path or a "
+            "`..`-escaping relative path would let pytest collect and import an arbitrary file "
+            "on the executor's own filesystem, running any module-level code and any `test_*` "
+            "function it contains."
+        ),
+        root_cause=(
+            "create_plan() validated task_type, depends_on indices, and cycle-freedom, but "
+            "never inspected the CONTENTS of a task's verification_plan entries. The identical "
+            "class of risk was already recognized and fixed for AI-proposed file WRITE paths "
+            "in _handle_repo_edit()'s _parse_code_agent_response() (`if '..' in "
+            "Path(f['path']).parts: raise`), but that discipline was not carried over to "
+            "verification targets."
+        ),
+        affected_component="app.mainai_execution.planner / app.mainai_execution.verify / app.mainai_execution.execution_job",
+        severity=EngineeringLessonSeverity.high,
+        evidence=(
+            "Found by direct comparison to the codebase's own existing precedent "
+            "(_parse_code_agent_response()'s '..' check for file writes) during the V0.1 "
+            "hardening pass's planner/subprocess attack review -- no existing test covered "
+            "targeted_tests target validation at all before this pass."
+        ),
+        fix=(
+            "Added validate_targeted_tests_target() (app/mainai_execution/verify.py): rejects "
+            "a non-string/empty target, an absolute path, or any path containing a '..' "
+            "segment. Wired into THREE places for defense in depth: create_plan() (plan-creation "
+            "time, fail-closed before anything is persisted), verify_task()'s own "
+            "_run_targeted_tests(), and execution_job.py's _run_pytest() (the run_tests task "
+            "type's own primary-work call site) -- so a target that somehow bypassed the "
+            "plan-time check is still caught at both real subprocess boundaries."
+        ),
+        general_rule=(
+            "Any AI-proposed value that becomes a filesystem path or subprocess argument must "
+            "be validated for path-traversal/absolute-path safety at EVERY boundary that uses "
+            "it, not just the first one -- a fix applied to one call site (file writes) does "
+            "not automatically cover a structurally identical risk at a different call site "
+            "(verification targets) unless someone deliberately generalizes it."
+        ),
+        applies_to=["run_tests", "repo_edit", "verification_plan", "targeted_tests", "planner"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.1 hardening pass (post-PR #57) -- targeted_tests path-traversal fix",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test="tests/backend/test_mainai_execution_planner.py::test_create_plan_rejects_a_path_traversing_or_absolute_targeted_tests_target",
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["run_tests"])
+    assert any(item.id == lesson.id for item in found)
 
 
 # ---------------------------------------------------------------- D. cycle detection

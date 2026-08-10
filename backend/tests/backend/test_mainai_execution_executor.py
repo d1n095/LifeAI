@@ -515,6 +515,17 @@ def test_verify_task_passes_trivially_for_an_empty_plan():
     assert result.steps == []
 
 
+@pytest.mark.parametrize("bad_target", ["../../../etc/passwd", "tests/../../secrets.py", "/etc/passwd", "..", ""])
+def test_verify_task_rejects_a_path_traversing_or_absolute_target(tmp_path, bad_target):
+    """Hardening pass finding (P1), second layer of defense: even if an unsafe target somehow
+    reached execution without ever passing through planner.create_plan()'s own rejection (see
+    tests/backend/test_mainai_execution_planner.py), verify_task() -- the actual subprocess
+    boundary -- refuses it independently, never silently running `python -m pytest` against a
+    path outside `cwd`."""
+    with pytest.raises(VerificationStepError):
+        verify_task(_FakeTask([{"kind": "targeted_tests", "target": bad_target}]), cwd=str(tmp_path))
+
+
 # ---------------------------------------------------------------- D. task_for_job
 
 
@@ -673,6 +684,51 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     ).scalar_one()
     assert completed_event["work_result"]["proposed"] is True
     assert "branch" in completed_event["work_result"]
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_run_tests_rejects_a_path_traversing_target_even_if_persisted(db_session, superuser_db, owner_id, monkeypatch, tmp_path):
+    """Hardening pass finding (P1), third layer of defense: planner.create_plan() now rejects
+    an unsafe `targeted_tests` target at plan time (see test_mainai_execution_planner.py), so
+    this simulates a target that reached the database some other way (e.g. pre-hardening data,
+    or a future insert path that skips create_plan()) -- execution_job.py's own `_run_pytest()`
+    must still refuse it at the actual subprocess boundary, counted here via a real
+    subprocess.run patch to prove the dangerous call never happens at all."""
+    import subprocess
+
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    (tmp_path / "backend").mkdir(parents=True)
+
+    call_count = {"n": 0}
+    real_run = subprocess.run
+
+    def _counting_run(*args, **kwargs):
+        call_count["n"] += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _counting_run)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="run_tests", verification_plan=[{"kind": "targeted_tests", "target": "tests/ok.py"}])
+    # Bypasses planner.create_plan()'s own rejection to simulate an unsafe target that reached
+    # the database some other way -- the point of this test.
+    task.verification_plan = [{"kind": "targeted_tests", "target": "../../../etc/passwd"}]
+    db_session.flush()
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    assert call_count["n"] == 0, "subprocess.run must never be invoked with the unsafe target"
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed
+    assert task.status != MainAITaskStatus.completed
 
 
 @pytest.mark.asyncio

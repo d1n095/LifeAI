@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
 from app.mainai_execution.lessons import apply_lessons_to_verification_plan
+from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 from app.models.mainai_execution import (
     TERMINAL_MAINAI_TASK_STATUSES,
     MainAIGoal,
@@ -194,6 +195,21 @@ def create_plan(
         for dep_idx in spec.depends_on:
             if not (0 <= dep_idx < len(tasks)):
                 raise PlanValidationError(f"depends_on index {dep_idx} is out of range for a {len(tasks)}-task plan.")
+        # Hardening pass finding (P1): verification_plan is AI-proposed content
+        # (propose_plan_via_ai() below) that ultimately becomes a real subprocess argument
+        # (verify.py's targeted_tests step, execution_job.py's run_tests handler) -- reject an
+        # unsafe target at PLAN time, fail-closed, same principle as the task_type/depends_on
+        # checks just above, rather than only catching it later at the actual subprocess
+        # boundary (which is ALSO defended, independently -- see validate_targeted_tests_target()'s
+        # own docstring for why both layers exist).
+        for step in spec.verification_plan:
+            if not isinstance(step, dict) or "kind" not in step:
+                raise PlanValidationError(f"Malformed verification_plan entry: {step!r}")
+            if step["kind"] == "targeted_tests":
+                try:
+                    validate_targeted_tests_target(step.get("target"))
+                except VerificationStepError as exc:
+                    raise PlanValidationError(str(exc)) from exc
 
     edges = [(i, dep_idx) for i, spec in enumerate(tasks) for dep_idx in spec.depends_on]
     cycle = _detect_cycle(len(tasks), edges)

@@ -45,7 +45,7 @@ from app.jobs.service import mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.executor import task_for_job
 from app.mainai_execution.graph import recompute_task_readiness
-from app.mainai_execution.verify import VerificationResult, VerificationStepError, VerificationStepResult, verify_task
+from app.mainai_execution.verify import VerificationResult, VerificationStepError, VerificationStepResult, validate_targeted_tests_target, verify_task
 from app.models.mainai_execution import (
     RETRYABLE_MAINAI_TASK_STATUSES,
     MainAIGoal,
@@ -147,6 +147,13 @@ async def _handle_repo_edit(db: Session, task: MainAITask) -> dict:
 
 
 def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
+    """Hardening pass finding (P1): `target` is AI-proposed, untrusted content
+    (app/mainai_execution/planner.py's propose_plan_via_ai()) that becomes a real subprocess
+    argv element -- validated with the SAME check verify.py's own targeted_tests step uses
+    (validate_targeted_tests_target()), so a `..`-escaping or absolute target can never reach
+    this subprocess call, matching the discipline _parse_code_agent_response() already applies
+    to AI-proposed file WRITE paths in _handle_repo_edit() above."""
+    validate_targeted_tests_target(target)
     result = subprocess.run(["python", "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
     return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
 
@@ -155,7 +162,10 @@ def _handle_run_tests(task: MainAITask) -> dict:
     targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
     if not targets:
         raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
-    results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
+    try:
+        results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
+    except VerificationStepError as exc:
+        raise TaskExecutionError(str(exc)) from exc
     return {"results": results}
 
 
