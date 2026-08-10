@@ -40,7 +40,7 @@ from app.mainai_execution.execution_job import run_task_execution_job
 from app.mainai_execution.executor import TaskNotRetryableError
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.mainai_execution.verify import VerificationStepError, verify_task
-from app.models.mainai_execution import EngineeringLessonSeverity, MainAITask, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_execution import EngineeringLessonSeverity, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
@@ -762,6 +762,130 @@ async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exis
     # The critical assertion: the second commit's parent is the FIRST commit (a true
     # fast-forward), never the original, stale base_branch sha.
     assert commit_parents[second["commit_sha"]] == first["commit_sha"]
+
+
+@pytest.mark.asyncio
+async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(db_session, owner_id, monkeypatch):
+    """Crash matrix finding I (hardening pass): unlike repo_edit, open_pr's real PR creation
+    happens INSIDE the same 'work_result' computation run_task_execution_job() checkpoints --
+    there is no separate 'finalized' checkpoint. A crash between a successful
+    create_pull_request() call and that checkpoint's commit meant resume called
+    _handle_open_pr() again from scratch, and create_pull_request() is not naturally
+    idempotent (GitHub rejects a second open PR for the same head/base with a 422) -- the
+    task would land on retryable_failed/failed even though the first PR had already durably
+    succeeded. Reproduced here by calling _handle_open_pr() twice for the same
+    task/goal/completed-repo_edit-sibling (simulating dispatch, then a crash before the
+    checkpoint, then a resume): both calls must succeed, and only ONE real
+    create_pull_request() call may ever happen -- the second call must find and reuse the
+    existing PR via list_pull_requests_for_head()."""
+    from app.integrations.github_client import GitHubClient
+    from app.mainai_execution.execution_job import _handle_open_pr
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "github_write_enabled", True)
+    monkeypatch.setattr(settings, "github_token", "fake-token-never-real")
+    monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
+
+    created_prs: list[dict] = []
+    create_calls = {"n": 0}
+
+    async def _fake_create_pull_request(self, *, title, body, head, base):
+        # Mirrors a real GitHub quirk this fix relies on: create_pull_request()'s own `head`
+        # is a bare branch name (same-repo PR), but the pulls-LIST endpoint's `head` filter
+        # requires the owner-prefixed `owner:branch` form -- so the stored/comparable value
+        # here is intentionally owner-prefixed even though the create call itself wasn't.
+        create_calls["n"] += 1
+        pr = {"number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42", "head": f"d1n095:{head}", "base": base, "state": "open"}
+        created_prs.append(pr)
+        return pr
+
+    async def _fake_list_pull_requests_for_head(self, *, head, base, state="all"):
+        return [pr for pr in created_prs if pr["head"] == head and pr["base"] == base and (state == "all" or pr["state"] == state)]
+
+    monkeypatch.setattr(GitHubClient, "create_pull_request", _fake_create_pull_request)
+    monkeypatch.setattr(GitHubClient, "list_pull_requests_for_head", _fake_list_pull_requests_for_head)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="open_pr")
+    # A completed repo_edit sibling's own `completed` event is how _handle_open_pr() finds the
+    # branch to open a PR for -- see _find_repo_edit_branch().
+    db_session.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=owner_id,
+            event_type=MainAITaskEventType.completed,
+            detail={"work_result": {"branch": "claude/mainai-task-abc", "base_branch": "claude/det-kommer-mer-879lcm"}},
+        )
+    )
+    db_session.commit()
+
+    first = await _handle_open_pr(db_session, task, goal)
+    assert first["proposed"] is False
+    assert first["pull_request_number"] == 42
+
+    # Simulates the crash: no checkpoint was recorded for `first`'s result, so
+    # run_task_execution_job() would call _handle_open_pr() again on resume.
+    second = await _handle_open_pr(db_session, task, goal)
+    assert second["proposed"] is False
+    assert second["pull_request_number"] == 42
+
+    assert create_calls["n"] == 1, "create_pull_request() must never be called twice for the same head/base"
+
+
+def test_record_engineering_lesson_for_the_handle_open_pr_resume_fix(db_session, owner_id):
+    """MAINAI V0.1 hardening pass (post-PR #57): engineering learning loop, mandatory for a P1
+    finding. Crash matrix point I ('after durable checkpoint before PR step', read here as
+    'the PR step itself IS the uncheckpointed work') found the same class of bug as point H,
+    in a sibling code path."""
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "open_pr's real PR creation happens INSIDE the same 'work_result' computation "
+            "run_task_execution_job() checkpoints -- unlike repo_edit, there is no separate "
+            "'finalized' checkpoint for it. A crash between a successful create_pull_request() "
+            "call and that checkpoint's commit meant resume called _handle_open_pr() again "
+            "from scratch. create_pull_request() is not naturally idempotent -- GitHub rejects "
+            "a second open PR for the same head/base with a 422 -- so the task would land on "
+            "retryable_failed/failed even though the first PR had already durably succeeded."
+        ),
+        root_cause=(
+            "_handle_open_pr() always called create_pull_request() unconditionally, with no "
+            "check for whether a PR for this exact head/base already existed -- the same root "
+            "cause as _finalize_repo_edit()'s own pre-fix bug (crash matrix point H), just "
+            "in a sibling task_type handler that was not covered by that first fix."
+        ),
+        affected_component="app.mainai_execution.execution_job._handle_open_pr",
+        severity=EngineeringLessonSeverity.high,
+        evidence=(
+            "Reproduced with a stateful fake GitHubClient: calling _handle_open_pr() twice for "
+            "the same task/goal (simulating dispatch, then a crash before the checkpoint, then "
+            "a resume) with the pre-fix code called create_pull_request() twice."
+        ),
+        fix=(
+            "Added GitHubClient.list_pull_requests_for_head() and wired it into "
+            "_handle_open_pr(): checks for an existing open PR on the exact head/base BEFORE "
+            "calling create_pull_request(), reusing it on resume instead of creating a "
+            "duplicate."
+        ),
+        general_rule=(
+            "A checkpoint-then-resume pattern only closes a crash window for the ONE call site "
+            "it was built for -- a sibling code path with the same 'real external side effect "
+            "computed as part of a checkpointed work_result' shape needs the SAME idempotency "
+            "check applied independently; fixing one instance of a pattern does not fix the "
+            "pattern everywhere it appears."
+        ),
+        applies_to=["open_pr", "github_client", "checkpoint", "crash_matrix"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.1 hardening pass (post-PR #57) -- crash matrix point I, _handle_open_pr resume fix",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test="tests/backend/test_mainai_execution_executor.py::test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr",
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["open_pr"])
+    assert any(item.id == lesson.id for item in found)
 
 
 def test_record_engineering_lesson_for_the_finalize_repo_edit_resume_fix(db_session, owner_id):

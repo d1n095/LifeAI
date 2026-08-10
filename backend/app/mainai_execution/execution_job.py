@@ -190,6 +190,16 @@ def _find_repo_edit_branch(db: Session, *, goal_id: uuid.UUID) -> dict | None:
 
 
 async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> dict:
+    """Crash-matrix finding (P1, hardening pass): open_pr's real PR creation happens inside
+    the SAME "work_result" computation run_task_execution_job() checkpoints -- a crash between
+    a successful create_pull_request() call and that checkpoint's commit would, on resume,
+    call this function again from scratch (no separate "finalized" checkpoint exists for
+    open_pr the way repo_edit's own push does). create_pull_request() is NOT naturally
+    idempotent -- GitHub allows only one open PR per head/base pair and rejects a second with a
+    422, which would land the task on retryable_failed/failed even though the first PR had
+    already durably succeeded. Fixed the same way _finalize_repo_edit() was: check whether a
+    PR for this exact head/base already exists FIRST and reuse it instead of creating a
+    second one."""
     settings = get_settings()
     edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
     if edit_info is None:
@@ -197,12 +207,19 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
 
     title = f"MainAI: {goal.title}"[:250]
     body = f"Automatiskt genererad av MainAI Execution Loop V0.1 för mål: {goal.title}\n\n{goal.original_instruction}"
+    head_branch = edit_info["branch"]
+    base_branch = edit_info.get("base_branch", "main")
 
     if not settings.github_write_enabled:
-        return {"proposed": True, "title": title, "body": body, "head": edit_info["branch"], "base": edit_info.get("base_branch", "main")}
+        return {"proposed": True, "title": title, "body": body, "head": head_branch, "base": base_branch}
 
     client = get_github_client()
-    pr = await client.create_pull_request(title=title, body=body, head=edit_info["branch"], base=edit_info.get("base_branch", "main"))
+    repo_owner = settings.github_repo.split("/", 1)[0]
+    existing = await client.list_pull_requests_for_head(head=f"{repo_owner}:{head_branch}", base=base_branch, state="open")
+    if existing:
+        pr = existing[0]
+    else:
+        pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch)
     return {"proposed": False, "pull_request_number": pr.get("number"), "pull_request_url": pr.get("html_url")}
 
 

@@ -82,6 +82,17 @@ class GitHubClient:
         repo = self._require_configured()
         return await self._request("GET", f"/repos/{repo}/pulls/{number}")
 
+    async def list_pull_requests_for_head(self, *, head: str, base: str, state: str = "all") -> list[dict]:
+        """Hardening pass finding (P1): the resume-safety counterpart to `get_ref(branch)` in
+        commit_multiple_files()'s own crash-window fix -- lets a caller check "does a PR for
+        this exact head/base already exist" BEFORE calling create_pull_request(), so a crash
+        between a successful PR creation and its durable checkpoint doesn't create a SECOND,
+        duplicate PR on resume (see app/mainai_execution/execution_job.py's `_handle_open_pr()`).
+        `head` must be in GitHub's own `owner:branch` filter format -- see that caller for how
+        it's constructed; passing a bare branch name silently matches nothing, not an error."""
+        repo = self._require_configured()
+        return await self._request("GET", f"/repos/{repo}/pulls?head={head}&base={base}&state={state}")
+
     async def list_check_runs(self, ref: str) -> list[dict]:
         repo = self._require_configured()
         data = await self._request("GET", f"/repos/{repo}/commits/{ref}/check-runs")
