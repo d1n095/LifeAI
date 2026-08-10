@@ -42,6 +42,7 @@ from app.config import get_settings
 from app.integrations.github_client import GitHubClientError, get_github_client
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.service import mark_completed, mark_failed, update_progress
+from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.executor import task_for_job
 from app.mainai_execution.graph import recompute_task_readiness
 from app.mainai_execution.verify import VerificationStepError, verify_task
@@ -238,23 +239,45 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
     db.commit()
 
     try:
-        if task.task_type == "read_only_audit":
-            work_result = await _handle_read_only_audit(db, task)
-        elif task.task_type == "repo_edit":
-            work_result = await _handle_repo_edit(db, task)
-        elif task.task_type == "run_tests":
-            work_result = _handle_run_tests(task)
-        elif task.task_type == "open_pr":
-            work_result = await _handle_open_pr(db, task, goal)
+        # Checkpoint/resume (app/mainai_execution/checkpoint.py): if THIS job_id already has a
+        # durable `work_result` checkpoint -- e.g. a previous worker process computed it (a
+        # real, possibly expensive, possibly non-deterministic AI call) and then crashed before
+        # finishing -- reuse it instead of repeating the call. The checkpoint, not this
+        # function's own in-memory state, is the only thing trusted for "was this already done".
+        work_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=job_id, step="work_result")
+        if work_checkpoint is not None:
+            logger.info("task_execution job %s (task %s): resuming work_result from durable checkpoint.", job_id, task.id)
+            work_result = work_checkpoint.executor_state["work_result"]
         else:
-            raise TaskExecutionError(f"Unknown task_type '{task.task_type}'.")
+            if task.task_type == "read_only_audit":
+                work_result = await _handle_read_only_audit(db, task)
+            elif task.task_type == "repo_edit":
+                work_result = await _handle_repo_edit(db, task)
+            elif task.task_type == "run_tests":
+                work_result = _handle_run_tests(task)
+            elif task.task_type == "open_pr":
+                work_result = await _handle_open_pr(db, task, goal)
+            else:
+                raise TaskExecutionError(f"Unknown task_type '{task.task_type}'.")
+            record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="work_result", data={"work_result": work_result})
+            db.commit()
 
         verification = verify_task(task, cwd=str(_backend_root()))
 
         if verification.passed and task.task_type == "repo_edit":
-            finalize_info = await _finalize_repo_edit(db, task, work_result)
+            # Same resume discipline for the GitHub push itself -- once github_write_enabled is
+            # on, this is the one step that is NOT safely repeatable (a second push creates a
+            # second commit), so a crash between a successful push and this checkpoint landing
+            # must not cause resume to push again.
+            finalize_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=job_id, step="finalized")
+            if finalize_checkpoint is not None:
+                finalize_info = finalize_checkpoint.executor_state["finalize_info"]
+            else:
+                finalize_info = await _finalize_repo_edit(db, task, work_result)
+                record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="finalized", data={"finalize_info": finalize_info})
+                db.commit()
             work_result = {**work_result, **finalize_info}
-            del work_result["previous_contents"]  # not durable evidence -- was only needed transiently for a future diff/rollback view
+            work_result.pop("previous_contents", None)  # not durable evidence -- was only needed transiently for a future diff/rollback view
 
     except (TaskExecutionError, VerificationStepError, GitHubClientError) as exc:
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)

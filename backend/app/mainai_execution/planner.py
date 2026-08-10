@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
+from app.mainai_execution.lessons import apply_lessons_to_verification_plan
 from app.models.mainai_execution import (
     TERMINAL_MAINAI_TASK_STATUSES,
     MainAIGoal,
@@ -242,7 +243,15 @@ def create_plan(
     db.flush()
 
     persisted: list[MainAITask] = []
+    applied_lessons_by_task: list[list[uuid.UUID]] = []
     for spec in tasks:
+        # Engineering-lesson influence (app/mainai_execution/lessons.py): a previously recorded
+        # lesson tagged for this task_type can add a targeted_tests step the spec itself didn't
+        # already have -- real influence on what gets verified, not a loose suggestion. Only
+        # ever ADDS to verification_plan, never removes a step the planner/founder specified.
+        verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
+            db, task_type=spec.task_type, verification_plan=spec.verification_plan
+        )
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
@@ -253,11 +262,12 @@ def create_plan(
             priority=spec.priority,
             risk_level=spec.risk_level,
             approval_required=spec.approval_required,
-            verification_plan=spec.verification_plan,
+            verification_plan=verification_plan,
             max_attempts=spec.max_attempts,
         )
         db.add(task)
         persisted.append(task)
+        applied_lessons_by_task.append(applied_lesson_ids)
     db.flush()
 
     for i, spec in enumerate(tasks):
@@ -270,15 +280,11 @@ def create_plan(
                 )
             )
 
-    for task in persisted:
-        db.add(
-            MainAITaskEvent(
-                task_id=task.id,
-                owner_id=task.owner_id,
-                event_type=MainAITaskEventType.created,
-                detail={"plan_version": next_version},
-            )
-        )
+    for task, applied_lesson_ids in zip(persisted, applied_lessons_by_task):
+        detail = {"plan_version": next_version}
+        if applied_lesson_ids:
+            detail["lessons_applied"] = [str(lesson_id) for lesson_id in applied_lesson_ids]
+        db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.created, detail=detail))
 
     goal.current_plan_version = next_version
     goal.status = MainAIGoalStatus.running
