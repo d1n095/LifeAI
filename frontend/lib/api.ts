@@ -606,6 +606,94 @@ export type MainAIJobProposal = {
 export const CANCELLABLE_MAINAI_JOB_STATUSES: MainAIJobStatus[] = ["queued", "running", "paused"];
 export const RETRYABLE_MAINAI_JOB_STATUSES: MainAIJobStatus[] = ["failed"];
 
+// MainAI Execution Loop V0.1 (see backend/app/routers/mainai_execution.py,
+// backend/app/mainai_execution/*). A goal's own richer status vocabulary than MainAIJobStatus
+// above -- see backend/app/models/mainai_execution.py's MainAIGoalStatus/MainAITaskStatus
+// docstrings for why a task can be `blocked`/`waiting_external`/`waiting_ci`, not just
+// queued/running/completed/failed/cancelled.
+export type MainAIGoal = {
+  id: string;
+  title: string;
+  status: string;
+  risk_level: string;
+  approval_policy: string;
+  current_plan_version: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  final_outcome: string | null;
+};
+
+export type MainAIPlan = {
+  id: string;
+  version: number;
+  status: string;
+  rationale: string;
+  created_at: string;
+};
+
+// Computed by the backend from mainai_jobs.lease_expires_at, never stored -- see
+// backend/app/mainai_execution/liveness.py's TaskLiveness enum.
+export type MainAITaskLiveness = "idle" | "running" | "stalled" | "dead" | "waiting_external" | "waiting_ci" | "done";
+
+export type MainAITask = {
+  id: string;
+  goal_id: string;
+  plan_id: string;
+  description: string;
+  task_type: string;
+  status: string;
+  priority: number;
+  risk_level: string;
+  approval_required: boolean;
+  verification_plan: Record<string, unknown>[];
+  attempts: number;
+  max_attempts: number;
+  blocker_reason: string | null;
+  mainai_job_id: string | null;
+  liveness: MainAITaskLiveness;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type MainAIGoalDetail = MainAIGoal & { plan: MainAIPlan | null; tasks: MainAITask[] };
+
+export type MainAITaskEvent = {
+  id: string;
+  event_type: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+};
+
+export type MainAICheckpoint = {
+  id: string;
+  plan_version: number;
+  executor_state: Record<string, unknown>;
+  test_status: string | null;
+  ci_status: string | null;
+  blocker: string | null;
+  created_at: string;
+};
+
+export type MainAITaskDetail = MainAITask & {
+  events: MainAITaskEvent[];
+  checkpoints: MainAICheckpoint[];
+  depends_on: string[];
+  approval_granted: boolean;
+};
+
+// The shape app/mainai_execution/final_report.py's generate_goal_report() returns -- kept
+// loose (not every nested field typed) since it is durable-state aggregation, not a stable
+// wire contract the UI depends on field-by-field.
+export type MainAIGoalReport = {
+  goal: Record<string, unknown>;
+  plan: Record<string, unknown> | null;
+  tasks: Record<string, unknown>[];
+  summary: { total_tasks: number; by_outcome: Record<string, number>; unresolved_risk_count: number };
+  generated_at: string;
+};
+
 export const api = {
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
@@ -787,4 +875,17 @@ export const api = {
   mainaiCancelJob: (id: string) => request<MainAIJob>(`/api/mainai/jobs/${id}/cancel`, { method: "POST" }),
   mainaiRetryJob: (id: string) => request<MainAIJob>(`/api/mainai/jobs/${id}/retry`, { method: "POST" }),
   mainaiJobsAdminAll: (limit = 20, offset = 0) => request<MainAIJob[]>(`/api/mainai/jobs/admin/all?limit=${limit}&offset=${offset}`),
+
+  // MainAI Execution Loop V0.1 (see backend/app/routers/mainai_execution.py).
+  mainaiExecutionGoals: (limit = 50, offset = 0) => request<MainAIGoal[]>(`/api/mainai/execution/goals?limit=${limit}&offset=${offset}`),
+  mainaiExecutionCreateGoal: (payload: { title: string; original_instruction: string; risk_level?: string; approval_policy?: string }) =>
+    request<MainAIGoal>("/api/mainai/execution/goals", { method: "POST", body: JSON.stringify(payload) }),
+  mainaiExecutionGoalDetail: (id: string) => request<MainAIGoalDetail>(`/api/mainai/execution/goals/${id}`),
+  mainaiExecutionCreatePlan: (goalId: string) => request<MainAIPlan>(`/api/mainai/execution/goals/${goalId}/plan`, { method: "POST" }),
+  mainaiExecutionGoalReport: (goalId: string) => request<MainAIGoalReport>(`/api/mainai/execution/goals/${goalId}/report`),
+  mainaiExecutionTaskDetail: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}`),
+  mainaiExecutionApproveTask: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}/approve`, { method: "POST" }),
+  mainaiExecutionRejectTask: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}/reject`, { method: "POST" }),
+  mainaiExecutionCancelTask: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}/cancel`, { method: "POST" }),
+  mainaiExecutionRetryTask: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}/retry`, { method: "POST" }),
 };
