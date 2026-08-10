@@ -11,13 +11,30 @@ from sqlalchemy.orm import Session
 
 from app.jobs import service as mainai_jobs_service
 from app.mainai_execution.approval import require_task_approval
+from app.mainai_execution.graph import recompute_task_readiness
 from app.models.mainai_execution import RETRYABLE_MAINAI_TASK_STATUSES, MainAIGoal, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
 from app.models.mainai_job import MainAIJob
+
+# A task can only be cancelled directly while nothing is actually executing it yet --
+# `retryable_failed` is included since it is, functionally, "not currently running and
+# waiting on a decision" exactly like `pending`/`ready`/`blocked` are. A `running` task has a
+# real mainai_jobs row in flight; see cancel_task()'s own docstring for why that case is
+# handled differently (and honestly documented as a real V0.1 limitation) rather than
+# pretending this function can stop it.
+_CANCELLABLE_MAINAI_TASK_STATUSES = frozenset(
+    {MainAITaskStatus.pending, MainAITaskStatus.ready, MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed}
+)
 
 
 class TaskNotRetryableError(Exception):
     def __init__(self, task_id: uuid.UUID, status: MainAITaskStatus):
         super().__init__(f"MainAITask {task_id} has status '{status.value}', not retryable.")
+        self.task_id = task_id
+
+
+class TaskNotCancellableError(Exception):
+    def __init__(self, task_id: uuid.UUID, status: MainAITaskStatus):
+        super().__init__(f"MainAITask {task_id} has status '{status.value}', not cancellable directly.")
         self.task_id = task_id
 
 
@@ -84,4 +101,35 @@ def retry_task(db: Session, *, task: MainAITask) -> MainAITask:
     task.status = MainAITaskStatus.ready
     db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.retry_scheduled, detail={"attempts": task.attempts}))
     db.flush()
+    return task
+
+
+def cancel_task(db: Session, *, task: MainAITask, cancelled_by: str, reason: str = "") -> MainAITask:
+    """Cancels a task that is NOT currently running (pending/ready/blocked/retryable_failed) --
+    a real, immediate, durable status transition, exactly like a replan's own supersession
+    (planner.py's create_plan()) already does for a stale plan's leftover tasks.
+
+    A `running` task is deliberately OUT OF SCOPE here, and this is an honest V0.1 limitation,
+    not an oversight: it has a real mainai_jobs row already in flight (a single AI call plus a
+    single verification pass, not a per-document loop like corpus_review has), with no natural
+    safe mid-task checkpoint to cooperatively check a cancel flag at. Calling
+    app/jobs/service.py's request_cancel() on that task's mainai_job_id still works exactly as
+    it always has (it sets cancel_requested, visible in the job's own record) but
+    execution_job.py does not check it mid-task -- a running task_execution job runs to its
+    natural completion or failure regardless. See docs/MAINAI_EXECUTION_LOOP_V0_1.md's LIMITED
+    list for this named explicitly, rather than this function silently claiming to stop
+    something it cannot."""
+    if task.status not in _CANCELLABLE_MAINAI_TASK_STATUSES:
+        raise TaskNotCancellableError(task.id, task.status)
+    task.status = MainAITaskStatus.cancelled
+    task.completed_at = datetime.utcnow()
+    if reason:
+        task.blocker_reason = reason
+    db.add(
+        MainAITaskEvent(
+            task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.cancelled, detail={"cancelled_by": cancelled_by, "reason": reason}
+        )
+    )
+    db.flush()
+    recompute_task_readiness(db, goal_id=task.goal_id)
     return task

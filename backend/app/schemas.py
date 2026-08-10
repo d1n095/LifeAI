@@ -874,3 +874,103 @@ class MainAIJobProposalOut(BaseModel):
     proposal_text: str
     status: str
     created_at: datetime
+
+
+# --- MainAI Execution Loop V0.1 (migration 0032, app/mainai_execution/*) -- the minimal
+# read/act surface over Goal/Plan/Task the founder's own required list names: create goal,
+# read goal, read current plan, list/read tasks, inspect liveness/checkpoint/verification/
+# approvals/blockers, read final report, grant/reject approval. See
+# app/routers/mainai_execution.py.
+
+
+class MainAIGoalCreateIn(BaseModel):
+    title: str
+    original_instruction: str
+    risk_level: str = "low"
+    approval_policy: str = "standard_repo_work"
+
+
+class MainAIGoalOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    status: str
+    risk_level: str
+    approval_policy: str
+    current_plan_version: int
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    final_outcome: str | None = None
+
+
+class MainAIPlanOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    version: int
+    status: str
+    rationale: str
+    created_at: datetime
+
+
+class MainAITaskEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    event_type: str
+    detail: dict
+    created_at: datetime
+
+
+class MainAICheckpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    plan_version: int
+    executor_state: dict
+    test_status: str | None = None
+    ci_status: str | None = None
+    blocker: str | None = None
+    created_at: datetime
+
+
+class MainAITaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    goal_id: uuid.UUID
+    plan_id: uuid.UUID
+    description: str
+    task_type: str
+    status: str
+    priority: int
+    risk_level: str
+    approval_required: bool
+    verification_plan: list
+    attempts: int
+    max_attempts: int
+    blocker_reason: str | None = None
+    mainai_job_id: uuid.UUID | None = None
+    # Not an ORM column -- computed by app/routers/mainai_execution.py's _task_out() via
+    # app/mainai_execution/liveness.py's task_liveness() and set AFTER model_validate(), since
+    # the MainAITask ORM object itself has no `liveness` attribute for from_attributes mapping
+    # to find. The default here exists only so model_validate(task) doesn't fail on a missing
+    # required field before that override happens.
+    liveness: str = ""
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class MainAITaskDependencyOut(BaseModel):
+    task_id: uuid.UUID
+    depends_on_task_id: uuid.UUID
+
+
+class MainAITaskDetailOut(MainAITaskOut):
+    events: list[MainAITaskEventOut]
+    checkpoints: list[MainAICheckpointOut]
+    depends_on: list[uuid.UUID]
+    approval_granted: bool
+
+
+class MainAIGoalDetailOut(MainAIGoalOut):
+    plan: MainAIPlanOut | None
+    tasks: list[MainAITaskOut]

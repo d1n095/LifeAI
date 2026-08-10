@@ -196,6 +196,56 @@ def test_retry_task_rejects_any_non_retryable_status(db_session, owner_id, statu
         executor.retry_task(db_session, task=task)
 
 
+@pytest.mark.parametrize("status", [MainAITaskStatus.pending, MainAITaskStatus.ready, MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed])
+def test_cancel_task_cancels_a_not_yet_running_task_and_blocks_its_dependents(db_session, owner_id, status):
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="cancel test",
+        tasks=[PlannedTaskSpec(description="to be cancelled", task_type="read_only_audit"), PlannedTaskSpec(description="dependent", task_type="read_only_audit", depends_on=[0])],
+        created_by="test",
+    )
+    db_session.commit()
+    task, dependent = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+    task.status = status
+    db_session.flush()
+
+    cancelled = executor.cancel_task(db_session, task=task, cancelled_by="founder", reason="no longer needed")
+    db_session.commit()
+
+    assert cancelled.status == MainAITaskStatus.cancelled
+    assert cancelled.completed_at is not None
+    assert MainAITaskEventType.cancelled.value in _events(db_session, task.id)
+
+    db_session.refresh(dependent)
+    assert dependent.status == MainAITaskStatus.blocked  # never falsely left `pending` forever
+
+
+def test_cancel_task_rejects_a_running_task(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal)
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    assert task.status == MainAITaskStatus.running
+
+    with pytest.raises(executor.TaskNotCancellableError):
+        executor.cancel_task(db_session, task=task, cancelled_by="founder")
+
+
+def test_cancel_task_rejects_an_already_terminal_task(db_session, owner_id):
+    from datetime import datetime
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal)
+    task.status = MainAITaskStatus.completed
+    task.completed_at = datetime.utcnow()
+    db_session.flush()
+
+    with pytest.raises(executor.TaskNotCancellableError):
+        executor.cancel_task(db_session, task=task, cancelled_by="founder")
+
+
 # ---------------------------------------------------------------- C. verify_task
 
 
