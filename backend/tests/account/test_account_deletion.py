@@ -37,7 +37,7 @@ def _narrow_privileges_before_this_module():
     """Pass 26: DELETE /api/account now calls erase_owner_memory(), which mainai_app is only
     granted EXECUTE on via apply_runtime_privileges.py/ensure_app_role.py's shared privilege
     policy — never automatically by the test DB setup's blanket GRANT. Same fixture, same
-    rationale, as tests/backend/test_source_purge.py's identical one: applied explicitly here
+    rationale, as tests/backend/storage/test_source_purge.py's identical one: applied explicitly here
     rather than assuming whatever an earlier test module left behind, since test execution
     order (including across tests/backend vs. tests/account) is not guaranteed."""
     module = _load_apply_runtime_privileges()
