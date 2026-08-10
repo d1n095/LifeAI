@@ -66,7 +66,7 @@ underlag.
 | Grundaren kan inte verifiera ett svar mot originalkällan | Varje `SourceRef` i svaret bär `document_id` + `active_truth_status`; frontend länkar direkt till `/library/{document_id}` från både chatt (`chat/page.tsx`) och workbench | `chat/page.tsx`, `workbench/page.tsx` |
 | Hallucinerad källhänvisning (modellen hittar på en käll-titel som inte finns) | Källlistan i svaret kommer ALLTID från den faktiska retrieval-listan (`hits`), aldrig från modellens fritextsvar — modellen kan inte lägga till en källa som inte redan hämtades | `chat.py`, `workbench.py` |
 
-**Obligatoriska testscenarier, alla täckta i `test_chat_source_grounding.py`/
+**Obligatoriska testscenarier, alla täckta i `tests/backend/chat/test_chat_source_grounding.py`/
 `test_workbench.py`:** en träff, flera samstämmiga källor, motstridiga källor, ingen relevant
 källa, historiskt vs. aktivt dokument, raderad källa, isolation mellan användare. (Ett
 scenario med en faktiskt trasig providerkedja täcks separat av providerarkitekturens egna

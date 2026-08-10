@@ -921,7 +921,7 @@ som utlöste triggern måste själv ha passerat WITH CHECK på samma konversatio
 att sessionen ser den och därmed alla dess befintliga meddelanden. En session som inte äger
 konversationen avvisas innan aggregatet ens körs. S1B:s kollisionsfrihetsbevis är alltså
 bevarat — och det är fastspikat av test, inte lämnat som resonemang
-(`tests/backend/test_messages_rls.py`, mutationstestat: en policy som kan dölja onumrerade
+(`tests/backend/chat/test_messages_rls.py`, mutationstestat: en policy som kan dölja onumrerade
 rader i samma konversation ger `assert 1 == 4`, alltså exakt den kollision beviset utesluter).
 
 Migration 0031 lägger också till `ix_conversations_user_id`, som saknats sedan `0001`: policyns
