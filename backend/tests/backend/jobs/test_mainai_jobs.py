@@ -62,7 +62,7 @@ EMBEDDING_DIM = get_settings().embedding_dim
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 
-_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
 
 def _load_apply_runtime_privileges():
@@ -754,7 +754,7 @@ def test_renew_mainai_job_lease_rejects_a_stale_generation(db_session, superuser
 
 
 def test_two_workers_racing_many_jobs_never_claim_the_same_job(db_session, superuser_db, make_verified_user):
-    """Real concurrency, same pattern as test_worker.py's ImportJob race test — real threads,
+    """Real concurrency, same pattern as tests/backend/jobs/test_worker.py's ImportJob race test — real threads,
     two separate DB connections."""
     import threading
 

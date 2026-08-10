@@ -388,7 +388,7 @@ async def test_worker_crash_mid_media_embedding_is_resumed_to_indexed_before_job
     assert doc.status == IndexStatus.embedding  # exactly where the crash left it
     stuck_doc_id = doc.id
 
-    # Simulate the abandoned lease expiring, exactly like test_worker.py's reclaim test.
+    # Simulate the abandoned lease expiring, exactly like tests/backend/jobs/test_worker.py's reclaim test.
     job_row.lease_expires_at = datetime.utcnow() - timedelta(seconds=5)
     superuser_db.add(job_row)
     superuser_db.commit()

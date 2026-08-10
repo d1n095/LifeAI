@@ -125,8 +125,8 @@ _MaintenanceSession = sessionmaker(bind=migration_engine)
 #   2. A new migration that CREATE OR REPLACEs storage_key_still_referenced_global() to also
 #      check it (never edit an already-shipped migration in place).
 #   3. A retention test proving a live row in the new table blocks physical deletion (see
-#      tests/backend/test_source_purge.py's Pass 29 section for the pattern), AND a matching
-#      row in tests/backend/test_source_purge.py's drift test that exercises THIS registry
+#      tests/backend/storage/test_source_purge.py's Pass 29 section for the pattern), AND a matching
+#      row in tests/backend/storage/test_source_purge.py's drift test that exercises THIS registry
 #      against the real SQL function so a registry entry with no matching SQL coverage (or vice
 #      versa) fails a test immediately instead of silently reopening this exact gap again.
 KNOWN_STORAGE_KEY_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -146,7 +146,7 @@ KNOWN_STORAGE_KEY_COLUMNS: tuple[tuple[str, str], ...] = (
 #
 # A founder review's explicit point: KNOWN_STORAGE_KEY_COLUMNS only protects reference
 # COLUMNS (what makes a key look "still needed"); it says nothing about DELETE call sites
-# (that is what tests/backend/test_source_purge.py's AST allowlist test covers) or about
+# (that is what tests/backend/storage/test_source_purge.py's AST allowlist test covers) or about
 # WRITE call sites -- this registry, and its own drift test
 # (test_every_storage_write_stream_reference_is_on_the_known_write_path_registry), close that
 # third gap: a new persistent writer added anywhere in the backend must be reviewed and

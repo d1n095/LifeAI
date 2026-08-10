@@ -472,7 +472,7 @@ def test_import_rejects_oversized_upload(client):
 def test_concurrent_blob_deletion_during_upload_finalization_fails_closed_without_creating_a_job(
     client, superuser_db, monkeypatch
 ):
-    """Pass 22, router-level companion to tests/backend/test_source_purge.py's low-level
+    """Pass 22, router-level companion to tests/backend/storage/test_source_purge.py's low-level
     advisory-lock proof (test_storage_key_lock_serializes_upload_and_purge_...): if the
     just-written blob vanishes between storage.write_stream() finishing and this request's own
     storage_key lock being acquired (e.g. a concurrent retry_source_blob_purge() call), the
@@ -660,7 +660,7 @@ def test_source_detail_segments_stay_empty_for_a_text_source(client):
 # destroy a completely unrelated, already-live reference sharing that key (see
 # app/storage/references.py's delete_if_unreferenced() module docstring for the full incident).
 # Tests A-D below are the founder's own lettering; E/F (the race and StorageError cases) live in
-# tests/backend/test_source_purge.py's Pass 30 section, at the references.py function level
+# tests/backend/storage/test_source_purge.py's Pass 30 section, at the references.py function level
 # rather than through the full HTTP stack.
 
 
@@ -786,7 +786,7 @@ def test_empty_upload_never_creates_an_import_job(client, superuser_db):
 # health, with zero signal that a blob may need a manual storage sweep. GET /api/library/
 # ops/status now also surfaces get_storage_cleanup_ops_status()'s aggregated view. Test A
 # (failed_not_queued creates the audit row in the first place) is covered end to end in
-# test_source_purge.py's test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_
+# tests/backend/storage/test_source_purge.py's test_delete_if_unreferenced_surfaces_a_double_failure_as_a_critical_
 # log_and_an_audit_row -- the tests below focus on what THIS blocker actually required: that
 # ops-status reads it back correctly.
 
