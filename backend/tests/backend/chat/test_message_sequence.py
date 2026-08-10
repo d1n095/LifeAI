@@ -652,7 +652,7 @@ def test_advisory_lock_key_matches_the_migration(db_session):
     from pathlib import Path
 
     migration = (
-        Path(__file__).resolve().parent.parent.parent / "alembic" / "versions" / "0030_message_sequence_number.py"
+        Path(__file__).resolve().parent.parent.parent.parent / "alembic" / "versions" / "0030_message_sequence_number.py"
     ).read_text(encoding="utf-8")
     assert f"pg_advisory_xact_lock({MESSAGE_SEQUENCE_ADVISORY_LOCK_NAMESPACE}," in migration
 
@@ -717,7 +717,7 @@ def test_create_job_rejects_input_refs_for_this_job_type(db_session, make_verifi
 def _claim(db, job_id) -> tuple[str, int]:
     """Claims `job_id` on the superuser connection, exactly as app/worker.py's real claim step
     does (see app/jobs/mainai_job_lease.py's own docstring for why the claim must run outside
-    any single owner's RLS scope). Same helper shape as tests/backend/test_mainai_jobs.py's."""
+    any single owner's RLS scope). Same helper shape as tests/backend/jobs/test_mainai_jobs.py's."""
     from sqlalchemy.orm import sessionmaker
 
     from app.db import migration_engine

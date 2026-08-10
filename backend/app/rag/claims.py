@@ -5,7 +5,7 @@ see app/models/knowledge_claim.py and docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's DEL 
 Reuses the existing provider abstraction (app.providers.registry.chat_with_fallback) the
 same way app/routers/chat.py and app/routers/workbench.py already do — no separate
 extraction-specific provider wiring, no real AI key in tests (see
-tests/backend/test_claims.py's deterministic fake chat provider).
+tests/backend/rag/test_claims.py's deterministic fake chat provider).
 """
 
 import json

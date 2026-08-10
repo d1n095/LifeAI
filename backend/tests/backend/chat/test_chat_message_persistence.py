@@ -267,7 +267,7 @@ def test_unverified_execution_claim_from_the_model_is_sanitized_through_the_real
     nothing stops an LLM from producing "jag arbetar med det i bakgrunden" as ordinary free
     text. This proves app/mainai_runtime_contract.py's sanitize_unverified_execution_claims()
     actually fires on the real /api/chat response body AND the persisted MessageModel row, not
-    just in the contract module's own unit tests (see test_mainai_jobs.py) -- and, per the
+    just in the contract module's own unit tests (see tests/backend/jobs/test_mainai_jobs.py) -- and, per the
     founder's HIGH-severity finding against the previous append-only version, that the false
     claim itself is genuinely GONE from what the founder reads, not merely followed by a
     disclaimer that leaves both the lie and the correction visible at once."""

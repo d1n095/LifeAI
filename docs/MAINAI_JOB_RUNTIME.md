@@ -346,7 +346,7 @@ it differs from `corpus_review` in three reviewed ways:
    needs no AI provider", so `get_capability_status()` reports it configured and available
    even with zero providers set up. A capability simply *forgotten* from that dict still fails
    closed, exactly as before — the two cases are deliberately distinguishable, and
-   `tests/backend/test_message_sequence.py` asserts both directions. This is the founder's
+   `tests/backend/chat/test_message_sequence.py` asserts both directions. This is the founder's
    "the system must keep working without AI wherever architecturally possible" rule made
    enforceable rather than aspirational: numbering the founder's own message history must not
    become unavailable because a model key is missing.
@@ -510,10 +510,10 @@ the claim — directly racing the new claimant's writes. Fixed with a fencing to
 `lease_generation` (migration `0028`, `mainai_jobs.lease_generation integer NOT NULL DEFAULT 0`):
 `claim_next_mainai_job()` bumps it by exactly 1 on every claim AND every reclaim, and every
 worker-driven write now goes through a single guarded UPDATE pattern
-(`app/rag/mainai_jobs_service.py::_guarded_job_write`) —
+(`app/jobs/service.py::_guarded_job_write`) —
 `WHERE id = :job_id AND locked_by = :worker_id AND lease_generation = :lease_generation AND
 status = 'running'` — in the SAME statement as the write itself. Zero rowcount raises
-`JobLeaseLostError`, updating nothing; the caller (`app/rag/corpus_review_job.py`) stops
+`JobLeaseLostError`, updating nothing; the caller (`app/jobs/handlers/corpus_review.py`) stops
 immediately on that error and makes no further writes. Proven with a real two-worker race
 (`test_stale_worker_is_rejected_by_every_write_after_a_reclaim`): worker A claims, its lease is
 force-expired, worker B reclaims, and EVERY one of worker A's subsequent write attempts
@@ -616,7 +616,7 @@ retry, fulfilling that function's own long-standing (previously unfulfilled) doc
 mid-run, a document with no reviewable content, or a single document's provider failure could
 each distort "reviewed N of N" into a claim that was not quite true, and a provider failure for
 one document aborted the WHOLE job even though the other documents were never at fault. Fixed:
-`app/rag/corpus_review_job.py` now tracks reviewed/skipped-deleted/unavailable/provider-failed
+`app/jobs/handlers/corpus_review.py` now tracks reviewed/skipped-deleted/unavailable/provider-failed
 counts separately against the job's fixed snapshot total, writes a `document_skipped` event
 (migration `0028` adds this event type) with a closed-vocabulary `reason` for every
 non-reviewed outcome, and the completion message reports the real breakdown
@@ -629,7 +629,7 @@ documents, three different outcomes in one run) and
 `test_run_corpus_review_job_fails_the_whole_job_on_a_genuinely_unexpected_error` (the other
 branch of that same split).
 
-**HIGH — account export omitted all MainAI job data.** `app/rag/account_export.py` now exports
+**HIGH — account export omitted all MainAI job data.** `app/account/export.py` now exports
 `mainai_jobs`/`mainai_job_events`/`mainai_job_proposals`, owner-scoped, deterministically
 ordered, same convention as every other section — `EXPORT_SCHEMA_VERSION` bumped to `3`. Event
 `detail`/proposal `proposal_text` are exported as-is: every event type this table can contain

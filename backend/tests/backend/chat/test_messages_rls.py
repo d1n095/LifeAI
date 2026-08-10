@@ -73,7 +73,7 @@ def _add_message(session, conversation_id, *, content="hej") -> Message:
 
 def _insert_unsequenced(superuser_db, conversation_id, *, content, created_at) -> uuid.UUID:
     """A pre-0030 history row: no ordinal at all. Same helper (and same `SET LOCAL` discipline)
-    as tests/backend/test_message_sequence.py — see that file for why replica mode is the only
+    as tests/backend/chat/test_message_sequence.py — see that file for why replica mode is the only
     honest way to reproduce pre-migration history."""
     message_id = uuid.uuid4()
     superuser_db.execute(sa_text("SET LOCAL session_replication_role = replica"))

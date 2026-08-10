@@ -1,6 +1,6 @@
 """S1A deterministic backfill (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, phase 2) —
 app/rag/backfill/memory_source.py. Real local Postgres, RLS exercised for real, same pattern
-as tests/backend/test_memory_source_units.py and tests/backend/test_claims.py.
+as tests/backend/rag/test_memory_source_units.py and tests/backend/rag/test_claims.py.
 """
 
 import threading

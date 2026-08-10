@@ -215,7 +215,7 @@ class AccountErasureBlockedError(Exception):
 
 # Pass 27: the SAME superuser/admin connection app/worker.py's `_ClaimSession` already uses
 # for cross-owner `knowledge_import_jobs` claiming — a second, independently-defined
-# sessionmaker bound to the same engine (exactly like tests/backend/test_worker.py's own
+# sessionmaker bound to the same engine (exactly like tests/backend/jobs/test_worker.py's own
 # `_ClaimSession` already does), not a shared import from worker.py, to avoid a needless
 # cross-module coupling between the account-erasure and durable-worker domains.
 _MaintenanceSession = sessionmaker(bind=migration_engine)
