@@ -170,6 +170,10 @@ def retry_task(db: Session, *, task: MainAITask) -> MainAITask:
     if task.status not in RETRYABLE_MAINAI_TASK_STATUSES:
         raise TaskNotRetryableError(task.id, task.status)
     task.status = MainAITaskStatus.ready
+    # V0.3: clear the automatic-retry-scan due-time -- it already did its job (or a founder
+    # retried manually, bypassing the scan entirely); a stale value here would be inert (the
+    # ready-task scan doesn't consult it) but is still worth not leaving lying around.
+    task.next_retry_at = None
     db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.retry_scheduled, detail={"attempts": task.attempts}))
     db.flush()
     return task

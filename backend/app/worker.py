@@ -44,13 +44,14 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
-from app.mainai_execution.execution_job import run_task_execution_job
-from app.mainai_execution.executor import dispatch_ready_task
+from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
+from app.mainai_execution.executor import dispatch_ready_task, retry_task
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
 from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
+from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
@@ -375,6 +376,63 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-advance MainAITask %s.", self.worker_id, task.id)
 
+    # V0.3: how many due mainai_task_waits (CI polls) this worker looks at per poll cycle --
+    # a real, bounded batch (never an unbounded scan), matching claim_storage_deletion_tasks'
+    # own `limit=50` precedent above. Deterministic ordering (next_poll_at, id) so a poll cycle
+    # that can't get through the whole due set still makes forward progress across cycles
+    # rather than potentially re-picking the same arbitrary subset every time.
+    _MAX_CI_WAITS_PER_TICK = 25
+    _MAX_RETRY_SCANS_PER_TICK = 25
+
+    async def _poll_mainai_task_waits(self, db: Session) -> None:
+        """MainAI V0.3's own auto-advance tick for `waiting_ci` tasks -- the counterpart to
+        `_advance_mainai_execution_tasks` above, but for a task that is not `ready` (nothing to
+        dispatch) and not `running` (no job/lease involved at all, see app/mainai_execution/
+        ci_wait.py's module docstring): it is durably waiting on an external fact
+        (`mainai_task_waits`), and this is what actually goes and checks that fact. Same
+        cross-owner, superuser-claim-session, per-item-isolated pattern as every other tick in
+        this method group -- a poll failure for one wait is logged and never stops the batch."""
+        now = datetime.utcnow()
+        due_waits = (
+            db.query(MainAITaskWait)
+            .filter(MainAITaskWait.status == MainAITaskWaitStatus.pending, MainAITaskWait.next_poll_at <= now)
+            .order_by(MainAITaskWait.next_poll_at.asc(), MainAITaskWait.id.asc())
+            .limit(self._MAX_CI_WAITS_PER_TICK)
+            .all()
+        )
+        for wait in due_waits:
+            try:
+                await resume_waiting_ci_task(db, wait)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to poll mainai_task_wait %s.", self.worker_id, wait.id)
+
+    def _advance_mainai_execution_retries(self, db: Session) -> None:
+        """MainAI V0.3's retry-with-backoff tick: moves every `retryable_failed` task whose
+        `next_retry_at` has elapsed back to `ready` via the existing, unchanged
+        `executor.retry_task()` -- the SAME manual-retry function a founder-triggered API call
+        already uses, not a second retry code path. Deliberately does NOT dispatch the task
+        itself: `_advance_mainai_execution_tasks` above already does that for every `ready`
+        task, on the very same poll cycle (it runs after this one), so a task this tick just
+        retried is picked up and actually redispatched without this tick needing to duplicate
+        that logic."""
+        now = datetime.utcnow()
+        due_tasks = (
+            db.query(MainAITask)
+            .filter(MainAITask.status == MainAITaskStatus.retryable_failed, MainAITask.next_retry_at.isnot(None), MainAITask.next_retry_at <= now)
+            .order_by(MainAITask.next_retry_at.asc(), MainAITask.id.asc())
+            .limit(self._MAX_RETRY_SCANS_PER_TICK)
+            .all()
+        )
+        for task in due_tasks:
+            try:
+                retry_task(db, task=task)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to auto-retry MainAITask %s.", self.worker_id, task.id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -390,6 +448,8 @@ class Worker:
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             self._retry_storage_deletion_tasks(claim_db)
+            await self._poll_mainai_task_waits(claim_db)
+            self._advance_mainai_execution_retries(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)

@@ -32,7 +32,7 @@ that it defaults to pushing to a live repo."""
 import logging
 import subprocess
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select
@@ -41,8 +41,10 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.integrations.github_client import GitHubClientError, get_github_client
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
+from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
+from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
 from app.mainai_execution.executor import task_for_job
 from app.mainai_execution.graph import recompute_task_readiness
 from app.mainai_execution.verify import (
@@ -70,10 +72,19 @@ from app.models.mainai_execution import (
 )
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.mainai_recovery import MainAITaskWorktree
+from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.providers.base import Message
 from app.providers.registry import chat_with_fallback
 
 logger = logging.getLogger("mainai.execution")
+
+# V0.3 retry-with-backoff: same compute_backoff_seconds() formula every other retry policy in
+# this codebase uses (app/jobs/retry.py), task-appropriate base/cap -- a task retry re-runs a
+# real AI call and possibly a real git push, not a cheap I/O operation, so this is minutes, not
+# STEG 11's import-job seconds. See app/mainai_execution/retry_orchestration.py for the worker
+# tick that actually acts on `next_retry_at` once it elapses.
+TASK_RETRY_BASE_SECONDS = 30.0
+TASK_RETRY_CAP_SECONDS = 900.0
 
 
 def _repo_root() -> Path:
@@ -409,7 +420,19 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
         pr = existing[0]
     else:
         pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch)
-    return {"proposed": False, "pull_request_number": pr.get("number"), "pull_request_url": pr.get("html_url")}
+    return {
+        "proposed": False,
+        "pull_request_number": pr.get("number"),
+        "pull_request_url": pr.get("html_url"),
+        # V0.3: the exact commit the PR's checks run against -- ci_wait.py's start_ci_wait()
+        # polls THIS sha, never "the branch's current tip" (see that module's docstring for why
+        # that distinction matters). `edit_info["commit_sha"]` is only present once a real push
+        # happened (see _finalize_repo_edit()'s own return); in proposal mode it's absent, and
+        # this dict's own "proposed": False above is only reachable when github_write_enabled
+        # is on and a real PR (existing or freshly created) exists, so a real commit_sha is
+        # always expected here in that case.
+        "head_sha": edit_info.get("commit_sha"),
+    }
 
 
 async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) -> dict:
@@ -604,6 +627,30 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             work_result = {**work_result, **finalize_info}
             work_result.pop("previous_contents", None)  # not durable evidence -- was only needed transiently for a future diff/rollback view
 
+        entered_ci_wait = False
+        if verification.passed and task.task_type == "open_pr" and not work_result.get("proposed", True) and work_result.get("head_sha"):
+            # V0.3: a real PR now exists on GitHub for a real commit -- the task is not actually
+            # DONE yet (its own goal is "land verified work", not merely "open a PR"), so it
+            # moves to `waiting_ci` instead of `completed`. Deliberately does NOT go through the
+            # work_result/finalized checkpoint machinery above (this isn't a resumable step --
+            # start_ci_wait() is its own, separately durable commit) and deliberately does NOT
+            # call _finalize_task_outcome() below -- that would prematurely mark the task
+            # completed. The mainai_jobs row this function is running as still reaches its own
+            # terminal `completed` state at the bottom of this function: THIS job's own work
+            # (open the PR) is genuinely done; only the TASK is still waiting. See
+            # app/mainai_execution/ci_wait.py's module docstring and app/worker.py's
+            # `_poll_mainai_task_waits` for how the wait later resolves back into this same
+            # task's own terminal outcome via resume_waiting_ci_task() below.
+            try:
+                renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
+            except JobLeaseLostError:
+                logger.warning("task_execution job %s: lease lost before starting CI wait.", job_id)
+                db.rollback()
+                return
+            start_ci_wait(db, task=task, job_id=job_id, repo=get_settings().github_repo, sha=work_result["head_sha"])
+            db.commit()
+            entered_ci_wait = True
+
     except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError) as exc:
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
         db.rollback()
@@ -632,6 +679,16 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             logger.warning("task_execution job %s: lease lost while recording failure.", job_id)
             db.rollback()
             return
+        return
+
+    if entered_ci_wait:
+        # V0.3: the TASK stays `waiting_ci` (see above) -- only this JOB's own work (opening
+        # the PR) is done, so only the job reaches a terminal status here.
+        try:
+            mark_completed(db, job, worker_id=worker_id, lease_generation=lease_generation, public_message="Pull request opened; waiting for CI.")
+        except JobLeaseLostError:
+            logger.warning("task_execution job %s: lease lost while recording PR-opened completion.", job_id)
+            db.rollback()
         return
 
     # Crash-matrix finding (P1) -- see the identical fix and full explanation in the except
@@ -663,14 +720,63 @@ def _finalize_task_outcome(db: Session, task: MainAITask, *, passed: bool, evide
     if passed:
         task.status = MainAITaskStatus.completed
         task.completed_at = datetime.utcnow()
+        task.next_retry_at = None
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.completed, detail=evidence))
     else:
         if task.attempts < task.max_attempts:
             task.status = MainAITaskStatus.retryable_failed
+            # V0.3: schedule the automatic retry-with-backoff scan (app/mainai_execution/
+            # retry_orchestration.py) rather than leaving this task sitting `retryable_failed`
+            # until a founder manually retries it -- app/mainai_execution/executor.py's
+            # retry_task() still exists unchanged for that manual path too.
+            task.next_retry_at = datetime.utcnow() + timedelta(
+                seconds=compute_backoff_seconds(task.attempts, base=TASK_RETRY_BASE_SECONDS, cap=TASK_RETRY_CAP_SECONDS)
+            )
         else:
             task.status = MainAITaskStatus.failed
             task.completed_at = datetime.utcnow()
+            task.next_retry_at = None
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.failed, detail=evidence))
 
     db.flush()
     recompute_task_readiness(db, goal_id=task.goal_id)
+
+
+async def resume_waiting_ci_task(db: Session, wait: MainAITaskWait) -> None:
+    """Called from app/worker.py's `_poll_mainai_task_waits` tick for one due (`pending`,
+    `next_poll_at` elapsed) wait -- polls it for real (app/mainai_execution/ci_wait.py's
+    poll_ci_wait()) and, ONLY once it reaches a terminal outcome, folds that outcome back into
+    the owning task via `_finalize_task_outcome()` (the SAME single completion gate every other
+    task_type's outcome goes through -- CI-wait does not get its own, separate notion of
+    "done"). Deliberately does not commit -- the caller commits (or rolls back) per-wait, the
+    same per-item isolation `_advance_mainai_execution_tasks`/`_retry_storage_deletion_tasks`
+    (app/worker.py) already use, so one wait's failure can never abort the whole tick.
+
+    Defensive no-op if the task is no longer `waiting_ci` (e.g. a cooperative cancel already
+    resolved it, see app/mainai_execution/ci_wait.py's cancel_ci_wait()) -- this function is
+    never the only path that can move a task off `waiting_ci`."""
+    task = db.get(MainAITask, wait.task_id)
+    if task is None or task.status != MainAITaskStatus.waiting_ci:
+        return
+
+    wait = await poll_ci_wait(db, wait)
+    if wait.status == MainAITaskWaitStatus.pending:
+        return
+
+    goal = db.get(MainAIGoal, task.goal_id)
+    if wait.status == MainAITaskWaitStatus.satisfied:
+        db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_satisfied, detail=wait.evidence))
+        _finalize_task_outcome(db, task, passed=True, evidence={"ci_wait": wait.evidence})
+    elif wait.status == MainAITaskWaitStatus.timed_out:
+        db.add(
+            MainAITaskEvent(
+                task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_timed_out, detail=wait.evidence
+            )
+        )
+        _finalize_task_outcome(db, task, passed=False, evidence={"ci_wait": wait.evidence, "reason": "timed_out"})
+    else:
+        # failed or cancelled -- both mean "this attempt did not produce verified, green work".
+        db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_failed, detail=wait.evidence))
+        _finalize_task_outcome(db, task, passed=False, evidence={"ci_wait": wait.evidence})
+    if goal is not None:
+        record_checkpoint(db, task=task, goal=goal, job_id=wait.job_id, step="ci_wait_resolved", data={"wait_status": wait.status.value})
