@@ -211,6 +211,17 @@ Named explicitly rather than silently left implicit:
 - `mainai_job_id` on a task points at the real, leased, heartbeated job currently or most
   recently executing it — liveness/retry/cancellation of the actual work is governed entirely
   by that already-reviewed runtime.
+- **A `mainai_jobs` row can never reach a terminal status (`completed`/`failed`) without its
+  linked `MainAITask` being finalized in the SAME atomic commit.** `mark_completed()`/
+  `mark_failed()` (app/jobs/service.py) each end with their own real `db.commit()` --
+  `run_task_execution_job()` calls `_finalize_task_outcome()` (flush-only) FIRST, so that
+  commit is the ONE atomic commit for both effects. Hardening-pass finding: the original order
+  called the job-status helper first, so a crash right after its commit landed (but before the
+  task's own outcome was ever committed) left the job durably terminal while the task stayed
+  `running` permanently -- not retryable, not cancellable, never revisited by
+  `claim_next_mainai_job()` (which only reclaims `queued` or `running`-with-expired-lease
+  rows). Fixed; proven with a test that calls through to the real `mark_completed()`/
+  `mark_failed()` and simulates the crash immediately after its real commit.
 
 ## APPROVAL MODEL
 
@@ -369,6 +380,7 @@ item not covered by a real test is named as a gap, not silently assumed.
 | Engineering lesson provenance | `test_record_and_lookup_lessons_by_tag`, Demo 4 |
 | Lesson lookup/application | `test_apply_lessons_to_verification_plan_*` (3 tests), `test_create_plan_is_actually_influenced_by_a_real_previously_recorded_lesson`, Demo 4 |
 | Durable state after restart | Demo 3, `test_mainai_execution_resilience.py` section B |
+| Job/task terminal-status atomicity (crash matrix, hardening pass) | `test_run_task_execution_job_crash_right_after_mark_completed_never_leaves_a_contradictory_state`, `..._crash_right_after_mark_failed_...` |
 
 ## Test suite
 
