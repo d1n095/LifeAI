@@ -84,6 +84,36 @@ def test_find_replan_trigger_ignores_a_retryable_failed_task(db_session, owner_i
     assert find_replan_trigger(db_session, goal=goal) is None
 
 
+def test_find_replan_trigger_ignores_a_failed_task_in_an_already_superseded_plan(db_session, owner_id):
+    """Central guard: a failed task belonging to a plan version that is no longer `active`
+    (already superseded by an earlier replan) must never trigger a SECOND replan for the same
+    goal -- that plan's own supersession already handled it. Without this scoping, a goal could
+    loop through repeated replans off the same stale failure forever."""
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session, goal=goal, rationale="v1", tasks=[PlannedTaskSpec(description="doomed", task_type="read_only_audit")], created_by="test"
+    )
+    db_session.commit()
+    old_task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    old_task.status = MainAITaskStatus.failed
+    from datetime import datetime
+
+    old_task.completed_at = datetime.utcnow()
+    db_session.commit()
+
+    # A second create_plan() call supersedes the first -- exactly what trigger_replan() itself
+    # does; the old plan (and old_task's own failure) is no longer live.
+    planner.create_plan(
+        db_session, goal=goal, rationale="v2", tasks=[PlannedTaskSpec(description="try again", task_type="read_only_audit")], created_by="test"
+    )
+    db_session.commit()
+
+    plans = db_session.query(MainAIPlan).filter(MainAIPlan.goal_id == goal.id).order_by(MainAIPlan.version).all()
+    assert plans[0].status == MainAIPlanStatus.superseded
+    assert plans[1].status == MainAIPlanStatus.active
+    assert find_replan_trigger(db_session, goal=goal) is None
+
+
 @pytest.mark.asyncio
 async def test_demo_auto_replan_triggers_after_a_task_permanently_exhausts_retries(db_session, superuser_db, owner_id, monkeypatch, tmp_path):
     """REQUIRED demo: a real failing pytest run exhausts a task's (max_attempts=1) retry
