@@ -46,6 +46,7 @@ from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task
+from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
 from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
 from app.mainai_execution.recovery_classifier import classify_recovery_record
 from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
@@ -54,7 +55,16 @@ from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
-from app.models.mainai_execution import ACTIVE_MAINAI_GOAL_STATUSES, MainAIGoal, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_execution import (
+    ACTIVE_MAINAI_GOAL_STATUSES,
+    EngineeringLesson,
+    EngineeringLessonStatus,
+    MainAIGoal,
+    MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
 from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryStatus
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
@@ -544,6 +554,42 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-replan MainAIGoal %s.", self.worker_id, goal.id)
 
+    # V0.3: how many active engineering lessons this worker inspects for conflicts per poll
+    # cycle -- a real, bounded scan, same reasoning as every other tick's own limit above. This
+    # table is founder-wide (not owner-scoped), so a single global bounded query covers it --
+    # no per-owner loop needed.
+    _MAX_LESSON_CONFLICT_SCANS_PER_TICK = 50
+
+    async def _resolve_engineering_lesson_conflicts(self, db: Session) -> None:
+        """MainAI V0.3's minimal engineering-lesson conflict detection tick -- closes the gap
+        EngineeringLessonConfidence's own docstring names explicitly ("nothing yet computes
+        lesson-vs-lesson contradiction"). Runs as an independent async worker tick rather than
+        being wired into lessons.py's apply_lessons_to_verification_plan(), which is called
+        synchronously from planner.py's create_plan() (50+ existing sync call sites across the
+        router and test suite -- making that path async was rejected as an unnecessary,
+        invasive change). Instead, this tick keeps the `active` lesson set clean BEFORE
+        lookup_lessons() (which only ever returns `active` rows) is consulted by the next
+        synchronous create_plan() call -- zero changes needed to lessons.py or planner.py.
+
+        A bounded global fetch of `active` lessons, then app/mainai_execution/lesson_conflicts.
+        py's resolve_conflicts_among() does the real work (deterministic pairing, then a real
+        AI judgment call per candidate pair, fail-closed on any error)."""
+        lessons = (
+            db.query(EngineeringLesson)
+            .filter(EngineeringLesson.status == EngineeringLessonStatus.active)
+            .order_by(EngineeringLesson.created_at.asc())
+            .limit(self._MAX_LESSON_CONFLICT_SCANS_PER_TICK)
+            .all()
+        )
+        if not lessons:
+            return
+        try:
+            await resolve_conflicts_among(db, lessons=lessons)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: failed to resolve engineering lesson conflicts.", self.worker_id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -563,6 +609,7 @@ class Worker:
             self._advance_mainai_execution_retries(claim_db)
             await self._advance_mainai_execution_auto_recovery(claim_db)
             await self._advance_mainai_execution_replan(claim_db)
+            await self._resolve_engineering_lesson_conflicts(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
