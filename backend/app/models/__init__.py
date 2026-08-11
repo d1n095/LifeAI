@@ -31,6 +31,16 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
+from app.models.mainai_recovery import (
+    AUTO_SALVAGEABLE_CLASSIFICATIONS,
+    MainAIRecoveryEvent,
+    MainAIRecoveryEventType,
+    MainAIRecoveryRecord,
+    MainAIRecoveryStatus,
+    MainAITaskWorktree,
+    MainAITaskWorktreeStatus,
+    RecoveryClassification,
+)
 from app.models.mainai_job import (
     CANCELLABLE_MAINAI_JOB_STATUSES,
     CLAIMABLE_MAINAI_JOB_STATUSES,
@@ -104,6 +114,14 @@ __all__ = [
     "MainAITaskEvent",
     "MainAITaskEventType",
     "MainAITaskStatus",
+    "AUTO_SALVAGEABLE_CLASSIFICATIONS",
+    "MainAIRecoveryEvent",
+    "MainAIRecoveryEventType",
+    "MainAIRecoveryRecord",
+    "MainAIRecoveryStatus",
+    "MainAITaskWorktree",
+    "MainAITaskWorktreeStatus",
+    "RecoveryClassification",
     "CANCELLABLE_MAINAI_JOB_STATUSES",
     "CLAIMABLE_MAINAI_JOB_STATUSES",
     "RETRYABLE_MAINAI_JOB_STATUSES",
