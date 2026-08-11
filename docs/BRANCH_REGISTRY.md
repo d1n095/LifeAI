@@ -6,6 +6,24 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #58 är MERGAD (2026-08-11).** Efter Round 2-korrigeringen (worktree-isoleringen wired till
+riktiga `repo_edit`-execution-pathen, se nedan) verifierade grundaren PR:n direkt mot GitHub och
+gav uttryckligt merge-godkännande. Slutlig verifiering på exakt head
+`4920e6d5456a7d5509f43607446ce410514bc7bc` innan merge: mergeable_state `clean`, required check
+(Vercel) grön, 0 reviews (`get_reviews()` tom lista — inga unresolved threads kan finnas utan
+reviews), base oförändrad (`03c0a9cb0323abebacbdd6be6f26dee363ead3c7`). PR:n togs ur draft och
+mergades med en vanlig merge commit (inte squash, inte rebase):
+merge-commit `8cde387aaa35a473c9bcd3e26127dacc5c949e7e`, med exakt två parents —
+`03c0a9cb0323abebacbdd6be6f26dee363ead3c7` (basgrenens tidigare tip) och
+`4920e6d5456a7d5509f43607446ce410514bc7bc` (PR #58:s slutliga head) — verifierat både via
+GitHub API (`merged: true`, `merged_by: d1n095`) och lokalt via `git log --format="%H %P"` samt
+`git ls-remote origin claude/det-kommer-mer-879lcm`. **Basgrenens nuvarande tip är
+`8cde387aaa35a473c9bcd3e26127dacc5c949e7e`.** MainAI V0.2 (Dead Agent Takeover/Salvage/Resume
+Hardening) finns nu i huvudlinjen, två gånger hardenad (Round 1: P0-klassificeringsfynd +
+P1-privilegiefynd; Round 2: worktree/execution_job-wiring + durability-fix + real-path-demos).
+Ingen deploy, ingen VPS, ingen produktion, ingen prod-migration/backfill rörd av denna merge —
+se `backend/docs/MAINAI_DEAD_AGENT_RECOVERY_V0_2.md` för den fullständiga tekniska statusen.
+
 **PR #58 hardening-pass Round 2 (2026-08-11):** grundaren avvisade uttryckligen Round 1:s
 slutsats att döpa worktree/execution_job-frånkopplingen till "V0.3-kandidat" — eftersom
 per-task worktree-isolering var ett explicit ORIGINALKRAV för V0.2 (dead-after-local-edit/
