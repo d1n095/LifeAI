@@ -55,6 +55,12 @@ from app.models.mainai_job import (
     MainAIJobProposalStatus,
     MainAIJobStatus,
 )
+from app.models.mainai_wait import (
+    TERMINAL_MAINAI_TASK_WAIT_STATUSES,
+    MainAITaskWait,
+    MainAITaskWaitSourceType,
+    MainAITaskWaitStatus,
+)
 from app.models.media_url_import import MediaUrlImport
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.memory_source_unit import (
@@ -136,6 +142,10 @@ __all__ = [
     "MainAIJobProposal",
     "MainAIJobProposalStatus",
     "MainAIJobStatus",
+    "TERMINAL_MAINAI_TASK_WAIT_STATUSES",
+    "MainAITaskWait",
+    "MainAITaskWaitSourceType",
+    "MainAITaskWaitStatus",
     "MediaUrlImport",
     "BackfillRunMode",
     "BackfillRunStatus",
