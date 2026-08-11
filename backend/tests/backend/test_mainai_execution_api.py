@@ -78,6 +78,9 @@ def test_api_requires_authentication_for_every_endpoint(client):
     assert client.get(f"/api/mainai/execution/goals/{goal_id}").status_code in (401, 403)
     assert client.get(f"/api/mainai/execution/tasks/{task_id}").status_code in (401, 403)
     assert client.post(f"/api/mainai/execution/tasks/{task_id}/approve").status_code in (401, 403)
+    assert client.get(f"/api/mainai/execution/goals/{goal_id}/plans").status_code in (401, 403)
+    assert client.get(f"/api/mainai/execution/tasks/{task_id}/waits").status_code in (401, 403)
+    assert client.get("/api/mainai/execution/lessons").status_code in (401, 403)
 
 
 # ---------------------------------------------------------------- B. goal lifecycle
@@ -244,6 +247,109 @@ def test_api_retry_succeeds_for_a_retryable_failed_task(client, db_session):
     res = client.post(f"/api/mainai/execution/tasks/{task.id}/retry", headers={"X-CSRF-Token": csrf})
     assert res.status_code == 200
     assert res.json()["status"] == "ready"
+
+
+# ---------------------------------------------------------------- E. V0.3: plans/waits/lessons endpoints
+
+
+def test_api_get_task_surfaces_next_retry_at(client, db_session):
+    csrf = _login(client)
+    goal = _founder_goal(db_session)
+    task = _founder_task(db_session, goal)
+    task.status = MainAITaskStatus.retryable_failed
+    task.attempts = 1
+    from datetime import datetime
+
+    task.next_retry_at = datetime.utcnow()
+    db_session.commit()
+
+    res = client.get(f"/api/mainai/execution/tasks/{task.id}", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+    assert res.json()["next_retry_at"] is not None
+
+
+def test_api_list_goal_plans_shows_every_version_oldest_first(client, db_session):
+    csrf = _login(client)
+    goal = _founder_goal(db_session)
+    _founder_task(db_session, goal)
+
+    res = client.get(f"/api/mainai/execution/goals/{goal.id}/plans", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+    plans = res.json()
+    assert len(plans) == 1
+    assert plans[0]["version"] == 1
+    assert plans[0]["status"] == "active"
+
+
+def test_api_list_goal_plans_returns_404_for_an_unknown_goal(client):
+    _login(client)
+    res = client.get(f"/api/mainai/execution/goals/{uuid.uuid4()}/plans")
+    assert res.status_code == 404
+
+
+def test_api_list_task_waits_surfaces_a_real_durable_wait(client, db_session):
+    from app.mainai_execution import executor
+    from app.mainai_execution.ci_wait import start_ci_wait
+
+    csrf = _login(client)
+    goal = _founder_goal(db_session)
+    task = _founder_task(db_session, goal, task_type="open_pr")
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test")
+    db_session.commit()
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+
+    res = client.get(f"/api/mainai/execution/tasks/{task.id}/waits", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+    waits = res.json()
+    assert len(waits) == 1
+    assert waits[0]["source_type"] == "github_check_runs"
+    assert waits[0]["status"] == "pending"
+
+
+def test_api_list_task_waits_returns_404_for_an_unknown_task(client):
+    _login(client)
+    res = client.get(f"/api/mainai/execution/tasks/{uuid.uuid4()}/waits")
+    assert res.status_code == 404
+
+
+def test_api_list_lessons_and_status_filter(client, db_session):
+    from datetime import datetime
+
+    from app.mainai_execution import lessons
+    from app.mainai_execution.lesson_conflicts import mark_conflict
+    from app.models.mainai_execution import EngineeringLessonSeverity
+
+    csrf = _login(client)
+    a = lessons.record_lesson(
+        db_session, problem="p", root_cause="rc", affected_component="app.foo", severity=EngineeringLessonSeverity.medium, evidence="e",
+        fix="always X", general_rule="always X", applies_to=["run_tests"], source_type="branch_registry_pass", source_ref="test",
+        created_by="test", first_seen_at=datetime.utcnow(),
+    )
+    b = lessons.record_lesson(
+        db_session, problem="p", root_cause="rc", affected_component="app.foo", severity=EngineeringLessonSeverity.medium, evidence="e",
+        fix="never X", general_rule="never X", applies_to=["run_tests"], source_type="branch_registry_pass", source_ref="test",
+        created_by="test", first_seen_at=datetime.utcnow(),
+    )
+    db_session.commit()
+
+    res = client.get("/api/mainai/execution/lessons", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+    assert {row["id"] for row in res.json()} >= {str(a.id), str(b.id)}
+
+    mark_conflict(db_session, lesson_a=a, lesson_b=b, reasoning="they disagree")
+    db_session.commit()
+
+    disputed_res = client.get("/api/mainai/execution/lessons?status_filter=disputed", headers={"X-CSRF-Token": csrf})
+    assert disputed_res.status_code == 200
+    disputed_ids = {row["id"] for row in disputed_res.json()}
+    assert disputed_ids == {str(a.id), str(b.id)}
+
+
+def test_api_list_lessons_rejects_an_invalid_status_filter(client):
+    _login(client)
+    res = client.get("/api/mainai/execution/lessons?status_filter=not_a_real_status")
+    assert res.status_code == 422
 
 
 # ---------------------------------------------------------------- D. owner isolation

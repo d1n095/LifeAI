@@ -32,6 +32,7 @@ from app.mainai_execution.recovery_classifier import classify_recovery_record
 from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
 from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
 from app.models.mainai_execution import (
+    EngineeringLesson,
     MainAICheckpoint,
     MainAIGoal,
     MainAIPlan,
@@ -43,8 +44,10 @@ from app.models.mainai_execution import (
 )
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryRecord, MainAIRecoveryStatus
+from app.models.mainai_wait import MainAITaskWait
 from app.models.user import User
 from app.schemas import (
+    EngineeringLessonOut,
     MainAICheckpointOut,
     MainAIGoalCreateIn,
     MainAIGoalDetailOut,
@@ -54,6 +57,7 @@ from app.schemas import (
     MainAITaskDetailOut,
     MainAITaskEventOut,
     MainAITaskOut,
+    MainAITaskWaitOut,
 )
 
 settings = get_settings()
@@ -169,6 +173,17 @@ def list_goal_tasks(goal_id: uuid.UUID, db: Session = Depends(get_db), user: Use
     return [_task_out(db, t) for t in tasks]
 
 
+@router.get("/goals/{goal_id}/plans", response_model=list[MainAIPlanOut])
+def list_goal_plans(goal_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """V0.3: every plan version this goal has ever had, oldest first -- the founder-facing
+    replan history. `create_plan()` (planner.py) never deletes a superseded plan, only marks
+    it `superseded` and versions a new one (app/mainai_execution/replan.py's automatic trigger
+    or a founder-driven POST /goals/{id}/plan both go through the same function), so this is a
+    real, complete history, not a reconstruction."""
+    _get_goal_or_404(db, goal_id)
+    return list(db.execute(select(MainAIPlan).where(MainAIPlan.goal_id == goal_id).order_by(MainAIPlan.version)).scalars())
+
+
 @router.post("/tasks/{task_id}/approve", response_model=MainAITaskDetailOut)
 @limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 def approve_task(request: Request, task_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
@@ -224,11 +239,13 @@ def retry_task(request: Request, task_id: uuid.UUID, db: Session = Depends(get_d
 # ---------------------------------------------------------------- V0.2: dead-agent recovery
 #
 # Deliberately minimal, matching V0.1's own "read/act, nothing exposed that isn't already a
-# real durable operation" discipline. No worker/background process runs recovery
-# automatically yet (see docs/MAINAI_DEAD_AGENT_RECOVERY_V0_2.md's REAL/STUBBED/LIMITED list)
-# -- /tasks/{id}/recover is the one founder-driven entry point that actually runs the real
-# pipeline (detect -> inspect -> classify -> takeover if safe and approved), mirroring how
-# POST /goals/{id}/plan is the one entry point that actually runs propose+create for a plan.
+# real durable operation" discipline. /tasks/{id}/recover is the founder-driven entry point
+# that runs the real pipeline (detect -> inspect -> classify -> takeover if safe and
+# approved), mirroring how POST /goals/{id}/plan is the one entry point that actually runs
+# propose+create for a plan. V0.3 (app/worker.py's `_advance_mainai_execution_auto_recovery`)
+# ALSO drives the same four functions unattended for a dead task_execution job's lease expiry
+# -- this endpoint remains the one a founder can call directly, e.g. to force an immediate
+# check rather than waiting for the next poll cycle.
 
 
 @router.get("/tasks/{task_id}/recovery", response_model=list[MainAIRecoveryRecordOut])
@@ -237,6 +254,19 @@ def list_task_recovery_records(task_id: uuid.UUID, db: Session = Depends(get_db)
     return list(
         db.execute(select(MainAIRecoveryRecord).where(MainAIRecoveryRecord.task_id == task_id).order_by(MainAIRecoveryRecord.created_at)).scalars()
     )
+
+
+# ---------------------------------------------------------------- V0.3: external waits (CI etc.)
+
+
+@router.get("/tasks/{task_id}/waits", response_model=list[MainAITaskWaitOut])
+def list_task_waits(task_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """V0.3: every durable external-wait record (app/mainai_execution/ci_wait.py) this task has
+    ever gone through -- what it's waiting for, its current status (pending/satisfied/failed/
+    timed_out/cancelled), and the last poll's evidence. A task can wait more than once across
+    its lifetime, so this is always the full list, oldest first."""
+    _get_task_or_404(db, task_id)
+    return list(db.execute(select(MainAITaskWait).where(MainAITaskWait.task_id == task_id).order_by(MainAITaskWait.created_at)).scalars())
 
 
 @router.post("/tasks/{task_id}/recover", response_model=MainAIRecoveryRecordOut, status_code=status.HTTP_201_CREATED)
@@ -294,3 +324,27 @@ def approve_recovery(request: Request, record_id: uuid.UUID, db: Session = Depen
     grant_recovery_approval(db, record=record, approved_by=user.email)
     db.commit()
     return record
+
+
+# ---------------------------------------------------------------- V0.3: engineering lessons
+
+
+@router.get("/lessons", response_model=list[EngineeringLessonOut])
+def list_lessons(status_filter: str | None = None, limit: int = 100, offset: int = 0, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """V0.3: founder-wide read-only view of engineering lessons (app/models/mainai_execution.py's
+    EngineeringLesson) -- including `disputed` ones once app/mainai_execution/lesson_conflicts.py's
+    mark_conflict() has run. Not RLS-protected / not owner-scoped, same as the model itself,
+    but still requires `require_founder` like every other endpoint in this router. `status_filter`
+    lets a founder ask specifically for `disputed` lessons needing a decision, without pulling
+    the whole (potentially large) founder-wide table."""
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    query = select(EngineeringLesson).order_by(EngineeringLesson.created_at.desc())
+    if status_filter is not None:
+        from app.models.mainai_execution import EngineeringLessonStatus
+
+        try:
+            query = query.where(EngineeringLesson.status == EngineeringLessonStatus(status_filter))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid status '{status_filter}'.") from exc
+    return list(db.execute(query.limit(limit).offset(offset)).scalars())

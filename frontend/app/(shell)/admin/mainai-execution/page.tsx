@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, MainAIGoal, MainAIGoalDetail, MainAIGoalReport, MainAITaskDetail } from "@/lib/api";
+import { api, EngineeringLesson, MainAIGoal, MainAIGoalDetail, MainAIGoalReport, MainAIPlan, MainAITaskDetail, MainAITaskWait } from "@/lib/api";
 
 // MainAI Execution Loop V0.1 (see backend/docs/MAINAI_EXECUTION_LOOP_V0_1.md,
 // backend/app/mainai_execution/*). Deliberately plain, function-before-design, same
@@ -50,7 +50,10 @@ export default function MainAIExecutionPage() {
   const [goals, setGoals] = useState<MainAIGoal[]>([]);
   const [selectedGoal, setSelectedGoal] = useState<MainAIGoalDetail | null>(null);
   const [selectedTask, setSelectedTask] = useState<MainAITaskDetail | null>(null);
+  const [taskWaits, setTaskWaits] = useState<MainAITaskWait[]>([]);
   const [report, setReport] = useState<MainAIGoalReport | null>(null);
+  const [plans, setPlans] = useState<MainAIPlan[] | null>(null);
+  const [disputedLessons, setDisputedLessons] = useState<EngineeringLesson[]>([]);
   const [title, setTitle] = useState("");
   const [instruction, setInstruction] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +68,16 @@ export default function MainAIExecutionPage() {
     }
   }
 
+  // V0.3: founder-wide disputed lessons -- not goal-scoped, so refreshed independently of any
+  // selected goal/task, same as refreshGoals() itself.
+  async function refreshDisputedLessons() {
+    try {
+      setDisputedLessons(await api.mainaiExecutionLessons("disputed"));
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
   async function openGoal(id: string) {
     const requestId = ++latestGoalRequestId.current;
     try {
@@ -72,7 +85,9 @@ export default function MainAIExecutionPage() {
       if (requestId !== latestGoalRequestId.current) return;
       setSelectedGoal(detail);
       setSelectedTask(null);
+      setTaskWaits([]);
       setReport(null);
+      setPlans(null);
     } catch (e: any) {
       if (requestId !== latestGoalRequestId.current) return;
       setError(e.message);
@@ -81,7 +96,9 @@ export default function MainAIExecutionPage() {
 
   async function openTask(id: string) {
     try {
-      setSelectedTask(await api.mainaiExecutionTaskDetail(id));
+      const [task, waits] = await Promise.all([api.mainaiExecutionTaskDetail(id), api.mainaiExecutionTaskWaits(id)]);
+      setSelectedTask(task);
+      setTaskWaits(waits);
     } catch (e: any) {
       setError(e.message);
     }
@@ -90,12 +107,14 @@ export default function MainAIExecutionPage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshGoals();
+    refreshDisputedLessons();
   }, []);
 
   // Real polling of the server's own state -- see admin/jobs/page.tsx's identical convention.
   useEffect(() => {
     const interval = setInterval(() => {
       refreshGoals();
+      refreshDisputedLessons();
       if (selectedGoal) openGoal(selectedGoal.id);
       if (selectedTask) openTask(selectedTask.id);
     }, POLL_INTERVAL_MS);
@@ -145,6 +164,17 @@ export default function MainAIExecutionPage() {
     }
   }
 
+  // V0.3: full plan-version (replan) history for the selected goal.
+  async function loadPlans() {
+    if (!selectedGoal) return;
+    setError(null);
+    try {
+      setPlans(await api.mainaiExecutionGoalPlans(selectedGoal.id));
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+
   async function taskAction(action: "approve" | "reject" | "cancel" | "retry") {
     if (!selectedTask) return;
     setBusy(true);
@@ -180,6 +210,21 @@ export default function MainAIExecutionPage() {
       {error && (
         <div role="alert" className="text-sm text-red-300">
           {error}
+        </div>
+      )}
+
+      {disputedLessons.length > 0 && (
+        <div className="rounded-xl border border-amber-500/40 p-4 space-y-2">
+          <div className="text-xs uppercase tracking-wide text-amber-300">
+            Motsägande tekniska lärdomar ({disputedLessons.length}) -- kräver granskning
+          </div>
+          <ul className="space-y-1 text-xs text-white/60">
+            {disputedLessons.map((l) => (
+              <li key={l.id}>
+                <span className="text-white/80">{l.affected_component}</span>: {l.general_rule}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -279,6 +324,9 @@ export default function MainAIExecutionPage() {
                   <button type="button" onClick={loadReport} className="text-xs rounded border border-border px-3 py-1.5">
                     Visa slutrapport
                   </button>
+                  <button type="button" onClick={loadPlans} className="text-xs rounded border border-border px-3 py-1.5">
+                    Visa planhistorik
+                  </button>
                 </div>
               </div>
 
@@ -297,11 +345,35 @@ export default function MainAIExecutionPage() {
                       </div>
                       <div className="text-white/50 mt-1">{TASK_STATUS_LABELS[t.status] ?? t.status}</div>
                       {t.blocker_reason && <div className="text-amber-300/80 mt-1">Blockerare: {t.blocker_reason}</div>}
+                      {t.next_retry_at && (
+                        <div className="text-blue-300/80 mt-1">Automatiskt nytt försök: {new Date(t.next_retry_at).toLocaleString("sv-SE")}</div>
+                      )}
                     </li>
                   ))}
                   {selectedGoal.tasks.length === 0 && <li className="text-white/30">Ingen plan ännu -- inga tasks.</li>}
                 </ul>
               </div>
+
+              {/* V0.3: plan-version (replan) history -- >1 rad betyder att minst en automatisk
+                  omplanering (app/mainai_execution/replan.py) har skett för det här målet. */}
+              {plans && (
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-wide text-white/40">Planhistorik ({plans.length} version{plans.length === 1 ? "" : "er"})</div>
+                  <ul className="space-y-2 max-h-48 overflow-y-auto">
+                    {plans.map((p) => (
+                      <li key={p.id} className="rounded-lg border border-border/60 p-3 text-xs">
+                        <div className="flex justify-between text-white/50">
+                          <span>
+                            v{p.version} ({p.status})
+                          </span>
+                          <span>{new Date(p.created_at).toLocaleString("sv-SE")}</span>
+                        </div>
+                        <div className="text-white/60 mt-1">{p.rationale}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {report && (
                 <div className="space-y-2">
@@ -335,6 +407,11 @@ export default function MainAIExecutionPage() {
                   <div>
                     Godkännande: {selectedTask.approval_required ? (selectedTask.approval_granted ? "Beviljat" : "Krävs, ej beviljat") : "Krävs inte"}
                   </div>
+                  {selectedTask.next_retry_at && (
+                    <div className="text-blue-300/80">
+                      Automatiskt nytt försök: {new Date(selectedTask.next_retry_at).toLocaleString("sv-SE")}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap gap-2 mt-3">
@@ -380,6 +457,26 @@ export default function MainAIExecutionPage() {
                   )}
                 </div>
               </div>
+
+              {/* V0.3: durable external waits (t.ex. CI) -- app/mainai_execution/ci_wait.py. */}
+              {taskWaits.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-wide text-white/40">Väntehistorik ({taskWaits.length})</div>
+                  <ul className="space-y-2 max-h-40 overflow-y-auto">
+                    {taskWaits.map((w) => (
+                      <li key={w.id} className="rounded-lg border border-border/60 p-3 text-xs">
+                        <div className="flex justify-between text-white/50">
+                          <span>
+                            {w.source_type} -- {w.status}
+                          </span>
+                          <span>{w.poll_count} pollningar</span>
+                        </div>
+                        <div className="text-white/40 mt-1">Deadline: {new Date(w.deadline_at).toLocaleString("sv-SE")}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <div className="text-xs uppercase tracking-wide text-white/40">Checkpoints ({selectedTask.checkpoints.length})</div>
