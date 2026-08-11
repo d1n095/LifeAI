@@ -202,7 +202,7 @@ def reject_task(request: Request, task_id: uuid.UUID, db: Session = Depends(get_
 def cancel_task(request: Request, task_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     task = _get_task_or_404(db, task_id)
     try:
-        executor.cancel_task(db, task=task, cancelled_by=user.email, reason="Cancelled by founder.")
+        executor.cancel_task(db, task=task, cancelled_by=user.email, cancelled_by_id=user.id, reason="Cancelled by founder.")
     except TaskNotCancellableError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     db.commit()

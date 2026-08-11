@@ -42,7 +42,7 @@ from app.config import get_settings
 from app.integrations.github_client import GitHubClientError, get_github_client
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.retry import compute_backoff_seconds
-from app.jobs.service import mark_completed, mark_failed, update_progress
+from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
 from app.mainai_execution.executor import task_for_job
@@ -81,10 +81,31 @@ logger = logging.getLogger("mainai.execution")
 # V0.3 retry-with-backoff: same compute_backoff_seconds() formula every other retry policy in
 # this codebase uses (app/jobs/retry.py), task-appropriate base/cap -- a task retry re-runs a
 # real AI call and possibly a real git push, not a cheap I/O operation, so this is minutes, not
-# STEG 11's import-job seconds. See app/mainai_execution/retry_orchestration.py for the worker
-# tick that actually acts on `next_retry_at` once it elapses.
+# STEG 11's import-job seconds. See app/worker.py's `_advance_mainai_execution_retries` for the
+# worker tick that actually acts on `next_retry_at` once it elapses.
 TASK_RETRY_BASE_SECONDS = 30.0
 TASK_RETRY_CAP_SECONDS = 900.0
+
+
+class TaskCancelledCooperatively(Exception):
+    """V0.3: raised internally by `_check_cancel_requested()` when it finds
+    `job.cancel_requested` True at one of this function's safe checkpoints (see
+    app/mainai_execution/executor.py's `cancel_task()` for how a `running` task's cancel
+    request gets there in the first place -- the SAME `job.cancel_requested`/`request_cancel()`
+    primitive `corpus_review.py` already uses, not a second cancellation mechanism). Caught by
+    `run_task_execution_job()`'s own outer try/except and turned into a durable `cancelled`
+    outcome for both the task and the job -- never `retryable_failed`/`failed` (a cancel is not
+    a failure) and never silently ignored."""
+
+
+def _check_cancel_requested(db: Session, job_id: uuid.UUID) -> None:
+    """A safe checkpoint: never called mid-write, always between one durable fact and the
+    next. Re-reads the job row fresh (`populate_existing=True`) rather than trusting a
+    possibly-stale in-memory `job` -- the founder's cancel click can land at any real wall-clock
+    moment, including between this function's own checks."""
+    job = db.get(MainAIJob, job_id, populate_existing=True)
+    if job is not None and job.cancel_requested:
+        raise TaskCancelledCooperatively()
 
 
 def _repo_root() -> Path:
@@ -506,6 +527,11 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             logger.info("task_execution job %s (task %s): resuming work_result from durable checkpoint.", job_id, task.id)
             work_result = work_checkpoint.executor_state["work_result"]
         else:
+            # V0.3 cooperative-cancel checkpoint ("before edit"/"before PR"): a resumed step
+            # (the `if` branch above) never re-checks here -- real work already legitimately
+            # started for it, and this checkpoint's whole point is to stop BEFORE the next
+            # real side effect, not to abandon one already durably in flight.
+            _check_cancel_requested(db, job_id)
             if task.task_type == "read_only_audit":
                 work_result = await _handle_read_only_audit(db, task)
             elif task.task_type == "repo_edit":
@@ -546,6 +572,12 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                 return
             record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="work_result", data={"work_result": work_result})
             db.commit()
+
+        # V0.3 cooperative-cancel checkpoint ("after edit"/"after local commit"): any real
+        # local git commit repo_edit made is already durable at this point (see
+        # _handle_repo_edit()'s own commit inside the block above) -- stopping here never
+        # destroys it, it only stops BEFORE the (real, subprocess-spawning) verification step.
+        _check_cancel_requested(db, job_id)
 
         # V0.2 duplicate-side-effect finding: verification was never checkpointed at all --
         # even when work_result itself resumed from a durable checkpoint above (recovery's own
@@ -596,6 +628,10 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             db.commit()
 
         if verification.passed and task.task_type == "repo_edit":
+            # V0.3 cooperative-cancel checkpoint ("before push"): the local commit already
+            # stands regardless; this is the last chance to stop before the one NOT-safely-
+            # repeatable real network side effect (a real `git push`) in this whole function.
+            _check_cancel_requested(db, job_id)
             # Same resume discipline for the GitHub push itself -- once github_write_enabled is
             # on, this is the one step that is NOT safely repeatable (a second push creates a
             # second commit), so a crash between a successful push and this checkpoint landing
@@ -650,6 +686,23 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             start_ci_wait(db, task=task, job_id=job_id, repo=get_settings().github_repo, sha=work_result["head_sha"])
             db.commit()
             entered_ci_wait = True
+
+    except TaskCancelledCooperatively:
+        logger.info("task_execution job %s (task %s): cooperative cancel acknowledged at a safe checkpoint.", job_id, task.id)
+        db.rollback()
+        job = db.get(MainAIJob, job_id)
+        task = db.get(MainAITask, task.id)
+        # Same ordering discipline as the outcome except-block below: this function's own
+        # write is flushed (not committed) FIRST, and mark_cancelled()'s own commit is called
+        # LAST, so a crash between the two loses nothing durable either way.
+        _finalize_cancelled_task(db, task, reason="cooperative_cancel")
+        try:
+            mark_cancelled(db, job, worker_id=worker_id, lease_generation=lease_generation)
+        except JobLeaseLostError:
+            logger.warning("task_execution job %s: lease lost while recording cooperative cancellation.", job_id)
+            db.rollback()
+            return
+        return
 
     except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError) as exc:
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
@@ -725,10 +778,10 @@ def _finalize_task_outcome(db: Session, task: MainAITask, *, passed: bool, evide
     else:
         if task.attempts < task.max_attempts:
             task.status = MainAITaskStatus.retryable_failed
-            # V0.3: schedule the automatic retry-with-backoff scan (app/mainai_execution/
-            # retry_orchestration.py) rather than leaving this task sitting `retryable_failed`
-            # until a founder manually retries it -- app/mainai_execution/executor.py's
-            # retry_task() still exists unchanged for that manual path too.
+            # V0.3: schedule the automatic retry-with-backoff scan (app/worker.py's
+            # `_advance_mainai_execution_retries`) rather than leaving this task sitting
+            # `retryable_failed` until a founder manually retries it -- app/mainai_execution/
+            # executor.py's retry_task() still exists unchanged for that manual path too.
             task.next_retry_at = datetime.utcnow() + timedelta(
                 seconds=compute_backoff_seconds(task.attempts, base=TASK_RETRY_BASE_SECONDS, cap=TASK_RETRY_CAP_SECONDS)
             )
@@ -738,6 +791,22 @@ def _finalize_task_outcome(db: Session, task: MainAITask, *, passed: bool, evide
             task.next_retry_at = None
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.failed, detail=evidence))
 
+    db.flush()
+    recompute_task_readiness(db, goal_id=task.goal_id)
+
+
+def _finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
+    """V0.3: the cooperative-cancel counterpart to `_finalize_task_outcome()` -- a genuinely
+    DIFFERENT terminal outcome, never routed through that function, because a cancel is not a
+    failure: it must never count against `task.attempts`, schedule a `next_retry_at`, or record
+    a `verification_failed` event that didn't actually happen. Records `cancelling` (the
+    in-flight acknowledgment) then `cancelled` (the durable terminal event), matching
+    MainAIJobEventType's own cancel_requested -> cancel_acknowledged -> cancelled shape."""
+    db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.cancelling, detail={"reason": reason}))
+    task.status = MainAITaskStatus.cancelled
+    task.completed_at = datetime.utcnow()
+    task.next_retry_at = None
+    db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.cancelled, detail={"reason": reason}))
     db.flush()
     recompute_task_readiness(db, goal_id=task.goal_id)
 

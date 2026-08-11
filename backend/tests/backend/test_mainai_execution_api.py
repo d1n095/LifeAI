@@ -197,17 +197,31 @@ def test_api_reject_cancels_an_approval_pending_task(client, db_session):
     assert res.json()["status"] == "cancelled"
 
 
-def test_api_cancel_returns_409_for_a_running_task(client, db_session):
+def test_api_cancel_of_a_running_task_is_cooperative_not_immediate(client, db_session):
+    """V0.3: cancelling a `running` task is no longer rejected outright (the old V0.1
+    limitation) -- it succeeds (200) and requests a cooperative cancel on the task's real
+    in-flight job (app/jobs/service.py's request_cancel(), same primitive corpus_review.py's
+    own per-batch check already uses), but the task itself stays `running` until
+    execution_job.py's own next safe checkpoint actually acknowledges it -- an API call alone
+    can never immediately kill work already in flight."""
     from app.mainai_execution import executor
+    from app.models.mainai_job import MainAIJob
 
     csrf = _login(client)
     goal = _founder_goal(db_session)
     task = _founder_task(db_session, goal)
-    executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test")
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test")
     db_session.commit()
 
     res = client.post(f"/api/mainai/execution/tasks/{task.id}/cancel", headers={"X-CSRF-Token": csrf})
-    assert res.status_code == 409
+    assert res.status_code == 200
+    assert res.json()["status"] == "running"
+
+    db_session.expire_all()
+    refreshed_job = db_session.get(MainAIJob, job.id)
+    assert refreshed_job.cancel_requested is True
+    events = db_session.execute(sa_text("SELECT event_type FROM mainai_task_events WHERE task_id = :id"), {"id": str(task.id)}).all()
+    assert "cancel_requested" in {row[0] for row in events}
 
 
 def test_api_retry_returns_409_for_a_non_retryable_task(client, db_session):
