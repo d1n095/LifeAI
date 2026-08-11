@@ -635,3 +635,104 @@ async def test_cross_owner_rls_isolation_holds_for_all_three_new_v0_2_tables_thr
     assert superuser_db.execute(sa_text("SELECT executor_id FROM mainai_task_worktrees WHERE id = :id"), {"id": str(worktree_id)}).scalar_one() == "worker-1"
     assert superuser_db.execute(sa_text("SELECT status FROM mainai_recovery_records WHERE id = :id"), {"id": str(record_id)}).scalar_one() == "detected"
     assert superuser_db.execute(sa_text("SELECT event_type FROM mainai_recovery_events WHERE id = :id"), {"id": str(event_id)}).scalar_one() == "dead_detected"
+
+
+# ------------------------------------ hardening-pass Round 2: required engineering lesson
+
+
+def test_record_engineering_lesson_for_recovery_state_not_reachable_from_real_execution_path(db_session, owner_id):
+    """Required engineering lesson (Round 2 hardening pass, per the founder's explicit
+    instruction): the recovery pipeline (worktree.py, recovery_inspector.py,
+    recovery_classifier.py) was built, fully tested, and proven correct in isolation BEFORE
+    _handle_repo_edit() ever called worktree.py at all -- so LOCAL_UNCOMMITTED_WORK/
+    LOCAL_COMMITTED_NOT_PUSHED were reachable only from tests that manually constructed the
+    worktree/commit state the recovery pipeline expects, never from a real dead repo_edit
+    task. The founder explicitly rejected treating this as acceptable V0.3-deferred scope
+    once identified -- it is a V0.2 correctness gap, not a documentation footnote."""
+    from app.mainai_execution import lessons
+    from app.models.mainai_execution import EngineeringLessonConfidence, EngineeringLessonSeverity
+
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "Recovery capability byggdes runt en state-modell som inte var nåbar från den "
+            "riktiga execution-pathen. worktree.py's per-task isolated git checkout, ownership "
+            "verification, and real local commit/push were fully built and exhaustively tested "
+            "directly (test_mainai_execution_worktree.py) and through the recovery pipeline's "
+            "own classification/salvage/takeover logic (test_mainai_execution_recovery.py, "
+            "the original hand-constructed versions of Demo 2/3) -- but _handle_repo_edit(), "
+            "the ONE production code path that runs a real repo_edit task, never called "
+            "worktree.py at all. It wrote directly to the shared backend checkout and pushed "
+            "via the GitHub Git Data API, exactly like V0.1. That meant two of V0.2's nine "
+            "recovery classifications (LOCAL_UNCOMMITTED_WORK, LOCAL_COMMITTED_NOT_PUSHED) -- "
+            "arguably the two most central 'dead mid-edit' scenarios the whole feature exists "
+            "for -- could never actually occur for a real dead task, no matter how correct the "
+            "classifier's own logic was proven to be in isolation. A related, more severe "
+            "consequence was found in the same pass: the classifier's ONLY reliable "
+            "PUSHED_NO_PR/PR_EXISTS signal (worktree_local_head_sha == remote_branch_sha) was "
+            "also unreachable for the same reason, silently bypassing the founder-approval "
+            "gate for a real pushed-but-dead repo_edit job (fixed in Round 1 of this pass by "
+            "also accepting a durable 'finalized' checkpoint as equally valid proof)."
+        ),
+        root_cause=(
+            "The recovery pipeline was built and verified end-to-end against REAL git state -- "
+            "but that real state was always produced by the TEST itself calling "
+            "create_task_worktree()/commit_worktree_changes() directly, never by the production "
+            "execution loop. Every test passed; the demos even matched the founder's own "
+            "required scenario list. Nothing in that verification process could have caught the "
+            "gap, because 'is the classifier correct given this evidence' and 'does this "
+            "evidence ever actually get produced by a real crash' are two entirely different "
+            "questions, and only the first one was being tested."
+        ),
+        affected_component="app.mainai_execution.execution_job._handle_repo_edit",
+        severity=EngineeringLessonSeverity.critical,
+        evidence=(
+            "Confirmed by grep: create_task_worktree() had exactly two real callers before this "
+            "fix -- recovery_salvage.py's rebind_worktree_to_job() (only reachable AFTER a "
+            "recovery record already exists, i.e. only during salvage of a state that could "
+            "never have been produced) and every V0.2 test/demo file, never "
+            "app/mainai_execution/execution_job.py. Confirmed by design: recovery_classifier.py's "
+            "LOCAL_COMMITTED_NOT_PUSHED branch reads worktree.current_commit directly off the "
+            "DB row -- a column no code path outside a test ever set."
+        ),
+        fix=(
+            "Wired worktree.py into _handle_repo_edit()'s real repo_edit handling: create/reuse "
+            "an ownership-verified worktree, edit only inside it, commit locally, push via "
+            "worktree.py's push_worktree_branch() -- all gated behind github_write_enabled "
+            "exactly like the code it replaces. A second, related durability gap surfaced "
+            "immediately once real crash-window demos were written through this new path "
+            "(rather than testing it in isolation again): the worktree row and its "
+            "current_commit column were only ever flushed, never committed, until AFTER the "
+            "whole handler returned -- so a real crash mid-function would have rolled that "
+            "state back too, reproducing the exact same unreachability bug one level deeper. "
+            "Fixed by committing at each fact recovery depends on, each preceded by the same "
+            "lease-renewal check every other real write in this file already uses."
+        ),
+        general_rule=(
+            "En recovery/safety feature är inte REAL förrän dess evidence/state faktiskt "
+            "produceras av production execution path -- tester som konstruerar state manuellt "
+            "räcker inte. Before trusting a recovery/resume/salvage capability as done, ask "
+            "specifically: does anything other than a test ever call the function(s) that "
+            "produce the state this capability reads? If the answer is no, the capability is "
+            "proven correct against a state that cannot occur -- which is a materially "
+            "different (and much weaker) claim than 'this capability works', and must not be "
+            "documented or reported as the latter."
+        ),
+        applies_to=["repo_edit", "recovery", "worktree", "dead_agent_recovery", "test_state_vs_production_state"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.2 hardening pass Round 2 (post-PR #58 draft review) -- worktree/execution_job wiring gap",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test=(
+            "tests/backend/test_mainai_execution_recovery_demos.py::"
+            "test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work, "
+            "tests/backend/test_mainai_execution_recovery_demos.py::"
+            "test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_pushed"
+        ),
+        confidence=EngineeringLessonConfidence.certain,
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["test_state_vs_production_state"])
+    assert any(item.id == lesson.id for item in found)
