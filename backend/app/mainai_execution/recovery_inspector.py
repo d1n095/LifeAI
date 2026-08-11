@@ -16,6 +16,15 @@ Evidence sources, each read-only, each independently falsifiable by a later re-i
   - GitHub (read-only: get_ref, list_pull_requests_for_head) — does the task's branch exist
     on the remote, and if so, is there already a PR for it?
   - mainai_task_events — did verification ever actually pass or fail for this task?
+  - engineering_lessons (via lessons.py's existing lookup_lessons(), V0.2 addition) — what
+    past, already-recorded incidents (any source, not just prior recoveries) are tagged with
+    this task's task_type? Pure read-only lookup, same "influences what a human/the planner
+    decides, never itself decides anything" discipline lessons.py's own docstring already
+    establishes — recovery/takeover never re-plans a task (any regression test a lesson
+    already added to task.verification_plan at ORIGINAL planning time stays in effect for a
+    takeover automatically, since the same task row is reused), so this exists purely to give
+    a human reviewing a blocked/manual-review record the same context a founder would have to
+    otherwise look up separately.
 
 Anything that cannot be read cleanly (more than one worktree row claims the same job, a git
 status call fails, a PR lookup errors) is recorded as an `unsafe_reason` and the record is
@@ -29,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from app.integrations.github_client import GitHubClient, GitHubClientError
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step
+from app.mainai_execution.lessons import lookup_lessons
 from app.mainai_execution.worktree import fetch_remote_branch, is_ancestor, task_branch_name, verify_worktree_ownership, worktree_git_status
 from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType
 from app.models.mainai_job import MainAIJob
@@ -182,6 +192,28 @@ async def inspect_recovery_record(db: Session, *, task: MainAITask, job: MainAIJ
     }
     evidence["verification_passed"] = MainAITaskEventType.verification_passed in verification_event_types
     evidence["verification_failed"] = MainAITaskEventType.verification_failed in verification_event_types
+
+    # V0.2 engineering-lessons reuse: pure lookup, same read-only "influences what a human or
+    # the planner decides, never itself decides anything" discipline lessons.py's own docstring
+    # already establishes for planner.py's create_plan() -- recovery/takeover never re-plans a
+    # task (reset_task_for_takeover() reuses the SAME task row, so any regression tests a
+    # lesson already added to task.verification_plan at ORIGINAL planning time are already in
+    # effect for a takeover automatically). What was missing is VISIBILITY: a founder doing
+    # manual review of a blocked/CONFLICTED_STATE record had no way to see whether this
+    # task_type has known past incidents at all without a separate query. Surfacing them here
+    # means the recovery record's own durable evidence -- and therefore the final report's
+    # recovery_history -- carries that context, never a fabricated one (an empty list is
+    # exactly as truthful as a populated one).
+    applicable_lessons = lookup_lessons(db, applies_to_any=[task.task_type])
+    evidence["applicable_lessons"] = [
+        {
+            "lesson_id": str(lesson.id),
+            "problem": lesson.problem,
+            "general_rule": lesson.general_rule,
+            "severity": lesson.severity.value,
+        }
+        for lesson in applicable_lessons
+    ]
 
     record.evidence = evidence
     if unsafe_reasons:

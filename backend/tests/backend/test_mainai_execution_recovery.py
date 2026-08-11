@@ -11,6 +11,7 @@ Covers each of the founder's A-I classification codes reachable from real eviden
     manual_review_required=True, and classification never proceeds past a blocked record."""
 
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -386,3 +387,51 @@ async def test_inspect_and_classify_are_idempotent(db_session, owner_id, patched
     event_types = [row[0] for row in events]
     assert event_types.count(MainAIRecoveryEventType.recovery_classified.value) == 1
     assert event_types.count(MainAIRecoveryEventType.recovery_inspected.value) == 1
+
+
+# ---------------------------------------------------------------- engineering lessons reuse
+
+
+@pytest.mark.asyncio
+async def test_inspect_surfaces_applicable_engineering_lessons_for_the_task_type(db_session, owner_id, patched_github):
+    """V0.2 engineering-lessons reuse: a lesson already recorded (from any source -- a prior
+    incident, a hardening pass, a prior recovery) for this task's task_type must show up in
+    the recovery record's own durable evidence, so a human reviewing it has the same context a
+    founder would otherwise have to separately query for."""
+    from app.mainai_execution import lessons
+    from app.models.mainai_execution import EngineeringLessonConfidence, EngineeringLessonSeverity
+
+    task, job = _task_and_job(db_session, owner_id, task_type="repo_edit")
+
+    lesson = lessons.record_lesson(
+        db_session,
+        problem="repo_edit tasks sometimes push mid-file-write and leave a half-applied change",
+        root_cause="worker crash between local commit and push",
+        affected_component="execution_job.py",
+        severity=EngineeringLessonSeverity.high,
+        evidence="observed in a prior dead-agent recovery",
+        fix="verify worktree ownership before any future push",
+        general_rule="always verify worktree ownership before trusting a local commit as complete",
+        applies_to=["repo_edit"],
+        source_type="test",
+        source_ref="unit-test",
+        created_by="test",
+        first_seen_at=datetime.utcnow(),
+        confidence=EngineeringLessonConfidence.likely,
+    )
+    db_session.commit()
+
+    record = await _detect_and_inspect(db_session, task, job)
+
+    applicable = record.evidence["applicable_lessons"]
+    assert len(applicable) == 1
+    assert applicable[0]["lesson_id"] == str(lesson.id)
+    assert applicable[0]["severity"] == "high"
+    assert applicable[0]["general_rule"] == "always verify worktree ownership before trusting a local commit as complete"
+
+
+@pytest.mark.asyncio
+async def test_inspect_applicable_lessons_is_empty_when_none_apply(db_session, owner_id, patched_github):
+    task, job = _task_and_job(db_session, owner_id, task_type="read_only_audit")
+    record = await _detect_and_inspect(db_session, task, job)
+    assert record.evidence["applicable_lessons"] == []
