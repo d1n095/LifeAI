@@ -141,7 +141,16 @@ class MainAIRecoveryRecord(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mainai_jobs.id", ondelete="CASCADE"), unique=True)
     detected_at: Mapped[datetime] = mapped_column(DateTime)
-    classification: Mapped[RecoveryClassification | None] = mapped_column(Enum(RecoveryClassification), nullable=True)
+    classification: Mapped[RecoveryClassification | None] = mapped_column(
+        # SQLAlchemy's Enum type stores the Python member NAME by default, not `.value` --
+        # every other enum in this codebase happens to have name == value (e.g. `queued =
+        # "queued"`) so this never mattered before. RecoveryClassification deliberately keeps
+        # lowercase, idiomatic Python member names (`nothing_done`) while its values match the
+        # founder's own uppercase vocabulary and migration 0033's CHECK constraint exactly
+        # (`NOTHING_DONE`) -- values_callable is what makes SQLAlchemy actually store `.value`.
+        Enum(RecoveryClassification, values_callable=lambda enum_cls: [member.value for member in enum_cls]),
+        nullable=True,
+    )
     # Structured, durable evidence snapshot (checkpoint/worktree/branch/commit/PR/CI state) --
     # never a summary reconstructed from memory later. See recovery_inspector.py.
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)

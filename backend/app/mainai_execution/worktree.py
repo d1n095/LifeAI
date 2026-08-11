@@ -230,6 +230,40 @@ def worktree_git_status(worktree: MainAITaskWorktree) -> dict:
     }
 
 
+def fetch_remote_branch(worktree: MainAITaskWorktree) -> str | None:
+    """Fetches the CURRENT remote tip of the worktree's own branch into this local checkout's
+    object database (read-only in effect -- never touches the local branch ref or working
+    tree) so is_ancestor() below has something real to compare against. Necessary because
+    create_task_worktree() makes a shallow, single-commit checkout (`--depth 1`) that never
+    contains anyone else's commits by default. Returns None if the branch does not exist on
+    the remote at all (nothing to compare against -- not an error)."""
+    _require_ownership(worktree)
+    path = Path(worktree.path)
+    result = subprocess.run(
+        ["git", "-C", str(path), "fetch", "origin", worktree.branch], cwd=str(path), capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS
+    )
+    if result.returncode != 0:
+        return None
+    return _run_git(["rev-parse", "FETCH_HEAD"], cwd=path).stdout.strip()
+
+
+def is_ancestor(worktree: MainAITaskWorktree, ancestor_sha: str) -> bool | None:
+    """True if `ancestor_sha` is a real ancestor of (or equal to) the worktree's local HEAD --
+    i.e. the local branch is a normal fast-forward continuation of that commit, not a genuine
+    divergence. Used by the recovery classifier to tell "hasn't pushed yet" (remote tip is an
+    ancestor of local HEAD) apart from a real conflict (it is not) without guessing from a bare
+    SHA mismatch. Returns None (never a bare crash) if `ancestor_sha` is not even present in
+    this local checkout's object database -- a truncated fetch or a genuinely unrelated commit,
+    itself signal the classifier should treat as unsafe rather than as "not an ancestor"."""
+    _require_ownership(worktree)
+    path = Path(worktree.path)
+    cat_file = subprocess.run(["git", "-C", str(path), "cat-file", "-e", ancestor_sha], capture_output=True, text=True)
+    if cat_file.returncode != 0:
+        return None
+    result = subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", ancestor_sha, "HEAD"], capture_output=True, text=True)
+    return result.returncode == 0
+
+
 def commit_worktree_changes(db: Session, worktree: MainAITaskWorktree, *, message: str) -> str | None:
     """Stages and commits everything currently in the worktree. Returns the new commit SHA, or
     None if there was nothing to commit (an empty commit is never created — "nothing changed"
