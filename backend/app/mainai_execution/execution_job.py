@@ -53,6 +53,14 @@ from app.mainai_execution.verify import (
     validate_targeted_tests_target,
     verify_task,
 )
+from app.mainai_execution.worktree import (
+    WorktreeError,
+    commit_worktree_changes,
+    create_task_worktree,
+    push_worktree_branch,
+    verify_worktree_ownership,
+    worktree_git_status,
+)
 from app.models.mainai_execution import (
     MainAIGoal,
     MainAITask,
@@ -61,6 +69,7 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
+from app.models.mainai_recovery import MainAITaskWorktree
 from app.providers.base import Message
 from app.providers.registry import chat_with_fallback
 
@@ -149,7 +158,15 @@ def _parse_code_agent_response(raw: str) -> dict:
     return parsed
 
 
-async def _handle_repo_edit(db: Session, task: MainAITask) -> dict:
+async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
+    """github_write_enabled is off (or GitHub isn't configured): the ORIGINAL V0.1 proposal-only
+    model, completely unchanged -- writes to the single shared local checkout this backend
+    process itself runs from, purely so real local verification (verify_task()) can still run
+    against real content, never touching the network or creating any isolated per-attempt
+    state. Kept as a separate function (not a branch inside _handle_repo_edit()) specifically so
+    the extensive existing path-traversal/symlink-escape hardening tests targeting this exact
+    behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
+    al.) keep exercising the identical code, unchanged."""
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
     result, _attempted = await chat_with_fallback(db, messages)
     parsed = _parse_code_agent_response(result.content)
@@ -173,6 +190,89 @@ async def _handle_repo_edit(db: Session, task: MainAITask) -> dict:
         "files": parsed["files"],
         "commit_message": parsed.get("commit_message", task.description[:200]),
         "previous_contents": previous_contents,
+        "provider": result.provider,
+        "model": result.model,
+    }
+
+
+async def _handle_repo_edit(db: Session, task: MainAITask, *, job: MainAIJob, worker_id: str) -> dict:
+    """Hardening-pass finding (real production-scope gap, not a security bug per se): V0.1/
+    early V0.2 always wrote a repo_edit's real content to the single shared backend checkout
+    and pushed exclusively via the GitHub Git Data API -- the per-task worktree isolation
+    worktree.py already built (real local `git commit`, ownership-verified per attempt) was
+    never actually wired into this, the ONE handler it exists for. That meant
+    LOCAL_UNCOMMITTED_WORK/LOCAL_COMMITTED_NOT_PUSHED, while fully proven correct at the
+    recovery-pipeline level, could never actually occur for a real dead repo_edit task -- a
+    genuine V0.2 scope gap, not merely a documentation one. Fixed here: when
+    `github_write_enabled` is on and GitHub is configured, every real repo_edit attempt now
+    creates (or, on a takeover's rebound worktree, reuses) its own isolated, ownership-verified
+    worktree, edits ONLY inside it, and commits locally -- exactly the state
+    recovery_inspector.py/recovery_classifier.py already read.
+
+    Salvage continuation (dedup, section 5 of the hardening pass): checked BEFORE any AI call.
+    If this job's worktree already carries real, ownership-verified progress (uncommitted edits
+    OR a local commit -- both durable git facts, never a DB checkpoint) from a prior dead
+    attempt that recovery_salvage.py rebound here, that progress is reused as-is; the AI is
+    never called a second time for work that already, genuinely exists on disk. Ownership
+    mismatch/ambiguity for an existing worktree row fails closed (TaskExecutionError), per the
+    founder's explicit instruction -- never silently treated as "nothing here" and overwritten."""
+    settings = get_settings()
+    if not settings.github_write_enabled:
+        return await _propose_repo_edit(db, task)
+
+    client = get_github_client()
+    if not client.is_configured():
+        raise TaskExecutionError(
+            "GITHUB_WRITE_ENABLED är på men GITHUB_TOKEN/GITHUB_REPO saknas -- kan inte skapa en verklig, "
+            "ownership-verifierad worktree för denna repo_edit-task."
+        )
+
+    existing_worktree = db.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == job.id).one_or_none()
+    if existing_worktree is not None:
+        if not verify_worktree_ownership(existing_worktree):
+            raise TaskExecutionError(
+                f"Worktree ownership verification failed for job {job.id} -- refusing to trust unverifiable local state (fail closed)."
+            )
+        status = worktree_git_status(existing_worktree)
+        if status["has_uncommitted_changes"] or existing_worktree.current_commit:
+            logger.info(
+                "task_execution job %s (task %s): continuing salvaged worktree progress -- no new AI call.", job.id, task.id
+            )
+            return {
+                "worktree_id": str(existing_worktree.id),
+                "worktree_path": existing_worktree.path,
+                "branch": existing_worktree.branch,
+                "resumed_from_worktree": True,
+                "commit_message": f"MainAI: {task.description[:180]}",
+            }
+        worktree = existing_worktree
+    else:
+        worktree = await create_task_worktree(db, task=task, job=job, lease_generation=job.lease_generation, executor_id=worker_id)
+
+    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
+    result, _attempted = await chat_with_fallback(db, messages)
+    parsed = _parse_code_agent_response(result.content)
+
+    worktree_root = Path(worktree.path).resolve()
+    for file in parsed["files"]:
+        # Identical two-layer defense _propose_repo_edit() already uses (syntactic guard at
+        # parse time + this resolve()-and-compare confinement check), now against the isolated
+        # worktree root instead of the shared repo root.
+        abs_path = (worktree_root / file["path"]).resolve()
+        if abs_path != worktree_root and worktree_root not in abs_path.parents:
+            raise TaskExecutionError(f"Refusing to write outside the worktree root: {file['path']!r} resolved to {abs_path}.")
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_text(file["content"])
+
+    commit_message = parsed.get("commit_message", task.description[:200])
+    commit_worktree_changes(db, worktree, message=commit_message)
+
+    return {
+        "worktree_id": str(worktree.id),
+        "worktree_path": worktree.path,
+        "branch": worktree.branch,
+        "files": [f["path"] for f in parsed["files"]],
+        "commit_message": commit_message,
         "provider": result.provider,
         "model": result.model,
     }
@@ -276,51 +376,40 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
 
 
 async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) -> dict:
-    """Only called once verify_task() has already passed (see run_task_execution_job()) --
-    the actual GitHub push, gated behind github_write_enabled exactly like
-    app/agent_orchestration.py's own prepare_github_pr().
+    """Only called once verify_task() has already passed (see run_task_execution_job()).
 
-    Crash-matrix finding (P1, hardening pass): run_task_execution_job() checkpoints this
-    function's result under step="finalized" specifically so a crash AFTER a real GitHub push
-    succeeds but BEFORE that checkpoint commits doesn't push a second time on resume -- but the
-    original version of this function still had a bug for exactly that crash window. On resume,
-    with no "finalized" checkpoint found, this function ran again from scratch: it re-read
-    `base_sha` from `base_branch` (unchanged by the first push, which only ever touches the
-    TASK's own branch), found the task branch already existed (from the successful first push)
-    and swallowed that as "a retry, fine, commit on top" -- but then built the new commit on
-    top of the STALE `base_sha` instead of the branch's actual current tip. GitHub's real
-    fast-forward-only update_ref() correctly rejected that (the new commit's parent wasn't the
-    branch's current HEAD) and raised GitHubClientError -- which run_task_execution_job()'s own
-    outer handler catches and turns into `retryable_failed`/`failed`, even though the FIRST
-    attempt's push had already durably succeeded. A task could end up permanently `failed` in
-    the final report while the real code change sat live on its branch the whole time.
+    Hardening-pass rewrite: the real push now goes through worktree.py's real local
+    `git push` (worktree.py's own `push_worktree_branch()`) against the SAME isolated,
+    ownership-verified worktree `_handle_repo_edit()` already committed to -- never the GitHub
+    Git Data API's remote-only commit-construction this function used before wiring worktree.py
+    into the live path. `work_result["worktree_id"]` is only ever absent in proposal mode
+    (github_write_enabled off, see `_propose_repo_edit()`), which this function still serves
+    identically to V0.1.
 
-    Fixed by checking whether `branch` ALREADY exists first (`get_ref(branch)` -- a real 404
-    raises GitHubClientError exactly like a missing ref should) and, if so, building the new
-    commit on top of ITS current tip instead of blindly recomputing from `base_branch`. A
-    genuinely first attempt (branch doesn't exist yet) still creates it from `base_branch` as
-    before. This does not make the whole operation perfectly idempotent (a resume after a
-    successful-but-uncheckpointed push still creates one extra, redundant commit with the same
-    file contents on top of the first) -- but it always succeeds and the task's final state is
-    truthful, which is what actually matters here; a byte-for-byte duplicate-content detection
-    to avoid even that redundant commit is out of scope for V0.1."""
-    settings = get_settings()
+    Crash-matrix finding (P1, ORIGINAL hardening pass, still true and now simpler to satisfy):
+    a crash AFTER a real push succeeds but BEFORE the "finalized" checkpoint commits must never
+    cause a resume to push a second, redundant commit. The OLD Git-Data-API version needed a
+    "does the branch already exist, build on its real tip" workaround for this, because it
+    reconstructed a brand new commit from `work_result["files"]` on every call. A real local
+    `git push` of the SAME, already-committed local branch has no such problem: pushing a
+    branch whose tip already matches origin's tip is a genuine no-op ("Everything up-to-date",
+    exit 0) -- calling this function twice for the same worktree is naturally idempotent,
+    without needing any tip-tracking logic at all."""
     branch = f"claude/mainai-task-{task.id}"
     base_branch = "claude/det-kommer-mer-879lcm"
 
-    if not settings.github_write_enabled:
+    worktree_id = work_result.get("worktree_id")
+    if worktree_id is None:
+        # Proposal mode (github_write_enabled off) -- unchanged from V0.1.
         return {"branch": branch, "base_branch": base_branch, "proposed": True, "files": [f["path"] for f in work_result["files"]]}
 
-    client = get_github_client()
-    try:
-        base_sha = await client.get_ref(branch)  # already exists -- a resume after a prior push, build on its real current tip
-    except GitHubClientError:
-        base_sha = await client.get_ref(base_branch)
-        await client.create_branch(new_branch=branch, from_sha=base_sha)
-    commit_result = await client.commit_multiple_files(
-        branch=branch, base_sha=base_sha, files=[{"path": f["path"], "content": f["content"]} for f in work_result["files"]], message=work_result["commit_message"]
-    )
-    return {"branch": branch, "base_branch": base_branch, "proposed": False, **commit_result}
+    worktree = db.query(MainAITaskWorktree).filter(MainAITaskWorktree.id == uuid.UUID(worktree_id)).one()
+    if not verify_worktree_ownership(worktree):
+        raise TaskExecutionError(
+            f"Worktree ownership verification failed for job {worktree.job_id} at push time -- refusing to trust unverifiable local state."
+        )
+    remote_sha = await push_worktree_branch(worktree)
+    return {"branch": worktree.branch, "base_branch": base_branch, "proposed": False, "commit_sha": remote_sha}
 
 
 async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, *, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
@@ -360,7 +449,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             if task.task_type == "read_only_audit":
                 work_result = await _handle_read_only_audit(db, task)
             elif task.task_type == "repo_edit":
-                work_result = await _handle_repo_edit(db, task)
+                work_result = await _handle_repo_edit(db, task, job=job, worker_id=worker_id)
             elif task.task_type == "run_tests":
                 work_result = _handle_run_tests(task)
             elif task.task_type == "open_pr":
@@ -412,7 +501,16 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             steps = [VerificationStepResult(kind="targeted_tests", passed=r["passed"], detail=r) for r in work_result["results"]]
             verification = VerificationResult(passed=all(s.passed for s in steps), steps=steps)
         else:
-            verification = verify_task(task, cwd=str(_backend_root()))
+            # Hardening-pass finding: a repo_edit task whose real edits now live inside an
+            # isolated worktree (see _handle_repo_edit()) must be verified against THAT
+            # worktree's own backend/ subdirectory -- the exact same repo layout as
+            # _backend_root(), just at a different, per-attempt path -- never against the
+            # shared checkout, which never received these edits at all once worktree.py is
+            # wired into the live path. Proposal mode (no worktree_path in work_result) keeps
+            # verifying against the shared checkout, unchanged from V0.1.
+            worktree_path = work_result.get("worktree_path") if task.task_type == "repo_edit" else None
+            verify_cwd = str(Path(worktree_path) / "backend") if worktree_path else str(_backend_root())
+            verification = verify_task(task, cwd=verify_cwd)
 
         if verification_checkpoint is None and verification.passed:
             try:
@@ -456,7 +554,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             work_result = {**work_result, **finalize_info}
             work_result.pop("previous_contents", None)  # not durable evidence -- was only needed transiently for a future diff/rollback view
 
-    except (TaskExecutionError, VerificationStepError, GitHubClientError) as exc:
+    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError) as exc:
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
         db.rollback()
         job = db.get(MainAIJob, job_id)
