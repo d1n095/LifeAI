@@ -98,6 +98,27 @@ class MainAITaskEventType(str, enum.Enum):
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
+    # V0.3 (migration 0036) -- durable external-wait (waiting_ci/waiting_external) lifecycle.
+    # See app/models/mainai_wait.py's MainAITaskWait for the durable wait record these
+    # events narrate.
+    wait_started = "wait_started"
+    wait_satisfied = "wait_satisfied"
+    wait_failed = "wait_failed"
+    wait_timed_out = "wait_timed_out"
+    # V0.3 -- cooperative cancellation of a `running` task, mirroring MainAIJobEventType's own
+    # cancel_requested/cancel_acknowledged split (app/models/mainai_job.py) at the task level --
+    # see app/mainai_execution/cancellation.py.
+    cancel_requested = "cancel_requested"
+    cancelling = "cancelling"
+    # V0.3 -- an unattended worker tick (not a founder-triggered API call) initiated a V0.2
+    # recovery/takeover for this task's dead attempt -- see app/mainai_execution/
+    # auto_recovery.py. Recorded in ADDITION to, never instead of, V0.2's own
+    # MainAIRecoveryEventType history for the recovery record itself.
+    auto_recovery_triggered = "auto_recovery_triggered"
+    # V0.3 -- app/mainai_execution/lesson_conflicts.py found a genuine contradiction between two
+    # `active` EngineeringLesson rows relevant to this task's verification -- see that module's
+    # docstring for the fail-closed policy this event records evidence for.
+    lesson_conflict_detected = "lesson_conflict_detected"
 
 
 class MainAIGoal(Base):
@@ -174,6 +195,13 @@ class MainAITask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # V0.3 (migration 0036): when a `retryable_failed` task becomes eligible for the worker's
+    # automatic retry-with-backoff scan (app/mainai_execution/retry_orchestration.py) -- NULL
+    # means "not currently scheduled for an automatic retry" (e.g. a task that failed
+    # permanently, or one a founder must retry manually via the existing API). Computed from
+    # app/jobs/retry.py's existing compute_backoff_seconds(task.attempts), the same formula
+    # mainai_jobs' own transient-failure retry already uses -- no second backoff policy.
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
 
 class MainAITaskDependency(Base):
@@ -238,6 +266,11 @@ class EngineeringLessonStatus(str, enum.Enum):
     active = "active"
     historical = "historical"
     superseded = "superseded"
+    # V0.3 (migration 0036): set on BOTH sides of a genuine contradiction
+    # app/mainai_execution/lesson_conflicts.py finds between two `active` lessons -- neither is
+    # silently picked over the other; a founder must resolve which (if either) returns to
+    # `active`. Never set by anything other than that module.
+    disputed = "disputed"
 
 
 class EngineeringLessonSeverity(str, enum.Enum):

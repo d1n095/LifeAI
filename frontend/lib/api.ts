@@ -651,6 +651,9 @@ export type MainAITask = {
   max_attempts: number;
   blocker_reason: string | null;
   mainai_job_id: string | null;
+  // V0.3: when this task becomes eligible for the worker's automatic retry-with-backoff scan
+  // -- null means no automatic retry is currently scheduled.
+  next_retry_at: string | null;
   liveness: MainAITaskLiveness;
   created_at: string;
   started_at: string | null;
@@ -681,6 +684,45 @@ export type MainAITaskDetail = MainAITask & {
   checkpoints: MainAICheckpoint[];
   depends_on: string[];
   approval_granted: boolean;
+};
+
+// V0.3 -- app/mainai_execution/ci_wait.py's durable external-wait record.
+export type MainAITaskWait = {
+  id: string;
+  task_id: string;
+  job_id: string;
+  source_type: string;
+  status: string;
+  resource_ref: Record<string, unknown>;
+  poll_count: number;
+  last_polled_at: string | null;
+  next_poll_at: string;
+  deadline_at: string;
+  evidence: Record<string, unknown>;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+// V0.3 -- founder-wide engineering lesson (app/mainai_execution/lessons.py), including
+// `disputed` once app/mainai_execution/lesson_conflicts.py's mark_conflict() has run.
+export type EngineeringLesson = {
+  id: string;
+  status: string;
+  problem: string;
+  root_cause: string;
+  affected_component: string;
+  severity: string;
+  evidence: string;
+  fix: string;
+  regression_test: string | null;
+  general_rule: string;
+  applies_to: string[];
+  source_type: string;
+  source_ref: string;
+  confidence: string;
+  created_by: string;
+  created_at: string;
+  superseded_by: string | null;
 };
 
 // The shape app/mainai_execution/final_report.py's generate_goal_report() returns -- kept
@@ -888,4 +930,9 @@ export const api = {
   mainaiExecutionRejectTask: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}/reject`, { method: "POST" }),
   mainaiExecutionCancelTask: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}/cancel`, { method: "POST" }),
   mainaiExecutionRetryTask: (id: string) => request<MainAITaskDetail>(`/api/mainai/execution/tasks/${id}/retry`, { method: "POST" }),
+  // V0.3 additions
+  mainaiExecutionGoalPlans: (goalId: string) => request<MainAIPlan[]>(`/api/mainai/execution/goals/${goalId}/plans`),
+  mainaiExecutionTaskWaits: (id: string) => request<MainAITaskWait[]>(`/api/mainai/execution/tasks/${id}/waits`),
+  mainaiExecutionLessons: (statusFilter?: string) =>
+    request<EngineeringLesson[]>(`/api/mainai/execution/lessons${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
 };

@@ -170,6 +170,10 @@ def retry_task(db: Session, *, task: MainAITask) -> MainAITask:
     if task.status not in RETRYABLE_MAINAI_TASK_STATUSES:
         raise TaskNotRetryableError(task.id, task.status)
     task.status = MainAITaskStatus.ready
+    # V0.3: clear the automatic-retry-scan due-time -- it already did its job (or a founder
+    # retried manually, bypassing the scan entirely); a stale value here would be inert (the
+    # ready-task scan doesn't consult it) but is still worth not leaving lying around.
+    task.next_retry_at = None
     db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.retry_scheduled, detail={"attempts": task.attempts}))
     db.flush()
     return task
@@ -199,31 +203,80 @@ def reset_task_for_takeover(db: Session, *, task: MainAITask) -> MainAITask:
     return task
 
 
-def cancel_task(db: Session, *, task: MainAITask, cancelled_by: str, reason: str = "") -> MainAITask:
-    """Cancels a task that is NOT currently running (pending/ready/blocked/retryable_failed) --
-    a real, immediate, durable status transition, exactly like a replan's own supersession
-    (planner.py's create_plan()) already does for a stale plan's leftover tasks.
+def cancel_task(
+    db: Session, *, task: MainAITask, cancelled_by: str, cancelled_by_id: uuid.UUID | None = None, reason: str = ""
+) -> MainAITask:
+    """Cancels a task -- three genuinely different mechanisms depending on what state it's
+    actually in, all reached through this one entry point (no parallel cancellation system):
 
-    A `running` task is deliberately OUT OF SCOPE here, and this is an honest V0.1 limitation,
-    not an oversight: it has a real mainai_jobs row already in flight (a single AI call plus a
-    single verification pass, not a per-document loop like corpus_review has), with no natural
-    safe mid-task checkpoint to cooperatively check a cancel flag at. Calling
-    app/jobs/service.py's request_cancel() on that task's mainai_job_id still works exactly as
-    it always has (it sets cancel_requested, visible in the job's own record) but
-    execution_job.py does not check it mid-task -- a running task_execution job runs to its
-    natural completion or failure regardless. See docs/MAINAI_EXECUTION_LOOP_V0_1.md's LIMITED
-    list for this named explicitly, rather than this function silently claiming to stop
-    something it cannot.
+    - pending/ready/blocked/retryable_failed: nothing is executing it yet -- a real, immediate,
+      durable status transition, exactly like a replan's own supersession (planner.py's
+      create_plan()) already does for a stale plan's leftover tasks.
+    - waiting_ci (V0.3): no job is currently in flight either (the job that opened the PR
+      already reached `completed` -- see execution_job.py's module docstring) -- also
+      immediate: the durable MainAITaskWait is cancelled (app/mainai_execution/ci_wait.py's
+      cancel_ci_wait()) so a later worker poll tick can never resurrect it, and the task is
+      finalized cancelled the same way.
+    - running (V0.3): a real mainai_jobs row IS in flight -- this can only ever be COOPERATIVE.
+      Sets `cancel_requested` on that job (app/jobs/service.py's request_cancel(), the SAME
+      primitive corpus_review.py's own per-batch cancel check already uses -- no second
+      cancellation mechanism) and records a `cancel_requested` task event; the task's status
+      stays `running` until execution_job.py's own next safe checkpoint actually acknowledges
+      it (see that module's `_check_cancel_requested()`/`TaskCancelledCooperatively`). V0.1's
+      original limitation here ("no safe checkpoint exists") is what V0.3 actually closes --
+      this docstring no longer claims that gap.
 
     Locks the row first (`_lock_task()`) so a cancel can never land as a lost-update against a
     concurrent dispatch/retry on the same task -- whichever caller's transaction commits first
     determines the task's real fate, and the second caller re-checks status against the
     freshly locked row instead of a possibly-stale in-memory one."""
     task = _lock_task(db, task.id)
+
+    if task.status == MainAITaskStatus.running:
+        if task.mainai_job_id is None or cancelled_by_id is None:
+            raise TaskNotCancellableError(task.id, task.status)
+        mainai_jobs_service.request_cancel(db, task.mainai_job_id, requested_by=cancelled_by_id)
+        db.add(
+            MainAITaskEvent(
+                task_id=task.id,
+                owner_id=task.owner_id,
+                event_type=MainAITaskEventType.cancel_requested,
+                detail={"cancelled_by": cancelled_by, "reason": reason},
+            )
+        )
+        db.flush()
+        return task
+
+    if task.status == MainAITaskStatus.waiting_ci:
+        from app.mainai_execution.ci_wait import cancel_ci_wait
+        from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
+
+        wait = (
+            db.query(MainAITaskWait)
+            .filter(MainAITaskWait.task_id == task.id, MainAITaskWait.status == MainAITaskWaitStatus.pending)
+            .one_or_none()
+        )
+        if wait is not None:
+            cancel_ci_wait(db, wait, reason=reason or "Cancelled by founder.")
+        task.status = MainAITaskStatus.cancelled
+        task.completed_at = datetime.utcnow()
+        task.next_retry_at = None
+        if reason:
+            task.blocker_reason = reason
+        db.add(
+            MainAITaskEvent(
+                task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.cancelled, detail={"cancelled_by": cancelled_by, "reason": reason}
+            )
+        )
+        db.flush()
+        recompute_task_readiness(db, goal_id=task.goal_id)
+        return task
+
     if task.status not in _CANCELLABLE_MAINAI_TASK_STATUSES:
         raise TaskNotCancellableError(task.id, task.status)
     task.status = MainAITaskStatus.cancelled
     task.completed_at = datetime.utcnow()
+    task.next_retry_at = None
     if reason:
         task.blocker_reason = reason
     db.add(

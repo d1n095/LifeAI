@@ -328,8 +328,12 @@ async def test_demo_2_failure_path_never_falsely_completes_and_the_report_tells_
     failing_report = next(t for t in report["tasks"] if t["task_id"] == str(failing_task.id))
     assert failing_report["task_outcome"] == "retryable_failed"
     assert failing_report["verification_outcome"]["passed"] is False
-    assert failing_report["unresolved_risk"] is True
-    assert report["summary"]["unresolved_risk_count"] >= 1
+    # V0.3: _finalize_task_outcome() now ALWAYS schedules an automatic retry-with-backoff for a
+    # retryable_failed task (app/worker.py's _advance_mainai_execution_retries picks it up
+    # unattended) -- it is genuinely no longer "unresolved" the way V0.1 reported it, since
+    # nothing is waiting on a founder decision. next_retry_at being set IS the truthful signal.
+    assert failing_report["unresolved_risk"] is False
+    assert failing_report["next_retry_at"] is not None
 
 
 # ---------------------------------------------------------------- D. Demo 3 -- restart / resume

@@ -44,13 +44,30 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
-from app.mainai_execution.execution_job import run_task_execution_job
-from app.mainai_execution.executor import dispatch_ready_task
+from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
+from app.mainai_execution.executor import dispatch_ready_task, retry_task
+from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
+from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
+from app.mainai_execution.recovery_classifier import classify_recovery_record
+from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
+from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
+from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
-from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
-from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
+from app.models.mainai_execution import (
+    ACTIVE_MAINAI_GOAL_STATUSES,
+    EngineeringLesson,
+    EngineeringLessonStatus,
+    MainAIGoal,
+    MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
+from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
+from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryStatus
+from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
@@ -375,6 +392,204 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-advance MainAITask %s.", self.worker_id, task.id)
 
+    # V0.3: how many due mainai_task_waits (CI polls) this worker looks at per poll cycle --
+    # a real, bounded batch (never an unbounded scan), matching claim_storage_deletion_tasks'
+    # own `limit=50` precedent above. Deterministic ordering (next_poll_at, id) so a poll cycle
+    # that can't get through the whole due set still makes forward progress across cycles
+    # rather than potentially re-picking the same arbitrary subset every time.
+    _MAX_CI_WAITS_PER_TICK = 25
+    _MAX_RETRY_SCANS_PER_TICK = 25
+
+    async def _poll_mainai_task_waits(self, db: Session) -> None:
+        """MainAI V0.3's own auto-advance tick for `waiting_ci` tasks -- the counterpart to
+        `_advance_mainai_execution_tasks` above, but for a task that is not `ready` (nothing to
+        dispatch) and not `running` (no job/lease involved at all, see app/mainai_execution/
+        ci_wait.py's module docstring): it is durably waiting on an external fact
+        (`mainai_task_waits`), and this is what actually goes and checks that fact. Same
+        cross-owner, superuser-claim-session, per-item-isolated pattern as every other tick in
+        this method group -- a poll failure for one wait is logged and never stops the batch."""
+        now = datetime.utcnow()
+        due_waits = (
+            db.query(MainAITaskWait)
+            .filter(MainAITaskWait.status == MainAITaskWaitStatus.pending, MainAITaskWait.next_poll_at <= now)
+            .order_by(MainAITaskWait.next_poll_at.asc(), MainAITaskWait.id.asc())
+            .limit(self._MAX_CI_WAITS_PER_TICK)
+            .all()
+        )
+        for wait in due_waits:
+            try:
+                await resume_waiting_ci_task(db, wait)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to poll mainai_task_wait %s.", self.worker_id, wait.id)
+
+    def _advance_mainai_execution_retries(self, db: Session) -> None:
+        """MainAI V0.3's retry-with-backoff tick: moves every `retryable_failed` task whose
+        `next_retry_at` has elapsed back to `ready` via the existing, unchanged
+        `executor.retry_task()` -- the SAME manual-retry function a founder-triggered API call
+        already uses, not a second retry code path. Deliberately does NOT dispatch the task
+        itself: `_advance_mainai_execution_tasks` above already does that for every `ready`
+        task, on the very same poll cycle (it runs after this one), so a task this tick just
+        retried is picked up and actually redispatched without this tick needing to duplicate
+        that logic."""
+        now = datetime.utcnow()
+        due_tasks = (
+            db.query(MainAITask)
+            .filter(MainAITask.status == MainAITaskStatus.retryable_failed, MainAITask.next_retry_at.isnot(None), MainAITask.next_retry_at <= now)
+            .order_by(MainAITask.next_retry_at.asc(), MainAITask.id.asc())
+            .limit(self._MAX_RETRY_SCANS_PER_TICK)
+            .all()
+        )
+        for task in due_tasks:
+            try:
+                retry_task(db, task=task)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to auto-retry MainAITask %s.", self.worker_id, task.id)
+
+    # V0.3: how many candidate dead task_execution jobs this worker inspects per poll cycle --
+    # a real, bounded scan, same reasoning as _MAX_CI_WAITS_PER_TICK above.
+    _MAX_AUTO_RECOVERY_SCANS_PER_TICK = 10
+
+    async def _advance_mainai_execution_auto_recovery(self, db: Session) -> None:
+        """MainAI V0.3's automatic dead-agent-recovery tick -- the detection step V0.2's own
+        `POST /tasks/{id}/recover` docstring explicitly named as NOT existing yet ("No worker/
+        background process runs recovery automatically"). Detection itself is exactly the
+        condition migration 0034's own docstring already establishes as the reason
+        `claim_next_mainai_job()`'s blind expired-lease reclaim branch excludes
+        `job_type='task_execution'`: a `running` task_execution job whose lease has expired is
+        a dead attempt that must go through the real inspect->classify->takeover gate, never
+        straight back into the generic poll loop. This tick finds exactly those jobs and drives
+        them through the SAME four functions (get_or_create_recovery_record ->
+        inspect_recovery_record -> classify_recovery_record -> execute_takeover) the founder's
+        own `/recover` endpoint already calls -- no second recovery pipeline, and no bypass of
+        `execute_takeover()`'s own approval gate (recovery_approval.py): PUSHED_NO_PR/PR_EXISTS
+        still raise RecoveryApprovalRequiredError here exactly as they do for a founder-
+        triggered call, caught and left for a founder to approve via the existing API,
+        never auto-approved by this tick. CONFLICTED_STATE/UNSAFE_TO_AUTO_RECOVER are never in
+        AUTO_SALVAGEABLE_CLASSIFICATIONS at all, so this tick never even attempts a takeover for
+        them -- classification alone (which IS unattended-safe, per that module's own
+        evidence-only judgment) still runs and durably records `manual_review_required=True`
+        for a founder to find.
+
+        Per-record isolation, same as every other tick in this method group: one record's
+        failure is logged and never stops the batch."""
+        now = datetime.utcnow()
+        dead_jobs = (
+            db.query(MainAIJob)
+            .filter(
+                MainAIJob.job_type == "task_execution",
+                MainAIJob.status == MainAIJobStatus.running,
+                MainAIJob.lease_expires_at.isnot(None),
+                MainAIJob.lease_expires_at < now,
+            )
+            .order_by(MainAIJob.lease_expires_at.asc())
+            .limit(self._MAX_AUTO_RECOVERY_SCANS_PER_TICK)
+            .all()
+        )
+        for job in dead_jobs:
+            task = db.query(MainAITask).filter(MainAITask.mainai_job_id == job.id).one_or_none()
+            if task is None or task.status != MainAITaskStatus.running:
+                continue
+            goal = db.get(MainAIGoal, task.goal_id)
+            if goal is None:
+                continue
+            try:
+                record = get_or_create_recovery_record(db, task=task, job=job)
+                db.commit()
+                record = await inspect_recovery_record(db, task=task, job=job, record=record)
+                db.commit()
+                record = classify_recovery_record(db, record=record)
+                db.commit()
+                if record.status == MainAIRecoveryStatus.classified and record.classification in AUTO_SALVAGEABLE_CLASSIFICATIONS:
+                    db.add(
+                        MainAITaskEvent(
+                            task_id=task.id,
+                            owner_id=task.owner_id,
+                            event_type=MainAITaskEventType.auto_recovery_triggered,
+                            detail={"recovery_record_id": str(record.id), "classification": record.classification.value},
+                        )
+                    )
+                    db.commit()
+                    try:
+                        record, _new_job = await execute_takeover(db, task=task, goal=goal, record=record, dispatched_by="mainai_worker_auto_recovery")
+                        db.commit()
+                    except (RecoveryApprovalRequiredError, TakeoverError):
+                        db.rollback()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to auto-recover mainai_job %s.", self.worker_id, job.id)
+
+    # V0.3: how many goals this worker checks for a needed replan per poll cycle -- a real,
+    # bounded scan, same reasoning as every other tick's own limit above.
+    _MAX_REPLAN_SCANS_PER_TICK = 10
+
+    async def _advance_mainai_execution_replan(self, db: Session) -> None:
+        """MainAI V0.3's minimal automatic replan trigger: for each active goal, checks
+        whether its CURRENT plan has a permanently `failed` task (app/mainai_execution/
+        replan.py's find_replan_trigger()) and, if so, proposes and persists a fresh plan
+        version via the SAME propose_plan_via_ai()/create_plan() V0.1's planner.py already
+        implements for a founder-triggered replan -- no second planning mechanism. A goal
+        whose active plan has no failed task is left untouched; a goal that already replanned
+        (its active plan is now the NEW version) naturally stops matching find_replan_trigger()
+        on the next tick, since that function only ever looks at the plan currently `active`.
+        Per-goal isolation, same as every other tick in this method group."""
+        goals = (
+            db.query(MainAIGoal)
+            .filter(MainAIGoal.status.in_(ACTIVE_MAINAI_GOAL_STATUSES))
+            .order_by(MainAIGoal.created_at.asc())
+            .limit(self._MAX_REPLAN_SCANS_PER_TICK)
+            .all()
+        )
+        for goal in goals:
+            try:
+                failed_task = find_replan_trigger(db, goal=goal)
+                if failed_task is None:
+                    continue
+                await trigger_replan(db, goal=goal, failed_task=failed_task, dispatched_by="mainai_worker_auto_replan")
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to auto-replan MainAIGoal %s.", self.worker_id, goal.id)
+
+    # V0.3: how many active engineering lessons this worker inspects for conflicts per poll
+    # cycle -- a real, bounded scan, same reasoning as every other tick's own limit above. This
+    # table is founder-wide (not owner-scoped), so a single global bounded query covers it --
+    # no per-owner loop needed.
+    _MAX_LESSON_CONFLICT_SCANS_PER_TICK = 50
+
+    async def _resolve_engineering_lesson_conflicts(self, db: Session) -> None:
+        """MainAI V0.3's minimal engineering-lesson conflict detection tick -- closes the gap
+        EngineeringLessonConfidence's own docstring names explicitly ("nothing yet computes
+        lesson-vs-lesson contradiction"). Runs as an independent async worker tick rather than
+        being wired into lessons.py's apply_lessons_to_verification_plan(), which is called
+        synchronously from planner.py's create_plan() (50+ existing sync call sites across the
+        router and test suite -- making that path async was rejected as an unnecessary,
+        invasive change). Instead, this tick keeps the `active` lesson set clean BEFORE
+        lookup_lessons() (which only ever returns `active` rows) is consulted by the next
+        synchronous create_plan() call -- zero changes needed to lessons.py or planner.py.
+
+        A bounded global fetch of `active` lessons, then app/mainai_execution/lesson_conflicts.
+        py's resolve_conflicts_among() does the real work (deterministic pairing, then a real
+        AI judgment call per candidate pair, fail-closed on any error)."""
+        lessons = (
+            db.query(EngineeringLesson)
+            .filter(EngineeringLesson.status == EngineeringLessonStatus.active)
+            .order_by(EngineeringLesson.created_at.asc())
+            .limit(self._MAX_LESSON_CONFLICT_SCANS_PER_TICK)
+            .all()
+        )
+        if not lessons:
+            return
+        try:
+            await resolve_conflicts_among(db, lessons=lessons)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: failed to resolve engineering lesson conflicts.", self.worker_id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -390,6 +605,11 @@ class Worker:
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             self._retry_storage_deletion_tasks(claim_db)
+            await self._poll_mainai_task_waits(claim_db)
+            self._advance_mainai_execution_retries(claim_db)
+            await self._advance_mainai_execution_auto_recovery(claim_db)
+            await self._advance_mainai_execution_replan(claim_db)
+            await self._resolve_engineering_lesson_conflicts(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)

@@ -948,6 +948,9 @@ class MainAITaskOut(BaseModel):
     max_attempts: int
     blocker_reason: str | None = None
     mainai_job_id: uuid.UUID | None = None
+    # V0.3 (migration 0036): when this task becomes eligible for the worker's automatic
+    # retry-with-backoff scan -- NULL means no automatic retry is currently scheduled.
+    next_retry_at: datetime | None = None
     # Not an ORM column -- computed by app/routers/mainai_execution.py's _task_out() via
     # app/mainai_execution/liveness.py's task_liveness() and set AFTER model_validate(), since
     # the MainAITask ORM object itself has no `liveness` attribute for from_attributes mapping
@@ -998,3 +1001,51 @@ class MainAIRecoveryRecordOut(BaseModel):
     manual_review_required: bool
     completed_at: datetime | None = None
     created_at: datetime
+
+
+class MainAITaskWaitOut(BaseModel):
+    """V0.3 minimal API surface -- read-only view of one durable external-wait record
+    (app/models/mainai_wait.py's MainAITaskWait). Same discipline as MainAIRecoveryRecordOut
+    above: every field is a durable column already written by the real wait pipeline
+    (app/mainai_execution/ci_wait.py), never a value computed just for this response."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    task_id: uuid.UUID
+    job_id: uuid.UUID
+    source_type: str
+    status: str
+    resource_ref: dict
+    poll_count: int
+    last_polled_at: datetime | None = None
+    next_poll_at: datetime
+    deadline_at: datetime
+    evidence: dict
+    created_at: datetime
+    resolved_at: datetime | None = None
+
+
+class EngineeringLessonOut(BaseModel):
+    """V0.3 minimal API surface -- read-only view of one founder-wide engineering lesson
+    (app/models/mainai_execution.py's EngineeringLesson), including its `disputed` status once
+    app/mainai_execution/lesson_conflicts.py's mark_conflict() has run. Not RLS-protected /
+    not owner-scoped -- same reasoning as the model itself."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    status: str
+    problem: str
+    root_cause: str
+    affected_component: str
+    severity: str
+    evidence: str
+    fix: str
+    regression_test: str | None = None
+    general_rule: str
+    applies_to: list
+    source_type: str
+    source_ref: str
+    confidence: str
+    created_by: str
+    created_at: datetime
+    superseded_by: uuid.UUID | None = None

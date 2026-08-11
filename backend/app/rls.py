@@ -305,7 +305,10 @@ _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"}
 # mainai_recovery_records are ordinary mutable tables (same "keep the baseline CRUD grant,
 # only verify ownership" treatment mainai_goals/mainai_plans/mainai_tasks already get, per the
 # comment above); mainai_recovery_events is append-only and privilege-narrowed below exactly
-# like mainai_task_events/mainai_checkpoints.
+# like mainai_task_events/mainai_checkpoints. V0.3 (migration 0036) added
+# mainai_task_waits — another ordinary mutable table (same baseline-CRUD, ownership-only
+# treatment as mainai_task_worktrees/mainai_recovery_records; a poll updates its own row's
+# status/evidence/next_poll_at in place, so it cannot be append-only like the *_events tables).
 _MAINAI_EXECUTION_TABLES = (
     "mainai_goals",
     "mainai_plans",
@@ -317,6 +320,7 @@ _MAINAI_EXECUTION_TABLES = (
     "mainai_task_worktrees",
     "mainai_recovery_records",
     "mainai_recovery_events",
+    "mainai_task_waits",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
