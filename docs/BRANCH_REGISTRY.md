@@ -6,6 +6,58 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**`claude/mainai-long-running-orchestration-v0-3` — INGEN PR ÄN, byggs fortfarande (2026-08-11).**
+Grenad från exakt `5ad6c4697cfa128f94a63a1b7bb3332a0ab9e888` (basgrenens tip vid grening,
+verifierad med `git ls-remote origin claude/det-kommer-mer-879lcm` — matchar också basgrenens
+tip just nu, ingen ny merge har landat under tiden så ingen rebase behövs, per `CLAUDE.md`s
+merge-regel om att aldrig rebasa i förväg "för säkerhets skull"). Byggd på grundarens uttryckliga
+mandat **MainAI V0.3 (Long-Running Orchestration)**, direkt ovanpå den redan mergade V0.1-loopen
+(PR #57) och V0.2-recovery-pipelinen (PR #58) — samma build→freeze→harden→merge-modell som
+V0.1/V0.2, uttryckligen INTE ramat som städning. Stänger sex luckor V0.1/V0.2:s egna dokument
+namngav: en task med ett riktigt, redan pushat GitHub-commit räknas nu inte som klar förrän dess
+checks är klara (`waiting_ci`, ingen ny kö/lease); en `running` tasks riktiga arbete kan nu
+faktiskt stoppas kooperativt (inte bara vägras avbrytas); en task som misslyckas upprepade
+gånger schemaläggs automatiskt om (samma `retry_task()` en grundare redan använde manuellt); ett
+dött `task_execution`-jobb hittas och tas över automatiskt (samma fyra V0.2-funktioner
+`POST /tasks/{id}/recover` redan anropade); en plan som visar sig fel omplaneras automatiskt
+(samma `propose_plan_via_ai()`/`create_plan()` en grundare redan använde manuellt); och två
+lärdomar som uttryckligen motsäger varandra flaggas nu istället för att båda tyst tillämpas.
+Ingen ny kö-/lease-/heartbeat-/recovery-/minnessystem byggdes — allt återanvänder V0.1/V0.2:s
+befintliga primitiver, bara NÄR de körs är nytt.
+
+Checkpoints 1–10 pushade (`git log claude/mainai-long-running-orchestration-v0-3`): migration
+0036 (`mainai_task_waits` + nya `MainAITaskEventType`-värden + `mainai_tasks.next_retry_at`),
+riktig CI-wait (`ci_wait.py`, wired in i `execution_job.py`/`worker.py`), kooperativ cancellation
+(tre säkra checkpoints i `run_task_execution_job()`), automatisk dead-agent-recovery-polling
+(återanvänder V0.2:s fyra funktioner oförändrade), minimal replan-trigger (`replan.py`,
+återanvänder `planner.py` oförändrat), minimal lärdomskonflikt-upptäckt
+(`lesson_conflicts.py` — deterministisk parning + en riktig AI-bedömning, fail-closed),
+`final_report.py`-utökning (wait/retry/cancel/replan/lärdomskonflikt-integration, korrigerad
+`unresolved_risk`-semantik), tre nya founder-API-ändpunkter (`GET /goals/{id}/plans`,
+`GET /tasks/{id}/waits`, `GET /lessons`) plus inkrementell admin-UI (planhistorik, väntehistorik,
+disputed-lessons-banner — ingen ny frontend-route), samtliga 9 obligatoriska demos genom riktiga
+produktionsvägar, samt en säkerhetsattack-pass (checkpoint 10) som hittade och fixade en genuin,
+tidigare oskyddad dubbel-finalize-race i `resume_waiting_ci_task()` (läste tasken via `db.get()`
+istället för kodbasens etablerade `_lock_task()`-mönster — två samtidiga worker-processer som
+pollar samma förfallna wait kunde båda observera `waiting_ci` och båda anropa
+`_finalize_task_outcome()`), fixad genom att låsa raden först, verifierad via mutationstest
+(fixen borttagen → regressionstestet går rött 3/3 körningar). Se
+`backend/docs/MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md` för den fullständiga, ärliga
+REAL/STUBBED/LIMITED/NOT IMPLEMENTED-statusen, säkerhets-/durability-invarianter,
+händelsevokabulären, samtliga 9 demoresultat, coverage-matris och V0.4-kandidater.
+
+Senaste fullständiga backend-svit (efter checkpoint 10): 1320 passed, 1 skipped by design
+(P2-kapacitetstest), 2 failed — båda `test_storage_local_fs.py`s egna concurrency-racetester,
+bekräftat pre-existing och orelaterade (alternerar pass/fail vid omkörning i isolation, noll diff
+mot bas i `app/storage/`/`tests/backend/storage/` under hela detta pass). Ruff rent på alla
+rörda filer. **Kvarstår innan PR öppnas** (task #399/#400 i den löpande planen): docs (denna
+post + `MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md`, båda nu klara), sedan en sista
+re-verifieringsrunda (migrationsrundtripp, RLS, frontend typecheck/lint, secrets-scan,
+docs-drift) innan EXAKT EN PR öppnas — **INTE mergad**, per grundarens uttryckliga
+"öppna en PR, merga INTE"-instruktion för hela V0.3-bygget. Ingen del av denna branch har rört
+deploy, VPS, produktion, prod-migration/backfill, CONTRACT, S1C, V0.4, destructive recovery
+eller force push.
+
 **PR #58 är MERGAD (2026-08-11).** Efter Round 2-korrigeringen (worktree-isoleringen wired till
 riktiga `repo_edit`-execution-pathen, se nedan) verifierade grundaren PR:n direkt mot GitHub och
 gav uttryckligt merge-godkännande. Slutlig verifiering på exakt head
