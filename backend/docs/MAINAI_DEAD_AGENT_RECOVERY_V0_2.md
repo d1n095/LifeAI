@@ -65,10 +65,12 @@ full column-level rationale.
 
 ## REAL
 
-- Real per-attempt filesystem isolation (`worktree.py`): a genuine `git` checkout on a
-  deterministic task-scoped branch, created from a GitHub-verified base SHA — never the shared
-  worker checkout, never `main`/`master`/the mainline branch (enforced both in code and by a DB
-  CHECK constraint).
+- Real per-attempt filesystem isolation (`worktree.py`), **as a capability the recovery
+  pipeline itself fully exercises** — a genuine `git` checkout on a deterministic task-scoped
+  branch, created from a GitHub-verified base SHA — never the shared worker checkout, never
+  `main`/`master`/the mainline branch (enforced both in code and by a DB CHECK constraint). Not
+  yet wired into `execution_job.py`'s own live `repo_edit` handler, though — see LIMITED #1,
+  the single most important honesty note in this document.
 - Real, falsifiable ownership: a worktree is only ever trusted after
   `verify_worktree_ownership()` reads back an on-disk marker file and compares it field-for-field
   against the DB row — missing, unreadable, or mismatched is always treated as "nothing here
@@ -122,26 +124,48 @@ Nothing in this list. Every piece named above does real work against real state.
 
 Named explicitly rather than silently left implicit:
 
-1. **No worker automatically runs recovery.** `POST /tasks/{id}/recover` is the one entry
+1. **`worktree.py` is not wired into `execution_job.py`'s own live `repo_edit` handler.**
+   Hardening-pass finding, the most important item in this document: `_handle_repo_edit()`
+   writes directly onto the shared backend checkout, and `_finalize_repo_edit()` pushes purely
+   through the GitHub Git Data API (`commit_multiple_files()`), exactly as it did in V0.1 —
+   `create_task_worktree()` is called only by the recovery pipeline's own tests/demos to
+   simulate what a dead worker's real progress would look like, and by `recovery_salvage.py`
+   when rebinding an existing worktree row that happens to exist. This means, for a real
+   `repo_edit` task executing today: no worktree is ever created, no local `git commit` object
+   ever exists, and `worktree_local_head_sha` is always absent from that task's own recovery
+   evidence. LOCAL_UNCOMMITTED_WORK and LOCAL_COMMITTED_NOT_PUSHED are therefore reachable only
+   in a future state where something actually calls `create_task_worktree()` from the live
+   execution path — not from any `repo_edit` task running today. A closely related
+   hardening-pass finding this branch DID fix (not merely document): `_classify()` originally
+   detected PUSHED_NO_PR/PR_EXISTS exclusively via `worktree_local_head_sha ==
+   remote_branch_sha`, which — given the gap just described — made those two classifications
+   equally unreachable for a real dead `repo_edit` job that HAD already pushed, silently
+   bypassing the founder-approval gate; `_classify()` now also accepts a durable `finalized`
+   checkpoint (real, written by execution_job.py itself, independent of any worktree) as
+   equally valid proof, closing that specific gap. See V0.3 CANDIDATES for the follow-up work
+   (wiring `execution_job.py` to actually use `worktree.py`) this finding implies — deliberately
+   NOT done in this hardening pass, since it is a scope-widening architecture change, not a bug
+   fix, and the founder's own instruction for this pass was to freeze feature scope.
+2. **No worker automatically runs recovery.** `POST /tasks/{id}/recover` is the one entry
    point that actually runs detect → inspect → classify → takeover — mirroring V0.1's own
    `POST /goals/{id}/plan` precedent (the one addition beyond pure read/act). There is no
    background poll cycle that notices a dead `task_execution` job and recovers it on its own;
    a founder (or a future automated caller) must call it.
-2. **Recovery approval is all-or-nothing per classification, not per-record policy
+3. **Recovery approval is all-or-nothing per classification, not per-record policy
    selection.** `standard_recovery` is the only policy V0.2 ships (mirrors `approval.py`'s own
    "exactly one policy" V0.1 precedent) — there is no UI or API for defining a second named
    recovery-approval policy.
-3. **CONFLICTED_STATE / UNSAFE_TO_AUTO_RECOVER have no in-app resolution workflow.** They
+4. **CONFLICTED_STATE / UNSAFE_TO_AUTO_RECOVER have no in-app resolution workflow.** They
    correctly fail closed (`manual_review_required=True`, `execute_takeover()` refuses outright)
    but resolving the underlying git divergence happens entirely out-of-band (a human fixes it
    directly), then a fresh inspection pass — there is no "resolve and retry" button.
-4. **`recover_task()` (the API endpoint) adds no additional liveness pre-check of its own.**
+5. **`recover_task()` (the API endpoint) adds no additional liveness pre-check of its own.**
    Calling it on a task whose job is not actually dead is safe (every underlying primitive —
    `mark_job_superseded()`'s row-locked re-check, the classifier's own evidence-only judgment —
    already fails closed), but the endpoint does not itself verify the job is dead before
    starting; it would only ever duplicate a guard that already exists at the real point of
    consequence.
-5. **Worktree cleanup on takeover is not exhaustive.** A rebound worktree keeps its real
+6. **Worktree cleanup on takeover is not exhaustive.** A rebound worktree keeps its real
    on-disk content; an abandoned one (e.g. NOTHING_DONE, where no worktree ever existed) is
    simply never created for the new attempt. There is no separate garbage-collection pass for
    worktree directories left behind by a container replacement.
@@ -162,11 +186,16 @@ Named explicitly rather than silently left implicit:
 
 ## KNOWN RISKS
 
-- **No background poll cycle for recovery** (see LIMITED #1) means a dead `task_execution` job
+- **`worktree.py` is not wired into the live `repo_edit` execution path** (LIMITED #1) — the
+  single biggest residual risk in this document: LOCAL_UNCOMMITTED_WORK/
+  LOCAL_COMMITTED_NOT_PUSHED are proven correct for the recovery pipeline's OWN logic (real
+  tests, real git operations) but not yet reachable from any task actually executing in
+  production today.
+- **No background poll cycle for recovery** (see LIMITED #2) means a dead `task_execution` job
   sits unrecovered until a founder (or a future caller) explicitly triggers `POST
   /tasks/{id}/recover`. At V0.2's scale this is a deliberate, named simplicity choice, not an
   oversight — see V0.3 CANDIDATES.
-- **Worktree directories are not garbage-collected** (LIMITED #5) — a long-abandoned worktree
+- **Worktree directories are not garbage-collected** (LIMITED #6) — a long-abandoned worktree
   whose recovery record never reaches a terminal state leaves real disk usage behind on
   whichever container/host created it, particularly relevant given the backend/worker
   filesystem is not persistent (`worktree.py`'s own module docstring).
@@ -338,15 +367,22 @@ API/UI" scope for this branch.
 Documented, not built, per the same "name it, don't build it yet" discipline V0.1's own
 document used:
 
+- **Wire `execution_job.py`'s `_handle_repo_edit()`/`_finalize_repo_edit()` to actually use
+  `worktree.py`** (LIMITED #1, KNOWN RISKS) — the single highest-priority item on this list.
+  Today the recovery pipeline's worktree-based salvage/classification logic is real and fully
+  tested, but no real `repo_edit` task execution ever creates the worktree it operates on. This
+  is a genuine architecture change (real local `git commit`/`git push` replacing the current
+  Git-Data-API-only push model for the live path), not a bug fix — deliberately out of scope
+  for a hardening pass whose job was to freeze feature scope, not extend it.
 - **A background pass that notices dead `task_execution` jobs and calls the recovery pipeline
-  automatically**, closing LIMITED #1 — today it is entirely founder/caller-triggered.
+  automatically**, closing LIMITED #2 — today it is entirely founder/caller-triggered.
 - **Worktree garbage collection** for abandoned worktrees whose recovery record never reaches a
-  terminal state (LIMITED #5 / KNOWN RISKS).
+  terminal state (LIMITED #6 / KNOWN RISKS).
 - **An in-app resolution workflow for CONFLICTED_STATE**, so a founder can act on a flagged
-  divergence without leaving the system (LIMITED #3).
+  divergence without leaving the system (LIMITED #4).
 - **A second named recovery-approval policy** if a future task type's external side effects need
   a different approval shape than `standard_recovery`'s all-or-nothing PUSHED_NO_PR/PR_EXISTS
-  split (LIMITED #2).
+  split (LIMITED #3).
 
 ## Coverage matrix
 
@@ -356,6 +392,7 @@ document used:
 | Durable evidence snapshot | `test_mainai_execution_recovery.py` (inspector section) |
 | Fail-closed on unreadable evidence | `test_inspect_blocks_with_manual_review_when_two_worktree_rows_claim_the_same_job` |
 | Deterministic A-I classification | `test_mainai_execution_recovery.py` (classifier section, all 9 codes) |
+| PUSHED_NO_PR/PR_EXISTS reachable with no worktree (hardening-pass P0 fix) | `test_classify_pushed_no_pr_is_reachable_with_no_worktree_at_all`, `test_classify_pr_exists_is_reachable_with_no_worktree_at_all` |
 | CONFLICTED_STATE priority | Demo 7 |
 | Worktree ownership trust (marker token) | `test_mainai_execution_worktree.py` |
 | Salvage: checkpoints copied forward | `test_mainai_execution_recovery_salvage.py` |
@@ -381,13 +418,14 @@ document used:
 | API: owner isolation | `test_recovery_api_a_founder_cannot_see_another_owners_recovery_records` |
 | No force push, ever | `worktree.py`'s `push_worktree_branch()` — plain push only, no code path passes `--force` |
 | Migration round-trip (0033-0035) | `test_migration_roundtrip.py` |
+| Privilege policy narrows `mainai_recovery_events` (hardening-pass P1 fix) | `test_apply_mainai_execution_privileges_narrows_mainai_recovery_events_even_from_a_blanket_grant`, `test_mainai_recovery_events_mainai_app_lacks_update_delete_privilege_at_the_grant_level` |
 
 ## Test suite
 
 New test files added by this branch:
 
 - `tests/backend/test_mainai_execution_worktree.py` (12 tests)
-- `tests/backend/test_mainai_execution_recovery.py` (13 tests)
+- `tests/backend/test_mainai_execution_recovery.py` (17 tests)
 - `tests/backend/test_mainai_execution_recovery_salvage.py` (8 tests)
 - `tests/backend/test_mainai_execution_recovery_takeover.py` (13 tests)
 - `tests/backend/test_mainai_execution_recovery_dedup.py` (4 tests)
