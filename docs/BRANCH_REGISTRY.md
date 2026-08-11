@@ -264,11 +264,17 @@ statusen. **INTE MERGAD** — väntar på grundarens granskning av PR. Ingen del
 rört merge till mainline, deploy, VPS, produktion, prod-migration, prod-backfill, CONTRACT
 eller S1C.
 
-**PR #57 — hardening-/attack-pass SLUTFÖRD (grundarens uttryckliga "Apple-like version model":
-frys scope, attackera hela versionen, fixa allt som hittas, regressionstesta, fånga
-engineering lessons, full slutverifiering, ENDAST DÄREFTER grundargranskning för merge).
-Aktuell head: `0e308b5`. Se full slutrapport i sessionen för komplett detalj. Ingen merge,
-ingen V0.2, ingen deploy/VPS/produktion under passet.**
+**PR #57 — MERGAD** (`claude/mainai-execution-loop-v0-1` → `claude/det-kommer-mer-879lcm`),
+efter grundarens uttryckliga "Apple-like version model"-process: frys scope, attackera hela
+versionen, fixa allt som hittas, regressionstesta, fånga engineering lessons, full
+slutverifiering, ENDAST DÄREFTER grundargranskning och merge-godkännande. Slutlig PR-head
+(innan merge): `fe397694459f72a19dda54acecbf82a9a85923df`. Merge-commit:
+`032c9e43c227bc254d4717c63c3da8427596b595` (parents: `6788211745cc31e6b4823809b67a1b669479f963`
+och `fe397694459f72a19dda54acecbf82a9a85923df` — en riktig tvåparent-merge, inte
+squash/rebase), verifierad direkt mot GitHub-API och `git ls-remote` som ny mainline-tip.
+`merged_by`: `d1n095`, efter grundarens uttryckliga merge-godkännande på den exakta head-SHA:n.
+Ingen deploy, ingen VPS, ingen produktion, ingen prod-migration/backfill, ingen CONTRACT,
+ingen S1C, ingen V0.2 utfördes i samband med denna merge.
 
 Fynd (root cause → fix → regressionstest → ev. mutationstest → engineering lesson för varje,
 se resp. commit):
