@@ -6,6 +6,29 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #59 är MERGAD (2026-08-11).** Efter hardening/attack-passet nedan (P3-fix + near-miss-lärdom
++ approval-escalation-/fairness-/subprocess-cancellation-/RLS-bevis) verifierade grundaren
+resultatet och gav uttryckligt merge-godkännande — "Kör — V0.3 är MERGE-READY". Slutlig
+pre-merge-verifiering: PR #59 `open`/`mergeable_state: clean`, samtliga 16 obligatoriska CI-checks
++ grindchecken "All required checks passed" gröna, 0 olösta review-threads, head oförändrad sedan
+hardening-pushen. PR:n var öppnad som draft (per V0.3-buildets "öppna, merga INTE"-instruktion);
+markerad ready-for-review (`draft: false`) omedelbart före merge — GitHub tillåter inte att merga
+en draft-PR direkt, och detta är en mekanisk förutsättning, inte en scope-utökning. Mergad med
+vanlig merge-commit (INTE squash, INTE rebase) via `mcp__github__merge_pull_request`.
+
+- **Head (branch-tipp som mergades):** `claude/mainai-long-running-orchestration-v0-3` @
+  `2541ac92e840339f09243385ec5924c67637a988`
+- **Merge-commit:** `f5c8ef3d764eabcb92fa46a9159e67d2c8d6ba85`
+- **Parents:** `5ad6c4697cfa128f94a63a1b7bb3332a0ab9e888` (basgrenens tip före merge) +
+  `2541ac92e840339f09243385ec5924c67637a988` (V0.3 hardened head) — verifierat både via
+  GitHub API (`merged_by`, `merged_at`) och direkt via `git log --parents` mot
+  `origin/claude/det-kommer-mer-879lcm` efter `git fetch`.
+- **`claude/det-kommer-mer-879lcm` (huvudgrenens tip) = `f5c8ef3d764eabcb92fa46a9159e67d2c8d6ba85`**
+  — bekräftat via `mcp__github__list_branches`, matchar merge-commit-SHA exakt.
+- **V0.3-status: MERGED.** Ingen deploy, VPS, produktion, prod-migration/backfill, CONTRACT, S1C,
+  V0.4 eller force push utfördes som del av merge-finaliseringen — endast merge + den här
+  registeruppdateringen, per grundarens uttryckliga avgränsning.
+
 **PR #59 hardening/attack-pass (2026-08-11):** samma build→freeze→harden→merge-modell som
 V0.1/V0.2. Hela diffen attackerades på nytt mot varje kategori grundaren namngav (wait
 state-machine, CI SHA/repo-binding, double-wake concurrency, kraschmatris,
@@ -35,10 +58,11 @@ mönster som V0.1:s sex tabeller) — inget hål. Åtta nya tester tillagda
 omkörning). Ruff rent, exakt en Alembic-head (`0036`), ingen migrationsändring detta pass, inga
 frontend-ändringar detta pass. Se
 `backend/docs/MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md`s nya "Hardening / attack pass"-avsnitt
-för fullständig detalj. **Fortfarande INTE mergad** — pushas till SAMMA PR #59, ingen ny PR.
+för fullständig detalj. Pushad till SAMMA PR #59 (ingen ny PR) — **PR #59 är nu MERGAD, se
+entryn ovan.**
 
-**PR #59 är ÖPPEN (draft, INTE mergad) — `claude/mainai-long-running-orchestration-v0-3` →
-`claude/det-kommer-mer-879lcm`, öppnad 2026-08-11.**
+**PR #59 var ÖPPEN (draft) — `claude/mainai-long-running-orchestration-v0-3` →
+`claude/det-kommer-mer-879lcm`, öppnad 2026-08-11, MERGAD 2026-08-11 (se MERGAD-entryn ovan).**
 Grenad från exakt `5ad6c4697cfa128f94a63a1b7bb3332a0ab9e888` (basgrenens tip vid grening,
 verifierad med `git ls-remote origin claude/det-kommer-mer-879lcm` — matchar också basgrenens
 tip just nu, ingen ny merge har landat under tiden så ingen rebase behövs, per `CLAUDE.md`s
@@ -85,10 +109,12 @@ mot bas i `app/storage/`/`tests/backend/storage/` under hela detta pass). Migrat
 2 passed, exakt en Alembic-head (`0036`). Ruff rent på alla rörda filer. Frontend: `tsc --noEmit`
 rent, `eslint` rent på de ändrade filerna. Secrets-scan av hela diffen: inga riktiga secrets,
 endast tydligt märkta fake-testtokens. Docs-drift: alla filvägar/funktionsnamn/konstanter i
-`MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md` verifierade mot faktisk kod. **PR #59 öppnad som
-draft — INTE mergad**, per grundarens uttryckliga "öppna en PR, merga INTE"-instruktion för hela
-V0.3-bygget. Ingen del av denna branch har rört deploy, VPS, produktion, prod-migration/backfill,
-CONTRACT, S1C, V0.4, destructive recovery eller force push.
+`MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md` verifierade mot faktisk kod. PR #59 öppnades som
+draft — INTE mergad vid det tillfället, per grundarens uttryckliga "öppna en PR, merga INTE"-
+instruktion för hela V0.3-bygget. Efter det efterföljande hardening-passet gav grundaren
+uttryckligt merge-godkännande — **PR #59 är nu MERGAD, se MERGAD-entryn högst upp i det här
+avsnittet.** Ingen del av denna branch eller merge-finaliseringen har rört deploy, VPS,
+produktion, prod-migration/backfill, CONTRACT, S1C, V0.4, destructive recovery eller force push.
 
 **PR #58 är MERGAD (2026-08-11).** Efter Round 2-korrigeringen (worktree-isoleringen wired till
 riktiga `repo_edit`-execution-pathen, se nedan) verifierade grundaren PR:n direkt mot GitHub och
