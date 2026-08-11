@@ -27,6 +27,10 @@ from app.mainai_execution import executor, final_report, planner
 from app.mainai_execution.executor import TaskNotCancellableError, TaskNotRetryableError
 from app.mainai_execution.liveness import task_liveness
 from app.mainai_execution.planner import PlanCycleError, PlanValidationError
+from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError, grant_recovery_approval
+from app.mainai_execution.recovery_classifier import classify_recovery_record
+from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
+from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
 from app.models.mainai_execution import (
     MainAICheckpoint,
     MainAIGoal,
@@ -38,6 +42,7 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
 )
 from app.models.mainai_job import MainAIJob
+from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryRecord, MainAIRecoveryStatus
 from app.models.user import User
 from app.schemas import (
     MainAICheckpointOut,
@@ -45,6 +50,7 @@ from app.schemas import (
     MainAIGoalDetailOut,
     MainAIGoalOut,
     MainAIPlanOut,
+    MainAIRecoveryRecordOut,
     MainAITaskDetailOut,
     MainAITaskEventOut,
     MainAITaskOut,
@@ -213,3 +219,78 @@ def retry_task(request: Request, task_id: uuid.UUID, db: Session = Depends(get_d
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     db.commit()
     return get_task(task_id, db=db, user=user)
+
+
+# ---------------------------------------------------------------- V0.2: dead-agent recovery
+#
+# Deliberately minimal, matching V0.1's own "read/act, nothing exposed that isn't already a
+# real durable operation" discipline. No worker/background process runs recovery
+# automatically yet (see docs/MAINAI_DEAD_AGENT_RECOVERY_V0_2.md's REAL/STUBBED/LIMITED list)
+# -- /tasks/{id}/recover is the one founder-driven entry point that actually runs the real
+# pipeline (detect -> inspect -> classify -> takeover if safe and approved), mirroring how
+# POST /goals/{id}/plan is the one entry point that actually runs propose+create for a plan.
+
+
+@router.get("/tasks/{task_id}/recovery", response_model=list[MainAIRecoveryRecordOut])
+def list_task_recovery_records(task_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    _get_task_or_404(db, task_id)
+    return list(
+        db.execute(select(MainAIRecoveryRecord).where(MainAIRecoveryRecord.task_id == task_id).order_by(MainAIRecoveryRecord.created_at)).scalars()
+    )
+
+
+@router.post("/tasks/{task_id}/recover", response_model=MainAIRecoveryRecordOut, status_code=status.HTTP_201_CREATED)
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+async def recover_task(request: Request, task_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """Runs the real recovery pipeline for a task's CURRENT `mainai_job_id` -- detect, inspect,
+    classify, and (only if the classification is auto-salvageable AND no founder approval is
+    outstanding) takeover. Safe to call on a task whose job is not actually dead: every
+    underlying primitive (mark_job_superseded()'s row-locked re-check, the classifier's own
+    evidence-only judgment) already fails closed on its own, so this endpoint adds no
+    additional liveness pre-check of its own -- it would only ever duplicate a guard that
+    already exists at the real point of consequence.
+
+    Returns the recovery record either way -- a caller inspects `classification`/`status`/
+    `manual_review_required` to know what happened: NOTHING_DONE..VERIFIED_WORK with no
+    approval needed completes the takeover immediately; PUSHED_NO_PR/PR_EXISTS come back still
+    `classified` awaiting POST /recovery/{id}/approve; CONFLICTED_STATE/UNSAFE_TO_AUTO_RECOVER
+    come back `manual_review_required=True` and are never auto-continued."""
+    task = _get_task_or_404(db, task_id)
+    if task.mainai_job_id is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Task has no dispatched job to recover.")
+    goal = _get_goal_or_404(db, task.goal_id)
+    job = db.get(MainAIJob, task.mainai_job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+
+    record = get_or_create_recovery_record(db, task=task, job=job)
+    db.commit()
+    record = await inspect_recovery_record(db, task=task, job=job, record=record)
+    db.commit()
+    record = classify_recovery_record(db, record=record)
+    db.commit()
+
+    if record.status == MainAIRecoveryStatus.classified and record.classification in AUTO_SALVAGEABLE_CLASSIFICATIONS:
+        try:
+            record, _new_job = await execute_takeover(db, task=task, goal=goal, record=record, dispatched_by=user.email)
+            db.commit()
+        except (RecoveryApprovalRequiredError, TakeoverError):
+            db.rollback()  # only the takeover's own uncommitted work rolls back -- classify already committed above
+
+    return record
+
+
+@router.post("/recovery/{record_id}/approve", response_model=MainAIRecoveryRecordOut)
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def approve_recovery(request: Request, record_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """Grants the V0.2 approval gate (recovery_approval.py) for one recovery record -- the
+    dead attempt's code is already visible on GitHub (PUSHED_NO_PR/PR_EXISTS), so takeover
+    does not continue on its own until a founder explicitly does this. Does not itself trigger
+    a takeover -- call POST /tasks/{task_id}/recover again afterwards, same as approving a
+    task (POST /tasks/{id}/approve) never dispatches it itself."""
+    record = db.get(MainAIRecoveryRecord, record_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recovery record not found.")
+    grant_recovery_approval(db, record=record, approved_by=user.email)
+    db.commit()
+    return record

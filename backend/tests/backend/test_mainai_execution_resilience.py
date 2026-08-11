@@ -35,6 +35,9 @@ from app.jobs.mainai_job_lease import claim_next_mainai_job
 from app.mainai_execution import checkpoint, executor, final_report, graph, lessons, planner
 from app.mainai_execution.execution_job import run_task_execution_job
 from app.mainai_execution.liveness import TaskLiveness, task_liveness
+from app.mainai_execution.recovery_classifier import classify_recovery_record
+from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
+from app.mainai_execution.recovery_takeover import execute_takeover
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import (
     EngineeringLessonSeverity,
@@ -153,7 +156,15 @@ async def test_run_task_execution_job_resumes_from_checkpoint_without_repeating_
     execution, and prove resume reads durable checkpoint state rather than in-memory/
     conversation state (there IS no conversation state here -- a second, independent
     run_task_execution_job() call is the closest a test can get to "a different process
-    entirely resumed this")."""
+    entirely resumed this").
+
+    V0.2 update: `task_execution` jobs are deliberately excluded from
+    `claim_next_mainai_job()`'s blind expired-lease reclaim (migration 0034) -- a dead one
+    only comes back through the real recovery pipeline (detect -> inspect -> classify ->
+    takeover, app/mainai_execution/recovery_takeover.py), which is what this test now drives
+    for its "second, independent" attempt, in place of the old bare reclaim. The invariant
+    this test proves is unchanged: the durable checkpoint, not any in-memory state, is what a
+    genuinely different attempt resumes from."""
     from app.mainai_execution import execution_job
 
     call_count = {"n": 0}
@@ -195,23 +206,36 @@ async def test_run_task_execution_job_resumes_from_checkpoint_without_repeating_
     crashed_job = superuser_db.get(MainAIJob, job.id)
     assert crashed_job.status == MainAIJobStatus.running  # untouched, exactly what a real crash leaves behind (no worker got to mark it terminal)
 
-    # Reclaim through the REAL, already-tested lease-expiry mechanism -- not a bespoke "resume"
-    # API. Fencing/lease is still the authority: a second worker only ever gets in because the
-    # lease genuinely expired, exactly as app/jobs/mainai_job_lease.py already guarantees.
+    # V0.2: the dead job's lease genuinely expires, but claim_next_mainai_job() will never
+    # blind-reclaim it (task_execution is excluded, migration 0034) -- only the real recovery
+    # pipeline may revive it.
     superuser_db.execute(sa_text("UPDATE mainai_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :j"), {"j": str(job.id)})
     superuser_db.commit()
-    reclaimed = claim_next_mainai_job(superuser_db, "worker-2", 120)
-    assert reclaimed is not None
-    _, _, generation2 = reclaimed
+    assert claim_next_mainai_job(superuser_db, "worker-2", 120) is None  # structurally invisible to blind reclaim
 
+    record = get_or_create_recovery_record(db_session, task=task, job=job)
+    db_session.commit()
+    record = await inspect_recovery_record(db_session, task=task, job=job, record=record)
+    db_session.commit()
+    record = classify_recovery_record(db_session, record=record)
+    db_session.commit()
+    assert record.classification.value == "CHECKPOINTED_WORK"  # real work_result checkpoint, no git/verification evidence yet
+
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="worker-2")
+    db_session.commit()
+
+    _, _, generation2 = claim_next_mainai_job(superuser_db, "worker-2", 120)
     _set_rls_user(db_session, owner_id)
-    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-2", lease_generation=generation2, lease_seconds=120)
+    await run_task_execution_job(db_session, new_job.id, owner_id, worker_id="worker-2", lease_generation=generation2, lease_seconds=120)
 
     assert call_count["n"] == 1  # STILL 1 -- resume reused the durable checkpoint, no second AI call
     assert verify_calls["n"] == 2  # verification itself is cheap/idempotent and correctly re-runs
 
-    finished_job = superuser_db.get(MainAIJob, job.id)
+    finished_job = superuser_db.get(MainAIJob, new_job.id)
     assert finished_job.status == MainAIJobStatus.completed
+    dead_job = superuser_db.get(MainAIJob, job.id)
+    assert dead_job.status == MainAIJobStatus.superseded  # the dead attempt's own honest terminal outcome
+    assert dead_job.superseded_by_job_id == new_job.id
     finished_task = superuser_db.get(MainAITask, task.id)
     assert finished_task.status == MainAITaskStatus.completed
 

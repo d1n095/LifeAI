@@ -974,3 +974,27 @@ class MainAITaskDetailOut(MainAITaskOut):
 class MainAIGoalDetailOut(MainAIGoalOut):
     plan: MainAIPlanOut | None
     tasks: list[MainAITaskOut]
+
+
+class MainAIRecoveryRecordOut(BaseModel):
+    """V0.2 minimal API surface -- read-only view of one dead-agent recovery attempt.
+    Deliberately mirrors MainAITaskDetailOut's own shape/discipline: every field here is a
+    durable column already written by the real recovery pipeline (recovery_inspector.py/
+    recovery_classifier.py/recovery_takeover.py), never a value computed just for this
+    response."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    task_id: uuid.UUID
+    job_id: uuid.UUID
+    detected_at: datetime
+    classification: str | None = None
+    evidence: dict
+    salvage_action: str | None = None
+    takeover_executor: str | None = None
+    takeover_job_id: uuid.UUID | None = None
+    status: str
+    blocker: str | None = None
+    manual_review_required: bool
+    completed_at: datetime | None = None
+    created_at: datetime

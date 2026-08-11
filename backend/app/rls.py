@@ -286,9 +286,26 @@ _MAINAI_JOB_FUNCTION_SPECS = [
 # itself.
 _MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 _MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
+# V0.2 hardening-pass finding (P1): migration 0033's own module docstring already claimed
+# "SELECT/INSERT on the two append-only-by-convention-or-trigger tables" is "applied and
+# verified by app/rls.py's apply_mainai_execution_privileges(), extended to cover these three
+# tables" -- but that extension never actually happened; this module was never touched by the
+# V0.2 branch at all. mainai_recovery_events (append-only, same DB-trigger-enforced-immutability
+# pattern as mainai_task_events/mainai_checkpoints) was left on ensure_app_role.py's blanket
+# SELECT/INSERT/UPDATE/DELETE default -- the deny-mutation trigger still functionally blocked
+# every UPDATE/DELETE attempt (it does not depend on this policy), so this was never an actual
+# hole in what mainai_app could DO, only a real deviation from this codebase's own established
+# "narrow every write path to exactly what it needs, never rely on a single layer alone"
+# doctrine (see the S1A privilege-policy series) and from what the migration's own docstring
+# already promised a reviewer.
+_MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 
 # All tables migration 0032 created, for the ownership-drift check below — same reasoning as
-# _MAINAI_JOB_TABLES.
+# _MAINAI_JOB_TABLES. V0.2 (migration 0033) added three more: mainai_task_worktrees/
+# mainai_recovery_records are ordinary mutable tables (same "keep the baseline CRUD grant,
+# only verify ownership" treatment mainai_goals/mainai_plans/mainai_tasks already get, per the
+# comment above); mainai_recovery_events is append-only and privilege-narrowed below exactly
+# like mainai_task_events/mainai_checkpoints.
 _MAINAI_EXECUTION_TABLES = (
     "mainai_goals",
     "mainai_plans",
@@ -297,12 +314,16 @@ _MAINAI_EXECUTION_TABLES = (
     "mainai_task_events",
     "mainai_checkpoints",
     "engineering_lessons",
+    "mainai_task_worktrees",
+    "mainai_recovery_records",
+    "mainai_recovery_events",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "mainai_task_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_checkpoints_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
+    {"name": "mainai_recovery_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -546,6 +567,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
 
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_task_events FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_checkpoints FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_recovery_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
@@ -561,6 +583,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         for table, allowed in (
             ("mainai_task_events", _MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_checkpoints", _MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES),
+            ("mainai_recovery_events", _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

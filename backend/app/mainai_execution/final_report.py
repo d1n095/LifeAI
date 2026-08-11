@@ -35,6 +35,7 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.models.mainai_job import MainAIJob
+from app.models.mainai_recovery import MainAIRecoveryRecord
 
 _UNRESOLVED_TASK_STATUSES = frozenset({MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed, MainAITaskStatus.failed})
 
@@ -53,12 +54,48 @@ def _latest_event(db: Session, task_id: uuid.UUID, event_types: set[MainAITaskEv
     ).scalar_one_or_none()
 
 
+def _recovery_history(db: Session, task_id: uuid.UUID) -> list[dict]:
+    """V0.2 integration: every dead-agent recovery attempt this task has ever gone through --
+    pure aggregation over already-durable mainai_recovery_records rows, same discipline this
+    module's own module docstring requires (never invents a summary, never calls an LLM). A
+    task can have MORE than one recovery record across its lifetime (a takeover's own new job
+    can itself later die and get recovered again), so this is always a list, oldest first --
+    never collapsed into a single "was this task ever recovered" boolean, which would hide
+    exactly the kind of repeated-failure pattern a founder most needs to see."""
+    records = db.execute(
+        select(MainAIRecoveryRecord).where(MainAIRecoveryRecord.task_id == task_id).order_by(MainAIRecoveryRecord.created_at)
+    ).scalars().all()
+    return [
+        {
+            "recovery_record_id": str(r.id),
+            "dead_job_id": str(r.job_id),
+            "classification": r.classification.value if r.classification is not None else None,
+            "status": r.status.value,
+            "salvage_action": r.salvage_action,
+            "takeover_job_id": str(r.takeover_job_id) if r.takeover_job_id is not None else None,
+            "manual_review_required": r.manual_review_required,
+            "blocker": r.blocker,
+            "detected_at": r.detected_at.isoformat(),
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        }
+        for r in records
+    ]
+
+
 def _task_report(db: Session, task: MainAITask) -> dict:
     verification_event = _latest_event(db, task.id, {MainAITaskEventType.verification_passed, MainAITaskEventType.verification_failed})
     approval_event = _latest_event(db, task.id, {MainAITaskEventType.approval_granted})
     job = db.get(MainAIJob, task.mainai_job_id) if task.mainai_job_id is not None else None
+    recovery_history = _recovery_history(db, task.id)
 
-    unresolved = task.status in _UNRESOLVED_TASK_STATUSES or (task.approval_required and approval_event is None)
+    # A recovery record still open (never reached `completed`) and flagged
+    # manual_review_required is a REAL unresolved risk even when the task's own status still
+    # reads `running` -- the task is silently stuck behind a dead job a human hasn't looked at
+    # yet, which _UNRESOLVED_TASK_STATUSES alone (blocked/retryable_failed/failed) never
+    # catches, since inspect/classify() never touches MainAITask.status itself.
+    unresolved_recovery = any(r["manual_review_required"] and r["status"] != "completed" for r in recovery_history)
+
+    unresolved = task.status in _UNRESOLVED_TASK_STATUSES or (task.approval_required and approval_event is None) or unresolved_recovery
 
     return {
         "task_id": str(task.id),
@@ -81,6 +118,7 @@ def _task_report(db: Session, task: MainAITask) -> dict:
         },
         "unresolved_risk": unresolved,
         "blocker_reason": task.blocker_reason,
+        "recovery_history": recovery_history,
     }
 
 
@@ -117,6 +155,11 @@ def generate_goal_report(db: Session, *, goal_id: uuid.UUID) -> dict:
             "total_tasks": len(task_reports),
             "by_outcome": counts,
             "unresolved_risk_count": sum(1 for t in task_reports if t["unresolved_risk"]),
+            # V0.2 integration: a goal-level rollup so a founder scanning the top of the
+            # report immediately sees whether ANY task in this goal ever went through a
+            # dead-agent recovery, without having to read every task's own recovery_history.
+            "tasks_with_recovery_history": sum(1 for t in task_reports if t["recovery_history"]),
+            "recovery_attempts_total": sum(len(t["recovery_history"]) for t in task_reports),
         },
         "generated_at": datetime.utcnow().isoformat(),
     }

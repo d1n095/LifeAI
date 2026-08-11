@@ -45,7 +45,19 @@ _CLAIM_SQL = text("""
     WHERE id = (
         SELECT id FROM mainai_jobs
         WHERE status = ANY(:claimable_statuses)
-           OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now())
+           OR (
+                status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()
+                -- V0.2 (migration 0034): task_execution is the one job type with real,
+                -- semi-irreversible external side effects (local git commits, GitHub pushes
+                -- -- see app/mainai_execution/worktree.py) -- a dead one must never be
+                -- silently handed back to whichever worker polls next. It stays `running`
+                -- with an expired lease (structurally invisible to this claim, not reachable
+                -- via any other path either) until
+                -- app/mainai_execution/recovery_takeover.py explicitly processes it through
+                -- the real inspect -> classify -> salvage gate and marks it `superseded`.
+                -- Every other job type's blind reclaim-and-resume is unchanged.
+                AND job_type <> 'task_execution'
+           )
         ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -120,3 +132,39 @@ def renew_mainai_job_lease(db: Session, job_id: uuid.UUID, worker_id: str, lease
     )
     if result.rowcount == 0:
         raise JobLeaseLostError(job_id, worker_id, lease_generation)
+
+
+class JobNotSupersedableError(Exception):
+    """Raised by mark_job_superseded() when the target job is not actually a dead, expired-
+    lease `running` job -- superseding a job that is still genuinely alive (or already
+    terminal) would either race a legitimate worker or silently overwrite an already-honest
+    outcome. See app/mainai_execution/recovery_takeover.py, the only caller."""
+
+
+def mark_job_superseded(db: Session, *, job_id: uuid.UUID, superseded_by_job_id: uuid.UUID) -> None:
+    """V0.2: the honest terminal outcome for a dead `task_execution` job once a takeover has
+    created its replacement (`superseded_by_job_id`). Never takes a worker_id/lease_generation
+    to verify -- by construction there is no legitimate CURRENT claimant to fence against
+    (task_execution jobs are structurally excluded from `claim_next_mainai_job()`'s reclaim
+    branch, see that module's `_CLAIM_SQL`), so the only real safety condition is re-verified
+    here atomically instead: the job must still be `running` with a lease that has genuinely
+    expired. A job that is still within its lease window (a legitimately busy worker, not a
+    dead one) or already terminal raises JobNotSupersedableError with NOTHING written -- this
+    is the one operation in the whole recovery pipeline that is closest to being destructive
+    (it retires a job row for good), so it fails closed rather than trusting the caller's own
+    belief that the job is dead."""
+    result = db.execute(
+        text("""
+            UPDATE mainai_jobs
+            SET status = 'superseded',
+                completed_at = now(),
+                superseded_by_job_id = :superseded_by_job_id
+            WHERE id = :job_id
+              AND status = 'running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < now()
+        """),
+        {"job_id": str(job_id), "superseded_by_job_id": str(superseded_by_job_id)},
+    )
+    if result.rowcount == 0:
+        raise JobNotSupersedableError(f"Job {job_id} is not a dead, expired-lease running job -- refusing to supersede it.")

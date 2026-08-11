@@ -6,6 +6,113 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #58 hardening-pass Round 2 (2026-08-11):** grundaren avvisade uttryckligen Round 1:s
+slutsats att döpa worktree/execution_job-frånkopplingen till "V0.3-kandidat" — eftersom
+per-task worktree-isolering var ett explicit ORIGINALKRAV för V0.2 (dead-after-local-edit/
+dead-after-local-commit-salvage skulle vara riktigt, inte bara testramverk), klassade grundaren
+det som en V0.2-korrekthetslucka som måste fixas FÖRE merge, inte som utökat scope. Fixat:
+`_handle_repo_edit()`/`_finalize_repo_edit()` i `execution_job.py` kopplades faktiskt in mot
+`worktree.py` — skapar/återanvänder en ownership-verifierad worktree, redigerar bara däri,
+committar lokalt, pushar via `push_worktree_branch()` — helt bakom `github_write_enabled`,
+med `_propose_repo_edit()` som ordagrann bevarad V0.1-proposal-path. Under implementationen
+hittades och fixades en andra, djupare bugg av samma art: worktree-raden och
+`current_commit`-kolumnen — exakt det klassificeraren läser för LOCAL_UNCOMMITTED_WORK/
+LOCAL_COMMITTED_NOT_PUSHED — flushades men committades aldrig förrän HELA handlern returnerat,
+så en riktig krasch (inte ett fångat undantag) hade rullat tillbaka samma tillstånd som just
+kopplats in, en gång till en nivå djupare. Fixat genom att committa direkt efter varje verklig
+git-nivåfakta, alltid bakom samma lease-förnyelsekontroll varje annan skrivning i filen redan
+använder. Demo 2 och 3 skrevs om i grunden: de konstruerar INTE längre recovery-state manuellt
+utan kraschar på riktigt inuti `run_task_execution_job()` (monkeypatchar
+`commit_worktree_changes`/`push_worktree_branch` att kasta EN gång efter att den riktiga
+AI-anropet/filskrivningen/committen redan skett), bevisar båda KRÄVDA krasch-fönstren genom den
+riktiga pathen, och asserterar att AI:n aldrig anropas två gånger (dedup). Ett genuint
+race/deadlock hittades och fixades i själva TESTET under detta arbete (inte produktionskod):
+`db_session` lämnades i en öppen transaktion efter den simulerade kraschen, vilket blockerade
+recovery-pipelinens egen `_kill_lease()`-UPDATE via en annan koppling — fixat med
+`db_session.rollback()` direkt efter, matchande det etablerade mönstret i
+`test_mainai_execution_executor.py`s egna krasch-simuleringstester. Säkerheten
+återattackerades mot den nya writepath:en (symlink-escape, ownership fail-closed vid
+worktree-återanvändning — båda nya tester, gröna). En specifik engineering lesson spelades in
+(`test_record_engineering_lesson_for_recovery_state_not_reachable_from_real_execution_path`):
+"En recovery/safety feature är inte REAL förrän dess evidence/state faktiskt produceras av
+production execution path — tester som konstruerar state manuellt räcker inte." Dokumentationen
+uppdaterades i grunden (LIMITED #1:s "inte kopplad"-formulering borttagen, REAL-listan
+uppdaterad, demo-beskrivningarna säger nu uttryckligen att de kör genom den riktiga pathen).
+Full backend-svit efter Round 2: 1261 passed, 1 skipped by design, 1 pre-existing orelaterad
+concurrency-flake (bekräftad grön 2/3 omkörningar, noll diff i `app/storage/` under hela detta
+pass) — mainai-scoped delmängd 357 passed, migrationsrundtripp 2 passed, exakt en Alembic-head
+(0035), ruff rent. Åtta Round 2-commits, `git ls-remote` bekräftar basgrenens tip fortfarande
+oförändrad. **Fortfarande INTE mergad**, väntar på grundarens granskning av Round 2.
+
+**PR #58 hardening-pass Round 1 (2026-08-11):** efter grundarens uttryckliga "Apple-like version
+model"-instruktion ("MERGA INTE. Nu fryser vi feature-scope och attackerar hela
+implementationen innan merge") attackerades hela V0.2-diffen mot faktisk kod. Två verkliga fynd,
+båda fixade med regressionstest verifierat via mutationstest (fixen borttagen → testet går rött):
+**P0** — `_classify()`s enda signal för PUSHED_NO_PR/PR_EXISTS var
+`worktree_local_head_sha == remote_branch_sha`, men det fältet fylls uteslutande från en
+`mainai_task_worktrees`-rad, och `execution_job.py`s riktiga `repo_edit`-hanterare skapar aldrig
+en sådan (skriver fortfarande till den delade checkouten, pushar via GitHub Git Data API) — en
+riktig död `repo_edit`-attempt som redan pushat föll därmed hela vägen till CHECKPOINTED_WORK
+(inget godkännande krävs), vilket kringgick godkännande-gate:en helt. Fixat genom att även
+acceptera en verklig `finalized`-checkpoint (skriven av `execution_job.py` självt, oberoende av
+worktree) som lika giltigt bevis. **P1** — migration 0033:s egen dokumentation påstod att
+`app/rls.py`s `apply_mainai_execution_privileges()` utökats för de tre nya V0.2-tabellerna, men
+den filen rördes aldrig i den ursprungliga V0.2-branchen; `mainai_recovery_events` (append-only)
+hade fortfarande det breda default-privilegiet från `ensure_app_role.py`. Deny-mutation-triggern
+blockerade fortfarande faktiskt varje UPDATE/DELETE (inget levande hål), men avvek från
+projektets etablerade "smalna av varje skrivväg, lita aldrig på ett enda lager"-doktrin
+(S1A-serien). Fixat genom att faktiskt utöka privilegiepolicyn som dokumentationen redan
+utlovade. Dessutom: dokumentationens REAL/LIMITED-avsnitt korrigerades (worktree.py:s isolering
+är byggd och testad men INTE kopplad till den riktiga `repo_edit`-exekveringsvägen — döpt till
+V0.3-kandidat #1, inte gjort i detta pass som skulle frysa feature-scope), plus två nya
+attacktester (stale worker fences via marker-rebind; direkt cross-owner RLS-bevis för alla tre
+nya tabeller) som båda gick gröna direkt och bekräftade befintligt skydd istället för att hitta
+nya fynd. Full backend-svit: 1258 passed (upp från 1244), migrationsrundtripp ren, ruff rent,
+inga secrets i diffen. Fyra hardening-commits, `git ls-remote` bekräftar basgrenens tip
+oförändrad (`03c0a9c`) — ingen rebase behövdes. **Fortfarande INTE mergad**, väntar på
+grundarens granskning.
+
+**PR #58 är ÖPPEN (draft, INTE mergad)** — `claude/mainai-dead-agent-recovery-v0-2` →
+`claude/det-kommer-mer-879lcm`, grenad från exakt `03c0a9cb0323abebacbdd6be6f26dee363ead3c7`
+(basgrenens tip vid grening, verifierad med `git ls-remote origin` — matchar också basgrenens
+tip vid slutet av detta pass, ingen ny merge har landat under tiden så ingen rebase behövdes,
+per `CLAUDE.md`s merge-regel om att aldrig rebasa i förväg "för säkerhets skull"). Byggd på
+grundarens uttryckliga instruktion **MainAI V0.2 (Dead Agent Takeover/Salvage/Resume
+Hardening)**, direkt ovanpå den redan mergade V0.1-loopen (PR #57). Stänger den lucka V0.1:s
+egen dokumentation uttryckligen namngav som V0.2-kandidat: dagens resume-historia var "SAMMA
+arbete återupptas vid reclaim" — äkta och testat, men förutsätter att den återkrävande workern
+kör identisk kod; V0.2 adresserar en worker som återkräver ett jobb vars ursprungliga worker är
+BEVISLIGEN död genom en riktig, medveten salvage-åtgärd. Ingen ny kö-/lease-/heartbeat-mekanism
+byggdes — varje dött försök är fortfarande en riktig, leasead, fenced `mainai_jobs`-rad.
+
+Nytt: migration 0033 (`mainai_task_worktrees`/`mainai_recovery_records`/
+`mainai_recovery_events`), migration 0034 (`superseded`-status + `superseded_by_job_id` för
+`mainai_jobs`, utesluter `task_execution` från blind lease-expiry-reclaim), migration 0035
+(godkännande-gate:ens `approval_granted`-händelsetyp), `app/mainai_execution/worktree.py`
+(riktig per-attempt git-isolering, ägarskap verifierat via on-disk marker-token),
+`recovery_inspector.py`/`recovery_classifier.py`/`recovery_approval.py`/`recovery_salvage.py`/
+`recovery_takeover.py` (hela pipelinen: detect → inspect → classify → [godkännande-gate för
+PUSHED_NO_PR/PR_EXISTS] → salvage → takeover), integration i `final_report.py` (recovery-
+historik + en riktig sanningsfixad `unresolved_risk`-lucka) och `recovery_inspector.py`s
+återanvändning av `lessons.py` (read-only, aldrig auto-inspelning), tre nya founder-API-ändpunkter
+i `app/routers/mainai_execution.py` (`GET /tasks/{id}/recovery`, `POST /tasks/{id}/recover`,
+`POST /recovery/{id}/approve` — medvetet backend-only, ingen frontend-ändring i detta pass), samt
+`backend/docs/MAINAI_DEAD_AGENT_RECOVERY_V0_2.md` (REAL/STUBBED/LIMITED/NOT IMPLEMENTED,
+klassificeringsvokabulären A-I med bevismappning, säkerhets-/durability-/godkännande-modeller,
+samtliga 7 obligatoriska demoresultat inkl. de två uttryckligen KRÄVDA — stale worker returns
+och tvetydigt/motsägelsefullt tillstånd — full coverage-matris, V0.3-kandidater). Se den
+doc-filen för den fullständiga, ärliga statusen.
+
+Full lokal verifiering innan PR öppnades: `pytest tests/` (hela backend-sviten) — 1244 passed,
+1 skipped by design (P2-kapacitetstest), 0 failed (en pre-existing, orelaterad
+concurrency-flake i `test_storage_local_fs.py`, grön i isolerad omkörning — noll diff mot bas i
+den filen); riktad mainai+migrationsrundtripp-svit — 348 passed, 2 passed. Samtliga 7
+obligatoriska demos (inkl. de två KRÄVDA: stale worker returns, tvetydigt tillstånd) kör genom
+den riktiga recovery-loopen, aldrig en manuell genväg. **INTE MERGAD** — öppnad som draft,
+väntar på grundarens granskning, per grundarens uttryckliga instruktion att stanna FÖRE merge.
+Ingen del av denna branch har rört merge till mainline, deploy, VPS, produktion,
+prod-migration/backfill, CONTRACT, S1C, V0.3, force push eller destructive recovery.
+
 **PR #37 är MERGAD** (`claude/vps-worker-privilege-race-hotfix` → `claude/det-kommer-mer-879lcm`),
 merge-commit `d5f37c2b798f7ae430a908037608d9c19e29cc70` — som därmed är basgrenens nuvarande tip.
 Grundaren körde därefter en fullt verifierad produktionsdeploy av den basen; produktionen är

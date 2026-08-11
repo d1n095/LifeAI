@@ -26,12 +26,12 @@ local filesystem/subprocess verification path."""
 
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text as sa_text
 
 from app.config import get_settings
-from app.integrations.github_client import GitHubClientError
 from app.jobs import service
 from app.jobs.mainai_job_lease import claim_next_mainai_job
 from app.mainai_execution import executor, lessons, planner
@@ -1185,79 +1185,84 @@ def test_record_engineering_lesson_for_the_repo_edit_absolute_path_write_fix(db_
 
 
 @pytest.mark.asyncio
-async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exists_from_a_prior_uncheckpointed_push(db_session, owner_id, monkeypatch):
-    """Crash matrix finding H (hardening pass): run_task_execution_job() checkpoints
-    _finalize_repo_edit()'s result under step='finalized' specifically so a crash AFTER a real
-    GitHub push succeeds but BEFORE that checkpoint commits doesn't push a second time -- but on
-    resume (no 'finalized' checkpoint found), _finalize_repo_edit() used to run again from
-    scratch: re-read base_sha from base_branch (unchanged by the first push), see the task
-    branch already existed and swallow that as 'fine, commit on top' -- then build the new
-    commit on the STALE base_sha instead of the branch's actual current tip. GitHub's real
-    fast-forward-only update_ref() correctly rejected that non-fast-forward update, and the
-    task ended up permanently `failed` even though the first attempt's push had already
-    durably succeeded. Reproduced here with a stateful fake GitHubClient modeling exactly that:
-    call _finalize_repo_edit() twice for the SAME task/work_result (simulating dispatch, then a
-    crash before the checkpoint, then a resume) -- both calls must succeed, and the second must
-    build on the first's real result, never on the stale original base."""
-    from app.integrations.github_client import GitHubClient
-    from app.mainai_execution.execution_job import _finalize_repo_edit
+async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exists_from_a_prior_uncheckpointed_push(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """Crash matrix finding H (ORIGINAL hardening pass) still applies, but the mechanism
+    changed with the live worktree-integration hardening pass: _finalize_repo_edit() now pushes
+    a real, already-committed local worktree branch via worktree.py's push_worktree_branch()
+    instead of reconstructing a commit through the GitHub Git Data API on every call. Proves
+    the SAME property the original test proved (calling _finalize_repo_edit() twice for the
+    SAME work_result -- simulating dispatch, a crash before the 'finalized' checkpoint lands,
+    then a resume -- must succeed both times and never create a duplicate/divergent commit) but
+    through the real worktree/git mechanism: a real bare git repo stands in for GitHub (same
+    pattern test_mainai_execution_worktree.py uses), and the SECOND push is asserted to be a
+    genuine git no-op (identical remote tip, no new commit) -- naturally idempotent, unlike the
+    old design's "second, redundant commit" caveat."""
+    import subprocess
 
-    settings = get_settings()  # @lru_cache'd singleton -- the same object execution_job.py's own get_settings() call returns
+    from app.integrations.github_client import GitHubClient, GitHubClientError
+    from app.mainai_execution import worktree as worktree_module
+    from app.mainai_execution.execution_job import _finalize_repo_edit, _handle_repo_edit
+    from app.mainai_execution.worktree import BASE_BRANCH
+
+    remote_path = tmp_path / "bare-remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote_path)], check=True)
+    seed_path = tmp_path / "seed-clone"
+    subprocess.run(["git", "clone", "-q", str(remote_path), str(seed_path)], check=True)
+    (seed_path / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(seed_path), "config", "user.email", "seed@test.local"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "config", "user.name", "Seed"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "checkout", "-q", "-b", BASE_BRANCH], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "commit", "-q", "-m", "seed"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "push", "-q", "origin", BASE_BRANCH], check=True)
+
+    settings = get_settings()
     monkeypatch.setattr(settings, "github_write_enabled", True)
-    monkeypatch.setattr(settings, "github_token", "fake-token-never-real")
-    monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
+    monkeypatch.setattr(settings, "github_repo", "test-owner/test-repo")
+    monkeypatch.setattr(settings, "github_token", "fake-token-not-used-over-network")
+    monkeypatch.setattr(worktree_module, "_authed_remote_url", lambda repo, token: str(remote_path))
 
-    refs: dict[str, str] = {"claude/det-kommer-mer-879lcm": "base-sha-0"}
-    commit_parents: dict[str, str] = {"base-sha-0": None}
-    calls: list[str] = []
-
-    async def _fake_get_ref(self, branch):
-        calls.append(f"get_ref:{branch}")
-        if branch not in refs:
-            raise GitHubClientError(f"404: no such branch {branch}")
-        return refs[branch]
-
-    async def _fake_create_branch(self, *, new_branch, from_sha):
-        calls.append(f"create_branch:{new_branch}:{from_sha}")
-        if new_branch in refs:
-            raise GitHubClientError("422: Reference already exists")
-        refs[new_branch] = from_sha
-
-    async def _fake_commit_multiple_files(self, *, branch, base_sha, files, message):
-        calls.append(f"commit:{branch}:{base_sha}")
-        current_tip = refs.get(branch)
-        if current_tip is not None and current_tip != base_sha:
-            # The real, fast-forward-only failure this test exists to prove never happens on
-            # a correct resume: the new commit's parent (base_sha) is not the branch's actual
-            # current HEAD.
-            raise GitHubClientError("422: Update is not a fast forward")
-        new_sha = f"commit-{len(commit_parents)}"
-        commit_parents[new_sha] = base_sha
-        refs[branch] = new_sha
-        return {"commit_sha": new_sha, "tree_sha": f"tree-{new_sha}", "blob_shas": {f["path"]: f"blob-{new_sha}" for f in files}}
+    async def _fake_get_ref(self, branch: str) -> str:
+        result = subprocess.run(["git", "-C", str(remote_path), "rev-parse", f"refs/heads/{branch}"], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise GitHubClientError(f"unknown ref {branch}")
+        return result.stdout.strip()
 
     monkeypatch.setattr(GitHubClient, "get_ref", _fake_get_ref)
-    monkeypatch.setattr(GitHubClient, "create_branch", _fake_create_branch)
-    monkeypatch.setattr(GitHubClient, "commit_multiple_files", _fake_commit_multiple_files)
+    monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat('{"files": [{"path": "x.py", "content": "x = 1\\n"}], "commit_message": "test edit"}'))
 
     goal = _goal(db_session, owner_id)
     task = _single_task_plan(db_session, goal, task_type="repo_edit")
-    work_result = {"files": [{"path": "backend/app/x.py", "content": "x = 1\n"}], "commit_message": "test edit"}
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    db_session.refresh(job)
+
+    work_result = await _handle_repo_edit(db_session, task, job=job, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+    db_session.commit()
+    assert work_result.get("worktree_id") is not None
 
     first = await _finalize_repo_edit(db_session, task, work_result)
     assert first["proposed"] is False
     branch = first["branch"]
-    assert refs[branch] == first["commit_sha"]
+    remote_tip_after_first = subprocess.run(["git", "-C", str(remote_path), "rev-parse", branch], capture_output=True, text=True, check=True).stdout.strip()
+    assert remote_tip_after_first == first["commit_sha"]
 
-    # Simulates the crash: no checkpoint was recorded for `first`'s result, so
-    # run_task_execution_job() would call _finalize_repo_edit() again on resume.
+    # Simulates the crash: no 'finalized' checkpoint was recorded for `first`'s result, so
+    # run_task_execution_job() would call _finalize_repo_edit() again on resume -- pushing the
+    # SAME already-committed local branch a second time.
     second = await _finalize_repo_edit(db_session, task, work_result)
     assert second["proposed"] is False
-    assert second["commit_sha"] != first["commit_sha"], "a real second commit is created (not perfectly idempotent, but must succeed)"
-    assert refs[branch] == second["commit_sha"]
-    # The critical assertion: the second commit's parent is the FIRST commit (a true
-    # fast-forward), never the original, stale base_branch sha.
-    assert commit_parents[second["commit_sha"]] == first["commit_sha"]
+    # Naturally idempotent: the second push is a genuine git no-op, not a second commit.
+    assert second["commit_sha"] == first["commit_sha"]
+    remote_log_after_second = subprocess.run(["git", "-C", str(remote_path), "log", "--oneline", branch], capture_output=True, text=True, check=True).stdout
+    assert remote_log_after_second.count("\n") == 2, "no duplicate commit was ever pushed"  # seed + the one real edit commit
 
 
 @pytest.mark.asyncio
@@ -1602,3 +1607,141 @@ async def test_run_task_execution_job_run_tests_derives_verification_from_its_ow
     assert task.status == MainAITaskStatus.retryable_failed  # the test run itself failed -- must never be `completed`
     event_types = _events(superuser_db, task.id)
     assert MainAITaskEventType.completed.value not in event_types
+
+
+def _bare_remote_for_worktree_write_path(tmp_path):
+    import subprocess
+
+    from app.mainai_execution.worktree import BASE_BRANCH
+
+    remote_path = tmp_path / "bare-remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote_path)], check=True)
+    seed_path = tmp_path / "seed-clone"
+    subprocess.run(["git", "clone", "-q", str(remote_path), str(seed_path)], check=True)
+    (seed_path / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(seed_path), "config", "user.email", "seed@test.local"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "config", "user.name", "Seed"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "checkout", "-q", "-b", BASE_BRANCH], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "commit", "-q", "-m", "seed"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "push", "-q", "origin", BASE_BRANCH], check=True)
+    return remote_path
+
+
+def _patch_github_for_worktree_write_path(monkeypatch, remote_path):
+    import subprocess
+
+    from app.integrations.github_client import GitHubClient, GitHubClientError
+    from app.mainai_execution import worktree as worktree_module
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "github_write_enabled", True)
+    monkeypatch.setattr(settings, "github_repo", "test-owner/test-repo")
+    monkeypatch.setattr(settings, "github_token", "fake-token-not-used-over-network")
+    monkeypatch.setattr(worktree_module, "_authed_remote_url", lambda repo, token: str(remote_path))
+
+    async def _fake_get_ref(self, branch: str) -> str:
+        result = subprocess.run(["git", "-C", str(remote_path), "rev-parse", f"refs/heads/{branch}"], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise GitHubClientError(f"unknown ref {branch}")
+        return result.stdout.strip()
+
+    monkeypatch.setattr(GitHubClient, "get_ref", _fake_get_ref)
+    monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_repo_edit_real_worktree_with_a_symlink_escape_never_writes_outside_the_worktree(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """Hardening-pass re-attack (Round 2, worktree-wiring): the real-worktree write path
+    (_handle_repo_edit(), github_write_enabled=True) has its OWN, separate resolve()-based
+    confinement check against worktree_root -- not the same code object as
+    _propose_repo_edit()'s check against repo_root, even though both are structurally
+    identical. This proves that second, duplicated layer was not lost or weakened by the
+    worktree-wiring refactor: a syntactically clean relative path (passes
+    _validate_repo_edit_file_path()'s '..'/absolute checks) that escapes via a symlink already
+    present in the real worktree checkout must still never write outside it."""
+    remote_path = _bare_remote_for_worktree_write_path(tmp_path)
+    _patch_github_for_worktree_write_path(monkeypatch, remote_path)
+
+    outside = tmp_path / f"mainai_real_worktree_symlink_escape_target_{uuid.uuid4().hex}"
+    outside.mkdir()
+
+    async def _symlink_planting_chat(self, messages, model, **kwargs):
+        # The worktree doesn't exist until _handle_repo_edit() creates it moments before this
+        # call, so the symlink is planted from inside the fake AI call itself -- the earliest
+        # point in the real flow where the real worktree path is known.
+        from app.models.mainai_recovery import MainAITaskWorktree
+
+        worktree = db_session.query(MainAITaskWorktree).filter(MainAITaskWorktree.owner_id == owner_id).one()
+        escape_hatch = Path(worktree.path) / "escape_hatch"
+        if not escape_hatch.exists():
+            escape_hatch.symlink_to(outside, target_is_directory=True)
+        return ChatResult(
+            content='{"files": [{"path": "escape_hatch/pwned.txt", "content": "PWNED"}], "commit_message": "x"}',
+            provider="openai",
+            model=model,
+            raw_usage={},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _symlink_planting_chat)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    try:
+        assert not (outside / "pwned.txt").exists(), "the symlink-escape write must never have happened"
+    finally:
+        for p in outside.glob("*"):
+            p.unlink()
+        outside.rmdir()
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed
+
+
+@pytest.mark.asyncio
+async def test_handle_repo_edit_refuses_to_reuse_a_worktree_whose_ownership_does_not_verify(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """Hardening-pass re-attack (Round 2): _handle_repo_edit()'s reuse branch (an existing
+    MainAITaskWorktree row for this job) must fail closed -- TaskExecutionError, never silently
+    treated as 'nothing here, create a new one' -- when verify_worktree_ownership() cannot
+    confirm the on-disk marker matches. Proves the fail-closed check the founder explicitly
+    required is real code that actually runs on this path, not just present elsewhere in
+    worktree.py's own unit tests."""
+    remote_path = _bare_remote_for_worktree_write_path(tmp_path)
+    _patch_github_for_worktree_write_path(monkeypatch, remote_path)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat('{"files": [{"path": "x.py", "content": "x = 1\\n"}], "commit_message": "x"}'))
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+
+    from app.mainai_execution.worktree import MARKER_FILENAME, create_task_worktree
+
+    fresh_job = db_session.get(MainAIJob, job.id)
+    worktree = await create_task_worktree(db_session, task=task, job=fresh_job, lease_generation=generation, executor_id="worker-1")
+    db_session.commit()
+    # Corrupt the on-disk marker -- exactly what a filesystem-level tamper or a genuinely
+    # unrelated leftover directory reused by path collision would look like to
+    # verify_worktree_ownership().
+    marker_path = Path(worktree.path) / MARKER_FILENAME
+    marker_path.write_text('{"task_id": "not-the-real-task", "job_id": "not-the-real-job", "marker_token": "spoofed"}', encoding="utf-8")
+
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.retryable_failed  # fail closed, never silently recreated or reused
+    assert not (Path(worktree.path) / "x.py").exists(), "no write must ever have happened against the unverifiable worktree"
