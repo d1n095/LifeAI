@@ -20,7 +20,7 @@ import json
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.liveness import task_liveness
@@ -36,8 +36,15 @@ from app.models.mainai_execution import (
 )
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import MainAIRecoveryRecord
+from app.models.mainai_wait import MainAITaskWait
 
-_UNRESOLVED_TASK_STATUSES = frozenset({MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed, MainAITaskStatus.failed})
+# `retryable_failed` is deliberately EXCLUDED here as of V0.3: _finalize_task_outcome()
+# (execution_job.py) now ALWAYS schedules a next_retry_at for it (app/worker.py's
+# `_advance_mainai_execution_retries` picks it up automatically) -- it is no longer "awaiting a
+# retry decision" the way V0.1's docstring described, since that decision is now made
+# unattended. A task that keeps failing eventually exhausts attempts and becomes `failed`,
+# which IS still unresolved below.
+_UNRESOLVED_TASK_STATUSES = frozenset({MainAITaskStatus.blocked, MainAITaskStatus.failed})
 
 
 class GoalNotFoundError(Exception):
@@ -82,20 +89,83 @@ def _recovery_history(db: Session, task_id: uuid.UUID) -> list[dict]:
     ]
 
 
+def _wait_history(db: Session, task_id: uuid.UUID) -> list[dict]:
+    """V0.3 integration: every durable external-wait (mainai_task_waits, app/mainai_execution/
+    ci_wait.py) this task has ever gone through -- same pure-aggregation discipline as
+    _recovery_history() above, and for the same reason: a task can wait more than once across
+    its lifetime (a takeover's new job attempt can open its own CI wait), so this is always a
+    list, oldest first."""
+    waits = db.execute(select(MainAITaskWait).where(MainAITaskWait.task_id == task_id).order_by(MainAITaskWait.created_at)).scalars().all()
+    return [
+        {
+            "wait_id": str(w.id),
+            "source_type": w.source_type.value,
+            "status": w.status.value,
+            "poll_count": w.poll_count,
+            "deadline_at": w.deadline_at.isoformat(),
+            "resolved_at": w.resolved_at.isoformat() if w.resolved_at else None,
+            "evidence": w.evidence,
+        }
+        for w in waits
+    ]
+
+
+def _lesson_conflict_evidence(db: Session, task_id: uuid.UUID) -> list[dict]:
+    """V0.3 integration: every `lesson_conflict_detected` event (app/mainai_execution/
+    lesson_conflicts.py's mark_conflict()) recorded against this task -- i.e. every time a
+    lesson that shaped this task's verification_plan was later found to genuinely contradict
+    another lesson. Always a list, oldest first, for the same reason recovery/wait history are:
+    a task can be affected by more than one disputed lesson."""
+    events = (
+        db.execute(
+            select(MainAITaskEvent)
+            .where(MainAITaskEvent.task_id == task_id, MainAITaskEvent.event_type == MainAITaskEventType.lesson_conflict_detected)
+            .order_by(MainAITaskEvent.created_at)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "lesson_id": e.detail.get("lesson_id"),
+            "conflicting_lesson_id": e.detail.get("conflicting_lesson_id"),
+            "reasoning": e.detail.get("reasoning"),
+            "detected_at": e.created_at.isoformat(),
+        }
+        for e in events
+    ]
+
+
 def _task_report(db: Session, task: MainAITask) -> dict:
     verification_event = _latest_event(db, task.id, {MainAITaskEventType.verification_passed, MainAITaskEventType.verification_failed})
     approval_event = _latest_event(db, task.id, {MainAITaskEventType.approval_granted})
+    replan_event = _latest_event(db, task.id, {MainAITaskEventType.replanned})
     job = db.get(MainAIJob, task.mainai_job_id) if task.mainai_job_id is not None else None
     recovery_history = _recovery_history(db, task.id)
+    wait_history = _wait_history(db, task.id)
+    lesson_conflicts = _lesson_conflict_evidence(db, task.id)
 
     # A recovery record still open (never reached `completed`) and flagged
     # manual_review_required is a REAL unresolved risk even when the task's own status still
     # reads `running` -- the task is silently stuck behind a dead job a human hasn't looked at
-    # yet, which _UNRESOLVED_TASK_STATUSES alone (blocked/retryable_failed/failed) never
-    # catches, since inspect/classify() never touches MainAITask.status itself.
+    # yet, which _UNRESOLVED_TASK_STATUSES alone (blocked/failed) never catches, since
+    # inspect/classify() never touches MainAITask.status itself.
     unresolved_recovery = any(r["manual_review_required"] and r["status"] != "completed" for r in recovery_history)
+    # V0.3: a wait that ended `failed`/`timed_out` always already drove the task through
+    # _finalize_task_outcome() (execution_job.py's resume_waiting_ci_task()), so the task's own
+    # status already reflects it -- this is deliberately NOT a second unresolved-risk signal, to
+    # avoid double-counting the same underlying fact two different ways.
+    # V0.3: a lesson this task relied on was later proven to contradict another lesson -- real,
+    # actionable evidence that this task's outcome may need a founder's re-review, regardless of
+    # whether the task itself already finished.
+    unresolved_lesson_conflict = bool(lesson_conflicts)
 
-    unresolved = task.status in _UNRESOLVED_TASK_STATUSES or (task.approval_required and approval_event is None) or unresolved_recovery
+    unresolved = (
+        task.status in _UNRESOLVED_TASK_STATUSES
+        or (task.approval_required and approval_event is None)
+        or unresolved_recovery
+        or unresolved_lesson_conflict
+    )
 
     return {
         "task_id": str(task.id),
@@ -105,7 +175,17 @@ def _task_report(db: Session, task: MainAITask) -> dict:
         "liveness": task_liveness(task, job).value,
         "attempts": task.attempts,
         "max_attempts": task.max_attempts,
-        "execution_attempt": {"mainai_job_id": str(job.id), "status": job.status.value} if job is not None else None,
+        "next_retry_at": task.next_retry_at.isoformat() if task.next_retry_at else None,
+        "execution_attempt": (
+            {
+                "mainai_job_id": str(job.id),
+                "status": job.status.value,
+                "cancel_requested": job.cancel_requested,
+                "cancel_acknowledged": job.cancel_acknowledged,
+            }
+            if job is not None
+            else None
+        ),
         "verification_outcome": (
             {"passed": verification_event.event_type == MainAITaskEventType.verification_passed, "recorded_at": verification_event.created_at.isoformat()}
             if verification_event is not None
@@ -119,6 +199,13 @@ def _task_report(db: Session, task: MainAITask) -> dict:
         "unresolved_risk": unresolved,
         "blocker_reason": task.blocker_reason,
         "recovery_history": recovery_history,
+        "wait_history": wait_history,
+        "triggered_replan": (
+            {"new_plan_version": replan_event.detail.get("new_plan_version"), "recorded_at": replan_event.created_at.isoformat()}
+            if replan_event is not None
+            else None
+        ),
+        "lesson_conflicts": lesson_conflicts,
     }
 
 
@@ -132,6 +219,10 @@ def generate_goal_report(db: Session, *, goal_id: uuid.UUID) -> dict:
         raise GoalNotFoundError(goal_id)
 
     plan = db.execute(select(MainAIPlan).where(MainAIPlan.goal_id == goal_id, MainAIPlan.status == MainAIPlanStatus.active)).scalar_one_or_none()
+    # V0.3: how many plan versions this goal has ever had -- >1 means at least one automatic
+    # replan (app/mainai_execution/replan.py) happened, visible without cross-referencing every
+    # task's own `triggered_replan` field.
+    plan_versions_total = db.execute(select(func.count()).select_from(MainAIPlan).where(MainAIPlan.goal_id == goal_id)).scalar_one()
     tasks = db.execute(select(MainAITask).where(MainAITask.goal_id == goal_id).order_by(MainAITask.created_at)).scalars().all()
     task_reports = [_task_report(db, task) for task in tasks]
 
@@ -160,6 +251,12 @@ def generate_goal_report(db: Session, *, goal_id: uuid.UUID) -> dict:
             # dead-agent recovery, without having to read every task's own recovery_history.
             "tasks_with_recovery_history": sum(1 for t in task_reports if t["recovery_history"]),
             "recovery_attempts_total": sum(len(t["recovery_history"]) for t in task_reports),
+            # V0.3 integration: the same top-of-report rollup discipline as recovery above,
+            # for the three other new long-running-orchestration signals.
+            "tasks_with_wait_history": sum(1 for t in task_reports if t["wait_history"]),
+            "tasks_awaiting_auto_retry": sum(1 for t in task_reports if t["next_retry_at"] is not None),
+            "plan_versions_total": plan_versions_total,
+            "tasks_with_disputed_lesson_evidence": sum(1 for t in task_reports if t["lesson_conflicts"]),
         },
         "generated_at": datetime.utcnow().isoformat(),
     }
