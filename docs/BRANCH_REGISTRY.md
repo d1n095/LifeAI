@@ -6,7 +6,8 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**`claude/mainai-long-running-orchestration-v0-3` — INGEN PR ÄN, byggs fortfarande (2026-08-11).**
+**PR #59 är ÖPPEN (draft, INTE mergad) — `claude/mainai-long-running-orchestration-v0-3` →
+`claude/det-kommer-mer-879lcm`, öppnad 2026-08-11.**
 Grenad från exakt `5ad6c4697cfa128f94a63a1b7bb3332a0ab9e888` (basgrenens tip vid grening,
 verifierad med `git ls-remote origin claude/det-kommer-mer-879lcm` — matchar också basgrenens
 tip just nu, ingen ny merge har landat under tiden så ingen rebase behövs, per `CLAUDE.md`s
@@ -46,17 +47,17 @@ pollar samma förfallna wait kunde båda observera `waiting_ci` och båda anropa
 REAL/STUBBED/LIMITED/NOT IMPLEMENTED-statusen, säkerhets-/durability-invarianter,
 händelsevokabulären, samtliga 9 demoresultat, coverage-matris och V0.4-kandidater.
 
-Senaste fullständiga backend-svit (efter checkpoint 10): 1320 passed, 1 skipped by design
+Slutlig full backend-svit innan PR öppnades: 1320 passed, 1 skipped by design
 (P2-kapacitetstest), 2 failed — båda `test_storage_local_fs.py`s egna concurrency-racetester,
 bekräftat pre-existing och orelaterade (alternerar pass/fail vid omkörning i isolation, noll diff
-mot bas i `app/storage/`/`tests/backend/storage/` under hela detta pass). Ruff rent på alla
-rörda filer. **Kvarstår innan PR öppnas** (task #399/#400 i den löpande planen): docs (denna
-post + `MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md`, båda nu klara), sedan en sista
-re-verifieringsrunda (migrationsrundtripp, RLS, frontend typecheck/lint, secrets-scan,
-docs-drift) innan EXAKT EN PR öppnas — **INTE mergad**, per grundarens uttryckliga
-"öppna en PR, merga INTE"-instruktion för hela V0.3-bygget. Ingen del av denna branch har rört
-deploy, VPS, produktion, prod-migration/backfill, CONTRACT, S1C, V0.4, destructive recovery
-eller force push.
+mot bas i `app/storage/`/`tests/backend/storage/` under hela detta pass). Migrationsrundtripp:
+2 passed, exakt en Alembic-head (`0036`). Ruff rent på alla rörda filer. Frontend: `tsc --noEmit`
+rent, `eslint` rent på de ändrade filerna. Secrets-scan av hela diffen: inga riktiga secrets,
+endast tydligt märkta fake-testtokens. Docs-drift: alla filvägar/funktionsnamn/konstanter i
+`MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md` verifierade mot faktisk kod. **PR #59 öppnad som
+draft — INTE mergad**, per grundarens uttryckliga "öppna en PR, merga INTE"-instruktion för hela
+V0.3-bygget. Ingen del av denna branch har rört deploy, VPS, produktion, prod-migration/backfill,
+CONTRACT, S1C, V0.4, destructive recovery eller force push.
 
 **PR #58 är MERGAD (2026-08-11).** Efter Round 2-korrigeringen (worktree-isoleringen wired till
 riktiga `repo_edit`-execution-pathen, se nedan) verifierade grundaren PR:n direkt mot GitHub och
