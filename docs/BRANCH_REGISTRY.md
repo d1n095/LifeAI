@@ -6,6 +6,34 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #58 hardening-pass (2026-08-11):** efter grundarens uttryckliga "Apple-like version
+model"-instruktion ("MERGA INTE. Nu fryser vi feature-scope och attackerar hela
+implementationen innan merge") attackerades hela V0.2-diffen mot faktisk kod. Två verkliga fynd,
+båda fixade med regressionstest verifierat via mutationstest (fixen borttagen → testet går rött):
+**P0** — `_classify()`s enda signal för PUSHED_NO_PR/PR_EXISTS var
+`worktree_local_head_sha == remote_branch_sha`, men det fältet fylls uteslutande från en
+`mainai_task_worktrees`-rad, och `execution_job.py`s riktiga `repo_edit`-hanterare skapar aldrig
+en sådan (skriver fortfarande till den delade checkouten, pushar via GitHub Git Data API) — en
+riktig död `repo_edit`-attempt som redan pushat föll därmed hela vägen till CHECKPOINTED_WORK
+(inget godkännande krävs), vilket kringgick godkännande-gate:en helt. Fixat genom att även
+acceptera en verklig `finalized`-checkpoint (skriven av `execution_job.py` självt, oberoende av
+worktree) som lika giltigt bevis. **P1** — migration 0033:s egen dokumentation påstod att
+`app/rls.py`s `apply_mainai_execution_privileges()` utökats för de tre nya V0.2-tabellerna, men
+den filen rördes aldrig i den ursprungliga V0.2-branchen; `mainai_recovery_events` (append-only)
+hade fortfarande det breda default-privilegiet från `ensure_app_role.py`. Deny-mutation-triggern
+blockerade fortfarande faktiskt varje UPDATE/DELETE (inget levande hål), men avvek från
+projektets etablerade "smalna av varje skrivväg, lita aldrig på ett enda lager"-doktrin
+(S1A-serien). Fixat genom att faktiskt utöka privilegiepolicyn som dokumentationen redan
+utlovade. Dessutom: dokumentationens REAL/LIMITED-avsnitt korrigerades (worktree.py:s isolering
+är byggd och testad men INTE kopplad till den riktiga `repo_edit`-exekveringsvägen — döpt till
+V0.3-kandidat #1, inte gjort i detta pass som skulle frysa feature-scope), plus två nya
+attacktester (stale worker fences via marker-rebind; direkt cross-owner RLS-bevis för alla tre
+nya tabeller) som båda gick gröna direkt och bekräftade befintligt skydd istället för att hitta
+nya fynd. Full backend-svit: 1258 passed (upp från 1244), migrationsrundtripp ren, ruff rent,
+inga secrets i diffen. Fyra hardening-commits, `git ls-remote` bekräftar basgrenens tip
+oförändrad (`03c0a9c`) — ingen rebase behövdes. **Fortfarande INTE mergad**, väntar på
+grundarens granskning.
+
 **PR #58 är ÖPPEN (draft, INTE mergad)** — `claude/mainai-dead-agent-recovery-v0-2` →
 `claude/det-kommer-mer-879lcm`, grenad från exakt `03c0a9cb0323abebacbdd6be6f26dee363ead3c7`
 (basgrenens tip vid grening, verifierad med `git ls-remote origin` — matchar också basgrenens
