@@ -456,8 +456,13 @@ repo_edit path now has its own dedicated resume/idempotency and path/ownership s
 the pre-existing V0.1 proposal-mode path-traversal/symlink-escape suite, unchanged.
 
 Run the full backend suite: `pytest tests/`. Last full run after the Round 2 hardening pass:
-see the PR body's final verification section for the exact counts on the pushed head. The mainai
-+ migration round-trip subset and the full V0.1+V0.2 execution suite
-(`test_mainai_execution_executor.py`, `test_mainai_execution_recovery.py`,
-`test_mainai_execution_worktree.py`, `test_mainai_execution_recovery_demos.py`,
-`test_mainai_execution_demos.py`) all pass with 0 failures as of this branch's head.
+1261 passed, 1 skipped (the P2 capacity test, skipped by design), 1 failed
+(`test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_completion`, a
+storage-layer race test — confirmed genuinely flaky by rerunning it 3x in isolation
+immediately after, passing 2 of 3 times; pre-existing, unrelated to this branch's diff, which
+never touches `app/storage/` or `tests/backend/storage/`). The mainai + migration round-trip
+subset (`pytest tests/ -k mainai`): 357 passed. `test_migration_roundtrip.py`: 2 passed. The
+full V0.1+V0.2 execution suite (`test_mainai_execution_executor.py`,
+`test_mainai_execution_recovery.py`, `test_mainai_execution_worktree.py`,
+`test_mainai_execution_recovery_demos.py`, `test_mainai_execution_demos.py`) run together: 96
+passed, 0 failed.
