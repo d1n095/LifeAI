@@ -16,6 +16,7 @@ const NAV = [
   { href: "/admin/memory", label: "Projektminne" },
   { href: "/admin/agents", label: "Agentuppdrag" },
   { href: "/admin/jobs", label: "Jobb & Aktivitet" },
+  { href: "/admin/mainai-execution", label: "MainAI Execution" },
   { href: "/account", label: "Konto" },
 ];
 

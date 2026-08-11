@@ -11,8 +11,24 @@ from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
 from app.providers.base import looks_like_placeholder_secret
-from app.rls import apply_mainai_job_runtime_privileges, apply_rls
-from app.routers import account, admin, agents, auth, chat, conversations, documents, health, knowledge, library, mainai_jobs, memory, projects, workbench
+from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges, apply_rls
+from app.routers import (
+    account,
+    admin,
+    agents,
+    auth,
+    chat,
+    conversations,
+    documents,
+    health,
+    knowledge,
+    library,
+    mainai_execution,
+    mainai_jobs,
+    memory,
+    projects,
+    workbench,
+)
 from app.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
@@ -56,6 +72,7 @@ app.include_router(admin.router)
 app.include_router(memory.router)
 app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
+app.include_router(mainai_execution.router)
 
 
 @app.on_event("startup")
@@ -79,6 +96,9 @@ def on_startup():
     # a REVOKE from migration 0026 alone would be silently undone by the next restart without
     # this every-boot reassertion (the exact Pass 12 boot-persistence bug class, applied here).
     call_with_db_retry(lambda: apply_mainai_job_runtime_privileges(migration_engine))
+    # Same every-boot reassertion, for the MainAI Execution Loop V0.1 objects (migration 0032)
+    # — see app/rls.py's apply_mainai_execution_privileges() docstring.
+    call_with_db_retry(lambda: apply_mainai_execution_privileges(migration_engine))
 
     _check_smtp_mode()
     _warn_placeholder_provider_keys()

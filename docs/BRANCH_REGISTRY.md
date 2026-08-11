@@ -242,6 +242,101 @@ Branch Registry-numrering, denna topp-sammanfattning) gjordes direkt efter PR #5
 se rapporten i sessionens slutmeddelande. Inget nytt arbete påbörjades efter detta, per
 grundarens uttryckliga instruktion.
 
+**`claude/mainai-execution-loop-v0-1` — MainAI Execution Loop V0.1, öppen mot
+`claude/det-kommer-mer-879lcm` (bas-tip vid grening: `a2d30357b1ae3c43678c37e5a93df850a49eb884`,
+verifierad med `git ls-remote origin` innan branchen skapades). Byggd på grundarens uttryckliga
+instruktion (NÄSTA HUVUDSTEG — MAINAI EXECUTION LOOP V0), sedan uppdaterat arbetssätt (fortsätt
+löpande utan att stanna vid varje checkpoint, förutom vid verkliga blockerare/
+säkerhetsfrågor/approval-krävande actions). Bygger den första fullständiga
+GOAL → PLAN → DURABLE TASKS → EXECUTOR → CHECKPOINT/VERIFY → APPROVAL GATE → FINAL REPORT-loopen
+ovanpå den REDAN BEFINTLIGA `mainai_jobs`-runtimen (migration 0025-0029) — ingen ny
+kö/lease/heartbeat-mekanism byggdes. Nytt: migration 0032 (`mainai_goals/mainai_plans/
+mainai_tasks/mainai_task_dependencies/mainai_task_events/mainai_checkpoints/
+engineering_lessons`), `app/mainai_execution/*` (planner/graph/executor/approval/verify/
+checkpoint/liveness/final_report/lessons/execution_job), en riktig GitHub multi-file-commit
+via Git Data API (ersätter den tidigare stubben i `agent_orchestration.py`), en autonom
+auto-advance-tick i `app/worker.py`, minimal founder-API (`app/routers/mainai_execution.py`)
+och minimal founder-UI (`frontend/app/(shell)/admin/mainai-execution/`), samt
+`backend/docs/MAINAI_EXECUTION_LOOP_V0_1.md` (REAL/STUBBED/LIMITED/NOT IMPLEMENTED,
+säkerhets-/durability-/godkännande-/verifierings-/lesson-modeller, alla fyra demoresultat,
+explicit coverage-matris, V0.2-kandidater). Se den doc-filen för den fullständiga, ärliga
+statusen. **INTE MERGAD** — väntar på grundarens granskning av PR. Ingen del av denna branch har
+rört merge till mainline, deploy, VPS, produktion, prod-migration, prod-backfill, CONTRACT
+eller S1C.
+
+**PR #57 — hardening-/attack-pass SLUTFÖRD (grundarens uttryckliga "Apple-like version model":
+frys scope, attackera hela versionen, fixa allt som hittas, regressionstesta, fånga
+engineering lessons, full slutverifiering, ENDAST DÄREFTER grundargranskning för merge).
+Aktuell head: `0e308b5`. Se full slutrapport i sessionen för komplett detalj. Ingen merge,
+ingen V0.2, ingen deploy/VPS/produktion under passet.**
+
+Fynd (root cause → fix → regressionstest → ev. mutationstest → engineering lesson för varje,
+se resp. commit):
+- **P1** — concurrency-race i `dispatch_ready_task()`/`create_job()`-commit-ordning (commit
+  `ed96666`).
+- **P1** — AI-styrd path traversal i `targeted_tests`-mål, både vid plan-skapande och vid
+  körning (commit `42da682`).
+- **P1** — crash-fönster mellan lyckad GitHub-push och durable checkpoint i `repo_edit`
+  (crash matrix H, commit `8539471`).
+- **P1** — samma mönster, sedan hittat i `open_pr`:s eget crash-fönster (crash matrix I,
+  commit `692c9d7`) — visar att en fix för ETT anropsställe inte automatiskt skyddar ett
+  syskon-anropsställe med samma form.
+- **P0 (kritisk)** — `_handle_repo_edit()` saknade absolut-sökvägskontroll: en AI-föreslagen
+  absolut sökväg var en riktig godtycklig filskrivningsprimitiv på executor-hostens
+  filsystem (pathlib's `/`-operator kastar bort basen för en absolut högersida). Verifierad
+  som en genuint exploaterbar bugg (regressionstesterna skrev faktiskt utanför sandlådan med
+  fixen borttagen), fixad med två oberoende lager + mutationstest (commit `cf61c96`).
+- **P1** — `subprocess.TimeoutExpired` från de riktiga pytest-subprocessanropen fångades
+  ingenstans, vilket lämnade en task permanent fast i `running` (varken retry- eller
+  cancel-bar) vid en subprocess-timeout, i både `verify.py`s `_run_targeted_tests()` och
+  `execution_job.py`s `_run_pytest()` (commit `e9ee9eb`).
+- **P1** — samma "commit-ending helper anropad mitt i en större operation"-mönster som fyndet
+  ovan, hittat en tredje gång: `mark_completed()`/`mark_failed()` (som själva slutar med sin
+  egen `db.commit()`) anropades FÖRE `_finalize_task_outcome()`, vilket öppnade ett
+  kraschfönster där jobbet kunde bli `completed`/`failed` medan tasken blev kvar `running`
+  permanent (jobbets terminal-status blockerar all reclaim — `claim_next_mainai_job()`
+  återkräver aldrig en redan terminal job). Fixat genom att kasta om ordningen så att
+  `_finalize_task_outcome()` körs FÖRE `mark_completed()`/`mark_failed()`, vilket gör
+  helper-funktionens commit till den enda atomiska commit-punkten för båda effekterna.
+  Verifierat med en "call-through-then-crash"-mutationstest (riktigt anrop till den äkta
+  funktionen, sedan krasch omedelbart efter dess riktiga commit) — en första testdesign som
+  bara ersatte funktionen med en direktkraschande mock hittades vara felaktig (den kunde inte
+  skilja ordningarna åt) och korrigerades. Grep-sweep av samtliga andra
+  commit-ending-helpers i `app/jobs/service.py` bekräftade inga fler instanser av mönstret i
+  exekveringsloopen (commit `9dfb855`). **Behandlas som en permanent
+  hög-prioritets-engineering-lesson-kategori** (grundarbekräftat): shared helper som själv
+  commit:ar → anropad mitt i en större operation → kraschfönster mellan två logiskt
+  sammanhörande state changes → motsägelsefullt durable state.
+- RLS/cross-owner-attack (samtliga sex nya V0.1-tabeller, guessed UUID, cross-owner FK) och
+  privilege-attack (TRUNCATE/REFERENCES/TRIGGER, default privileges) genomförda utan nya fynd
+  — befintliga skydd höll (commit `1d727ac` + befintlig `test_runtime_table_privileges.py`).
+- State-machine mutation matrix: DB CHECK-constraints (`ck_mainai_tasks_
+  completed_at_matches_terminal_status`, `ck_mainai_tasks_attempts_within_budget`) och
+  lease-fencingens skydd mot dubbla terminal-events verifierade direkt mot en riktig
+  brytningsförsök — höll, ingen fix behövdes (commit `b70986b`).
+- Static scan (ruff, hela repot): 44 pre-existing/out-of-scope fynd verifierade via
+  `git diff <merge-base> HEAD` (noll diff i berörda filer), 2 fynd i denna passs egna
+  berörda filer städade (commit `c071880`).
+- Performance/bounds-genomgång: `lookup_lessons()` saknar `LIMIT` (GIN-indexerad, ingen full
+  scan, men okapad) — dokumenterat som känd risk, inte fixat i detta pass (commit `4fa2e6c`).
+- Documentation-drift-genomgång: jämfört kod/migration 0032/modeller/API/UI/tests mot
+  `MAINAI_EXECUTION_LOOP_V0_1.md` och detta register — en verklig drift hittad (atomicitets-
+  fixen ovan var odokumenterad) och fixad (commit `0e308b5`).
+
+Full slutverifiering (exakt slut-head `0e308b5`): migrationsrundtripp ren, exakt en Alembic-
+head (0032), Python compile/import rent, ruff repo-brett (endast pre-existing/out-of-scope),
+frontend `tsc`/`eslint`/`next build` rent (inkl. `/admin/mainai-execution`-rutten), `npm audit`
+1 pre-existing fynd (noll diff mot bas, out of scope), full `pytest tests/backend tests/security
+tests/account` (1185 passed, 1 skipped by design, 1 pre-existing/unrelated concurrency-flake i
+`test_storage_local_fs.py` — noll diff, 3/3 grönt isolerat), hela V0.1-targeted-sviten (137
+passed), RLS cross-owner-isolation för samtliga sex nya tabeller (grönt), privilege-verifiering
+(grönt), sekretess-scan av hela PR-diffen (inga riktiga secrets, endast testfixture-placeholders
+som `TestFounderPassword123!`), stale-reference-scan (inga döda filreferenser i
+`MAINAI_EXECUTION_LOOP_V0_1.md`). CI på exakt denna head: samma pre-existing/unrelated flake
+(`test_library_import.py`, noll diff, 3/3 grönt isolerat) orsakade en initial röd
+"Backend — unit/integration tests"; `rerun_failed_jobs` kördes på samma head-SHA (ingen ny
+commit) för ett rent CI-resultat. 0 unresolved review threads.
+
 **Senast verifierat mot faktiskt git-/GitHub-läge:** 2026-08-09, mot GitHubs PR-API direkt
 (`mcp__github__pull_request_read`, `list_pull_requests`, inte memorerat). **PR #36 är MERGAD**
 (`claude/mainai-job-runtime-integration` → `claude/det-kommer-mer-879lcm`), merge-commit

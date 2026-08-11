@@ -43,9 +43,13 @@ from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
+from app.mainai_execution.approval import ApprovalRequiredError
+from app.mainai_execution.execution_job import run_task_execution_job
+from app.mainai_execution.executor import dispatch_ready_task
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
+from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
@@ -164,6 +168,9 @@ async def process_claimed_mainai_job(
             await run_message_sequence_backfill_job(
                 db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds
             )
+        elif job is not None and job.job_type == "task_execution":
+            record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
+            await run_task_execution_job(db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
         elif job is not None:
             logger.error("Worker %s: mainai_job %s has unknown job_type '%s'.", worker_id, job_id, job.job_type)
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
@@ -334,6 +341,40 @@ class Worker:
                     "Worker %s: återförsök av storage_deletion_task %s misslyckades.", self.worker_id, task_id
                 )
 
+    def _advance_mainai_execution_tasks(self, db: Session) -> None:
+        """MainAI Execution Loop V0.1's own auto-advance tick -- the piece that makes the
+        Goal/Plan/Task graph actually self-propelling instead of static. Both
+        app/mainai_execution/planner.py's create_plan() and app/mainai_execution/
+        execution_job.py's _finalize_task_outcome() call recompute_task_readiness()
+        (app/mainai_execution/graph.py), which only ever marks a dependency-free/now-
+        unblocked task `ready` in the database -- neither one dispatches it. This tick is what
+        actually does that: every poll cycle, scan every `ready` MainAITask across ALL owners
+        (same superuser/cross-owner reasoning as _requeue_blocked_jobs/
+        _reconcile_orphaned_documents/_retry_storage_deletion_tasks above) and call
+        dispatch_ready_task() for each -- the exact same approval-gated, checkpoint-aware
+        dispatch path a founder-triggered API call would use, never a parallel or privileged
+        shortcut.
+
+        An approval_required task with no grant yet correctly stays `ready`
+        (dispatch_ready_task() raises ApprovalRequiredError, caught here, no job created) --
+        an unattended tick can never silently satisfy an approval gate, it only advances what
+        is already actually clear to run. Every other exception attempting ONE task is caught,
+        logged, and never stops the rest of this batch or this poll cycle, exactly like
+        _retry_storage_deletion_tasks' own per-task isolation above."""
+        ready_tasks = db.query(MainAITask).filter(MainAITask.status == MainAITaskStatus.ready).all()
+        for task in ready_tasks:
+            goal = db.get(MainAIGoal, task.goal_id)
+            if goal is None:
+                continue
+            try:
+                dispatch_ready_task(db, task=task, goal=goal, dispatched_by="mainai_worker_auto_advance")
+                db.commit()
+            except ApprovalRequiredError:
+                db.rollback()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to auto-advance MainAITask %s.", self.worker_id, task.id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -349,6 +390,7 @@ class Worker:
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             self._retry_storage_deletion_tasks(claim_db)
+            self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
