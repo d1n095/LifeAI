@@ -195,7 +195,9 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     }
 
 
-async def _handle_repo_edit(db: Session, task: MainAITask, *, job: MainAIJob, worker_id: str) -> dict:
+async def _handle_repo_edit(
+    db: Session, task: MainAITask, *, job: MainAIJob, worker_id: str, lease_generation: int, lease_seconds: int
+) -> dict:
     """Hardening-pass finding (real production-scope gap, not a security bug per se): V0.1/
     early V0.2 always wrote a repo_edit's real content to the single shared backend checkout
     and pushed exclusively via the GitHub Git Data API -- the per-task worktree isolation
@@ -215,7 +217,23 @@ async def _handle_repo_edit(db: Session, task: MainAITask, *, job: MainAIJob, wo
     attempt that recovery_salvage.py rebound here, that progress is reused as-is; the AI is
     never called a second time for work that already, genuinely exists on disk. Ownership
     mismatch/ambiguity for an existing worktree row fails closed (TaskExecutionError), per the
-    founder's explicit instruction -- never silently treated as "nothing here" and overwritten."""
+    founder's explicit instruction -- never silently treated as "nothing here" and overwritten.
+
+    Durability finding (this pass, found by driving a REAL crash through this exact function
+    rather than constructing recovery state by hand): every fact this function produces that
+    recovery_classifier.py depends on must be committed to durable storage BEFORE the next,
+    riskier step runs. A genuine process crash (connection dropped, not a caught exception)
+    rolls back whatever this db session had only flushed, not committed -- so without these
+    explicit commits, LOCAL_UNCOMMITTED_WORK/LOCAL_COMMITTED_NOT_PUSHED would still be
+    unreachable from a real crash even with worktree.py fully wired in: a crashed worker's
+    worktree ROW itself (and, separately, `worktree.current_commit`, which
+    recovery_classifier.py reads directly from this column rather than re-deriving it live --
+    see its own docstring) would simply never have existed as far as recovery is concerned,
+    even though real git state sits on disk. Each commit point below is preceded by the exact
+    same lease-renewal check every other real side effect in this file already uses, for the
+    exact same reason: a stale worker must never durably write anything, including "just" a
+    worktree row -- JobLeaseLostError propagates out of this function uncaught so the one call
+    site in run_task_execution_job() can stop exactly like every other fenced-out write here."""
     settings = get_settings()
     if not settings.github_write_enabled:
         return await _propose_repo_edit(db, task)
@@ -234,9 +252,24 @@ async def _handle_repo_edit(db: Session, task: MainAITask, *, job: MainAIJob, wo
                 f"Worktree ownership verification failed for job {job.id} -- refusing to trust unverifiable local state (fail closed)."
             )
         status = worktree_git_status(existing_worktree)
-        if status["has_uncommitted_changes"] or existing_worktree.current_commit:
+        if status["has_uncommitted_changes"]:
             logger.info(
-                "task_execution job %s (task %s): continuing salvaged worktree progress -- no new AI call.", job.id, task.id
+                "task_execution job %s (task %s): committing salvaged uncommitted worktree progress -- no new AI call.", job.id, task.id
+            )
+            renew_mainai_job_lease(db, job.id, worker_id, lease_generation, lease_seconds)
+            commit_message = f"MainAI: {task.description[:180]}"
+            commit_worktree_changes(db, existing_worktree, message=commit_message)
+            db.commit()
+            return {
+                "worktree_id": str(existing_worktree.id),
+                "worktree_path": existing_worktree.path,
+                "branch": existing_worktree.branch,
+                "resumed_from_worktree": True,
+                "commit_message": commit_message,
+            }
+        if existing_worktree.current_commit:
+            logger.info(
+                "task_execution job %s (task %s): reusing already-committed salvaged worktree progress -- no new AI call.", job.id, task.id
             )
             return {
                 "worktree_id": str(existing_worktree.id),
@@ -248,6 +281,8 @@ async def _handle_repo_edit(db: Session, task: MainAITask, *, job: MainAIJob, wo
         worktree = existing_worktree
     else:
         worktree = await create_task_worktree(db, task=task, job=job, lease_generation=job.lease_generation, executor_id=worker_id)
+        renew_mainai_job_lease(db, job.id, worker_id, lease_generation, lease_seconds)
+        db.commit()
 
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
     result, _attempted = await chat_with_fallback(db, messages)
@@ -265,7 +300,9 @@ async def _handle_repo_edit(db: Session, task: MainAITask, *, job: MainAIJob, wo
         abs_path.write_text(file["content"])
 
     commit_message = parsed.get("commit_message", task.description[:200])
+    renew_mainai_job_lease(db, job.id, worker_id, lease_generation, lease_seconds)
     commit_worktree_changes(db, worktree, message=commit_message)
+    db.commit()
 
     return {
         "worktree_id": str(worktree.id),
@@ -449,7 +486,20 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             if task.task_type == "read_only_audit":
                 work_result = await _handle_read_only_audit(db, task)
             elif task.task_type == "repo_edit":
-                work_result = await _handle_repo_edit(db, task, job=job, worker_id=worker_id)
+                # _handle_repo_edit() makes its own internal, lease-checked commits (worktree
+                # creation, real local git commits) since those facts must be durable before
+                # this function's own AI call / longer-running steps run -- see its docstring.
+                # A lease lost during one of those internal steps propagates JobLeaseLostError
+                # here uncaught, handled exactly like every other lease-checked commit point in
+                # this function: log, roll back, stop silently (another worker now owns this).
+                try:
+                    work_result = await _handle_repo_edit(
+                        db, task, job=job, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds
+                    )
+                except JobLeaseLostError:
+                    logger.warning("task_execution job %s: lease lost during repo_edit worktree operations.", job_id)
+                    db.rollback()
+                    return
             elif task.task_type == "run_tests":
                 work_result = _handle_run_tests(task)
             elif task.task_type == "open_pr":

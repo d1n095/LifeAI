@@ -1186,7 +1186,7 @@ def test_record_engineering_lesson_for_the_repo_edit_absolute_path_write_fix(db_
 
 @pytest.mark.asyncio
 async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exists_from_a_prior_uncheckpointed_push(
-    db_session, owner_id, monkeypatch, tmp_path
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
 ):
     """Crash matrix finding H (ORIGINAL hardening pass) still applies, but the mechanism
     changed with the live worktree-integration hardening pass: _finalize_repo_edit() now pushes
@@ -1240,7 +1240,11 @@ async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exis
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
-    work_result = await _handle_repo_edit(db_session, task, job=job, worker_id="worker-1")
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    db_session.refresh(job)
+
+    work_result = await _handle_repo_edit(db_session, task, job=job, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
     db_session.commit()
     assert work_result.get("worktree_id") is not None
 
