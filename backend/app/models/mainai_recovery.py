@@ -154,7 +154,7 @@ class MainAIRecoveryRecord(Base):
     # Structured, durable evidence snapshot (checkpoint/worktree/branch/commit/PR/CI state) --
     # never a summary reconstructed from memory later. See recovery_inspector.py.
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
-    salvage_action: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    salvage_action: Mapped[str | None] = mapped_column(String(128), nullable=True)
     takeover_executor: Mapped[str | None] = mapped_column(String(128), nullable=True)
     takeover_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("mainai_jobs.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[MainAIRecoveryStatus] = mapped_column(Enum(MainAIRecoveryStatus), default=MainAIRecoveryStatus.detected)

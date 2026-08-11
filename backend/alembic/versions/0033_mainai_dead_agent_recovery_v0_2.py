@@ -147,7 +147,7 @@ def upgrade() -> None:
             detected_at timestamp without time zone NOT NULL,
             classification varchar(32),
             evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
-            salvage_action varchar(64),
+            salvage_action varchar(128),
             takeover_executor varchar(128),
             takeover_job_id uuid REFERENCES mainai_jobs(id) ON DELETE SET NULL,
             status varchar(24) NOT NULL DEFAULT 'detected',

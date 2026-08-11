@@ -313,6 +313,34 @@ async def push_worktree_branch(worktree: MainAITaskWorktree) -> str:
     return remote_sha
 
 
+def rebind_worktree_to_job(db: Session, worktree: MainAITaskWorktree, *, new_job_id: uuid.UUID, new_lease_generation: int) -> MainAITaskWorktree:
+    """Durable ownership transfer for a salvage/takeover: the worktree's DB row and its
+    on-disk marker are BOTH rewritten to point at the new attempt's job_id, with a freshly
+    minted marker_token (never reused -- a stale marker_token surviving a rebind would defeat
+    the whole point of binding trust to a specific attempt). Requires the CURRENT ownership to
+    already verify -- rebinding something that doesn't provably belong to the OLD job in the
+    first place would just be forging a NEW false claim of ownership, not a genuine transfer."""
+    _require_ownership(worktree)
+    path = Path(worktree.path)
+
+    new_marker_token = secrets.token_hex(16)
+    marker = {
+        "task_id": str(worktree.task_id),
+        "job_id": str(new_job_id),
+        "marker_token": new_marker_token,
+        "lease_generation": new_lease_generation,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    _marker_path(path).write_text(json.dumps(marker), encoding="utf-8")
+
+    worktree.job_id = new_job_id
+    worktree.lease_generation = new_lease_generation
+    worktree.marker_token = new_marker_token
+    db.add(worktree)
+    db.flush()
+    return worktree
+
+
 def release_worktree(db: Session, worktree: MainAITaskWorktree, *, status: MainAITaskWorktreeStatus) -> None:
     """Ends a worktree's active lifecycle. The local directory is deliberately removed
     (ephemeral by design, matching the container's own non-persistent filesystem) -- the
