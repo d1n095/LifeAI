@@ -299,6 +299,81 @@ async def test_takeover_refuses_a_non_auto_salvageable_classification(db_session
         await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
 
 
+# ---------------------------------------------------------------- approval gate
+
+
+@pytest.mark.asyncio
+async def test_takeover_refuses_pushed_no_pr_without_founder_approval(db_session, superuser_db, owner_id):
+    """V0.2 approval model: PUSHED_NO_PR means the dead attempt's code is already visible on
+    GitHub -- a real external side effect -- so takeover must not proceed autonomously without
+    an explicit founder approval, even though the classification is itself auto-salvageable."""
+    from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
+    from app.models.mainai_recovery import RecoveryClassification as RC
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job = db_session.get(MainAIJob, task.mainai_job_id)
+    record = await _through_classification(db_session, task, dead_job)
+
+    # Force the classification directly (same established pattern as
+    # test_takeover_refuses_a_non_auto_salvageable_classification above) to prove the
+    # takeover-side approval guard independent of the inspector/classifier's own real-git
+    # PUSHED_NO_PR detection, which is already covered by test_mainai_execution_recovery.py.
+    record.classification = RC.pushed_no_pr
+    db_session.add(record)
+    db_session.commit()
+
+    with pytest.raises(RecoveryApprovalRequiredError):
+        await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+
+    # Refused BEFORE any mutation -- the dead job's task must still be untouched (running),
+    # never reset to ready, and no new job dispatched.
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.running
+    assert task.mainai_job_id == dead_job.id
+
+
+@pytest.mark.asyncio
+async def test_takeover_refuses_pr_exists_without_founder_approval(db_session, superuser_db, owner_id):
+    from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
+    from app.models.mainai_recovery import RecoveryClassification as RC
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job = db_session.get(MainAIJob, task.mainai_job_id)
+    record = await _through_classification(db_session, task, dead_job)
+    record.classification = RC.pr_exists
+    db_session.add(record)
+    db_session.commit()
+
+    with pytest.raises(RecoveryApprovalRequiredError):
+        await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+
+
+@pytest.mark.asyncio
+async def test_takeover_proceeds_for_pushed_no_pr_once_founder_approval_is_granted(db_session, superuser_db, owner_id):
+    from app.mainai_execution.recovery_approval import grant_recovery_approval
+    from app.models.mainai_recovery import RecoveryClassification as RC
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job_id = task.mainai_job_id
+    dead_job = db_session.get(MainAIJob, dead_job_id)
+    record = await _through_classification(db_session, task, dead_job)
+    record.classification = RC.pushed_no_pr
+    db_session.add(record)
+    db_session.commit()
+
+    grant_recovery_approval(db_session, record=record, approved_by="founder@lifeos.local")
+    db_session.commit()
+
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    assert record.status == MainAIRecoveryStatus.completed
+    assert new_job.id != dead_job_id
+    superuser_db.expire_all()
+    dead_row = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :id"), {"id": str(dead_job_id)}).one()
+    assert dead_row[0] == "superseded"
+
+
 def test_mark_job_superseded_refuses_a_job_that_is_not_genuinely_dead(db_session, superuser_db, owner_id):
     goal = _goal(db_session, owner_id)
     planner.create_plan(

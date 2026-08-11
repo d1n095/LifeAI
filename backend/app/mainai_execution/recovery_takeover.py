@@ -1,6 +1,12 @@
 """V0.2 recovery pipeline stage 5: takeover — the ONE place old and new executors' authority
 formally switches over. Orchestrates, in this exact order:
 
+  0. require_recovery_approval() (recovery_approval.py) — the approval gate, checked BEFORE
+     any mutation, exactly like dispatch_ready_task()'s own require_task_approval() check.
+     Distinct decision from that task-level gate: not "is this task's content allowed to run"
+     but "is it safe to let this autonomous pass take over a dead job without a founder
+     looking at it first". Only PUSHED_NO_PR/PR_EXISTS require it by default (the dead
+     attempt's code is already visible on GitHub) — see that module's own docstring.
   1. reset_task_for_takeover() (executor.py) — the dead job's task, still stuck at `running`,
      moves back to `ready` WITHOUT fabricating a pass/fail verdict (a dead job proves nothing
      about whether the work would have succeeded).
@@ -34,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from app.jobs.mainai_job_lease import JobNotSupersedableError, mark_job_superseded
 from app.mainai_execution import executor
+from app.mainai_execution.recovery_approval import require_recovery_approval
 from app.mainai_execution.recovery_inspector import record_recovery_event
 from app.mainai_execution.recovery_salvage import salvage_recovery_record
 from app.models.mainai_execution import MainAIGoal, MainAITask
@@ -59,6 +66,12 @@ async def execute_takeover(
         raise TakeoverError(
             f"recovery record {record.id} classification {record.classification} is not auto-salvageable -- refusing takeover."
         )
+    # V0.2 approval gate (recovery_approval.py): PUSHED_NO_PR/PR_EXISTS mean the dead
+    # attempt's code is already visible on GitHub -- a real external side effect -- so
+    # `standard_recovery` requires an explicit founder approval before takeover proceeds,
+    # checked here BEFORE any mutation, mirroring dispatch_ready_task()'s own
+    # require_task_approval() call at the very top of its function.
+    require_recovery_approval(db, record=record)
 
     dead_job_id = record.job_id
 
