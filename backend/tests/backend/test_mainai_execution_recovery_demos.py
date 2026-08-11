@@ -212,15 +212,63 @@ async def test_demo_1_dead_before_any_work_recovers_via_nothing_done(db_session,
 
 
 @pytest.mark.asyncio
-async def test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work(db_session, superuser_db, owner_id, patched_github):
-    """The worker created its isolated worktree and wrote a real file, then died before ever
-    committing. LOCAL_UNCOMMITTED_WORK -- salvage rebinds the SAME worktree (with its real,
-    still-uncommitted content) to the new attempt rather than abandoning it."""
+async def test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work(
+    db_session, superuser_db, owner_id, monkeypatch, patched_github
+):
+    """REQUIRED demo, hardening-pass Round 2: unlike the ORIGINAL version of this demo (which
+    called worktree.py's create_task_worktree()/wrote a file directly and never ran
+    run_task_execution_job() at all), this crash is driven through the REAL, unmodified
+    execution_job.py repo_edit path -- the exact same reasoning test_mainai_execution_demos.py's
+    own Demo 3 already documents for why this is the most faithful simulation of a genuine
+    process crash available in a unit test. Only commit_worktree_changes() itself is made to
+    raise (once), so everything up to and including the real AI call and the real file write
+    to the real worktree happens for real; the worktree ROW's own durability (Round 2 (2/N)'s
+    fix) is what makes LOCAL_UNCOMMITTED_WORK reachable from this crash point at all."""
+    from app.mainai_execution import execution_job
+
+    call_count = {"n": 0}
+
+    async def _counting_chat(self, messages, model, **kwargs):
+        call_count["n"] += 1
+        return ChatResult(
+            content='{"files": [{"path": "draft.txt", "content": "uncommitted real edit\\n"}], "commit_message": "add draft.txt"}',
+            provider="openai",
+            model=model,
+            raw_usage={},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _counting_chat)
+
+    real_commit_worktree_changes = execution_job.commit_worktree_changes
+    commit_calls = {"n": 0}
+
+    def _commit_that_crashes_on_first_call(db, worktree, *, message):
+        commit_calls["n"] += 1
+        if commit_calls["n"] == 1:
+            raise RuntimeError("simulated worker crash after local edit, before local commit")
+        return real_commit_worktree_changes(db, worktree, message=message)
+
+    monkeypatch.setattr(execution_job, "commit_worktree_changes", _commit_that_crashes_on_first_call)
+
     task, goal, dead_job = _dispatch_and_claim(db_session, superuser_db, owner_id, task_type="repo_edit")
-    wt = await create_task_worktree(db_session, task=task, job=dead_job, lease_generation=dead_job.lease_generation, executor_id="dead-worker")
-    db_session.commit()
-    (Path(wt.path) / "draft.txt").write_text("uncommitted real edit\n", encoding="utf-8")
-    _kill_lease(superuser_db, db_session, owner_id, dead_job.id)
+    dead_job_id = dead_job.id
+
+    with pytest.raises(RuntimeError, match="simulated worker crash after local edit"):
+        await run_task_execution_job(
+            db_session, dead_job_id, owner_id, worker_id="dead-worker", lease_generation=dead_job.lease_generation, lease_seconds=120
+        )
+    db_session.rollback()  # nothing further ever gets committed after a real crash (matches the established idiom elsewhere in this suite) -- releases the row lock a real dropped connection would also release
+
+    # The real production evidence a genuine crash leaves behind: a durable worktree row
+    # (committed by _handle_repo_edit() BEFORE the AI call, per the Round 2 durability fix),
+    # with the AI's real file write sitting genuinely uncommitted on disk.
+    from app.models.mainai_recovery import MainAITaskWorktree
+
+    dead_worktree = db_session.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == dead_job_id).one()
+    assert (Path(dead_worktree.path) / "draft.txt").read_text(encoding="utf-8") == "uncommitted real edit\n"
+    assert call_count["n"] == 1
+
+    _kill_lease(superuser_db, db_session, owner_id, dead_job_id)
 
     record = await _through_classification(db_session, task, dead_job)
     assert record.classification == RecoveryClassification.local_uncommitted_work
@@ -228,30 +276,87 @@ async def test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work(
     record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
     db_session.commit()
 
-    from app.models.mainai_recovery import MainAITaskWorktree
-
     rebound = db_session.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == new_job.id).one()
-    assert rebound.id == wt.id
+    assert rebound.id == dead_worktree.id
     assert (Path(rebound.path) / "draft.txt").read_text(encoding="utf-8") == "uncommitted real edit\n"
-    assert db_session.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == dead_job.id).one_or_none() is None
+    assert db_session.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == dead_job_id).one_or_none() is None
+
+    # The resumed attempt runs through the real, unmodified poll-loop entry point too -- the
+    # salvaged worktree's uncommitted content is committed for real and pushed, with NO second
+    # AI call (dedup requirement: the real edit already existed, redoing it would be wasted,
+    # possibly divergent, AI work).
+    generation = _claim_and_run(db_session, superuser_db, owner_id, new_job.id)
+    await run_task_execution_job(db_session, new_job.id, owner_id, worker_id="recovery-worker-2", lease_generation=generation, lease_seconds=120)
+
+    assert call_count["n"] == 1  # never called a second time
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.completed
+    remote_tip_content = subprocess.run(
+        ["git", "-C", str(patched_github["remote"]), "show", f"{rebound.branch}:draft.txt"], capture_output=True, text=True, check=True
+    ).stdout
+    assert remote_tip_content == "uncommitted real edit\n"  # the salvaged edit, genuinely pushed
 
 
 # ========================================================== Demo 3: dead AFTER local commit
 
 
 @pytest.mark.asyncio
-async def test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_pushed(db_session, superuser_db, owner_id, patched_github):
-    """The worker committed real content locally and then died before pushing.
-    LOCAL_COMMITTED_NOT_PUSHED -- the real local commit (a genuine git object, verifiable via
-    `git cat-file`) survives the takeover under the rebound worktree."""
+async def test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_pushed(
+    db_session, superuser_db, owner_id, monkeypatch, patched_github
+):
+    """REQUIRED demo, hardening-pass Round 2: same reasoning as Demo 2 above -- driven through
+    the REAL execution_job.py repo_edit path, not a hand-constructed worktree.py call. Only
+    push_worktree_branch() itself is made to raise (once), so the real AI call, real file
+    write, AND real local `git commit` all happen for real before the simulated crash; the
+    durably-committed `worktree.current_commit` DB column (Round 2 (2/N)'s fix -- the exact
+    fact recovery_classifier.py's LOCAL_COMMITTED_NOT_PUSHED branch reads) is what makes this
+    classification reachable from a genuine crash at this exact point."""
+    from app.mainai_execution import execution_job
+
+    call_count = {"n": 0}
+
+    async def _counting_chat(self, messages, model, **kwargs):
+        call_count["n"] += 1
+        return ChatResult(
+            content='{"files": [{"path": "committed.txt", "content": "committed real change\\n"}], "commit_message": "add committed.txt"}',
+            provider="openai",
+            model=model,
+            raw_usage={},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _counting_chat)
+
+    real_push_worktree_branch = execution_job.push_worktree_branch
+    push_calls = {"n": 0}
+
+    async def _push_that_crashes_on_first_call(worktree):
+        push_calls["n"] += 1
+        if push_calls["n"] == 1:
+            raise RuntimeError("simulated worker crash after local commit, before push")
+        return await real_push_worktree_branch(worktree)
+
+    monkeypatch.setattr(execution_job, "push_worktree_branch", _push_that_crashes_on_first_call)
+
     task, goal, dead_job = _dispatch_and_claim(db_session, superuser_db, owner_id, task_type="repo_edit")
-    wt = await create_task_worktree(db_session, task=task, job=dead_job, lease_generation=dead_job.lease_generation, executor_id="dead-worker")
-    db_session.commit()
-    (Path(wt.path) / "committed.txt").write_text("committed real change\n", encoding="utf-8")
-    local_sha = commit_worktree_changes(db_session, wt, message="committed.txt")
-    db_session.commit()
-    assert local_sha is not None
-    _kill_lease(superuser_db, db_session, owner_id, dead_job.id)
+    dead_job_id = dead_job.id
+
+    with pytest.raises(RuntimeError, match="simulated worker crash after local commit"):
+        await run_task_execution_job(
+            db_session, dead_job_id, owner_id, worker_id="dead-worker", lease_generation=dead_job.lease_generation, lease_seconds=120
+        )
+    db_session.rollback()  # nothing further ever gets committed after a real crash -- releases the row lock a real dropped connection would also release
+
+    from app.models.mainai_recovery import MainAITaskWorktree
+
+    dead_worktree = db_session.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == dead_job_id).one()
+    local_sha = subprocess.run(
+        ["git", "-C", dead_worktree.path, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert dead_worktree.current_commit == local_sha  # durably recorded BEFORE the crash
+    assert call_count["n"] == 1
+    assert push_calls["n"] == 1
+
+    _kill_lease(superuser_db, db_session, owner_id, dead_job_id)
 
     record = await _through_classification(db_session, task, dead_job)
     assert record.classification == RecoveryClassification.local_committed_not_pushed
@@ -259,11 +364,21 @@ async def test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_p
     record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
     db_session.commit()
 
-    from app.models.mainai_recovery import MainAITaskWorktree
-
     rebound = db_session.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == new_job.id).one()
     current_sha = subprocess.run(["git", "-C", rebound.path, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     assert current_sha == local_sha  # the real commit object, unchanged
+
+    generation = _claim_and_run(db_session, superuser_db, owner_id, new_job.id)
+    await run_task_execution_job(db_session, new_job.id, owner_id, worker_id="recovery-worker-2", lease_generation=generation, lease_seconds=120)
+
+    assert call_count["n"] == 1  # never re-called the AI for already-committed work
+    assert push_calls["n"] == 2  # first call crashed; the resumed attempt's real push succeeded
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.completed
+    remote_tip = subprocess.run(
+        ["git", "-C", str(patched_github["remote"]), "rev-parse", rebound.branch], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert remote_tip == local_sha  # the exact same real commit, genuinely pushed -- not a new one
 
 
 # =================================================================== Demo 4: dead AFTER push
