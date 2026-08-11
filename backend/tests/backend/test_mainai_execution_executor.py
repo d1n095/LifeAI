@@ -32,7 +32,6 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.config import get_settings
-from app.integrations.github_client import GitHubClientError
 from app.jobs import service
 from app.jobs.mainai_job_lease import claim_next_mainai_job
 from app.mainai_execution import executor, lessons, planner
