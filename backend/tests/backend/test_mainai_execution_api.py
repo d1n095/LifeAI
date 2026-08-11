@@ -366,6 +366,44 @@ def test_api_a_founder_cannot_see_another_owners_goal(client, db_session, make_v
     assert res.status_code == 404
 
 
+def test_api_a_founder_cannot_list_another_owners_goal_plans(client, db_session, make_verified_user):
+    """V0.3: `GET /goals/{id}/plans` uses the SAME `_get_goal_or_404` gate as every other
+    goal endpoint above, but is spot-checked directly here (per task #398's own scope) rather
+    than only inferred from the shared-helper argument -- a real other-owner goal with a real
+    plan must still 404 through this specific new endpoint."""
+    csrf = _login(client)
+    other, _ = make_verified_user()
+    _set_rls_user(db_session, other.id)
+    other_goal = planner.create_goal(db_session, owner_id=other.id, title="not yours", original_instruction="x", created_by="test")
+    planner.create_plan(db_session, goal=other_goal, rationale="r", tasks=[PlannedTaskSpec(description="x", task_type="read_only_audit")], created_by="test")
+    db_session.commit()
+
+    res = client.get(f"/api/mainai/execution/goals/{other_goal.id}/plans", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 404
+
+
+def test_api_a_founder_cannot_list_another_owners_task_waits(client, db_session, make_verified_user):
+    """V0.3: `GET /tasks/{id}/waits` -- same reasoning as the plans test above, but for the
+    other new V0.3 endpoint and a real durable wait row, not just an empty task."""
+    from app.mainai_execution import executor
+    from app.mainai_execution.ci_wait import start_ci_wait
+
+    csrf = _login(client)
+    other, _ = make_verified_user()
+    _set_rls_user(db_session, other.id)
+    other_goal = planner.create_goal(db_session, owner_id=other.id, title="not yours", original_instruction="x", created_by="test")
+    planner.create_plan(db_session, goal=other_goal, rationale="r", tasks=[PlannedTaskSpec(description="x", task_type="open_pr")], created_by="test")
+    db_session.commit()
+    other_task = db_session.query(MainAITask).filter(MainAITask.goal_id == other_goal.id).one()
+    job = executor.dispatch_ready_task(db_session, task=other_task, goal=other_goal, dispatched_by="test")
+    db_session.commit()
+    start_ci_wait(db_session, task=other_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+
+    res = client.get(f"/api/mainai/execution/tasks/{other_task.id}/waits", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 404
+
+
 def test_cross_owner_rls_isolation_holds_for_every_new_v0_1_table_through_the_real_runtime_role(db_session, superuser_db, make_verified_user):
     """Hardening pass, RLS/cross-owner attack section: `db_session` is bound to the real
     restricted `mainai_app` runtime role (see conftest.py's own fixture docstring), never the

@@ -465,3 +465,83 @@ async def test_resume_waiting_ci_task_is_a_defensive_no_op_if_the_task_already_l
 
     task = db_session.get(MainAITask, task.id)
     assert task.status == MainAITaskStatus.cancelled
+
+
+# ---------------------------------------------------------------- E. security: concurrent double-finalize
+
+
+def test_resume_waiting_ci_task_concurrent_same_wait_never_double_finalizes(db_session, superuser_db, owner_id, monkeypatch):
+    """Security/correctness attack pass finding: app/worker.py's `_poll_mainai_task_waits`
+    picks up due waits with an unlocked `status == pending` query, no lease/claim of its own
+    -- two real worker processes could both pick up the SAME due wait and both call
+    resume_waiting_ci_task() concurrently. Before this fix, that function read the task with a
+    plain db.get() (no row lock), so both callers could pass the `waiting_ci` check and both
+    call _finalize_task_outcome() on the same task -- a double-dispatch-shaped race (double
+    `completed`/`verification_passed` events, or a double attempts++ / next_retry_at
+    overwrite). Fixed by having resume_waiting_ci_task() lock the task row first
+    (_lock_task()), same primitive as every other task-status transition in this codebase.
+    Real two-thread, two-session pattern, same as
+    test_dispatch_ready_task_concurrent_same_task_never_double_dispatches
+    (test_mainai_execution_executor.py)."""
+    import asyncio
+    import threading
+
+    from app.db import SessionLocal
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "github_token", "fake-token-never-real")
+    monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="open_pr")
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+    task_id = task.id
+    wait_id = wait.id
+
+    async def _fake_list_check_runs(self, ref):
+        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+
+    monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+    monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
+
+    errors: list[str] = []
+    barrier = threading.Barrier(2, timeout=5)
+
+    def _worker():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            w = session.get(MainAITaskWait, wait_id)
+            barrier.wait()
+            asyncio.run(resume_waiting_ci_task(session, w))
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below, not swallowed
+            session.rollback()
+            errors.append(repr(exc))
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=_worker), threading.Thread(target=_worker)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"both callers should complete cleanly (the loser is a no-op, not an error): {errors}"
+
+    final_task = superuser_db.get(MainAITask, task_id)
+    assert final_task.status == MainAITaskStatus.completed
+    assert final_task.attempts == 1, "attempts must not be double-touched by the race"
+
+    completed_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'completed'"), {"t": str(task_id)}
+    ).scalar()
+    assert completed_events == 1, "exactly one 'completed' event, not one per racing caller"
+
+    wait_satisfied_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'wait_satisfied'"), {"t": str(task_id)}
+    ).scalar()
+    assert wait_satisfied_events == 1, "exactly one 'wait_satisfied' event, not one per racing caller"

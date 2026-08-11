@@ -45,7 +45,7 @@ from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
-from app.mainai_execution.executor import task_for_job
+from app.mainai_execution.executor import _lock_task, task_for_job
 from app.mainai_execution.graph import recompute_task_readiness
 from app.mainai_execution.verify import (
     VerificationResult,
@@ -823,9 +823,20 @@ async def resume_waiting_ci_task(db: Session, wait: MainAITaskWait) -> None:
 
     Defensive no-op if the task is no longer `waiting_ci` (e.g. a cooperative cancel already
     resolved it, see app/mainai_execution/ci_wait.py's cancel_ci_wait()) -- this function is
-    never the only path that can move a task off `waiting_ci`."""
-    task = db.get(MainAITask, wait.task_id)
-    if task is None or task.status != MainAITaskStatus.waiting_ci:
+    never the only path that can move a task off `waiting_ci`.
+
+    Locks the task row FIRST (`_lock_task()`, the same primitive dispatch_ready_task()/
+    retry_task()/cancel_task() already use for every other task-status transition in this
+    codebase) before checking status -- two concurrent worker processes both polling the SAME
+    due wait (app/worker.py's `_poll_mainai_task_waits` has no row-level claim of its own, only
+    a `status == pending` filter) could otherwise both read `waiting_ci`, both poll GitHub, and
+    both call `_finalize_task_outcome()` on the same task -- a double-dispatch-shaped race, not
+    just a wasted API call, since a second finalize on an already-`completed`/`retryable_failed`
+    task would double-increment `attempts` or double-schedule `next_retry_at`. The loser blocks
+    on the lock, re-reads the FRESH row after the winner commits, and finds `task.status` no
+    longer `waiting_ci` -- a clean no-op, same shape as every other lock-then-recheck guard."""
+    task = _lock_task(db, wait.task_id)
+    if task.status != MainAITaskStatus.waiting_ci:
         return
 
     wait = await poll_ci_wait(db, wait)
