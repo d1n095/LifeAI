@@ -385,7 +385,24 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="work_result", data={"work_result": work_result})
             db.commit()
 
-        if task.task_type == "run_tests":
+        # V0.2 duplicate-side-effect finding: verification was never checkpointed at all --
+        # even when work_result itself resumed from a durable checkpoint above (recovery's own
+        # salvaged evidence, or a plain crash-after-work_result-before-verification resume),
+        # this function still called verify_task() again from scratch every time, silently
+        # re-running whatever real subprocess side effects the task's verification_plan has
+        # (targeted_tests -> a real `python -m pytest` invocation). A "verification" checkpoint
+        # is only ever recorded for a PASS (see below) -- a durably recorded FAILURE is
+        # deliberately never reused, since retrying is supposed to give a fresh attempt a real
+        # chance to pass, not have it fail from a stale, possibly now-inapplicable verdict.
+        verification_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=job_id, step="verification")
+        if verification_checkpoint is not None:
+            logger.info("task_execution job %s (task %s): resuming verification from durable checkpoint.", job_id, task.id)
+            evidence = verification_checkpoint.executor_state["verification"]
+            verification = VerificationResult(
+                passed=evidence["passed"],
+                steps=[VerificationStepResult(kind=s["kind"], passed=s["passed"], detail=s["detail"]) for s in evidence["steps"]],
+            )
+        elif task.task_type == "run_tests":
             # run_tests' own primary work IS its verification. Re-derive the VerificationResult
             # directly from the real pytest outcomes already captured in work_result rather
             # than also calling verify_task() -- which would independently re-run the exact
@@ -396,6 +413,16 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             verification = VerificationResult(passed=all(s.passed for s in steps), steps=steps)
         else:
             verification = verify_task(task, cwd=str(_backend_root()))
+
+        if verification_checkpoint is None and verification.passed:
+            try:
+                renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
+            except JobLeaseLostError:
+                logger.warning("task_execution job %s: lease lost before verification checkpoint commit.", job_id)
+                db.rollback()
+                return
+            record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="verification", data={"verification": verification.evidence()})
+            db.commit()
 
         if verification.passed and task.task_type == "repo_edit":
             # Same resume discipline for the GitHub push itself -- once github_write_enabled is

@@ -15,7 +15,7 @@ from app.mainai_execution.execution_job import run_task_execution_job
 from app.mainai_execution.recovery_classifier import classify_recovery_record
 from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
 from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
-from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
+from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.mainai_recovery import MainAIRecoveryStatus, RecoveryClassification
 from app.providers.base import ChatResult
@@ -162,6 +162,108 @@ async def test_takeover_salvages_checkpoint_so_the_new_job_never_recomputes_it(d
     await run_task_execution_job(db_session, new_job.id, owner_id, worker_id="recovery-worker-2", lease_generation=generation, lease_seconds=120)
 
     assert call_counter[0] == 0  # never recomputed
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_takeover_salvages_verification_so_the_new_job_never_reverifies(db_session, superuser_db, owner_id, monkeypatch):
+    """V0.2 duplicate-side-effect prevention (verification): a dead job that already durably
+    recorded BOTH a work_result checkpoint AND a passed verification checkpoint (VERIFIED_WORK)
+    must have the new attempt reuse the verification verdict, never call verify_task() again --
+    that would silently re-run the task's real verification_plan side effects (e.g. a real
+    `python -m pytest` subprocess for a targeted_tests step) a second time against content that
+    already, provably, passed."""
+    import app.mainai_execution.execution_job as execution_job_module
+
+    call_counter = [0]
+    real_verify_task = execution_job_module.verify_task
+
+    def _counting_verify_task(*args, **kwargs):
+        call_counter[0] += 1
+        return real_verify_task(*args, **kwargs)
+
+    monkeypatch.setattr(execution_job_module, "verify_task", _counting_verify_task)
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job_id = task.mainai_job_id
+    dead_job = db_session.get(MainAIJob, dead_job_id)
+
+    # The dead worker DID finish its real work AND its real verification before dying -- both
+    # are durably recorded for the dead job, nothing else.
+    record_checkpoint(db_session, task=task, goal=goal, job_id=dead_job_id, step="work_result", data={"work_result": {"summary": "already done"}})
+    record_checkpoint(
+        db_session, task=task, goal=goal, job_id=dead_job_id, step="verification",
+        data={"verification": {"passed": True, "steps": []}},
+    )
+    db_session.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.verification_passed, detail={}))
+    db_session.commit()
+
+    record = await _through_classification(db_session, task, dead_job)
+    assert record.classification == RecoveryClassification.verified_work
+
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    copied = latest_checkpoint_for_step(db_session, task_id=task.id, job_id=new_job.id, step="verification")
+    assert copied is not None
+    assert copied.executor_state["verification"] == {"passed": True, "steps": []}
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "recovery-worker-2", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, new_job.id, owner_id, worker_id="recovery-worker-2", lease_generation=generation, lease_seconds=120)
+
+    assert call_counter[0] == 0  # verify_task() never called again for this task
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_takeover_salvages_open_pr_work_result_so_the_new_job_never_recreates_the_pr(db_session, superuser_db, owner_id, monkeypatch):
+    """V0.2 duplicate-side-effect prevention (PR): an `open_pr` task's real work IS its
+    checkpointed work_result (the actual `pull_request_number`/`pull_request_url` -- see
+    execution_job.py's `_handle_open_pr()`). A dead `open_pr` job that already durably recorded
+    that checkpoint must have the new attempt reuse it verbatim, never call
+    GitHubClient.create_pull_request() again -- GitHub itself would reject a genuine second
+    call with a 422 (only one open PR per head/base pair), but the point here is that it must
+    never even be ATTEMPTED for work that's already durably done."""
+    from app.integrations.github_client import GitHubClient
+
+    call_counter = [0]
+
+    async def _counting_create_pr(self, *, title, body, head, base):
+        call_counter[0] += 1
+        raise AssertionError("create_pull_request() must never be called for salvaged open_pr work")
+
+    monkeypatch.setattr(GitHubClient, "create_pull_request", _counting_create_pr)
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id, task_type="open_pr")
+    dead_job_id = task.mainai_job_id
+    dead_job = db_session.get(MainAIJob, dead_job_id)
+
+    # The dead worker DID open the real PR before dying -- its work_result checkpoint durably
+    # records that outcome, nothing else.
+    record_checkpoint(
+        db_session, task=task, goal=goal, job_id=dead_job_id, step="work_result",
+        data={"work_result": {"proposed": False, "pull_request_number": 42, "pull_request_url": "https://github.com/test-owner/test-repo/pull/42"}},
+    )
+    db_session.commit()
+
+    record = await _through_classification(db_session, task, dead_job)
+    assert record.classification == RecoveryClassification.checkpointed_work
+
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    copied = latest_checkpoint_for_step(db_session, task_id=task.id, job_id=new_job.id, step="work_result")
+    assert copied is not None
+    assert copied.executor_state["work_result"]["pull_request_number"] == 42
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "recovery-worker-2", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, new_job.id, owner_id, worker_id="recovery-worker-2", lease_generation=generation, lease_seconds=120)
+
+    assert call_counter[0] == 0  # create_pull_request() never called again for this task
     db_session.refresh(task)
     assert task.status == MainAITaskStatus.completed
 

@@ -17,7 +17,12 @@ Per classification:
     (CHECKPOINTED_WORK, VERIFIED_WORK, PUSHED_NO_PR, PR_EXISTS): that checkpoint is copied
     forward verbatim under the new job_id. This is real, previously-computed, already-durable
     work — recomputing it would waste a real (possibly expensive, possibly
-    non-deterministic) provider call for no benefit.
+    non-deterministic) provider call for no benefit. Duplicate side-effect prevention
+    (verification): if the dead job ALSO durably recorded a `verification` checkpoint (only
+    ever written for a genuine PASS — see execution_job.py) for that exact work_result, it is
+    copied forward too, so the new attempt does not silently re-run the task's real
+    verification_plan side effects (e.g. a `targeted_tests` subprocess pytest invocation) a
+    second time against content that already, provably, passed.
   - PUSHED_NO_PR / PR_EXISTS specifically ALSO get a `finalized` checkpoint synthesized from
     the inspector's own evidence (the real branch name, the fact that `remote_branch_exists`
     was independently confirmed via GitHub). This directly closes the exact gap
@@ -124,6 +129,22 @@ async def salvage_recovery_record(
                 data={"work_result": old_work_checkpoint.executor_state["work_result"]},
             )
             actions_taken.append("copied_work_result_checkpoint")
+
+            # Duplicate side-effect prevention (verification): a "verification" checkpoint is
+            # only ever paired with the EXACT work_result it was checked against
+            # (execution_job.py records it immediately after that work_result durably passed)
+            # -- so it is only ever safe to copy forward here alongside that same work_result,
+            # never on its own. Only present for a job that ran after this checkpoint step
+            # existed; an older dead job simply has none to copy, and the new attempt correctly
+            # falls back to a real, honest re-verification rather than inventing one.
+            if evidence.get("verification_passed"):
+                old_verification_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=record.job_id, step="verification")
+                if old_verification_checkpoint is not None:
+                    record_checkpoint(
+                        db, task=task, goal=goal, job_id=new_job.id, step="verification",
+                        data={"verification": old_verification_checkpoint.executor_state["verification"]},
+                    )
+                    actions_taken.append("copied_verification_checkpoint")
 
     if record.classification in _PUSHED_CLASSIFICATIONS:
         branch = evidence.get("branch_name") or evidence.get("worktree_branch")
