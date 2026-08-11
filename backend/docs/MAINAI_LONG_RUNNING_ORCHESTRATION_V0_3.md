@@ -204,7 +204,16 @@ Named explicitly rather than silently left implicit:
 3. **Cooperative cancellation has exactly three checkpoints**, matching `run_task_execution_job()`'s
    own three natural stopping points (before work, after commit, after verification/before
    push). A task type with a longer or different internal sequence would need its own checkpoint
-   placement — this is not a general "cancel anywhere" primitive.
+   placement — this is not a general "cancel anywhere" primitive. **Named precisely (hardening-
+   pass finding, §12 attack)**: no checkpoint interrupts a task_type handler already in flight —
+   a `run_tests` task's real `subprocess.run()` pytest invocation (or a `repo_edit`/`run_tests`
+   task's `targeted_tests` verification step) always runs to its own natural completion (pass,
+   fail, or its own internal timeout) once started; a cancel that lands while it's running is
+   picked up only at the NEXT checkpoint afterward, never mid-subprocess. Proven directly: the
+   subprocess's real result is still checkpointed and never corrupted, but the task still
+   correctly finalizes `cancelled`, never `completed`, once the next checkpoint runs (see
+   `test_cancel_arriving_while_a_real_subprocess_is_running_lets_it_finish_then_stops_at_the_next_checkpoint`,
+   `tests/backend/test_mainai_execution_cancellation.py`).
 4. **The replan trigger looks at exactly one signal**: a permanently `failed` task in the
    currently active plan. It does not consider partial progress, cost, or how many times a goal
    has already been replanned — a goal could in principle replan repeatedly if each new plan's
@@ -224,6 +233,18 @@ Named explicitly rather than silently left implicit:
    (proven by dedicated tests), not an unbounded scan, but a goal/task/wait/job past its own
    tick's bound simply waits for the next cycle rather than being starved forever by a design
    flaw; at V0.3's scale this is a deliberate simplicity choice.
+   **Fairness, precisely (hardening-pass finding, §7 attack)**: every one of these queries
+   orders strictly by due-time (`next_poll_at`/`next_retry_at`/`lease_expires_at` ascending,
+   `id` ascending as a tiebreak) with NO `goal_id`/owner grouping at all. This is real, honest
+   **temporal FIFO** (oldest-due-first, monotonically draining, mathematically never a
+   permanent starve of a finite backlog) — it is explicitly NOT per-goal round-robin fairness.
+   Proven directly: one goal with a backlog larger than a single tick's own bound can and does
+   delay a DIFFERENT goal's own newly-due, single item by roughly
+   `ceil(backlog_size / tick_limit)` ticks, even though that item is individually more urgent
+   in wall-clock terms (see
+   `test_retry_tick_is_fifo_by_due_time_not_fair_across_goals_and_the_doc_must_say_so`,
+   `tests/backend/test_mainai_execution_retry_tick.py`). Named explicitly here rather than
+   implying an unverified per-goal fairness guarantee.
 
 ## NOT IMPLEMENTED
 
@@ -253,6 +274,18 @@ Named explicitly rather than silently left implicit:
   jobs/goals/lessons than a single tick's bound in one poll cycle will process the rest on
   later cycles — correct, not lossy, but a founder should not expect same-tick processing at
   volumes well beyond V0.3's tested scale.
+- **Scheduler query index strategy analyzed, not load-tested at production scale (hardening-pass
+  finding, §25).** All five bounded scans (waits/retries/auto-recovery/replan/lesson-conflict)
+  filter on an indexed `status` (or `job_type`+`status`) column with an additional due-time
+  filter (`next_poll_at`/`next_retry_at`/`lease_expires_at`, each independently indexed too).
+  `EXPLAIN` on the current (near-empty) test database shows the planner choosing the `status`
+  index, which is the right choice at this data volume. This is expected to remain correct at
+  real scale too, since these `status` values are a small enumerated set that most rows leave
+  quickly (pending → satisfied/failed/timed_out; retryable_failed → ready; running → completed/
+  superseded) — a genuinely large, sustained backlog in one of these statuses would itself be a
+  real operational signal worth alerting on, not just a query-plan concern. Not verified against
+  a synthetic multi-thousand-row population under real Postgres statistics — named here as an
+  honest gap rather than an unverified performance claim.
 
 ## SECURITY INVARIANTS
 
@@ -444,12 +477,17 @@ documents used:
 
 New/substantially-extended test files added by this branch:
 
-- `tests/backend/test_mainai_execution_ci_wait.py` (18 tests, incl. the double-finalize
-  concurrency regression test)
-- `tests/backend/test_mainai_execution_cancellation.py` (5 tests, incl. both required demos)
-- `tests/backend/test_mainai_execution_retry_tick.py` (4 tests)
+- `tests/backend/test_mainai_execution_ci_wait.py` (22 tests, incl. the double-finalize
+  concurrency regression test, the cancel-vs-in-flight-poll concurrency proof, the
+  resource_ref fail-closed test, a direct-SQL cross-owner RLS attack test, and the recorded
+  engineering lesson — all added during the hardening/attack pass)
+- `tests/backend/test_mainai_execution_cancellation.py` (6 tests, incl. both required demos
+  and the real-subprocess cooperative-cancellation test added during the hardening pass)
+- `tests/backend/test_mainai_execution_retry_tick.py` (5 tests, incl. the FIFO-fairness proof
+  added during the hardening pass)
 - `tests/backend/test_mainai_execution_auto_recovery.py` (3 tests, incl. the required demo)
-- `tests/backend/test_mainai_execution_replan.py` (4 tests, incl. the required demo)
+- `tests/backend/test_mainai_execution_replan.py` (5 tests, incl. the required demo and the
+  CRITICAL approval-escalation-across-replan test added during the hardening pass)
 - `tests/backend/test_mainai_execution_lesson_conflicts.py` (11 tests, incl. the required demo)
 - `tests/backend/test_mainai_execution_final_report_v0_3.py` (6 tests)
 
@@ -460,10 +498,54 @@ during the hardening/security-attack pass; and `tests/backend/test_mainai_execut
 `unresolved_risk` semantics (a `retryable_failed` task with a scheduled retry is no longer an
 unresolved risk).
 
-Run the full backend suite: `pytest tests/`. Last full run after the security-attack-pass
-checkpoint: 1320 passed, 1 skipped (the P2 capacity test, skipped by design), 2 failed
-(`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk` and
-`test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_completion`, both
-storage-layer race tests — confirmed genuinely flaky by rerunning in isolation immediately
-after, alternating pass/fail across runs; pre-existing, unrelated to this branch's diff, which
-never touches `app/storage/` or `tests/backend/storage/`).
+## Hardening / attack pass (post-PR #59 draft review)
+
+Same build → freeze → harden → merge model as V0.1/V0.2. Full diff re-review against every
+attack category the founder named (wait state machine, CI SHA/repo binding, double-wake
+concurrency, crash matrix, scheduler bounds/fairness, retry/side-effect dedup, cancellation/
+stale-worker/subprocess termination, auto-recovery/takeover fencing, replan/approval
+escalation, lesson-conflict safety, event integrity, RLS/privileges, API, final report
+truthfulness, migration/performance, mutation coverage, doc truthfulness). Real findings:
+
+- **Fixed (P3, fail-closed hardening)**: `poll_ci_wait()`'s repo-drift guard used
+  `if repo and client.settings.github_repo != repo`, which silently skipped the identity check
+  entirely if the wait's own stored `repo` (or `sha`) were ever falsy, instead of refusing to
+  poll. Fixed to fail closed on either missing field, matching the "no optimistic success"
+  principle the rest of this module already follows.
+- **Verified correct, not changed (near-miss, engineering lesson recorded)**:
+  `resume_waiting_ci_task()` holds the task row lock across `poll_ci_wait()`'s real GitHub
+  network round-trip. A tempting "poll first, lock only for the write" reordering was analyzed
+  and found to introduce a genuinely NEW race (a poll already in flight when a cancel lands
+  could still overwrite the wait row's `cancelled` status back to `satisfied`/`failed` after
+  the cancel's own commit) — the reordering was never made. A real two-thread concurrency test
+  now proves the CURRENT design is safe under a real resume-vs-cancel race, and was
+  mutation-verified against the exact reordering that was considered and rejected.
+- **Verified correct, newly tested**: approval escalation across an automatic replan (§16,
+  flagged CRITICAL) — a v1 approval can never apply to a v2 task even when the new task also
+  requires approval, proven end to end through the real `trigger_replan()`, mutation-verified.
+- **Verified correct, newly tested**: cooperative cancellation while a real subprocess
+  (`run_tests`' pytest invocation) is genuinely in flight — the subprocess always runs to its
+  own natural completion, never interrupted mid-flight; the cancel is only picked up at the
+  next checkpoint afterward. Named explicitly in the docs (was previously only implied).
+- **Verified and precisely characterized, not previously proven**: scheduler fairness (§7) —
+  every bounded tick query is real temporal FIFO (oldest-due-first, ordered by due-time with no
+  goal/owner grouping at all), not per-goal round-robin fairness. Proven directly: one goal's
+  large backlog measurably delays a different goal's own newly-due item by roughly
+  `backlog_size / tick_limit` ticks. The doc's own LIMITED #7 was tightened to state this
+  precisely rather than leaving it implied.
+- **Verified, no gap found**: `mainai_task_waits` RLS under the real runtime role (direct SQL
+  cross-owner attack, matching V0.1's own established pattern for this table for the first
+  time) and its Postgres privilege floor (TRUNCATE/REFERENCES/TRIGGER never granted — covered
+  automatically by the existing global, table-name-agnostic privilege test).
+- Every other attacked area (retry-scheduling dedup, auto-recovery approval-gate bypass
+  resistance, lesson-conflict fail-closed AI judgment, event append-only enforcement, migration
+  0036's CHECK/FK/RLS/index shape, API authority boundaries, final report truthfulness) was
+  re-attacked against the actual current code and confirmed already correctly guarded by the
+  build-phase's own work — no further P0/P1/P2 findings.
+
+Run the full backend suite: `pytest tests/`. Last full run after the hardening pass: 1328
+passed, 1 skipped (the P2 capacity test, skipped by design), 1 failed
+(`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`, a storage-layer race
+test — confirmed genuinely flaky by rerunning in isolation immediately after, passing;
+pre-existing, unrelated to this branch's diff, which never touches `app/storage/` or
+`tests/backend/storage/`).

@@ -178,6 +178,78 @@ async def test_demo_auto_replan_triggers_after_a_task_permanently_exhausts_retri
     assert all(t.id != failed_task.id for t in new_tasks), "a replan must create genuinely NEW tasks, not reuse the old id"
 
 
+@pytest.mark.asyncio
+async def test_replan_never_inherits_the_old_plans_approval_even_when_the_new_task_also_requires_it(db_session, owner_id, monkeypatch):
+    """V0.3 hardening pass, §16 CRITICAL attack: a founder's approval for a v1 task must NEVER
+    automatically apply to a v2 task an automatic replan creates -- not even when the new task
+    also requires approval (simulating the AI having judged the replanned work equally or more
+    risky). require_task_approval() (approval.py) keys strictly on MainAITaskEvent.task_id, and
+    create_plan() (planner.py) always mints a brand-new task id for every task in a new plan
+    version -- proven here end to end through a REAL automatic replan (trigger_replan(), the
+    exact function app/worker.py's auto-replan tick calls), not just by inspecting the code.
+    v1's own approval_granted event must still exist afterward (never deleted/rewritten,
+    matching this table's append-only discipline), yet dispatch_ready_task() on the NEW task
+    must still raise ApprovalRequiredError until a founder explicitly approves it again."""
+    from datetime import datetime
+
+    from app.mainai_execution.approval import ApprovalRequiredError, grant_task_approval
+    from app.mainai_execution.replan import trigger_replan
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="v1, founder already reviewed and approved this exact task",
+        tasks=[PlannedTaskSpec(description="edit something sensitive", task_type="repo_edit", approval_required=True)],
+        created_by="test",
+    )
+    db_session.commit()
+    old_task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    grant_task_approval(db_session, task=old_task, approved_by="founder@test")
+    db_session.commit()
+    old_task_id = old_task.id
+
+    old_task = db_session.get(MainAITask, old_task_id)
+    old_task.status = MainAITaskStatus.failed
+    old_task.completed_at = datetime.utcnow()
+    db_session.commit()
+
+    async def _fake_chat(self, messages, model, **kwargs):
+        return await _fake_plan_response(model)
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
+
+    plan = await trigger_replan(db_session, goal=goal, failed_task=old_task, dispatched_by="test")
+    db_session.commit()
+
+    new_task = db_session.query(MainAITask).filter(MainAITask.plan_id == plan.id).one()
+    assert new_task.id != old_task_id, "a replan must create a genuinely NEW task id"
+
+    old_approval_still_exists = db_session.execute(
+        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'approval_granted'"), {"t": str(old_task_id)}
+    ).scalar()
+    assert old_approval_still_exists == 1, "v1's own approval must survive untouched -- never deleted or rewritten by the replan"
+
+    new_task_has_no_approval = db_session.execute(
+        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'approval_granted'"), {"t": str(new_task.id)}
+    ).scalar()
+    assert new_task_has_no_approval == 0, "the new task must start with genuinely no approval of its own"
+
+    # Simulates the AI having judged the replanned work as needing approval too (not just
+    # inheriting the old flag) -- the critical assertion is that this is checked against the
+    # NEW task's own id, never satisfied by v1's approval sitting in the same table.
+    new_task.approval_required = True
+    db_session.commit()
+    assert new_task.status == MainAITaskStatus.ready, "a dependency-free replanned task must already be ready"
+
+    with pytest.raises(ApprovalRequiredError):
+        executor.dispatch_ready_task(db_session, task=new_task, goal=goal, dispatched_by="test-worker")
+
+    db_session.rollback()
+    new_task = db_session.get(MainAITask, new_task.id)
+    assert new_task.status == MainAITaskStatus.ready, "a refused dispatch must never leave the task partially transitioned"
+
+
 async def _fake_plan_response(model):
     import json
 

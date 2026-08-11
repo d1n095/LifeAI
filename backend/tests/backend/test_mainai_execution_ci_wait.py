@@ -27,6 +27,7 @@ from app.integrations.github_client import GitHubClient
 from app.jobs.mainai_job_lease import claim_next_mainai_job
 from app.mainai_execution import executor, planner
 from app.mainai_execution.ci_wait import cancel_ci_wait, evaluate_check_runs, poll_ci_wait, start_ci_wait
+from app.mainai_execution.executor import TaskNotCancellableError
 from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
@@ -288,6 +289,42 @@ async def test_poll_ci_wait_refuses_to_poll_if_configured_repo_no_longer_matches
     assert "poll_error" in resolved.evidence
 
 
+@pytest.mark.asyncio
+async def test_poll_ci_wait_fails_closed_when_its_own_resource_ref_is_missing_repo_or_sha(db_session, owner_id, monkeypatch):
+    """V0.3 hardening pass, §3 attack (no optimistic success): a wait record with a falsy
+    `repo` or `sha` in its own durable resource_ref must never let the repo-drift comparison
+    silently short-circuit past it (`if repo and ...` skips the check entirely when `repo` is
+    falsy) -- both missing fields must refuse to poll, exactly like a genuine repo mismatch,
+    never guess or fall through to comparing against an empty string."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
+    monkeypatch.setattr(settings, "github_token", "fake-token")
+
+    called = {"n": 0}
+
+    async def _fake_list_check_runs(self, ref):
+        called["n"] += 1
+        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+
+    monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+
+    for missing_field, resource_ref in (("repo", {"repo": "", "sha": "deadbeef"}), ("sha", {"repo": "d1n095/LifeAI", "sha": ""})):
+        goal = _goal(db_session, owner_id)
+        task = _single_task_plan(db_session, goal, task_type="open_pr")
+        job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+        db_session.commit()
+        wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+        wait.resource_ref = resource_ref
+        db_session.commit()
+
+        resolved = await poll_ci_wait(db_session, wait)
+        db_session.commit()
+
+        assert called["n"] == 0, f"must never poll when {missing_field!r} is missing from resource_ref"
+        assert resolved.status == MainAITaskWaitStatus.pending
+        assert "poll_error" in resolved.evidence
+
+
 # ---------------------------------------------------------------- C. real end-to-end demos
 
 
@@ -545,3 +582,245 @@ def test_resume_waiting_ci_task_concurrent_same_wait_never_double_finalizes(db_s
         sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'wait_satisfied'"), {"t": str(task_id)}
     ).scalar()
     assert wait_satisfied_events == 1, "exactly one 'wait_satisfied' event, not one per racing caller"
+
+
+def test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsistent_with_the_task(
+    db_session, superuser_db, owner_id, monkeypatch
+):
+    """V0.3 hardening pass, §4/§10/§11 attack: resume_waiting_ci_task() locks the task row
+    (`_lock_task()`) BEFORE calling poll_ci_wait() -- meaning a real GitHub API round-trip runs
+    while that lock is held. A tempting "optimization" would be to poll first and lock only for
+    the write, to stop a founder's concurrent cancel from blocking behind an in-flight poll.
+    This test exists because that reordering was analyzed during the hardening pass and found
+    to introduce a genuine NEW race: a poll already in flight when a cancel lands could still
+    flush its own (blind, unconditional) update to the wait row AFTER the cancel's own commit,
+    silently reverting `wait.status` from `cancelled` back to `satisfied`/`failed` even though
+    the task itself correctly stayed `cancelled` -- leaving the wait and task rows mutually
+    inconsistent. The reordering was deliberately NOT made; this test instead proves the
+    CURRENT design (lock held across the poll) is genuinely safe under a real concurrent
+    resume-vs-cancel race: cancel_task() must block behind the in-flight poll's task lock, and
+    once the poll wins and finalizes the task, cancel_task() must see the FRESH status and
+    refuse rather than silently succeeding against stale state -- and the wait's own final
+    status must always agree with the task's."""
+    import asyncio
+    import threading
+    import time
+
+    from app.db import SessionLocal
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "github_token", "fake-token-never-real")
+    monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="open_pr")
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+    task_id = task.id
+    wait_id = wait.id
+
+    poll_started = threading.Event()
+    release_poll = threading.Event()
+
+    async def _slow_list_check_runs(self, ref):
+        poll_started.set()
+        assert release_poll.wait(timeout=5), "test setup: main thread never released the in-flight poll"
+        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+
+    monkeypatch.setattr(GitHubClient, "list_check_runs", _slow_list_check_runs)
+    monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
+
+    resume_errors: list[str] = []
+    cancel_result: dict = {}
+
+    def _resume_worker():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            w = session.get(MainAITaskWait, wait_id)
+            asyncio.run(resume_waiting_ci_task(session, w))
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below, not swallowed
+            session.rollback()
+            resume_errors.append(repr(exc))
+        finally:
+            session.close()
+
+    def _cancel_worker():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            t = session.get(MainAITask, task_id)
+            executor.cancel_task(session, task=t, cancelled_by="founder@test", cancelled_by_id=owner_id, reason="race test")
+            session.commit()
+            cancel_result["outcome"] = "succeeded"
+        except TaskNotCancellableError as exc:
+            session.rollback()
+            cancel_result["outcome"] = "refused"
+            cancel_result["detail"] = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            cancel_result["outcome"] = "error"
+            cancel_result["detail"] = repr(exc)
+        finally:
+            session.close()
+
+    resume_thread = threading.Thread(target=_resume_worker)
+    resume_thread.start()
+    assert poll_started.wait(timeout=5), "resume never reached the GitHub poll -- test setup broken"
+
+    cancel_thread = threading.Thread(target=_cancel_worker)
+    cancel_thread.start()
+    # A real moment for cancel_task() to reach _lock_task() and genuinely block behind the
+    # poll's still-held task lock -- proves ordering, not just eventual outcome.
+    time.sleep(0.3)
+    assert cancel_thread.is_alive(), "cancel_task() must be blocked behind the in-flight poll's task-row lock, not free to run ahead of it"
+
+    release_poll.set()
+    resume_thread.join(timeout=10)
+    cancel_thread.join(timeout=10)
+
+    assert not resume_errors, f"resume must complete cleanly: {resume_errors}"
+    assert cancel_result.get("outcome") == "refused", (
+        f"the poll won the lock race and completed the task first -- cancel_task() must then refuse "
+        f"(task no longer in a directly-cancellable status), never silently succeed against stale state: {cancel_result}"
+    )
+
+    final_task = superuser_db.get(MainAITask, task_id)
+    final_wait = superuser_db.get(MainAITaskWait, wait_id)
+    assert final_task.status == MainAITaskStatus.completed
+    assert final_wait.status == MainAITaskWaitStatus.satisfied, "the wait's own status must always agree with the task's real outcome"
+
+
+# ---------------------------------------------------------------- F. RLS: direct SQL cross-owner attack
+
+
+def test_cross_owner_rls_isolation_holds_for_mainai_task_waits_through_the_real_runtime_role(db_session, superuser_db, make_verified_user):
+    """V0.3 hardening pass, §20 attack: `mainai_task_waits` (migration 0036) only ever had
+    indirect RLS coverage before this pass -- through the ORM in test_mainai_execution_ci_wait.py's
+    own single-owner tests, and through the API layer's two new endpoints (test_mainai_execution_api.py).
+    This is the SAME direct-SQL, real-runtime-role attack pattern
+    `test_cross_owner_rls_isolation_holds_for_every_new_v0_1_table_through_the_real_runtime_role`
+    (test_mainai_execution_api.py) already established for the six V0.1 tables -- `db_session`
+    is bound to the real restricted `mainai_app` role (see conftest.py), never the superuser.
+    Owner A creates a real wait; owner B (same runtime role, different RLS context) must see
+    NONE of it via SELECT, and a targeted UPDATE/DELETE by owner B against owner A's own row id
+    must affect exactly zero rows (RLS silently filters the WHERE target out of existence, this
+    app's own established 404-not-403 convention) -- never a 500, never a leak."""
+    owner_a, _ = make_verified_user()
+    owner_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, owner_a.id)
+    goal = _goal(db_session, owner_a.id)
+    task = _single_task_plan(db_session, goal, task_type="open_pr")
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+    wait_id = wait.id
+
+    # --- owner B: SELECT must see nothing of owner A's wait -----------------------------------
+    _set_rls_user(db_session, owner_b.id)
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_task_waits WHERE id = :id"), {"id": str(wait_id)}).scalar() == 0
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_task_waits WHERE task_id = :id"), {"id": str(task.id)}).scalar() == 0
+    # A guessed/random UUID fares no differently -- confirms genuine owner-scoped filtering, not
+    # a coincidence of this specific id.
+    import uuid as _uuid
+
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_task_waits WHERE id = :id"), {"id": str(_uuid.uuid4())}).scalar() == 0
+
+    # --- owner B: a targeted UPDATE/DELETE against owner A's row id affects zero rows ---------
+    r = db_session.execute(sa_text("UPDATE mainai_task_waits SET status = 'cancelled' WHERE id = :id"), {"id": str(wait_id)})
+    assert r.rowcount == 0
+    r = db_session.execute(sa_text("DELETE FROM mainai_task_waits WHERE id = :id"), {"id": str(wait_id)})
+    assert r.rowcount == 0
+    db_session.rollback()
+
+    # --- confirm via the superuser connection that nothing above actually got mutated ---------
+    assert superuser_db.execute(sa_text("SELECT status FROM mainai_task_waits WHERE id = :id"), {"id": str(wait_id)}).scalar_one() == "pending"
+
+
+def test_record_engineering_lesson_for_the_lock_before_poll_ordering_near_miss(db_session, owner_id):
+    """Required engineering lesson (V0.3 hardening/attack pass, per the founder's explicit
+    instruction that every genuine finding this pass surfaces must be durably recorded, not
+    just fixed and forgotten). This one is NOT a shipped bug -- it is a near-miss caught during
+    analysis, before any code changed, and is exactly the kind of lesson worth recording: it
+    almost became a real regression."""
+    from datetime import datetime
+
+    from app.mainai_execution import lessons
+    from app.models.mainai_execution import EngineeringLessonConfidence, EngineeringLessonSeverity
+
+    lesson = lessons.record_lesson(
+        db_session,
+        problem=(
+            "Under attack-pass-analys av resume_waiting_ci_task() (den kod som redan, i "
+            "build-fasen, hade fixats för en dubbel-finalize-race genom att låsa task-raden "
+            "FÖRE poll_ci_wait()'s riktiga GitHub-nätverksanrop) identifierades att detta lås "
+            "hålls kvar under HELA nätverksanropet -- ett verkligt, mätbart designval: en "
+            "grundares POST /tasks/{id}/cancel för en waiting_ci-task kan blockera bakom en "
+            "pågående poll. En frestande 'optimering' övervägdes: flytta låset till EFTER "
+            "poll_ci_wait() och lås bara för det faktiska skrivmomentet, för att undvika att "
+            "hålla ett DB-lås under extern I/O. Denna omordning implementerades TEMPORÄRT för "
+            "att verifiera den nya concurrency-testets mutation-täckning (se "
+            "test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsistent_with_the_task) "
+            "och visade sig introducera en genuint NY race: en poll redan i flykt när en cancel "
+            "landar kan fortfarande flusha sin egen (blinda, ovillkorade) uppdatering av "
+            "wait-raden EFTER cancelns commit, och tyst återställa wait.status från 'cancelled' "
+            "till 'satisfied'/'failed' -- även om tasken själv korrekt förblev 'cancelled'. "
+            "Omordningen gjordes ALDRIG permanent; den kastades efter mutationsverifieringen."
+        ),
+        root_cause=(
+            "poll_ci_wait() skriver till wait-raden som en SIDOEFFEKT av att göra nätverksanropet "
+            "(poll_count/evidence/status/next_poll_at), inte som ett separat, låst steg efteråt. "
+            "En 'poll utan lås, lås bara för skrivningen' -refaktorering ser harmlös ut just för "
+            "att den fokuserar på TASK-radens lås -- men poll_ci_wait()'s egen, oberoende skrivning "
+            "till WAIT-raden förblir olåst i den varianten, och en blind UPDATE utan "
+            "WHERE-status-villkor skyddar inte mot att skriva över ett nyare, redan committat "
+            "värde en samtidig cancel just satte."
+        ),
+        fix=(
+            "Inget produktionskodfynd att fixa -- den ursprungliga, redan shippade ordningen "
+            "(lås task-raden FÖRE poll_ci_wait()) behölls oförändrad, eftersom den redan är "
+            "korrekt: den serialiserar cancel_task()'s waiting_ci-gren och resume_waiting_ci_task() "
+            "fullständigt mot varandra genom samma task-radslås. Istället skrevs ett nytt, riktigt "
+            "concurrency-test (två trådar, en verklig fördröjd poll, en verklig cancel_task()-anrop) "
+            "som bevisar att den BEFINTLIGA ordningen är säker, och mutationsverifierades genom att "
+            "temporärt applicera just den frestande omordningen -- testet gick rött 3/3 körningar, "
+            "vilket bekräftade fyndet var verkligt och att testet fångar det."
+        ),
+        general_rule=(
+            "En 'flytta bara låset för att minska I/O-under-lock-latens'-omordning är ALDRIG säker "
+            "att anta harmlös utan att explicit spåra VARJE skrivning den berörda funktionen gör "
+            "(inte bara den mest uppenbara), och utan att verifiera mot en verklig, samtidig "
+            "motpart (här: cancel_task()) -- inte bara mot sig själv. Analysera alltid samtliga "
+            "skrivvägar i en funktion innan ett lås flyttas, även när ändringen ser ut som en ren "
+            "prestandaförbättring; skriv sedan ett riktigt concurrency-test som bevisar den "
+            "BEFINTLIGA koden säker, snarare än att anta det."
+        ),
+        affected_component="app.mainai_execution.execution_job.resume_waiting_ci_task",
+        severity=EngineeringLessonSeverity.medium,
+        evidence=(
+            "Temporär omordning + tre repeterade körningar av "
+            "test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsistent_with_the_task "
+            "gav SSL/OperationalError-krascher orsakade av den nya racen, 3/3 körningar -- "
+            "omordningen kastades omedelbart efteråt, aldrig committad."
+        ),
+        applies_to=["ci_wait", "concurrency", "locking", "cancellation", "waiting_ci"],
+        source_type="branch_registry_pass",
+        source_ref="MAINAI V0.3 hardening/attack pass (post-PR #59 draft review) -- lock-vs-poll-ordering near-miss",
+        created_by="hardening-pass",
+        first_seen_at=datetime.utcnow(),
+        regression_test=(
+            "tests/backend/test_mainai_execution_ci_wait.py::"
+            "test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsistent_with_the_task"
+        ),
+        confidence=EngineeringLessonConfidence.certain,
+    )
+    db_session.commit()
+
+    assert lesson.id is not None
+    found = lessons.lookup_lessons(db_session, applies_to_any=["locking"])
+    assert any(item.id == lesson.id for item in found)

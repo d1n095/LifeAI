@@ -181,6 +181,69 @@ async def test_demo_cancel_requested_before_dispatch_stops_before_any_ai_call(db
 
 
 @pytest.mark.asyncio
+async def test_cancel_arriving_while_a_real_subprocess_is_running_lets_it_finish_then_stops_at_the_next_checkpoint(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """V0.3 hardening pass, §12 attack (subprocess termination): cooperative cancellation has
+    exactly three checkpoints (see execution_job.py's own docstring) -- none of them interrupt a
+    task_type handler already in flight, including a `run_tests` task's real `subprocess.run()`
+    pytest invocation. This is a real, previously-unverified and previously-undocumented
+    consequence worth proving explicitly rather than just implying from "3 checkpoints": a
+    cancel that lands WHILE the subprocess is genuinely running must NOT kill it or corrupt its
+    result -- the subprocess runs to its own natural completion, its real result is still
+    checkpointed, and ONLY THEN does the next safe checkpoint (immediately after work_result,
+    before verification) catch the cancel and correctly finalize the task `cancelled` -- never
+    `completed`, even though the subprocess itself finished normally and successfully."""
+    from app.mainai_execution import execution_job
+
+    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    (tmp_path / "backend" / "tests" / "test_scratch_ok.py").write_text("def test_scratch_ok():\n    assert True\n")
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(
+        db_session, goal, task_type="run_tests", verification_plan=[{"kind": "targeted_tests", "target": "tests/test_scratch_ok.py"}]
+    )
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    job_id = job.id
+
+    real_run_pytest = execution_job._run_pytest
+    subprocess_ran_to_completion = {"result": None}
+
+    def _run_pytest_and_cancel_mid_flight(target, *, cwd, timeout_seconds=300):
+        # Simulates a REAL concurrent cancel request landing on a SEPARATE connection while
+        # this subprocess is genuinely still running -- request_cancel() is the same primitive
+        # a founder's own API call uses, not a test-only shortcut.
+        from app.jobs.service import request_cancel
+
+        request_cancel(superuser_db, job_id, requested_by=owner_id)
+        superuser_db.commit()
+        result = real_run_pytest(target, cwd=cwd, timeout_seconds=timeout_seconds)
+        subprocess_ran_to_completion["result"] = result
+        return result
+
+    monkeypatch.setattr(execution_job, "_run_pytest", _run_pytest_and_cancel_mid_flight)
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    db_session.refresh(job)
+
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    assert subprocess_ran_to_completion["result"] is not None, "the in-flight subprocess must run to its own natural completion, never be killed"
+    assert subprocess_ran_to_completion["result"]["passed"] is True, "the real pytest result must be genuine, not corrupted by the concurrent cancel"
+
+    task = db_session.get(MainAITask, task.id)
+    job = db_session.get(MainAIJob, job.id)
+    assert task.status == MainAITaskStatus.cancelled, "the NEXT checkpoint after the subprocess must catch the cancel and never report completed"
+    assert job.status == MainAIJobStatus.cancelled
+    events = _events(db_session, task.id)
+    assert "cancelled" in events
+    assert "completed" not in events, "a real, successful subprocess result must never be reported as task completion once cancelled"
+
+
+@pytest.mark.asyncio
 async def test_demo_cancel_arriving_mid_flight_preserves_the_already_made_local_commit_and_never_pushes(
     db_session, superuser_db, owner_id, monkeypatch, tmp_path
 ):

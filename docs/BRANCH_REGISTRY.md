@@ -6,6 +6,37 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #59 hardening/attack-pass (2026-08-11):** samma build→freeze→harden→merge-modell som
+V0.1/V0.2. Hela diffen attackerades på nytt mot varje kategori grundaren namngav (wait
+state-machine, CI SHA/repo-binding, double-wake concurrency, kraschmatris,
+scheduler-bounds/fairness, retry/side-effect-dedup, cancellation/stale-worker/subprocess-
+termination, auto-recovery/takeover-fencing, replan/approval-escalation, lärdomskonflikt-
+säkerhet, event-integritet, RLS/privilegier, API, slutrapport-sanningsenlighet, migration/
+prestanda, mutationstäckning, dokumentsanning). Fynd: **P3-fix** — `poll_ci_wait()`s
+repo-drift-koll (`if repo and ...`) skippade tyst hela kollen om wait:ens egen `repo`/`sha`
+någonsin vore falsy, istället för att fail-closed; fixat. **Near-miss hittad och medvetet INTE
+fixad** — en frestande "poll före lås"-omordning av `resume_waiting_ci_task()` analyserades och
+visade sig introducera en genuint NY race (en pågående poll kunde skriva över en cancels
+committade `wait.status` efteråt); omordningen kastades, ett riktigt concurrency-test skrevs
+istället som bevisar den BEFINTLIGA ordningen är säker (mutationsverifierat mot just den
+omordningen), och en engineering lesson spelades in. **Kritiskt-flaggad invariant nu bevisad**
+— approval escalation över en automatisk replan (§16): en v1-approval kan aldrig gälla en
+v2-task, bevisat end-to-end genom riktig `trigger_replan()`, mutationsverifierat.
+**Fairness precist karakteriserad** — schedulern är riktig temporal FIFO (äldst-förfallen-först,
+ingen goal/owner-gruppering alls), INTE per-goal round-robin; bevisat direkt att en stor backlog
+i en goal mätbart försenar en annan goals nyare, mer akuta item. Dokumentationen skärptes för
+att säga detta precist. **Subprocess-cancellation verifierad och nu explicit dokumenterad** —
+en riktig pågående subprocess (t.ex. run_tests pytest) avbryts aldrig mitt i, bara vid nästa
+checkpoint efteråt. **RLS för `mainai_task_waits` direktattackerad för första gången** (samma
+mönster som V0.1:s sex tabeller) — inget hål. Åtta nya tester tillagda
+(`test_mainai_execution_ci_wait.py` 18→22, `_cancellation.py` 5→6, `_retry_tick.py` 4→5,
+`_replan.py` 4→5). Full backend-svit efter passet: 1328 passed, 1 skipped by design, 1 failed
+(samma bekräftat pre-existing, orelaterade `test_storage_local_fs.py`-flake, grön i isolerad
+omkörning). Ruff rent, exakt en Alembic-head (`0036`), ingen migrationsändring detta pass, inga
+frontend-ändringar detta pass. Se
+`backend/docs/MAINAI_LONG_RUNNING_ORCHESTRATION_V0_3.md`s nya "Hardening / attack pass"-avsnitt
+för fullständig detalj. **Fortfarande INTE mergad** — pushas till SAMMA PR #59, ingen ny PR.
+
 **PR #59 är ÖPPEN (draft, INTE mergad) — `claude/mainai-long-running-orchestration-v0-3` →
 `claude/det-kommer-mer-879lcm`, öppnad 2026-08-11.**
 Grenad från exakt `5ad6c4697cfa128f94a63a1b7bb3332a0ab9e888` (basgrenens tip vid grening,

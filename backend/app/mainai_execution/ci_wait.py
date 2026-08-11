@@ -136,12 +136,19 @@ async def poll_ci_wait(db: Session, wait: MainAITaskWait) -> MainAITaskWait:
     sha = wait.resource_ref.get("sha")
 
     try:
+        # Hardening-pass finding (P3, no optimistic success): a wait record missing its own
+        # repo/sha (should be structurally impossible given start_ci_wait()'s own callers, but
+        # never assumed) must fail closed here too, exactly like a genuine repo-drift -- never
+        # silently skip the identity check just because the field it's comparing against is
+        # itself falsy.
+        if not repo or not sha:
+            raise GitHubClientError(f"wait {wait.id} is missing its own durable repo/sha -- refusing to poll rather than guess.")
         client = get_github_client()
         # Defense in depth beyond just polling the right SHA (see module docstring): if this
         # backend's currently-configured repo has drifted from the repo this wait was created
         # for (a config change between wait creation and poll time), refuse to poll rather than
         # silently asking the WRONG repository whether an unrelated commit's checks passed.
-        if repo and client.settings.github_repo != repo:
+        if client.settings.github_repo != repo:
             raise GitHubClientError(f"configured github_repo '{client.settings.github_repo}' no longer matches this wait's own repo '{repo}'.")
         check_runs = await client.list_check_runs(sha)
         done, passed, evidence = evaluate_check_runs(check_runs)
