@@ -19,6 +19,22 @@ class MainAITaskWorktreeStatus(str, enum.Enum):
     abandoned = "abandoned"
 
 
+class MainAITaskWorktreeRecoveryState(str, enum.Enum):
+    """Whether a recovery pass has verified this worktree's ownership -- separate from
+    MainAITaskWorktreeStatus, which tracks the worktree's own filesystem lifecycle, not
+    whether a takeover is allowed to reuse it."""
+
+    unclaimed = "unclaimed"
+    ownership_verified = "ownership_verified"
+    ownership_rejected = "ownership_rejected"
+    claimed_for_takeover = "claimed_for_takeover"
+
+
+# A working branch must never be one of these -- enforced both here (defense in depth) and by
+# migration 0033's ck_mainai_task_worktrees_branch_not_protected CHECK constraint.
+PROTECTED_BRANCHES = frozenset({"main", "master", "claude/det-kommer-mer-879lcm"})
+
+
 class MainAIRecoveryStatus(str, enum.Enum):
     """A recovery record's own lifecycle -- distinct from MainAITaskStatus (the task it's
     recovering) and MainAIJobStatus (the dead job it's recovering from)."""
@@ -100,10 +116,15 @@ class MainAITaskWorktree(Base):
     job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("mainai_jobs.id", ondelete="CASCADE"), unique=True)
     lease_generation: Mapped[int] = mapped_column(Integer)
     executor_id: Mapped[str] = mapped_column(String(128))
+    repo: Mapped[str] = mapped_column(String(255))
+    base_sha: Mapped[str] = mapped_column(String(64))
+    branch: Mapped[str] = mapped_column(String(255))
     path: Mapped[str] = mapped_column(Text)
     marker_token: Mapped[str] = mapped_column(String(64))
-    base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    current_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    recovery_state: Mapped[MainAITaskWorktreeRecoveryState] = mapped_column(
+        Enum(MainAITaskWorktreeRecoveryState), default=MainAITaskWorktreeRecoveryState.unclaimed
+    )
     status: Mapped[MainAITaskWorktreeStatus] = mapped_column(Enum(MainAITaskWorktreeStatus), default=MainAITaskWorktreeStatus.active)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     released_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

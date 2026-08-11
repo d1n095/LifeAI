@@ -39,7 +39,14 @@ Three tables:
     lifecycle progresses) — not append-only, matching `mainai_tasks` itself, not
     `mainai_task_events`. `UNIQUE(job_id)`: a `mainai_jobs` row is itself already a single
     dispatch attempt (`dispatch_ready_task()` mints a new job per ready-dispatch, see
-    executor.py), so at most one worktree ever belongs to one job.
+    executor.py), so at most one worktree ever belongs to one job. Per the founder's explicit
+    ownership-metadata list: `repo`/`base_sha`/`branch` are NOT NULL (a worktree is only ever
+    created from a verified base SHA, with a task-scoped branch — never left implicit), a
+    CHECK denies `branch` ever being a protected/mainline name, `current_commit` tracks the
+    latest local commit as `worktree.py` advances it, and `recovery_state` (separate from the
+    worktree's own `status` lifecycle) tracks whether a recovery pass has verified this
+    worktree's ownership before any takeover is allowed to reuse it — starts `unclaimed`,
+    only ever becomes `claimed_for_takeover` after `verify_worktree_ownership()` succeeds.
 
   - `mainai_recovery_records`: one row per dead/stalled job a recovery pass has looked at.
     `classification` is the founder's own A-I vocabulary (documented in the CHECK below and
@@ -90,10 +97,13 @@ def upgrade() -> None:
             job_id uuid NOT NULL UNIQUE REFERENCES mainai_jobs(id) ON DELETE CASCADE,
             lease_generation integer NOT NULL,
             executor_id varchar(128) NOT NULL,
+            repo varchar(255) NOT NULL,
+            base_sha varchar(64) NOT NULL,
+            branch varchar(255) NOT NULL,
             path text NOT NULL,
             marker_token varchar(64) NOT NULL,
-            base_sha varchar(64),
-            branch varchar(255),
+            current_commit varchar(64),
+            recovery_state varchar(32) NOT NULL DEFAULT 'unclaimed',
             status varchar(16) NOT NULL DEFAULT 'active',
             created_at timestamp without time zone NOT NULL,
             released_at timestamp without time zone,
@@ -104,6 +114,17 @@ def upgrade() -> None:
             ),
             CONSTRAINT ck_mainai_task_worktrees_released_at_matches_status CHECK (
                 (released_at IS NULL) = (status = 'active')
+            ),
+            CONSTRAINT ck_mainai_task_worktrees_recovery_state CHECK (
+                recovery_state IN ('unclaimed', 'ownership_verified', 'ownership_rejected', 'claimed_for_takeover')
+            ),
+            -- Never mainline/the branch this whole recovery system's own PRs land on -- a task
+            -- worktree's working branch must always be the deterministic per-task name
+            -- (`claude/mainai-task-<task_id>`), enforced here as well as in worktree.py itself
+            -- (defense in depth: a bug in the Python guard must not be the only thing standing
+            -- between a task attempt and writing directly to the branch other work depends on).
+            CONSTRAINT ck_mainai_task_worktrees_branch_not_protected CHECK (
+                branch NOT IN ('main', 'master', 'claude/det-kommer-mer-879lcm')
             )
         );
         CREATE INDEX ix_mainai_task_worktrees_task_id ON mainai_task_worktrees USING btree (task_id);
