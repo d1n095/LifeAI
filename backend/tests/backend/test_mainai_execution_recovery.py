@@ -560,3 +560,78 @@ def test_mainai_recovery_events_mainai_app_lacks_update_delete_privilege_at_the_
             sa_text("SELECT has_table_privilege('mainai_app', 'public.mainai_recovery_events', :priv)"), {"priv": priv}
         ).scalar()
         assert has_it is False, f"mainai_app must not hold {priv} on mainai_recovery_events"
+
+
+# ---------------------------------------------------------------- RLS / owner isolation (hardening pass)
+
+
+@pytest.mark.asyncio
+async def test_cross_owner_rls_isolation_holds_for_all_three_new_v0_2_tables_through_the_real_runtime_role(
+    db_session, superuser_db, make_verified_user
+):
+    """Hardening-pass attack (section 10): mirrors
+    test_cross_owner_rls_isolation_holds_for_every_new_v0_1_table_through_the_real_runtime_role
+    (test_mainai_execution_api.py) for the three V0.2 tables migration 0033 added --
+    `db_session` is bound to the real restricted `mainai_app` runtime role, never the
+    superuser. Owner A creates a real worktree, recovery record, and recovery event (through
+    the actual pipeline); owner B (same runtime role, different RLS context) must see NONE of
+    it via SELECT (including for a guessed random UUID, proving genuine owner-scoped
+    filtering, not just "this id happens not to match"), and a targeted UPDATE/DELETE by owner
+    B against owner A's own row ids must affect exactly zero rows."""
+    import uuid as uuid_module
+
+    owner_a, _ = make_verified_user()
+    owner_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, owner_a.id)
+    task, job = _task_and_job(db_session, owner_a.id, task_type="read_only_audit")
+    record = get_or_create_recovery_record(db_session, task=task, job=job)
+    db_session.commit()
+    worktree_id = superuser_db.execute(
+        sa_text(
+            """
+            INSERT INTO mainai_task_worktrees
+                (id, task_id, owner_id, job_id, lease_generation, executor_id, repo, base_sha, branch, path, marker_token, created_at)
+            VALUES (gen_random_uuid(), :task_id, :owner_id, :job_id, 1, 'worker-1', 'test-owner/test-repo', :base_sha,
+                    :branch, '/tmp/does-not-exist', 'secret-token', now())
+            RETURNING id
+            """
+        ),
+        {"task_id": str(task.id), "owner_id": str(owner_a.id), "job_id": str(job.id), "base_sha": "0" * 40, "branch": f"claude/mainai-task-{task.id}"},
+    ).scalar()
+    superuser_db.commit()
+    record_id, task_id, event_id = record.id, task.id, superuser_db.execute(
+        sa_text("SELECT id FROM mainai_recovery_events WHERE recovery_record_id = :id LIMIT 1"), {"id": str(record.id)}
+    ).scalar()
+
+    # --- owner B: SELECT must see nothing of owner A's rows ---------------------------------
+    _set_rls_user(db_session, owner_b.id)
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_task_worktrees WHERE id = :id"), {"id": str(worktree_id)}).scalar() == 0
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_recovery_records WHERE id = :id"), {"id": str(record_id)}).scalar() == 0
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_recovery_events WHERE id = :id"), {"id": str(event_id)}).scalar() == 0
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_recovery_records WHERE task_id = :id"), {"id": str(task_id)}).scalar() == 0
+    # A guessed/random UUID fares no differently -- confirms genuine owner-scoped filtering.
+    assert db_session.execute(sa_text("SELECT count(*) FROM mainai_recovery_records WHERE id = :id"), {"id": str(uuid_module.uuid4())}).scalar() == 0
+
+    # --- owner B: a targeted UPDATE/DELETE against owner A's row ids affects zero rows ------
+    r = db_session.execute(sa_text("UPDATE mainai_task_worktrees SET executor_id = 'hijacked' WHERE id = :id"), {"id": str(worktree_id)})
+    assert r.rowcount == 0
+    r = db_session.execute(sa_text("UPDATE mainai_recovery_records SET status = 'blocked', blocker = 'x' WHERE id = :id"), {"id": str(record_id)})
+    assert r.rowcount == 0
+    r = db_session.execute(sa_text("DELETE FROM mainai_recovery_records WHERE id = :id"), {"id": str(record_id)})
+    assert r.rowcount == 0
+    db_session.rollback()
+
+    # --- append-only: even the TRUE OWNER cannot mutate/delete a recovery event -------------
+    _set_rls_user(db_session, owner_a.id)
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("UPDATE mainai_recovery_events SET event_type = 'takeover_completed' WHERE id = :id"), {"id": str(event_id)})
+    db_session.rollback()
+    with pytest.raises(Exception):
+        db_session.execute(sa_text("DELETE FROM mainai_recovery_events WHERE id = :id"), {"id": str(event_id)})
+    db_session.rollback()
+
+    # --- confirm via the superuser connection that nothing above actually got mutated -------
+    assert superuser_db.execute(sa_text("SELECT executor_id FROM mainai_task_worktrees WHERE id = :id"), {"id": str(worktree_id)}).scalar_one() == "worker-1"
+    assert superuser_db.execute(sa_text("SELECT status FROM mainai_recovery_records WHERE id = :id"), {"id": str(record_id)}).scalar_one() == "detected"
+    assert superuser_db.execute(sa_text("SELECT event_type FROM mainai_recovery_events WHERE id = :id"), {"id": str(event_id)}).scalar_one() == "dead_detected"
