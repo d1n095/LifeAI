@@ -238,6 +238,82 @@ async def test_classify_pushed_no_pr(db_session, owner_id, patched_github):
     assert record.classification == RecoveryClassification.pushed_no_pr
 
 
+# --------- E2. PUSHED_NO_PR with NO worktree at all (the real production repo_edit path)
+
+
+@pytest.mark.asyncio
+async def test_classify_pushed_no_pr_is_reachable_with_no_worktree_at_all(db_session, owner_id, patched_github):
+    """Hardening-pass regression (P0): execution_job.py's actual production `repo_edit` handler
+    (`_handle_repo_edit()`/`_finalize_repo_edit()`) never calls `create_task_worktree()` -- it
+    still writes to the shared checkout and pushes via the GitHub Git Data API (see
+    docs/MAINAI_DEAD_AGENT_RECOVERY_V0_2.md's LIMITED section). Before this fix, `_classify()`
+    could ONLY reach PUSHED_NO_PR/PR_EXISTS via `worktree_local_head_sha == remote_branch_sha`
+    -- a signal that is always None for every real repo_edit job, since none of them ever
+    create a worktree. This is the real-production shape: a branch pushed directly to the
+    remote (no worktree, no local git commit object anywhere) plus the real `finalized`
+    checkpoint execution_job.py itself records right after a confirmed push -- exactly what a
+    dead repo_edit job that already pushed looks like in practice."""
+    task, job = _task_and_job(db_session, owner_id)
+    goal = _goal_for(db_session, task)
+    branch = f"claude/mainai-task-{task.id}"
+
+    # Simulates the real Git Data API push _finalize_repo_edit() performs -- a commit lands on
+    # the task's branch on the remote, with NO local worktree/clone involved anywhere.
+    other_clone = Path(patched_github["remote"]).parent / "pushed-via-api-clone"
+    subprocess.run(["git", "clone", "-q", str(patched_github["remote"]), str(other_clone)], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "checkout", "-q", "-b", branch, f"origin/{BASE_BRANCH}"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.email", "api@test.local"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.name", "API"], check=True)
+    (other_clone / "pushed.txt").write_text("real content pushed via the Git Data API\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(other_clone), "add", "pushed.txt"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "commit", "-q", "-m", "pushed.txt"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "push", "-q", "origin", branch], check=True)
+
+    record_checkpoint(db_session, task=task, goal=goal, job_id=job.id, step="work_result", data={"work_result": {"files": ["pushed.txt"]}})
+    record_checkpoint(db_session, task=task, goal=goal, job_id=job.id, step="finalized", data={"finalize_info": {"branch": branch, "proposed": False}})
+    db_session.commit()
+
+    record = await _detect_and_inspect(db_session, task, job)
+    assert record.evidence["worktree_exists"] is False
+    assert record.evidence.get("worktree_local_head_sha") is None  # no worktree -- exactly what real production evidence looks like
+    assert record.evidence["remote_branch_exists"] is True
+    assert record.evidence["has_finalized_checkpoint"] is True
+
+    record = classify_recovery_record(db_session, record=record)
+    db_session.commit()
+    assert record.classification == RecoveryClassification.pushed_no_pr
+    assert record.manual_review_required is False  # auto-salvageable, but see recovery_approval.py -- still gated behind founder approval
+
+
+@pytest.mark.asyncio
+async def test_classify_pr_exists_is_reachable_with_no_worktree_at_all(db_session, owner_id, patched_github):
+    """Same real-production shape as the PUSHED_NO_PR regression above, but a PR already exists
+    for the branch too -- must classify PR_EXISTS, not PUSHED_NO_PR or CHECKPOINTED_WORK."""
+    task, job = _task_and_job(db_session, owner_id)
+    goal = _goal_for(db_session, task)
+    branch = f"claude/mainai-task-{task.id}"
+
+    other_clone = Path(patched_github["remote"]).parent / "pushed-via-api-clone-2"
+    subprocess.run(["git", "clone", "-q", str(patched_github["remote"]), str(other_clone)], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "checkout", "-q", "-b", branch, f"origin/{BASE_BRANCH}"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.email", "api@test.local"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.name", "API"], check=True)
+    (other_clone / "pr.txt").write_text("real content behind a real PR, pushed via the Git Data API\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(other_clone), "add", "pr.txt"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "commit", "-q", "-m", "pr.txt"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "push", "-q", "origin", branch], check=True)
+    patched_github["prs"][f"test-owner:{branch}"] = [{"number": 99, "html_url": "https://example.invalid/pr/99"}]
+
+    record_checkpoint(db_session, task=task, goal=goal, job_id=job.id, step="work_result", data={"work_result": {"files": ["pr.txt"]}})
+    record_checkpoint(db_session, task=task, goal=goal, job_id=job.id, step="finalized", data={"finalize_info": {"branch": branch, "proposed": False}})
+    db_session.commit()
+
+    record = await _detect_and_inspect(db_session, task, job)
+    record = classify_recovery_record(db_session, record=record)
+    db_session.commit()
+    assert record.classification == RecoveryClassification.pr_exists
+
+
 # ---------------------------------------------------------------- F. PR_EXISTS
 
 
@@ -435,3 +511,52 @@ async def test_inspect_applicable_lessons_is_empty_when_none_apply(db_session, o
     task, job = _task_and_job(db_session, owner_id, task_type="read_only_audit")
     record = await _detect_and_inspect(db_session, task, job)
     assert record.evidence["applicable_lessons"] == []
+
+
+# ---------------------------------------------------------------- privilege policy (hardening pass)
+
+
+def test_apply_mainai_execution_privileges_narrows_mainai_recovery_events_even_from_a_blanket_grant(superuser_db):
+    """Hardening-pass finding (P1): migration 0033's own module docstring already claimed
+    mainai_app's grants on the three new V0.2 tables are "applied and verified by app/rls.py's
+    apply_mainai_execution_privileges(), extended to cover these three tables" -- but that
+    extension never actually happened; app/rls.py was untouched by the original V0.2 branch.
+    The append-only deny-mutation trigger on mainai_recovery_events still functionally blocked
+    every UPDATE/DELETE regardless (see the trigger tests below), but relying on that single
+    layer alone -- without also revoking the raw grant -- is exactly the class of gap this
+    project's own S1A privilege-policy series (and Pass 44's TRUNCATE finding) established the
+    "narrow every write path to exactly what it needs, never one layer alone" doctrine to close.
+    Same "survives a worst-case blanket GRANT ALL from ensure_app_role.py's own boot-time
+    default" proof test_apply_mainai_job_runtime_privileges_survives_reboots_blanket_grant_all
+    already established for mainai_job_events."""
+    from app.db import migration_engine
+    from app.rls import _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES, _effective_table_privileges, apply_mainai_execution_privileges
+
+    superuser_db.execute(sa_text("GRANT ALL PRIVILEGES ON TABLE mainai_recovery_events TO mainai_app"))
+    superuser_db.commit()
+
+    apply_mainai_execution_privileges(migration_engine, require_complete=True)  # must not raise
+
+    conn = superuser_db.connection()
+    assert _effective_table_privileges(conn, "mainai_app", "mainai_recovery_events") == _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES
+    assert _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES == frozenset({"SELECT", "INSERT"})
+
+
+def test_mainai_recovery_events_mainai_app_lacks_update_delete_privilege_at_the_grant_level(db_session, superuser_db, owner_id, patched_github):
+    """Distinguishes "the grant itself is gone" from "merely trigger-blocked" -- the same
+    distinction test_mainai_job_events_mainai_app_lacks_update_delete_privilege draws for its
+    own sibling table. Checks has_table_privilege() directly (the real, effective-privilege
+    check Postgres itself uses), not just that an UPDATE/DELETE attempt raises."""
+    task, job = _task_and_job(db_session, owner_id, task_type="read_only_audit")
+    record = get_or_create_recovery_record(db_session, task=task, job=job)
+    db_session.commit()
+    event_id = superuser_db.execute(
+        sa_text("SELECT id FROM mainai_recovery_events WHERE recovery_record_id = :id LIMIT 1"), {"id": str(record.id)}
+    ).scalar()
+    assert event_id is not None
+
+    for priv in ("UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"):
+        has_it = superuser_db.execute(
+            sa_text("SELECT has_table_privilege('mainai_app', 'public.mainai_recovery_events', :priv)"), {"priv": priv}
+        ).scalar()
+        assert has_it is False, f"mainai_app must not hold {priv} on mainai_recovery_events"

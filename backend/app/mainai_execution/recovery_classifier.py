@@ -16,7 +16,25 @@ VERIFIED_WORK sits below the git-state codes on purpose: for a `repo_edit` task 
 evidence is strictly more concrete and further along than "verification passed" alone (which
 happens BEFORE the push step in V0.1's own flow — see execution_job.py's
 run_task_execution_job()). VERIFIED_WORK is the correct top signal for task types that never
-touch git at all (`read_only_audit`, `run_tests`), where no worktree/branch evidence exists."""
+touch git at all (`read_only_audit`, `run_tests`), where no worktree/branch evidence exists.
+
+Hardening-pass finding (P0, real production correctness/approval-bypass bug): the SHA-equality
+check below (`remote_sha == local_head`) was the ONLY signal `_classify()` used to detect
+PUSHED_NO_PR/PR_EXISTS -- but `local_head` (`worktree_local_head_sha`) is populated exclusively
+from a `mainai_task_worktrees` row, and `execution_job.py`'s actual production `repo_edit`
+handler (`_handle_repo_edit()`/`_finalize_repo_edit()`) does NOT create one -- it still writes
+to the shared checkout and pushes via the GitHub Git Data API (see
+docs/MAINAI_DEAD_AGENT_RECOVERY_V0_2.md's LIMITED section). For every real dead `repo_edit`
+job today, `local_head` is therefore always None, so this branch could NEVER be reached no
+matter how far the dead job actually got -- a dead job that had ALREADY, genuinely pushed to
+GitHub fell all the way through to CHECKPOINTED_WORK (auto-salvageable, no approval needed),
+silently bypassing the one gate (require_recovery_approval()) that exists specifically because
+PUSHED_NO_PR/PR_EXISTS mean real code is already live on GitHub, and risking a real duplicate
+commit when the salvaged work_result re-ran `_finalize_repo_edit()`. Fixed by also accepting
+`has_finalized_checkpoint` (real, durably recorded by execution_job.py itself immediately after
+a confirmed successful push, entirely independent of whether a worktree exists) together with
+a live-confirmed `remote_branch_exists` as an equally valid proof that the push already
+happened -- using only evidence recovery_inspector.py already gathers, never a new signal."""
 
 from app.mainai_execution.recovery_inspector import record_recovery_event
 from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryEventType, MainAIRecoveryRecord, MainAIRecoveryStatus, RecoveryClassification
@@ -30,7 +48,9 @@ def _classify(evidence: dict) -> RecoveryClassification:
     local_head = evidence.get("worktree_local_head_sha")
     remote_sha = evidence.get("remote_branch_sha")
 
-    if remote_exists and remote_sha is not None and remote_sha == local_head:
+    worktree_confirms_push = remote_exists and remote_sha is not None and remote_sha == local_head
+    checkpoint_confirms_push = bool(remote_exists) and bool(evidence.get("has_finalized_checkpoint"))
+    if worktree_confirms_push or checkpoint_confirms_push:
         if evidence.get("pr_exists"):
             return RecoveryClassification.pr_exists
         return RecoveryClassification.pushed_no_pr
