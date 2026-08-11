@@ -65,12 +65,29 @@ full column-level rationale.
 
 ## REAL
 
-- Real per-attempt filesystem isolation (`worktree.py`), **as a capability the recovery
-  pipeline itself fully exercises** — a genuine `git` checkout on a deterministic task-scoped
-  branch, created from a GitHub-verified base SHA — never the shared worker checkout, never
-  `main`/`master`/the mainline branch (enforced both in code and by a DB CHECK constraint). Not
-  yet wired into `execution_job.py`'s own live `repo_edit` handler, though — see LIMITED #1,
-  the single most important honesty note in this document.
+- Real per-attempt filesystem isolation (`worktree.py`), **wired into the actual production
+  `repo_edit` execution path, not just exercised by the recovery pipeline's own tests.**
+  Hardening-pass Round 2 finding and fix: `execution_job.py`'s `_handle_repo_edit()` now
+  creates (or, on a takeover's rebound worktree, reuses) a genuine `git` checkout on a
+  deterministic task-scoped branch, created from a GitHub-verified base SHA — never the shared
+  worker checkout, never `main`/`master`/the mainline branch (enforced both in code and by a DB
+  CHECK constraint) — for every real repo_edit attempt when `github_write_enabled` is on.
+  `_finalize_repo_edit()` pushes that same real local commit via `worktree.py`'s
+  `push_worktree_branch()`, replacing the GitHub Git Data API-only push model V0.1 used. This
+  means LOCAL_UNCOMMITTED_WORK and LOCAL_COMMITTED_NOT_PUSHED are genuinely reachable from a
+  real dead `repo_edit` task today, proven end to end through `run_task_execution_job()` itself
+  (Demo 2/3, see DEMO RESULTS) — not merely correct against hand-constructed evidence. The
+  original V0.1 proposal-mode path (`github_write_enabled` off) is unchanged, preserved
+  verbatim as `_propose_repo_edit()`.
+- Real durability for every fact the recovery classifier depends on: the worktree row itself,
+  and separately `worktree.current_commit` (the exact DB column
+  `LOCAL_COMMITTED_NOT_PUSHED` reads), are committed to Postgres immediately after each real
+  git-level fact they describe becomes true — each commit point gated behind the same
+  lease-renewal check every other real write in `execution_job.py` already uses. Found and
+  fixed in the same pass: without this, a genuine process crash (not a caught exception) would
+  have rolled back the in-flight transaction along with real, already-on-disk git state,
+  reproducing the exact "recovery state a real crash can't produce" problem one level deeper —
+  see the recorded engineering lesson.
 - Real, falsifiable ownership: a worktree is only ever trusted after
   `verify_worktree_ownership()` reads back an on-disk marker file and compares it field-for-field
   against the DB row — missing, unreadable, or mismatched is always treated as "nothing here
@@ -124,51 +141,41 @@ Nothing in this list. Every piece named above does real work against real state.
 
 Named explicitly rather than silently left implicit:
 
-1. **`worktree.py` is not wired into `execution_job.py`'s own live `repo_edit` handler.**
-   Hardening-pass finding, the most important item in this document: `_handle_repo_edit()`
-   writes directly onto the shared backend checkout, and `_finalize_repo_edit()` pushes purely
-   through the GitHub Git Data API (`commit_multiple_files()`), exactly as it did in V0.1 —
-   `create_task_worktree()` is called only by the recovery pipeline's own tests/demos to
-   simulate what a dead worker's real progress would look like, and by `recovery_salvage.py`
-   when rebinding an existing worktree row that happens to exist. This means, for a real
-   `repo_edit` task executing today: no worktree is ever created, no local `git commit` object
-   ever exists, and `worktree_local_head_sha` is always absent from that task's own recovery
-   evidence. LOCAL_UNCOMMITTED_WORK and LOCAL_COMMITTED_NOT_PUSHED are therefore reachable only
-   in a future state where something actually calls `create_task_worktree()` from the live
-   execution path — not from any `repo_edit` task running today. A closely related
-   hardening-pass finding this branch DID fix (not merely document): `_classify()` originally
-   detected PUSHED_NO_PR/PR_EXISTS exclusively via `worktree_local_head_sha ==
-   remote_branch_sha`, which — given the gap just described — made those two classifications
-   equally unreachable for a real dead `repo_edit` job that HAD already pushed, silently
-   bypassing the founder-approval gate; `_classify()` now also accepts a durable `finalized`
-   checkpoint (real, written by execution_job.py itself, independent of any worktree) as
-   equally valid proof, closing that specific gap. See V0.3 CANDIDATES for the follow-up work
-   (wiring `execution_job.py` to actually use `worktree.py`) this finding implies — deliberately
-   NOT done in this hardening pass, since it is a scope-widening architecture change, not a bug
-   fix, and the founder's own instruction for this pass was to freeze feature scope.
-2. **No worker automatically runs recovery.** `POST /tasks/{id}/recover` is the one entry
+1. **No worker automatically runs recovery.** `POST /tasks/{id}/recover` is the one entry
    point that actually runs detect → inspect → classify → takeover — mirroring V0.1's own
    `POST /goals/{id}/plan` precedent (the one addition beyond pure read/act). There is no
    background poll cycle that notices a dead `task_execution` job and recovers it on its own;
    a founder (or a future automated caller) must call it.
-3. **Recovery approval is all-or-nothing per classification, not per-record policy
+2. **Recovery approval is all-or-nothing per classification, not per-record policy
    selection.** `standard_recovery` is the only policy V0.2 ships (mirrors `approval.py`'s own
    "exactly one policy" V0.1 precedent) — there is no UI or API for defining a second named
    recovery-approval policy.
-4. **CONFLICTED_STATE / UNSAFE_TO_AUTO_RECOVER have no in-app resolution workflow.** They
+3. **CONFLICTED_STATE / UNSAFE_TO_AUTO_RECOVER have no in-app resolution workflow.** They
    correctly fail closed (`manual_review_required=True`, `execute_takeover()` refuses outright)
    but resolving the underlying git divergence happens entirely out-of-band (a human fixes it
    directly), then a fresh inspection pass — there is no "resolve and retry" button.
-5. **`recover_task()` (the API endpoint) adds no additional liveness pre-check of its own.**
+4. **`recover_task()` (the API endpoint) adds no additional liveness pre-check of its own.**
    Calling it on a task whose job is not actually dead is safe (every underlying primitive —
    `mark_job_superseded()`'s row-locked re-check, the classifier's own evidence-only judgment —
    already fails closed), but the endpoint does not itself verify the job is dead before
    starting; it would only ever duplicate a guard that already exists at the real point of
    consequence.
-6. **Worktree cleanup on takeover is not exhaustive.** A rebound worktree keeps its real
+5. **Worktree cleanup on takeover is not exhaustive.** A rebound worktree keeps its real
    on-disk content; an abandoned one (e.g. NOTHING_DONE, where no worktree ever existed) is
    simply never created for the new attempt. There is no separate garbage-collection pass for
    worktree directories left behind by a container replacement.
+6. **A narrow, structurally unavoidable crash window remains between a real git-level fact and
+   its DB commit.** `_handle_repo_edit()`'s own commits happen IMMEDIATELY after each real git
+   operation (worktree creation, local commit) — but "real git op, then commit the DB fact
+   describing it" can never be a single atomic step across two different systems. A crash in
+   that exact single-statement gap (vanishingly narrow, but not zero) still loses the DB-side
+   fact even though the git-side fact survives; recovery would then under-classify that
+   specific case (most likely as NOTHING_DONE for the worktree-creation gap, or
+   LOCAL_UNCOMMITTED_WORK instead of LOCAL_COMMITTED_NOT_PUSHED for the commit gap) rather than
+   over-claim safety. Not a new gap this branch introduces — the SAME class of gap exists for
+   every other checkpoint commit in `execution_job.py`, V0.1 included; named here because the
+   Round 2 durability fix makes it the narrowest it can practically be, not because it can be
+   eliminated entirely.
 
 ## NOT IMPLEMENTED
 
@@ -186,19 +193,17 @@ Named explicitly rather than silently left implicit:
 
 ## KNOWN RISKS
 
-- **`worktree.py` is not wired into the live `repo_edit` execution path** (LIMITED #1) — the
-  single biggest residual risk in this document: LOCAL_UNCOMMITTED_WORK/
-  LOCAL_COMMITTED_NOT_PUSHED are proven correct for the recovery pipeline's OWN logic (real
-  tests, real git operations) but not yet reachable from any task actually executing in
-  production today.
-- **No background poll cycle for recovery** (see LIMITED #2) means a dead `task_execution` job
+- **No background poll cycle for recovery** (see LIMITED #1) means a dead `task_execution` job
   sits unrecovered until a founder (or a future caller) explicitly triggers `POST
   /tasks/{id}/recover`. At V0.2's scale this is a deliberate, named simplicity choice, not an
   oversight — see V0.3 CANDIDATES.
-- **Worktree directories are not garbage-collected** (LIMITED #6) — a long-abandoned worktree
+- **Worktree directories are not garbage-collected** (LIMITED #5) — a long-abandoned worktree
   whose recovery record never reaches a terminal state leaves real disk usage behind on
   whichever container/host created it, particularly relevant given the backend/worker
   filesystem is not persistent (`worktree.py`'s own module docstring).
+- **The narrow git-op/DB-commit crash window** (LIMITED #6) — structurally unavoidable across
+  two different systems, narrowed as far as practically possible by the Round 2 durability fix,
+  not eliminated.
 - **`lookup_lessons()` reuse inherits the same uncapped-result-set risk V0.1 already documented**
   for its own use inside `planner.py` — not newly introduced here, but now read on every
   `inspect_recovery_record()` call too.
@@ -318,13 +323,21 @@ before its claim) — never a manual shortcut that fakes evidence directly.
    NOTHING_DONE; the new attempt performs the real work for the first time (LLM call count
    asserted == 1); the dead job ends `superseded`. **PASSED.**
 2. **Dead after a local edit** —
-   `test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work`:
-   LOCAL_UNCOMMITTED_WORK; the SAME worktree, with its real still-uncommitted content, is
-   rebound to the new attempt rather than abandoned. **PASSED.**
+   `test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work`: driven through the
+   REAL `run_task_execution_job()`/`_handle_repo_edit()` path (Round 2 hardening pass — the
+   original version of this demo called `worktree.py` directly and never exercised
+   `execution_job.py` at all). `commit_worktree_changes()` is made to raise once so the real AI
+   call and real file write happen for real before the simulated crash. LOCAL_UNCOMMITTED_WORK;
+   the SAME worktree, with its real still-uncommitted content, is rebound to the new attempt and
+   committed for real on resume — the AI is asserted called exactly once overall (no duplicated
+   work). **PASSED.**
 3. **Dead after a local commit** —
-   `test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_pushed`:
-   LOCAL_COMMITTED_NOT_PUSHED; the real local commit object (verified via `git rev-parse HEAD`)
-   survives the takeover unchanged. **PASSED.**
+   `test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_pushed`: same real-path
+   principle — `push_worktree_branch()` is made to raise once so the real AI call, file write,
+   AND local `git commit` all happen for real first. LOCAL_COMMITTED_NOT_PUSHED; the real local
+   commit object (verified via `git rev-parse HEAD`, and via the durably-committed
+   `worktree.current_commit` DB column) survives the takeover unchanged and is pushed for real
+   on resume — asserted exactly once, never a redundant second commit. **PASSED.**
 4. **Dead after a push** —
    `test_demo_4_dead_after_push_recovers_via_pushed_no_pr_with_founder_approval`: PUSHED_NO_PR;
    `execute_takeover()` raises `RecoveryApprovalRequiredError` until
@@ -367,22 +380,15 @@ API/UI" scope for this branch.
 Documented, not built, per the same "name it, don't build it yet" discipline V0.1's own
 document used:
 
-- **Wire `execution_job.py`'s `_handle_repo_edit()`/`_finalize_repo_edit()` to actually use
-  `worktree.py`** (LIMITED #1, KNOWN RISKS) — the single highest-priority item on this list.
-  Today the recovery pipeline's worktree-based salvage/classification logic is real and fully
-  tested, but no real `repo_edit` task execution ever creates the worktree it operates on. This
-  is a genuine architecture change (real local `git commit`/`git push` replacing the current
-  Git-Data-API-only push model for the live path), not a bug fix — deliberately out of scope
-  for a hardening pass whose job was to freeze feature scope, not extend it.
 - **A background pass that notices dead `task_execution` jobs and calls the recovery pipeline
-  automatically**, closing LIMITED #2 — today it is entirely founder/caller-triggered.
+  automatically**, closing LIMITED #1 — today it is entirely founder/caller-triggered.
 - **Worktree garbage collection** for abandoned worktrees whose recovery record never reaches a
-  terminal state (LIMITED #6 / KNOWN RISKS).
+  terminal state (LIMITED #5 / KNOWN RISKS).
 - **An in-app resolution workflow for CONFLICTED_STATE**, so a founder can act on a flagged
-  divergence without leaving the system (LIMITED #4).
+  divergence without leaving the system (LIMITED #3).
 - **A second named recovery-approval policy** if a future task type's external side effects need
   a different approval shape than `standard_recovery`'s all-or-nothing PUSHED_NO_PR/PR_EXISTS
-  split (LIMITED #3).
+  split (LIMITED #2).
 
 ## Coverage matrix
 
@@ -419,22 +425,39 @@ document used:
 | No force push, ever | `worktree.py`'s `push_worktree_branch()` — plain push only, no code path passes `--force` |
 | Migration round-trip (0033-0035) | `test_migration_roundtrip.py` |
 | Privilege policy narrows `mainai_recovery_events` (hardening-pass P1 fix) | `test_apply_mainai_execution_privileges_narrows_mainai_recovery_events_even_from_a_blanket_grant`, `test_mainai_recovery_events_mainai_app_lacks_update_delete_privilege_at_the_grant_level` |
+| `worktree.py` wired into the real `repo_edit` execution path (hardening-pass Round 2 fix) | `test_mainai_execution_executor.py`'s `_handle_repo_edit`/`_finalize_repo_edit` real-worktree tests; Demo 2/3 |
+| LOCAL_UNCOMMITTED_WORK/LOCAL_COMMITTED_NOT_PUSHED reachable from a REAL crash (not hand-constructed state) | Demo 2/3, rewritten Round 2 to crash inside `run_task_execution_job()` itself |
+| Durability: worktree row + `current_commit` survive a real crash (hardening-pass Round 2 fix) | Demo 2/3 (assert durable state exists after `db_session.rollback()` simulates a dropped connection) |
+| No duplicated AI call / commit / push on salvage-then-resume | Demo 2/3 (`call_count`/`push_calls` asserted) |
+| Path/symlink-escape safety on the real worktree write path (re-attack, Round 2) | `test_run_task_execution_job_repo_edit_real_worktree_with_a_symlink_escape_never_writes_outside_the_worktree` |
+| Ownership fail-closed on worktree reuse (re-attack, Round 2) | `test_handle_repo_edit_refuses_to_reuse_a_worktree_whose_ownership_does_not_verify` |
+| Engineering lesson recorded for the state-not-reachable-from-production-path finding | `test_record_engineering_lesson_for_recovery_state_not_reachable_from_real_execution_path` |
 
 ## Test suite
 
 New test files added by this branch:
 
-- `tests/backend/test_mainai_execution_worktree.py` (12 tests)
-- `tests/backend/test_mainai_execution_recovery.py` (17 tests)
+- `tests/backend/test_mainai_execution_worktree.py` (13 tests)
+- `tests/backend/test_mainai_execution_recovery.py` (19 tests)
 - `tests/backend/test_mainai_execution_recovery_salvage.py` (8 tests)
 - `tests/backend/test_mainai_execution_recovery_takeover.py` (13 tests)
 - `tests/backend/test_mainai_execution_recovery_dedup.py` (4 tests)
-- `tests/backend/test_mainai_execution_recovery_demos.py` (7 tests — the required demos)
+- `tests/backend/test_mainai_execution_recovery_demos.py` (7 tests — the required demos, demos 2
+  and 3 rewritten in the Round 2 hardening pass to run through the real `execution_job.py` path)
 - `tests/backend/test_mainai_execution_recovery_api.py` (8 tests)
 - `tests/backend/test_mainai_execution_checkpoint_fencing.py` (2 tests)
 
-Run the full backend suite: `pytest tests/`. Last full run before this branch's PR was opened:
-1244 passed, 1 skipped (a P2 capacity test, skipped by design), 0 failed (one storage-layer race
-test flaked once under full-suite load and passed cleanly in isolation on rerun — pre-existing,
-unrelated to this branch's diff, not touched by any file changed here). The mainai + migration
-round-trip subset: 348 passed, 2 passed.
+Plus, in `tests/backend/test_mainai_execution_executor.py` (V0.1's own file, not new but
+substantially extended by the Round 2 hardening pass's worktree-wiring work): the real-worktree
+repo_edit path now has its own dedicated resume/idempotency and path/ownership security tests
+(`test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exists_from_a_prior_uncheckpointed_push`,
+`test_run_task_execution_job_repo_edit_real_worktree_with_a_symlink_escape_never_writes_outside_the_worktree`,
+`test_handle_repo_edit_refuses_to_reuse_a_worktree_whose_ownership_does_not_verify`), alongside
+the pre-existing V0.1 proposal-mode path-traversal/symlink-escape suite, unchanged.
+
+Run the full backend suite: `pytest tests/`. Last full run after the Round 2 hardening pass:
+see the PR body's final verification section for the exact counts on the pushed head. The mainai
++ migration round-trip subset and the full V0.1+V0.2 execution suite
+(`test_mainai_execution_executor.py`, `test_mainai_execution_recovery.py`,
+`test_mainai_execution_worktree.py`, `test_mainai_execution_recovery_demos.py`,
+`test_mainai_execution_demos.py`) all pass with 0 failures as of this branch's head.
