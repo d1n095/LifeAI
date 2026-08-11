@@ -6,6 +6,47 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #58 är ÖPPEN (draft, INTE mergad)** — `claude/mainai-dead-agent-recovery-v0-2` →
+`claude/det-kommer-mer-879lcm`, grenad från exakt `03c0a9cb0323abebacbdd6be6f26dee363ead3c7`
+(basgrenens tip vid grening, verifierad med `git ls-remote origin` — matchar också basgrenens
+tip vid slutet av detta pass, ingen ny merge har landat under tiden så ingen rebase behövdes,
+per `CLAUDE.md`s merge-regel om att aldrig rebasa i förväg "för säkerhets skull"). Byggd på
+grundarens uttryckliga instruktion **MainAI V0.2 (Dead Agent Takeover/Salvage/Resume
+Hardening)**, direkt ovanpå den redan mergade V0.1-loopen (PR #57). Stänger den lucka V0.1:s
+egen dokumentation uttryckligen namngav som V0.2-kandidat: dagens resume-historia var "SAMMA
+arbete återupptas vid reclaim" — äkta och testat, men förutsätter att den återkrävande workern
+kör identisk kod; V0.2 adresserar en worker som återkräver ett jobb vars ursprungliga worker är
+BEVISLIGEN död genom en riktig, medveten salvage-åtgärd. Ingen ny kö-/lease-/heartbeat-mekanism
+byggdes — varje dött försök är fortfarande en riktig, leasead, fenced `mainai_jobs`-rad.
+
+Nytt: migration 0033 (`mainai_task_worktrees`/`mainai_recovery_records`/
+`mainai_recovery_events`), migration 0034 (`superseded`-status + `superseded_by_job_id` för
+`mainai_jobs`, utesluter `task_execution` från blind lease-expiry-reclaim), migration 0035
+(godkännande-gate:ens `approval_granted`-händelsetyp), `app/mainai_execution/worktree.py`
+(riktig per-attempt git-isolering, ägarskap verifierat via on-disk marker-token),
+`recovery_inspector.py`/`recovery_classifier.py`/`recovery_approval.py`/`recovery_salvage.py`/
+`recovery_takeover.py` (hela pipelinen: detect → inspect → classify → [godkännande-gate för
+PUSHED_NO_PR/PR_EXISTS] → salvage → takeover), integration i `final_report.py` (recovery-
+historik + en riktig sanningsfixad `unresolved_risk`-lucka) och `recovery_inspector.py`s
+återanvändning av `lessons.py` (read-only, aldrig auto-inspelning), tre nya founder-API-ändpunkter
+i `app/routers/mainai_execution.py` (`GET /tasks/{id}/recovery`, `POST /tasks/{id}/recover`,
+`POST /recovery/{id}/approve` — medvetet backend-only, ingen frontend-ändring i detta pass), samt
+`backend/docs/MAINAI_DEAD_AGENT_RECOVERY_V0_2.md` (REAL/STUBBED/LIMITED/NOT IMPLEMENTED,
+klassificeringsvokabulären A-I med bevismappning, säkerhets-/durability-/godkännande-modeller,
+samtliga 7 obligatoriska demoresultat inkl. de två uttryckligen KRÄVDA — stale worker returns
+och tvetydigt/motsägelsefullt tillstånd — full coverage-matris, V0.3-kandidater). Se den
+doc-filen för den fullständiga, ärliga statusen.
+
+Full lokal verifiering innan PR öppnades: `pytest tests/` (hela backend-sviten) — 1244 passed,
+1 skipped by design (P2-kapacitetstest), 0 failed (en pre-existing, orelaterad
+concurrency-flake i `test_storage_local_fs.py`, grön i isolerad omkörning — noll diff mot bas i
+den filen); riktad mainai+migrationsrundtripp-svit — 348 passed, 2 passed. Samtliga 7
+obligatoriska demos (inkl. de två KRÄVDA: stale worker returns, tvetydigt tillstånd) kör genom
+den riktiga recovery-loopen, aldrig en manuell genväg. **INTE MERGAD** — öppnad som draft,
+väntar på grundarens granskning, per grundarens uttryckliga instruktion att stanna FÖRE merge.
+Ingen del av denna branch har rört merge till mainline, deploy, VPS, produktion,
+prod-migration/backfill, CONTRACT, S1C, V0.3, force push eller destructive recovery.
+
 **PR #37 är MERGAD** (`claude/vps-worker-privilege-race-hotfix` → `claude/det-kommer-mer-879lcm`),
 merge-commit `d5f37c2b798f7ae430a908037608d9c19e29cc70` — som därmed är basgrenens nuvarande tip.
 Grundaren körde därefter en fullt verifierad produktionsdeploy av den basen; produktionen är
