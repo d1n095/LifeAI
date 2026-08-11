@@ -46,11 +46,16 @@ from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task
+from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
+from app.mainai_execution.recovery_classifier import classify_recovery_record
+from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
+from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
-from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
-from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
+from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
+from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryStatus
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
@@ -433,6 +438,79 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-retry MainAITask %s.", self.worker_id, task.id)
 
+    # V0.3: how many candidate dead task_execution jobs this worker inspects per poll cycle --
+    # a real, bounded scan, same reasoning as _MAX_CI_WAITS_PER_TICK above.
+    _MAX_AUTO_RECOVERY_SCANS_PER_TICK = 10
+
+    async def _advance_mainai_execution_auto_recovery(self, db: Session) -> None:
+        """MainAI V0.3's automatic dead-agent-recovery tick -- the detection step V0.2's own
+        `POST /tasks/{id}/recover` docstring explicitly named as NOT existing yet ("No worker/
+        background process runs recovery automatically"). Detection itself is exactly the
+        condition migration 0034's own docstring already establishes as the reason
+        `claim_next_mainai_job()`'s blind expired-lease reclaim branch excludes
+        `job_type='task_execution'`: a `running` task_execution job whose lease has expired is
+        a dead attempt that must go through the real inspect->classify->takeover gate, never
+        straight back into the generic poll loop. This tick finds exactly those jobs and drives
+        them through the SAME four functions (get_or_create_recovery_record ->
+        inspect_recovery_record -> classify_recovery_record -> execute_takeover) the founder's
+        own `/recover` endpoint already calls -- no second recovery pipeline, and no bypass of
+        `execute_takeover()`'s own approval gate (recovery_approval.py): PUSHED_NO_PR/PR_EXISTS
+        still raise RecoveryApprovalRequiredError here exactly as they do for a founder-
+        triggered call, caught and left for a founder to approve via the existing API,
+        never auto-approved by this tick. CONFLICTED_STATE/UNSAFE_TO_AUTO_RECOVER are never in
+        AUTO_SALVAGEABLE_CLASSIFICATIONS at all, so this tick never even attempts a takeover for
+        them -- classification alone (which IS unattended-safe, per that module's own
+        evidence-only judgment) still runs and durably records `manual_review_required=True`
+        for a founder to find.
+
+        Per-record isolation, same as every other tick in this method group: one record's
+        failure is logged and never stops the batch."""
+        now = datetime.utcnow()
+        dead_jobs = (
+            db.query(MainAIJob)
+            .filter(
+                MainAIJob.job_type == "task_execution",
+                MainAIJob.status == MainAIJobStatus.running,
+                MainAIJob.lease_expires_at.isnot(None),
+                MainAIJob.lease_expires_at < now,
+            )
+            .order_by(MainAIJob.lease_expires_at.asc())
+            .limit(self._MAX_AUTO_RECOVERY_SCANS_PER_TICK)
+            .all()
+        )
+        for job in dead_jobs:
+            task = db.query(MainAITask).filter(MainAITask.mainai_job_id == job.id).one_or_none()
+            if task is None or task.status != MainAITaskStatus.running:
+                continue
+            goal = db.get(MainAIGoal, task.goal_id)
+            if goal is None:
+                continue
+            try:
+                record = get_or_create_recovery_record(db, task=task, job=job)
+                db.commit()
+                record = await inspect_recovery_record(db, task=task, job=job, record=record)
+                db.commit()
+                record = classify_recovery_record(db, record=record)
+                db.commit()
+                if record.status == MainAIRecoveryStatus.classified and record.classification in AUTO_SALVAGEABLE_CLASSIFICATIONS:
+                    db.add(
+                        MainAITaskEvent(
+                            task_id=task.id,
+                            owner_id=task.owner_id,
+                            event_type=MainAITaskEventType.auto_recovery_triggered,
+                            detail={"recovery_record_id": str(record.id), "classification": record.classification.value},
+                        )
+                    )
+                    db.commit()
+                    try:
+                        record, _new_job = await execute_takeover(db, task=task, goal=goal, record=record, dispatched_by="mainai_worker_auto_recovery")
+                        db.commit()
+                    except (RecoveryApprovalRequiredError, TakeoverError):
+                        db.rollback()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to auto-recover mainai_job %s.", self.worker_id, job.id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -450,6 +528,7 @@ class Worker:
             self._retry_storage_deletion_tasks(claim_db)
             await self._poll_mainai_task_waits(claim_db)
             self._advance_mainai_execution_retries(claim_db)
+            await self._advance_mainai_execution_auto_recovery(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
