@@ -148,7 +148,7 @@ async def test_salvage_nothing_done_is_a_clean_noop(db_session, owner_id, patche
     goal = _goal_for(db_session, task)
 
     new_job = _mark_job_dead_and_retry_task(db_session, task, job)
-    record = salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+    record = await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
     db_session.commit()
 
     assert record.status == MainAIRecoveryStatus.salvaged
@@ -165,7 +165,7 @@ async def test_salvage_checkpointed_work_copies_the_real_work_result_forward(db_
 
     record = await _through_classification(db_session, task, job)
     new_job = _mark_job_dead_and_retry_task(db_session, task, job)
-    record = salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+    record = await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
     db_session.commit()
 
     assert "copied_work_result_checkpoint" in record.salvage_action
@@ -193,7 +193,7 @@ async def test_salvage_pushed_no_pr_synthesizes_a_truthful_finalized_checkpoint(
     assert record.classification == RecoveryClassification.pushed_no_pr
 
     new_job = _mark_job_dead_and_retry_task(db_session, task, job)
-    record = salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+    record = await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
     db_session.commit()
 
     assert "synthesized_finalized_checkpoint" in record.salvage_action
@@ -201,6 +201,87 @@ async def test_salvage_pushed_no_pr_synthesizes_a_truthful_finalized_checkpoint(
     assert finalize_checkpoint is not None
     assert finalize_checkpoint.executor_state["finalize_info"]["branch"] == wt.branch
     assert finalize_checkpoint.executor_state["finalize_info"]["proposed"] is False
+
+
+# ---------------------------------------------------------------- branch/commit salvage safety
+
+
+@pytest.mark.asyncio
+async def test_salvage_refuses_when_remote_branch_tip_moved_since_inspection(db_session, owner_id, patched_github, tmp_path):
+    """Branch/commit salvage safety check: inspection recorded `remote_branch_sha` at one
+    point in time; something outside this system (a human, another process) then advances
+    the same branch before salvage ever runs. Salvage must re-verify live and refuse to
+    synthesize a `finalized` checkpoint for a tip it can no longer prove is still there --
+    never trust the stale inspection snapshot."""
+    task, job = _task_and_job(db_session, owner_id)
+    goal = _goal_for(db_session, task)
+    wt = await create_task_worktree(db_session, task=task, job=job, lease_generation=1, executor_id="worker-1")
+    db_session.commit()
+    (Path(wt.path) / "pushed.txt").write_text("pushed content\n", encoding="utf-8")
+    commit_worktree_changes(db_session, wt, message="pushed.txt")
+    db_session.commit()
+    await push_worktree_branch(wt)
+    record_checkpoint(db_session, task=task, goal=goal, job_id=job.id, step="work_result", data={"work_result": {"files": ["pushed.txt"]}})
+    db_session.commit()
+
+    record = await _through_classification(db_session, task, job)
+    from app.models.mainai_recovery import RecoveryClassification
+
+    assert record.classification == RecoveryClassification.pushed_no_pr
+    inspected_sha = record.evidence["remote_branch_sha"]
+
+    # Something outside this system advances the branch AFTER inspection, BEFORE salvage.
+    other_clone = tmp_path / "other-clone-moved-tip"
+    remote = patched_github["remote"]
+    subprocess.run(["git", "clone", "-q", str(remote), str(other_clone)], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "checkout", "-q", wt.branch], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.email", "other@test.local"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "config", "user.name", "Other"], check=True)
+    (other_clone / "extra.txt").write_text("someone else's commit\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(other_clone), "add", "extra.txt"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "commit", "-q", "-m", "external advance"], check=True)
+    subprocess.run(["git", "-C", str(other_clone), "push", "-q", "origin", wt.branch], check=True)
+    moved_sha = subprocess.run(
+        ["git", "-C", str(other_clone), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert moved_sha != inspected_sha  # sanity: the remote genuinely moved
+
+    new_job = _mark_job_dead_and_retry_task(db_session, task, job)
+    with pytest.raises(SalvageError, match="tip has moved"):
+        await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+
+    # No finalized checkpoint was ever synthesized for unprovable state.
+    assert latest_checkpoint_for_step(db_session, task_id=task.id, job_id=new_job.id, step="finalized") is None
+
+
+@pytest.mark.asyncio
+async def test_salvage_refuses_when_remote_branch_deleted_since_inspection(db_session, owner_id, patched_github, tmp_path):
+    """Same safety check, the other failure shape: the branch existed at inspection time but
+    is gone by the time salvage runs (merged and deleted, manually removed, etc.)."""
+    task, job = _task_and_job(db_session, owner_id)
+    goal = _goal_for(db_session, task)
+    wt = await create_task_worktree(db_session, task=task, job=job, lease_generation=1, executor_id="worker-1")
+    db_session.commit()
+    (Path(wt.path) / "pushed.txt").write_text("pushed content\n", encoding="utf-8")
+    commit_worktree_changes(db_session, wt, message="pushed.txt")
+    db_session.commit()
+    await push_worktree_branch(wt)
+    record_checkpoint(db_session, task=task, goal=goal, job_id=job.id, step="work_result", data={"work_result": {"files": ["pushed.txt"]}})
+    db_session.commit()
+
+    record = await _through_classification(db_session, task, job)
+    from app.models.mainai_recovery import RecoveryClassification
+
+    assert record.classification == RecoveryClassification.pushed_no_pr
+
+    remote = patched_github["remote"]
+    subprocess.run(["git", "-C", str(remote), "branch", "-D", wt.branch], check=True)
+
+    new_job = _mark_job_dead_and_retry_task(db_session, task, job)
+    with pytest.raises(SalvageError, match="no longer exists on the remote"):
+        await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+
+    assert latest_checkpoint_for_step(db_session, task_id=task.id, job_id=new_job.id, step="finalized") is None
 
 
 @pytest.mark.asyncio
@@ -213,7 +294,7 @@ async def test_salvage_local_uncommitted_work_rebinds_the_worktree_to_the_new_jo
 
     record = await _through_classification(db_session, task, job)
     new_job = _mark_job_dead_and_retry_task(db_session, task, job)
-    record = salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+    record = await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
     db_session.commit()
 
     assert "rebound_worktree" in record.salvage_action
@@ -236,7 +317,7 @@ async def test_salvage_refuses_a_record_that_is_not_yet_classified(db_session, o
 
     new_job = _mark_job_dead_and_retry_task(db_session, task, job)
     with pytest.raises(SalvageError):
-        salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+        await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
 
 
 @pytest.mark.asyncio
@@ -267,4 +348,4 @@ async def test_salvage_refuses_a_non_auto_salvageable_classification(db_session,
 
     new_job = _mark_job_dead_and_retry_task(db_session, task, job)
     with pytest.raises(SalvageError):
-        salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)
+        await salvage_recovery_record(db_session, task=task, goal=goal, record=record, new_job=new_job)

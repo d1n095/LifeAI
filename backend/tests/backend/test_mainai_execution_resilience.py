@@ -221,7 +221,7 @@ async def test_run_task_execution_job_resumes_from_checkpoint_without_repeating_
     db_session.commit()
     assert record.classification.value == "CHECKPOINTED_WORK"  # real work_result checkpoint, no git/verification evidence yet
 
-    record, new_job = execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="worker-2")
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="worker-2")
     db_session.commit()
 
     _, _, generation2 = claim_next_mainai_job(superuser_db, "worker-2", 120)

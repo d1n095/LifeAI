@@ -50,7 +50,7 @@ class TakeoverError(RuntimeError):
     pass
 
 
-def execute_takeover(
+async def execute_takeover(
     db: Session, *, task: MainAITask, goal: MainAIGoal, record: MainAIRecoveryRecord, dispatched_by: str
 ) -> tuple[MainAIRecoveryRecord, MainAIJob]:
     if record.status != MainAIRecoveryStatus.classified:
@@ -71,7 +71,7 @@ def execute_takeover(
     # already reviewed/committed) -- it internally advances classified -> salvaging -> salvaged.
     # This function's own `taking_over`/`taken_over` transitions happen AFTER, once salvage's
     # own work is durably done, so the two functions' status contracts never collide.
-    salvage_recovery_record(db, task=task, goal=goal, record=record, new_job=new_job)
+    await salvage_recovery_record(db, task=task, goal=goal, record=record, new_job=new_job)
 
     record.status = MainAIRecoveryStatus.taking_over
     db.add(record)

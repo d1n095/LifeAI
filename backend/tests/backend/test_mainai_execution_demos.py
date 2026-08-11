@@ -409,7 +409,7 @@ async def test_demo_3_restart_resume_through_the_real_worker_poll_loop(db_sessio
     superuser_db.commit()
     assert record.classification.value == "CHECKPOINTED_WORK"
 
-    record, new_job = execute_takeover(superuser_db, task=task, goal=goal_row, record=record, dispatched_by="recovery-worker")
+    record, new_job = await execute_takeover(superuser_db, task=task, goal=goal_row, record=record, dispatched_by="recovery-worker")
     superuser_db.commit()
 
     # The new attempt is now an ordinary `queued` job -- Worker().run_once() picks it up and

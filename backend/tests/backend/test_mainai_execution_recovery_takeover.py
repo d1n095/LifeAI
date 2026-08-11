@@ -101,7 +101,7 @@ async def test_takeover_full_chain_nothing_done(db_session, superuser_db, owner_
     record = await _through_classification(db_session, task, dead_job)
     assert record.classification == RecoveryClassification.nothing_done
 
-    record, new_job = execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
     db_session.commit()
 
     assert record.status == MainAIRecoveryStatus.completed
@@ -148,7 +148,7 @@ async def test_takeover_salvages_checkpoint_so_the_new_job_never_recomputes_it(d
     record = await _through_classification(db_session, task, dead_job)
     assert record.classification == RecoveryClassification.checkpointed_work
 
-    record, new_job = execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
     db_session.commit()
 
     copied = latest_checkpoint_for_step(db_session, task_id=task.id, job_id=new_job.id, step="work_result")
@@ -174,7 +174,7 @@ async def test_takeover_refuses_a_record_that_is_not_classified(db_session, supe
     db_session.commit()
 
     with pytest.raises(TakeoverError):
-        execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+        await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
 
 
 @pytest.mark.asyncio
@@ -194,7 +194,7 @@ async def test_takeover_refuses_a_non_auto_salvageable_classification(db_session
     db_session.commit()
 
     with pytest.raises(TakeoverError):
-        execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+        await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
 
 
 def test_mark_job_superseded_refuses_a_job_that_is_not_genuinely_dead(db_session, superuser_db, owner_id):
@@ -229,7 +229,7 @@ async def test_superseded_job_writes_are_rejected_exactly_like_any_stale_lease(d
     stale_generation = dead_job.lease_generation
 
     record = await _through_classification(db_session, task, dead_job)
-    execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
     db_session.commit()
 
     with pytest.raises(JobLeaseLostError):
