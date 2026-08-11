@@ -1,0 +1,236 @@
+"""V0.2 recovery pipeline stage 5: takeover (recovery_takeover.execute_takeover()). Real
+Postgres, real dispatch/claim cycle -- proves the FULL chain end to end: a dead job's task
+moves back to `ready`, a genuinely new `mainai_jobs` row is dispatched, salvage copies durable
+evidence forward, the dead job is fenced (`superseded`), and a worker can then actually claim
+and run the NEW job to completion using the salvaged evidence (never recomputing a checkpoint
+that already existed)."""
+
+import pytest
+from sqlalchemy import text as sa_text
+
+from app.jobs.mainai_job_lease import JobLeaseLostError, JobNotSupersedableError, claim_next_mainai_job, mark_job_superseded, renew_mainai_job_lease
+from app.mainai_execution import executor, planner
+from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
+from app.mainai_execution.execution_job import run_task_execution_job
+from app.mainai_execution.recovery_classifier import classify_recovery_record
+from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
+from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
+from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
+from app.models.mainai_job import MainAIJob, MainAIJobStatus
+from app.models.mainai_recovery import MainAIRecoveryStatus, RecoveryClassification
+from app.providers.base import ChatResult
+from app.providers.openai_provider import OpenAIProvider
+from app.request_context import current_user_id as current_user_id_var
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _apply_privilege_policy_before_this_module():
+    from app.db import migration_engine
+    from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges
+
+    apply_mainai_job_runtime_privileges(migration_engine)
+    apply_mainai_execution_privileges(migration_engine)
+
+
+def _set_rls_user(session, owner_id) -> None:
+    current_user_id_var.set(str(owner_id))
+    session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
+
+
+@pytest.fixture
+def owner_id(db_session, make_verified_user):
+    user, _password = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    return user.id
+
+
+def _fake_chat(response_text: str, call_counter: list[int] | None = None):
+    async def _chat(self, messages, model, **kwargs):
+        if call_counter is not None:
+            call_counter[0] += 1
+        return ChatResult(content=response_text, provider="openai", model=model, raw_usage={})
+
+    return _chat
+
+
+def _goal(db_session, owner_id):
+    return planner.create_goal(db_session, owner_id=owner_id, title="Takeover test goal", original_instruction="x", created_by="test")
+
+
+def _task_and_dead_job(db_session, superuser_db, owner_id, *, task_type="read_only_audit") -> tuple[MainAITask, MainAIGoal]:
+    """Dispatches a task, claims its job, then kills it (lease expired) -- the exact state a
+    real takeover is meant to recover from."""
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session, goal=goal, rationale="single task",
+        tasks=[planner.PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[])],
+        created_by="test",
+    )
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    db_session.refresh(task)
+
+    claim_next_mainai_job(superuser_db, "dead-worker", 120)
+    superuser_db.execute(
+        sa_text("UPDATE mainai_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :id"), {"id": str(task.mainai_job_id)}
+    )
+    superuser_db.commit()
+    _set_rls_user(db_session, owner_id)
+    db_session.refresh(task)
+    return task, goal
+
+
+async def _through_classification(db_session, task, dead_job):
+    record = get_or_create_recovery_record(db_session, task=task, job=dead_job)
+    db_session.commit()
+    record = await inspect_recovery_record(db_session, task=task, job=dead_job, record=record)
+    db_session.commit()
+    record = classify_recovery_record(db_session, record=record)
+    db_session.commit()
+    return record
+
+
+@pytest.mark.asyncio
+async def test_takeover_full_chain_nothing_done(db_session, superuser_db, owner_id):
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job_id = task.mainai_job_id
+    dead_job = db_session.get(MainAIJob, dead_job_id)
+
+    record = await _through_classification(db_session, task, dead_job)
+    assert record.classification == RecoveryClassification.nothing_done
+
+    record, new_job = execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    assert record.status == MainAIRecoveryStatus.completed
+    assert record.takeover_job_id == new_job.id
+    assert new_job.id != dead_job_id
+    assert new_job.status == MainAIJobStatus.queued
+    assert new_job.lease_generation == 0  # fresh, never yet claimed
+
+    superuser_db.expire_all()
+    dead_row = superuser_db.execute(sa_text("SELECT status, superseded_by_job_id, completed_at FROM mainai_jobs WHERE id = :id"), {"id": str(dead_job_id)}).one()
+    assert dead_row[0] == "superseded"
+    assert dead_row[1] == new_job.id
+    assert dead_row[2] is not None
+
+    db_session.refresh(task)
+    assert task.mainai_job_id == new_job.id
+    assert task.status == MainAITaskStatus.running  # dispatch_ready_task already claimed it back to running
+
+    event_types = [
+        row[0] for row in db_session.execute(
+            sa_text("SELECT event_type FROM mainai_recovery_events WHERE recovery_record_id = :id ORDER BY created_at"), {"id": str(record.id)}
+        ).all()
+    ]
+    assert event_types == [
+        "dead_detected", "recovery_started", "recovery_inspected", "recovery_classified",
+        "takeover_started", "salvage_started", "salvage_completed", "takeover_completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_takeover_salvages_checkpoint_so_the_new_job_never_recomputes_it(db_session, superuser_db, owner_id, monkeypatch):
+    call_counter = [0]
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("Analysen visar inga problem.", call_counter))
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job_id = task.mainai_job_id
+    dead_job = db_session.get(MainAIJob, dead_job_id)
+
+    # The dead worker DID finish its real (mocked) AI call before dying -- a genuine
+    # work_result checkpoint exists for the dead job, nothing else.
+    record_checkpoint(db_session, task=task, goal=goal, job_id=dead_job_id, step="work_result", data={"work_result": {"analysis": "already done"}})
+    db_session.commit()
+
+    record = await _through_classification(db_session, task, dead_job)
+    assert record.classification == RecoveryClassification.checkpointed_work
+
+    record, new_job = execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    copied = latest_checkpoint_for_step(db_session, task_id=task.id, job_id=new_job.id, step="work_result")
+    assert copied is not None
+    assert copied.executor_state["work_result"] == {"analysis": "already done"}
+
+    # A real worker now claims and runs the NEW job to completion -- the salvaged checkpoint
+    # must be what it uses; the AI provider must NEVER be called again for this task.
+    _, _, generation = claim_next_mainai_job(superuser_db, "recovery-worker-2", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, new_job.id, owner_id, worker_id="recovery-worker-2", lease_generation=generation, lease_seconds=120)
+
+    assert call_counter[0] == 0  # never recomputed
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_takeover_refuses_a_record_that_is_not_classified(db_session, superuser_db, owner_id):
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job = db_session.get(MainAIJob, task.mainai_job_id)
+    record = get_or_create_recovery_record(db_session, task=task, job=dead_job)
+    db_session.commit()
+
+    with pytest.raises(TakeoverError):
+        execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+
+
+@pytest.mark.asyncio
+async def test_takeover_refuses_a_non_auto_salvageable_classification(db_session, superuser_db, owner_id):
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job = db_session.get(MainAIJob, task.mainai_job_id)
+    record = await _through_classification(db_session, task, dead_job)
+
+    # Force an unsafe classification directly (simulating what a real CONFLICTED_STATE
+    # classify() run would produce) to prove the takeover-side guard, independent of the
+    # inspector/classifier's own already-tested detection logic.
+    from app.models.mainai_recovery import RecoveryClassification as RC
+
+    record.classification = RC.conflicted_state
+    record.manual_review_required = True
+    db_session.add(record)
+    db_session.commit()
+
+    with pytest.raises(TakeoverError):
+        execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+
+
+def test_mark_job_superseded_refuses_a_job_that_is_not_genuinely_dead(db_session, superuser_db, owner_id):
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session, goal=goal, rationale="single task",
+        tasks=[planner.PlannedTaskSpec(description="do it", task_type="read_only_audit", verification_plan=[])],
+        created_by="test",
+    )
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    claim_next_mainai_job(superuser_db, "healthy-worker", 120)  # still well within its lease
+
+    import uuid
+
+    with pytest.raises(JobNotSupersedableError):
+        mark_job_superseded(superuser_db, job_id=job.id, superseded_by_job_id=uuid.uuid4())
+    superuser_db.rollback()
+
+    row = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :id"), {"id": str(job.id)}).one()
+    assert row[0] == "running"  # untouched
+
+
+@pytest.mark.asyncio
+async def test_superseded_job_writes_are_rejected_exactly_like_any_stale_lease(db_session, superuser_db, owner_id):
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job_id = task.mainai_job_id
+    dead_job = db_session.get(MainAIJob, dead_job_id)
+    stale_generation = dead_job.lease_generation
+
+    record = await _through_classification(db_session, task, dead_job)
+    execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    with pytest.raises(JobLeaseLostError):
+        renew_mainai_job_lease(db_session, dead_job_id, "dead-worker", stale_generation, 120)

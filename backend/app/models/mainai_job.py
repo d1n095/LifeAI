@@ -19,7 +19,11 @@ class MainAIJobStatus(str, enum.Enum):
     request honored between batches (see app/jobs/handlers/corpus_review.py) — there is no
     automatic pause. `queued`/`running` are the only claimable states (see
     CLAIMABLE_MAINAI_JOB_STATUSES below); every other state is terminal or requires an
-    explicit retry to leave."""
+    explicit retry to leave. `superseded` (migration 0034, V0.2) is a fifth terminal outcome
+    alongside completed/failed/cancelled: a `task_execution` job whose lease expired and was
+    NOT blindly reclaimed (see CLAIMABLE_MAINAI_JOB_STATUSES's own note on why task_execution
+    is excluded from that reclaim branch) but instead replaced by a fresh job through
+    app/mainai_execution/recovery_takeover.py."""
 
     queued = "queued"
     running = "running"
@@ -27,12 +31,19 @@ class MainAIJobStatus(str, enum.Enum):
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
+    superseded = "superseded"
 
 
 # claim_next_mainai_job() (app/jobs/mainai_job_lease.py) picks these up unconditionally by
 # status; `running` is ALSO reclaimable, but only together with an expired lease (a time
 # condition, not status membership), matching CLAIMABLE_IMPORT_JOB_STATUSES's own precedent
-# (app/models/import_job.py) for why that split exists.
+# (app/models/import_job.py) for why that split exists. V0.2 (migration 0034): the
+# expired-lease reclaim branch additionally excludes `job_type = 'task_execution'` in the raw
+# SQL itself (this frozenset can't express a job_type condition) -- task_execution is the only
+# job type with real, semi-irreversible external side effects (local git commits, GitHub
+# pushes), so a dead one must go through app/mainai_execution/recovery_takeover.py's real
+# inspect->classify->salvage gate, never straight back into the generic poll loop. Every other
+# job type's blind reclaim-and-resume behavior is completely unchanged.
 CLAIMABLE_MAINAI_JOB_STATUSES = frozenset({MainAIJobStatus.queued})
 
 # A job can only ever be retried out of a genuinely terminal, non-cancelled state — retrying a
@@ -140,6 +151,11 @@ class MainAIJob(Base):
     # Who/what asked for this job — 'founder' for a direct request, or a future system
     # trigger name. Never a free-text field an end user controls the content of.
     created_by: Mapped[str] = mapped_column(String(64))
+
+    # V0.2 (migration 0034): set only when status == 'superseded' -- points at the fresh
+    # mainai_jobs row a takeover created to replace this dead one. See
+    # app/mainai_execution/recovery_takeover.py.
+    superseded_by_job_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("mainai_jobs.id", ondelete="SET NULL"), nullable=True)
 
 
 class MainAIJobEvent(Base):

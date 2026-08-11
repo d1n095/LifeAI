@@ -23,12 +23,16 @@ Covers, in order:
   C. Demo 2 -- failure path: a deliberately failing run_tests task proves the task lands on
      retryable_failed (never completed), its dependent is never falsely advanced, and
      record_final_report() tells the truth about it (unresolved_risk, no false "success").
-  D. Demo 3 -- restart/resume: a simulated crash mid-task, reclaimed through the real
-     lease-expiry path, resumes from the durable checkpoint with the AI provider called exactly
-     once and no duplicate terminal event -- run end-to-end through Worker().run_once() this
-     time (not a direct run_task_execution_job() call, unlike the narrower proof in
-     test_mainai_execution_resilience.py) to show the SAME guarantee holds through the real
-     poll loop's own claim/dispatch path.
+  D. Demo 3 -- restart/resume: a simulated crash mid-task. V0.2 update (migration 0034):
+     `task_execution` jobs are deliberately excluded from `claim_next_mainai_job()`'s blind
+     expired-lease reclaim -- Worker().run_once() alone can no longer revive a dead one, only
+     the real recovery pipeline can (detect -> inspect -> classify -> takeover,
+     app/mainai_execution/recovery_takeover.py). This demo now shows both halves working
+     together: the recovery pipeline creates the new attempt (proving the dead job is
+     structurally invisible to blind reclaim first), and Worker().run_once() then picks up
+     THAT new, ordinary queued job and drives it to completion through the real poll loop --
+     the AI provider is still called exactly once overall and there is still no duplicate
+     terminal event, which is the guarantee this demo exists to prove.
   E. Demo 4 -- engineering lesson: a REAL historical incident from this project's own history
      (BLOCKER: implement real lease fencing for mainai_jobs -- see docs/BRANCH_REGISTRY.md /
      the task tracker's own #323) is recorded as an EngineeringLesson with full provenance,
@@ -52,9 +56,13 @@ from app.mainai_execution import final_report, lessons, planner
 from app.mainai_execution.approval import grant_task_approval
 from app.mainai_execution.execution_job import run_task_execution_job
 from app.mainai_execution.planner import PlannedTaskSpec
+from app.mainai_execution.recovery_classifier import classify_recovery_record
+from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
+from app.mainai_execution.recovery_takeover import execute_takeover
 from app.models.mainai_execution import (
     EngineeringLessonConfidence,
     EngineeringLessonSeverity,
+    MainAIGoal,
     MainAIGoalStatus,
     MainAITask,
     MainAITaskEventType,
@@ -385,18 +393,38 @@ async def test_demo_3_restart_resume_through_the_real_worker_poll_loop(db_sessio
     assert checkpoint_row["step"] == "work_result"
     assert superuser_db.get(MainAIJob, job_id).status == MainAIJobStatus.running
 
-    # Reclaim through the REAL lease-expiry mechanism, this time driven by the real
-    # Worker().run_once() poll loop -- the same production code path start to finish.
+    # V0.2: the dead job's lease genuinely expires, but it is structurally invisible to
+    # Worker().run_once()'s own blind reclaim (task_execution excluded, migration 0034) --
+    # only the real recovery pipeline may revive it.
     superuser_db.execute(sa_text("UPDATE mainai_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = :j"), {"j": str(job_id)})
     superuser_db.commit()
+    assert claim_next_mainai_job(superuser_db, "some-other-worker", 120) is None
 
+    goal_row = superuser_db.get(MainAIGoal, task.goal_id)
+    record = get_or_create_recovery_record(superuser_db, task=task, job=superuser_db.get(MainAIJob, job_id))
+    superuser_db.commit()
+    record = await inspect_recovery_record(superuser_db, task=task, job=superuser_db.get(MainAIJob, job_id), record=record)
+    superuser_db.commit()
+    record = classify_recovery_record(superuser_db, record=record)
+    superuser_db.commit()
+    assert record.classification.value == "CHECKPOINTED_WORK"
+
+    record, new_job = execute_takeover(superuser_db, task=task, goal=goal_row, record=record, dispatched_by="recovery-worker")
+    superuser_db.commit()
+
+    # The new attempt is now an ordinary `queued` job -- Worker().run_once() picks it up and
+    # drives it to completion through the real, unmodified production poll loop, exactly like
+    # any other job.
     worked = await Worker().run_once()
     assert worked is True
 
     superuser_db.expire_all()
     task = superuser_db.get(MainAITask, task.id)
-    job = superuser_db.get(MainAIJob, job_id)
+    job = superuser_db.get(MainAIJob, new_job.id)
+    dead_job = superuser_db.get(MainAIJob, job_id)
     assert job.status == MainAIJobStatus.completed
+    assert dead_job.status == MainAIJobStatus.superseded
+    assert dead_job.superseded_by_job_id == new_job.id
     assert task.status == MainAITaskStatus.completed
     assert call_count["n"] == 1  # resumed from the durable checkpoint -- no second AI call
     assert verify_calls["n"] == 2

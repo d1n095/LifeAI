@@ -175,6 +175,30 @@ def retry_task(db: Session, *, task: MainAITask) -> MainAITask:
     return task
 
 
+def reset_task_for_takeover(db: Session, *, task: MainAITask) -> MainAITask:
+    """V0.2: moves a task whose OWN job died back to `ready` for a takeover's fresh dispatch
+    (app/mainai_execution/recovery_takeover.py). Deliberately separate from retry_task()
+    (which only accepts an ALREADY-verified `retryable_failed` task, reached only through a
+    real verification_failed event) -- a dead job proves nothing about whether the work would
+    have passed or failed, so this must never fabricate that verdict. Only accepts a task
+    genuinely still `running` (the state it's stuck at when its job died before
+    _finalize_task_outcome() ever ran) -- a task in any other status was not actually
+    abandoned mid-flight and has no business going through takeover at all. Locked the same
+    way retry_task() is, for the same concurrent-caller reason."""
+    task = _lock_task(db, task.id)
+    if task.status != MainAITaskStatus.running:
+        raise TaskNotRetryableError(task.id, task.status)
+    task.status = MainAITaskStatus.ready
+    db.add(
+        MainAITaskEvent(
+            task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.retry_scheduled,
+            detail={"reason": "recovery_takeover", "attempts": task.attempts},
+        )
+    )
+    db.flush()
+    return task
+
+
 def cancel_task(db: Session, *, task: MainAITask, cancelled_by: str, reason: str = "") -> MainAITask:
     """Cancels a task that is NOT currently running (pending/ready/blocked/retryable_failed) --
     a real, immediate, durable status transition, exactly like a replan's own supersession

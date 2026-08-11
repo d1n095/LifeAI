@@ -367,6 +367,21 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                 work_result = await _handle_open_pr(db, task, goal)
             else:
                 raise TaskExecutionError(f"Unknown task_type '{task.task_type}'.")
+            # V0.2 fencing finding: unlike task-state/verification writes (which reach
+            # durability only together with mark_completed()/mark_failed()'s own lease-checked
+            # commit, in the except/success blocks below), this checkpoint commit used to be
+            # its OWN, earlier, entirely unchecked commit -- reachable after a real AI call
+            # that can run long enough for the lease to have already expired and been reclaimed
+            # by someone else. Re-verifying (and, as a useful side effect, extending) the lease
+            # immediately before this commit closes that window; a stale worker whose lease
+            # is already gone stops here, before writing anything, exactly like the dispatch-
+            # time check above.
+            try:
+                renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
+            except JobLeaseLostError:
+                logger.warning("task_execution job %s: lease lost before work_result checkpoint commit.", job_id)
+                db.rollback()
+                return
             record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="work_result", data={"work_result": work_result})
             db.commit()
 
@@ -391,7 +406,24 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             if finalize_checkpoint is not None:
                 finalize_info = finalize_checkpoint.executor_state["finalize_info"]
             else:
+                # V0.2 fencing finding (same reasoning as the work_result checkpoint above,
+                # applied before the ACTUAL irreversible side effect this time, not just
+                # before its checkpoint): a stale worker whose lease already expired must
+                # never reach _finalize_repo_edit()'s real GitHub push at all -- a second,
+                # concurrent claimant could already be mid-flight on the exact same branch.
+                try:
+                    renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
+                except JobLeaseLostError:
+                    logger.warning("task_execution job %s: lease lost before GitHub push.", job_id)
+                    db.rollback()
+                    return
                 finalize_info = await _finalize_repo_edit(db, task, work_result)
+                try:
+                    renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
+                except JobLeaseLostError:
+                    logger.warning("task_execution job %s: lease lost before finalized checkpoint commit (push already happened).", job_id)
+                    db.rollback()
+                    return
                 record_checkpoint(db, task=task, goal=goal, job_id=job_id, step="finalized", data={"finalize_info": finalize_info})
                 db.commit()
             work_result = {**work_result, **finalize_info}

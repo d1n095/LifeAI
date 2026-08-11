@@ -343,6 +343,24 @@ async def test_inspect_blocks_with_manual_review_when_two_worktree_rows_claim_th
     assert unchanged.classification is None
     assert unchanged.status == MainAIRecoveryStatus.blocked
 
+    # The DROP CONSTRAINT above is real DDL against the session-scoped test database, not
+    # data the autouse `_clean_tables` truncation between tests will ever undo -- restore it
+    # exactly as migration 0033 defines it so the schema this test leaves behind for every
+    # later test (including tests/backend/test_migration_roundtrip.py's whole-schema
+    # snapshot comparison, which runs later in the same session and would otherwise see a
+    # permanently mutated "before" schema that no longer matches what the migration chain
+    # itself produces) is the one the migration chain actually specifies. The duplicate row
+    # this test inserted above must go first -- it would otherwise violate the very
+    # uniqueness the constraint re-adds.
+    superuser_db.execute(sa_text("DELETE FROM mainai_task_worktrees WHERE job_id = :job_id"), {"job_id": str(job.id)})
+    superuser_db.execute(
+        sa_text(
+            "ALTER TABLE mainai_task_worktrees "
+            "ADD CONSTRAINT mainai_task_worktrees_job_id_key UNIQUE (job_id)"
+        )
+    )
+    superuser_db.commit()
+
 
 # ---------------------------------------------------------------- idempotency
 
