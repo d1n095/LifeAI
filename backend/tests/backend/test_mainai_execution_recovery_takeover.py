@@ -411,3 +411,67 @@ async def test_superseded_job_writes_are_rejected_exactly_like_any_stale_lease(d
 
     with pytest.raises(JobLeaseLostError):
         renew_mainai_job_lease(db_session, dead_job_id, "dead-worker", stale_generation, 120)
+
+
+# ---------------------------------------------------------------- final report integration
+
+
+@pytest.mark.asyncio
+async def test_final_report_surfaces_recovery_history_for_a_recovered_task(db_session, superuser_db, owner_id):
+    """V0.2 final-report integration: generate_goal_report() must show that a task went
+    through a real dead-agent recovery -- durable evidence, not something a founder has to
+    already know to go look for in a separate table."""
+    from app.mainai_execution import final_report
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job_id = task.mainai_job_id
+    dead_job = db_session.get(MainAIJob, dead_job_id)
+
+    record = await _through_classification(db_session, task, dead_job)
+    assert record.classification == RecoveryClassification.nothing_done
+
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    report = final_report.generate_goal_report(db_session, goal_id=goal.id)
+    task_report = report["tasks"][0]
+
+    assert len(task_report["recovery_history"]) == 1
+    entry = task_report["recovery_history"][0]
+    assert entry["recovery_record_id"] == str(record.id)
+    assert entry["dead_job_id"] == str(dead_job_id)
+    assert entry["classification"] == "NOTHING_DONE"
+    assert entry["status"] == "completed"
+    assert entry["takeover_job_id"] == str(new_job.id)
+    assert entry["manual_review_required"] is False
+
+    assert report["summary"]["tasks_with_recovery_history"] == 1
+    assert report["summary"]["recovery_attempts_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_final_report_flags_unresolved_risk_for_a_task_stuck_behind_a_blocked_recovery(db_session, superuser_db, owner_id):
+    """A recovery record left `blocked`/manual_review_required (CONFLICTED_STATE/
+    UNSAFE_TO_AUTO_RECOVER, or simply not yet inspected past that point) leaves the task's own
+    status at `running` -- inspect/classify() never touches MainAITask.status. Without the
+    recovery-aware unresolved_risk check, a task silently stuck forever behind a dead job a
+    human hasn't reviewed would report as if nothing were wrong."""
+    from app.mainai_execution import final_report
+    from app.models.mainai_recovery import RecoveryClassification as RC
+
+    task, goal = _task_and_dead_job(db_session, superuser_db, owner_id)
+    dead_job = db_session.get(MainAIJob, task.mainai_job_id)
+    record = await _through_classification(db_session, task, dead_job)
+    record.classification = RC.conflicted_state
+    record.manual_review_required = True
+    record.status = MainAIRecoveryStatus.blocked
+    record.blocker = "genuine_divergence_between_local_and_remote"
+    db_session.add(record)
+    db_session.commit()
+
+    report = final_report.generate_goal_report(db_session, goal_id=goal.id)
+    task_report = report["tasks"][0]
+
+    assert task_report["task_outcome"] == "running"  # untouched by inspect/classify
+    assert task_report["unresolved_risk"] is True  # but the recovery history must catch it
+    assert report["summary"]["unresolved_risk_count"] == 1
