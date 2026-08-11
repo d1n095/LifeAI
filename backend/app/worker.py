@@ -50,10 +50,11 @@ from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
 from app.mainai_execution.recovery_classifier import classify_recovery_record
 from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
 from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
+from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
-from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_execution import ACTIVE_MAINAI_GOAL_STATUSES, MainAIGoal, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
 from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryStatus
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
@@ -511,6 +512,38 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-recover mainai_job %s.", self.worker_id, job.id)
 
+    # V0.3: how many goals this worker checks for a needed replan per poll cycle -- a real,
+    # bounded scan, same reasoning as every other tick's own limit above.
+    _MAX_REPLAN_SCANS_PER_TICK = 10
+
+    async def _advance_mainai_execution_replan(self, db: Session) -> None:
+        """MainAI V0.3's minimal automatic replan trigger: for each active goal, checks
+        whether its CURRENT plan has a permanently `failed` task (app/mainai_execution/
+        replan.py's find_replan_trigger()) and, if so, proposes and persists a fresh plan
+        version via the SAME propose_plan_via_ai()/create_plan() V0.1's planner.py already
+        implements for a founder-triggered replan -- no second planning mechanism. A goal
+        whose active plan has no failed task is left untouched; a goal that already replanned
+        (its active plan is now the NEW version) naturally stops matching find_replan_trigger()
+        on the next tick, since that function only ever looks at the plan currently `active`.
+        Per-goal isolation, same as every other tick in this method group."""
+        goals = (
+            db.query(MainAIGoal)
+            .filter(MainAIGoal.status.in_(ACTIVE_MAINAI_GOAL_STATUSES))
+            .order_by(MainAIGoal.created_at.asc())
+            .limit(self._MAX_REPLAN_SCANS_PER_TICK)
+            .all()
+        )
+        for goal in goals:
+            try:
+                failed_task = find_replan_trigger(db, goal=goal)
+                if failed_task is None:
+                    continue
+                await trigger_replan(db, goal=goal, failed_task=failed_task, dispatched_by="mainai_worker_auto_replan")
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to auto-replan MainAIGoal %s.", self.worker_id, goal.id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -529,6 +562,7 @@ class Worker:
             await self._poll_mainai_task_waits(claim_db)
             self._advance_mainai_execution_retries(claim_db)
             await self._advance_mainai_execution_auto_recovery(claim_db)
+            await self._advance_mainai_execution_replan(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
