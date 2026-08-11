@@ -6,7 +6,45 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-**PR #58 hardening-pass (2026-08-11):** efter grundarens uttryckliga "Apple-like version
+**PR #58 hardening-pass Round 2 (2026-08-11):** grundaren avvisade uttryckligen Round 1:s
+slutsats att döpa worktree/execution_job-frånkopplingen till "V0.3-kandidat" — eftersom
+per-task worktree-isolering var ett explicit ORIGINALKRAV för V0.2 (dead-after-local-edit/
+dead-after-local-commit-salvage skulle vara riktigt, inte bara testramverk), klassade grundaren
+det som en V0.2-korrekthetslucka som måste fixas FÖRE merge, inte som utökat scope. Fixat:
+`_handle_repo_edit()`/`_finalize_repo_edit()` i `execution_job.py` kopplades faktiskt in mot
+`worktree.py` — skapar/återanvänder en ownership-verifierad worktree, redigerar bara däri,
+committar lokalt, pushar via `push_worktree_branch()` — helt bakom `github_write_enabled`,
+med `_propose_repo_edit()` som ordagrann bevarad V0.1-proposal-path. Under implementationen
+hittades och fixades en andra, djupare bugg av samma art: worktree-raden och
+`current_commit`-kolumnen — exakt det klassificeraren läser för LOCAL_UNCOMMITTED_WORK/
+LOCAL_COMMITTED_NOT_PUSHED — flushades men committades aldrig förrän HELA handlern returnerat,
+så en riktig krasch (inte ett fångat undantag) hade rullat tillbaka samma tillstånd som just
+kopplats in, en gång till en nivå djupare. Fixat genom att committa direkt efter varje verklig
+git-nivåfakta, alltid bakom samma lease-förnyelsekontroll varje annan skrivning i filen redan
+använder. Demo 2 och 3 skrevs om i grunden: de konstruerar INTE längre recovery-state manuellt
+utan kraschar på riktigt inuti `run_task_execution_job()` (monkeypatchar
+`commit_worktree_changes`/`push_worktree_branch` att kasta EN gång efter att den riktiga
+AI-anropet/filskrivningen/committen redan skett), bevisar båda KRÄVDA krasch-fönstren genom den
+riktiga pathen, och asserterar att AI:n aldrig anropas två gånger (dedup). Ett genuint
+race/deadlock hittades och fixades i själva TESTET under detta arbete (inte produktionskod):
+`db_session` lämnades i en öppen transaktion efter den simulerade kraschen, vilket blockerade
+recovery-pipelinens egen `_kill_lease()`-UPDATE via en annan koppling — fixat med
+`db_session.rollback()` direkt efter, matchande det etablerade mönstret i
+`test_mainai_execution_executor.py`s egna krasch-simuleringstester. Säkerheten
+återattackerades mot den nya writepath:en (symlink-escape, ownership fail-closed vid
+worktree-återanvändning — båda nya tester, gröna). En specifik engineering lesson spelades in
+(`test_record_engineering_lesson_for_recovery_state_not_reachable_from_real_execution_path`):
+"En recovery/safety feature är inte REAL förrän dess evidence/state faktiskt produceras av
+production execution path — tester som konstruerar state manuellt räcker inte." Dokumentationen
+uppdaterades i grunden (LIMITED #1:s "inte kopplad"-formulering borttagen, REAL-listan
+uppdaterad, demo-beskrivningarna säger nu uttryckligen att de kör genom den riktiga pathen).
+Full backend-svit efter Round 2: 1261 passed, 1 skipped by design, 1 pre-existing orelaterad
+concurrency-flake (bekräftad grön 2/3 omkörningar, noll diff i `app/storage/` under hela detta
+pass) — mainai-scoped delmängd 357 passed, migrationsrundtripp 2 passed, exakt en Alembic-head
+(0035), ruff rent. Åtta Round 2-commits, `git ls-remote` bekräftar basgrenens tip fortfarande
+oförändrad. **Fortfarande INTE mergad**, väntar på grundarens granskning av Round 2.
+
+**PR #58 hardening-pass Round 1 (2026-08-11):** efter grundarens uttryckliga "Apple-like version
 model"-instruktion ("MERGA INTE. Nu fryser vi feature-scope och attackerar hela
 implementationen innan merge") attackerades hela V0.2-diffen mot faktisk kod. Två verkliga fynd,
 båda fixade med regressionstest verifierat via mutationstest (fixen borttagen → testet går rött):
