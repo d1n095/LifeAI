@@ -6,6 +6,32 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #60 är ÖPPEN (draft, INTE mergad) — `claude/life-canonical-architecture-recovery` →
+`claude/det-kommer-mer-879lcm`, öppnad 2026-08-11.** Grundaren pausade allt vidare
+capability-byggande direkt efter att V0.3 (PR #59) mergats och gav ett uttryckligt
+arkitektur-återställningsmandat: läs hela repot, jämför mot verklig kod, fastställ Life
+Core/LifeAI-gränsen, Source Vault, dubbel minnesmodell, Memory Threads, ChatGPT-export-
+inhämtningsmodell, Founder HQ — INGEN ny kod förrän arkitekturen är genomgången och godkänd.
+**Rent dokumentationsarbete, noll produktionskod.** Läste 40 DB-tabeller, 36 migrationer
+(`0001`-`0036`), 15 backend-routers, 18 `mainai_execution`-moduler, 10 frontend-route-grupper,
+och varje befintligt arkitektur-/plandokument i `docs/`+`backend/docs/` (~10 000 rader).
+Viktigaste fyndet: `docs/MAINAI_ARCHITECTURE.md` §1 uttrycker redan grundarens nya
+"Life Core är inte beroende av AI"-princip nästan ordagrant, men varken det dokumentet eller
+`docs/MEMORY_ARCHITECTURE.md` är uppdaterade sedan MainAI V0.1–V0.3:s exekveringsmotor
+(Goals/Plans/Tasks/Jobs) byggdes — bevis för att verklig capability byggdes snabbare än den
+kanoniska kartan hölls uppdaterad, precis grundarens egen instinkt för varför passet behövdes.
+Fyra nya dokument skapade (utökar/förenar befintlig design, duplicerar inte):
+`docs/LIFE_CANONICAL_ARCHITECTURE.md` (systemkarta, Layer 0-6, repo-realitetsmatris,
+AI-beroendematris, capability-arkitektur — saknas helt, designad här),
+`docs/LIFE_REQUIREMENT_TRACEABILITY.md` (tematisk kravspårbarhet, första kanoniska passet, inte
+uttömmande mening-för-mening),
+`docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md` (AI-oberoendeprincipen gjord strukturellt
+kontrollerbar, uttryckligen skild från det befintliga P7A/P7B `governance_documents`-designet),
+`docs/LIFE_SOURCE_VAULT_AND_MEMORY_ARCHITECTURE.md` (förenar Source Vault/dubbel-minne/
+ChatGPT-inhämtning med befintlig S1A-S5/P1-P7-plan; enda genuint nya designen är Memory
+Threads). Inget av grundarens §24-förbud (ny capability, deploy, VPS, prod-migration, force
+push, m.m.) rört. **Öppnas som draft, INTE mergad** — väntar på grundarens genomgång.
+
 **PR #59 är MERGAD (2026-08-11).** Efter hardening/attack-passet nedan (P3-fix + near-miss-lärdom
 + approval-escalation-/fairness-/subprocess-cancellation-/RLS-bevis) verifierade grundaren
 resultatet och gav uttryckligt merge-godkännande — "Kör — V0.3 är MERGE-READY". Slutlig
