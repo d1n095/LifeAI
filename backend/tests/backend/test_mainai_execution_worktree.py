@@ -38,6 +38,7 @@ from app.mainai_execution.worktree import (
     commit_worktree_changes,
     create_task_worktree,
     push_worktree_branch,
+    rebind_worktree_to_job,
     release_worktree,
     task_branch_name,
     verify_worktree_ownership,
@@ -222,6 +223,53 @@ async def test_verify_worktree_ownership_rejects_a_different_tasks_marker(db_ses
 
     wt.task_id = uuid.uuid4()  # in-memory only -- simulates comparing against the wrong row
     assert verify_worktree_ownership(wt) is False
+
+
+@pytest.mark.asyncio
+async def test_rebind_fences_a_stale_workers_own_in_memory_worktree_object(db_session, owner_id, patched_github):
+    """Hardening-pass attack (section 3, 'stale worker returns'): worktree.py grants no lease
+    of its own (see its module docstring) -- ownership is entirely the marker-token comparison.
+    Proves that ALONE is enough to fence a stale worker A that still holds its OWN in-memory
+    MainAITaskWorktree object (loaded before a takeover rebinds the row) from writing to the
+    SAME on-disk directory after rebind_worktree_to_job() has handed it to a new attempt: A's
+    object still carries the OLD marker_token, but the on-disk marker file was overwritten with
+    a freshly minted one during rebind -- the comparison in verify_worktree_ownership() reads
+    A's stale in-memory value, so it can never match the new on-disk secret."""
+    task, job = _repo_edit_job(db_session, owner_id)
+    stale_worktree_object = await create_task_worktree(db_session, task=task, job=job, lease_generation=1, executor_id="worker-A")
+    db_session.commit()
+    old_marker_token = stale_worktree_object.marker_token
+    assert verify_worktree_ownership(stale_worktree_object) is True
+
+    new_job = MainAIJob(
+        owner_id=owner_id, job_type="task_execution", status="queued", input_refs={}, created_by="test",
+    )
+    db_session.add(new_job)
+    db_session.flush()
+    rebind_worktree_to_job(db_session, stale_worktree_object, new_job_id=new_job.id, new_lease_generation=1)
+    db_session.commit()
+
+    # The rebind mutated the SAME Python object stale_worktree_object points at (rebind_worktree_to_job
+    # returns and mutates it in place) -- simulate worker A instead holding its OWN separate,
+    # pre-rebind snapshot, exactly like a real stale process that loaded the row before rebind
+    # and never refreshed it.
+    class _StaleSnapshot:
+        pass
+
+    stale_snapshot = _StaleSnapshot()
+    stale_snapshot.task_id = task.id
+    stale_snapshot.job_id = job.id  # worker A's own OLD job_id, from before the rebind
+    stale_snapshot.marker_token = old_marker_token
+    stale_snapshot.path = stale_worktree_object.path
+
+    assert verify_worktree_ownership(stale_snapshot) is False  # worker A can never write again
+    with pytest.raises(WorktreeOwnershipError):
+        commit_worktree_changes(db_session, stale_snapshot, message="worker A trying to write after being fenced")
+
+    # The NEW attempt's own (rebound) object is correctly trusted.
+    assert verify_worktree_ownership(stale_worktree_object) is True
+    assert stale_worktree_object.job_id == new_job.id
+    assert stale_worktree_object.marker_token != old_marker_token
 
 
 # ---------------------------------------------------------------- D. local commit
