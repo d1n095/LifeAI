@@ -13,6 +13,7 @@ bootstrap" rule applied to bookkeeping: a count is a fact, not an interpretation
 import datetime
 import uuid
 
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure, SourceImportBatchStatus
@@ -23,6 +24,45 @@ def create_batch(db: Session, owner_id: uuid.UUID, *, label: str, source_descrip
     db.add(batch)
     db.flush()
     return batch
+
+
+def _atomic_increment(db: Session, batch: SourceImportBatch, *, also_set: dict | None = None, **deltas: int) -> None:
+    """SQL-level `col = col + :delta` against the row directly, NOT a Python read-modify-write
+    on the ORM-loaded object. Hardening pass, Section 6 (founder mandate, PR #61 pre-merge):
+    every `record_*` function below used to do `batch.x += 1`, which SQLAlchemy flushes as
+    `SET x = <python-computed literal>` -- two sessions that both load the row before either
+    commits silently lose one increment under READ COMMITTED (Postgres's default), no error,
+    no conflict, just a wrong final count. Proven empirically
+    (tests/backend/rag/test_bootstrap_hardening.py: 20 concurrent increments produced 4, not
+    20) before this fix, and used as a durable engineering lesson afterward. This directly
+    threatened the N/N completeness proof §P exists to guarantee.
+
+    `also_set` (plain column=value overwrites, e.g. status) is folded into the SAME UPDATE
+    statement rather than left as a separate ORM attribute assignment -- a real bug this fix's
+    own first draft hit: `db.expire(batch)` does NOT flush pending changes first (unlike a
+    query's autoflush), so a plain `batch.status = x` set between two `_atomic_increment` calls
+    was silently discarded by the second call's expire() before ever reaching the database.
+    Keeping every write to this row inside one atomic statement per call avoids that class of
+    bug entirely, not just the counter race it was originally written for.
+
+    `db.expire(batch)` after the UPDATE discards the object's now-stale in-memory attributes
+    without registering a pending write for them -- the next attribute read (e.g.
+    `batch.reconciles()`) transparently re-SELECTs the row's true, current, atomically-updated
+    state within the same transaction. Not `session.refresh()`: that issues the SELECT
+    immediately (in the middle of a bookkeeping call that may not need it yet); expire() is
+    lazy, one round-trip only when a caller actually reads an attribute again."""
+    set_parts = [f"{col} = {col} + :{col}" for col in deltas]
+    params: dict = dict(deltas)
+    for col, value in (also_set or {}).items():
+        set_parts.append(f"{col} = :{col}")
+        params[col] = value
+    set_clause = ", ".join(set_parts)
+    params["id"] = str(batch.id)
+    db.execute(
+        sa_text(f"UPDATE source_import_batches SET {set_clause} WHERE id = :id"),  # noqa: S608 -- col names are this function's own fixed kwarg/also_set keys, never caller-supplied strings
+        params,
+    )
+    db.expire(batch)
 
 
 def record_discovery_totals(
@@ -42,23 +82,27 @@ def record_discovery_totals(
     parsed); a caller with a different expectation (e.g. attachments counted separately) may
     adjust them afterward, but the default keeps §P's reconciliation check meaningful without
     every caller having to restate it."""
-    batch.discovered_files += files
-    batch.discovered_archives += archives
-    batch.discovered_conversations += conversations
-    batch.discovered_messages += messages
-    batch.discovered_attachments += attachments
-    batch.discovered_bytes += total_bytes
-    batch.stored_originals_total += files
-    batch.parsed_total += files
-    batch.status = SourceImportBatchStatus.importing
+    _atomic_increment(
+        db,
+        batch,
+        also_set={"status": SourceImportBatchStatus.importing.value},
+        discovered_files=files,
+        discovered_archives=archives,
+        discovered_conversations=conversations,
+        discovered_messages=messages,
+        discovered_attachments=attachments,
+        discovered_bytes=total_bytes,
+        stored_originals_total=files,
+        parsed_total=files,
+    )
 
 
 def record_stored_original(db: Session, batch: SourceImportBatch) -> None:
-    batch.stored_originals_done += 1
+    _atomic_increment(db, batch, stored_originals_done=1)
 
 
 def record_parsed(db: Session, batch: SourceImportBatch) -> None:
-    batch.parsed_done += 1
+    _atomic_increment(db, batch, parsed_done=1)
 
 
 def record_duplicate(db: Session, batch: SourceImportBatch) -> None:
@@ -66,15 +110,14 @@ def record_duplicate(db: Session, batch: SourceImportBatch) -> None:
     content-addressed dedup) still counts as a stored original -- the content genuinely exists
     in the Source Vault, just under a blob this batch didn't need to write itself -- but is
     tallied separately so the founder can see how much of a corpus was already present."""
-    batch.stored_originals_done += 1
-    batch.duplicate_count += 1
+    _atomic_increment(db, batch, stored_originals_done=1, duplicate_count=1)
 
 
 def record_unsupported(db: Session, batch: SourceImportBatch) -> None:
     """A file with no matching parser (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §F/§J) -- still
     stored (record_stored_original is called separately), just never parsed. Counts toward
     `unsupported_count`, one of the three buckets `parsed_done` must reconcile against."""
-    batch.unsupported_count += 1
+    _atomic_increment(db, batch, unsupported_count=1)
 
 
 def record_failed(db: Session, batch: SourceImportBatch, *, source_ref: str, reason: str, retryable: bool = False) -> None:
@@ -83,7 +126,7 @@ def record_failed(db: Session, batch: SourceImportBatch, *, source_ref: str, rea
     the distinction between "never stored" and "stored but unparseable" is exactly what
     `source_import_batch_failures.reason` records in free text for a human to read, not a
     separate counter axis; §P's reconciliation check only needs the aggregate."""
-    batch.failed_count += 1
+    _atomic_increment(db, batch, failed_count=1)
     db.add(
         SourceImportBatchFailure(
             owner_id=batch.owner_id,
