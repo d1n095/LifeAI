@@ -6,6 +6,22 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+**PR #60 korrigeringsomgång (2026-08-11):** grundaren granskade det första passet och avvisade
+uttryckligen att kalla det slutlig Canonical Life Architecture — den här sessionen hade aldrig
+tillgång till grundarens externa källmaterial (`~/Documents/mainai_intake/`), och
+kravspårbarheten var tematisk, inte en fullständig atomic extraction. **Alla fyra dokument
+ommärkta PROVISIONAL CANONICAL ARCHITECTURE / BOOTSTRAP MAP** — bästa nuvarande karta, inte
+auktoritativ. Nytt: `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md` — exakt implementation proposal
+(fortfarande ingen kod) för den minsta AI-oberoende intake-grunden (corpus manifest, S1C, ChatGPT-
+export-parsing, CSV/XLSX, teknisk immutability-framtvingning för originalblobbar) som löser
+cirkelproblemet: läs-korpusen kräver en säker intake-motor, och intake-motorn måste vara liten
+nog att godkännas innan korpusen läses. Memory Thread-designet korrigerat samtidigt: en
+tråd-medlem är nu `member_kind`+`member_ref_id` (samma mönster som S1A:s `source_kind`), inte
+tvunget en `memory_source_units`-rad — derived/system-objekt (beslut, mål, lessons, tasks, PR:er)
+låtsas inte längre vara råa källor. Ordningen framåt: Source Foundation Bootstrap godkänns och
+byggs → hela grundarkorpusen importeras genom den → DÅ görs den riktiga slutliga Canonical Life
+Architecture Recovery. Fortfarande draft, fortfarande INTE mergad.
+
 **PR #60 är ÖPPEN (draft, INTE mergad) — `claude/life-canonical-architecture-recovery` →
 `claude/det-kommer-mer-879lcm`, öppnad 2026-08-11.** Grundaren pausade allt vidare
 capability-byggande direkt efter att V0.3 (PR #59) mergats och gav ett uttryckligt
