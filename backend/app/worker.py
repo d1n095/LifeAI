@@ -38,6 +38,7 @@ from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
+from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
 from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
@@ -183,6 +184,11 @@ async def process_claimed_mainai_job(
         elif job is not None and job.job_type == MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE:
             record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
             await run_message_sequence_backfill_job(
+                db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds
+            )
+        elif job is not None and job.job_type == MESSAGE_SOURCE_BACKFILL_JOB_TYPE:
+            record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
+            await run_message_source_backfill_job(
                 db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds
             )
         elif job is not None and job.job_type == "task_execution":

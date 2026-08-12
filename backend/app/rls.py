@@ -67,6 +67,19 @@ RLS_STATEMENTS = [
     # every owner-scoped table, matching the rest of this list.
     "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
+    # Life Source Foundation Bootstrap (migration 0037) — see docs/
+    # LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md. source_import_batches/source_import_batch_failures
+    # are ordinary owner-scoped tracking tables; message_source_units is S1C (docs/
+    # MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8/§8), the same exclusive-arc pattern as
+    # document_source_units, extended to Message. Also enabled directly in the migration
+    # itself; listed here too so this idempotent reapply path stays the single source of
+    # truth for every owner-scoped table, matching the rest of this list.
+    "ALTER TABLE source_import_batches ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE source_import_batches FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE source_import_batch_failures ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE source_import_batch_failures FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE message_source_units ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE message_source_units FORCE ROW LEVEL SECURITY",
 ]
 
 # `messages` is the one table here whose owner is not a column on the row itself: a message
@@ -197,6 +210,21 @@ POLICY_DEFINITIONS = [
         "name": "messages_isolation",
         # The only DERIVED entry in this list — see MESSAGES_ISOLATION_EXPR above.
         "expr": MESSAGES_ISOLATION_EXPR,
+    },
+    {
+        "table": "source_import_batches",
+        "name": "source_import_batches_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "source_import_batch_failures",
+        "name": "source_import_batch_failures_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "message_source_units",
+        "name": "message_source_units_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
 ]
 

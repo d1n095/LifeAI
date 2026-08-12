@@ -69,10 +69,18 @@ EXECUTABLE_EXTENSIONS = {
     ".app", ".scr", ".jar", ".apk", ".vbs", ".psm1", ".dylib",
 }
 
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".markdown", ".json", ".html", ".htm"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".markdown", ".json", ".html", ".htm", ".csv"}
+
+# docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §F: CSV is a plain-text, deterministically parseable
+# format needing no new dependency (app/rag/extract.py's existing UTF-8-decode fallback already
+# handles it correctly, the same as .txt/.md/.json) -- so it's added here as a pure config
+# change, not new extraction code. XLSX is deliberately NOT added: it's a binary format that
+# would require a new third-party dependency (e.g. openpyxl), which is a supply-chain decision
+# this bootstrap pass does not make unilaterally -- see that doc's §F for the explicit
+# "where an extractor exists or can be safely introduced" framing this follows.
 
 # Only checked for formats with an actual fixed binary signature — plain-text formats
-# (.txt/.md/.json/.html) have no such signature, so "never trust the extension alone" for
+# (.txt/.md/.json/.html/.csv) have no such signature, so "never trust the extension alone" for
 # those means something different (they're just decoded as UTF-8 downstream, which fails
 # safely on genuinely binary content) rather than a magic-byte check that doesn't exist.
 MAGIC_BYTES: dict[str, list[bytes]] = {

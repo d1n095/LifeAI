@@ -201,3 +201,12 @@ class Document(Base):
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deletion_status: Mapped[DeletionStatus] = mapped_column(Enum(DeletionStatus), default=DeletionStatus.none)
+
+    # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+    # §E) — which corpus-import batch this document arrived through, if any. NULL for every
+    # document uploaded outside a tracked batch (the ordinary Library upload path, unaffected).
+    # Only ever set once, at creation, alongside storage_key/file_path — see that column's own
+    # comment for why mainai_app cannot UPDATE either of them afterward.
+    source_import_batch_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("source_import_batches.id"), nullable=True, index=True
+    )
