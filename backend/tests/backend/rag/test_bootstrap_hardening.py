@@ -667,6 +667,150 @@ def test_section8_wrong_owner_on_message_source_unit_rejected_by_trigger():
         session.close()
 
 
+# --- Section 11: job fencing / stale worker for message_source_backfill --------------------
+
+
+def _claim_mainai_job(db, job_id):
+    """Claims `job_id` on the superuser connection, exactly as app/worker.py's real claim step
+    does (see app/jobs/mainai_job_lease.py's own docstring for why the claim must run outside
+    any single owner's RLS scope). Same helper shape as tests/backend/chat/test_message_sequence.py's
+    and tests/backend/jobs/test_mainai_jobs.py's own `_claim`."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.jobs.mainai_job_lease import claim_next_mainai_job
+
+    claim_db = sessionmaker(bind=migration_engine)()
+    try:
+        claimed = claim_next_mainai_job(claim_db, "test-worker", 120)
+    finally:
+        claim_db.close()
+    assert claimed is not None
+    assert claimed[0] == job_id
+    return "test-worker", claimed[2]
+
+
+@pytest.mark.asyncio
+async def test_section11_message_source_backfill_job_completes_and_reports_truthfully():
+    """The durable job path end to end (not just the pure backfill function Section 8/12
+    already exercise): capability-gated, no-AI, real worker claim/lease, and a truthful
+    completion message once every message has a source unit."""
+    from app.jobs import service
+    from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+    from app.rag.backfill.message_source import count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section11-job-owner@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 11")
+        session.add(conversation)
+        session.commit()
+        for i in range(3):
+            session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content=f"Section 11 message {i}"))
+        session.commit()
+        owner_id = owner.id
+        assert count_messages_without_source_unit(session, owner_id) == 3
+
+        job = service.create_job(session, owner_id=owner_id, job_type=MESSAGE_SOURCE_BACKFILL_JOB_TYPE, input_refs=[], created_by="founder")
+        worker_id, generation = _claim_mainai_job(session, job.id)
+
+        await run_message_source_backfill_job(session, job.id, owner_id, worker_id=worker_id, lease_generation=generation, lease_seconds=60)
+
+        refreshed = session.get(MainAIJob, job.id)
+        session.refresh(refreshed)
+        assert refreshed.status == MainAIJobStatus.completed
+        assert "Created 3 message_source_units row(s)" in refreshed.public_message
+        assert "No messages remain without a source unit" in refreshed.public_message
+        assert count_messages_without_source_unit(session, owner_id) == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_section11_a_job_whose_lease_was_stolen_creates_no_source_units_at_all():
+    """Lease fencing proof for `message_source_backfill`, mirroring
+    tests/backend/chat/test_message_sequence.py's identical test for `message_sequence_backfill`
+    (the sibling job type on the exact same mainai_jobs runtime): a worker running with a
+    STALE generation (a second worker has since re-claimed/incremented it -- simulated here by
+    simply passing generation + 1, the same as an actual reclaim would leave behind) must be
+    fenced out at its very first write and must create zero message_source_units rows, not a
+    partial set. The job itself is left exactly as `running` -- a fenced-out worker has no
+    authority to transition it to any terminal state either; that is the live worker's job when
+    it next heartbeats or a recovery pass reclaims it."""
+    from app.jobs import service
+    from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+    from app.rag.backfill.message_source import count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section11-stale-worker@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 11 stale worker")
+        session.add(conversation)
+        session.commit()
+        session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="Historisk."))
+        session.commit()
+        owner_id = owner.id
+
+        job = service.create_job(session, owner_id=owner_id, job_type=MESSAGE_SOURCE_BACKFILL_JOB_TYPE, input_refs=[], created_by="founder")
+        worker_id, generation = _claim_mainai_job(session, job.id)
+
+        await run_message_source_backfill_job(
+            session, job.id, owner_id, worker_id=worker_id, lease_generation=generation + 1, lease_seconds=60
+        )
+
+        assert count_messages_without_source_unit(session, owner_id) == 1, "a fenced-out worker must create nothing"
+        refreshed = session.get(MainAIJob, job.id)
+        session.refresh(refreshed)
+        assert refreshed.status == MainAIJobStatus.running, "a fenced-out worker must not transition the job either"
+        assert refreshed.progress_current == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_section11_a_cancelled_message_source_backfill_job_stops_and_writes_nothing():
+    """cancel_requested is honoured before the first batch is ever processed -- a cancel racing
+    with a claim must not leave a partially-completed job masquerading as still `running` with
+    silent progress, nor as `completed`."""
+    from app.jobs import service
+    from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+    from app.rag.backfill.message_source import count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section11-cancel@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 11 cancel")
+        session.add(conversation)
+        session.commit()
+        session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="Avbryts."))
+        session.commit()
+        owner_id = owner.id
+
+        job = service.create_job(session, owner_id=owner_id, job_type=MESSAGE_SOURCE_BACKFILL_JOB_TYPE, input_refs=[], created_by="founder")
+        service.request_cancel(session, job.id, requested_by=owner_id)
+        worker_id, generation = _claim_mainai_job(session, job.id)
+
+        await run_message_source_backfill_job(session, job.id, owner_id, worker_id=worker_id, lease_generation=generation, lease_seconds=60)
+
+        refreshed = session.get(MainAIJob, job.id)
+        session.refresh(refreshed)
+        assert refreshed.status == MainAIJobStatus.cancelled
+        assert count_messages_without_source_unit(session, owner_id) == 1, "a cancel before the first batch backfills nothing"
+    finally:
+        session.rollback()
+        session.close()
+
+
 # --- Section 12: AI-independence proof -----------------------------------------------------
 
 
