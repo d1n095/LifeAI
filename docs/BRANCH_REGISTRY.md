@@ -6,6 +6,69 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
+
+**PR #60 — `claude/life-canonical-architecture-recovery` → `claude/det-kommer-mer-879lcm` —
+ÖPPEN, DRAFT, medvetet FRYST.** "PROVISIONAL CANONICAL ARCHITECTURE / BOOTSTRAP MAP" — fyra
+arkitekturdokument (`docs/LIFE_CANONICAL_ARCHITECTURE.md`,
+`docs/LIFE_REQUIREMENT_TRACEABILITY.md`, `docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md`,
+`docs/LIFE_SOURCE_VAULT_AND_MEMORY_ARCHITECTURE.md`) plus implementationsförslaget
+`docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`. Explicit INTE godkänd som slutlig Canonical
+Architecture av grundaren — extern grundarkorpus (`~/Documents/mainai_intake/`) var aldrig
+tillgänglig under den första passet, och requirement traceability var tematisk, inte atomär.
+Ska förbli draft/provisional tills grundarens fulla korpus faktiskt importerats (via PR #61:s
+bootstrap, se nedan) och en riktig slutlig arkitekturgranskning gjorts. **Ingen kod byggd på
+den här branchen** — rent designarbete.
+
+**PR #61 — `claude/life-source-foundation-bootstrap` → `claude/det-kommer-mer-879lcm` — ÖPPEN,
+DRAFT, redo för granskning.** Den faktiska kodimplementationen av
+`docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`s förslag (PR #60:s implementationsdesign) — grenad
+direkt från mainline (`27f0d1e...`, PR #59:s mergecommit), INTE från PR #60:s designbranch, per
+grundarens uttryckliga instruktion att koda och design ska hållas isär. Bygger allt som INTE
+kräver ett riktigt ChatGPT-exportexempel: migration 0037
+(`source_import_batches`/`source_import_batch_failures` — korpusmanifest med en DB-tvingad
+N/N-fullständighets-CHECK; `message_source_units` — S1C, meddelanden som en andra
+`memory_source_units`-subtyp, samma exclusive-arc-mönster som `document_source_units`;
+`documents.source_import_batch_id`), race-säker find-or-create + resumable backfill för
+meddelanden (`app/rag/message_source.py`/`app/rag/backfill/message_source.py`, speglar
+`app/rag/memory_source.py`s bevisade SAVEPOINT-mönster exakt), ren bokföringstjänst för
+korpusbatchar (`app/rag/corpus_batch.py`), en durabel `message_source_backfill`-jobbtyp på
+befintlig `mainai_jobs`-runtime, CSV tillagt i `zip_import.py` (ingen ny parser behövs — XLSX
+medvetet UTESLUTET, kräver ett nytt beroende, inget ensidigt beslut).
+
+**Ett verkligt designfel hittat och korrigerat UNDER bygget** (inte antaget korrekt från
+designläsningen): det ursprungliga försöket att göra `documents.storage_key`/`file_path`
+oföränderliga via kolumnnivå-privilegier (`REVOKE`/`GRANT` per kolumn i
+`s1a_privilege_policy.py`) visade sig — vid körning av HELA backend-testsviten, inte bara de
+nya filerna isolerat — blockera en riktig, legitim produktionskodväg:
+`app/rag/library_import.py` skapar `Document`-raden FÖRST (`storage_key` fortfarande NULL,
+eftersom den innehålls-adresserade nyckeln inte kan vara känd förrän blobben är hashad och
+skriven), och sätter den sedan via en riktig UPDATE när blobben väl är lagrad. Postgres
+GRANT/REVOKE är binärt och kan inte uttrycka "bara om för närvarande NULL", så mekanismen
+blockerade även den legitima första skrivningen — 53 orelaterade test föll. Ersatt med en
+BEFORE UPDATE-trigger (`trg_documents_storage_immutable`) som tillåter NULL → värde en gång och
+avvisar bara en SENARE ändring av ett redan satt värde — samma write-once-mönster koden redan
+använder för `document_source_units`/`message_source_units` (migration 0019). Verifierat: hela
+testsviten, som hade 53 fel mot kolumnprivilege-ansatsen, går ren med triggern.
+
+Full backend-svit körd tre gånger mot en riktig Postgres/Redis under bygget: ren utom EN
+bekräftat pre-existing, orelaterad filsystems-trådrace (`test_write_stream_vs_delete_never_
+returns_a_blob_missing_from_disk` i `app/storage/local_fs.py`, orörd av den här branchen,
+reproducerad som flaky oberoende av ändringen vid upprepade körningar). Två fynd som bara syntes
+i den fulla sviten (inte i isolerade körningar av de nya testfilerna) fixades: ett befintligt
+test som använde `.csv` som sitt "stöds inte"-exempel (nu genuint stött av den här bootstrapen)
+uppdaterat till `.xlsx`; två av bootstrapens egna triggertester lättades från en exakt
+felmeddelande-match till samma konvention `test_memory_source_units.py` redan använder (en
+tidigare moduls egen privilege-narrowing-fixture kan legitimt hinna före triggern med "permission
+denied" beroende på testordning).
+
+**Beroende och rekommenderad merge-ordning:** PR #61 är fristående kod, oberoende av PR #60 —
+kan granskas och mergas när som helst utan att röra PR #60:s diff. PR #60 beror däremot på att
+PR #61:s bootstrap FAKTISKT används för att importera grundarens fulla korpus innan en riktig
+slutlig Canonical Architecture Recovery kan göras — PR #60 ska INTE mergas eller uppdateras i
+förväg bara för att PR #61 mergas (se `CLAUDE.md`s merge-regel). Ingen konflikt mellan
+brancherna identifierad — helt disjunkta filuppsättningar.
+
 **PR #59 är MERGAD (2026-08-11).** Efter hardening/attack-passet nedan (P3-fix + near-miss-lärdom
 + approval-escalation-/fairness-/subprocess-cancellation-/RLS-bevis) verifierade grundaren
 resultatet och gav uttryckligt merge-godkännande — "Kör — V0.3 är MERGE-READY". Slutlig
