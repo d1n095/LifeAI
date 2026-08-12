@@ -1,20 +1,22 @@
-"""Privilege coverage for the Life Source Foundation Bootstrap (migration 0037,
-docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D/§L) — two separate mechanisms in
-backend/scripts/security/s1a_privilege_policy.py:
+"""Privilege/immutability coverage for the Life Source Foundation Bootstrap (migration 0037,
+docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D/§L) — two separate mechanisms:
 
-1. Table-level narrowing (`_PROTECTED_TABLES`) for the three new S1C/corpus-manifest tables —
-   same mechanism tests/backend/test_ensure_app_role.py already covers for the pre-existing
-   S1A tables, applied here to `message_source_units` / `source_import_batches` /
-   `source_import_batch_failures`.
+1. Table-level narrowing (`_PROTECTED_TABLES` in backend/scripts/security/s1a_privilege_policy.py)
+   for the three new S1C/corpus-manifest tables — same mechanism
+   tests/backend/test_ensure_app_role.py already covers for the pre-existing S1A tables, applied
+   here to `message_source_units` / `source_import_batches` / `source_import_batch_failures`.
 
-2. Column-level narrowing (`_COLUMN_PROTECTED_TABLES`) — the P0 original-source-immutability
-   invariant the founder's bootstrap mandate named explicitly: `documents.storage_key` and
-   `documents.file_path` (the Source Vault original a Document points at) must never be
-   UPDATE-able by `mainai_app`, while every OTHER column on `documents` stays fully writable.
-   This is the mechanism a real empirical bug was found and fixed in while building this pass
-   (see the module's own comment on Postgres's has_column_privilege semantics) — these tests
-   are the regression proof for that fix, run against a real Postgres instance, not asserted
-   from the text of a GRANT statement.
+2. `documents.storage_key` / `documents.file_path` write-once immutability (the P0 Source Vault
+   invariant the founder's bootstrap mandate named explicitly) — enforced by migration 0037's
+   `trg_documents_storage_immutable` BEFORE UPDATE trigger, NOT by privilege narrowing. An
+   earlier version of this pass tried column-level privilege narrowing here and it broke a real
+   production code path (app/rag/library_import.py's legitimate NULL -> value first write via
+   UPDATE, once a blob is durably stored) — found empirically by running the full test suite,
+   not assumed correct from a design read. The trigger is the correct primitive: it allows the
+   one-time NULL -> value transition every document goes through, and rejects only a LATER
+   change to an already-set value, which privilege GRANT/REVOKE (binary, not value-conditional)
+   cannot express. These tests are the regression proof for both the original invariant and the
+   fix, run against a real Postgres instance.
 """
 
 import importlib.util
@@ -22,6 +24,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
@@ -31,7 +34,6 @@ from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
-_POLICY_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "s1a_privilege_policy.py"
 
 
 def _load(path: Path, name: str):
@@ -52,24 +54,6 @@ def _narrow_privileges_before_this_module():
     module.apply_and_verify(get_settings().database_url)
 
 
-@pytest.fixture
-def restore_privileges():
-    """Mirrors tests/backend/test_runtime_table_privileges.py's fixture of the same name —
-    restores the uniform DML floor after a test deliberately widens mainai_app's privileges,
-    so later tests/modules aren't left running against a mutated privilege environment."""
-    yield
-    settings = get_settings()
-    import psycopg2
-
-    admin = psycopg2.connect(settings.database_url)
-    admin.autocommit = True
-    with admin.cursor() as cur:
-        cur.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app")
-    admin.close()
-    module = _load(_APPLY_RUNTIME_PRIVILEGES_PATH, "apply_runtime_privileges")
-    module.apply_and_verify(settings.database_url)
-
-
 def _set_rls_user(session, owner_id) -> None:
     current_user_id_var.set(str(owner_id))
     session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
@@ -82,15 +66,15 @@ def _make_user(session, email="privilege-owner@example.com") -> User:
     return user
 
 
-def _make_document(session, owner_id, *, title="Kalla") -> Document:
+def _make_document(session, owner_id, *, title="Kalla", storage_key="originals/abc123", file_path="/legacy/path.pdf") -> Document:
     _set_rls_user(session, owner_id)
     document = Document(
         title=title,
         source=DocumentSource.upload,
         uploaded_by=owner_id,
         active_truth_status=ActiveTruthStatus.active,
-        storage_key="originals/abc123",
-        file_path="/legacy/path.pdf",
+        storage_key=storage_key,
+        file_path=file_path,
     )
     session.add(document)
     session.commit()
@@ -146,104 +130,139 @@ def test_mainai_app_has_no_update_or_delete_on_source_import_batch_failures():
             assert held is False, f"parser-failure records must be append-only: mainai_app must not hold {priv}"
 
 
-# --- column-level immutability: documents.storage_key / documents.file_path -----------------
-
-
-def test_mainai_app_cannot_update_storage_key_or_file_path_columns():
-    with migration_engine.connect() as conn:
-        for column in ("storage_key", "file_path"):
-            held = conn.execute(
-                sa_text("SELECT has_column_privilege('mainai_app', 'public.documents', :c, 'UPDATE')"),
-                {"c": column},
-            ).scalar()
-            assert held is False, f"mainai_app must not be able to UPDATE documents.{column} -- P0 Source Vault immutability"
-
-
-def test_mainai_app_has_no_table_level_update_on_documents():
-    """The regression proof for the exact bug this pass found and fixed: a surviving TABLE-level
-    UPDATE grant would make has_column_privilege() return true for storage_key/file_path too,
-    silently defeating the column-level REVOKE above. This must be gone entirely -- UPDATE is
-    only ever granted at column level now."""
+def test_mainai_app_keeps_full_table_level_update_on_documents():
+    """The regression proof for the exact conflict this pass found and resolved: documents must
+    keep ordinary table-level UPDATE (every other test exercising the upload/processing pipeline
+    depends on it), because storage_key/file_path immutability is now enforced by a trigger, not
+    by narrowing this grant."""
     with migration_engine.connect() as conn:
         held = conn.execute(
             sa_text("SELECT has_table_privilege('mainai_app', 'public.documents', 'UPDATE')")
         ).scalar()
-        assert held is False
+        assert held is True
 
 
-def test_mainai_app_can_still_update_other_document_columns():
-    """The narrowing must not have overshot -- every OTHER column on documents (e.g. `title`,
-    `active_truth_status`) must remain fully writable; only storage_key/file_path are
-    protected."""
-    with migration_engine.connect() as conn:
-        for column in ("title", "active_truth_status"):
-            held = conn.execute(
-                sa_text("SELECT has_column_privilege('mainai_app', 'public.documents', :c, 'UPDATE')"),
-                {"c": column},
-            ).scalar()
-            assert held is True, f"mainai_app must still be able to UPDATE documents.{column}"
+# --- documents.storage_key / documents.file_path write-once immutability (trigger) ----------
 
 
-def test_real_update_of_storage_key_is_rejected_end_to_end(restore_privileges):
-    """Not just a catalog-privilege check -- an ACTUAL UPDATE statement issued through the
-    restricted runtime role (app.db.SessionLocal, exactly what application code uses) against
-    storage_key must fail with an insufficient-privilege error, while an UPDATE of an
-    unprotected column on the same row succeeds."""
-    import psycopg2.errors
-    from sqlalchemy.exc import DBAPIError
-
+def test_first_write_of_storage_key_from_null_succeeds():
+    """The legitimate case this invariant must NOT block: app/rag/library_import.py creates the
+    Document row with storage_key/file_path still NULL, then sets them once the blob is durably
+    stored — a real UPDATE, not an INSERT."""
     session = SessionLocal()
     try:
-        owner = _make_user(session, "end-to-end-immutable@example.com")
-        document = _make_document(session, owner.id)
+        owner = _make_user(session, "first-write@example.com")
+        document = _make_document(session, owner.id, storage_key=None, file_path=None)
         _set_rls_user(session, owner.id)
 
-        with pytest.raises(DBAPIError) as excinfo:
-            session.execute(
-                sa_text("UPDATE documents SET storage_key = :new WHERE id = :id"),
-                {"new": "tampered/key", "id": str(document.id)},
-            )
-            session.commit()
-        session.rollback()
-        assert isinstance(excinfo.value.orig, psycopg2.errors.InsufficientPrivilege)
-
-        _set_rls_user(session, owner.id)
-        session.execute(sa_text("UPDATE documents SET title = :t WHERE id = :id"), {"t": "Nytt namn", "id": str(document.id)})
+        document.storage_key = "originals/first-write-key"
+        document.file_path = "/vault/first-write-key"
         session.commit()
         session.refresh(document)
-        assert document.title == "Nytt namn"
-        assert document.storage_key == "originals/abc123"  # untouched by the rejected attempt
+        assert document.storage_key == "originals/first-write-key"
+        assert document.file_path == "/vault/first-write-key"
     finally:
         session.rollback()
         session.close()
 
 
-def test_column_protected_tables_covers_documents_storage_key_and_file_path():
-    """Sanity check at the policy-source level, mirroring
-    tests/backend/rag/test_memory_source_backfill_run.py's test_policy_registry_backfill_
-    tables_present -- the policy module itself must still declare this protection, not just
-    happen to produce the right DB state on this run."""
-    policy = _load(_POLICY_PATH, "s1a_privilege_policy")
-    protected = {(table, priv): set(cols) for table, priv, cols in policy._COLUMN_PROTECTED_TABLES}
-    assert ("documents", "UPDATE") in protected
-    assert protected[("documents", "UPDATE")] == {"storage_key", "file_path"}
-
-
-def test_verify_only_mode_agrees_column_protection_is_in_place():
-    """The durable-worker container's boot path (--verify-only, apply_privilege_policy(...,
-    mutate=False)) must independently confirm the column-level state too, not just the
-    table-level `_PROTECTED_TABLES` checks it already covered before this bootstrap pass."""
-    policy = _load(_POLICY_PATH, "s1a_privilege_policy")
-    settings = get_settings()
-    import psycopg2
-
-    conn = psycopg2.connect(settings.database_url)
+def test_changing_an_already_set_storage_key_is_rejected():
+    session = SessionLocal()
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT current_user")
-            (expected_owner,) = cur.fetchone()
-            errors = policy.apply_privilege_policy(cur, expected_owner=expected_owner, require_complete=True, mutate=False)
-        assert errors == [], f"read-only verification found policy mismatches: {errors}"
+        owner = _make_user(session, "change-rejected@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/original-key")
+        _set_rls_user(session, owner.id)
+
+        document.storage_key = "originals/a-different-key"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session.commit()
     finally:
-        conn.rollback()
-        conn.close()
+        session.rollback()
+        session.close()
+
+
+def test_changing_an_already_set_file_path_is_rejected():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "change-file-path-rejected@example.com")
+        document = _make_document(session, owner.id, file_path="/vault/original.pdf")
+        _set_rls_user(session, owner.id)
+
+        document.file_path = "/vault/tampered.pdf"
+        with pytest.raises((IntegrityError, DBAPIError), match="file_path is immutable"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_setting_storage_key_to_the_same_value_is_a_harmless_no_op():
+    """Re-asserting the SAME value (OLD == NEW) must not be treated as a change -- some code
+    paths may legitimately re-set an attribute that happens not to have changed."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "no-op-same-value@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/stable-key")
+        _set_rls_user(session, owner.id)
+
+        session.execute(
+            sa_text("UPDATE documents SET storage_key = :same WHERE id = :id"),
+            {"same": "originals/stable-key", "id": str(document.id)},
+        )
+        session.commit()
+        session.refresh(document)
+        assert document.storage_key == "originals/stable-key"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_updating_other_document_columns_is_unaffected_by_the_guard():
+    """The trigger must only ever fire on storage_key/file_path changes -- every other column
+    (title, active_truth_status, ...) stays freely writable, in the same UPDATE or a separate
+    one."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "other-columns-unaffected@example.com")
+        document = _make_document(session, owner.id)
+        _set_rls_user(session, owner.id)
+
+        document.title = "Nytt namn"
+        document.active_truth_status = ActiveTruthStatus.superseded
+        session.commit()
+        session.refresh(document)
+        assert document.title == "Nytt namn"
+        assert document.active_truth_status == ActiveTruthStatus.superseded
+        assert document.storage_key == "originals/abc123"  # untouched
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_real_two_phase_upload_flow_survives_the_guard_end_to_end():
+    """Mirrors app/rag/library_import.py's real sequence: INSERT with storage_key NULL, then a
+    single later UPDATE setting storage_key/file_path/status/size_bytes together once the blob
+    write succeeds -- through the restricted runtime role, exactly what production does."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "two-phase-upload@example.com")
+        document = _make_document(session, owner.id, storage_key=None, file_path=None)
+        _set_rls_user(session, owner.id)
+        assert document.storage_key is None
+
+        document.storage_key = "originals/two-phase-key"
+        document.size_bytes = 4096
+        document.title = "Uppdaterad titel"
+        session.commit()
+        session.refresh(document)
+        assert document.storage_key == "originals/two-phase-key"
+        assert document.size_bytes == 4096
+        assert document.title == "Uppdaterad titel"
+
+        # A SECOND attempt to change the now-set storage_key must still be rejected.
+        document.storage_key = "originals/a-hijacked-key"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()

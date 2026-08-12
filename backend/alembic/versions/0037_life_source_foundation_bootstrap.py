@@ -133,6 +133,41 @@ def upgrade() -> None:
         CREATE INDEX ix_documents_source_import_batch ON documents (source_import_batch_id);
     """)
 
+    # --- documents.storage_key / file_path: write-once immutability (P0 Source Vault invariant,
+    # docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D) -------------------------------------------
+    # A BEFORE UPDATE trigger, not privilege narrowing -- app/rag/library_import.py legitimately
+    # creates a Document row FIRST (storage_key still NULL; the content-addressed key can't be
+    # known before the blob is hashed and durably written) and only later, once the blob write
+    # succeeds, issues a real UPDATE setting storage_key/file_path together with status/
+    # size_bytes/stored_at. That one-time NULL -> value transition must stay possible; only a
+    # LATER change to an already-set value is the violation this invariant actually cares
+    # about. Postgres GRANT/REVOKE is binary (can/cannot UPDATE a column) and has no way to
+    # express "only if currently NULL" -- a value-conditional trigger is the correct primitive
+    # here, exactly the same kind migration 0019 already uses for document_source_units/
+    # message_source_units field immutability (trg_dsu_guard_update / trg_msgsu_guard_update).
+    # Applies regardless of which role issues the UPDATE (RLS-independent, like every other
+    # guard trigger in this schema) -- not just a mainai_app-specific restriction.
+    op.execute("""
+        CREATE OR REPLACE FUNCTION trg_documents_guard_storage_immutable() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
+        BEGIN
+            IF OLD.storage_key IS NOT NULL AND NEW.storage_key IS DISTINCT FROM OLD.storage_key THEN
+                RAISE EXCEPTION 'documents.storage_key is immutable once set (id=%)', OLD.id;
+            END IF;
+            IF OLD.file_path IS NOT NULL AND NEW.file_path IS DISTINCT FROM OLD.file_path THEN
+                RAISE EXCEPTION 'documents.file_path is immutable once set (id=%)', OLD.id;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER trg_documents_storage_immutable
+            BEFORE UPDATE ON documents
+            FOR EACH ROW EXECUTE FUNCTION trg_documents_guard_storage_immutable();
+    """)
+
     # --- S1C: message_source_units ---------------------------------------------------------
     # Extend the parent CHECK additively -- a constraint replace, not a rewrite. Every existing
     # row's source_kind is one of the three original values and remains valid.
@@ -328,15 +363,20 @@ def upgrade() -> None:
     # This migration does NOT contain literal REVOKE/GRANT naming mainai_app -- same reasoning
     # as migration 0019's own module docstring (a fresh `alembic upgrade head` on a database
     # where mainai_app does not exist yet would fail outright). Runtime privilege narrowing for
-    # source_import_batches/source_import_batch_failures/message_source_units, and for
-    # documents.storage_key/file_path (immutability, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
-    # §D), is applied and verified at every boot by
-    # backend/scripts/security/s1a_privilege_policy.py via ensure_app_role.py/
-    # apply_runtime_privileges.py, exactly like every other S1A-pattern table.
+    # source_import_batches/source_import_batch_failures/message_source_units is applied and
+    # verified at every boot by backend/scripts/security/s1a_privilege_policy.py via
+    # ensure_app_role.py/apply_runtime_privileges.py, exactly like every other S1A-pattern
+    # table. documents.storage_key/file_path immutability (docs/LIFE_SOURCE_FOUNDATION_
+    # BOOTSTRAP.md §D) is enforced above by trg_documents_storage_immutable instead -- a
+    # trigger, not a privilege grant, since the invariant is value-conditional (see that
+    # trigger's own comment for why).
 
 
 def downgrade() -> None:
     op.execute("""
+        DROP TRIGGER IF EXISTS trg_documents_storage_immutable ON documents;
+        DROP FUNCTION IF EXISTS trg_documents_guard_storage_immutable();
+
         DROP TRIGGER IF EXISTS trg_msgsu_no_delete ON message_source_units;
         DROP FUNCTION IF EXISTS trg_msgsu_forbid_delete();
         DROP TRIGGER IF EXISTS trg_msgsu_update_guard ON message_source_units;

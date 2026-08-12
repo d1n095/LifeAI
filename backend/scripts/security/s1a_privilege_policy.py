@@ -124,38 +124,23 @@ _PROTECTED_TABLES = [
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
 
-# Column-level narrowing — a DIFFERENT mechanism from _PROTECTED_TABLES above, needed for
-# tables that legitimately need broad table-level privileges (documents needs SELECT/INSERT/
-# UPDATE/DELETE for its many actively-used columns) but must never allow SPECIFIC columns to
-# change after creation. docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D: documents.storage_key/
-# file_path name the Source Vault original a Document points at — the P0 immutability
-# invariant the founder's bootstrap mandate named explicitly.
-#
-# IMPORTANT POSTGRES SEMANTICS, verified against a real Postgres 16 instance while building
-# this (not assumed): `REVOKE UPDATE (col) ON TABLE t FROM role` does NOT override a
-# TABLE-LEVEL `GRANT UPDATE ON TABLE t TO role` — `has_column_privilege()` returns true if
-# EITHER a column-level OR a table-level grant covers that column, and a column-level REVOKE
-# only removes a column-specific ACL entry, never a table-level one. Since
-# `ensure_app_role.py`'s `GRANT ALL PRIVILEGES ON ALL TABLES` grants TABLE-level UPDATE (which
-# implicitly covers every column), a naive `REVOKE UPDATE (storage_key) ...` immediately after
-# it is a no-op in practice — confirmed by running this against a real database, not assumed
-# correct from documentation. The only correct mechanism is: REVOKE the table-level privilege
-# entirely, then GRANT it back at COLUMN level for every column EXCEPT the protected ones
-# (enumerated dynamically from `information_schema.columns`, never hardcoded, so a future
-# migration that adds a column to `documents` is covered automatically without anyone having
-# to remember to update a column list here).
-_COLUMN_PROTECTED_TABLES = [
-    ("documents", "UPDATE", ["storage_key", "file_path"]),
-]
-
-
-def _table_column_names(cur, table: str) -> list[str]:
-    cur.execute(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position",
-        (table,),
-    )
-    return [row[0] for row in cur.fetchall()]
+# NOTE on documents.storage_key/file_path immutability (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+# §D): an EARLIER version of this bootstrap pass tried to enforce this via column-level
+# privilege narrowing here (REVOKE table-level UPDATE on `documents`, re-GRANT at column level
+# for every column except storage_key/file_path). That mechanism was reverted after it broke a
+# real, legitimate production code path found empirically: app/rag/library_import.py creates
+# the Document row FIRST (storage_key still NULL, since the content-addressed key can't be
+# known before the blob is hashed/written), then issues a single UPDATE setting storage_key
+# together with status/size_bytes/stored_at once the blob is durably on disk — a genuine
+# one-time "first write" that happens via UPDATE, not INSERT, and that column-level REVOKE had
+# no way to distinguish from a later, illegitimate change to an already-set value (Postgres
+# GRANT/REVOKE is binary — can/cannot UPDATE a column — it cannot express "only if currently
+# NULL"). The correct primitive for THAT invariant is a write-once BEFORE UPDATE trigger,
+# exactly the mechanism this codebase already uses for field-level immutability elsewhere
+# (migration 0019's document_source_units/message_source_units guard triggers) — see migration
+# 0037's `trg_documents_guard_storage_immutable` for the actual enforcement. Privilege
+# narrowing remains the right tool for table-level access (below); it is not the right tool
+# for value-conditional immutability.
 
 # Pass 44 — the schema-wide privilege floor. mainai_app must never hold ANY of these on ANY
 # table in schema public, whether or not that table appears in `_PROTECTED_TABLES` above.
@@ -416,13 +401,6 @@ def apply_privilege_policy(
         if table not in tables_present and require_complete:
             errors.append(f"{table}: table does not exist (required)")
 
-    column_tables_present = {
-        table for table, _priv, _cols in _COLUMN_PROTECTED_TABLES if _table_exists(cur, table)
-    }
-    for table, _priv, _cols in _COLUMN_PROTECTED_TABLES:
-        if table not in column_tables_present and require_complete:
-            errors.append(f"{table}: table does not exist (required)")
-
     signatures: dict[str, str] = {}
     for name, _grant_to_app, _requires_bypassrls, _expected_return_type, expected_args in _FUNCTIONS:
         sig, resolve_errors = _resolve_function(cur, name, expected_args)
@@ -464,23 +442,6 @@ def apply_privilege_policy(
             if allowed_privs:
                 cur.execute(f'GRANT {", ".join(allowed_privs)} ON TABLE public."{table}" TO {APP_ROLE}')
 
-        # Column-level narrowing (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D) — applied AFTER
-        # the table-level GRANTs above (which include the broad `documents` UPDATE this narrows
-        # back down), same ordering discipline as the schema-wide floor running before the
-        # per-table narrowing: each layer strictly tightens whatever came before it.
-        for table, priv, excluded_columns in _COLUMN_PROTECTED_TABLES:
-            if table not in column_tables_present:
-                continue
-            # REVOKE the table-level grant entirely first — a column-level GRANT alongside a
-            # surviving table-level one would be pointless (the table-level grant alone already
-            # covers every column). Then re-grant at column level for everything EXCEPT the
-            # protected columns.
-            cur.execute(f'REVOKE {priv} ON TABLE public."{table}" FROM {APP_ROLE}')
-            allowed_columns = [c for c in _table_column_names(cur, table) if c not in excluded_columns]
-            if allowed_columns:
-                cols_sql = ", ".join(f'"{c}"' for c in allowed_columns)
-                cur.execute(f'GRANT {priv} ({cols_sql}) ON TABLE public."{table}" TO {APP_ROLE}')
-
         for name, grant_to_app, _requires_bypassrls, _expected_return_type, _expected_args in _FUNCTIONS:
             sig = signatures.get(name)
             if sig is None:
@@ -514,47 +475,6 @@ def apply_privilege_policy(
                     f"grant {APP_ROLE} any of {_NEVER_GRANTED_TABLE_PRIVS} (RLS does not apply to "
                     f"TRUNCATE, and REFERENCES/TRIGGER are DDL-only privileges the runtime role "
                     f"never uses)"
-                )
-
-    # Column-level narrowing verification (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D) — runs
-    # in BOTH mutate and read-only modes, same reasoning as the schema-wide floor above: the
-    # durable worker must be able to fail closed if a boot somehow left documents.storage_key/
-    # file_path directly UPDATE-able by mainai_app.
-    for table, priv, excluded_columns in _COLUMN_PROTECTED_TABLES:
-        if table not in column_tables_present:
-            continue
-        # The table-level grant must be gone entirely — a surviving table-level grant would
-        # make every per-column check below meaningless (has_column_privilege returns true for
-        # ANY column when a table-level grant exists, see the mechanism note above).
-        cur.execute("SELECT has_table_privilege(%s, %s, %s)", (APP_ROLE, table, priv))
-        if cur.fetchone()[0]:
-            errors.append(
-                f"{table}.{priv}: {APP_ROLE} still holds this at the TABLE level — a table-level "
-                f"grant implicitly covers every column including the protected ones, making the "
-                f"column-level narrowing below meaningless (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D)"
-            )
-        for column in excluded_columns:
-            cur.execute("SELECT has_column_privilege(%s, %s, %s, %s)", (APP_ROLE, table, column, priv))
-            if cur.fetchone()[0]:
-                errors.append(
-                    f"{table}.{column}.{priv}: {APP_ROLE} still holds it — this column names a "
-                    f"Source Vault original and must never be directly mutable by the runtime "
-                    f"role (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D)"
-                )
-        # The regrant must have actually happened for the REST of the table's columns — a
-        # verification that only checks the protected columns are locked down would also pass
-        # if the regrant silently failed entirely and mainai_app lost the ability to update
-        # documents at all, which is a real, different bug the founder's own routers would
-        # hit immediately (e.g. index_status transitions) — checked here rather than left to
-        # be discovered as a runtime 500.
-        other_columns = [c for c in _table_column_names(cur, table) if c not in excluded_columns]
-        if other_columns:
-            sample_column = other_columns[0]
-            cur.execute("SELECT has_column_privilege(%s, %s, %s, %s)", (APP_ROLE, table, sample_column, priv))
-            if not cur.fetchone()[0]:
-                errors.append(
-                    f"{table}.{sample_column}.{priv}: {APP_ROLE} does NOT have it — the column-level "
-                    f"regrant for every non-protected column appears to have failed entirely"
                 )
 
     leaked_defaults = _default_acl_privileges(cur) & set(_NEVER_GRANTED_TABLE_PRIVS)
