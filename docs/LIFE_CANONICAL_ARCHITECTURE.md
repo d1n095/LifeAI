@@ -1,9 +1,24 @@
-# Life — Canonical Architecture
+# Life — Provisional Canonical Architecture / Bootstrap Map
 
-**Status:** Discovery/architecture pass, no code written. Produced per the founder's explicit
-"Canonical Architecture Recovery & AI-Independent Core Audit" mandate (2026-08-11), run
+**Status: PROVISIONAL CANONICAL ARCHITECTURE / BOOTSTRAP MAP — NOT the final Canonical Life
+Architecture.** Discovery/architecture pass, no code written. Produced per the founder's
+explicit "Canonical Architecture Recovery & AI-Independent Core Audit" mandate (2026-08-11), run
 immediately after MainAI V0.3 merged (mainline `27f0d1e550aa158cf11e44b1c69e8d074959df73`).
-Feature work is frozen until this is reviewed and approved.
+Feature work is frozen until a genuinely final architecture is reviewed and approved.
+
+**Why this is provisional, explicitly, per the founder's own correction (2026-08-11):** this
+pass read the entire repo, its `docs/`+`backend/docs/` corpus (~10,000 lines), and the actual
+DB schema/code — but it did **not** have access to the founder's external source material
+(`~/Documents/mainai_intake/` on the founder's Mac: `FKP_curated/`, `Life_OS_Claude_Handoff/`,
+`chatgpt_export/`, `savings-story-scanner-main/`), and its requirement traceability is thematic,
+not a full atomic per-sentence extraction. The founder's explicit position: the whole point of
+stopping to do an architecture recovery was to stop building from fragmented project knowledge
+— locking this document as *final* before the full founder corpus has been ingested would
+repeat exactly that mistake at one level up. This document remains the best current map and
+should be used as such, but is not authoritative until superseded by the real Canonical Life
+Architecture Recovery performed after `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md` ships and the
+full corpus is actually in the system. See that document for the two-step plan
+(Bootstrap → full-corpus Canonical Architecture Recovery) this status note refers to.
 
 **What this document is:** the single map of what Life is, what already exists, what's
 designed-but-not-built, and what's genuinely missing — assembled from (1) the actual repo/DB

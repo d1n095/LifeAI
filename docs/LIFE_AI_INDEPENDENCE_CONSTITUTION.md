@@ -5,6 +5,13 @@
 statement of the founder's §0 "grundlag" — it exists so future sessions (human or MainAI) can
 check a decision against it without re-deriving the principle from a conversation.
 
+**Provisional note (2026-08-11 correction):** the law itself (§1) does not depend on the
+founder's full external corpus and is not provisional. The AI-dependency matrix it cites (§4,
+sourced from `docs/LIFE_CANONICAL_ARCHITECTURE.md` §G) IS part of the provisional bootstrap map
+and may be refined once the full corpus is ingested — see that document's status note. Nothing
+here blocks acting on the law now; it only means the specific subsystem classifications in §4
+should be re-checked, not re-derived from scratch, once the final Canonical Architecture ships.
+
 **Relationship to a different, similarly-named existing concept — read this before anything
 else:** `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.4/§6.7 already designs something called
 "MainAI:s konstitution" (P7A/P7B, `governance_documents`). **That is a different thing from this

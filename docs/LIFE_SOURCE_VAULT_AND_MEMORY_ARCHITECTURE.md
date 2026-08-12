@@ -83,6 +83,12 @@ already carry `derived_from`/`memory_source_id` links back into deterministic me
 provenance chain the founder's model requires already exists as a design, and partially as
 code.
 
+**Provisional note (2026-08-11):** this document, like `docs/LIFE_CANONICAL_ARCHITECTURE.md`, is
+part of the Bootstrap Map, not the final architecture — see that document's status note. The
+Memory Threads design in §3 below has already been through one founder-review correction round
+(the member-kind polymorphism fix); treat it as more settled than the rest of this pass's
+inventory work, but still design-only.
+
 ## 3. Memory Threads
 
 **The founder's requirement:** a Memory Thread is a first-class object, not the same thing as a
@@ -106,7 +112,18 @@ why none of them is actually a Memory Thread:
   in purpose (see Requirement Traceability §6's note on keeping this distinct from the founder's
   personal Goal/Dream graph).
 
-**Recommended minimal shape** (design only):
+**Design correction (2026-08-11, founder review):** an earlier version of this section proposed
+that every thread member be a `memory_source_units.id`, on the theory that PRs/engineering-
+lessons/goals would "get into a thread for free" once each became its own `memory_source_units`
+subtype. The founder correctly rejected this: `memory_source_units` (S1A) is specifically the
+**raw evidence** layer — content-hashed, immutable, provenance-anchored *original* material. A
+decision, a goal, an engineering lesson, a `mainai_task`, or a PR is **derived/system knowledge**,
+not raw evidence, and forcing it into the raw-evidence table just to be thread-addressable would
+be exactly the kind of category error §2 above warns against for Life Memory generally (a
+generated conclusion must never be indistinguishable from the source it was drawn from). The
+corrected design below fixes this before any schema is locked.
+
+**Recommended shape** (design only, corrected):
 
 ```
 memory_threads
@@ -116,25 +133,40 @@ memory_threads
   created_at, updated_at
 
 memory_thread_members
-  thread_id, memory_source_id     -- REFERENCES memory_source_units(id) -- reuses S1A's
-                                    -- universal source-unit abstraction directly; a thread
-                                    -- member is just another consumer of the same proveance
-                                    -- primitive claims/entities already use
+  thread_id
+  member_kind          -- 'memory_source_unit' | 'knowledge_claim' | 'project_entity' |
+                        -- 'engineering_lesson' | 'mainai_task' | 'founder_memory_note' |
+                        -- 'external_reference'   -- for things with no row in this DB at all,
+                        --                           e.g. a GitHub PR — see below
+  member_ref_id         -- UUID, meaning depends on member_kind; NULL when member_kind=
+                        -- 'external_reference'
+  external_ref           -- text (e.g. a GitHub PR URL/number), set ONLY when member_kind=
+                        -- 'external_reference', NULL otherwise
   added_at, added_by
+  UNIQUE (thread_id, member_kind, member_ref_id)      -- member_ref_id nullable-safe per Postgres
+                                                        -- NULL-distinct semantics; external_ref
+                                                        -- gets its own uniqueness rule instead
+                                                        -- when member_kind='external_reference'
 
 memory_thread_relationships
   from_thread_id, to_thread_id, relationship_type   -- merges_into | splits_from | relates_to |
                                                       -- supersedes
 ```
 
-The critical design decision, made here explicitly so it isn't re-litigated later: **a thread
-member is a `memory_source_units.id`**, not a new parallel reference type — this means Memory
-Threads sit *on top of* S1A's already-built universal provenance layer exactly the way
-`KnowledgeClaim.memory_source_id` does, and get PRs/engineering-lessons/goals into a thread "for
-free" the moment those become their own `memory_source_units` subtypes (a straightforward
-extension of the existing `source_kind` enum pattern, not a redesign). This is the direct
-technical reason S1A was worth building first and worth treating as foundational infrastructure
-rather than a Library-specific detail.
+**The critical design decision, made here explicitly so it isn't re-litigated later:** a thread
+member is identified by **kind + id**, following the exact discriminator pattern S1A already
+proved for `memory_source_units.source_kind`/`document_source_units` — not a single foreign key
+into one table, and not a fabricated `memory_source_units` row for something that isn't raw
+evidence. `member_kind='memory_source_unit'` is how raw sources (documents, chunks, and later
+messages via S1C) join a thread; every other kind references its own real table
+(`knowledge_claims`, `project_entities`, `engineering_lessons`, `mainai_tasks`,
+`founder_memory_notes`) directly, and `external_reference` covers things that are real but have
+no row anywhere in this database at all (a GitHub PR is GitHub's data, not ours). A future
+implementation should verify per-`member_kind` ownership with a trigger, the same pattern S1A's
+`transition_own_memory_source()` already uses to check `memory_source_units.owner_id` before
+allowing a transition — extended here to check whichever table `member_kind` points at, not a
+new mechanism. This is more implementation work than the single-FK version would have been, but
+it is the version that doesn't lie about what a claim, a goal, or a PR *is*.
 
 ## 4. ChatGPT / large chat export ingestion model
 

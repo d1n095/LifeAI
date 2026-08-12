@@ -1,4 +1,10 @@
-# Life — Requirement Traceability
+# Life — Requirement Traceability (Provisional)
+
+**Status: PROVISIONAL — part of the Bootstrap Map, not the final requirement traceability.**
+Sourced only from the repo/docs corpus and this mandate; the founder's external corpus
+(`~/Documents/mainai_intake/`) has not yet been ingested. This matrix will be redone, not just
+extended, once `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md` ships and the full founder corpus is
+in the system — see that document.
 
 **Scope note:** this is a themed traceability matrix — each row is a real, sourced requirement
 theme extracted from an actual document or the founder's actual words, not a mechanical
