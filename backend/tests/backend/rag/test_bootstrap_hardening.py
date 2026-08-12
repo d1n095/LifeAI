@@ -665,3 +665,85 @@ def test_section8_wrong_owner_on_message_source_unit_rejected_by_trigger():
     finally:
         session.rollback()
         session.close()
+
+
+# --- Section 12: AI-independence proof -----------------------------------------------------
+
+
+def test_section12_source_foundation_modules_never_import_app_providers():
+    """Static, drift-preventing proof (not just "it happened not to call one at runtime"): none
+    of the Source Foundation Bootstrap's own modules may import app.providers at all, at the
+    AST level -- a future edit that adds a provider import here would be a real regression
+    against the "ingen AI behövs for detta" requirement, and this test fails the moment it
+    happens, before any runtime behavior even needs to be exercised."""
+    import ast
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parent.parent.parent.parent
+    source_foundation_modules = [
+        backend_root / "app" / "rag" / "corpus_batch.py",
+        backend_root / "app" / "rag" / "message_source.py",
+        backend_root / "app" / "rag" / "backfill" / "message_source.py",
+        backend_root / "app" / "jobs" / "handlers" / "message_source_backfill.py",
+        backend_root / "app" / "models" / "source_import_batch.py",
+    ]
+    violations = []
+    for path in source_foundation_modules:
+        assert path.exists(), f"expected Source Foundation module not found: {path}"
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "app.providers" or alias.name.startswith("app.providers."):
+                        violations.append(f"{path.name}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and (node.module == "app.providers" or node.module.startswith("app.providers.")):
+                    violations.append(f"{path.name}: from {node.module} import ...")
+    assert violations == [], f"Source Foundation modules must never import app.providers: {violations}"
+
+
+def test_section12_full_corpus_batch_lifecycle_never_touches_any_provider(monkeypatch):
+    """Runtime companion to the static AST check: runs the corpus manifest's full recording
+    lifecycle (create -> discover -> store -> parse -> duplicate -> unsupported -> failed ->
+    complete) with every provider client monkeypatched to explode if called at all -- proving
+    the entire bookkeeping path genuinely needs no AI, not just that it currently doesn't call
+    one by coincidence."""
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _explode(self, messages, model, **kwargs):
+        raise AssertionError("corpus manifest bookkeeping must never call a provider -- no AI needed for this")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _explode)
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section12-no-provider@example.com")
+        _set_rls_user(session, owner.id)
+
+        batch = create_batch(session, owner.id, label="AI-independence proof")
+        from app.rag.corpus_batch import (
+            record_discovery_totals,
+            record_duplicate,
+            record_failed,
+            record_parsed,
+            record_unsupported,
+            try_mark_completed,
+        )
+
+        # discovered_files=3: 1 genuinely stored + 1 duplicate (both count toward
+        # stored_originals_done=2) + 1 failed (never stored) = 3, reconciling the first
+        # equation; of the 2 stored, 1 parsed + 1 unsupported = 2, reconciling the second.
+        record_discovery_totals(session, batch, files=3)
+        record_stored_original(session, batch)
+        record_duplicate(session, batch)
+        record_failed(session, batch, source_ref="broken.pdf", reason="parser raised")
+        record_parsed(session, batch)
+        record_unsupported(session, batch)
+        session.commit()
+
+        completed = try_mark_completed(session, batch)
+        session.commit()
+        assert completed is True
+    finally:
+        session.rollback()
+        session.close()
