@@ -497,3 +497,171 @@ def test_section3_account_erasure_hard_deletes_documents_entirely():
         )
     finally:
         verify_session.close()
+
+
+# --- Section 8: S1C exclusive arc -- mutation test + wrong-owner attack ---------------------
+
+
+def test_section8_mutation_restoring_old_document_only_trigger_makes_s1c_regress():
+    """The founder's explicit mutation-testing ask: prove the S1C exclusive-arc regression
+    coverage is not vacuous. Temporarily restores migration 0019's ORIGINAL, pre-0037 trigger
+    function (which only ever checked `document_source_units`, with no `message` arm at all)
+    on the real schema, attempts the exact same "create a message source unit" operation
+    tests/backend/rag/test_message_source_units.py's own
+    test_get_or_create_message_source_unit_creates_parent_and_subtype already covers, and
+    asserts it NOW fails -- proving that test genuinely depends on migration 0037's fix, not
+    on some unrelated permissive default. Restores the correct, current trigger in a finally
+    block regardless of outcome, so this mutation never leaks into any other test."""
+    from app.db import migration_engine
+    from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
+
+    _OLD_SINGLE_ARC_TRIGGER = """
+        CREATE OR REPLACE FUNCTION trg_msu_check_subtype_exists() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM public.document_source_units WHERE memory_source_id = NEW.id) THEN
+                RAISE EXCEPTION 'memory_source_units %: no matching document_source_units row', NEW.id;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+    """
+    _CURRENT_MULTI_ARC_TRIGGER = """
+        CREATE OR REPLACE FUNCTION trg_msu_check_subtype_exists() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
+        BEGIN
+            IF NEW.source_kind IN ('document_chunk', 'document_version', 'document_record') THEN
+                IF NOT EXISTS (SELECT 1 FROM public.document_source_units WHERE memory_source_id = NEW.id) THEN
+                    RAISE EXCEPTION 'memory_source_units %: no matching document_source_units row', NEW.id;
+                END IF;
+            ELSIF NEW.source_kind = 'message' THEN
+                IF NOT EXISTS (SELECT 1 FROM public.message_source_units WHERE memory_source_id = NEW.id) THEN
+                    RAISE EXCEPTION 'memory_source_units %: no matching message_source_units row', NEW.id;
+                END IF;
+            ELSE
+                RAISE EXCEPTION 'memory_source_units %: unrecognized source_kind %', NEW.id, NEW.source_kind;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+    """
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section8-mutation@example.com")
+        _set_rls_user(session, owner.id)
+        from app.models.conversation import Conversation, Message, MessageRole
+
+        conversation = Conversation(user_id=owner.id, title="Mutationstest")
+        session.add(conversation)
+        session.commit()
+        message = Message(conversation_id=conversation.id, role=MessageRole.user, content="Mutationstest.")
+        session.add(message)
+        session.commit()
+        owner_id, conversation_id, message_id = owner.id, conversation.id, message.id
+    finally:
+        session.close()
+
+    with migration_engine.begin() as conn:
+        conn.execute(sa_text(_OLD_SINGLE_ARC_TRIGGER))
+
+    try:
+        mutated_session = SessionLocal()
+        try:
+            _set_rls_user(mutated_session, owner_id)
+            locator = MessageSourceLocator(
+                owner_id=owner_id, message_id=message_id, conversation_id=conversation_id,
+                role=MessageRole.user, observed_at=message.created_at,
+                content_text="Mutationstest.",
+            )
+            get_or_create_message_source_unit(mutated_session, locator)
+            with pytest.raises(Exception, match="no matching document_source_units row"):
+                mutated_session.commit()
+        finally:
+            mutated_session.rollback()
+            mutated_session.close()
+    finally:
+        with migration_engine.begin() as conn:
+            conn.execute(sa_text(_CURRENT_MULTI_ARC_TRIGGER))
+
+    # Confirm the restore genuinely took effect: the real operation succeeds again afterward.
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        second_message = Message(conversation_id=conversation_id, role=MessageRole.user, content="Efter aterstallning.")
+        verify_session.add(second_message)
+        verify_session.commit()
+        from app.rag.message_source import MessageSourceLocator as _Locator
+
+        msu_id = get_or_create_message_source_unit(
+            verify_session,
+            _Locator(
+                owner_id=owner_id, message_id=second_message.id, conversation_id=conversation_id,
+                role=MessageRole.user, observed_at=second_message.created_at, content_text="Efter aterstallning.",
+            ),
+        )
+        verify_session.commit()
+        assert msu_id is not None
+    finally:
+        verify_session.close()
+
+
+def test_section8_wrong_owner_on_message_source_unit_rejected_by_trigger():
+    """A message_source_units row that claims ownership of a conversation belonging to a
+    DIFFERENT owner must be rejected. owner_id itself matches the RLS session (owner_a), so a
+    naive "owner_id = owner_b" attempt (caught by RLS alone, a different and already-covered
+    layer) is deliberately avoided here. In practice this hits an even earlier defense than the
+    trigger's own `v_conv_owner IS DISTINCT FROM NEW.owner_id` check: the trigger's own SELECT
+    against `messages` runs as the SAME RLS-scoped role as the caller (not SECURITY DEFINER),
+    so migration 0031's owner-scoped RLS on `messages` makes owner_b's message invisible to
+    owner_a's session in the first place -- "message_id does not exist" rather than "does not
+    belong to owner_id". Either message is a correct rejection; which one fires is an
+    implementation detail of which defense layer runs first, not a distinction worth locking
+    the test to."""
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.memory_source_unit import MemorySourceUnit, MessageSourceUnit, SourceKind, SourceRole, SnapshotStatus
+    from app.rag.message_source import compute_content_hash
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section8-owner-a@example.com")
+        owner_b = _make_user(session, "section8-owner-b@example.com")
+        _set_rls_user(session, owner_b.id)
+        conversation_b = Conversation(user_id=owner_b.id, title="Owner B:s konversation")
+        session.add(conversation_b)
+        session.commit()
+        message_b = Message(conversation_id=conversation_b.id, role=MessageRole.user, content="Text.")
+        session.add(message_b)
+        session.commit()
+        conversation_b_id, message_b_id = conversation_b.id, message_b.id
+
+        _set_rls_user(session, owner_a.id)
+        content_hash, hash_version = compute_content_hash("Text.")
+        msu = MemorySourceUnit(
+            owner_id=owner_a.id,  # matches RLS/session -- the attack is claiming owner B's conversation, not owner_id itself
+            source_kind=SourceKind.message,
+            source_identity_key=f"message:{message_b_id}",
+            source_role=SourceRole.founder,
+            observed_at=message_b.created_at,
+            content_text="Text.",
+            content_hash=content_hash,
+            content_hash_version=hash_version,
+            snapshot_status=SnapshotStatus.exact,
+        )
+        session.add(msu)
+        session.flush()
+        session.add(
+            MessageSourceUnit(
+                memory_source_id=msu.id, owner_id=owner_a.id, source_kind=SourceKind.message,
+                message_id=message_b_id, conversation_id=conversation_b_id,
+            )
+        )
+        with pytest.raises((IntegrityError, DBAPIError), match="does not belong to owner_id|does not exist"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
