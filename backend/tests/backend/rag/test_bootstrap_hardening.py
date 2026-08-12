@@ -7,15 +7,43 @@ Section numbers below refer to the founder's 27-section attack-pass mandate. Not
 gets its own test module; this file covers Section 6 (counter concurrency) first, then grows.
 """
 
+import importlib.util
 import threading
+from pathlib import Path
 
+import pytest
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from app.db import SessionLocal
+from app.config import get_settings
+from app.db import SessionLocal, migration_engine
+from app.models.document import ActiveTruthStatus, Document, DocumentSource
+from app.models.user import User, UserRole
 from app.rag.corpus_batch import create_batch, record_stored_original
 from app.request_context import current_user_id as current_user_id_var
-from app.models.user import User, UserRole
 from app.security import hash_password
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _narrow_privileges_before_this_module():
+    """Same reasoning as tests/backend/test_account_erasure.py's identical fixture -- this
+    module exercises both the S1A privilege policy (scripts/security/s1a_privilege_policy.py)
+    AND account erasure's SECURITY DEFINER functions (erase_owner_memory,
+    erase_own_mainai_job_children -- governed by app/rls.py's
+    apply_mainai_job_runtime_privileges(), a SEPARATE policy module). conftest.py's own
+    `_test_database` fixture only grants the plain table-level DML floor, never function
+    EXECUTE privileges, so a run of this file in isolation needs to apply both real policies
+    itself rather than relying on another test module's own fixture having run first."""
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.apply_and_verify(get_settings().database_url)
+
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    apply_mainai_job_runtime_privileges(migration_engine)
 
 
 def _set_rls_user(session, owner_id) -> None:
@@ -28,6 +56,21 @@ def _make_user(session, email="hardening-owner@example.com") -> User:
     session.add(user)
     session.commit()
     return user
+
+
+def _make_document(session, owner_id, *, title="Kalla", storage_key=None, file_path=None) -> Document:
+    _set_rls_user(session, owner_id)
+    document = Document(
+        title=title,
+        source=DocumentSource.upload,
+        uploaded_by=owner_id,
+        active_truth_status=ActiveTruthStatus.active,
+        storage_key=storage_key,
+        file_path=file_path,
+    )
+    session.add(document)
+    session.commit()
+    return document
 
 
 # --- Section 6: counter concurrency -----------------------------------------------------
@@ -86,6 +129,371 @@ def test_section6_two_concurrent_sessions_incrementing_same_counter_do_not_lose_
         assert final.stored_originals_done == increments, (
             f"lost update: expected {increments} after {increments} concurrent increments, "
             f"got {final.stored_originals_done} -- record_stored_original() is not atomic"
+        )
+    finally:
+        verify_session.close()
+
+
+# --- Section 2: source immutability under real races (G/H/I/J/K) --------------------------
+#
+# A-F (row created NULL, legitimate first write, same-value no-op, different-value rejected,
+# storage_key/file_path changed alone) are already covered by
+# tests/backend/test_source_foundation_bootstrap_privileges.py. This file covers the
+# remaining, genuinely concurrent cases the founder's mandate named explicitly.
+
+
+def test_section2_g_both_storage_key_and_file_path_changed_in_one_statement_rejected():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section2-g@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/g-key", file_path="/vault/g.pdf")
+        _set_rls_user(session, owner.id)
+
+        document.storage_key = "originals/tampered"
+        document.file_path = "/vault/tampered.pdf"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section2_h_illegal_storage_key_change_together_with_a_legal_field_rejects_the_whole_update():
+    """A single UPDATE statement that touches BOTH an allowed field (title) and the protected
+    storage_key must be rejected in full -- Postgres statement atomicity means the trigger
+    aborting the statement rolls back the title change too, never a partial "some columns
+    applied" outcome."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section2-h@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/h-key")
+        _set_rls_user(session, owner.id)
+
+        document.title = "Ny titel som aldrig ska sparas"
+        document.storage_key = "originals/h-tampered"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session.commit()
+        session.rollback()
+
+        verify_session = SessionLocal()
+        try:
+            _set_rls_user(verify_session, owner.id)
+            reloaded = verify_session.get(Document, document.id)
+            assert reloaded.title == "Kalla"  # the whole statement rolled back, not just storage_key
+            assert reloaded.storage_key == "originals/h-key"
+        finally:
+            verify_session.close()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section2_i_concurrent_first_writers_with_different_values_exactly_one_wins():
+    """Two sessions race to set the SAME row's storage_key from NULL with DIFFERENT values.
+    Real Postgres row-level locking means the second UPDATE blocks until the first commits;
+    by the time it actually runs, OLD.storage_key is no longer NULL (the first winner already
+    set it), so the trigger correctly rejects the second writer's different value -- exactly
+    one canonical value survives, never a silent last-write-wins."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "section2-i@example.com")
+        document = _make_document(setup_session, owner.id, storage_key=None)
+        owner_id, document_id = owner.id, document.id
+    finally:
+        setup_session.close()
+
+    results: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
+
+    def _writer(name: str, value: str):
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            session.execute(
+                sa_text("UPDATE documents SET storage_key = :v WHERE id = :id"),
+                {"v": value, "id": str(document_id)},
+            )
+            session.commit()
+            results[name] = "committed"
+        except (IntegrityError, DBAPIError):
+            session.rollback()
+            results[name] = "rejected"
+        except Exception as exc:  # noqa: BLE001
+            errors[name] = exc
+        finally:
+            session.close()
+
+    thread_a = threading.Thread(target=_writer, args=("a", "originals/writer-a"))
+    thread_b = threading.Thread(target=_writer, args=("b", "originals/writer-b"))
+    thread_a.start()
+    thread_b.start()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+    assert not errors, f"unexpected exceptions: {errors}"
+    assert sorted(results.values()) == ["committed", "rejected"], (
+        f"exactly one of two concurrent different-value first-writers must win, got {results}"
+    )
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        final = verify_session.get(Document, document_id)
+        winner = "a" if results["a"] == "committed" else "b"
+        expected = {"a": "originals/writer-a", "b": "originals/writer-b"}[winner]
+        assert final.storage_key == expected
+    finally:
+        verify_session.close()
+
+
+def test_section2_j_concurrent_first_writers_with_the_same_value_both_succeed_harmlessly():
+    """Two sessions race to set the SAME row's storage_key from NULL to the IDENTICAL value
+    (a realistic scenario: two workers independently re-derive the same content-addressed hash
+    for the same file and both attempt to attach it). Neither commit is a "tamper" -- the
+    second writer's OLD.storage_key IS NOT NULL check fires, but NEW == OLD, so the trigger's
+    own `IS DISTINCT FROM` guard does not raise for the second one either."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "section2-j@example.com")
+        document = _make_document(setup_session, owner.id, storage_key=None)
+        owner_id, document_id = owner.id, document.id
+    finally:
+        setup_session.close()
+
+    results: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
+
+    def _writer(name: str):
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            session.execute(
+                sa_text("UPDATE documents SET storage_key = :v WHERE id = :id"),
+                {"v": "originals/shared-hash", "id": str(document_id)},
+            )
+            session.commit()
+            results[name] = "committed"
+        except (IntegrityError, DBAPIError):
+            session.rollback()
+            results[name] = "rejected"
+        except Exception as exc:  # noqa: BLE001
+            errors[name] = exc
+        finally:
+            session.close()
+
+    thread_a = threading.Thread(target=_writer, args=("a",))
+    thread_b = threading.Thread(target=_writer, args=("b",))
+    thread_a.start()
+    thread_b.start()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+    assert not errors, f"unexpected exceptions: {errors}"
+    assert results == {"a": "committed", "b": "committed"}, (
+        f"same-value concurrent first writers must both succeed harmlessly, got {results}"
+    )
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        final = verify_session.get(Document, document_id)
+        assert final.storage_key == "originals/shared-hash"
+    finally:
+        verify_session.close()
+
+
+def test_section2_k_stale_transaction_overwrite_after_first_writer_commits_is_rejected():
+    """A session that read the row BEFORE any storage_key was set (Python object still shows
+    storage_key=None), but whose own commit races AFTER a different session already won the
+    first write, must not silently overwrite the winner just because its own in-memory view is
+    stale -- the trigger evaluates the REAL row state at UPDATE time, not the stale Python
+    object's belief."""
+    session_stale = SessionLocal()
+    session_winner = SessionLocal()
+    try:
+        owner = _make_user(session_stale, "section2-k@example.com")
+        document = _make_document(session_stale, owner.id, storage_key=None)
+        document_id, owner_id = document.id, owner.id
+
+        # session_stale "reads" the row (already has document.storage_key == None in memory).
+        _set_rls_user(session_stale, owner_id)
+        stale_doc = session_stale.get(Document, document_id)
+        assert stale_doc.storage_key is None
+
+        # A DIFFERENT session wins the real first write and commits first.
+        _set_rls_user(session_winner, owner_id)
+        session_winner.execute(
+            sa_text("UPDATE documents SET storage_key = :v WHERE id = :id"),
+            {"v": "originals/real-winner", "id": str(document_id)},
+        )
+        session_winner.commit()
+
+        # The stale session now attempts its own "first write" of a different value.
+        stale_doc.storage_key = "originals/stale-overwrite-attempt"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session_stale.commit()
+    finally:
+        session_stale.rollback()
+        session_stale.close()
+        session_winner.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        final = verify_session.get(Document, document_id)
+        assert final.storage_key == "originals/real-winner"
+    finally:
+        verify_session.close()
+
+
+# --- Section 3: delete/purge trust boundary — the TRUTH, not a claim ------------------------
+#
+# These tests establish empirically what PR #61 does and does NOT protect against deletion.
+# Verdict (see the hardening-pass final report for full reasoning): "IMMUTABLE AGAINST UPDATE"
+# (proven above, Section 2) is NOT the same claim as "IMMUTABLE AGAINST DELETION" -- and this
+# PR never claimed the latter. A Document row WITH a `document_source_units` row is protected
+# from a raw hard DELETE by a pre-existing FK RESTRICT (migration 0019, unrelated to this
+# bootstrap). The normal application delete path (`purge_source()`, S1A Pass 21-23, built
+# entirely before this bootstrap) deliberately soft-deletes the Document row and, once the
+# underlying blob is genuinely unreferenced, physically deletes it from disk -- a reviewed,
+# intentional feature this bootstrap did not touch and does not have standing to silently
+# reverse. Documents with ZERO document_source_units rows have no such FK protection at all.
+
+
+def test_section3_hard_delete_of_a_document_with_a_source_unit_is_blocked_by_fk_restrict():
+    """The one REAL protection against a raw `DELETE FROM documents` that exists today -- not
+    purpose-built for this bootstrap, but a real, DB-enforced backstop that predates it
+    (migration 0019's `document_source_units.document_id` FK has no ON DELETE action)."""
+    from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+    from app.models.document_chunk import DocumentChunk
+    from app.models.memory_source_unit import SnapshotStatus
+    from datetime import datetime, timezone
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-fk-restrict@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/section3-fk", file_path=None)
+        _set_rls_user(session, owner.id)
+        chunk = DocumentChunk(document_id=document.id, owner_id=owner.id, chunk_index=0, text="Text.", embedding=[0.1] * 1536)
+        session.add(chunk)
+        session.commit()
+
+        get_or_create_memory_source_unit(
+            session,
+            DocumentSourceLocator(
+                owner_id=owner.id, document_id=document.id, version_id=None, chunk_id=chunk.id,
+                observed_at=datetime.now(timezone.utc), content_text="Text.", snapshot_status=SnapshotStatus.exact,
+            ),
+        )
+        session.commit()
+
+        with pytest.raises((IntegrityError, DBAPIError), match="foreign key|violates"):
+            session.execute(sa_text("DELETE FROM documents WHERE id = :id"), {"id": str(document.id)})
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section3_hard_delete_of_a_document_with_no_source_unit_at_all_succeeds_unprotected():
+    """The gap the module docstring itself names (`legacy_without_memory_source`): a Document
+    that never got a document_source_units row has NO FK backstop -- a raw hard DELETE succeeds
+    today. Documented here as the honest truth, not silently fixed: closing it would mean
+    either (a) retroactively backfilling a source unit for every legacy document, which
+    fabricates provenance data that never really existed, or (b) adding a blanket delete-guard
+    trigger on `documents` itself -- a real, standalone architectural change bigger than this
+    hardening pass's scope, and one that would also have to account for account erasure's own
+    legitimate hard-delete path (see the next test)."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-no-fk@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/section3-no-source-unit")
+        _set_rls_user(session, owner.id)
+
+        document_id, owner_id = document.id, owner.id
+        session.execute(sa_text("DELETE FROM documents WHERE id = :id"), {"id": str(document_id)})
+        session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        assert verify_session.get(Document, document_id) is None
+    finally:
+        verify_session.close()
+
+
+def test_section3_purge_source_soft_deletes_then_physically_deletes_an_unreferenced_blob():
+    """The normal application delete path, proven end-to-end: purge_source() soft-deletes the
+    Document row (deleted_at set, row still exists) then, since nothing else references the
+    content-addressed storage_key, retry_source_blob_purge() physically removes the blob from
+    disk. This is deliberate, pre-existing behavior (S1A Pass 21-23) this bootstrap did not
+    change -- proof that "canonical originals" are NOT unconditionally undeletable today, only
+    non-silently-mutable while they exist."""
+    import io
+
+    from app.rag.library_import import _store_bytes_with_reference_lock
+    from app.storage import get_storage
+    from app.storage.purge import purge_source
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-purge-blob@example.com")
+        _set_rls_user(session, owner.id)
+        blob = _store_bytes_with_reference_lock(session, get_storage(), b"section 3 purge content, unique", max_bytes=10_000)
+        document = _make_document(session, owner.id, storage_key=blob.storage_key)
+        session.commit()
+
+        assert get_storage().exists(blob.storage_key) is True
+
+        result = purge_source(session, document.id, owner.id)
+        session.commit()
+
+        assert result.deletion_status.value in ("purged", "pending")
+        reloaded = session.get(Document, document.id)
+        assert reloaded is not None  # soft-deleted, row still exists
+        assert reloaded.deleted_at is not None
+
+        if result.deletion_status.value == "purged":
+            assert get_storage().exists(blob.storage_key) is False, (
+                "purge_source() genuinely deletes the physical blob once unreferenced -- "
+                "this bootstrap's storage_key immutability trigger does not and cannot prevent this"
+            )
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section3_account_erasure_hard_deletes_documents_entirely():
+    """Account erasure (app/account/erasure.py, pre-existing, out of this bootstrap's scope)
+    hard-deletes Document rows outright, after first purging the memory-source rows that would
+    otherwise FK-block it via `erase_owner_memory()`. A deliberate, founder-initiated total
+    account wipe -- not a "normal" incidental deletion path, and correctly so (a founder must
+    be able to erase their own account's data in full)."""
+    from app.account.erasure import erase_account_data
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-account-erasure@example.com")
+        document = _make_document(session, owner.id, storage_key=None)
+        _set_rls_user(session, owner.id)
+        document_id, owner_id = document.id, owner.id
+
+        erase_account_data(session, owner)
+        session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        assert verify_session.get(Document, document_id) is None, (
+            "account erasure is documented and expected to hard-delete Document rows entirely"
         )
     finally:
         verify_session.close()
