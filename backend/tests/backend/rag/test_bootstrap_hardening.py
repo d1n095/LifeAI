@@ -747,3 +747,114 @@ def test_section12_full_corpus_batch_lifecycle_never_touches_any_provider(monkey
     finally:
         session.rollback()
         session.close()
+
+
+# --- Section 19: end-to-end deterministic demo corpus with a crash mid-way ------------------
+
+
+def test_section19_deterministic_demo_corpus_survives_a_crash_and_reaches_exact_n_of_n():
+    """A synthetic demo corpus matching the founder's exact required scenario chain: normal
+    text, CSV, a duplicate, an unsupported file, a failed file, and a conversation's worth of
+    messages backfilled alongside it. A "crash" happens after SOME but not all sources are
+    recorded (the batch is deliberately left mid-flight, unclosed, exactly like a real process
+    dying mid-run would leave it); "restart" is simply resuming the recording calls with the
+    SAME batch row -- proving discovered == accounted-for only once genuinely true, never
+    fabricated, and that no source is silently dropped across the interruption."""
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.rag.backfill.message_source import backfill_message_source_units, count_messages_without_source_unit
+    from app.rag.corpus_batch import (
+        record_discovery_totals,
+        record_duplicate,
+        record_failed,
+        record_parsed,
+        record_unsupported,
+        try_mark_completed,
+    )
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section19-demo-corpus@example.com")
+        _set_rls_user(session, owner.id)
+
+        batch = create_batch(session, owner.id, label="Section 19 demo corpus")
+        # Discovered: notes.txt, data.csv, readme.md, duplicate-of-notes.txt, unsupported.xlsx,
+        # corrupt.pdf -- 6 files total.
+        record_discovery_totals(session, batch, files=6, conversations=1, messages=3)
+        session.commit()
+        batch_id, owner_id = batch.id, owner.id
+
+        # --- "process" the first half, then the process dies (crash simulated by simply
+        # stopping here -- the batch row is left exactly as committed, still `importing`) ---
+        record_stored_original(session, batch)  # notes.txt
+        record_parsed(session, batch)
+        record_stored_original(session, batch)  # data.csv
+        record_parsed(session, batch)
+        record_duplicate(session, batch)  # duplicate-of-notes.txt
+        record_parsed(session, batch)  # a duplicate still counts toward parsed_done -- its
+        # content is identical to an already-parsed original, but §P's reconciliation invariant
+        # (parsed_done + unsupported_count + semantic_pending_count == stored_originals_done)
+        # requires EVERY stored original, duplicate or not, to reach one of those three terminal
+        # states -- matches the established pattern in test_source_import_batches.py's
+        # test_record_duplicate_counts_toward_stored_and_duplicate_count.
+        session.commit()
+    finally:
+        session.close()
+
+    crash_check_session = SessionLocal()
+    try:
+        _set_rls_user(crash_check_session, owner_id)
+        from app.models.source_import_batch import SourceImportBatch, SourceImportBatchStatus
+
+        mid_crash_batch = crash_check_session.get(SourceImportBatch, batch_id)
+        assert mid_crash_batch.status == SourceImportBatchStatus.importing  # never fabricated as complete
+        assert mid_crash_batch.reconciles() is False
+        assert mid_crash_batch.stored_originals_done == 3  # notes.txt, data.csv, duplicate
+        assert mid_crash_batch.discovered_files == 6  # 3 files still genuinely unaccounted for
+    finally:
+        crash_check_session.close()
+
+    # --- "restart": a fresh session/process picks up the SAME batch and finishes the job ---
+    restart_session = SessionLocal()
+    try:
+        _set_rls_user(restart_session, owner_id)
+        from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure
+
+        resumed_batch = restart_session.get(SourceImportBatch, batch_id)
+        record_stored_original(restart_session, resumed_batch)  # readme.md
+        record_parsed(restart_session, resumed_batch)
+        record_stored_original(restart_session, resumed_batch)  # unsupported.xlsx (still stored)
+        record_unsupported(restart_session, resumed_batch)
+        record_failed(restart_session, resumed_batch, source_ref="corrupt.pdf", reason="parser raised: not a real PDF")
+        restart_session.commit()
+
+        # Message backfill runs alongside the file corpus, independently.
+        conversation = Conversation(user_id=owner_id, title="Section 19 conversation")
+        restart_session.add(conversation)
+        restart_session.commit()
+        for i in range(3):
+            restart_session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content=f"Meddelande {i}"))
+        restart_session.commit()
+        assert count_messages_without_source_unit(restart_session, owner_id) == 3
+        backfill_result = backfill_message_source_units(restart_session, owner_id)
+        assert backfill_result.created == 3
+        assert count_messages_without_source_unit(restart_session, owner_id) == 0
+
+        completed = try_mark_completed(restart_session, resumed_batch)
+        restart_session.commit()
+
+        assert completed is True, "the batch must reach exact reconciliation once every discovered file is genuinely accounted for"
+        assert resumed_batch.discovered_files == 6
+        assert resumed_batch.stored_originals_done == 5  # notes, csv, duplicate, readme, unsupported.xlsx
+        assert resumed_batch.failed_count == 1  # corrupt.pdf
+        assert resumed_batch.stored_originals_done + resumed_batch.failed_count == resumed_batch.discovered_files
+        assert resumed_batch.duplicate_count == 1
+        assert resumed_batch.unsupported_count == 1
+        assert resumed_batch.parsed_done == 4  # notes, csv, duplicate, readme
+        assert resumed_batch.parsed_done + resumed_batch.unsupported_count == resumed_batch.stored_originals_done
+
+        failures = restart_session.query(SourceImportBatchFailure).filter_by(batch_id=batch_id).all()
+        assert len(failures) == 1
+        assert failures[0].source_ref == "corrupt.pdf"
+    finally:
+        restart_session.rollback()
+        restart_session.close()
