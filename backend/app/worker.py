@@ -74,6 +74,7 @@ from app.providers.verification import ensure_verified
 from app.rag.library_import import run_import_job
 from app.request_context import current_user_id
 from app.rag.zip_import import ZipSecurityError
+from app.structured_import.service import STRUCTURED_EXPORT_IMPORT_JOB_TYPE, run_structured_export_import_job
 
 logger = logging.getLogger("mainai.worker")
 
@@ -188,6 +189,16 @@ async def process_claimed_mainai_job(
         elif job is not None and job.job_type == "task_execution":
             record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
             await run_task_execution_job(db, job_id, owner_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
+        elif job is not None and job.job_type == STRUCTURED_EXPORT_IMPORT_JOB_TYPE:
+            record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
+            await run_structured_export_import_job(
+                db,
+                job_id,
+                owner_id,
+                worker_id=worker_id,
+                lease_generation=lease_generation,
+                lease_seconds=lease_seconds,
+            )
         elif job is not None:
             logger.error("Worker %s: mainai_job %s has unknown job_type '%s'.", worker_id, job_id, job.job_type)
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)

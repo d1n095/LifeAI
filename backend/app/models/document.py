@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -138,6 +138,7 @@ class DeletionStatus(str, enum.Enum):
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (UniqueConstraint("id", "uploaded_by", name="uq_documents_id_uploaded_by"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)

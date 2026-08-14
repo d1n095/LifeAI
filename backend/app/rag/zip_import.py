@@ -29,6 +29,7 @@ file — a nested zip IS one entry from its parent's point of view.
 import hashlib
 import io
 import json
+import stat
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -173,6 +174,11 @@ def _normalize_member_name(name: str) -> str:
     return name.replace("\\", "/")
 
 
+def _is_symlink_entry(info: zipfile.ZipInfo) -> bool:
+    """True only when Unix mode bits explicitly classify the entry as a symlink."""
+    return stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF)
+
+
 def _magic_bytes_ok(suffix: str, content: bytes) -> bool:
     signatures = MAGIC_BYTES.get(suffix)
     if not signatures:
@@ -240,6 +246,7 @@ def _extract_recursive(
     violation, at any depth — identical semantics to the pre-P2, non-recursive version."""
     infolist = zf.infolist()
     real_entries = [i for i in infolist if not i.is_dir()]
+    seen_paths: set[str] = set()
 
     for info in real_entries:
         name = info.filename
@@ -252,6 +259,27 @@ def _extract_recursive(
         budget.total_files += 1
         if budget.total_files > max_files:
             raise ZipSecurityError(f"För många filer i paketet (minst {budget.total_files} st, max {max_files}).")
+
+        # Never follow or read link targets from an untrusted archive. zipfile itself does
+        # not extract here, but treating a link's payload as ordinary source content would
+        # create misleading provenance for any future streaming adapter that reuses this
+        # validator.
+        if _is_symlink_entry(info):
+            entries_out.append(
+                ZipEntryResult(filename=name, status="rejected", reason="Symboliska länkar i arkiv importeras aldrig.")
+            )
+            continue
+
+        # Duplicate central-directory names are ambiguous: zf.open(name) can select a
+        # different entry than a caller expects. Keep processing safe siblings, but reject
+        # every later collision deterministically instead of silently overwriting identity.
+        collision_key = normalized_name.casefold()
+        if collision_key in seen_paths:
+            entries_out.append(
+                ZipEntryResult(filename=name, status="rejected", reason="Sökvägen kolliderar med en tidigare arkivpost.")
+            )
+            continue
+        seen_paths.add(collision_key)
 
         # Per-file size cap — applies identically at every nesting level, including to a
         # nested archive's own declared size (it is one entry from its parent's perspective).

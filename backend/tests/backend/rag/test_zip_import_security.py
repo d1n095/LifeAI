@@ -4,6 +4,7 @@ validator; nothing is mocked. Each attack class gets its own test so a regressio
 defense doesn't get masked by another."""
 
 import io
+import stat
 import zipfile
 
 import pytest
@@ -30,6 +31,33 @@ def test_accepts_a_normal_small_package():
     assert len(result.ok_entries) == 3
     names = {e.filename for e in result.ok_entries}
     assert names == {"a.txt", "b.md", "sub/c.txt"}
+
+
+def test_symlink_entry_is_rejected_without_aborting_safe_siblings():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        link = zipfile.ZipInfo("link.txt")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(link, "target.txt")
+        zf.writestr("safe.txt", "safe")
+    result = validate_and_extract_zip(buf.getvalue())
+    assert [(entry.filename, entry.status) for entry in result.entries] == [
+        ("link.txt", "rejected"),
+        ("safe.txt", "ok"),
+    ]
+
+
+def test_case_colliding_archive_paths_are_rejected_deterministically():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("folder/Item.txt", "first")
+        zf.writestr("folder/item.txt", "second")
+    result = validate_and_extract_zip(buf.getvalue())
+    assert [(entry.filename, entry.status) for entry in result.entries] == [
+        ("folder/Item.txt", "ok"),
+        ("folder/item.txt", "rejected"),
+    ]
 
 
 def test_rejects_path_traversal_dotdot():

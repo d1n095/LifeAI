@@ -257,7 +257,9 @@ class CapabilityUnavailableError(Exception):
 # able to execute as a durable job. Adding a new job_type without adding it here is a bug,
 # not an oversight this module can auto-discover — see docs/MAINAI_JOB_RUNTIME.md's
 # "capability manifest" section for how a real new capability gets added.
-CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review", "message_sequence_backfill", "task_execution"})
+CAPABILITY_MANIFEST: frozenset[str] = frozenset(
+    {"corpus_review", "message_sequence_backfill", "structured_export_import", "task_execution"}
+)
 
 # Which provider ROLE (see app/providers/registry.py's resolve_active) each capability's
 # actual execution depends on being configured. corpus_review calls chat_with_fallback(), i.e.
@@ -282,6 +284,9 @@ CAPABILITY_MANIFEST: frozenset[str] = frozenset({"corpus_review", "message_seque
 _CAPABILITY_PROVIDER_ROLE: dict[str, str | None] = {
     "corpus_review": "chat",
     "message_sequence_backfill": None,
+    # Format-agnostic structured import is deterministic local parsing. The production
+    # adapter registry intentionally stays empty until a real export format is verified.
+    "structured_export_import": None,
     "task_execution": "chat",
 }
 
@@ -309,6 +314,12 @@ _CAPABILITY_WRITE_PROFILE: dict[str, dict] = {
     "message_sequence_backfill": {
         "modifies_existing_data": True,
         "writes_new_records": False,
+        "sandbox_only": False,
+        "production_prohibited": False,
+    },
+    "structured_export_import": {
+        "modifies_existing_data": False,
+        "writes_new_records": True,
         "sandbox_only": False,
         "production_prohibited": False,
     },

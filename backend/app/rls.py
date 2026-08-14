@@ -58,6 +58,12 @@ RLS_STATEMENTS = [
     "ALTER TABLE mainai_job_events FORCE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_job_proposals ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_job_proposals FORCE ROW LEVEL SECURITY",
+    # ChatGPT Import Foundation — generic adapter checkpoints/results only. The canonical
+    # source remains the owner-scoped Document referenced by each run.
+    "ALTER TABLE structured_import_runs ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE structured_import_runs FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE structured_import_items ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE structured_import_items FORCE ROW LEVEL SECURITY",
     # Message-level owner isolation (migration 0031) — the one owner-scoped table that had no
     # policy of its own until then, flagged during S1B (docs/BRANCH_REGISTRY.md Pass 42) and
     # deliberately fixed in its own change. Ownership is DERIVED from the conversation rather
@@ -193,6 +199,16 @@ POLICY_DEFINITIONS = [
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
+        "table": "structured_import_runs",
+        "name": "structured_import_runs_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "structured_import_items",
+        "name": "structured_import_items_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
         "table": "messages",
         "name": "messages_isolation",
         # The only DERIVED entry in this list — see MESSAGES_ISOLATION_EXPR above.
@@ -257,7 +273,13 @@ _MAINAI_JOB_PROPOSAL_TABLE_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT", "
 # All owner-scoped tables this policy manages, for the ownership check below — not just the
 # two that get privilege lockdown, since a table silently getting re-owned by anything other
 # than the real migration/admin role is itself a drift signal worth catching.
-_MAINAI_JOB_TABLES = ("mainai_jobs", "mainai_job_events", "mainai_job_proposals")
+_MAINAI_JOB_TABLES = (
+    "mainai_jobs",
+    "mainai_job_events",
+    "mainai_job_proposals",
+    "structured_import_runs",
+    "structured_import_items",
+)
 
 # One row per SECURITY DEFINER / trigger function this policy owns. mainai_app_execute=False
 # for the two trigger functions is deliberate: firing a trigger never requires the

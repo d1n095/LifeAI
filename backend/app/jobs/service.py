@@ -176,6 +176,35 @@ def _validate_task_execution_input_refs(db: Session, owner_id: uuid.UUID, input_
         raise InvalidInputRefsError(f"MainAITask {task_id} has status '{task.status.value}', not '{expected.value}' — not a valid dispatch target.")
 
 
+def _validate_structured_export_input_refs(db: Session, owner_id: uuid.UUID, input_refs: list[dict]) -> None:
+    """Exactly one canonical stored Document and one opaque adapter key.
+
+    The key names a registered contract implementation; it carries no guessed export schema.
+    """
+    if len(input_refs) != 2:
+        raise InvalidInputRefsError("structured_export_import requires one document and one adapter reference.")
+    document_refs = [ref for ref in input_refs if isinstance(ref, dict) and ref.get("type") == "document"]
+    adapter_refs = [ref for ref in input_refs if isinstance(ref, dict) and ref.get("type") == "structured_export_adapter"]
+    if len(document_refs) != 1 or len(adapter_refs) != 1:
+        raise InvalidInputRefsError("structured_export_import requires one document and one structured_export_adapter.")
+    try:
+        document_id = uuid.UUID(str(document_refs[0].get("id")))
+    except ValueError as exc:
+        raise InvalidInputRefsError("structured export document id is invalid.") from exc
+    adapter_key = adapter_refs[0].get("id")
+    if not isinstance(adapter_key, str) or not adapter_key or len(adapter_key) > 128:
+        raise InvalidInputRefsError("structured export adapter key must contain 1..128 characters.")
+    document = db.execute(
+        select(Document).where(
+            Document.id == document_id,
+            Document.uploaded_by == owner_id,
+            Document.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
+    if document is None or not document.storage_key or not document.checksum:
+        raise InvalidInputRefsError("structured export source must be an owned, live, durably stored document.")
+
+
 def create_job(
     db: Session,
     *,
@@ -268,6 +297,8 @@ def create_job(
         # execution unit for exactly one task, and never fewer, since a task_execution job
         # with no task to execute has nothing to do.
         _validate_task_execution_input_refs(db, owner_id, input_refs, expect_claimed=job_id is not None)
+    elif job_type == "structured_export_import":
+        _validate_structured_export_input_refs(db, owner_id, input_refs)
 
     savepoint = db.begin_nested()
     try:
