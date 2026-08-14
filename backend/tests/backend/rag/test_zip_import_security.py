@@ -127,8 +127,8 @@ def test_ignores_executable_files_regardless_of_content():
 
 
 def test_skips_unsupported_file_types():
-    # data.xlsx, not data.csv -- Life Source Foundation Bootstrap (docs/LIFE_SOURCE_FOUNDATION_
-    # BOOTSTRAP.md §F) added .csv to ALLOWED_EXTENSIONS (extract.py's existing UTF-8 fallback
+    # data.xlsx, not data.csv -- PR #60's provisional Source Foundation proposal §F led this
+    # bootstrap to add .csv to ALLOWED_EXTENSIONS (extract.py's existing UTF-8 fallback
     # already handled it correctly; no new parser needed). XLSX is deliberately NOT added (a
     # binary format needing a new dependency, a supply-chain decision this bootstrap pass does
     # not make unilaterally) -- so it's still a genuinely unsupported type, unlike CSV now is.

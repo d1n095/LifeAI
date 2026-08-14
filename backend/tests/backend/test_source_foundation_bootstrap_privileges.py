@@ -1,5 +1,5 @@
 """Privilege/immutability coverage for the Life Source Foundation Bootstrap (migration 0037,
-docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D/§L) — two separate mechanisms:
+PR #60 provisional proposal §D/§L) — two separate mechanisms:
 
 1. Table-level narrowing (`_PROTECTED_TABLES` in backend/scripts/security/s1a_privilege_policy.py)
    for the three new S1C/corpus-manifest tables — same mechanism
@@ -29,6 +29,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
+from app.rag.corpus_batch import create_batch
 from app.models.user import User, UserRole
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
@@ -212,6 +213,26 @@ def test_setting_storage_key_to_the_same_value_is_a_harmless_no_op():
         session.commit()
         session.refresh(document)
         assert document.storage_key == "originals/stable-key"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_source_import_batch_link_is_write_once_after_assignment():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "batch-link-write-once@example.com")
+        _set_rls_user(session, owner.id)
+        first = create_batch(session, owner.id, label="First batch")
+        second = create_batch(session, owner.id, label="Second batch")
+        document = _make_document(session, owner.id, storage_key=None, file_path=None)
+        _set_rls_user(session, owner.id)
+
+        document.source_import_batch_id = first.id
+        session.commit()
+        document.source_import_batch_id = second.id
+        with pytest.raises((IntegrityError, DBAPIError), match="source_import_batch_id is immutable"):
+            session.commit()
     finally:
         session.rollback()
         session.close()

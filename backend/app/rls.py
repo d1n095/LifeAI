@@ -67,9 +67,9 @@ RLS_STATEMENTS = [
     # every owner-scoped table, matching the rest of this list.
     "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
-    # Life Source Foundation Bootstrap (migration 0037) — see docs/
-    # LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md. source_import_batches/source_import_batch_failures
-    # are ordinary owner-scoped tracking tables; message_source_units is S1C (docs/
+    # Life Source Foundation Bootstrap (migration 0037; PR #60 provisional proposal).
+    # source_import_batches/source_import_batch_failures are ordinary owner-scoped tracking
+    # tables; message_source_units is the message-source slice of S1C (docs/
     # MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8/§8), the same exclusive-arc pattern as
     # document_source_units, extended to Message. Also enabled directly in the migration
     # itself; listed here too so this idempotent reapply path stays the single source of

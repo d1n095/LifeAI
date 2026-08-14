@@ -1,4 +1,4 @@
-"""S1C historical backfill (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md,
+"""S1C message-source historical backfill (PR #60 provisional proposal,
 docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8/§8): creates a `message_source_units` row for
 every existing `messages` row that doesn't have one yet.
 
@@ -17,6 +17,7 @@ No AI, no provider, no network — pure SQL + the deterministic find-or-create p
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -56,7 +57,14 @@ def candidate_message_ids(db: Session, owner_id: uuid.UUID, limit: int) -> list[
     return [row[0] for row in db.execute(stmt).all()]
 
 
-def backfill_message_source_units(db: Session, owner_id: uuid.UUID, *, max_batches: int = 200, batch_size: int = 200) -> MessageSourceBackfillResult:
+def backfill_message_source_units(
+    db: Session,
+    owner_id: uuid.UUID,
+    *,
+    max_batches: int = 200,
+    batch_size: int = 200,
+    before_batch_commit: Callable[[], None] | None = None,
+) -> MessageSourceBackfillResult:
     """Runs up to `max_batches` batches of `batch_size` messages each, committing after every
     batch (same discipline as app/rag/backfill/memory_source.py's own batched backfill) — a
     crash or lease loss between batches loses only the in-flight batch, not the whole run.
@@ -90,5 +98,12 @@ def backfill_message_source_units(db: Session, owner_id: uuid.UUID, *, max_batch
             )
             result.created += 1
             result.processed += 1
+        # A durable-job caller supplies a lease-fencing write here. It runs in the SAME
+        # transaction as the source-unit inserts, immediately before commit: if ownership was
+        # reclaimed while this batch was running, the failed fence rolls the whole batch back
+        # instead of allowing a stale worker's domain writes to escape before its next progress
+        # update. Pure/manual backfills intentionally need no job lease and omit the callback.
+        if before_batch_commit is not None:
+            before_batch_commit()
         db.commit()
     return result

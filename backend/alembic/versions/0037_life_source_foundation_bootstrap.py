@@ -1,6 +1,6 @@
-"""Life Source Foundation Bootstrap — corpus manifest, S1C (messages as memory sources).
+"""Life Source Foundation Bootstrap — corpus manifest, S1C message-source slice.
 
-Per docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md (founder mandate, 2026-08-11), built as the
+Per PR #60's provisional Source Foundation proposal (founder mandate, 2026-08-11), built as the
 narrowly-scoped, AI-independent intake foundation needed before the founder's full external
 corpus can be imported and a final Canonical Life Architecture Recovery attempted. This
 migration does NOT touch ChatGPT-specific structure (chatgpt_export_imports is deliberately
@@ -12,7 +12,7 @@ Two independent pieces:
 1. **source_import_batches / source_import_batch_failures** — a new, ordinary, owner-scoped
    tracking pair (no immutability machinery needed; this is operational progress data, not
    evidence) that answers "prove the whole corpus was processed" per the bootstrap doc's §E/§P.
-2. **S1C — message_source_units** — already fully designed in
+2. **S1C message-source slice — message_source_units** — already designed in
    docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8/§8 before this mandate existed ("S1C: kräver
    S1B, egen PR" — S1B/its RLS step are already merged, migrations 0030/0031). This migration
    builds exactly what was already approved in principle: `Message` becomes a second
@@ -68,6 +68,8 @@ def upgrade() -> None:
 
             duplicate_count integer NOT NULL DEFAULT 0,
             failed_count integer NOT NULL DEFAULT 0,
+            storage_failed_count integer NOT NULL DEFAULT 0,
+            parse_failed_count integer NOT NULL DEFAULT 0,
             unsupported_count integer NOT NULL DEFAULT 0,
             semantic_pending_count integer NOT NULL DEFAULT 0,
 
@@ -82,6 +84,7 @@ def upgrade() -> None:
                 AND stored_originals_done >= 0 AND stored_originals_total >= 0
                 AND parsed_done >= 0 AND parsed_total >= 0
                 AND duplicate_count >= 0 AND failed_count >= 0
+                AND storage_failed_count >= 0 AND parse_failed_count >= 0
                 AND unsupported_count >= 0 AND semantic_pending_count >= 0
             ),
             -- The bootstrap doc's §P completeness proof, enforced structurally rather than
@@ -91,11 +94,16 @@ def upgrade() -> None:
             CONSTRAINT ck_sib_completed_reconciles CHECK (
                 status <> 'completed'
                 OR (
-                    discovered_files = stored_originals_done + failed_count
-                    AND parsed_done + unsupported_count + semantic_pending_count = stored_originals_done
+                    stored_originals_total = discovered_files
+                    AND parsed_total = stored_originals_done
+                    AND failed_count = storage_failed_count + parse_failed_count
+                    AND discovered_files = stored_originals_done + storage_failed_count
+                    AND parsed_done + unsupported_count + semantic_pending_count + parse_failed_count = stored_originals_done
                 )
             )
         );
+        ALTER TABLE source_import_batches
+            ADD CONSTRAINT uq_sib_id_owner UNIQUE (id, owner_id);
         CREATE INDEX ix_sib_owner ON source_import_batches (owner_id);
     """)
 
@@ -103,11 +111,14 @@ def upgrade() -> None:
         CREATE TABLE source_import_batch_failures (
             id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
             owner_id uuid NOT NULL REFERENCES users(id),
-            batch_id uuid NOT NULL REFERENCES source_import_batches(id),
+            batch_id uuid NOT NULL,
             source_ref text NOT NULL,
             reason text NOT NULL,
             retryable boolean NOT NULL DEFAULT false,
-            created_at timestamptz NOT NULL DEFAULT now()
+            failure_stage varchar(16) NOT NULL,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            CONSTRAINT ck_sibf_failure_stage CHECK (failure_stage IN ('storage', 'parse')),
+            FOREIGN KEY (batch_id, owner_id) REFERENCES source_import_batches(id, owner_id)
         );
         CREATE INDEX ix_sibf_batch ON source_import_batch_failures (batch_id);
     """)
@@ -129,12 +140,18 @@ def upgrade() -> None:
     # --- documents.source_import_batch_id -------------------------------------------------
     op.execute("""
         ALTER TABLE documents
-            ADD COLUMN source_import_batch_id uuid REFERENCES source_import_batches(id);
+            ADD COLUMN source_import_batch_id uuid;
+        ALTER TABLE documents
+            ADD CONSTRAINT ck_documents_batch_has_owner
+                CHECK (source_import_batch_id IS NULL OR uploaded_by IS NOT NULL),
+            ADD CONSTRAINT fk_documents_batch_owner
+                FOREIGN KEY (source_import_batch_id, uploaded_by)
+                REFERENCES source_import_batches(id, owner_id);
         CREATE INDEX ix_documents_source_import_batch ON documents (source_import_batch_id);
     """)
 
     # --- documents.storage_key / file_path: write-once immutability (P0 Source Vault invariant,
-    # docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §D) -------------------------------------------
+    # PR #60 provisional proposal §D) --------------------------------------------------------
     # A BEFORE UPDATE trigger, not privilege narrowing -- app/rag/library_import.py legitimately
     # creates a Document row FIRST (storage_key still NULL; the content-addressed key can't be
     # known before the blob is hashed and durably written) and only later, once the blob write
@@ -159,6 +176,10 @@ def upgrade() -> None:
             IF OLD.file_path IS NOT NULL AND NEW.file_path IS DISTINCT FROM OLD.file_path THEN
                 RAISE EXCEPTION 'documents.file_path is immutable once set (id=%)', OLD.id;
             END IF;
+            IF OLD.source_import_batch_id IS NOT NULL
+               AND NEW.source_import_batch_id IS DISTINCT FROM OLD.source_import_batch_id THEN
+                RAISE EXCEPTION 'documents.source_import_batch_id is immutable once set (id=%)', OLD.id;
+            END IF;
             RETURN NEW;
         END;
         $$;
@@ -168,7 +189,7 @@ def upgrade() -> None:
             FOR EACH ROW EXECUTE FUNCTION trg_documents_guard_storage_immutable();
     """)
 
-    # --- S1C: message_source_units ---------------------------------------------------------
+    # --- S1C message-source slice: message_source_units ------------------------------------
     # Extend the parent CHECK additively -- a constraint replace, not a rewrite. Every existing
     # row's source_kind is one of the three original values and remains valid.
     op.execute("""
@@ -366,8 +387,8 @@ def upgrade() -> None:
     # source_import_batches/source_import_batch_failures/message_source_units is applied and
     # verified at every boot by backend/scripts/security/s1a_privilege_policy.py via
     # ensure_app_role.py/apply_runtime_privileges.py, exactly like every other S1A-pattern
-    # table. documents.storage_key/file_path immutability (docs/LIFE_SOURCE_FOUNDATION_
-    # BOOTSTRAP.md §D) is enforced above by trg_documents_storage_immutable instead -- a
+    # table. documents.storage_key/file_path immutability (PR #60 provisional proposal §D)
+    # is enforced above by trg_documents_storage_immutable instead -- a
     # trigger, not a privilege grant, since the invariant is value-conditional (see that
     # trigger's own comment for why).
 

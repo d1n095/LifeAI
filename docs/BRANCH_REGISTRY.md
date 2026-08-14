@@ -22,12 +22,13 @@ den här branchen** — rent designarbete.
 
 **PR #61 — `claude/life-source-foundation-bootstrap` → `claude/det-kommer-mer-879lcm` — ÖPPEN,
 DRAFT, redo för granskning.** Den faktiska kodimplementationen av
-`docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`s förslag (PR #60:s implementationsdesign) — grenad
+PR #60:s provisoriska `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`-förslag — filen finns
+medvetet bara på den frysta designgrenen och är därför inte en lokal länk i PR #61 — grenad
 direkt från mainline (`27f0d1e...`, PR #59:s mergecommit), INTE från PR #60:s designbranch, per
-grundarens uttryckliga instruktion att koda och design ska hållas isär. Bygger allt som INTE
-kräver ett riktigt ChatGPT-exportexempel: migration 0037
+grundarens uttryckliga instruktion att koda och design ska hållas isär. Bygger den avgränsade
+schema-/meddelandekällgrunden som INTE kräver ett riktigt ChatGPT-exportexempel: migration 0037
 (`source_import_batches`/`source_import_batch_failures` — korpusmanifest med en DB-tvingad
-N/N-fullständighets-CHECK; `message_source_units` — S1C, meddelanden som en andra
+N/N-fullständighets-CHECK; `message_source_units` — meddelandekäll-delen av S1C, meddelanden som en andra
 `memory_source_units`-subtyp, samma exclusive-arc-mönster som `document_source_units`;
 `documents.source_import_batch_id`), race-säker find-or-create + resumable backfill för
 meddelanden (`app/rag/message_source.py`/`app/rag/backfill/message_source.py`, speglar
@@ -35,6 +36,12 @@ meddelanden (`app/rag/message_source.py`/`app/rag/backfill/message_source.py`, s
 korpusbatchar (`app/rag/corpus_batch.py`), en durabel `message_source_backfill`-jobbtyp på
 befintlig `mainai_jobs`-runtime, CSV tillagt i `zip_import.py` (ingen ny parser behövs — XLSX
 medvetet UTESLUTET, kräver ett nytt beroende, inget ensidigt beslut).
+
+**S1C-scopeförtydligande:** denna PR bygger endast `message_source_units` och dess backfill.
+Den äldre planen använder "S1C" för ett större paket som även innehåller
+`knowledge_claim_evidence`; den tabellen har fortfarande ingen aktiv writer och ingår inte i
+den här deterministiska bootstrapen. Implementationens kommentarer säger därför
+"S1C message-source slice" i stället för att påstå att hela S1C är levererad.
 
 **Ett verkligt designfel hittat och korrigerat UNDER bygget** (inte antaget korrekt från
 designläsningen): det ursprungliga försöket att göra `documents.storage_key`/`file_path`

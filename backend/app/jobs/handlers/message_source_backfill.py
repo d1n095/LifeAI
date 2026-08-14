@@ -1,6 +1,6 @@
 """A MainAI job type on the Durable Job Foundation (migration 0026, app/models/mainai_job.py):
 `message_source_backfill` — S1C's historical find-or-create pass (docs/
-LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md), run as a real, persisted, resumable, cancellable job.
+PR #60's provisional Source Foundation proposal), run as a real, persisted, resumable, cancellable job.
 Modeled directly on message_sequence_backfill.py (the S1B job this reuses the exact runtime
 pattern from) — see that module's docstring for why this must be a job, not an endpoint or a
 migration, and why reusing `mainai_jobs`' lease/fencing/heartbeat/cancellation/retry/audit
@@ -27,7 +27,7 @@ MESSAGE_SOURCE_BACKFILL_JOB_TYPE = "message_source_backfill"
 
 # Same reasoning as message_sequence_backfill.py's own cap: bounds how long a single claimed
 # job can hold its lease. Expressed in messages (not batches) here since that's the unit the
-# founder's own completeness language (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §P) counts in.
+# founder's own completeness language (PR #60 provisional proposal §P) counts in.
 MAX_MESSAGES_PER_RUN = 20_000
 _BATCH_SIZE = 200
 
@@ -89,7 +89,15 @@ async def run_message_source_backfill_job(
 
         batch_cap = min(_BATCH_SIZE, MAX_MESSAGES_PER_RUN - processed)
         try:
-            result = backfill_message_source_units(db, owner_id, max_batches=1, batch_size=batch_cap)
+            result = backfill_message_source_units(
+                db,
+                owner_id,
+                max_batches=1,
+                batch_size=batch_cap,
+                before_batch_commit=lambda: renew_mainai_job_lease(
+                    db, job_id, worker_id, lease_generation, lease_seconds
+                ),
+            )
         except JobLeaseLostError:
             db.rollback()
             _lease_lost("backfill batch")

@@ -81,7 +81,12 @@ from app.models.provider_config import ProviderConfig
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
-from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure, SourceImportBatchStatus
+from app.models.source_import_batch import (
+    SourceImportBatch,
+    SourceImportBatchFailure,
+    SourceImportBatchStatus,
+    SourceImportFailureStage,
+)
 from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
@@ -177,6 +182,7 @@ __all__ = [
     "SourceImportBatch",
     "SourceImportBatchFailure",
     "SourceImportBatchStatus",
+    "SourceImportFailureStage",
     "SourceRelationship",
     "StorageDeletionReason",
     "StorageDeletionStatus",

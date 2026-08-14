@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import CheckConstraint, DateTime, Enum, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -138,6 +138,17 @@ class DeletionStatus(str, enum.Enum):
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (
+        CheckConstraint(
+            "source_import_batch_id IS NULL OR uploaded_by IS NOT NULL",
+            name="ck_documents_batch_has_owner",
+        ),
+        ForeignKeyConstraint(
+            ["source_import_batch_id", "uploaded_by"],
+            ["source_import_batches.id", "source_import_batches.owner_id"],
+            name="fk_documents_batch_owner",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
@@ -202,11 +213,12 @@ class Document(Base):
     stored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deletion_status: Mapped[DeletionStatus] = mapped_column(Enum(DeletionStatus), default=DeletionStatus.none)
 
-    # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+    # Life Source Foundation Bootstrap (migration 0037, PR #60 provisional proposal
     # §E) — which corpus-import batch this document arrived through, if any. NULL for every
     # document uploaded outside a tracked batch (the ordinary Library upload path, unaffected).
-    # Only ever set once, at creation, alongside storage_key/file_path — see that column's own
-    # comment for why mainai_app cannot UPDATE either of them afterward.
+    # May be assigned after row creation by a two-phase intake path, but migration 0037's
+    # write-once trigger rejects changing or clearing it once assigned. A composite FK binds
+    # the batch owner to uploaded_by so provenance cannot cross an owner boundary.
     source_import_batch_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("source_import_batches.id"), nullable=True, index=True
+        UUID(as_uuid=True), nullable=True, index=True
     )

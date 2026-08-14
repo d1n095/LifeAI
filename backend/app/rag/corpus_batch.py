@@ -1,4 +1,4 @@
-"""Corpus manifest domain service (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §E/§P) —
+"""Corpus manifest domain service (PR #60 provisional proposal §E/§P) —
 create/track/reconcile a `source_import_batches` row. No AI, no provider, no network: this is
 pure bookkeeping over counters, the same "deterministic first" discipline as
 app/rag/zip_import.py's own safety checks.
@@ -16,7 +16,16 @@ import uuid
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
-from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure, SourceImportBatchStatus
+from app.models.source_import_batch import (
+    SourceImportBatch,
+    SourceImportBatchFailure,
+    SourceImportBatchStatus,
+    SourceImportFailureStage,
+)
+
+
+class InvalidCorpusBatchTransition(RuntimeError):
+    pass
 
 
 def create_batch(db: Session, owner_id: uuid.UUID, *, label: str, source_description: str | None = None) -> SourceImportBatch:
@@ -26,7 +35,14 @@ def create_batch(db: Session, owner_id: uuid.UUID, *, label: str, source_descrip
     return batch
 
 
-def _atomic_increment(db: Session, batch: SourceImportBatch, *, also_set: dict | None = None, **deltas: int) -> None:
+def _atomic_increment(
+    db: Session,
+    batch: SourceImportBatch,
+    *,
+    also_set: dict | None = None,
+    required_status: SourceImportBatchStatus | None = None,
+    **deltas: int,
+) -> None:
     """SQL-level `col = col + :delta` against the row directly, NOT a Python read-modify-write
     on the ORM-loaded object. Hardening pass, Section 6 (founder mandate, PR #61 pre-merge):
     every `record_*` function below used to do `batch.x += 1`, which SQLAlchemy flushes as
@@ -58,10 +74,18 @@ def _atomic_increment(db: Session, batch: SourceImportBatch, *, also_set: dict |
         params[col] = value
     set_clause = ", ".join(set_parts)
     params["id"] = str(batch.id)
-    db.execute(
-        sa_text(f"UPDATE source_import_batches SET {set_clause} WHERE id = :id"),  # noqa: S608 -- col names are this function's own fixed kwarg/also_set keys, never caller-supplied strings
+    where = "id = :id"
+    if required_status is not None:
+        where += " AND status = :required_status"
+        params["required_status"] = required_status.value
+    result = db.execute(
+        sa_text(f"UPDATE source_import_batches SET {set_clause} WHERE {where}"),  # noqa: S608 -- identifiers are fixed by this module
         params,
     )
+    if result.rowcount != 1:
+        raise InvalidCorpusBatchTransition(
+            f"batch {batch.id} is not in required status {required_status.value!r}"
+        )
     db.expire(batch)
 
 
@@ -86,6 +110,7 @@ def record_discovery_totals(
         db,
         batch,
         also_set={"status": SourceImportBatchStatus.importing.value},
+        required_status=SourceImportBatchStatus.discovering,
         discovered_files=files,
         discovered_archives=archives,
         discovered_conversations=conversations,
@@ -114,19 +139,35 @@ def record_duplicate(db: Session, batch: SourceImportBatch) -> None:
 
 
 def record_unsupported(db: Session, batch: SourceImportBatch) -> None:
-    """A file with no matching parser (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §F/§J) -- still
+    """A file with no matching parser (PR #60 provisional proposal §F/§J) -- still
     stored (record_stored_original is called separately), just never parsed. Counts toward
-    `unsupported_count`, one of the three buckets `parsed_done` must reconcile against."""
+    `unsupported_count`, one of the terminal buckets stored originals reconcile against."""
     _atomic_increment(db, batch, unsupported_count=1)
 
 
-def record_failed(db: Session, batch: SourceImportBatch, *, source_ref: str, reason: str, retryable: bool = False) -> None:
-    """A source that could not even be stored (hash/write failure) or could not be parsed
-    despite having a matching parser (corrupt content). Both cases increment `failed_count` --
-    the distinction between "never stored" and "stored but unparseable" is exactly what
-    `source_import_batch_failures.reason` records in free text for a human to read, not a
-    separate counter axis; §P's reconciliation check only needs the aggregate."""
-    _atomic_increment(db, batch, failed_count=1)
+def record_failed(
+    db: Session,
+    batch: SourceImportBatch,
+    *,
+    source_ref: str,
+    reason: str,
+    stage: SourceImportFailureStage,
+    retryable: bool = False,
+) -> None:
+    """Records an explicitly classified failure.
+
+    Storage failures account for a discovered source that never became a stored original.
+    Parse failures account for an already-stored original that reached a terminal parser
+    failure. Keeping those axes separate prevents one file from being double-counted in the
+    two completion equations.
+    """
+    if stage is SourceImportFailureStage.storage:
+        # Discovery initially expects every file to reach parsing. Once a source definitively
+        # fails before storage, it cannot be a parse candidate; reduce that denominator in the
+        # same atomic statement that records the terminal storage failure.
+        _atomic_increment(db, batch, failed_count=1, storage_failed_count=1, parsed_total=-1)
+    else:
+        _atomic_increment(db, batch, failed_count=1, parse_failed_count=1)
     db.add(
         SourceImportBatchFailure(
             owner_id=batch.owner_id,
@@ -134,6 +175,7 @@ def record_failed(db: Session, batch: SourceImportBatch, *, source_ref: str, rea
             source_ref=source_ref,
             reason=reason,
             retryable=retryable,
+            failure_stage=stage,
         )
     )
 

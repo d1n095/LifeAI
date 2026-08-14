@@ -1,4 +1,4 @@
-"""S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037) — schema/trigger/RLS/
+"""S1C message-source slice (PR #60 provisional proposal, migration 0037) — schema/trigger/RLS/
 find-or-create/backfill coverage for `message_source_units`. Real local Postgres, mirroring
 tests/backend/rag/test_memory_source_units.py's and test_memory_source_backfill.py's pattern
 (RLS is exercised for real, not mocked) for the document-chunk subtype.
@@ -656,6 +656,37 @@ def test_backfill_never_calls_any_provider(monkeypatch):
 
         result = backfill_message_source_units(session, owner.id)
         assert result.created == 1
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_backfill_fence_failure_rolls_back_the_in_flight_batch():
+    """The job fence runs after inserts but before their commit. A lease loss at that exact
+    point must leave no source rows behind; checking only before a batch would leave a stale
+    worker window during the batch itself."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "backfill-mid-batch-fence@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Fence")
+        session.add(conversation)
+        session.commit()
+        session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="Uncommitted"))
+        session.commit()
+
+        def _lose_lease_before_commit():
+            raise RuntimeError("simulated lease reclaim")
+
+        with pytest.raises(RuntimeError, match="simulated lease reclaim"):
+            backfill_message_source_units(
+                session,
+                owner.id,
+                max_batches=1,
+                before_batch_commit=_lose_lease_before_commit,
+            )
+        session.rollback()
+        assert count_messages_without_source_unit(session, owner.id) == 1
     finally:
         session.rollback()
         session.close()

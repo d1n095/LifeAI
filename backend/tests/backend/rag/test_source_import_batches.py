@@ -1,25 +1,30 @@
-"""Corpus manifest (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §E/§P, migration 0037) —
+"""Corpus manifest (PR #60 provisional proposal §E/§P, migration 0037) —
 `source_import_batches` / `source_import_batch_failures` / app/rag/corpus_batch.py. Real local
 Postgres, RLS exercised for real.
 
-This is the direct test of the founder's exact required proof: a corpus batch's own counters
-(not a self-reported claim) must show discovered_files == stored + failed, and
-parsed + unsupported + pending == stored, before the database will even allow status=completed
--- "exact N/N completeness bevisas". Also covers duplicate counting, parser-failure visibility,
-unsupported-file bookkeeping, and owner isolation.
+This directly tests the batch ledger's internal reconciliation: its counters must show
+discovered_files == stored + storage-failed, and parsed + unsupported + pending + parse-failed
+== stored, before the database will allow status=completed. Referenced-record-backed
+completeness requires a future real ingestion path; this PR does not claim that stronger proof.
+Also covers duplicate counting, parser-failure visibility, unsupported-file bookkeeping, and
+owner isolation.
 """
-
-import uuid
 
 import pytest
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 
-from app.db import SessionLocal
-from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure, SourceImportBatchStatus
+from app.db import SessionLocal, migration_engine
+from app.models.source_import_batch import (
+    SourceImportBatch,
+    SourceImportBatchFailure,
+    SourceImportBatchStatus,
+    SourceImportFailureStage,
+)
 from app.models.user import User, UserRole
 from app.rag.corpus_batch import (
     create_batch,
+    InvalidCorpusBatchTransition,
     mark_partial_or_failed,
     record_discovery_totals,
     record_duplicate,
@@ -86,6 +91,20 @@ def test_record_discovery_totals_sets_denominators_and_moves_to_importing():
         assert batch.parsed_total == 10
     finally:
         session.rollback()
+        session.close()
+
+
+def test_discovery_denominators_can_only_be_recorded_once():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "discovery-once@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Discovery once")
+        record_discovery_totals(session, batch, files=2)
+        with pytest.raises(InvalidCorpusBatchTransition):
+            record_discovery_totals(session, batch, files=100)
+        session.rollback()
+    finally:
         session.close()
 
 
@@ -166,6 +185,29 @@ def test_db_check_constraint_rejects_completed_status_when_counters_dont_reconci
         session.close()
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("stored_originals_total", 999), ("parsed_total", 999)],
+)
+def test_db_completion_rejects_false_denominators(column, value):
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, f"bad-total-{column}@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Bad denominator")
+        record_discovery_totals(session, batch, files=1)
+        record_stored_original(session, batch)
+        record_parsed(session, batch)
+        with pytest.raises(IntegrityError, match="ck_sib_completed_reconciles"):
+            session.execute(
+                sa_text(f"UPDATE source_import_batches SET {column} = :value, status = 'completed' WHERE id = :id"),
+                {"value": value, "id": str(batch.id)},
+            )
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_failed_files_count_toward_completeness_not_just_stored():
     """A file that could not even be stored still counts toward "accounted for" -- completeness
     means discovered_files == stored + failed, not stored == discovered."""
@@ -178,12 +220,19 @@ def test_failed_files_count_toward_completeness_not_just_stored():
         record_discovery_totals(session, batch, files=4)
         for _ in range(3):
             record_stored_original(session, batch)
-        record_failed(session, batch, source_ref="corrupt-file.pdf", reason="write failed: disk full")
+        record_failed(
+            session,
+            batch,
+            source_ref="corrupt-file.pdf",
+            reason="write failed: disk full",
+            stage=SourceImportFailureStage.storage,
+        )
         for _ in range(3):
             record_parsed(session, batch)
         session.commit()
 
         assert batch.reconciles()
+        assert batch.parsed_total == 3
         completed = try_mark_completed(session, batch)
         session.commit()
         assert completed is True
@@ -229,7 +278,15 @@ def test_record_failed_creates_visible_failure_row_with_reason():
 
         batch = create_batch(session, owner.id, label="Parser failures visible")
         record_discovery_totals(session, batch, files=1)
-        record_failed(session, batch, source_ref="broken.docx", reason="parser raised: bad zip central directory", retryable=False)
+        record_stored_original(session, batch)
+        record_failed(
+            session,
+            batch,
+            source_ref="broken.docx",
+            reason="parser raised: bad zip central directory",
+            stage=SourceImportFailureStage.parse,
+            retryable=False,
+        )
         session.commit()
 
         assert batch.failed_count == 1
@@ -238,6 +295,9 @@ def test_record_failed_creates_visible_failure_row_with_reason():
         assert failures[0].source_ref == "broken.docx"
         assert "bad zip central directory" in failures[0].reason
         assert failures[0].retryable is False
+        assert failures[0].failure_stage == SourceImportFailureStage.parse
+        assert batch.storage_failed_count == 0
+        assert batch.parse_failed_count == 1
         assert failures[0].owner_id == owner.id
     finally:
         session.rollback()
@@ -374,7 +434,14 @@ def test_rls_owner_isolation_on_source_import_batch_failures():
         owner_b = _make_user(session, "failure-rls-b@example.com")
         _set_rls_user(session, owner_a.id)
         batch = create_batch(session, owner_a.id, label="Owner A's corpus")
-        record_failed(session, batch, source_ref="a.pdf", reason="boom")
+        record_discovery_totals(session, batch, files=1)
+        record_failed(
+            session,
+            batch,
+            source_ref="a.pdf",
+            reason="boom",
+            stage=SourceImportFailureStage.storage,
+        )
         session.commit()
 
         _set_rls_user(session, owner_b.id)
@@ -392,3 +459,48 @@ def test_policy_registry_new_tables_present():
     assert "source_import_batches" in policy_tables
     assert "source_import_batch_failures" in policy_tables
     assert "message_source_units" in policy_tables
+
+
+def test_failure_cannot_reference_another_owners_batch_even_as_admin():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "batch-owner-a@example.com")
+        owner_b = _make_user(session, "batch-owner-b@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A")
+        session.commit()
+        with migration_engine.begin() as conn:
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    sa_text("""
+                        INSERT INTO source_import_batch_failures
+                            (owner_id, batch_id, source_ref, reason, retryable, failure_stage)
+                        VALUES (:owner_id, :batch_id, 'x', 'wrong owner', false, 'storage')
+                    """),
+                    {"owner_id": str(owner_b.id), "batch_id": str(batch.id)},
+                )
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_document_cannot_reference_another_owners_batch_even_as_admin():
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "document-owner-a@example.com")
+        owner_b = _make_user(session, "document-owner-b@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A")
+        session.commit()
+        with migration_engine.begin() as conn:
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    sa_text("""
+                        INSERT INTO documents (id, uploaded_by, title, source, source_import_batch_id)
+                        VALUES (gen_random_uuid(), :owner_id, 'wrong batch', 'upload', :batch_id)
+                    """),
+                    {"owner_id": str(owner_b.id), "batch_id": str(batch.id)},
+                )
+    finally:
+        session.rollback()
+        session.close()

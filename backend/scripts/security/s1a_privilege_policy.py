@@ -107,7 +107,7 @@ _PROTECTED_TABLES = [
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
     ("storage_deletion_tasks", []),
-    # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+    # Life Source Foundation Bootstrap (migration 0037, PR #60 provisional proposal
     # §D/§L) — message_source_units is S1C, the exact same exclusive-arc pattern as
     # document_source_units above (every field guarded immutable by trg_msgsu_guard_update,
     # so UPDATE would always fail via the trigger anyway; narrowed at the grant level too for
@@ -124,7 +124,7 @@ _PROTECTED_TABLES = [
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
 
-# NOTE on documents.storage_key/file_path immutability (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+# NOTE on documents.storage_key/file_path immutability (PR #60 provisional proposal
 # §D): an EARLIER version of this bootstrap pass tried to enforce this via column-level
 # privilege narrowing here (REVOKE table-level UPDATE on `documents`, re-GRANT at column level
 # for every column except storage_key/file_path). That mechanism was reverted after it broke a

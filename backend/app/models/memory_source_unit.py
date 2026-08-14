@@ -17,7 +17,7 @@ class SourceKind(str, enum.Enum):
     itself can be vouched for. Each kind gets its own subtype table (see document_source_units),
     never a generic 'document' — see §4.8's "Dokumentgranularitet".
 
-    `message` is S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037) — see
+    `message` is the message-source slice of S1C (PR #60 provisional proposal, migration 0037) — see
     message_source_units below. Future source kinds (media_segment, ...) follow the identical
     pattern: a new enum value here plus a new subtype table, never a nullable column bolted
     onto an existing subtype."""
@@ -180,7 +180,7 @@ class MemorySourceLifecycleEvent(Base):
 
 
 class MessageSourceUnit(Base):
-    """S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037,
+    """S1C message-source slice (PR #60 provisional proposal, migration 0037,
     docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8/§8) — `Message` as a second
     `MemorySourceUnit` subtype, the exact exclusive-arc pattern `DocumentSourceUnit` already
     established (composite FK to `memory_source_units(id, owner_id, source_kind)`, every field

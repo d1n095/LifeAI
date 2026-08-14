@@ -282,7 +282,7 @@ CAPABILITY_MANIFEST: frozenset[str] = frozenset(
 # require_capability() is re-checked per-dispatch (app/worker.py) so an unconfigured provider
 # is caught even for a task whose OWN task_type wouldn't have needed it.
 #
-# `message_source_backfill` (S1C, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md,
+# `message_source_backfill` (S1C message-source slice, PR #60 provisional proposal,
 # app/rag/backfill/message_source.py) is the same "None" case as message_sequence_backfill for
 # the identical reason: it's pure SQL + a deterministic find-or-create over rows that already
 # exist, no provider call anywhere in the path.

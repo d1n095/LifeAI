@@ -1,4 +1,4 @@
-"""S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037,
+"""S1C message-source slice (PR #60 provisional proposal, migration 0037,
 docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8/§8): race-safe, crash-safe find-or-create for
 `MemorySourceUnit`/`MessageSourceUnit` rows -- the exact same SAVEPOINT pattern
 app/rag/memory_source.py already established for `DocumentSourceUnit`, applied to `Message`

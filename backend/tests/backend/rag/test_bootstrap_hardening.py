@@ -18,6 +18,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
+from app.models.source_import_batch import SourceImportFailureStage
 from app.models.user import User, UserRole
 from app.rag.corpus_batch import create_batch, record_stored_original
 from app.request_context import current_user_id as current_user_id_var
@@ -434,8 +435,6 @@ def test_section3_purge_source_soft_deletes_then_physically_deletes_an_unreferen
     disk. This is deliberate, pre-existing behavior (S1A Pass 21-23) this bootstrap did not
     change -- proof that "canonical originals" are NOT unconditionally undeletable today, only
     non-silently-mutable while they exist."""
-    import io
-
     from app.rag.library_import import _store_bytes_with_reference_lock
     from app.storage import get_storage
     from app.storage.purge import purge_source
@@ -811,6 +810,85 @@ async def test_section11_a_cancelled_message_source_backfill_job_stops_and_write
         session.close()
 
 
+@pytest.mark.asyncio
+async def test_section11_lease_reclaimed_during_batch_rolls_back_source_writes(monkeypatch):
+    """Reclaim after the batch has begun, not the easier stale-at-entry case. The replacement
+    generation is committed from another connection after the first source insert; the
+    before-commit fence must then fail and roll the entire source transaction back."""
+    from app.jobs import service
+    from app.jobs.handlers.message_source_backfill import (
+        MESSAGE_SOURCE_BACKFILL_JOB_TYPE,
+        run_message_source_backfill_job,
+    )
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.rag.backfill import message_source as backfill_module
+    from app.rag.backfill.message_source import count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section11-mid-batch-reclaim@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Mid-batch reclaim")
+        session.add(conversation)
+        session.commit()
+        session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="Must roll back"))
+        session.commit()
+
+        job = service.create_job(
+            session,
+            owner_id=owner.id,
+            job_type=MESSAGE_SOURCE_BACKFILL_JOB_TYPE,
+            input_refs=[],
+            created_by="founder",
+        )
+        worker_id, generation = _claim_mainai_job(session, job.id)
+
+        original = backfill_module.get_or_create_message_source_unit
+        reclaimed = False
+
+        def _create_then_reclaim(db, locator):
+            nonlocal reclaimed
+            source_id = original(db, locator)
+            if not reclaimed:
+                with migration_engine.begin() as conn:
+                    conn.execute(
+                        sa_text("""
+                            UPDATE mainai_jobs
+                               SET locked_by = 'replacement-worker',
+                                   lease_generation = lease_generation + 1,
+                                   lease_expires_at = now() + interval '60 seconds'
+                             WHERE id = :job_id
+                        """),
+                        {"job_id": str(job.id)},
+                    )
+                reclaimed = True
+            return source_id
+
+        monkeypatch.setattr(backfill_module, "get_or_create_message_source_unit", _create_then_reclaim)
+        await run_message_source_backfill_job(
+            session,
+            job.id,
+            owner.id,
+            worker_id=worker_id,
+            lease_generation=generation,
+            lease_seconds=60,
+        )
+
+        assert reclaimed is True
+        assert count_messages_without_source_unit(session, owner.id) == 1
+        with migration_engine.connect() as conn:
+            state = conn.execute(
+                sa_text("SELECT status, locked_by, lease_generation FROM mainai_jobs WHERE id = :id"),
+                {"id": str(job.id)},
+            ).one()
+        assert state.status == "running"
+        assert state.locked_by == "replacement-worker"
+        assert state.lease_generation == generation + 1
+    finally:
+        session.rollback()
+        session.close()
+
+
 # --- Section 12: AI-independence proof -----------------------------------------------------
 
 
@@ -874,13 +952,19 @@ def test_section12_full_corpus_batch_lifecycle_never_touches_any_provider(monkey
             try_mark_completed,
         )
 
-        # discovered_files=3: 1 genuinely stored + 1 duplicate (both count toward
-        # stored_originals_done=2) + 1 failed (never stored) = 3, reconciling the first
-        # equation; of the 2 stored, 1 parsed + 1 unsupported = 2, reconciling the second.
+        # discovered_files=3: 1 parsed + 1 duplicate/unsupported + 1 stored/parser-failed.
+        # All three originals are preserved and each reaches exactly one terminal parse bucket.
         record_discovery_totals(session, batch, files=3)
         record_stored_original(session, batch)
         record_duplicate(session, batch)
-        record_failed(session, batch, source_ref="broken.pdf", reason="parser raised")
+        record_stored_original(session, batch)
+        record_failed(
+            session,
+            batch,
+            source_ref="broken.pdf",
+            reason="parser raised",
+            stage=SourceImportFailureStage.parse,
+        )
         record_parsed(session, batch)
         record_unsupported(session, batch)
         session.commit()
@@ -936,8 +1020,8 @@ def test_section19_deterministic_demo_corpus_survives_a_crash_and_reaches_exact_
         record_duplicate(session, batch)  # duplicate-of-notes.txt
         record_parsed(session, batch)  # a duplicate still counts toward parsed_done -- its
         # content is identical to an already-parsed original, but §P's reconciliation invariant
-        # (parsed_done + unsupported_count + semantic_pending_count == stored_originals_done)
-        # requires EVERY stored original, duplicate or not, to reach one of those three terminal
+            # (parsed + unsupported + semantic_pending + parse_failed == stored originals)
+            # requires EVERY stored original, duplicate or not, to reach one terminal
         # states -- matches the established pattern in test_source_import_batches.py's
         # test_record_duplicate_counts_toward_stored_and_duplicate_count.
         session.commit()
@@ -968,7 +1052,14 @@ def test_section19_deterministic_demo_corpus_survives_a_crash_and_reaches_exact_
         record_parsed(restart_session, resumed_batch)
         record_stored_original(restart_session, resumed_batch)  # unsupported.xlsx (still stored)
         record_unsupported(restart_session, resumed_batch)
-        record_failed(restart_session, resumed_batch, source_ref="corrupt.pdf", reason="parser raised: not a real PDF")
+        record_stored_original(restart_session, resumed_batch)  # corrupt.pdf was preserved before parsing failed
+        record_failed(
+            restart_session,
+            resumed_batch,
+            source_ref="corrupt.pdf",
+            reason="parser raised: not a real PDF",
+            stage=SourceImportFailureStage.parse,
+        )
         restart_session.commit()
 
         # Message backfill runs alongside the file corpus, independently.
@@ -988,13 +1079,18 @@ def test_section19_deterministic_demo_corpus_survives_a_crash_and_reaches_exact_
 
         assert completed is True, "the batch must reach exact reconciliation once every discovered file is genuinely accounted for"
         assert resumed_batch.discovered_files == 6
-        assert resumed_batch.stored_originals_done == 5  # notes, csv, duplicate, readme, unsupported.xlsx
+        assert resumed_batch.stored_originals_done == 6  # all originals preserved, including corrupt.pdf
         assert resumed_batch.failed_count == 1  # corrupt.pdf
-        assert resumed_batch.stored_originals_done + resumed_batch.failed_count == resumed_batch.discovered_files
+        assert resumed_batch.stored_originals_done + resumed_batch.storage_failed_count == resumed_batch.discovered_files
         assert resumed_batch.duplicate_count == 1
         assert resumed_batch.unsupported_count == 1
         assert resumed_batch.parsed_done == 4  # notes, csv, duplicate, readme
-        assert resumed_batch.parsed_done + resumed_batch.unsupported_count == resumed_batch.stored_originals_done
+        assert (
+            resumed_batch.parsed_done
+            + resumed_batch.unsupported_count
+            + resumed_batch.parse_failed_count
+            == resumed_batch.stored_originals_done
+        )
 
         failures = restart_session.query(SourceImportBatchFailure).filter_by(batch_id=batch_id).all()
         assert len(failures) == 1

@@ -71,7 +71,7 @@ EXECUTABLE_EXTENSIONS = {
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".markdown", ".json", ".html", ".htm", ".csv"}
 
-# docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md §F: CSV is a plain-text, deterministically parseable
+# PR #60 provisional Source Foundation proposal §F: CSV is a plain-text, deterministically parseable
 # format needing no new dependency (app/rag/extract.py's existing UTF-8-decode fallback already
 # handles it correctly, the same as .txt/.md/.json) -- so it's added here as a pure config
 # change, not new extraction code. XLSX is deliberately NOT added: it's a binary format that

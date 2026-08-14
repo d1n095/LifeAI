@@ -261,7 +261,7 @@ def create_job(
         if input_refs:
             raise InvalidInputRefsError("message_sequence_backfill takes no input_refs — its scope is the whole owner's unnumbered message history.")
     elif job_type == "message_source_backfill":
-        # S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md): same shape as message_sequence_backfill
+        # S1C message-source slice (PR #60 provisional proposal): same shape as message_sequence_backfill
         # above — scope is "every one of THIS owner's messages without a message_source_units
         # row yet", derived at execution time (app/rag/backfill/message_source.py). No inputs.
         if input_refs:
