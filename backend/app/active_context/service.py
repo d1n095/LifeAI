@@ -28,6 +28,7 @@ from app.models.mainai_execution import EngineeringLesson, MainAICheckpoint, Mai
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import MainAIRecoveryRecord
 from app.models.memory_source_unit import DocumentSourceUnit, MemorySourceUnit, MessageSourceUnit
+from app.models.memory_thread import MemoryThread
 from app.models.project import Project
 from app.models.project_memory import ProjectNote
 
@@ -37,7 +38,7 @@ SUPPORTED_TYPES = frozenset({
     "memory_source_unit", "document_source_unit", "message_source_unit", "mainai_goal",
     "mainai_plan", "mainai_task", "mainai_job", "mainai_checkpoint", "mainai_recovery",
     "engineering_lesson", "intelligence_execution", "intelligence_evidence",
-    "intelligence_interpretation", "intelligence_idea", "project", "project_note",
+    "intelligence_interpretation", "intelligence_idea", "project", "project_note", "memory_thread",
 })
 ANCHOR_TYPES = SUPPORTED_TYPES | {"explicit_topic"}
 
@@ -86,6 +87,7 @@ def _owned_row(db: Session, owner_id: uuid.UUID, ref: _Ref):
         "intelligence_evidence": (IntelligenceEvidence, IntelligenceEvidence.owner_id),
         "intelligence_interpretation": (IntelligenceInterpretation, IntelligenceInterpretation.owner_id),
         "intelligence_idea": (IntelligenceIdea, IntelligenceIdea.owner_id),
+        "memory_thread": (MemoryThread, MemoryThread.owner_id),
     }
     if ref.object_type in mappings:
         model, owner_column = mappings[ref.object_type]
