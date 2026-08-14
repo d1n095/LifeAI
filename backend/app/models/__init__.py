@@ -1,4 +1,12 @@
 from app.models.agent_task import AgentRole, AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from app.models.active_context import (
+    ActiveContextEvent,
+    ActiveContextMember,
+    ActiveContextSet,
+    ContextAuthority,
+    ContextBasis,
+    ContextMemberState,
+)
 from app.models.audit import AuditLog
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
@@ -111,6 +119,12 @@ __all__ = [
     "AgentTaskEvent",
     "AgentTaskEventType",
     "AgentTaskStatus",
+    "ActiveContextEvent",
+    "ActiveContextMember",
+    "ActiveContextSet",
+    "ContextAuthority",
+    "ContextBasis",
+    "ContextMemberState",
     "AuditLog",
     "ClaimRelationship",
     "CompanyInfo",

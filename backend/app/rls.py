@@ -90,6 +90,11 @@ RLS_STATEMENTS = [
         )
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
+    *[
+        statement
+        for table in ("active_context_sets", "active_context_members", "active_context_events")
+        for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    ],
 ]
 
 # `messages` is the one table here whose owner is not a column on the row itself: a message
@@ -247,6 +252,14 @@ POLICY_DEFINITIONS = [
             "intelligence_ideas", "intelligence_idea_links", "intelligence_idea_lessons",
         )
     ],
+    *[
+        {
+            "table": table,
+            "name": f"{table}_isolation",
+            "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+        }
+        for table in ("active_context_sets", "active_context_members", "active_context_events")
+    ],
 ]
 
 
@@ -376,6 +389,12 @@ _MAINAI_EXECUTION_TABLES = (
     "intelligence_ideas",
     "intelligence_idea_links",
     "intelligence_idea_lessons",
+    # Migration 0039 deliberately reuses this already boot-persistent ownership/privilege
+    # verifier rather than introducing a second security-policy runner for three context
+    # tables linked to the same execution/source domain.
+    "active_context_sets",
+    "active_context_members",
+    "active_context_events",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
@@ -385,6 +404,13 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "mainai_recovery_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {
         "name": "intelligence_governance_deny_mutation",
+        "identity_args": "",
+        "return_type": "trigger",
+        "mainai_app_execute": False,
+        "security_definer": False,
+    },
+    {
+        "name": "active_context_events_deny_update",
         "identity_args": "",
         "return_type": "trigger",
         "mainai_app_execute": False,
@@ -639,6 +665,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             "intelligence_ideas", "intelligence_idea_links", "intelligence_idea_lessons",
         ):
             conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON active_context_sets FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON active_context_members FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON active_context_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
@@ -659,6 +688,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 "intelligence_executions", "intelligence_evidence", "intelligence_interpretations",
                 "intelligence_ideas", "intelligence_idea_links", "intelligence_idea_lessons",
             )),
+            ("active_context_sets", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("active_context_members", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("active_context_events", frozenset({"SELECT", "INSERT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
