@@ -95,6 +95,10 @@ from app.models.memory_source_unit import (
     SourceKind,
     SourceRole,
 )
+from app.models.memory_thread import (
+    MemoryThread, MemoryThreadEvent, MemoryThreadMember, MemoryThreadRelationship,
+    ThreadClassificationBasis, ThreadState,
+)
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.project_memory import ProjectBranchPRStatus, ProjectCheckpoint, ProjectCheckpointNote, ProjectNote, ProjectSource
@@ -200,6 +204,12 @@ __all__ = [
     "LifecycleStatus",
     "MemorySourceLifecycleEvent",
     "MemorySourceUnit",
+    "MemoryThread",
+    "MemoryThreadEvent",
+    "MemoryThreadMember",
+    "MemoryThreadRelationship",
+    "ThreadClassificationBasis",
+    "ThreadState",
     "MessageSourceUnit",
     "OccurredAtBasis",
     "SnapshotStatus",
