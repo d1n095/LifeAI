@@ -100,7 +100,11 @@ RLS_STATEMENTS = [
                       "life_solution_selections", "life_solution_component_links", "life_problem_events",
                       "work_strategies", "work_strategy_executions", "work_trace_events", "work_efficiency_observations",
                       "work_strategy_findings", "work_verification_obligations", "work_verification_observations",
-                      "work_stopping_decisions", "work_specialist_contributions", "work_strategy_lesson_links")
+                      "work_stopping_decisions", "work_specialist_contributions", "work_strategy_lesson_links",
+                      "strategy_comparisons", "strategy_comparability_assessments", "strategy_quality_assessments",
+                      "strategy_efficiency_deltas", "strategy_experiments", "strategy_promotion_candidates",
+                      "strategy_experiment_comparisons", "strategy_promotion_comparisons", "strategy_learning_links",
+                      "strategy_learning_observations", "strategy_evaluation_events")
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
 ]
@@ -274,7 +278,11 @@ POLICY_DEFINITIONS = [
                       "life_solution_selections", "life_solution_component_links", "life_problem_events",
                       "work_strategies", "work_strategy_executions", "work_trace_events", "work_efficiency_observations",
                       "work_strategy_findings", "work_verification_obligations", "work_verification_observations",
-                      "work_stopping_decisions", "work_specialist_contributions", "work_strategy_lesson_links")
+                      "work_stopping_decisions", "work_specialist_contributions", "work_strategy_lesson_links",
+                      "strategy_comparisons", "strategy_comparability_assessments", "strategy_quality_assessments",
+                      "strategy_efficiency_deltas", "strategy_experiments", "strategy_promotion_candidates",
+                      "strategy_experiment_comparisons", "strategy_promotion_comparisons", "strategy_learning_links",
+                      "strategy_learning_observations", "strategy_evaluation_events")
     ],
 ]
 
@@ -440,6 +448,17 @@ _MAINAI_EXECUTION_TABLES = (
     "work_stopping_decisions",
     "work_specialist_contributions",
     "work_strategy_lesson_links",
+    "strategy_comparisons",
+    "strategy_comparability_assessments",
+    "strategy_quality_assessments",
+    "strategy_efficiency_deltas",
+    "strategy_experiments",
+    "strategy_promotion_candidates",
+    "strategy_experiment_comparisons",
+    "strategy_promotion_comparisons",
+    "strategy_learning_links",
+    "strategy_learning_observations",
+    "strategy_evaluation_events",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
@@ -482,6 +501,14 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {
         "name": "work_strategy_execution_counter_only", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "strategy_evaluation_deny_mutation", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "strategy_evaluation_state_only", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
 ]
@@ -754,6 +781,12 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                       "work_verification_obligations", "work_verification_observations", "work_stopping_decisions",
                       "work_specialist_contributions", "work_strategy_lesson_links"):
             conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        for table in ("strategy_experiments", "strategy_promotion_candidates"):
+            conn.execute(text(f"REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        for table in ("strategy_comparisons", "strategy_comparability_assessments", "strategy_quality_assessments",
+                      "strategy_efficiency_deltas", "strategy_experiment_comparisons", "strategy_promotion_comparisons",
+                      "strategy_learning_links", "strategy_learning_observations", "strategy_evaluation_events"):
+            conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
@@ -795,6 +828,12 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 "work_strategies", "work_trace_events", "work_efficiency_observations", "work_strategy_findings",
                 "work_verification_obligations", "work_verification_observations", "work_stopping_decisions",
                 "work_specialist_contributions", "work_strategy_lesson_links")),
+            *((table, frozenset({"SELECT", "INSERT", "UPDATE"})) for table in (
+                "strategy_experiments", "strategy_promotion_candidates")),
+            *((table, frozenset({"SELECT", "INSERT"})) for table in (
+                "strategy_comparisons", "strategy_comparability_assessments", "strategy_quality_assessments",
+                "strategy_efficiency_deltas", "strategy_experiment_comparisons", "strategy_promotion_comparisons",
+                "strategy_learning_links", "strategy_learning_observations", "strategy_evaluation_events")),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

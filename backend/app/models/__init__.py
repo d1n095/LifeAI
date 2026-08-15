@@ -118,6 +118,19 @@ from app.models.source_import_batch import (
     SourceImportBatchStatus,
     SourceImportFailureStage,
 )
+from app.models.strategy_evaluation import (
+    StrategyComparabilityAssessment,
+    StrategyComparison,
+    StrategyEfficiencyDelta,
+    StrategyEvaluationEvent,
+    StrategyExperiment,
+    StrategyExperimentComparison,
+    StrategyLearningLink,
+    StrategyLearningObservation,
+    StrategyPromotionCandidate,
+    StrategyPromotionComparison,
+    StrategyQualityAssessment,
+)
 from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
@@ -273,4 +286,15 @@ __all__ = [
     "WorkTraceEvent",
     "WorkVerificationObligation",
     "WorkVerificationObservation",
+    "StrategyComparabilityAssessment",
+    "StrategyComparison",
+    "StrategyEfficiencyDelta",
+    "StrategyEvaluationEvent",
+    "StrategyExperiment",
+    "StrategyExperimentComparison",
+    "StrategyLearningLink",
+    "StrategyLearningObservation",
+    "StrategyPromotionCandidate",
+    "StrategyPromotionComparison",
+    "StrategyQualityAssessment",
 ]
