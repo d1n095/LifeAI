@@ -94,7 +94,10 @@ RLS_STATEMENTS = [
         statement
         for table in ("active_context_sets", "active_context_members", "active_context_events",
                       "memory_threads", "memory_thread_members", "memory_thread_relationships", "memory_thread_events",
-                      "life_intents", "life_intent_blockers", "life_intent_dependencies", "life_intent_events")
+                      "life_intents", "life_intent_blockers", "life_intent_dependencies", "life_intent_events",
+                      "life_problems", "life_problem_approaches", "life_solution_components", "life_component_evaluations",
+                      "life_problem_assumptions", "life_problem_decisions", "life_approach_outcomes", "life_problem_lesson_links",
+                      "life_solution_selections", "life_solution_component_links", "life_problem_events")
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
 ]
@@ -262,7 +265,10 @@ POLICY_DEFINITIONS = [
         }
         for table in ("active_context_sets", "active_context_members", "active_context_events",
                       "memory_threads", "memory_thread_members", "memory_thread_relationships", "memory_thread_events",
-                      "life_intents", "life_intent_blockers", "life_intent_dependencies", "life_intent_events")
+                      "life_intents", "life_intent_blockers", "life_intent_dependencies", "life_intent_events",
+                      "life_problems", "life_problem_approaches", "life_solution_components", "life_component_evaluations",
+                      "life_problem_assumptions", "life_problem_decisions", "life_approach_outcomes", "life_problem_lesson_links",
+                      "life_solution_selections", "life_solution_component_links", "life_problem_events")
     ],
 ]
 
@@ -407,6 +413,17 @@ _MAINAI_EXECUTION_TABLES = (
     "life_intent_blockers",
     "life_intent_dependencies",
     "life_intent_events",
+    "life_problems",
+    "life_problem_approaches",
+    "life_solution_components",
+    "life_component_evaluations",
+    "life_problem_assumptions",
+    "life_problem_decisions",
+    "life_approach_outcomes",
+    "life_problem_lesson_links",
+    "life_solution_selections",
+    "life_solution_component_links",
+    "life_problem_events",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
@@ -437,6 +454,10 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {
         "name": "life_intent_append_only_deny_update", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "life_problem_append_only_deny_update", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
 ]
@@ -699,6 +720,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON life_intent_blockers FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON life_intent_dependencies FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON life_intent_events FROM mainai_app"))
+        for table in ("life_problems", "life_problem_approaches", "life_solution_components", "life_problem_assumptions", "life_problem_decisions"):
+            conn.execute(text(f"REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        for table in ("life_component_evaluations", "life_approach_outcomes", "life_problem_lesson_links",
+                      "life_solution_selections", "life_solution_component_links", "life_problem_events"):
+            conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
@@ -730,6 +756,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("life_intent_blockers", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("life_intent_dependencies", frozenset({"SELECT", "INSERT"})),
             ("life_intent_events", frozenset({"SELECT", "INSERT"})),
+            *((table, frozenset({"SELECT", "INSERT", "UPDATE"})) for table in (
+                "life_problems", "life_problem_approaches", "life_solution_components", "life_problem_assumptions", "life_problem_decisions")),
+            *((table, frozenset({"SELECT", "INSERT"})) for table in (
+                "life_component_evaluations", "life_approach_outcomes", "life_problem_lesson_links",
+                "life_solution_selections", "life_solution_component_links", "life_problem_events")),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

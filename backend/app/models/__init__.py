@@ -103,6 +103,11 @@ from app.models.memory_thread import (
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
 from app.models.project_memory import ProjectBranchPRStatus, ProjectCheckpoint, ProjectCheckpointNote, ProjectNote, ProjectSource
+from app.models.problem_learning import (
+    LifeApproachOutcome, LifeComponentEvaluation, LifeProblem, LifeProblemApproach,
+    LifeProblemAssumption, LifeProblemDecision, LifeProblemEvent, LifeProblemLessonLink,
+    LifeSolutionComponent, LifeSolutionComponentLink, LifeSolutionSelection,
+)
 from app.models.provider_config import ProviderConfig
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
@@ -228,6 +233,17 @@ __all__ = [
     "ProjectCheckpointNote",
     "ProjectNote",
     "ProjectSource",
+    "LifeApproachOutcome",
+    "LifeComponentEvaluation",
+    "LifeProblem",
+    "LifeProblemApproach",
+    "LifeProblemAssumption",
+    "LifeProblemDecision",
+    "LifeProblemEvent",
+    "LifeProblemLessonLink",
+    "LifeSolutionComponent",
+    "LifeSolutionComponentLink",
+    "LifeSolutionSelection",
     "ProviderConfig",
     "ProviderVerificationCheck",
     "RefreshToken",
