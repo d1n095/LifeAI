@@ -434,8 +434,6 @@ def test_section3_purge_source_soft_deletes_then_physically_deletes_an_unreferen
     disk. This is deliberate, pre-existing behavior (S1A Pass 21-23) this bootstrap did not
     change -- proof that "canonical originals" are NOT unconditionally undeletable today, only
     non-silently-mutable while they exist."""
-    import io
-
     from app.rag.library_import import _store_bytes_with_reference_lock
     from app.storage import get_storage
     from app.storage.purge import purge_source
