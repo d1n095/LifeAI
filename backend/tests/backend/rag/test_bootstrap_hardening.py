@@ -989,6 +989,53 @@ def test_section13_insert_into_source_import_batch_failures_referencing_a_foreig
         session.close()
 
 
+# --- Section 23: durable persistence of this pass's engineering lessons --------------------
+
+
+def test_section23_hardening_lessons_are_seeded_durably_and_idempotently():
+    """scripts/mainai/seed_life_source_foundation_hardening_lessons.py persists this pass's
+    three real findings (write-once privilege-vs-lifecycle, S1C exclusive-arc trigger gap,
+    source_import_batch_failures composite-FK gap) into the SAME `engineering_lessons` table
+    app/mainai_execution/planner.py's create_plan() already reads via
+    apply_lessons_to_verification_plan() -- proving the seed script actually works against a
+    real database and is safely re-runnable, not just that it parses."""
+    import importlib.util
+
+    from app.models.mainai_execution import EngineeringLesson
+
+    spec = importlib.util.spec_from_file_location(
+        "seed_life_source_foundation_hardening_lessons",
+        Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "mainai" / "seed_life_source_foundation_hardening_lessons.py",
+    )
+    seed_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed_module)
+
+    session = SessionLocal()
+    try:
+        first_run = seed_module.seed(session)
+        assert len(first_run) == 3, "expected all three hardening-pass lessons on a clean insert"
+
+        second_run = seed_module.seed(session)
+        assert second_run == [], "re-running the seed script must insert nothing once the lessons already exist"
+
+        stored = (
+            session.query(EngineeringLesson)
+            .filter(EngineeringLesson.source_ref.like(f"{seed_module._SOURCE_REF_PREFIX}%"))
+            .all()
+        )
+        assert len(stored) == 3
+        for lesson in stored:
+            assert lesson.regression_test is not None
+            assert lesson.applies_to
+            assert lesson.source_type == "hardening_pass"
+    finally:
+        session.query(EngineeringLesson).filter(
+            EngineeringLesson.source_ref.like(f"{seed_module._SOURCE_REF_PREFIX}%")
+        ).delete(synchronize_session=False)
+        session.commit()
+        session.close()
+
+
 # --- Section 12: AI-independence proof -----------------------------------------------------
 
 
