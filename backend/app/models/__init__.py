@@ -30,6 +30,7 @@ from app.models.intelligence_governance import (
 )
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.life_intent import LifeIntent, LifeIntentBlocker, LifeIntentDependency, LifeIntentEvent
 from app.models.mainai_execution import (
     ACTIVE_MAINAI_GOAL_STATUSES,
     READY_FOR_DISPATCH_MAINAI_TASK_STATUSES,
@@ -147,6 +148,10 @@ __all__ = [
     "IntelligenceIdeaLesson",
     "IntelligenceIdeaLink",
     "IntelligenceInterpretation",
+    "LifeIntent",
+    "LifeIntentBlocker",
+    "LifeIntentDependency",
+    "LifeIntentEvent",
     "ParticipationMode",
     "ReviewKind",
     "KnowledgeClaim",
