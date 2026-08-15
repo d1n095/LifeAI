@@ -126,6 +126,11 @@ from app.models.strategy_evaluation import (
     StrategyPromotionComparison,
     StrategyQualityAssessment,
 )
+from app.models.strategy_synthesis import (
+    StrategySynthesisCase, StrategySynthesisComponent, StrategySynthesisConflict,
+    StrategySynthesisEvaluationLink, StrategySynthesisEvent, StrategySynthesisInput,
+    StrategySynthesisLessonLink, StrategySynthesisMaterialization,
+)
 from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
@@ -291,4 +296,12 @@ __all__ = [
     "StrategyPromotionCandidate",
     "StrategyPromotionComparison",
     "StrategyQualityAssessment",
+    "StrategySynthesisCase",
+    "StrategySynthesisComponent",
+    "StrategySynthesisConflict",
+    "StrategySynthesisEvaluationLink",
+    "StrategySynthesisEvent",
+    "StrategySynthesisInput",
+    "StrategySynthesisLessonLink",
+    "StrategySynthesisMaterialization",
 ]
