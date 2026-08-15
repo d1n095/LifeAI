@@ -811,6 +811,184 @@ async def test_section11_a_cancelled_message_source_backfill_job_stops_and_write
         session.close()
 
 
+# --- Section 13: RLS owner isolation, guessed UUIDs, cross-owner writes --------------------
+
+
+def test_section13_guessed_uuid_point_lookup_on_source_import_batches_never_exists():
+    """A random, never-issued UUID must read back as "not found", the same as any real row
+    belonging to a different owner -- RLS gives an attacker no way to distinguish "this id
+    belongs to someone else" from "this id was never issued" (no oracle for enumeration)."""
+    import uuid as _uuid
+
+    from app.models.source_import_batch import SourceImportBatch
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section13-guess-batch@example.com")
+        _set_rls_user(session, owner.id)
+        assert session.get(SourceImportBatch, _uuid.uuid4()) is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_cross_owner_point_lookup_by_real_id_on_source_import_batches_is_invisible():
+    """Beyond the existing count()-based isolation test: a wrong owner's session cannot even
+    fetch a KNOWN, real batch id by direct primary-key lookup -- RLS hides the row entirely,
+    it does not merely exclude it from aggregate counts. `populate_existing=True` forces a
+    real SELECT rather than returning the still-cached ORM object from this same session's own
+    identity map (the object was loaded earlier under owner_a's RLS context)."""
+    from app.models.source_import_batch import SourceImportBatch
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-batch@example.com")
+        owner_b = _make_user(session, "section13-b-batch@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's real batch")
+        session.commit()
+        batch_id = batch.id
+
+        _set_rls_user(session, owner_b.id)
+        assert session.get(SourceImportBatch, batch_id, populate_existing=True) is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_cross_owner_update_affects_zero_rows_and_delete_is_never_a_runtime_privilege_at_all():
+    """UPDATE is genuinely granted to mainai_app on `source_import_batches` (progress counters
+    advance as ingestion proceeds -- see scripts/security/s1a_privilege_policy.py's
+    `_PROTECTED_TABLES`), so a wrong owner's UPDATE is the real RLS proof: it must affect
+    exactly zero rows, not merely fail to be SELECTed afterward. DELETE, by contrast, is
+    intentionally never granted to mainai_app on this table at all (a batch's history is kept
+    permanently -- deleting it would make its own §P completeness proof unreconstructable) --
+    so a DELETE attempt is rejected by Postgres's privilege system itself, for EITHER owner,
+    before RLS row-visibility is even relevant. Both are real, independent defense layers; this
+    test proves both hold, and that neither one was mistakenly assumed to be the other."""
+    from sqlalchemy.exc import ProgrammingError
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-write@example.com")
+        owner_b = _make_user(session, "section13-b-write@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's write target")
+        session.commit()
+        batch_id = batch.id
+
+        _set_rls_user(session, owner_b.id)
+        update_result = session.execute(
+            sa_text("UPDATE source_import_batches SET label = 'hijacked' WHERE id = :id"), {"id": str(batch_id)}
+        )
+        assert update_result.rowcount == 0, "a wrong owner's UPDATE must touch zero rows"
+        session.commit()
+
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            session.execute(sa_text("DELETE FROM source_import_batches WHERE id = :id"), {"id": str(batch_id)})
+        session.rollback()
+
+        _set_rls_user(session, owner_a.id)
+        from app.models.source_import_batch import SourceImportBatch
+
+        untouched = session.get(SourceImportBatch, batch_id, populate_existing=True)
+        assert untouched is not None
+        assert untouched.label == "Owner A's write target"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_cross_owner_point_lookup_on_message_source_units_is_invisible_and_no_update_or_delete_privilege_exists_at_all():
+    """Same guessed-UUID + cross-owner SELECT proof as the batches table above, for
+    `message_source_units` -- Section 8 already covers the INSERT-time trigger's cross-owner
+    check, this covers a wrong owner's read of an already-committed row. UPDATE and DELETE are
+    a stronger case than `source_import_batches`: mainai_app holds NEITHER privilege on this
+    table at all (SELECT, INSERT only -- see `_PROTECTED_TABLES`), for the exact same
+    "narrowed at the grant level too, not just the trigger" defense-in-depth reasoning as
+    `document_source_units`. So both statements are rejected by privilege denial regardless of
+    which owner's session issues them -- RLS row-visibility is never even reached."""
+    import uuid as _uuid
+
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.memory_source_unit import MemorySourceUnit
+    from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-msu@example.com")
+        owner_b = _make_user(session, "section13-b-msu@example.com")
+        _set_rls_user(session, owner_a.id)
+        conversation = Conversation(user_id=owner_a.id, title="Section 13")
+        session.add(conversation)
+        session.commit()
+        message = Message(conversation_id=conversation.id, role=MessageRole.user, content="Riktig text.")
+        session.add(message)
+        session.commit()
+
+        msu_id = get_or_create_message_source_unit(
+            session,
+            MessageSourceLocator(
+                owner_id=owner_a.id, message_id=message.id, conversation_id=conversation.id,
+                role=MessageRole.user, observed_at=message.created_at, content_text="Riktig text.",
+            ),
+        )
+        session.commit()
+
+        _set_rls_user(session, owner_b.id)
+        assert session.get(MemorySourceUnit, _uuid.uuid4()) is None, "a guessed uuid must never resolve"
+        assert session.get(MemorySourceUnit, msu_id, populate_existing=True) is None, (
+            "a real row belonging to another owner must be invisible"
+        )
+
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            session.execute(sa_text("UPDATE memory_source_units SET content_text = 'hijacked' WHERE id = :id"), {"id": str(msu_id)})
+        session.rollback()
+
+        _set_rls_user(session, owner_b.id)
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            session.execute(sa_text("DELETE FROM memory_source_units WHERE id = :id"), {"id": str(msu_id)})
+        session.rollback()
+
+        _set_rls_user(session, owner_a.id)
+        untouched = session.get(MemorySourceUnit, msu_id, populate_existing=True)
+        assert untouched is not None
+        assert untouched.content_text == "Riktig text."
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_insert_into_source_import_batch_failures_referencing_a_foreign_batch_id_is_rejected():
+    """An INSERT-time cross-owner attack on the child table: owner_b claims owner_b's own
+    owner_id (so the row's own RLS WITH CHECK passes) but points batch_id at a batch that
+    genuinely belongs to owner_a -- proving there is a real, enforced link between
+    `source_import_batch_failures.owner_id` and the batch it claims to belong to, not just
+    independent per-table RLS that happens to look consistent in the common case."""
+    from app.models.source_import_batch import SourceImportBatchFailure
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-foreign-batch@example.com")
+        owner_b = _make_user(session, "section13-b-foreign-batch@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's corpus")
+        session.commit()
+        batch_id = batch.id
+
+        _set_rls_user(session, owner_b.id)
+        session.add(
+            SourceImportBatchFailure(owner_id=owner_b.id, batch_id=batch_id, source_ref="x.pdf", reason="attempted hijack")
+        )
+        with pytest.raises((IntegrityError, DBAPIError)):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
 # --- Section 12: AI-independence proof -----------------------------------------------------
 
 

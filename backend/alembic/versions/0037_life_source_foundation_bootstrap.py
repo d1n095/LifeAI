@@ -94,7 +94,15 @@ def upgrade() -> None:
                     discovered_files = stored_originals_done + failed_count
                     AND parsed_done + unsupported_count + semantic_pending_count = stored_originals_done
                 )
-            )
+            ),
+            -- Lets source_import_batch_failures below carry a real composite FK tying its own
+            -- owner_id to the SAME owner_id the referenced batch actually has (migration 0027's
+            -- `uq_mainai_jobs_id_owner_id` / composite `FOREIGN KEY (job_id, owner_id)` pattern,
+            -- reused here) -- a plain `batch_id REFERENCES source_import_batches(id)` would let
+            -- a caller satisfy this table's own RLS WITH CHECK (owner_id = the caller) while
+            -- pointing batch_id at a batch genuinely owned by someone else, since RLS only ever
+            -- checks a row's OWN owner_id column, never a referenced row's.
+            CONSTRAINT uq_sib_id_owner_id UNIQUE (id, owner_id)
         );
         CREATE INDEX ix_sib_owner ON source_import_batches (owner_id);
     """)
@@ -103,11 +111,13 @@ def upgrade() -> None:
         CREATE TABLE source_import_batch_failures (
             id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
             owner_id uuid NOT NULL REFERENCES users(id),
-            batch_id uuid NOT NULL REFERENCES source_import_batches(id),
+            batch_id uuid NOT NULL,
             source_ref text NOT NULL,
             reason text NOT NULL,
             retryable boolean NOT NULL DEFAULT false,
-            created_at timestamptz NOT NULL DEFAULT now()
+            created_at timestamptz NOT NULL DEFAULT now(),
+            CONSTRAINT fk_sibf_batch_owner
+                FOREIGN KEY (batch_id, owner_id) REFERENCES source_import_batches (id, owner_id)
         );
         CREATE INDEX ix_sibf_batch ON source_import_batch_failures (batch_id);
     """)
