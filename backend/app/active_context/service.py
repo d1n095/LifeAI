@@ -24,6 +24,7 @@ from app.models.intelligence_governance import (
 )
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.life_intent import LifeIntent, LifeIntentBlocker
 from app.models.mainai_execution import EngineeringLesson, MainAICheckpoint, MainAIGoal, MainAIPlan, MainAITask
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import MainAIRecoveryRecord
@@ -39,6 +40,7 @@ SUPPORTED_TYPES = frozenset({
     "mainai_plan", "mainai_task", "mainai_job", "mainai_checkpoint", "mainai_recovery",
     "engineering_lesson", "intelligence_execution", "intelligence_evidence",
     "intelligence_interpretation", "intelligence_idea", "project", "project_note", "memory_thread",
+    "life_intent", "life_intent_blocker",
 })
 ANCHOR_TYPES = SUPPORTED_TYPES | {"explicit_topic"}
 
@@ -88,6 +90,8 @@ def _owned_row(db: Session, owner_id: uuid.UUID, ref: _Ref):
         "intelligence_interpretation": (IntelligenceInterpretation, IntelligenceInterpretation.owner_id),
         "intelligence_idea": (IntelligenceIdea, IntelligenceIdea.owner_id),
         "memory_thread": (MemoryThread, MemoryThread.owner_id),
+        "life_intent": (LifeIntent, LifeIntent.owner_id),
+        "life_intent_blocker": (LifeIntentBlocker, LifeIntentBlocker.owner_id),
     }
     if ref.object_type in mappings:
         model, owner_column = mappings[ref.object_type]
