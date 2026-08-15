@@ -19,7 +19,7 @@ from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.user import User, UserRole
-from app.rag.corpus_batch import create_batch, record_stored_original
+from app.rag.corpus_batch import create_batch, record_failed, record_stored_original
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 
@@ -1033,6 +1033,152 @@ def test_section23_hardening_lessons_are_seeded_durably_and_idempotently():
             EngineeringLesson.source_ref.like(f"{seed_module._SOURCE_REF_PREFIX}%")
         ).delete(synchronize_session=False)
         session.commit()
+        session.close()
+
+
+# --- Section 18: failure record attacks -----------------------------------------------------
+
+
+def test_section18_a_repeated_failure_for_the_same_source_ref_creates_a_new_row_each_time():
+    """record_failed() is a plain append-only event log, not a dedup-by-source_ref upsert -- a
+    retry of the same source that fails again for a DIFFERENT reason (e.g. transient network
+    error, then later a genuine corrupt-content error) must leave BOTH failures visible for a
+    human to read, not silently overwrite/merge them. This also means failed_count increments
+    once per CALL, not once per distinct source -- documented here as the real, current
+    behavior a caller must respect (calling record_failed() twice for what is conceptually the
+    same source inflates failed_count past what a single discovered file should ever
+    contribute)."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-a-repeat@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18a")
+        record_failed(session, batch, source_ref="flaky.pdf", reason="transient: connection reset", retryable=True)
+        record_failed(session, batch, source_ref="flaky.pdf", reason="permanent: corrupt after retry", retryable=False)
+        session.commit()
+
+        from app.models.source_import_batch import SourceImportBatchFailure
+
+        rows = (
+            session.query(SourceImportBatchFailure)
+            .filter_by(batch_id=batch.id, source_ref="flaky.pdf")
+            .order_by(SourceImportBatchFailure.created_at)
+            .all()
+        )
+        assert len(rows) == 2
+        assert rows[0].reason == "transient: connection reset"
+        assert rows[1].reason == "permanent: corrupt after retry"
+        session.refresh(batch)
+        assert batch.failed_count == 2
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section18_b_a_very_large_reason_string_is_stored_intact():
+    """`reason` is an unbounded Postgres TEXT column -- a verbose parser stack trace or a
+    misbehaving caller passing something enormous must not truncate silently or crash the
+    insert."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-b-huge@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18b")
+        huge_reason = "parser traceback:\n" + ("line of stack trace\n" * 5000)  # ~100KB
+        record_failed(session, batch, source_ref="giant-error.pdf", reason=huge_reason)
+        session.commit()
+
+        from app.models.source_import_batch import SourceImportBatchFailure
+
+        stored = session.query(SourceImportBatchFailure).filter_by(batch_id=batch.id).one()
+        assert stored.reason == huge_reason
+        assert len(stored.reason) > 90_000
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section18_c_a_malicious_looking_source_ref_is_stored_as_inert_opaque_text():
+    """`source_ref` is never interpreted as a real filesystem path, HTML, or SQL by this layer
+    -- it is a free-text label a human reads in a failure list. Path traversal sequences,
+    control characters, and script-looking content must round-trip byte-for-byte as plain data,
+    proving there is no path resolution, templating, or string-concatenated SQL anywhere in
+    this write path (parameterized queries throughout `corpus_batch.py`). A literal NUL byte is
+    handled separately below: libpq/psycopg2 cannot transmit a NUL inside a text parameter at
+    all (a C-string protocol limitation below the ORM), so it fails loud with a clear
+    ValueError at the driver -- never silently truncated, corrupted, or interpreted -- which is
+    the correct, safe outcome, just a different one than the other ordinary-Postgres-text
+    payloads below."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-c-malicious@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18c")
+        malicious_refs = [
+            "../../../../etc/passwd",
+            "C:\\Windows\\System32\\config\\SAM",
+            "<script>alert('xss')</script>.pdf",
+            "'; DROP TABLE source_import_batch_failures; --",
+            "a" * 10_000 + ".pdf",
+        ]
+        for ref in malicious_refs:
+            record_failed(session, batch, source_ref=ref, reason="rejected as unsafe filename")
+        session.commit()
+
+        from app.models.source_import_batch import SourceImportBatchFailure
+
+        stored_refs = {
+            row.source_ref
+            for row in session.query(SourceImportBatchFailure).filter_by(batch_id=batch.id).all()
+        }
+        assert stored_refs == set(malicious_refs), "every malicious-looking ref must round-trip exactly, unmodified"
+        session.refresh(batch)
+        assert batch.failed_count == len(malicious_refs)
+
+        record_failed(session, batch, source_ref="file\x00withnull.pdf", reason="should never reach the database")
+        with pytest.raises(ValueError, match="NUL"):
+            session.commit()
+        session.rollback()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section18_d_a_source_recorded_as_both_stored_and_failed_can_never_reconcile():
+    """The real caller contract, made explicit: record_stored_original() and record_failed() are
+    meant to be mutually exclusive PER SOURCE (record_failed()'s own docstring: 'a source that
+    could not even be stored... or could not be parsed... both cases increment failed_count' --
+    never stored_originals_done). Nothing in corpus_batch.py currently enforces that a caller
+    respects this (no link by source_ref), so this test proves the honest consequence if a
+    caller mistakenly calls both for the same conceptual source: the batch can never reach
+    reconciles()==True, because the file is double-counted against `discovered_files` in §P's
+    first equation. This is a real, undocumented-elsewhere caller-contract fragility worth
+    flagging in the final report, not a database-level bug this pass introduced or can safely
+    fix without a broader design decision (e.g. a source_ref-keyed uniqueness constraint) that
+    is out of this hardening pass's scope."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-d-double-count@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18d")
+        record_discovery_totals_kwargs = {"files": 1}
+        from app.rag.corpus_batch import record_discovery_totals
+
+        record_discovery_totals(session, batch, **record_discovery_totals_kwargs)
+        record_stored_original(session, batch)  # storage genuinely succeeded
+        record_failed(session, batch, source_ref="stored-then-unparseable.pdf", reason="parser raised after storage")
+        session.commit()
+
+        session.refresh(batch)
+        assert batch.discovered_files == 1
+        assert batch.stored_originals_done == 1
+        assert batch.failed_count == 1
+        # The double-count: stored_originals_done + failed_count == 2 for a batch that only
+        # ever discovered 1 file -- reconciles() can never be True for this batch as-is.
+        assert batch.reconciles() is False
+        assert batch.discovered_files != batch.stored_originals_done + batch.failed_count
+    finally:
+        session.rollback()
         session.close()
 
 
