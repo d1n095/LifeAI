@@ -32,6 +32,10 @@ from app.models.memory_source_unit import DocumentSourceUnit, MemorySourceUnit, 
 from app.models.memory_thread import MemoryThread
 from app.models.project import Project
 from app.models.project_memory import ProjectNote
+from app.models.problem_learning import (
+    LifeApproachOutcome, LifeProblem, LifeProblemApproach, LifeProblemAssumption,
+    LifeProblemDecision, LifeSolutionComponent,
+)
 
 
 SUPPORTED_TYPES = frozenset({
@@ -40,7 +44,9 @@ SUPPORTED_TYPES = frozenset({
     "mainai_plan", "mainai_task", "mainai_job", "mainai_checkpoint", "mainai_recovery",
     "engineering_lesson", "intelligence_execution", "intelligence_evidence",
     "intelligence_interpretation", "intelligence_idea", "project", "project_note", "memory_thread",
-    "life_intent", "life_intent_blocker",
+    "life_intent", "life_intent_blocker", "life_problem", "life_problem_approach",
+    "life_solution_component", "life_problem_assumption", "life_problem_decision",
+    "life_approach_outcome",
 })
 ANCHOR_TYPES = SUPPORTED_TYPES | {"explicit_topic"}
 
@@ -92,6 +98,12 @@ def _owned_row(db: Session, owner_id: uuid.UUID, ref: _Ref):
         "memory_thread": (MemoryThread, MemoryThread.owner_id),
         "life_intent": (LifeIntent, LifeIntent.owner_id),
         "life_intent_blocker": (LifeIntentBlocker, LifeIntentBlocker.owner_id),
+        "life_problem": (LifeProblem, LifeProblem.owner_id),
+        "life_problem_approach": (LifeProblemApproach, LifeProblemApproach.owner_id),
+        "life_solution_component": (LifeSolutionComponent, LifeSolutionComponent.owner_id),
+        "life_problem_assumption": (LifeProblemAssumption, LifeProblemAssumption.owner_id),
+        "life_problem_decision": (LifeProblemDecision, LifeProblemDecision.owner_id),
+        "life_approach_outcome": (LifeApproachOutcome, LifeApproachOutcome.owner_id),
     }
     if ref.object_type in mappings:
         model, owner_column = mappings[ref.object_type]
