@@ -62,6 +62,41 @@ felmeddelande-match till samma konvention `test_memory_source_units.py` redan an
 tidigare moduls egen privilege-narrowing-fixture kan legitimt hinna före triggern med "permission
 denied" beroende på testordning).
 
+**Hardening/attack-pass PÅGÅENDE (2026-08-15, grundarens 27-avsnittsmandat, `MERGA INTE` tills
+slutrapport).** Ny fil `backend/tests/backend/rag/test_bootstrap_hardening.py` (24 tester,
+samtliga gröna). Klart och verifierat hittills: Sektion 6 (räknarrace — riktig lost-update-bugg
+hittad och fixad i `corpus_batch.py`, se ovan), Sektion 2/3 (samtidiga immutability-races,
+delete/purge-gräns dokumenterad ärligt), Sektion 8 (S1C exclusive-arc mutationstest + fel-ägare-
+attack), Sektion 12 (AST-bevis: Source Foundation-moduler importerar aldrig `app.providers`),
+Sektion 19 (fullständig krasch/återupptagnings-demo, N/N-bevis), Sektion 11 (job fencing/stale
+worker för `message_source_backfill`, samma mönster som `message_sequence_backfill`), Sektion 13
+(RLS/gissad-UUID-isolering + **ett riktigt fynd**), Sektion 23 (lärdomar persisterade,
+`scripts/mainai/seed_life_source_foundation_hardening_lessons.py`, körd lokalt, INTE mot
+produktion).
+
+**Ett andra riktigt fynd, hittat och fixat under hardening-passet:**
+`source_import_batch_failures.batch_id` var en vanlig enkolumns-FK utan bindning mellan radens
+egen `owner_id` och den refererade batchens `owner_id` — RLS kontrollerar bara radens EGEN
+`owner_id`, aldrig något om raden den refererar till, så en ägare kunde peka `batch_id` på en
+batch som genuint ägdes av någon annan samtidigt som deras egen RLS WITH CHECK ändå gick igenom.
+Fixat i migration 0037 (redigerad på plats, före PR-granskning — inte en påstaplad
+uppföljningsmigration) med exakt samma composite-FK-mönster migration 0027 redan etablerade för
+`mainai_jobs`s barntabeller: `UNIQUE(id, owner_id)` på `source_import_batches` +
+`FOREIGN KEY (batch_id, owner_id) REFERENCES source_import_batches(id, owner_id)` på
+`source_import_batch_failures`. Migrations-roundtrip (upp → ner → upp) verifierad mot en
+engångsdatabas; full backend/rag/account/jobs/privilege-svit 601 gröna, 1 skip (avsiktlig).
+
+**Kvarstår av mandatet** (ej påbörjat eller endast delvis): Sektion 4 (hash/blob-integritet),
+5/7/9/10 (batch-completeness edge cases, idempotens, meddelande-identitet, backfill-krasch-
+matris — delvis redan täckt av befintlig svit, inte en explicit sektion ännu), 14 (privilege-
+golv — bekräftat redan generiskt täckt av `test_runtime_table_privileges.py`, ingen ny kod
+behövdes), 16 (CSV-attackmatris), 17 (arkiv/korpus-säkerhet — bekräftelse, ingen regression
+förväntad), 18 (failure-record-attacker), 20 (prestanda/gränser), 21 (input-fuzzing), 22
+(dok-sanning — `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md` bekräftat AVSIKTLIGT frånvarande från
+den här branchen, den lever på PR #60:s designbranch per grundarens uttryckliga instruktion om
+att hålla kod och design isär — INTE ett dokumentationsfel), 24 (slutlig samlad verifiering), 25
+(slutlig PR-uppdatering), 26 (slutrapport med MERGE-READY/NOT MERGE-READY).
+
 **Beroende och rekommenderad merge-ordning:** PR #61 är fristående kod, oberoende av PR #60 —
 kan granskas och mergas när som helst utan att röra PR #60:s diff. PR #60 beror däremot på att
 PR #61:s bootstrap FAKTISKT används för att importera grundarens fulla korpus innan en riktig
