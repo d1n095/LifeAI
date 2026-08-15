@@ -97,7 +97,10 @@ RLS_STATEMENTS = [
                       "life_intents", "life_intent_blockers", "life_intent_dependencies", "life_intent_events",
                       "life_problems", "life_problem_approaches", "life_solution_components", "life_component_evaluations",
                       "life_problem_assumptions", "life_problem_decisions", "life_approach_outcomes", "life_problem_lesson_links",
-                      "life_solution_selections", "life_solution_component_links", "life_problem_events")
+                      "life_solution_selections", "life_solution_component_links", "life_problem_events",
+                      "work_strategies", "work_strategy_executions", "work_trace_events", "work_efficiency_observations",
+                      "work_strategy_findings", "work_verification_obligations", "work_verification_observations",
+                      "work_stopping_decisions", "work_specialist_contributions", "work_strategy_lesson_links")
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
 ]
@@ -268,7 +271,10 @@ POLICY_DEFINITIONS = [
                       "life_intents", "life_intent_blockers", "life_intent_dependencies", "life_intent_events",
                       "life_problems", "life_problem_approaches", "life_solution_components", "life_component_evaluations",
                       "life_problem_assumptions", "life_problem_decisions", "life_approach_outcomes", "life_problem_lesson_links",
-                      "life_solution_selections", "life_solution_component_links", "life_problem_events")
+                      "life_solution_selections", "life_solution_component_links", "life_problem_events",
+                      "work_strategies", "work_strategy_executions", "work_trace_events", "work_efficiency_observations",
+                      "work_strategy_findings", "work_verification_obligations", "work_verification_observations",
+                      "work_stopping_decisions", "work_specialist_contributions", "work_strategy_lesson_links")
     ],
 ]
 
@@ -424,6 +430,16 @@ _MAINAI_EXECUTION_TABLES = (
     "life_solution_selections",
     "life_solution_component_links",
     "life_problem_events",
+    "work_strategies",
+    "work_strategy_executions",
+    "work_trace_events",
+    "work_efficiency_observations",
+    "work_strategy_findings",
+    "work_verification_obligations",
+    "work_verification_observations",
+    "work_stopping_decisions",
+    "work_specialist_contributions",
+    "work_strategy_lesson_links",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
@@ -458,6 +474,14 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {
         "name": "life_problem_append_only_deny_update", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "work_intelligence_deny_mutation", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "work_strategy_execution_counter_only", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
 ]
@@ -725,6 +749,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         for table in ("life_component_evaluations", "life_approach_outcomes", "life_problem_lesson_links",
                       "life_solution_selections", "life_solution_component_links", "life_problem_events"):
             conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_strategy_executions FROM mainai_app"))
+        for table in ("work_strategies", "work_trace_events", "work_efficiency_observations", "work_strategy_findings",
+                      "work_verification_obligations", "work_verification_observations", "work_stopping_decisions",
+                      "work_specialist_contributions", "work_strategy_lesson_links"):
+            conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
@@ -761,6 +790,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             *((table, frozenset({"SELECT", "INSERT"})) for table in (
                 "life_component_evaluations", "life_approach_outcomes", "life_problem_lesson_links",
                 "life_solution_selections", "life_solution_component_links", "life_problem_events")),
+            ("work_strategy_executions", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            *((table, frozenset({"SELECT", "INSERT"})) for table in (
+                "work_strategies", "work_trace_events", "work_efficiency_observations", "work_strategy_findings",
+                "work_verification_obligations", "work_verification_observations", "work_stopping_decisions",
+                "work_specialist_contributions", "work_strategy_lesson_links")),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
