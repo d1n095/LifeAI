@@ -7,6 +7,22 @@ migration does NOT touch ChatGPT-specific structure (chatgpt_export_imports is d
 deferred until a real export sample is available, per the founder's own explicit instruction)
 and does NOT change any existing table's data, only adds.
 
+KNOWN REVISION-NUMBER COLLISION (PR #61 correction pass, founder-mandated architecture review,
+2026-08-16). An independent branch, `codex/chatgpt-import-foundation` (never opened as a PR,
+forked directly from mainline rather than from this branch), also declares a migration numbered
+`0037` (`0037_structured_import_foundation.py`, `revision="0037"`, `down_revision="0036"`) for
+an unrelated, generic structured-import adapter framework. Applying both against the same
+`down_revision="0036"` would give Alembic two competing heads. Resolution: THIS migration keeps
+`0037` unchanged (it is the one on the branch actually being merged first; renumbering an
+about-to-merge migration to accommodate a branch that was never even opened as a PR would be
+backwards). `codex/chatgpt-import-foundation`'s migration must be renumbered when it is next
+rebased onto mainline: its `down_revision` must become whatever this repo's actual Alembic head
+is AT THAT TIME (`alembic heads` on the target base, not a number hardcoded here — the exact
+digits depend on what has merged by then, including whether any of the `codex/*` chain stacked
+on top of it, e.g. `codex/scoped-development-supervisor-foundation`'s own `0038`-`0045`, has
+also merged), and its own `revision` renumbered to the next free slot after that. Do not merge
+`codex/chatgpt-import-foundation` as-is against a mainline that already contains this file.
+
 Two independent pieces:
 
 1. **source_import_batches / source_import_batch_failures** — a new, ordinary, owner-scoped
@@ -67,7 +83,14 @@ def upgrade() -> None:
             parsed_total integer NOT NULL DEFAULT 0,
 
             duplicate_count integer NOT NULL DEFAULT 0,
-            failed_count integer NOT NULL DEFAULT 0,
+            -- PR #61 correction pass (post-review, founder-mandated): a single `failed_count`
+            -- bucket let a post-storage parse failure double-count against both
+            -- stored_originals_done (already incremented when the file was stored) and
+            -- failed_count (incremented again on the later parse failure), permanently
+            -- breaking the reconciliation CHECK below for that batch. Split by pipeline stage
+            -- so every file is counted in exactly one bucket per stage.
+            storage_failed_count integer NOT NULL DEFAULT 0,
+            parse_failed_count integer NOT NULL DEFAULT 0,
             unsupported_count integer NOT NULL DEFAULT 0,
             semantic_pending_count integer NOT NULL DEFAULT 0,
 
@@ -81,18 +104,22 @@ def upgrade() -> None:
                 AND discovered_messages >= 0 AND discovered_attachments >= 0 AND discovered_bytes >= 0
                 AND stored_originals_done >= 0 AND stored_originals_total >= 0
                 AND parsed_done >= 0 AND parsed_total >= 0
-                AND duplicate_count >= 0 AND failed_count >= 0
+                AND duplicate_count >= 0 AND storage_failed_count >= 0 AND parse_failed_count >= 0
                 AND unsupported_count >= 0 AND semantic_pending_count >= 0
             ),
             -- The bootstrap doc's §P completeness proof, enforced structurally rather than
             -- left as an application-level convention: a batch cannot be marked completed
-            -- unless every discovered file is accounted for as either stored or failed, and
-            -- every stored original is accounted for as parsed, unsupported, or pending.
+            -- unless every discovered file is accounted for as either stored or failed at the
+            -- storage stage, and every STORED file is accounted for as parsed, unsupported,
+            -- pending, or failed at the parse stage. Two independent equations, one per stage
+            -- -- a file that fails at the parse stage is counted once in stored_originals_done
+            -- (it WAS stored) and once in parse_failed_count, never in storage_failed_count.
             CONSTRAINT ck_sib_completed_reconciles CHECK (
                 status <> 'completed'
                 OR (
-                    discovered_files = stored_originals_done + failed_count
-                    AND parsed_done + unsupported_count + semantic_pending_count = stored_originals_done
+                    discovered_files = stored_originals_done + storage_failed_count
+                    AND parsed_done + unsupported_count + semantic_pending_count + parse_failed_count
+                        = stored_originals_done
                 )
             ),
             -- Lets source_import_batch_failures below carry a real composite FK tying its own
@@ -137,9 +164,24 @@ def upgrade() -> None:
     """)
 
     # --- documents.source_import_batch_id -------------------------------------------------
+    # PR #61 correction pass (post-review, founder-mandated): the original single-column
+    # `REFERENCES source_import_batches(id)` had the exact same cross-owner gap already found
+    # and fixed on source_import_batch_failures.batch_id above -- documents' own RLS policy
+    # (documents_isolation) only ever checks documents.uploaded_by, never anything about a row
+    # source_import_batch_id references, so a plain FK would let a caller satisfy their own
+    # row's RLS WITH CHECK while pointing source_import_batch_id at a batch genuinely owned by
+    # someone else. Composite FK against uq_sib_id_owner_id, same pattern as fk_sibf_batch_owner.
+    # Postgres's default MATCH SIMPLE means the constraint is only enforced when BOTH columns
+    # are non-NULL, which is correct here: uploaded_by is nullable for reasons unrelated to
+    # this column (documents.py's own "kept only for the one remaining internal-invariant
+    # guard" comment), and source_import_batch_id is NULL for every document outside a tracked
+    # batch -- neither case is the cross-owner attack this constraint exists to close.
     op.execute("""
         ALTER TABLE documents
-            ADD COLUMN source_import_batch_id uuid REFERENCES source_import_batches(id);
+            ADD COLUMN source_import_batch_id uuid;
+        ALTER TABLE documents
+            ADD CONSTRAINT fk_documents_batch_owner
+            FOREIGN KEY (source_import_batch_id, uploaded_by) REFERENCES source_import_batches (id, owner_id);
         CREATE INDEX ix_documents_source_import_batch ON documents (source_import_batch_id);
     """)
 

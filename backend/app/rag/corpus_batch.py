@@ -120,13 +120,33 @@ def record_unsupported(db: Session, batch: SourceImportBatch) -> None:
     _atomic_increment(db, batch, unsupported_count=1)
 
 
-def record_failed(db: Session, batch: SourceImportBatch, *, source_ref: str, reason: str, retryable: bool = False) -> None:
-    """A source that could not even be stored (hash/write failure) or could not be parsed
-    despite having a matching parser (corrupt content). Both cases increment `failed_count` --
-    the distinction between "never stored" and "stored but unparseable" is exactly what
-    `source_import_batch_failures.reason` records in free text for a human to read, not a
-    separate counter axis; §P's reconciliation check only needs the aggregate."""
-    _atomic_increment(db, batch, failed_count=1)
+def record_storage_failed(db: Session, batch: SourceImportBatch, *, source_ref: str, reason: str, retryable: bool = False) -> None:
+    """A source that could not even be stored (hash/write failure) -- it never became part of
+    `stored_originals_done`. Counts toward `storage_failed_count`, the bucket
+    `ck_sib_completed_reconciles`' discovery-vs-storage equation checks against. Kept
+    structurally separate from `record_parse_failed` (PR #61 correction pass) so a caller can
+    never double-count the same file against both a "stored" and a "failed" bucket."""
+    _atomic_increment(db, batch, storage_failed_count=1)
+    db.add(
+        SourceImportBatchFailure(
+            owner_id=batch.owner_id,
+            batch_id=batch.id,
+            source_ref=source_ref,
+            reason=reason,
+            retryable=retryable,
+        )
+    )
+
+
+def record_parse_failed(db: Session, batch: SourceImportBatch, *, source_ref: str, reason: str, retryable: bool = False) -> None:
+    """A source that WAS stored successfully (the caller already called `record_stored_original`
+    or `record_duplicate` for it) but could not be parsed despite having a matching parser
+    (corrupt content). Counts toward `parse_failed_count`, the bucket
+    `ck_sib_completed_reconciles`' storage-vs-parse-outcome equation checks against -- calling
+    this for a file `record_storage_failed` was already called for (or vice versa) double-counts
+    it and will make the batch permanently unable to reconcile; each source_ref must go through
+    exactly one of the two."""
+    _atomic_increment(db, batch, parse_failed_count=1)
     db.add(
         SourceImportBatchFailure(
             owner_id=batch.owner_id,

@@ -53,7 +53,18 @@ class SourceImportBatch(Base):
     parsed_total: Mapped[int] = mapped_column(Integer, default=0)
 
     duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
-    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    # PR #61 correction pass (post-review, founder-mandated): a single `failed_count` bucket
+    # could not distinguish "never stored" (never counted in stored_originals_done) from
+    # "stored, then failed to parse" (already counted in stored_originals_done) -- a source
+    # that failed at the parse stage after a successful store used to increment BOTH
+    # stored_originals_done and failed_count for the SAME file, permanently breaking
+    # ck_sib_completed_reconciles' first equation (discovered_files would forever be one less
+    # than stored_originals_done + failed_count) while simultaneously breaking the second
+    # equation (that file was never counted in parsed_done/unsupported_count/
+    # semantic_pending_count either). Splitting the bucket by stage keeps each stored file
+    # accounted for exactly once in each equation, regardless of which stage it failed at.
+    storage_failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    parse_failed_count: Mapped[int] = mapped_column(Integer, default=0)
     unsupported_count: Mapped[int] = mapped_column(Integer, default=0)
     semantic_pending_count: Mapped[int] = mapped_column(Integer, default=0)
 
@@ -63,10 +74,15 @@ class SourceImportBatch(Base):
     def reconciles(self) -> bool:
         """Python-side mirror of migration 0037's `ck_sib_completed_reconciles` CHECK -- lets
         application code decide "is this batch actually done" BEFORE attempting to set
-        status=completed (and getting a database error), not just after."""
+        status=completed (and getting a database error), not just after.
+
+        Two independent equations, one per pipeline stage: every discovered file is either
+        stored or failed at the storage stage (never both); every STORED file is then either
+        parsed, unsupported, pending, or failed at the parse stage (never more than one of
+        these, and never also absent from storage_failed_count, since it WAS stored)."""
         return (
-            self.discovered_files == self.stored_originals_done + self.failed_count
-            and self.parsed_done + self.unsupported_count + self.semantic_pending_count
+            self.discovered_files == self.stored_originals_done + self.storage_failed_count
+            and self.parsed_done + self.unsupported_count + self.semantic_pending_count + self.parse_failed_count
             == self.stored_originals_done
         )
 

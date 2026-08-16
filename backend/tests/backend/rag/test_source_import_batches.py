@@ -9,8 +9,6 @@ parsed + unsupported + pending == stored, before the database will even allow st
 unsupported-file bookkeeping, and owner isolation.
 """
 
-import uuid
-
 import pytest
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
@@ -23,8 +21,9 @@ from app.rag.corpus_batch import (
     mark_partial_or_failed,
     record_discovery_totals,
     record_duplicate,
-    record_failed,
+    record_parse_failed,
     record_parsed,
+    record_storage_failed,
     record_stored_original,
     record_unsupported,
     try_mark_completed,
@@ -168,7 +167,7 @@ def test_db_check_constraint_rejects_completed_status_when_counters_dont_reconci
 
 def test_failed_files_count_toward_completeness_not_just_stored():
     """A file that could not even be stored still counts toward "accounted for" -- completeness
-    means discovered_files == stored + failed, not stored == discovered."""
+    means discovered_files == stored + storage_failed, not stored == discovered."""
     session = SessionLocal()
     try:
         owner = _make_user(session, "failed-toward-completeness@example.com")
@@ -178,7 +177,7 @@ def test_failed_files_count_toward_completeness_not_just_stored():
         record_discovery_totals(session, batch, files=4)
         for _ in range(3):
             record_stored_original(session, batch)
-        record_failed(session, batch, source_ref="corrupt-file.pdf", reason="write failed: disk full")
+        record_storage_failed(session, batch, source_ref="corrupt-file.pdf", reason="write failed: disk full")
         for _ in range(3):
             record_parsed(session, batch)
         session.commit()
@@ -229,10 +228,12 @@ def test_record_failed_creates_visible_failure_row_with_reason():
 
         batch = create_batch(session, owner.id, label="Parser failures visible")
         record_discovery_totals(session, batch, files=1)
-        record_failed(session, batch, source_ref="broken.docx", reason="parser raised: bad zip central directory", retryable=False)
+        record_stored_original(session, batch)  # the file WAS stored; only parsing failed
+        record_parse_failed(session, batch, source_ref="broken.docx", reason="parser raised: bad zip central directory", retryable=False)
         session.commit()
 
-        assert batch.failed_count == 1
+        assert batch.parse_failed_count == 1
+        assert batch.reconciles()  # 1 == 1 + 0, and 0+0+0+1 == 1 -- both stages accounted for
         failures = session.query(SourceImportBatchFailure).filter_by(batch_id=batch.id).all()
         assert len(failures) == 1
         assert failures[0].source_ref == "broken.docx"
@@ -321,7 +322,7 @@ def test_negative_counters_rejected_by_check_constraint():
 
         batch = create_batch(session, owner.id, label="Bad counters")
         session.commit()
-        batch.failed_count = -1
+        batch.storage_failed_count = -1
         with pytest.raises(IntegrityError, match="ck_sib_counts_non_negative"):
             session.commit()
     finally:
@@ -374,7 +375,7 @@ def test_rls_owner_isolation_on_source_import_batch_failures():
         owner_b = _make_user(session, "failure-rls-b@example.com")
         _set_rls_user(session, owner_a.id)
         batch = create_batch(session, owner_a.id, label="Owner A's corpus")
-        record_failed(session, batch, source_ref="a.pdf", reason="boom")
+        record_storage_failed(session, batch, source_ref="a.pdf", reason="boom")
         session.commit()
 
         _set_rls_user(session, owner_b.id)

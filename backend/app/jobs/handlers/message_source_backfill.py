@@ -80,10 +80,24 @@ async def run_message_source_backfill_job(
                 _lease_lost("cancel")
             return
 
+        # PR #61 correction pass (post-review, founder-mandated): renew_mainai_job_lease() must
+        # NOT be committed here on its own -- its docstring is explicit that it "does NOT
+        # commit — the caller's own batch transaction boundary decides when this becomes
+        # durable" (same discipline as update_progress()/corpus_review.py). Committing right
+        # after renew (the previous bug) closed the fencing window too early: the UPDATE's row
+        # lock was released at that commit, so a worker whose subsequent batch took long enough
+        # for the freshly-renewed lease to still expire could have its domain writes below land
+        # anyway, since nothing re-checked the lease at THAT commit. Leaving the renewal
+        # uncommitted keeps its row lock held for the batch's entire duration below -- no other
+        # worker's claim_next_mainai_job() can reclaim this row (SELECT ... FOR UPDATE SKIP
+        # LOCKED skips locked rows) until backfill_message_source_units' own commit lands,
+        # which now durably includes the lease renewal and the batch's domain writes as one
+        # atomic transaction. A lease that was already lost before this call still raises
+        # immediately with nothing written, exactly as before.
         try:
             renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
-            db.commit()
         except JobLeaseLostError:
+            db.rollback()
             _lease_lost("heartbeat")
             return
 
