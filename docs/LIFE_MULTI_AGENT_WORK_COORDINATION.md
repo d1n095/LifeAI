@@ -157,6 +157,19 @@ asked directly. `agent_runtime_snapshot()`/`work_registry_snapshot()` both take 
 matching this codebase's established doctrine — even though `coordination_agents` itself stays
 deliberately founder-wide and unfiltered.
 
+For an assignment `evaluate_assignment_readiness()` would itself call `ASSIGNABLE` (no
+structural dependency/duplicate/scope/staleness/availability blocker) but whose canonical
+status is the explicit, human/process-set `blocked` or `changes_requested` — reached only
+through a direct `transition_status()` call, never computed by that function — `block_reason`
+falls back to the most recent `status_changed` event's own `detail`, the same append-only log
+every other piece of an assignment's history already goes through, rather than silently
+reporting no reason at all for a row someone explicitly marked blocked. This is what actually
+lets a caller distinguish "waiting for review" from "waiting for approval/a provider/an
+external resource/a branch-PR/a founder decision/truly impossible" — the founder's own
+requested wait-reason vocabulary — using data this module already writes: any caller blocking
+an assignment records `detail={"reason": "waiting_founder_decision"}` (or whatever taxonomy
+string it wants) and the runtime view surfaces exactly that, verbatim, never invented here.
+
 **`app.agent_coordination.routing`** answers "which currently registered agent(s) are eligible
 for this assignment" as a pure filter, in this fixed order: the reviewer/researcher-must-be-
 read_only invariant, a scope-conflict pre-check (`scan_write_scope_conflict()` — a refactor
