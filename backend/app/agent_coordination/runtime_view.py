@@ -208,12 +208,23 @@ def _current_assignments_for_agent(db: Session, *, agent_id: uuid.UUID, owner_id
 
 
 def agent_runtime_snapshot(db: Session, agent: CoordinationAgent, *, owner_id: uuid.UUID) -> AgentRuntimeView:
-    """One agent's complete current-state snapshot. `owner_id` is required and filters
-    `agent_work_assignments` explicitly -- defense in depth alongside RLS, matching this
-    codebase's established doctrine (see e.g.
-    app.agent_coordination.service.create_work_assignment's own identical reasoning), never
-    relying on the session's RLS context alone even though `coordination_agents` itself is
-    deliberately founder-wide and unfiltered (see that model's own docstring)."""
+    """One agent's complete current-state snapshot. `owner_id` is required and this function's
+    OWN `agent_work_assignments` query (`_current_assignments_for_agent` below) filters by it
+    explicitly -- defense in depth alongside RLS, matching this codebase's established
+    doctrine (see e.g. app.agent_coordination.service.create_work_assignment's own identical
+    reasoning), never relying on the session's RLS context alone even though
+    `coordination_agents` itself is deliberately founder-wide and unfiltered (see that model's
+    own docstring).
+
+    Known, pre-existing, NOT fixed here: `agent_availability()`/`count_active_assignments()`
+    below (both inherited unchanged from app.agent_coordination.service, already shipped and
+    tested) do NOT take this same explicit `owner_id` -- they rely on the caller's RLS session
+    context alone for their own `agent_work_assignments` read. In this single-founder
+    deployment that is harmless (one session, one owner), but it means `availability_reason`
+    on this view is only as owner-scoped as the CALLING session's RLS context, not as
+    explicitly guaranteed as `current_assignments` above. Widening that pair's own signature
+    is out of this PR's scope -- it is already-merged, already-reviewed PR #82 code; see
+    docs/BRANCH_REGISTRY.md's entry for this branch."""
 
     available, reason = agent_availability(db, agent_id=agent.id)
     assignments = _current_assignments_for_agent(db, agent_id=agent.id, owner_id=owner_id)

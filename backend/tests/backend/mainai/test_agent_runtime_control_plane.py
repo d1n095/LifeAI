@@ -12,6 +12,7 @@ non-overlapping subsystem), Codex IDLE. See docs/LIFE_MULTI_AGENT_WORK_COORDINAT
 "Runtime visibility & deterministic routing" section for the full architecture."""
 
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import text as sa_text
@@ -27,11 +28,13 @@ from app.agent_coordination.runtime_view import (
     RuntimeStatus,
     agent_runtime_snapshot,
     all_agents_runtime_snapshot,
+    assignment_runtime_view,
     work_registry_snapshot,
 )
 from app.agent_coordination.service import (
     acquire_lease,
     build_agent_outcome_payload,
+    create_parallel_exploration_group,
     create_work_assignment,
     register_agent,
     transition_status,
@@ -128,6 +131,28 @@ def test_running_agent_status_derived_from_active_lease(superuser_db, owner_id):
     assert view.heartbeat_at is not None
 
 
+def test_heartbeat_at_selects_the_most_recent_across_multiple_active_leases(superuser_db, owner_id):
+    """An agent with concurrency_limit > 1 can hold more than one active lease at once --
+    heartbeat_at must report the MOST RECENT last_heartbeat_at across all of them, never an
+    arbitrary one (e.g. the first row returned)."""
+    goal, _plan, (task_a, task_b) = _goal_plan_task(superuser_db, owner_id, task_count=2)
+    codex = _agent(superuser_db, "codex", concurrency_limit=2)
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_a, agent=codex, role="builder", mode="read_write", paths=["backend/app/finance/**"])
+    b = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_b, agent=codex, role="builder", mode="read_write", paths=["frontend/**"])
+    lease_a = _lease(superuser_db, a, codex, branch="codex/finance", worktree="/tmp/wt-heartbeat-a", paths=["backend/app/finance/**"], ttl_seconds=600).lease
+    _lease(superuser_db, b, codex, branch="codex/frontend", worktree="/tmp/wt-heartbeat-b", paths=["frontend/**"], ttl_seconds=600)
+    transition_status(superuser_db, assignment=a, new_status="running")
+    transition_status(superuser_db, assignment=b, new_status="running")
+
+    stale_cutoff = datetime.utcnow() - timedelta(minutes=10)
+    lease_a.last_heartbeat_at = stale_cutoff
+    superuser_db.flush()
+
+    view = agent_runtime_snapshot(superuser_db, codex, owner_id=owner_id)
+    assert view.heartbeat_at is not None
+    assert view.heartbeat_at > stale_cutoff  # lease_b's fresher heartbeat won, not lease_a's staled-back one
+
+
 def test_waiting_dependency_agent_status_and_block_reason(superuser_db, owner_id):
     goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
     cursor = _agent(superuser_db, "cursor-agent")
@@ -219,6 +244,20 @@ def test_work_registry_snapshot_lists_every_current_assignment(superuser_db, own
     assert {v.repository_identity for v in registry} == {"lifeai"}
 
 
+def test_assignment_runtime_view_accepts_a_pre_fetched_agent_without_a_redundant_query(superuser_db, owner_id):
+    """agent_key comes from the explicitly supplied `agent` (an already-fetched row a caller
+    like agent_runtime_snapshot() passes in to avoid one query per assignment) rather than
+    assignment_runtime_view() re-fetching it itself -- calling it directly, standalone, proves
+    that parameter actually drives the result."""
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    view = assignment_runtime_view(superuser_db, a, agent=cursor)
+    assert view.agent_key == cursor.agent_key
+    assert view.assignment_id == a.id
+    assert view.canonical_status == a.status.value
+
+
 def test_all_agents_runtime_snapshot_sees_every_registered_agent(superuser_db, owner_id):
     cursor = _agent(superuser_db, "cursor-agent")
     claude = _agent(superuser_db, "claude-code")
@@ -246,7 +285,7 @@ def test_routing_scenario_a_two_non_overlapping_writers_both_eligible(superuser_
 def test_routing_scenario_b_write_request_on_occupied_path_rejected(superuser_db, owner_id):
     goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
     cursor = _agent(superuser_db, "cursor-agent")
-    _agent(superuser_db, "claude-code")
+    claude = _agent(superuser_db, "claude-code")
     a = _assign(
         superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write",
         paths=["backend/app/autonomous_gap/**", "backend/app/development_supervisor/**"],
@@ -259,6 +298,45 @@ def test_routing_scenario_b_write_request_on_occupied_path_rejected(superuser_db
     )
     assert decision.outcome == OUTCOME_SCOPE_CONFLICT
     assert decision.eligible_agent_ids == ()
+    # SCOPE_CONFLICT blocks every registered agent equally -- diagnostics must not come back
+    # empty just because the rejection happened before per-candidate filtering ran.
+    assert {r.agent_id for r in decision.rejected} == {cursor.id, claude.id}
+    rejected_reasons = {r.reason for r in decision.rejected}
+    assert len(rejected_reasons) == 1 and "already conflicts with active lease" in next(iter(rejected_reasons))
+
+
+def test_routing_parallel_exploration_group_exempts_overlapping_writers(superuser_db, owner_id):
+    """The one explicit exemption from SCOPE_CONFLICT: two agents intentionally competing on
+    the SAME canonical problem, both already placed in the SAME parallel-exploration group,
+    remain routable onto overlapping paths -- proving `eligible_agents_for()` correctly threads
+    `parallel_exploration_group_id` through to `scan_write_scope_conflict()`."""
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    codex = _agent(superuser_db, "codex")
+    group = create_parallel_exploration_group(
+        superuser_db, owner_id=owner_id, goal_id=goal.id, canonical_problem_ref="best-routing-approach", created_by="founder"
+    )
+    a = _assign(
+        superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write",
+        paths=["backend/app/agent_coordination/**"], parallel_exploration_group_id=group.id,
+    )
+    _lease(superuser_db, a, cursor, branch="cursor/explore-a", worktree="/tmp/wt-routing-explore-a", paths=a.allowed_paths, ttl_seconds=600)
+
+    # WITHOUT the group id, the same scope is correctly SCOPE_CONFLICT.
+    without_group = eligible_agents_for(
+        superuser_db, owner_id=owner_id, role="builder", read_write_mode="read_write",
+        repository_identity="lifeai", allowed_paths=["backend/app/agent_coordination/**"],
+    )
+    assert without_group.outcome == OUTCOME_SCOPE_CONFLICT
+
+    # WITH the matching group id, codex remains routable onto the same overlapping scope.
+    with_group = eligible_agents_for(
+        superuser_db, owner_id=owner_id, role="builder", read_write_mode="read_write",
+        repository_identity="lifeai", allowed_paths=["backend/app/agent_coordination/**"],
+        parallel_exploration_group_id=group.id,
+    )
+    assert with_group.outcome != OUTCOME_SCOPE_CONFLICT
+    assert codex.id in with_group.eligible_agent_ids
 
 
 def test_routing_scenario_c_read_only_review_never_blocked_by_scope_conflict(superuser_db, owner_id):

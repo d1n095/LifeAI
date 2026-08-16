@@ -86,6 +86,8 @@ def eligible_agents_for(
             OUTCOME_NONE_AVAILABLE, reason=f"role '{role}' must be assigned read_write_mode='read_only'; '{read_write_mode}' is not a valid pairing"
         )
 
+    candidates = list(db.execute(select(CoordinationAgent).order_by(CoordinationAgent.agent_key)).scalars())
+
     if mode_enum == WorkAssignmentReadWriteMode.read_write:
         conflict_outcome, conflicting_lease = scan_write_scope_conflict(
             db,
@@ -97,13 +99,18 @@ def eligible_agents_for(
             parallel_exploration_group_id=parallel_exploration_group_id,
         )
         if conflict_outcome is not None:
+            # The conflict is over the SCOPE itself, not any one candidate -- it blocks every
+            # agent equally, so every candidate is recorded as rejected with the SAME concrete
+            # reason (never left empty; a caller inspecting `rejected` for diagnostics on the
+            # most common real-world rejection must not get nothing back).
+            conflict_reason = f"requested scope already conflicts with active lease {conflicting_lease.id} ({conflict_outcome})"
             return RoutingDecision(
                 OUTCOME_SCOPE_CONFLICT,
-                reason=f"requested scope already conflicts with active lease {conflicting_lease.id} ({conflict_outcome})",
+                rejected=tuple(CandidateRejection(a.id, a.agent_key, conflict_reason) for a in candidates),
+                reason=conflict_reason,
             )
 
     required = set(required_capabilities)
-    candidates = list(db.execute(select(CoordinationAgent).order_by(CoordinationAgent.agent_key)).scalars())
     eligible: list[uuid.UUID] = []
     rejected: list[CandidateRejection] = []
 
