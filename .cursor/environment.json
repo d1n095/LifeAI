@@ -1,0 +1,19 @@
+{
+  "name": "Life OS / MainAI",
+  "install": ".cursor/install.sh",
+  "start": ".cursor/start.sh",
+  "terminals": [
+    {
+      "name": "backend (FastAPI :8000)",
+      "command": "cd backend && source .venv/bin/activate && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    },
+    {
+      "name": "frontend (Next.js :3000)",
+      "command": "cd frontend && INTERNAL_API_URL=http://localhost:8000 exec npx next dev -p 3000"
+    }
+  ],
+  "ports": [
+    { "name": "Frontend (Next.js)", "port": 3000 },
+    { "name": "Backend (FastAPI)", "port": 8000 }
+  ]
+}
