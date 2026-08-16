@@ -223,6 +223,18 @@ def validate_plan(db, context: operator.OperatorContext, plan: DevelopmentPlan):
             MainAIGoal.id == task.goal_id, MainAIGoal.owner_id == context.owner_id
         )
     ).scalar_one()
+    # This driver is reached only from the autonomous chain (development_supervisor /
+    # safe_planner) -- a human-reviewed goal dispatched via the ordinary executor never runs
+    # through validate_plan(). A goal still carrying the human-reviewed "standard_repo_work"
+    # default here would let autonomous writes/commits inherit that policy's AUTO approval
+    # silently (founder P1 review finding) -- fail closed instead of trusting the caller set
+    # the right policy.
+    if goal.approval_policy != "autonomous_development_work":
+        raise DriverPlanError(
+            "autonomous development driver requires goal.approval_policy == "
+            "'autonomous_development_work' -- refusing to run local writes/commits under a "
+            f"policy ('{goal.approval_policy}') not scoped for unattended execution"
+        )
     require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
     if binding.id != plan.strategy_execution_id:
         raise DriverPlanError("strategy binding is not canonical")

@@ -69,6 +69,13 @@ class SupervisorScope:
     completion_criteria: tuple[str, ...] = ()
     life_intent_id: uuid.UUID | None = None
     self_work: bool = False
+    # Distinct from approval_policy on the goal: approval_policy gates the MainAITask's own
+    # write/commit, but a WorkBinding with no deterministic candidate falls through to
+    # plan_with_provider() -- a real, billed external API call. That is a spend decision, not
+    # a repo-write decision, and the founder authorizing a scope for autonomous local work does
+    # not imply authorizing it to spend money calling a provider (founder P1 review finding).
+    # Defaults closed; the founder must opt a scope into provider spend explicitly.
+    provider_spend_authorized: bool = False
 
 
 @dataclass(frozen=True)
@@ -256,6 +263,15 @@ def select_candidate(assessments):
                 None,
                 "CAPABILITY_MISSING",
                 "a bounded candidate has a durable capability gap",
+            )
+        # Checked before the generic "provider" branch below: an authorization gap is not an
+        # outage -- retrying will never resolve it, unlike WAITING_PROVIDER, so it must not be
+        # bucketed into the same classification a caller might just retry against.
+        if any("not authorized" in item.reason for item in assessments):
+            return (
+                None,
+                "PROVIDER_SPEND_NOT_AUTHORIZED",
+                "provider-assisted planning is not authorized for this scope",
             )
         if any("provider" in item.reason for item in assessments):
             return None, "WAITING_PROVIDER", "provider-dependent work is waiting"
@@ -528,6 +544,36 @@ async def run_supervisor(
                 request=request,
                 operator_context=context,
                 candidate=binding.candidate,
+            )
+        elif not scope.provider_spend_authorized:
+            # binding.candidate is None -> this task has no deterministic plan and would
+            # otherwise fall through to plan_with_provider(), a real billed external call.
+            # A scope not explicitly authorized for provider spend must never reach that call
+            # -- deny it the same shape as WAITING_PROVIDER/CAPABILITY_MISSING (deferred if
+            # other work is independent, else a durable classification), never a silent AUTO
+            # fallback (founder P1 review finding).
+            cp = _checkpoint(
+                db,
+                goal=goal,
+                task=task,
+                job_id=job.id,
+                phase="PROVIDER_SPEND_NOT_AUTHORIZED",
+                state={
+                    "completed_task_ids": [str(value) for value in selected],
+                    "selected_task_id": str(task.id),
+                },
+            )
+            if binding.independent:
+                deferred[task.id] = "provider-assisted planning is not authorized for this scope"
+                continue
+            return _result(
+                "PROVIDER_SPEND_NOT_AUTHORIZED",
+                goal,
+                completed_jobs,
+                selected,
+                assessments,
+                "provider-assisted planning requires scope.provider_spend_authorized=True",
+                cp,
             )
         else:
             planning = await plan_with_provider(

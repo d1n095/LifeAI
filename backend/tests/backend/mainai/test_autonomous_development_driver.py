@@ -19,15 +19,15 @@ from app.models.active_context import ActiveContextMember
 from app.models.mainai_execution import MainAICheckpoint, MainAITaskStatus
 from app.models.mainai_job import MainAIJobStatus
 from app.models.work_intelligence import WorkTraceEvent
-from app.mainai_execution.approval import ApprovalRequiredError
+from app.mainai_execution.approval import ApprovalRequiredError, grant_task_approval
 from tests.backend.mainai.test_development_operator import (
     _foundation as _operator_foundation,
     _git,
 )
 
 
-def _driver_foundation(db, tmp_path):
-    values = _operator_foundation(db, tmp_path)
+def _driver_foundation(db, tmp_path, *, approved=True):
+    values = _operator_foundation(db, tmp_path, approved=approved)
     values[2].status = MainAITaskStatus.running
     db.flush()
     return values
@@ -242,16 +242,14 @@ def test_failed_verification_never_completes_task(superuser_db, tmp_path):
 def test_approval_review_and_retry_bounds_stop_with_exact_reason(
     superuser_db, tmp_path
 ):
-    _, _, task, _, _, context = _driver_foundation(superuser_db, tmp_path)
-    task.approval_required = True
-    superuser_db.flush()
+    _, _, task, _, _, context = _driver_foundation(superuser_db, tmp_path, approved=False)
     with pytest.raises(ApprovalRequiredError):
         run_driver(
             superuser_db,
             context=context,
             plan=_plan(context, "approval", _read_step()),
         )
-    task.approval_required = False
+    grant_task_approval(superuser_db, task=task, approved_by="test")
     review = run_driver(
         superuser_db,
         context=context,
@@ -377,3 +375,129 @@ def test_end_to_end_provider_independent_development_task(superuser_db, tmp_path
         "stage_scoped_changes",
         "commit_scoped_changes",
     ]
+
+
+# --- P1 approval-default regression coverage (founder review finding) -------------------
+#
+# The autonomous chain (development_supervisor / safe_planner) reaches this driver without a
+# human reviewing each task, unlike the ordinary founder-facing executor. Before this fix, a
+# goal that forgot to set approval_policy would silently inherit "standard_repo_work"'s AUTO
+# default for repo_edit -- these tests prove that gap is closed at both of its two layers:
+# (1) the driver refuses to run at all under any policy but "autonomous_development_work",
+# and (2) even under that policy, an individual write/commit still requires a real
+# approval_granted event, exactly like founder-facing work does.
+
+
+def test_autonomous_write_denied_when_goal_does_not_use_autonomous_policy(
+    superuser_db, tmp_path
+):
+    _, goal, task, _, _, context = _driver_foundation(superuser_db, tmp_path)
+    assert goal.approval_policy == "autonomous_development_work"
+    goal.approval_policy = "standard_repo_work"
+    superuser_db.flush()
+    with pytest.raises(DriverPlanError, match="autonomous_development_work"):
+        validate_plan(
+            superuser_db,
+            context,
+            _plan(
+                context,
+                "unscoped-write",
+                DriverStep(
+                    "create_file",
+                    "add a file",
+                    "new source hash",
+                    {"path": "unauthorized.py", "content": "x = 1\n", "expected_sha256": None},
+                    LOCAL_WRITE,
+                ),
+            ),
+        )
+    assert task.status == MainAITaskStatus.running
+
+
+def test_autonomous_commit_denied_without_task_approval(superuser_db, tmp_path):
+    _, goal, task, _, _, context = _driver_foundation(superuser_db, tmp_path, approved=False)
+    assert goal.approval_policy == "autonomous_development_work"
+    with pytest.raises(ApprovalRequiredError):
+        run_driver(
+            superuser_db,
+            context=context,
+            plan=_plan(
+                context,
+                "unapproved-commit",
+                DriverStep(
+                    "stage_scoped_changes",
+                    "stage authorized files",
+                    "scoped index",
+                    {"paths": ["safe.txt"]},
+                    LOCAL_WRITE,
+                ),
+                DriverStep(
+                    "commit_scoped_changes",
+                    "commit without approval",
+                    "exact commit SHA",
+                    {"message": "should be denied"},
+                    LOCAL_WRITE,
+                ),
+            ),
+        )
+
+
+def test_approved_autonomous_write_and_commit_still_functions(superuser_db, tmp_path):
+    _, goal, task, job, worktree, context = _driver_foundation(superuser_db, tmp_path)
+    assert goal.approval_policy == "autonomous_development_work"
+    task.verification_plan = []
+    superuser_db.flush()
+    context = replace(context, allowed_paths=("approved.py", "test_approved.py"))
+    approved = "def add(left, right):\n    return left + right\n"
+    approved_test = "from approved import add\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+    plan = _plan(
+        context,
+        "approved-write-and-commit",
+        DriverStep(
+            "create_file",
+            "add an authorized file",
+            "new source hash",
+            {"path": "approved.py", "content": approved, "expected_sha256": None},
+            LOCAL_WRITE,
+        ),
+        DriverStep(
+            "create_file",
+            "add a focused regression test",
+            "new test hash",
+            {"path": "test_approved.py", "content": approved_test, "expected_sha256": None},
+            LOCAL_WRITE,
+        ),
+        DriverStep(
+            "run_focused_test",
+            "prove the authorized change is correct",
+            "pytest exit zero",
+            {"profile_name": "focused_pytest", "arguments": ["test_approved.py"]},
+            LOCAL_EXECUTION,
+            verification_required=True,
+        ),
+        DriverStep(
+            "verification_evaluate",
+            "evaluate required operator evidence",
+            "verification checkpoint",
+            required_risk=READ_ONLY,
+        ),
+        DriverStep(
+            "stage_scoped_changes",
+            "stage authorized files",
+            "scoped index",
+            {"paths": ["approved.py", "test_approved.py"]},
+            LOCAL_WRITE,
+        ),
+        DriverStep(
+            "commit_scoped_changes",
+            "commit approved change",
+            "exact commit SHA",
+            {"message": "Add approved file"},
+            LOCAL_WRITE,
+        ),
+    )
+    result = run_driver(superuser_db, context=context, plan=plan, max_actions=10)
+    assert result.classification == "COMPLETE"
+    assert task.status == MainAITaskStatus.completed
+    assert job.status == MainAIJobStatus.completed
+    assert worktree.current_commit == _git(context.repository_root, "rev-parse", "HEAD")

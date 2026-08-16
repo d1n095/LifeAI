@@ -418,6 +418,18 @@ def validate_candidate(
         _validate_step(operator_context, step)
     if time.monotonic() - started > request.max_elapsed_seconds:
         raise CandidateValidationError("planning elapsed-time bound exceeded")
+    # Safe Planner is reached only from the autonomous chain (development_supervisor), never
+    # from a human-reviewed goal dispatched through the ordinary executor -- fail closed the
+    # same way development_driver.validate_plan() does rather than relying on this check
+    # happening to also run there later in the call chain (founder P1 review finding: an
+    # autonomous goal must never silently inherit the human-reviewed "standard_repo_work"
+    # AUTO default).
+    if goal.approval_policy != "autonomous_development_work":
+        raise CandidateValidationError(
+            "autonomous safe planner requires goal.approval_policy == "
+            "'autonomous_development_work' -- refusing to plan local writes/commits under a "
+            f"policy ('{goal.approval_policy}') not scoped for unattended execution"
+        )
     require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
     candidate_hash = _candidate_hash(candidate)
     plan = DevelopmentPlan(

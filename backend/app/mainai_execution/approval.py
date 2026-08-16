@@ -41,17 +41,38 @@ class ApprovalRequiredError(ApprovalError):
         self.task_id = task_id
 
 
-# task_type -> default approval requirement, for the ONE policy V0.1 ships. A per-task
-# `approval_required=True` set by the planner always overrides this default (see
-# requires_approval()) -- this table only supplies what happens when the planner didn't set
-# an explicit opinion.
+# task_type -> default approval requirement. A per-task `approval_required=True` set by the
+# planner always overrides this default (see requires_approval()) -- this table only supplies
+# what happens when the planner didn't set an explicit opinion.
+#
+# `standard_repo_work` is the founder-facing default: a human reviewed and created the goal
+# (see app/routers/mainai_execution.py's create_goal(), behind require_founder), so every
+# task_type the planner can currently propose is AUTO, matching the founder's own stated
+# default for work they already looked at and asked for.
+#
+# `autonomous_development_work` is for goals a founder-authorized SCOPE (see
+# app/development_supervisor/service.py's SupervisorScope) runs without a human reviewing each
+# individual task -- the founder authorized the GOAL, not each write. Unlike standard_repo_work,
+# repo_edit (which is also how a commit happens -- there is no separate commit task_type; see
+# app/development_operator/service.py's commit_scoped_changes capability, dispatched from a
+# repo_edit task) and open_pr default to requiring approval: an autonomous loop must not
+# silently inherit the human-reviewed default just because it targets the same task_type
+# vocabulary. read_only_audit and run_tests stay AUTO -- they are deterministic, reversible,
+# and provider-independent, so gating them would only slow down harmless work without closing
+# any real gap (the founder's own P1 review finding this policy fixes).
 APPROVAL_POLICIES: dict[str, dict[str, bool]] = {
     "standard_repo_work": {
         "read_only_audit": False,
         "repo_edit": False,
         "run_tests": False,
         "open_pr": False,
-    }
+    },
+    "autonomous_development_work": {
+        "read_only_audit": False,
+        "repo_edit": True,
+        "run_tests": False,
+        "open_pr": True,
+    },
 }
 
 
