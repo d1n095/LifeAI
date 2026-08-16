@@ -66,6 +66,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -442,13 +444,21 @@ def generate_child_task_for_gap(
     gap: DiscoveredGap,
     requested_by: str,
     max_generation_depth: int = DEFAULT_MAX_GENERATION_DEPTH,
+    operator_context: OperatorContext | None = None,
 ) -> GapOutcome:
     """The atomic per-gap pipeline: record evidence (always) -> depth bound -> authority
     assessment -> (if authorized) propose + insert via insert_plan_tasks(). Never writes a
     `mainai_tasks` row directly -- the only mutation path to that table is the call to
     insert_plan_tasks() below. Never constructs a MainAIGoal. Idempotent end to end (see this
     module's own docstring) -- safe to call twice for the same gap, and safe to resume after an
-    interruption at any point."""
+    interruption at any point.
+
+    When `operator_context` is supplied, the MainAIJob row is locked with
+    `SELECT … FOR UPDATE` and lease/generation ownership is revalidated before ANY durable
+    gap/child write. A stale worker fails closed with GapLeaseLostError and inserts nothing."""
+    if operator_context is not None:
+        require_live_gap_lease(db, context=operator_context, for_update=True)
+
     problem = record_gap(db, owner_id=goal.owner_id, gap=gap, requested_by=requested_by)
 
     if gap.generation_depth >= max_generation_depth:
@@ -463,6 +473,10 @@ def generate_child_task_for_gap(
     classification, reason = assess_gap_authority(db, scope=scope, goal=goal, gap=gap)
     if classification is not None:
         return GapOutcome(classification, problem, None, reason)
+
+    if operator_context is not None:
+        # Still holding the same transaction lock; re-assert generation before child insert.
+        require_live_gap_lease(db, context=operator_context, for_update=True)
 
     task_spec = propose_child_task_spec(gap)
     existing_edges = []
@@ -574,15 +588,22 @@ def run_gap_generation(
 # Transient waits and terminal admin states are not gap signals.
 
 
-def require_live_gap_lease(db: Session, *, context: OperatorContext) -> MainAIJob:
-    """Revalidate worker lease / locked_by / generation fencing immediately before durable gap
-    recording or child insertion. A stale worker must fail closed and never insert work."""
-    job = db.execute(
-        select(MainAIJob).where(
-            MainAIJob.id == context.job_id,
-            MainAIJob.owner_id == context.owner_id,
-        )
-    ).scalar_one_or_none()
+def require_live_gap_lease(
+    db: Session, *, context: OperatorContext, for_update: bool = False
+) -> MainAIJob:
+    """Revalidate worker lease / locked_by / generation fencing for live gap work.
+
+    When `for_update=True`, the MainAIJob row is locked (`SELECT … FOR UPDATE`) and the
+    caller must hold that lock through durable gap/child writes so a concurrent takeover
+    cannot slip between an unlocked preflight check and `record_gap`/`insert_plan_tasks`.
+    A stale worker must fail closed and never insert work."""
+    stmt = select(MainAIJob).where(
+        MainAIJob.id == context.job_id,
+        MainAIJob.owner_id == context.owner_id,
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    job = db.execute(stmt).scalar_one_or_none()
     if (
         job is None
         or job.status != MainAIJobStatus.running
@@ -590,6 +611,8 @@ def require_live_gap_lease(db: Session, *, context: OperatorContext) -> MainAIJo
         or job.lease_generation != context.lease_generation
     ):
         raise GapLeaseLostError("stale or absent MainAI job lease before gap recording/insertion")
+    if job.lease_expires_at is not None and job.lease_expires_at <= datetime.utcnow():
+        raise GapLeaseLostError("expired MainAI job lease before gap recording/insertion")
     return job
 
 
@@ -610,14 +633,87 @@ def _narrow_allowed_paths(*, scope: SupervisorScope, binding_paths: tuple[str, .
     return tuple(scope.allowed_paths)
 
 
-def _structured_repair_recipe_for_gap(*, goal: MainAIGoal) -> str | None:
-    """Name a registered structured repair recipe from the authorized goal instruction.
-    Never synthesizes from free-form provider prose."""
+def _structured_repair_recipe_for_gap(
+    *,
+    goal: MainAIGoal,
+    failure_evidence: dict | None,
+    allowed_paths: tuple[str, ...],
+) -> str | None:
+    """Attach a *registered demo* repair recipe only when structured failure evidence qualifies.
+
+    `multiplication_repair` proves the live WorkBinding/PlanCandidate handoff for the bounded
+    calculator fixture — it is NOT general arbitrary-code repair. Eligibility requires all of:
+      1. verification/test-shaped failure evidence (not free-form prose alone),
+      2. the authorized goal instruction naming the calculator multiplication domain,
+      3. the effective path envelope already authorizing both recipe paths.
+    Vague instruction text alone never selects a recipe.
+    """
+    evidence = failure_evidence or {}
+    failed_capability = str(
+        evidence.get("failed_capability") or evidence.get("capability") or ""
+    ).strip()
+    if failed_capability not in {
+        "run_focused_test",
+        "run_static_check",
+        "verification_evaluate",
+        "patch_file",
+        "create_file",
+    } and not evidence.get("verification_required"):
+        return None
     instruction = (goal.original_instruction or "").lower()
-    if "calculator" in instruction and (
-        "multiplication" in instruction or "multiply" in instruction
+    if "calculator" not in instruction or (
+        "multiplication" not in instruction and "multiply" not in instruction
     ):
-        return "multiplication_repair"
+        return None
+    required_paths = {"calculator.py", "test_calculator.py"}
+    if not required_paths.issubset(set(allowed_paths)):
+        # Envelope too narrow for this demo recipe — do not attach; planning must fail closed.
+        return None
+    step_args = evidence.get("step_arguments") or {}
+    test_args = step_args.get("arguments") if isinstance(step_args, dict) else None
+    if isinstance(test_args, list) and test_args:
+        if "test_calculator.py" not in {str(item) for item in test_args}:
+            return None
+    return "multiplication_repair"
+
+
+def _reverify_contract_from_evidence(
+    *, task: MainAITask, failure_evidence: dict | None
+) -> dict | None:
+    """Structured re-verification contract for the ORIGINAL source task after repair.
+
+    Prefer explicit focused-test arguments from the failing driver step, then the task's own
+    verification_plan targeted_tests entries. Returns None when no supported contract exists
+    (caller must fail closed rather than invent test_calculator.py)."""
+    evidence = failure_evidence or {}
+    step_args = evidence.get("step_arguments") if isinstance(evidence.get("step_arguments"), dict) else {}
+    if evidence.get("failed_capability") == "run_focused_test" or step_args.get("profile_name"):
+        arguments = step_args.get("arguments")
+        profile = step_args.get("profile_name") or "focused_pytest"
+        if isinstance(arguments, list) and arguments:
+            return {
+                "capability": "run_focused_test",
+                "profile_name": profile,
+                "arguments": [str(item) for item in arguments],
+                "source": "failure_evidence.step_arguments",
+            }
+    for entry in task.verification_plan or ():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") == "targeted_tests" and entry.get("target"):
+            return {
+                "capability": "run_focused_test",
+                "profile_name": "focused_pytest",
+                "arguments": [str(entry["target"])],
+                "source": "task.verification_plan",
+            }
+        if entry.get("kind") == "static_analysis":
+            return {
+                "capability": "run_static_check",
+                "profile_name": "static",
+                "arguments": [],
+                "source": "task.verification_plan",
+            }
     return None
 
 
@@ -633,6 +729,7 @@ def _build_execution_envelope(
     source_job_id: uuid.UUID | None = None,
     generation_depth: int = 0,
     repair_recipe: str | None = None,
+    reverify: dict | None = None,
 ) -> dict:
     """Structured envelope persisted on LifeProblem.provenance so the Supervisor can derive a
     WorkBinding without a founder/test hand-authored PlanCandidate. Never auto-approved.
@@ -657,6 +754,7 @@ def _build_execution_envelope(
         "failure_evidence": dict(failure_evidence or {}),
         "verification_requirements": list(task.verification_plan or []),
         "repair_recipe": repair_recipe,
+        "reverify": dict(reverify) if reverify else None,
     }
 
 
@@ -845,6 +943,7 @@ def _repairable_failure_evidence(classification: str, detail: dict | None) -> di
             "operator_result": detail.get("result"),
             "trace_event_id": detail.get("trace_event_id"),
             "requested_paths": detail.get("paths") or detail.get("path"),
+            "step_arguments": dict(detail.get("step_arguments") or {}),
         }
     if classification == "FAILED_NONRETRYABLE":
         failed_capability = detail.get("capability") or detail.get("failed_capability")
@@ -870,6 +969,8 @@ def _repairable_failure_evidence(classification: str, detail: dict | None) -> di
             "operator_result": detail.get("result"),
             "trace_event_id": detail.get("trace_event_id"),
             "verification_required": bool(detail.get("verification_required")),
+            "step_arguments": dict(detail.get("step_arguments") or {}),
+            "paths": detail.get("paths") or detail.get("path"),
         }
     return None
 
@@ -894,6 +995,12 @@ def gap_from_verification_required(
         raise GapEvidenceError("failing WorkBinding path scope intersects authorized scope to empty set")
     evidence = dict(failure_evidence or {})
     evidence.setdefault("signal", "VERIFICATION_REQUIRED")
+    repair_recipe = _structured_repair_recipe_for_gap(
+        goal=goal,
+        failure_evidence=evidence,
+        allowed_paths=allowed_paths,
+    )
+    reverify = _reverify_contract_from_evidence(task=task, failure_evidence=evidence)
     envelope = _build_execution_envelope(
         scope=scope,
         task=task,
@@ -909,7 +1016,8 @@ def gap_from_verification_required(
         failure_evidence=evidence,
         source_job_id=source_job_id,
         generation_depth=depth,
-        repair_recipe=_structured_repair_recipe_for_gap(goal=goal),
+        repair_recipe=repair_recipe,
+        reverify=reverify,
     )
     return DiscoveredGap(
         gap_type="verification_failure",
@@ -1036,7 +1144,8 @@ def handle_live_gap_signal(
         )
 
     if operator_context is not None:
-        require_live_gap_lease(db, context=operator_context)
+        # Unlocked preflight only — the durable mutation fence is inside generate_child_task_for_gap.
+        require_live_gap_lease(db, context=operator_context, for_update=False)
 
     try:
         if classification == "CAPABILITY_MISSING":
@@ -1079,6 +1188,7 @@ def handle_live_gap_signal(
         gap=gap,
         requested_by=requested_by,
         max_generation_depth=bounds.max_generation_depth,
+        operator_context=operator_context,
     )
     if (
         outcome.classification == "ACCEPTED"

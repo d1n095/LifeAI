@@ -13,8 +13,8 @@ from app.autonomous_gap.service import (
     GapGenerationBounds,
     GapGenerationError,
     gap_from_verification_required,
+    generate_child_task_for_gap,
     handle_live_gap_signal,
-    record_gap,
 )
 from app.mainai_execution.approval import grant_task_approval
 from app.mainai_execution.executor import dispatch_ready_task
@@ -257,47 +257,101 @@ async def test_real_failed_verification_repair_without_manual_child_binding(
 
 
 @pytest.mark.asyncio
-async def test_takeover_different_worker_id_converges(superuser_db, tmp_path):
+async def test_takeover_different_worker_lease_converges(superuser_db, tmp_path):
+    """Real lease takeover: worker B owns locked_by+generation and re-records the same gap."""
+    from app.models.mainai_job import MainAIJobStatus
+    from datetime import datetime, timedelta
+
     _, goal, first, second, _, _, prepare, scope = _foundation(
         superuser_db, tmp_path, tied=True
     )
     second.status = MainAITaskStatus.blocked
+    plan = superuser_db.get(MainAIPlan, first.plan_id)
     job = dispatch_ready_task(
         superuser_db, task=first, goal=goal, dispatched_by="worker-a"
     )
-    context = prepare(first, job)
+    job.status = MainAIJobStatus.running
+    job.locked_by = "worker-a"
+    job.lease_generation = 1
+    job.started_at = job.started_at or datetime.utcnow()
+    job.last_heartbeat_at = datetime.utcnow()
+    job.lease_expires_at = datetime.utcnow() + timedelta(minutes=5)
+    superuser_db.flush()
+
+    base_ctx = prepare(first, job)
+    # prepare() defaults to supervisor-worker — pin lease to worker A.
+    job.locked_by = "worker-a"
+    job.lease_generation = 1
+    job.started_at = job.started_at or datetime.utcnow()
+    job.last_heartbeat_at = datetime.utcnow()
+    job.lease_expires_at = datetime.utcnow() + timedelta(minutes=5)
+    superuser_db.flush()
+    context_a = replace(
+        base_ctx,
+        worker_id="worker-a",
+        lease_generation=1,
+        allowed_paths=scope.allowed_paths,
+    )
+
+    evidence = {
+        "signal": "FAILED_NONRETRYABLE",
+        "failed_capability": "run_focused_test",
+        "verification_required": True,
+        "step_arguments": {
+            "profile_name": "focused_pytest",
+            "arguments": ["test_calculator.py"],
+        },
+    }
     gap = gap_from_verification_required(
         db=superuser_db,
         scope=scope,
         goal=goal,
         task=first,
+        binding_paths=scope.allowed_paths,
         source_job_id=job.id,
-        failure_evidence={
-            "signal": "VERIFICATION_REQUIRED",
-            "verification_passed": False,
-            "failed_capability": "verification_evaluate",
-            "operator_result": None,
-            "trace_event_id": None,
-            "requested_paths": None,
-        },
+        failure_evidence=evidence,
     )
-    first_problem = record_gap(
-        superuser_db, owner_id=goal.owner_id, gap=gap, requested_by="worker-a"
-    )
-
-    def reuse_context(task, current_job):
-        assert task.id == first.id
-        assert current_job.id == job.id
-        return context
-
-    result = await run_supervisor(
+    outcome_a = generate_child_task_for_gap(
         superuser_db,
         scope=scope,
-        bindings=(_binding(first, reuse_context, scope, _unverified_candidate()),),
-        bounds=SupervisorBounds(max_jobs=1),
-        worker_id="worker-b",
+        goal=goal,
+        plan=plan,
+        gap=gap,
+        requested_by="worker-a",
+        operator_context=context_a,
     )
-    assert result.classification == "WAITING_APPROVAL"
+    assert outcome_a.classification == "ACCEPTED"
+    first_problem = outcome_a.problem
+    assert first_problem is not None
+    assert outcome_a.inserted_tasks and len(outcome_a.inserted_tasks) == 1
+    child_id = outcome_a.inserted_tasks[0].id
+
+    # Worker B takes the lease (generation bump + lock ownership).
+    job.locked_by = "worker-b"
+    job.lease_generation = 2
+    job.last_heartbeat_at = datetime.utcnow()
+    job.lease_expires_at = datetime.utcnow() + timedelta(minutes=5)
+    superuser_db.flush()
+    context_b = replace(
+        context_a,
+        worker_id="worker-b",
+        lease_generation=2,
+        allowed_paths=scope.allowed_paths,
+    )
+
+    outcome_b = generate_child_task_for_gap(
+        superuser_db,
+        scope=scope,
+        goal=goal,
+        plan=plan,
+        gap=gap,
+        requested_by="worker-b",
+        operator_context=context_b,
+    )
+    assert outcome_b.classification == "ACCEPTED"
+    assert outcome_b.problem.id == first_problem.id
+    assert [task.id for task in (outcome_b.inserted_tasks or ())] == [child_id]
+
     problems = (
         superuser_db.execute(
             select(LifeProblem).where(LifeProblem.mainai_task_id == first.id)
@@ -318,19 +372,312 @@ async def test_takeover_different_worker_id_converges(superuser_db, tmp_path):
         .all()
         if (event.detail or {}).get("gap_attempt") is True
     ]
-    assert len(attempt_events) == 2
-    assert "requested_by" not in first_problem.provenance
-    assert len(
-        superuser_db.execute(
-            select(MainAITask).where(
-                MainAITask.goal_id == goal.id,
-                MainAITask.description
-                == f"Repair the verification failure blocking: {first.description}",
+    assert len(attempt_events) >= 2
+    assert {event.detail.get("requested_by") for event in attempt_events} >= {
+        "worker-a",
+        "worker-b",
+    }
+    superuser_db.refresh(first_problem)
+    assert "requested_by" not in (first_problem.provenance or {})
+
+    # Park source and let Supervisor select the single canonical child → approval gate.
+    first.status = MainAITaskStatus.blocked
+    superuser_db.flush()
+
+    def prepare_worker_b(task, current_job):
+        ctx = prepare(task, current_job)
+        current_job.locked_by = "worker-b"
+        current_job.lease_generation = max(current_job.lease_generation, 2)
+        current_job.started_at = current_job.started_at or datetime.utcnow()
+        current_job.last_heartbeat_at = datetime.utcnow()
+        current_job.lease_expires_at = datetime.utcnow() + timedelta(minutes=5)
+        superuser_db.flush()
+        return replace(
+            ctx,
+            worker_id="worker-b",
+            lease_generation=current_job.lease_generation,
+            allowed_paths=scope.allowed_paths,
+        )
+
+    result = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(_binding(first, prepare_worker_b, scope, None),),
+        bounds=SupervisorBounds(max_jobs=1),
+        worker_id="worker-b",
+    )
+    assert result.classification == "WAITING_APPROVAL"
+    assert (
+        len(
+            superuser_db.execute(
+                select(MainAITask).where(
+                    MainAITask.goal_id == goal.id,
+                    MainAITask.description
+                    == f"Repair the verification failure blocking: {first.description}",
+                )
             )
+            .scalars()
+            .all()
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_write_gap_after_lease_transfer(
+    superuser_db, tmp_path, monkeypatch
+):
+    """TOCTOU race: lease transfers after unlocked preflight, before durable generate."""
+    from datetime import datetime, timedelta
+
+    import app.autonomous_gap.service as gap_service
+
+    _, goal, first, second, _, _, prepare, scope = _foundation(
+        superuser_db, tmp_path, tied=True
+    )
+    second.status = MainAITaskStatus.blocked
+    job = dispatch_ready_task(
+        superuser_db, task=first, goal=goal, dispatched_by="worker-a"
+    )
+    context = prepare(first, job)
+    # Force known lease identity matching context.
+    job.locked_by = context.worker_id
+    job.lease_generation = context.lease_generation
+    job.started_at = job.started_at or datetime.utcnow()
+    job.last_heartbeat_at = datetime.utcnow()
+    job.lease_expires_at = datetime.utcnow() + timedelta(minutes=5)
+    superuser_db.flush()
+
+    real_generate = gap_service.generate_child_task_for_gap
+    stolen = {"done": False}
+
+    def steal_before_durable_write(*args, **kwargs):
+        current = superuser_db.get(supervisor_service.MainAIJob, context.job_id)
+        current.locked_by = "worker-b"
+        current.lease_generation = context.lease_generation + 1
+        superuser_db.flush()
+        stolen["done"] = True
+        return real_generate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        gap_service, "generate_child_task_for_gap", steal_before_durable_write
+    )
+
+    before_problems = superuser_db.query(LifeProblem).count()
+    before_tasks = (
+        superuser_db.query(MainAITask).filter(MainAITask.goal_id == goal.id).count()
+    )
+    with pytest.raises(gap_service.GapLeaseLostError):
+        gap_service.handle_live_gap_signal(
+            superuser_db,
+            scope=scope,
+            goal=goal,
+            plan=superuser_db.get(MainAIPlan, first.plan_id),
+            task=first,
+            classification="VERIFICATION_REQUIRED",
+            requested_by="worker-a",
+            operator_context=context,
+            binding_paths=scope.allowed_paths,
+            source_job_id=job.id,
+            driver_detail={
+                "capability": "verification_evaluate",
+                "failed_capability": "verification_evaluate",
+                "verification_required": True,
+            },
+        )
+    assert stolen["done"] is True
+    assert superuser_db.query(LifeProblem).count() == before_problems
+    assert (
+        superuser_db.query(MainAITask).filter(MainAITask.goal_id == goal.id).count()
+        == before_tasks
+    )
+
+
+@pytest.mark.asyncio
+async def test_narrow_binding_rejects_test_file_write_and_full_envelope_allows(
+    superuser_db, tmp_path
+):
+    """P1 path scope: binding.allowed_paths is enforced at Operator mutation / planning."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    _, goal, first, second, repo, original, prepare, scope = _foundation(
+        superuser_db, tmp_path, tied=True
+    )
+    second.status = MainAITaskStatus.blocked
+    test_path = repo / "test_calculator.py"
+    assert not test_path.exists()
+
+    # Create a real repair child under the full authorized envelope first.
+    failed = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(
+            _binding(
+                first,
+                prepare,
+                scope,
+                _broken_multiply_candidate(original),
+                independent=False,
+            ),
+        ),
+        bounds=SupervisorBounds(max_jobs=1),
+    )
+    assert failed.classification == "FAILED_NONRETRYABLE"
+    child = _repair_child(superuser_db, goal, first)
+    problem = superuser_db.execute(
+        select(LifeProblem).where(LifeProblem.mainai_task_id == first.id)
+    ).scalar_one()
+    assert (problem.provenance.get("execution_envelope") or {}).get(
+        "repair_recipe"
+    ) == "multiplication_repair"
+    # The broken source plan may already have created the test file — capture pre-repair bytes.
+    pre_reject_test = test_path.read_text() if test_path.exists() else None
+    pre_reject_calc = (repo / "calculator.py").read_text()
+    grant_task_approval(superuser_db, task=child, approved_by="founder")
+
+    def prepare_broad(task, job):
+        ctx = prepare(task, job)
+        return replace(
+            ctx, allowed_paths=("calculator.py", "test_calculator.py")
+        )
+
+    # Narrow binding while context still claims both paths — must fail closed.
+    envelope = dict(problem.provenance.get("execution_envelope") or {})
+    envelope["allowed_paths"] = ["calculator.py"]
+    problem.provenance = {
+        **problem.provenance,
+        "allowed_paths": ["calculator.py"],
+        "execution_envelope": envelope,
+    }
+    flag_modified(problem, "provenance")
+    superuser_db.flush()
+
+    narrow_child_binding = WorkBinding(
+        child.id,
+        prepare_broad,
+        None,
+        independent=True,
+        repository_identity=scope.repository_identity,
+        allowed_paths=("calculator.py",),
+        allow_deterministic_fallback=True,
+    )
+    rejected = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(narrow_child_binding,),
+        bounds=SupervisorBounds(max_jobs=1),
+    )
+    assert rejected.classification == "OUT_OF_SCOPE"
+    assert (repo / "calculator.py").read_text() == pre_reject_calc
+    if pre_reject_test is None:
+        assert not test_path.exists()
+    else:
+        assert test_path.read_text() == pre_reject_test
+    superuser_db.refresh(child)
+    assert child.status != MainAITaskStatus.completed
+
+    # Both paths explicitly authorized — demo recipe may execute.
+    child.status = MainAITaskStatus.ready
+    superuser_db.flush()
+    grant_task_approval(superuser_db, task=child, approved_by="founder")
+    envelope["allowed_paths"] = ["calculator.py", "test_calculator.py"]
+    problem.provenance = {
+        **problem.provenance,
+        "allowed_paths": ["calculator.py", "test_calculator.py"],
+        "execution_envelope": envelope,
+    }
+    flag_modified(problem, "provenance")
+    superuser_db.flush()
+
+    wide_binding = WorkBinding(
+        child.id,
+        prepare,
+        None,
+        independent=True,
+        repository_identity=scope.repository_identity,
+        allowed_paths=("calculator.py", "test_calculator.py"),
+        allow_deterministic_fallback=True,
+    )
+    allowed = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(wide_binding,),
+        bounds=SupervisorBounds(max_jobs=2),
+    )
+    assert allowed.classification in {"RUN_BOUND_REACHED", "COMPLETE"}
+    superuser_db.refresh(child)
+    assert child.status == MainAITaskStatus.completed
+    assert test_path.exists()
+    assert "return left * right" in (repo / "calculator.py").read_text()
+
+
+@pytest.mark.asyncio
+async def test_breadth_bounds_are_per_supervisor_invocation(superuser_db, tmp_path):
+    """Breadth counters reset each run_supervisor call (not sticky across invocations)."""
+    _, goal, first, second, _, _, prepare, scope = _foundation(
+        superuser_db, tmp_path, tied=True
+    )
+    first.priority = 40
+    second.priority = 30
+    first_result = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(
+            _binding(first, prepare, scope, _unverified_candidate()),
+            _binding(second, prepare, scope, _unverified_candidate()),
+        ),
+        bounds=SupervisorBounds(max_jobs=2),
+        gap_bounds=GapGenerationBounds(max_children_per_run=1),
+    )
+    assert first_result.classification == "WAITING_APPROVAL"
+    first_state = next(
+        cp.executor_state.get("supervisor_state", {})
+        for cp in _gap_checkpoints(superuser_db, goal.id)
+        if cp.id == first_result.checkpoint_id
+    )
+    assert first_state.get("gaps_recorded_this_run", 0) >= 1
+    assert first_state.get("children_inserted_this_run", 0) >= 1
+    problems_after_first = (
+        superuser_db.execute(
+            select(LifeProblem).where(LifeProblem.owner_id == goal.owner_id)
         )
         .scalars()
         .all()
-    ) == 1
+    )
+    assert len(problems_after_first) == 1
+
+    # Park the first lineage (source + repair child) so a fresh invocation can select second.
+    first.status = MainAITaskStatus.blocked
+    repair_child = _repair_child(superuser_db, goal, first)
+    repair_child.status = MainAITaskStatus.blocked
+    second.status = MainAITaskStatus.ready
+    second.priority = 50
+    superuser_db.flush()
+    second_result = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(_binding(second, prepare, scope, _unverified_candidate()),),
+        bounds=SupervisorBounds(max_jobs=1),
+        gap_bounds=GapGenerationBounds(max_children_per_run=1),
+        worker_id="supervisor-worker-resume",
+    )
+    assert second_result.classification == "WAITING_APPROVAL"
+    second_state = next(
+        cp.executor_state.get("supervisor_state", {})
+        for cp in _gap_checkpoints(superuser_db, goal.id)
+        if cp.id == second_result.checkpoint_id
+    )
+    # Fresh invocation: counters start at zero and may record again (not restored from prior).
+    assert second_state.get("gaps_recorded_this_run", 0) >= 1
+    assert second_state.get("children_inserted_this_run", 0) >= 1
+    problems_after_second = (
+        superuser_db.execute(
+            select(LifeProblem).where(LifeProblem.owner_id == goal.owner_id)
+        )
+        .scalars()
+        .all()
+    )
+    assert len(problems_after_second) == 2
 
 
 @pytest.mark.asyncio

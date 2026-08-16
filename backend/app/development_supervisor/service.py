@@ -23,7 +23,7 @@ from app.autonomous_gap.service import (
     resume_source_after_repair,
 )
 from app.development_driver.service import run_driver
-from app.development_operator.service import DEVELOPMENT_CAPABILITIES
+from app.development_operator.service import DEVELOPMENT_CAPABILITIES, OperatorContext
 from app.intelligence_governance import record_evidence
 from app.life_intents.service import IntentError, evaluate_feasibility
 from app.mainai_execution.approval import ApprovalRequiredError
@@ -41,8 +41,10 @@ from app.models.work_intelligence import WorkStrategyExecution
 from app.provider_planning.service import PlanningAdapter, plan_with_provider
 from app.safe_planner.service import (
     CandidateStep,
+    CandidateValidationError,
     FounderPlanningRequest,
     PlanCandidate,
+    PlanningResult,
     build_multiplication_repair_candidate,
     plan_founder_request,
 )
@@ -75,6 +77,123 @@ DEFERRED_REASON_MESSAGES = {
 
 class SupervisorError(RuntimeError):
     pass
+
+
+def _intersect_path_envelopes(*path_sets: tuple[str, ...]) -> tuple[str, ...]:
+    nonempty = [tuple(paths) for paths in path_sets if paths]
+    if not nonempty:
+        return ()
+    current = set(nonempty[0])
+    for paths in nonempty[1:]:
+        current &= set(paths)
+    return tuple(sorted(current))
+
+
+def bind_execution_context(
+    *,
+    scope: SupervisorScope,
+    binding: WorkBinding,
+    context: OperatorContext,
+) -> OperatorContext:
+    """Fail-closed path authority: OperatorContext may never exceed WorkBinding or scope.
+
+    effective_allowed_paths = intersection(scope, binding, context).
+    Never silently broadens the binding. Empty intersection rejects execution.
+    """
+    binding_paths = tuple(binding.allowed_paths or ())
+    if not binding_paths:
+        raise SupervisorError("WorkBinding.allowed_paths is required for execution")
+    effective = _intersect_path_envelopes(
+        tuple(scope.allowed_paths),
+        binding_paths,
+        tuple(context.allowed_paths or scope.allowed_paths),
+    )
+    if not effective:
+        raise SupervisorError(
+            "effective path envelope is empty after intersecting SupervisorScope, "
+            "WorkBinding, and OperatorContext allowed_paths"
+        )
+    # Reject any context path that escapes the binding (do not keep extras).
+    if set(context.allowed_paths or ()) - set(binding_paths):
+        # Narrow safely to the intersection rather than aborting ordinary prepare_context
+        # helpers that hand a broader parent envelope — but never add paths beyond binding.
+        pass
+    if not set(effective).issubset(set(binding_paths)):
+        raise SupervisorError("effective paths escape WorkBinding.allowed_paths")
+    if not set(effective).issubset(set(scope.allowed_paths)):
+        raise SupervisorError("effective paths escape SupervisorScope.allowed_paths")
+    return replace(context, allowed_paths=effective)
+
+
+def _reverify_candidate_for_source(*, source: MainAITask, problem) -> PlanCandidate:
+    """Build a re-verify-only candidate from structured gap evidence — never invent calculator tests."""
+    envelope = ((problem.provenance or {}).get("execution_envelope") or {}) if problem is not None else {}
+    contract = envelope.get("reverify") if isinstance(envelope, dict) else None
+    if not isinstance(contract, dict):
+        raise SupervisorError(
+            "unsupported re-verification: gap envelope lacks a structured reverify contract"
+        )
+    capability = contract.get("capability")
+    if capability == "run_focused_test":
+        arguments = contract.get("arguments") or []
+        if not isinstance(arguments, list) or not arguments:
+            raise SupervisorError(
+                "unsupported re-verification: focused-test contract missing arguments"
+            )
+        profile = contract.get("profile_name") or "focused_pytest"
+        return PlanCandidate(
+            interpretation="re-verify original work after autonomous repair",
+            requested_outcome="original verification passes on the repaired repository",
+            rationale="run the structured verification contract from the gap envelope only",
+            steps=(
+                CandidateStep(
+                    "verify",
+                    "run structured focused verification",
+                    "pytest pass",
+                    "run_focused_test",
+                    {
+                        "profile_name": profile,
+                        "arguments": [str(item) for item in arguments],
+                    },
+                    required_risk="LOCAL_EXECUTION",
+                    verification_required=True,
+                ),
+                CandidateStep(
+                    "gate",
+                    "evaluate verification evidence",
+                    "verification pass",
+                    "verification_evaluate",
+                    depends_on=("verify",),
+                ),
+            ),
+        )
+    if capability == "run_static_check":
+        return PlanCandidate(
+            interpretation="re-verify original work after autonomous repair",
+            requested_outcome="original static verification passes",
+            rationale="run the structured static-check contract from the gap envelope only",
+            steps=(
+                CandidateStep(
+                    "verify",
+                    "run structured static check",
+                    "static pass",
+                    "run_static_check",
+                    {},
+                    required_risk="LOCAL_EXECUTION",
+                    verification_required=True,
+                ),
+                CandidateStep(
+                    "gate",
+                    "evaluate verification evidence",
+                    "verification pass",
+                    "verification_evaluate",
+                    depends_on=("verify",),
+                ),
+            ),
+        )
+    raise SupervisorError(
+        f"unsupported re-verification capability '{capability}'; refusing calculator-global fallback"
+    )
 
 
 @dataclass(frozen=True)
@@ -331,36 +450,6 @@ def select_candidate(assessments):
     return tied[0], "SELECTED", "highest-priority actionable canonical task"
 
 
-def _reverify_only_candidate() -> PlanCandidate:
-    """After a repair child lands, re-verify the original work without re-applying a broken plan."""
-    return PlanCandidate(
-        interpretation="re-verify original work after autonomous repair",
-        requested_outcome="original verification passes on the repaired repository",
-        rationale="run focused verification only; do not rewrite source from the failed plan",
-        steps=(
-            CandidateStep(
-                "verify",
-                "run focused test",
-                "pytest pass",
-                "run_focused_test",
-                {
-                    "profile_name": "focused_pytest",
-                    "arguments": ["test_calculator.py"],
-                },
-                required_risk="LOCAL_EXECUTION",
-                verification_required=True,
-            ),
-            CandidateStep(
-                "gate",
-                "evaluate verification evidence",
-                "verification pass",
-                "verification_evaluate",
-                depends_on=("verify",),
-            ),
-        ),
-    )
-
-
 def _augment_bindings_with_gap_children(db, *, scope, bindings: tuple[WorkBinding, ...]) -> tuple[WorkBinding, ...]:
     """Close the live handoff: discover gap-generated children and derive WorkBindings from
     structured gap evidence. Does not invent PlanCandidates or auto-approve."""
@@ -490,7 +579,14 @@ async def run_supervisor(
 
     Gap children inserted mid-run are auto-bound from structured LifeProblem provenance so the
     live loop does not require founder/test job translation of WorkBinding/PlanCandidate.
-    Founder approval policy remains authoritative at dispatch."""
+    Founder approval policy remains authoritative at dispatch.
+
+    Breadth counters (`gaps_recorded_this_run`, `children_inserted_this_run`,
+    `unresolved_gaps_this_run`) are **per Supervisor invocation**: each call to
+    `run_supervisor` starts them at zero. Prior checkpoints may still record the counters for
+    observability of that invocation, but they are not restored across calls. Resume of
+    completed_task_ids remains checkpoint-based.
+    """
     bounds = bounds or SupervisorBounds()
     gap_bounds = gap_bounds or GapGenerationBounds()
     if not 1 <= bounds.max_jobs <= 20 or bounds.max_elapsed_seconds < 1:
@@ -507,9 +603,10 @@ async def run_supervisor(
     binding_map = {binding.task_id: binding for binding in bindings}
     last_candidates = ()
     deferred: dict[uuid.UUID, str] = {}
-    gaps_recorded_this_run = int(prior.get("gaps_recorded_this_run", 0) or 0)
-    children_inserted_this_run = int(prior.get("children_inserted_this_run", 0) or 0)
-    unresolved_gaps_this_run = int(prior.get("unresolved_gaps_this_run", 0) or 0)
+    # Per-invocation breadth bounds (not sticky across Supervisor calls).
+    gaps_recorded_this_run = 0
+    children_inserted_this_run = 0
+    unresolved_gaps_this_run = 0
 
     def _gap_state_extra(gap_outcome):
         return {
@@ -694,6 +791,7 @@ async def run_supervisor(
                 state={
                     "completed_task_ids": [str(value) for value in selected],
                     "selected_task_id": str(task.id),
+                    **_gap_state_extra(None),
                 },
             )
             return _result(
@@ -711,11 +809,11 @@ async def run_supervisor(
             or context.task_id != task.id
             or context.job_id != job.id
             or str(context.repository_root.resolve()) != scope.repository_identity
-            or not set(context.allowed_paths).issubset(set(scope.allowed_paths))
         ):
             raise SupervisorError(
                 "execution context escapes authorized owner/repository scope"
             )
+        context = bind_execution_context(scope=scope, binding=binding, context=context)
         strategy_execution = db.execute(
             select(WorkStrategyExecution).where(
                 WorkStrategyExecution.id == context.strategy_execution_id,
@@ -776,14 +874,23 @@ async def run_supervisor(
                 if problem is not None
                 else None
             )
-            if recipe == "multiplication_repair":
-                recipe_candidate = build_multiplication_repair_candidate(context)
-            planning = plan_founder_request(
-                db,
-                request=request,
-                operator_context=context,
-                candidate=recipe_candidate,
-            )
+            try:
+                if recipe == "multiplication_repair":
+                    recipe_candidate = build_multiplication_repair_candidate(context)
+                planning = plan_founder_request(
+                    db,
+                    request=request,
+                    operator_context=context,
+                    candidate=recipe_candidate,
+                )
+            except CandidateValidationError as exc:
+                planning = PlanningResult(
+                    "OUT_OF_SCOPE",
+                    {
+                        "reason": str(exc),
+                        "repair_recipe": recipe,
+                    },
+                )
             if planning.classification == "WAITING_PROVIDER":
                 if not scope.provider_spend_authorized:
                     cp = _checkpoint(
@@ -972,9 +1079,24 @@ async def run_supervisor(
             if resumed is not None:
                 deferred.pop(resumed.id, None)
                 existing = binding_map.get(resumed.id)
-                reverify = _reverify_only_candidate()
+                repair_problem = gap_problem_for_child_task(
+                    db, owner_id=scope.owner_id, task=task
+                )
+                reverify = _reverify_candidate_for_source(
+                    source=resumed, problem=repair_problem
+                )
+                envelope_paths = tuple(
+                    ((repair_problem.provenance or {}).get("execution_envelope") or {}).get(
+                        "allowed_paths"
+                    )
+                    or scope.allowed_paths
+                ) if repair_problem is not None else tuple(scope.allowed_paths)
                 if existing is not None:
-                    updated = replace(existing, candidate=reverify)
+                    updated = replace(
+                        existing,
+                        candidate=reverify,
+                        allowed_paths=existing.allowed_paths or envelope_paths,
+                    )
                     binding_map[resumed.id] = updated
                     bindings = tuple(
                         binding_map.get(item.task_id, item) for item in bindings
@@ -984,11 +1106,11 @@ async def run_supervisor(
                         task_id=resumed.id,
                         prepare_context=bindings[0].prepare_context,
                         candidate=reverify,
-                        required_capabilities=("run_focused_test",),
+                        required_capabilities=("run_focused_test", "run_static_check"),
                         expected_contribution="re-verify original work after repair",
                         independent=True,
                         repository_identity=scope.repository_identity,
-                        allowed_paths=scope.allowed_paths,
+                        allowed_paths=envelope_paths or tuple(scope.allowed_paths),
                     )
                     bindings = bindings + (derived,)
                     binding_map[resumed.id] = derived

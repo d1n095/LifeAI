@@ -590,6 +590,11 @@ def run_driver(
             failure_detail.setdefault("verification_required", step.verification_required)
             failure_detail.setdefault("result", result.result)
             failure_detail.setdefault("trace_event_id", str(result.trace_event_id))
+            failure_detail.setdefault("step_arguments", dict(step.arguments or {}))
+            if "path" in (step.arguments or {}):
+                failure_detail.setdefault("path", step.arguments.get("path"))
+            if "paths" in (step.arguments or {}):
+                failure_detail.setdefault("paths", step.arguments.get("paths"))
             cp = _checkpoint(
                 db,
                 context,

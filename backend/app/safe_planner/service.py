@@ -600,7 +600,20 @@ def deterministic_candidate(instruction: str, operator_context=None) -> PlanCand
 
 
 def build_multiplication_repair_candidate(operator_context=None) -> PlanCandidate:
-    """Structured multiply repair/implement recipe for the autonomous-gap live handoff."""
+    """Bounded *demo* multiply repair recipe for the autonomous-gap live handoff.
+
+    Proves envelope → WorkBinding → registered PlanCandidate wiring. Requires the effective
+    OperatorContext path envelope to already authorize both `calculator.py` and
+    `test_calculator.py`; never silently broadens authority to write the test file.
+    """
+    required_paths = ("calculator.py", "test_calculator.py")
+    if operator_context is not None:
+        allowed = tuple(operator_context.allowed_paths or ())
+        if allowed and not set(required_paths).issubset(set(allowed)):
+            raise CandidateValidationError(
+                "multiplication_repair requires calculator.py and test_calculator.py in the "
+                "effective OperatorContext path envelope; refusing to broaden binding scope"
+            )
     test = (
         "from calculator import multiply\n\n"
         "def test_multiply():\n"

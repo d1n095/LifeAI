@@ -18,28 +18,43 @@ carrying the worker identity (reusing an existing allowed event_type from migrat
 migration). A takeover by a differently named worker therefore converges on the same `LifeProblem`
 and child rather than raising a provenance conflict.
 
-Before either durable gap recording or child insertion, `require_live_gap_lease()` revalidates the
-operator context against the owner-scoped job, lock owner, running state, and lease generation.
-`GapLeaseLostError` is isolated by the Supervisor, so stale work inserts nothing while unrelated
-work remains eligible to continue.
+Before either durable gap recording or child insertion, `generate_child_task_for_gap()`
+locks the owner-scoped `MainAIJob` with `SELECT … FOR UPDATE` and revalidates `locked_by`,
+`lease_generation`, running status, and lease expiry. An unlocked preflight may still run
+earlier for fast-fail, but it is not authoritative — a stale worker that loses the lease after
+preflight and before the locked mutation raises `GapLeaseLostError` and inserts nothing.
+`GapLeaseLostError` is isolated by the Supervisor so unrelated work remains eligible.
+
+Executable path authority is the intersection of `SupervisorScope.allowed_paths`,
+`WorkBinding.allowed_paths`, and `OperatorContext.allowed_paths`. The Supervisor narrows the
+context via `bind_execution_context()` before Safe Planner / Driver / Operator mutation. A
+binding may never be silently broadened. The registered demo recipe `multiplication_repair`
+requires both `calculator.py` and `test_calculator.py` in that effective envelope; otherwise
+planning fails closed with `OUT_OF_SCOPE` instead of writing the test file.
+
+Breadth counters (`gaps_recorded_this_run`, `children_inserted_this_run`,
+`unresolved_gaps_this_run`) are **per Supervisor invocation** — each `run_supervisor` call
+starts them at zero (not sticky across calls). Checkpoints still record the counters for
+observability of that invocation.
+
+`multiplication_repair` is a bounded registered demo recipe proving the live handoff
+(envelope → auto WorkBinding → deterministic PlanCandidate). It is selected only when
+structured failure evidence qualifies (verification/test-shaped capability + calculator
+multiplication domain in the authorized instruction + envelope paths). It does **not** claim
+general arbitrary-code repair.
+
+Re-verification after repair uses the structured `reverify` contract stored on the gap
+envelope (from failing step arguments or the source task's verification_plan). There is no
+calculator-global fallback.
 
 Lineage depth is owner-scoped and fail-closed. `_live_generation_depth(db, owner_id=..., task=...)`
 must resolve every `autonomous_gap_child:` event to exactly one parent `LifeProblem`; malformed,
 missing, or ambiguous lineage becomes `DEPTH_BOUND_REACHED`, never an implicit depth of zero.
-Live breadth counters also enforce `max_gaps_per_run`, `max_children_per_run`, and
-`max_unresolved_gaps` across Supervisor checkpoints.
 
-The Supervisor now derives a child `WorkBinding` from the gap's structured execution envelope.
-The derived binding deliberately has `candidate=None`: Safe Planner first tries its deterministic
-recipe registry with the live operator context, and only then reaches the separately authorized
-provider path. No caller or test has to hand-author a child `PlanCandidate` or `WorkBinding`, and
-this does not auto-approve the child.
-
-The deterministic calculator recipe recognizes the foundation instruction ("calculator",
-"verified test(s)", and "multiply"/"multiplication"), repairs or adds `multiply`, writes the
-focused test, verifies, stages, and commits within the path envelope. A completed repair child
-resumes its parked source task with a reverify-only candidate, so the original defective plan is
-not replayed.
+The Supervisor derives a child `WorkBinding` from the gap's structured execution envelope
+(`candidate=None`, `allow_deterministic_fallback=True`). Safe Planner resolves a registered
+recipe when eligible; otherwise provider spend remains separately authorized. No caller or test
+must hand-author a child `PlanCandidate`, and insertion still does not auto-approve.
 
 Structured signals now cover:
 
