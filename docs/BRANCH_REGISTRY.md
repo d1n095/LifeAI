@@ -6199,6 +6199,83 @@ från den slutliga hardenade PR #61-branchen — saknar alltså PR #61:s senare 
   #61:s 0037 (se den filens docstring för exakt regel — inget hårdkodat nummer, beror på
   merge-ordning). Ej PR, ej CI-körd.
 
+### Rekonstruerad kedja (2026-08-16) — ombasering mot mergad PR #61 + P1-fix (approval-default)
+
+Efter PR #61:s merge (`0caa7d3`) fick grundaren i uppdrag att förbereda hela 12-lagerskedjan
+för granskningsbar integration UTAN att merga något. Genomfört: (1) varje lager
+cherry-pickat/rebasat lager-för-lager från den ORIGINELLA `codex/*`-kedjan (ovan) till en
+NY `claude/reconciled-*`-branch stackad på den mergade PR #61-basen, (2) `docs/`-rättelser
+och en whitespace-fix kaskaderade genom berörda nedströmslager, (3) P1-fyndet ovan (AUTO-
+godkännande för autonom skrivning/spend) designat och implementerat som ett separat,
+oberoende granskningsbart lager ovanpå spetsen. `codex/*`-branchernas ORIGINAL lämnas orörda
+(namngivning `claude/reconciled-<codex-branchnamn>` medvetet vald istället för att
+force-pusha över en annan agents brancher).
+
+**Varför `d9be330` (`codex/pr61-independent-hardening`) medvetet UTESLÖTS ur kedjan:** dess
+fix för samma tre fynd som PR #61:s egen korrigeringsomgång redan löste hade en inkompatibel,
+nu föråldrad form (`SourceImportFailureStage`-enum + `failure_stage`-kolumn + kvarhållet
+`failed_count`, mot den mergade formen: `storage_failed_count`/`parse_failed_count`-delning
+med `failed_count` helt borttaget). Fynden är redan korrekt lösta via mergad PR #61 — att
+behålla `d9be330` hade återinfört den föråldrade formen.
+
+**Bas:** `0caa7d3` (PR #61, mergad i `claude/det-kommer-mer-879lcm`).
+
+| # | Branch | Head SHA | Bas/beroende | Migration | CI-status (lokalt) | Granskningsstatus |
+|---|--------|----------|--------------|-----------|---------------------|--------------------|
+| 0 | `claude/reconciled-intelligence-governance-foundation` | `1879a5b` | `0caa7d3` | 0038 | ruff clean, migration round-trip OK | Klar för egen PR |
+| 1 | `claude/reconciled-active-context-intelligence-foundation` | `0c48283` | #0 | 0039 | ruff clean | Klar för egen PR |
+| 2 | `claude/reconciled-memory-threads-foundation` | `bca602f` | #1 | 0040 | ruff clean | Klar för egen PR |
+| 3 | `claude/reconciled-goals-dreams-dependencies-foundation` | `44b022c` | #2 | 0041 | ruff clean | Klar för egen PR |
+| 4 | `claude/reconciled-problem-solution-decision-learning-foundation` | `5ffa3f8` | #3 | 0042 | ruff clean (EOF-whitespace fixad) | Klar för egen PR |
+| 5 | `claude/reconciled-self-optimizing-work-intelligence-foundation` | `b649be5` | #4 | 0043 | ruff clean | Klar för egen PR |
+| 6 | `claude/reconciled-strategy-evaluation-promotion-foundation` | `af2ff86` | #5 | 0044 | ruff clean (enda riktiga cherry-pick-konflikten, löst mot mergad form) | Klar för egen PR |
+| 7 | `claude/reconciled-strategy-synthesis-learning-foundation` | `d40cf9f` | #6 | 0045 | ruff clean | Klar för egen PR |
+| 8 | `claude/reconciled-life-development-operator-foundation` | `f9bd9bd` | #7 | — | ruff clean | Klar för egen PR |
+| 9 | `claude/reconciled-autonomous-development-loop-foundation` | `8c56891` | #8 | — | ruff clean | Klar för egen PR |
+| 10 | `claude/reconciled-life-safe-planner-foundation` | `8711130` | #9 | — | ruff clean | Klar för egen PR |
+| 11 | `claude/reconciled-provider-assisted-planning-foundation` | `5bad9d0` | #10 | — | ruff clean | Klar för egen PR |
+| 12 | `claude/reconciled-scoped-development-supervisor-foundation` | `416e548` | #11 | — | ruff clean, alla 110 lagerspecifika tester gröna | Klar för egen PR (spetsen — kumulativt innehåller allt ovan) |
+| 13 | `claude/reconciled-chain-p1-approval-fix` | `cf6d5c5` | #12 | — | ruff clean, 51/51 autonomikedje-tester + 6 nya regressionstester gröna | Klar för egen PR — **MÅSTE mergas innan lager #0–12 behandlas som produktionsklara** (se P1 nedan) |
+
+Migrationskedjan är verifierad enkel-huvud (`0045` är head, ingen gren) och varje
+`down_revision` pekar korrekt mot den MERGADE PR #61:s `0037` (Alembic följer revisions-ID,
+inte filinnehåll — filens innehåll ändrades materiellt under PR #61:s korrigeringsomgång men
+`0038`:s `down_revision = "0037"` behövde ingen ändring).
+
+**Löst under rekonciliationen (Task 2/CI-readiness):** `backend/app/models/__init__.py`s enda
+verkliga cherry-pick-konflikt (lager 6, `096f81c` → `af2ff86`) — HEAD:s korrekta enradiga
+`source_import_batch`-import mot en inkommande patch som ärvde ett föråldrat
+`SourceImportFailureStage`-symbol från det uteslutna `d9be330`. Löst till förmån för den
+mergade PR #61-formen; verifierat orört behov via `grep` (noll träffar) samt en riktig
+`python3 -c "import app.models"`.
+
+**P1-fixen (branch #13, `cf6d5c5`) — se `app/mainai_execution/approval.py`, `app/development_
+driver/service.py`, `app/safe_planner/service.py`, `app/development_supervisor/service.py`:**
+en ny namngiven policy `autonomous_development_work` (repo_edit + open_pr kräver godkännande,
+read_only_audit/run_tests förblir AUTO), plus ett fail-closed-krav i driver/safe_planner att
+`goal.approval_policy` faktiskt ÄR den policyn (annars vägras körning helt — den gamla
+`standard_repo_work`-defaulten kan inte längre av misstag ärvas av autonomt arbete), plus ett
+nytt `SupervisorScope.provider_spend_authorized`-fält (default `False`) som grindar riktiga
+provider-spend-anrop separat från repo-skriv-godkännandet. Använder uteslutande den
+BEFINTLIGA `MainAIGoal.approval_policy`/`require_task_approval()`-mekanismen — inget parallellt
+godkännandesystem. 6 nya regressionstester bevisar: autonom skrivning nekas utan rätt policy;
+commit nekas utan uppgiftsgodkännande; provider-spend nekas utan scope-auktorisering; godkänt
+autonomt skriv+commit fungerar fortfarande; oauktoriserad provider-spend fryser inte oberoende
+deterministiskt arbete.
+
+**Status: EJ MERGE-READY som helhet ännu** — varje lager (#0–13) är nu individuellt
+granskningsbart och lokalt CI-klart, men:
+1. Ingen PR öppnad ännu för något lager (mandatet: "Do not open PRs yet unless explicitly
+   necessary for validation").
+2. Rekommenderad PR-/mergeordning: #0 → #1 → #2 → ... → #12 → #13, strikt i den ordningen
+   (varje lager beror linjärt på föregående; #13 måste mergas sist eftersom den är den enda
+   som stänger P1-fyndet, men ska INTE hoppas över eller skjutas upp obestämt).
+3. Innan lager #0–12 behandlas som produktionsklara måste #13 (P1-fixen) vara mergad —
+   annars kvarstår gapet dessa lager introducerade.
+4. `codex/chatgpt-import-foundation` (se "Sidogrenar" ovan) förblir separat, INTE en del av
+   den här kedjan, och får INTE mergas förrän dess `0037`-kollision är omnumrerad mot den
+   faktiska nästa lediga migrationen vid den tidpunkt den faktiskt förbereds för integration.
+
 ### MainAI V0.1/V0.2/V0.3 — redan mergade, oberoende omgranskade (2026-08-16)
 
 Del av samma review: `claude/mainai-execution-loop-v0-1` (PR #57), `claude/mainai-dead-agent-
