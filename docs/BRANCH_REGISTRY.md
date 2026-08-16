@@ -6,6 +6,7 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+<<<<<<< HEAD
 ## Aktiva PR:er (2026-08-17) — PR #80 fryst; storage-race fix separat
 
 **PR #80 — FRYST, CODE-READY @ `5b9257b`.** Rör INTE i PR #80-worktree. Väntar på den här
@@ -38,6 +39,25 @@ förrän storage-race CI-blocker är löst och granskad.
 
 **PR #83 (`claude/agent-runtime-control-plane`) — Claude night-shift/observability.**
 Oberoende scope; rörs inte av den här branchen.
+=======
+## Aktiva PR:er (2026-08-17) — PR #79 mergad; PR #80 reconcileras
+
+**PR #79 — MERGAD** i `claude/det-kommer-mer-879lcm` @ `69f30e0` (2026-08-17). Live-wiring av
+autonomous gap → child task in i Supervisor (`handle_live_gap_signal`). Ingen ny migration —
+Alembic single head **0046** (via PR #82). Se
+`docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
+
+**`cursor/pr79-live-loop-hardening` → `claude/det-kommer-mer-879lcm` (PR #80) — ÖPPEN,
+reconcileras.** Stackad hardening ovanpå mergad PR #79. Stänger live-handoff-luckan
+(auto-derive WorkBinding + `multiplication_repair` som **begränsat demo-recept**), P1
+idempotent takeover, lease-fencing med `SELECT … FOR UPDATE`, execution-time path intersection
+(`scope ∩ binding ∩ OperatorContext`), strukturerad reverify, breadth-counters per Supervisor-
+invocation. Ingen migration (Alembic head kvar **0046**). Merga INTE förrän CI grön och
+granskad.
+
+**PR #83/#84 (`claude/agent-runtime-control-plane` m.fl.) — Claude night-shift/observability.**
+Oberoende scope; rörs inte av den här stack-passet.
+>>>>>>> 3158e73 (Document PR #79 hardening stack in the branch registry)
 
 ## Pass 57 (2026-08-16): `claude/multi-agent-work-coordination-foundation` — Multi-Agent Work Coordination-grunden, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
@@ -91,15 +111,14 @@ samma förbefintliga tidszonsartefakt ovan), 163/166 `tests/backend/mainai/` (3 
 `development_operator`-scope, orört av den här branchen).
 
 **Beroenden (historiskt + uppdaterat 2026-08-17):** Byggdes oberoende av Cursors PR #79/#80 —
-ingen delad kod, ingen delad migration (0046 = 0045 → 0046, ingen kollision). **PR #82 är nu
-mergad i mainline (`78f4eb0`).** PR #79 har därefter reconcilerats mot den tippen (merge,
-ingen ny migration). PR #80 förblir fryst på `1d3ebff` tills PR #79 är godkänd.
+ingen delad kod, ingen delad migration (0046 = 0045 → 0046, ingen kollision). **PR #82 mergad
+(`78f4eb0`). PR #79 mergad (`69f30e0`).** PR #80 reconcileras nu mot post-#79 mainline.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/multi-agent-work-coordination-foundation` | [#82](https://github.com/d1n095/LifeAI/pull/82) | **Mergad** i `claude/det-kommer-mer-879lcm` @ `78f4eb0` | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
-| `claude/mainai-autonomous-gap-live-integration` | [#79](https://github.com/d1n095/LifeAI/pull/79) | Öppen, reconcilerad mot mainline inkl. 0046 | Live gap→child wiring in i Supervisor | mainline @ `78f4eb0` |
-| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | Fryst tills #79 godkänd | Live-loop hardening (P1 path/lease) | PR #79 @ `bed835a` (oförändrad tills vidare) |
+| `claude/multi-agent-work-coordination-foundation` | [#82](https://github.com/d1n095/LifeAI/pull/82) | **Mergad** @ `78f4eb0` | Multi-Agent Work Coordination, migration 0046 | mainline |
+| `claude/mainai-autonomous-gap-live-integration` | [#79](https://github.com/d1n095/LifeAI/pull/79) | **Mergad** @ `69f30e0` | Live gap→child wiring | mainline inkl. 0046 |
+| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | Reconcileras | Live-loop hardening (P1 path/lease) | mainline @ `69f30e0` |
 
 ## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
 
