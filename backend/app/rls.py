@@ -80,6 +80,16 @@ RLS_STATEMENTS = [
     "ALTER TABLE source_import_batch_failures FORCE ROW LEVEL SECURITY",
     "ALTER TABLE message_source_units ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE message_source_units FORCE ROW LEVEL SECURITY",
+    # Life Intelligence Governance & Meta-Learning (migration 0038): immutable observations
+    # linked to the existing MainAI execution runtime; never a parallel job system.
+    *[
+        statement
+        for table in (
+            "intelligence_executions", "intelligence_evidence", "intelligence_interpretations",
+            "intelligence_ideas", "intelligence_idea_links", "intelligence_idea_lessons",
+        )
+        for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    ],
 ]
 
 # `messages` is the one table here whose owner is not a column on the row itself: a message
@@ -226,6 +236,17 @@ POLICY_DEFINITIONS = [
         "name": "message_source_units_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
+    *[
+        {
+            "table": table,
+            "name": f"{table}_isolation",
+            "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+        }
+        for table in (
+            "intelligence_executions", "intelligence_evidence", "intelligence_interpretations",
+            "intelligence_ideas", "intelligence_idea_links", "intelligence_idea_lessons",
+        )
+    ],
 ]
 
 
@@ -349,6 +370,12 @@ _MAINAI_EXECUTION_TABLES = (
     "mainai_recovery_records",
     "mainai_recovery_events",
     "mainai_task_waits",
+    "intelligence_executions",
+    "intelligence_evidence",
+    "intelligence_interpretations",
+    "intelligence_ideas",
+    "intelligence_idea_links",
+    "intelligence_idea_lessons",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
@@ -356,6 +383,13 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "mainai_task_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_checkpoints_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_recovery_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
+    {
+        "name": "intelligence_governance_deny_mutation",
+        "identity_args": "",
+        "return_type": "trigger",
+        "mainai_app_execute": False,
+        "security_definer": False,
+    },
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -600,6 +634,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_task_events FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_checkpoints FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_recovery_events FROM mainai_app"))
+        for table in (
+            "intelligence_executions", "intelligence_evidence", "intelligence_interpretations",
+            "intelligence_ideas", "intelligence_idea_links", "intelligence_idea_lessons",
+        ):
+            conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
@@ -616,6 +655,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("mainai_task_events", _MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_checkpoints", _MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_recovery_events", _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES),
+            *((table, frozenset({"SELECT", "INSERT"})) for table in (
+                "intelligence_executions", "intelligence_evidence", "intelligence_interpretations",
+                "intelligence_ideas", "intelligence_idea_links", "intelligence_idea_lessons",
+            )),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
@@ -642,8 +685,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 errors.append(f"{name}: expected signature '({spec['identity_args']})', found '({row.identity_args})'")
             if row.rettype != spec["return_type"]:
                 errors.append(f"{name}: expected return type '{spec['return_type']}', found '{row.rettype}'")
-            if not row.prosecdef:
-                errors.append(f"{name}: expected SECURITY DEFINER, not set")
+            expects_security_definer = spec.get("security_definer", True)
+            if row.prosecdef != expects_security_definer:
+                errors.append(
+                    f"{name}: SECURITY DEFINER is {row.prosecdef}, expected {expects_security_definer}"
+                )
             if row.lanname != "plpgsql":
                 errors.append(f"{name}: expected language plpgsql, found '{row.lanname}'")
             if not row.proconfig or "search_path=pg_catalog" not in row.proconfig:
@@ -653,16 +699,17 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             if row.owner == "mainai_app":
                 errors.append(f"{name}: must never be owned by mainai_app")
 
-            role_priv = conn.execute(
-                text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = :owner"),
-                {"owner": row.owner},
-            ).first()
-            if role_priv is None or not (role_priv.rolsuper or role_priv.rolbypassrls):
-                errors.append(
-                    f"{name}: owner '{row.owner}' has neither SUPERUSER nor BYPASSRLS — a SECURITY "
-                    "DEFINER function meant to operate under FORCE RLS must be owned by a role that "
-                    "can actually do so"
-                )
+            if expects_security_definer:
+                role_priv = conn.execute(
+                    text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = :owner"),
+                    {"owner": row.owner},
+                ).first()
+                if role_priv is None or not (role_priv.rolsuper or role_priv.rolbypassrls):
+                    errors.append(
+                        f"{name}: owner '{row.owner}' has neither SUPERUSER nor BYPASSRLS — a SECURITY "
+                        "DEFINER function meant to operate under FORCE RLS must be owned by a role that "
+                        "can actually do so"
+                    )
 
             public_has_execute = conn.execute(
                 text(

@@ -7,6 +7,19 @@ from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.import_job import ImportJob
+from app.models.intelligence_governance import (
+    ClassificationBasis,
+    ExecutionRole,
+    IdeaDisposition,
+    IntelligenceEvidence,
+    IntelligenceExecution,
+    IntelligenceIdea,
+    IntelligenceIdeaLesson,
+    IntelligenceIdeaLink,
+    IntelligenceInterpretation,
+    ParticipationMode,
+    ReviewKind,
+)
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.mainai_execution import (
@@ -102,6 +115,17 @@ __all__ = [
     "DocumentChunk",
     "EmailVerificationToken",
     "ImportJob",
+    "ClassificationBasis",
+    "ExecutionRole",
+    "IdeaDisposition",
+    "IntelligenceEvidence",
+    "IntelligenceExecution",
+    "IntelligenceIdea",
+    "IntelligenceIdeaLesson",
+    "IntelligenceIdeaLink",
+    "IntelligenceInterpretation",
+    "ParticipationMode",
+    "ReviewKind",
     "KnowledgeClaim",
     "KnowledgeVersion",
     "ACTIVE_MAINAI_GOAL_STATUSES",
