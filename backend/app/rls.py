@@ -104,7 +104,10 @@ RLS_STATEMENTS = [
                       "strategy_comparisons", "strategy_comparability_assessments", "strategy_quality_assessments",
                       "strategy_efficiency_deltas", "strategy_experiments", "strategy_promotion_candidates",
                       "strategy_experiment_comparisons", "strategy_promotion_comparisons", "strategy_learning_links",
-                      "strategy_learning_observations", "strategy_evaluation_events")
+                      "strategy_learning_observations", "strategy_evaluation_events",
+                      "strategy_synthesis_cases", "strategy_synthesis_inputs", "strategy_synthesis_components",
+                      "strategy_synthesis_conflicts", "strategy_synthesis_materializations",
+                      "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
 ]
@@ -282,7 +285,10 @@ POLICY_DEFINITIONS = [
                       "strategy_comparisons", "strategy_comparability_assessments", "strategy_quality_assessments",
                       "strategy_efficiency_deltas", "strategy_experiments", "strategy_promotion_candidates",
                       "strategy_experiment_comparisons", "strategy_promotion_comparisons", "strategy_learning_links",
-                      "strategy_learning_observations", "strategy_evaluation_events")
+                      "strategy_learning_observations", "strategy_evaluation_events",
+                      "strategy_synthesis_cases", "strategy_synthesis_inputs", "strategy_synthesis_components",
+                      "strategy_synthesis_conflicts", "strategy_synthesis_materializations",
+                      "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")
     ],
 ]
 
@@ -459,6 +465,14 @@ _MAINAI_EXECUTION_TABLES = (
     "strategy_learning_links",
     "strategy_learning_observations",
     "strategy_evaluation_events",
+    "strategy_synthesis_cases",
+    "strategy_synthesis_inputs",
+    "strategy_synthesis_components",
+    "strategy_synthesis_conflicts",
+    "strategy_synthesis_materializations",
+    "strategy_synthesis_evaluation_links",
+    "strategy_synthesis_lesson_links",
+    "strategy_synthesis_events",
 )
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
@@ -509,6 +523,22 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {
         "name": "strategy_evaluation_state_only", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "strategy_synthesis_deny_mutation", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "strategy_synthesis_case_update_guard", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "strategy_synthesis_component_update_guard", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "strategy_synthesis_conflict_update_guard", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
 ]
@@ -787,6 +817,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                       "strategy_efficiency_deltas", "strategy_experiment_comparisons", "strategy_promotion_comparisons",
                       "strategy_learning_links", "strategy_learning_observations", "strategy_evaluation_events"):
             conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        for table in ("strategy_synthesis_cases", "strategy_synthesis_components", "strategy_synthesis_conflicts"):
+            conn.execute(text(f"REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        for table in ("strategy_synthesis_inputs", "strategy_synthesis_materializations",
+                      "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events"):
+            conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
@@ -834,6 +869,11 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 "strategy_comparisons", "strategy_comparability_assessments", "strategy_quality_assessments",
                 "strategy_efficiency_deltas", "strategy_experiment_comparisons", "strategy_promotion_comparisons",
                 "strategy_learning_links", "strategy_learning_observations", "strategy_evaluation_events")),
+            *((table, frozenset({"SELECT", "INSERT", "UPDATE"})) for table in (
+                "strategy_synthesis_cases", "strategy_synthesis_components", "strategy_synthesis_conflicts")),
+            *((table, frozenset({"SELECT", "INSERT"})) for table in (
+                "strategy_synthesis_inputs", "strategy_synthesis_materializations",
+                "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
