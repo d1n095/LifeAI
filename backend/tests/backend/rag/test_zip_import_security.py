@@ -127,10 +127,15 @@ def test_ignores_executable_files_regardless_of_content():
 
 
 def test_skips_unsupported_file_types():
-    raw = _make_zip({"data.csv": b"a,b,c", "readme.txt": b"ok"})
+    # data.xlsx, not data.csv -- Life Source Foundation Bootstrap (docs/LIFE_SOURCE_FOUNDATION_
+    # BOOTSTRAP.md §F) added .csv to ALLOWED_EXTENSIONS (extract.py's existing UTF-8 fallback
+    # already handled it correctly; no new parser needed). XLSX is deliberately NOT added (a
+    # binary format needing a new dependency, a supply-chain decision this bootstrap pass does
+    # not make unilaterally) -- so it's still a genuinely unsupported type, unlike CSV now is.
+    raw = _make_zip({"data.xlsx": b"not a real xlsx file", "readme.txt": b"ok"})
     result = validate_and_extract_zip(raw)
     assert [e.filename for e in result.ok_entries] == ["readme.txt"]
-    assert any(e.filename == "data.csv" and e.status == "skipped" for e in result.entries)
+    assert any(e.filename == "data.xlsx" and e.status == "skipped" for e in result.entries)
 
 
 def test_never_trusts_extension_alone_rejects_content_mismatched_pdf():

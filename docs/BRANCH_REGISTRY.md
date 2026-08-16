@@ -6,6 +6,148 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
+
+**PR #60 — `claude/life-canonical-architecture-recovery` → `claude/det-kommer-mer-879lcm` —
+ÖPPEN, DRAFT, medvetet FRYST.** "PROVISIONAL CANONICAL ARCHITECTURE / BOOTSTRAP MAP" — fyra
+arkitekturdokument (`docs/LIFE_CANONICAL_ARCHITECTURE.md`,
+`docs/LIFE_REQUIREMENT_TRACEABILITY.md`, `docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md`,
+`docs/LIFE_SOURCE_VAULT_AND_MEMORY_ARCHITECTURE.md`) plus implementationsförslaget
+`docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`. Explicit INTE godkänd som slutlig Canonical
+Architecture av grundaren — extern grundarkorpus (`~/Documents/mainai_intake/`) var aldrig
+tillgänglig under den första passet, och requirement traceability var tematisk, inte atomär.
+Ska förbli draft/provisional tills grundarens fulla korpus faktiskt importerats (via PR #61:s
+bootstrap, se nedan) och en riktig slutlig arkitekturgranskning gjorts. **Ingen kod byggd på
+den här branchen** — rent designarbete.
+
+**PR #61 — `claude/life-source-foundation-bootstrap` → `claude/det-kommer-mer-879lcm` — ÖPPEN,
+DRAFT, redo för granskning.** Den faktiska kodimplementationen av
+`docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`s förslag (PR #60:s implementationsdesign) — grenad
+direkt från mainline (`27f0d1e...`, PR #59:s mergecommit), INTE från PR #60:s designbranch, per
+grundarens uttryckliga instruktion att koda och design ska hållas isär. Bygger allt som INTE
+kräver ett riktigt ChatGPT-exportexempel: migration 0037
+(`source_import_batches`/`source_import_batch_failures` — korpusmanifest med en DB-tvingad
+N/N-fullständighets-CHECK; `message_source_units` — S1C, meddelanden som en andra
+`memory_source_units`-subtyp, samma exclusive-arc-mönster som `document_source_units`;
+`documents.source_import_batch_id`), race-säker find-or-create + resumable backfill för
+meddelanden (`app/rag/message_source.py`/`app/rag/backfill/message_source.py`, speglar
+`app/rag/memory_source.py`s bevisade SAVEPOINT-mönster exakt), ren bokföringstjänst för
+korpusbatchar (`app/rag/corpus_batch.py`), en durabel `message_source_backfill`-jobbtyp på
+befintlig `mainai_jobs`-runtime, CSV tillagt i `zip_import.py` (ingen ny parser behövs — XLSX
+medvetet UTESLUTET, kräver ett nytt beroende, inget ensidigt beslut).
+
+**Ett verkligt designfel hittat och korrigerat UNDER bygget** (inte antaget korrekt från
+designläsningen): det ursprungliga försöket att göra `documents.storage_key`/`file_path`
+oföränderliga via kolumnnivå-privilegier (`REVOKE`/`GRANT` per kolumn i
+`s1a_privilege_policy.py`) visade sig — vid körning av HELA backend-testsviten, inte bara de
+nya filerna isolerat — blockera en riktig, legitim produktionskodväg:
+`app/rag/library_import.py` skapar `Document`-raden FÖRST (`storage_key` fortfarande NULL,
+eftersom den innehålls-adresserade nyckeln inte kan vara känd förrän blobben är hashad och
+skriven), och sätter den sedan via en riktig UPDATE när blobben väl är lagrad. Postgres
+GRANT/REVOKE är binärt och kan inte uttrycka "bara om för närvarande NULL", så mekanismen
+blockerade även den legitima första skrivningen — 53 orelaterade test föll. Ersatt med en
+BEFORE UPDATE-trigger (`trg_documents_storage_immutable`) som tillåter NULL → värde en gång och
+avvisar bara en SENARE ändring av ett redan satt värde — samma write-once-mönster koden redan
+använder för `document_source_units`/`message_source_units` (migration 0019). Verifierat: hela
+testsviten, som hade 53 fel mot kolumnprivilege-ansatsen, går ren med triggern.
+
+Full backend-svit körd tre gånger mot en riktig Postgres/Redis under bygget: ren utom EN
+bekräftat pre-existing, orelaterad filsystems-trådrace (`test_write_stream_vs_delete_never_
+returns_a_blob_missing_from_disk` i `app/storage/local_fs.py`, orörd av den här branchen,
+reproducerad som flaky oberoende av ändringen vid upprepade körningar). Två fynd som bara syntes
+i den fulla sviten (inte i isolerade körningar av de nya testfilerna) fixades: ett befintligt
+test som använde `.csv` som sitt "stöds inte"-exempel (nu genuint stött av den här bootstrapen)
+uppdaterat till `.xlsx`; två av bootstrapens egna triggertester lättades från en exakt
+felmeddelande-match till samma konvention `test_memory_source_units.py` redan använder (en
+tidigare moduls egen privilege-narrowing-fixture kan legitimt hinna före triggern med "permission
+denied" beroende på testordning).
+
+**Hardening/attack-pass KLAR (2026-08-15, grundarens 27-avsnittsmandat) — MERGE-READY, väntar
+på grundarens godkännande.** `backend/tests/backend/rag/test_bootstrap_hardening.py` (46
+tester, samtliga gröna) täcker samtliga 27 avsnitt i mandatet (se PR #61:s slutrapport i
+sessionen för den fullständiga per-avsnitts-redovisningen). Två riktiga fynd hittades och
+fixades under passet (inte antagna korrekta):
+
+1. **Privilege vs. write-once-livscykel** (Sektion 2/3): kolumnnivå-`REVOKE` för
+   `documents.storage_key`/`file_path` blockerade den legitima NULL→värde-förstaskrivningen
+   `library_import.py` gör — GRANT/REVOKE kan inte uttrycka "bara om NULL". Fixat med
+   `trg_documents_storage_immutable` (BEFORE UPDATE-trigger), samma mönster som redan finns
+   för `document_source_units`/`message_source_units`.
+2. **Composite-FK-lucka** (Sektion 13): `source_import_batch_failures.batch_id` var en vanlig
+   enkolumns-FK utan bindning mellan radens egen `owner_id` och den refererade batchens
+   `owner_id` — en ägares egen giltiga RLS WITH CHECK kunde maskera en `batch_id` som pekade
+   på en annan ägares batch. Fixat i migration 0037 (redigerad på plats, inte en påstaplad
+   uppföljningsmigration) med migration 0027:s redan etablerade composite-FK-mönster:
+   `UNIQUE(id, owner_id)` på `source_import_batches` +
+   `FOREIGN KEY (batch_id, owner_id) REFERENCES source_import_batches(id, owner_id)`.
+
+Båda lärdomarna (plus den ursprungliga S1C-trigger-lärdomen) persisterade maskinläsbart i
+`engineering_lessons` via `scripts/mainai/seed_life_source_foundation_hardening_lessons.py`
+(körd lokalt, INTE mot produktion). Sektion 22:s dok-sanningskontroll bekräftade att
+`docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`:s frånvaro från den här branchen är AVSIKTLIG (den
+lever på PR #60:s designbranch), inte ett dokumentationsfel.
+
+**Slutlig verifiering (2026-08-15):** migrations-roundtrip (upp → ner → upp) mot en
+engångsdatabas, exakt en Alembic-head (`0037`), ruff rent på alla ändrade filer, ingen
+hemlighet hittad. Full backend-svit (`pytest tests/`, 1424 tester): 1422 gröna, 1 skip
+(avsiktlig, P2-kapacitetstest), 1 fel — bekräftat samma pre-existing, orelaterade
+filsystems-trådrace (`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`,
+orörd av den här branchen) redan dokumenterad i PR #61:s egen kropp; reproducerad som genuint
+flaky (fail/fail/pass) i tre isolerade körningar utan någon kodändring mellan dem. GitHub CI
+på head `d0e7e8d`: samtliga 16 obligatoriska checks gröna inklusive "All required checks
+passed", `mergeable_state: clean`, 0 olösta review-threads.
+
+**Beroende och rekommenderad merge-ordning:** PR #61 är fristående kod, oberoende av PR #60 —
+kan granskas och mergas när som helst utan att röra PR #60:s diff. PR #60 beror däremot på att
+PR #61:s bootstrap FAKTISKT används för att importera grundarens fulla korpus innan en riktig
+slutlig Canonical Architecture Recovery kan göras — PR #60 ska INTE mergas eller uppdateras i
+förväg bara för att PR #61 mergas (se `CLAUDE.md`s merge-regel). Ingen konflikt mellan
+brancherna identifierad — helt disjunkta filuppsättningar.
+
+**Oberoende arkitektur-/säkerhets-/integrationsgranskning av hela Life-utvecklings-/
+autonomikedjan (2026-08-16)** hittade att en separat AI-agent ("Codex") pushat direkt till en
+kedja av 15 `codex/*`-brancher (se det nya avsnittet "Codex-brancher" nedan för fullständig
+lista) — aldrig öppnade som PR:er, aldrig körda i CI. En av dessa,
+`codex/pr61-independent-hardening`, är en egen, oberoende hardening-pass på PR #61, grenad från
+`3d56fc8` (mitt i det egna hardening-passet ovan) — den hittade tre RIKTIGA, då ofixade fynd i
+PR #61 som det egna passet missade. Grundaren beställde en riktad korrigeringsomgång.
+
+**PR #61 korrigeringsomgång (2026-08-16) — de tre fynden från `codex/pr61-independent-hardening`
+inkorporerade:**
+
+1. **Parse-failure-reconciliation-bugg**: en enda `failed_count`-hink lät en post-storage
+   parse-fel dubbelräknas mot BÅDE `stored_originals_done` (redan inkrementerad vid lagring)
+   och `failed_count` (inkrementerad igen vid parse-felet) för SAMMA fil, vilket bröt
+   `ck_sib_completed_reconciles` permanent för en sådan batch. Fixat genom att dela hinken per
+   pipeline-steg: `storage_failed_count` (aldrig lagrad) + `parse_failed_count` (lagrad, men
+   misslyckades vid parsning) — `corpus_batch.py`s `record_failed()` ersatt med
+   `record_storage_failed()`/`record_parse_failed()`, migration 0037 redigerad på plats (samma
+   redan etablerade mönster som composite-FK-fixen).
+2. **Cross-owner-FK-lucka på `documents.source_import_batch_id`**: samma sårbarhetsklass
+   Sektion 13 redan fixat på `source_import_batch_failures.batch_id`, nu stängd på
+   `documents.source_import_batch_id` via samma composite-`(id, owner_id)`-mönster:
+   `fk_documents_batch_owner FOREIGN KEY (source_import_batch_id, uploaded_by) REFERENCES
+   source_import_batches(id, owner_id)`.
+3. **`message_source_backfill`s lease-fencing-transaktionsgränsbugg**: lease-förnyelsen
+   committades separat FÖRE batchens egna domänskrivningar (en egen, tidigare `db.commit()`
+   direkt efter `renew_mainai_job_lease()`), vilket lämnade ett fönster där en arbetare vars
+   lease löpte ut MITT I en batch ändå kunde committa den batchens effekter efteråt. Fixat genom
+   att ta bort den förtida committen — förnyelsens UPDATE ligger nu okommitterad kvar (håller
+   radlåset) tills batchens egen commit (`backfill_message_source_units()`s) täcker båda
+   atomiskt, exakt det mönster `renew_mainai_job_lease()`s egen docstring redan föreskrev men
+   den här handlern inte följde.
+
+Alembic-revisionskollisionen mellan PR #61:s `0037_life_source_foundation_bootstrap.py` och
+`codex/chatgpt-import-foundation`s `0037_structured_import_foundation.py` dokumenterad i
+migrationsfilens egen docstring (inte löst genom att byta PR #61:s revisionsnummer — se den
+docstringen för den exakta framtida ombenämningsplanen). Ingen mandatöverträdelse hittades i
+`codex/chatgpt-import-foundation` (tom adapter-registry, syntetiska testfixturer, inget
+ChatGPT-specifikt schema — respekterar "inget ChatGPT-adapter utan riktigt exportprov" genom
+konstruktion).
+
+Ny huvud-SHA och full re-verifiering: se slutrapporten i sessionen för exakt SHA,
+testresultat, migrations-roundtrip och CI-status efter korrigeringsomgången.
+
 **PR #59 är MERGAD (2026-08-11).** Efter hardening/attack-passet nedan (P3-fix + near-miss-lärdom
 + approval-escalation-/fairness-/subprocess-cancellation-/RLS-bevis) verifierade grundaren
 resultatet och gav uttryckligt merge-godkännande — "Kör — V0.3 är MERGE-READY". Slutlig
@@ -5975,3 +6117,99 @@ Denna lista byggdes från en snabb `git merge-base`-genomgång av samtliga fjär
 tillfället ovan — den täcker ANCESTRY (är X en förfader till Y), inte innehållet i varje
 branch i detalj. Om en branch saknas här, eller om något ser fel ut, uppdatera det här
 dokumentet efter verifiering — gissa inte.
+
+## Codex-brancher (upptäckta 2026-08-16, tidigare helt ospårade i det här registret)
+
+En oberoende arkitektur-/säkerhets-/integrationsgranskning (grundarens beställning, 2026-08-16)
+av hela Life-utvecklings-/autonomikedjan hittade 15 `codex/*`-brancher på `origin` — pushade
+direkt av en separat AI-agent ("Codex"), **aldrig öppnade som GitHub PR, aldrig körda i CI**
+(`.github/workflows/ci.yml`s `push`/`pull_request`-triggers täcker `main`/`claude/**`, inte
+`codex/**`). Verifierat via `git fetch`/`git log`/`git merge-base --is-ancestor` direkt mot
+`origin`, inte gissat.
+
+### Huvudkedjan — 12 lager, strikt linjär (verifierad via `git merge-base --is-ancestor`)
+
+Varje branch är en ANCESTOR av nästa (bekräftad kedja, inte 12 oberoende brancher) — endast
+spetsen behöver granskas för att se HELA kedjans innehåll:
+
+1. `codex/active-context-intelligence-foundation` @ `4abd52a` (2026-08-14 23:09) — 33 filer
+2. `codex/memory-threads-foundation` @ `d7a1803` (2026-08-14 23:32) — 39 filer
+3. `codex/goals-dreams-dependencies-foundation` @ `50a4d68` (2026-08-15 05:30) — 45 filer
+4. `codex/problem-solution-decision-learning-foundation` @ `9b61b45` (2026-08-15 07:10) — 51 filer
+5. `codex/self-optimizing-work-intelligence-foundation` @ `ea74b79` (2026-08-15 08:01) — 57 filer
+   ("Work Intelligence", migration 0043)
+6. `codex/strategy-evaluation-promotion-foundation` @ `096f81c` (2026-08-15 10:41) — 63 filer
+   ("Strategy Evaluation", migration 0044)
+7. `codex/strategy-synthesis-learning-foundation` @ `e41505d` (2026-08-15 12:00) — 69 filer
+   ("Strategy Synthesis", migration 0045)
+8. `codex/life-development-operator-foundation` @ `71f449f` (2026-08-15 13:51) — 73 filer
+9. `codex/autonomous-development-loop-foundation` @ `7d7dd07` (2026-08-15 16:37) — 77 filer
+10. `codex/life-safe-planner-foundation` @ `27308d0` (2026-08-15 17:01) — 81 filer
+11. `codex/provider-assisted-planning-foundation` @ `15188c0` (2026-08-15 17:55) — 85 filer
+12. `codex/scoped-development-supervisor-foundation` @ `c7c8ea1` (2026-08-15 20:53) — **spetsen**,
+    89 filer, 23284 tillägg mot `27f0d1e` (mainlinens merge-base)
+
+`codex/agent-evaluation-learning-foundation` @ `09aad6b` (2026-08-14 21:57, "intelligence
+governance evidence foundation", migration 0038) är också en ANCESTOR av spetsen (kedjans
+migration 0038), men INTE en ancestor av `active-context-intelligence-foundation` — infogad i
+kedjan från en separat gren snarare än en ren linjär rebase.
+
+Hela kedjan grenad från PR #61 vid commit `3d56fc8` (mitt i det egna hardening-passet), INTE
+från den slutliga hardenade PR #61-branchen — saknar alltså PR #61:s senare hardening-fynd
+(Sektion 13:s composite-FK-fix m.fl.) fram tills den rebasas om.
+
+**Granskningsresultat (spetsen läst i sin helhet):**
+- Ingen merge-/deploy-/produktionsförmåga någonstans i koden (grep efter
+  `create_pull_request`/`merge_pull_request`/`deploy_hook` gav noll träffar;
+  `app/integrations/github_client.py` orörd).
+- `push_branch()` finns men är död kod — `remote_write_authorized`-flaggan har ingen sättare
+  någonstans.
+- **P1**: lokal filskrivning/commit OCH riktiga provider-anrop (`chat_with_fallback`, äkta
+  spend) är AUTO-godkända som default (`APPROVAL_POLICIES["standard_repo_work"]`, ärvt
+  oförändrat från V0.1) — inget spend-specifikt godkännande-grind.
+- **P1**: aldrig körd i CI trots 13 nya testfiler som använder samma riktiga-Postgres-mönster
+  som resten av kodbasen.
+- Ingen duplicering av jobb-/kö-infrastruktur — migrationerna 0038–0045 lägger bara till nya
+  domäntabeller, återanvänder `MainAITask`/`MainAIGoal`/`MainAIJob`/`MainAICheckpoint` från
+  `app/mainai_execution/` helt.
+- Skapar aldrig egna `MainAITask`/`MainAIGoal`/`MainAIPlan`-rader — kan bara agera på redan
+  grundar-godkänt arbete, inte hitta på nytt eget. Det är den enda spärren som håller
+  autonomiscopet begränsat idag.
+- **Status: EJ MERGE-READY.** Behöver, i ordning: (1) rebasas om mot mergad/korrigerad PR #61,
+  (2) delas upp i 12 separata PR:er (en per lager, matchar `CLAUDE.md`s "en branch = ett
+  syfte"-princip) och faktiskt köras i CI, (3) AUTO-godkännande-defaulten för autonom
+  skrivning/spend medvetet omprövad innan den behandlas som granskningsklar.
+
+### Sidogrenar (inte del av huvudkedjan)
+
+- **`codex/pr61-independent-hardening`** @ `d9be330` (2026-08-14 16:49) — grenad från PR #61 @
+  `3d56fc8`, EN commit ("Harden source foundation integrity boundaries"), ÄR en ancestor av
+  huvudkedjans spets (dess innehåll togs in där). Hittade tre riktiga, då ofixade fynd i PR #61
+  — se PR #61:s korrigeringsomgång ovan, alla tre nu inkorporerade i
+  `claude/life-source-foundation-bootstrap`. Ej PR, ej CI-körd.
+- **`codex/chatgpt-import-foundation`** @ `0d7659e` (2026-08-14 18:17, "Add format-agnostic
+  structured import foundation") — grenad direkt från mainline (`27f0d1e`), INTE från PR #61,
+  INTE en ancestor av huvudkedjans spets. Generisk, medvetet tom adapter-ramverk (`registry.py`:
+  `_bindings: dict = {}`, inga registreringar) — **ingen mandatöverträdelse**, inget
+  ChatGPT-specifikt schema/fältnamn/filstruktur någonstans, testfixturer syntetiska och
+  explicit dokumenterade som sådana. Deklarerar `0037_structured_import_foundation.py` — en
+  Alembic-revisionskollision med PR #61:s `0037_life_source_foundation_bootstrap.py`
+  (identiskt `revision="0037"`, `down_revision="0036"`), dokumenterad i PR #61:s
+  migrationsfil; måste ombenämnas vid nästa rebase mot en mainline som redan innehåller PR
+  #61:s 0037 (se den filens docstring för exakt regel — inget hårdkodat nummer, beror på
+  merge-ordning). Ej PR, ej CI-körd.
+
+### MainAI V0.1/V0.2/V0.3 — redan mergade, oberoende omgranskade (2026-08-16)
+
+Del av samma review: `claude/mainai-execution-loop-v0-1` (PR #57), `claude/mainai-dead-agent-
+recovery-v0-2` (PR #58), `claude/mainai-long-running-orchestration-v0-3` (PR #59) — samtliga
+redan MERGADE i `claude/det-kommer-mer-879lcm` (se ovan). Oberoende granskning fann INGEN P0:
+ingen merge-förmåga finns i koden alls (`KNOWN_TASK_TYPES` sluten mängd, inget
+`merge`/`deploy`); godkännande-grinden (`require_task_approval()`) är kodmässigt
+fail-closed och kan inte självuppfyllas; V0.2:s dead-worker-fencing är solid (`task_execution`
+strukturellt undantagen från blind reclaim, `mark_job_superseded()` re-verifierar atomiskt);
+idempotens/duplicate-side-effect-skydd bekräftat via `work_trace_events.idempotency_key` +
+lease-omverifiering före varje durabel skrivning. **P1 (icke-blockerande, för framtida
+"Autonomous Gap → Child-Task Generation")**: `create_plan()` är full-supersession-bara — ingen
+primitiv för att foga in EN ny child-task under en befintlig plan utan att kansellera alla
+syskon-tasks; måste byggas innan den funktionen kan börjas.

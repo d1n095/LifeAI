@@ -107,9 +107,40 @@ _PROTECTED_TABLES = [
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
     ("storage_deletion_tasks", []),
+    # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+    # §D/§L) — message_source_units is S1C, the exact same exclusive-arc pattern as
+    # document_source_units above (every field guarded immutable by trg_msgsu_guard_update,
+    # so UPDATE would always fail via the trigger anyway; narrowed at the grant level too for
+    # the same "don't rely on the trigger alone" defense-in-depth reasoning as document_source_
+    # units). source_import_batches/source_import_batch_failures are ordinary operational
+    # tracking data, not evidence — UPDATE is genuinely needed on the batch (progress counters
+    # advance as ingestion proceeds), but never DELETE (a batch's history is kept, matching the
+    # founder's own §P completeness-proof requirement — deleting a batch would make its
+    # completeness proof unreconstructable).
+    ("message_source_units", ["SELECT", "INSERT"]),
+    ("source_import_batches", ["SELECT", "INSERT", "UPDATE"]),
+    ("source_import_batch_failures", ["SELECT", "INSERT"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
+
+# NOTE on documents.storage_key/file_path immutability (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+# §D): an EARLIER version of this bootstrap pass tried to enforce this via column-level
+# privilege narrowing here (REVOKE table-level UPDATE on `documents`, re-GRANT at column level
+# for every column except storage_key/file_path). That mechanism was reverted after it broke a
+# real, legitimate production code path found empirically: app/rag/library_import.py creates
+# the Document row FIRST (storage_key still NULL, since the content-addressed key can't be
+# known before the blob is hashed/written), then issues a single UPDATE setting storage_key
+# together with status/size_bytes/stored_at once the blob is durably on disk — a genuine
+# one-time "first write" that happens via UPDATE, not INSERT, and that column-level REVOKE had
+# no way to distinguish from a later, illegitimate change to an already-set value (Postgres
+# GRANT/REVOKE is binary — can/cannot UPDATE a column — it cannot express "only if currently
+# NULL"). The correct primitive for THAT invariant is a write-once BEFORE UPDATE trigger,
+# exactly the mechanism this codebase already uses for field-level immutability elsewhere
+# (migration 0019's document_source_units/message_source_units guard triggers) — see migration
+# 0037's `trg_documents_guard_storage_immutable` for the actual enforcement. Privilege
+# narrowing remains the right tool for table-level access (below); it is not the right tool
+# for value-conditional immutability.
 
 # Pass 44 — the schema-wide privilege floor. mainai_app must never hold ANY of these on ANY
 # table in schema public, whether or not that table appears in `_PROTECTED_TABLES` above.

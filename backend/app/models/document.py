@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -139,6 +139,21 @@ class DeletionStatus(str, enum.Enum):
 class Document(Base):
     __tablename__ = "documents"
 
+    # PR #61 correction pass (post-review, founder-mandated): source_import_batch_id's real
+    # constraint is the composite fk_documents_batch_owner below (source_import_batch_id,
+    # uploaded_by) -> source_import_batches(id, owner_id) -- the same cross-owner gap already
+    # closed on source_import_batch_failures.batch_id. A plain single-column FK on
+    # source_import_batch_id alone (documents' RLS only ever checks uploaded_by, never a
+    # referenced row's owner) would let a caller point this column at a batch genuinely owned
+    # by someone else while still satisfying their own row's RLS WITH CHECK.
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_import_batch_id", "uploaded_by"],
+            ["source_import_batches.id", "source_import_batches.owner_id"],
+            name="fk_documents_batch_owner",
+        ),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(512))
@@ -201,3 +216,10 @@ class Document(Base):
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deletion_status: Mapped[DeletionStatus] = mapped_column(Enum(DeletionStatus), default=DeletionStatus.none)
+
+    # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
+    # §E) — which corpus-import batch this document arrived through, if any. NULL for every
+    # document uploaded outside a tracked batch (the ordinary Library upload path, unaffected).
+    # Only ever set once, at creation, alongside storage_key/file_path — see that column's own
+    # comment for why mainai_app cannot UPDATE either of them afterward.
+    source_import_batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)

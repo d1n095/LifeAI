@@ -10,25 +10,33 @@ from app.db import Base
 
 
 class SourceKind(str, enum.Enum):
-    """S1A scope only (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8): document-derived
-    source units. `document_chunk` is the normal, fully-traceable path (a live DocumentChunk).
+    """S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8): document-derived source units.
+    `document_chunk` is the normal, fully-traceable path (a live DocumentChunk).
     `document_version` is used when the chunk has since been purged but the KnowledgeVersion
     is still resolvable. `document_record` is the most degraded case: only the Document row
-    itself can be vouched for. Future source kinds (message, media_segment, ...) get their
-    own subtype table (see document_source_units) and their own enum value here, never a
-    generic 'document' — see §4.8's "Dokumentgranularitet"."""
+    itself can be vouched for. Each kind gets its own subtype table (see document_source_units),
+    never a generic 'document' — see §4.8's "Dokumentgranularitet".
+
+    `message` is S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037) — see
+    message_source_units below. Future source kinds (media_segment, ...) follow the identical
+    pattern: a new enum value here plus a new subtype table, never a nullable column bolted
+    onto an existing subtype."""
 
     document_chunk = "document_chunk"
     document_version = "document_version"
     document_record = "document_record"
+    message = "message"
 
 
 class SourceRole(str, enum.Enum):
     """Who actually authored the source content — never inferred from who uploaded it (see
-    §4.8's "source_role"). Every document backfilled from before this table existed gets
-    `unknown` permanently; a future, separate source_attributions table handles reviewed
-    reattribution, never a silent UPDATE of this column (it's immutable, enforced by
-    trg_msu_guard_update)."""
+    §4.8's "source_role"). Every DOCUMENT source gets `unknown` permanently (uploading a file
+    doesn't tell you who wrote it) — a future, separate source_attributions table handles
+    reviewed reattribution, never a silent UPDATE of this column (it's immutable, enforced by
+    trg_msu_guard_update). MESSAGE sources (S1C, migration 0037) are the one exception:
+    `messages.role` is real, known authorship recorded at write time, so
+    trg_msgsu_validate_fields requires source_role to match it exactly (user->founder,
+    assistant->assistant, system->system) rather than defaulting to unknown."""
 
     founder = "founder"
     assistant = "assistant"
@@ -169,3 +177,31 @@ class MemorySourceLifecycleEvent(Base):
     actor_type: Mapped[str] = mapped_column(Text)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class MessageSourceUnit(Base):
+    """S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037,
+    docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8/§8) — `Message` as a second
+    `MemorySourceUnit` subtype, the exact exclusive-arc pattern `DocumentSourceUnit` already
+    established (composite FK to `memory_source_units(id, owner_id, source_kind)`, every field
+    permanently immutable via `trg_msgsu_guard_update`, delete forbidden outside account
+    erasure via `trg_msgsu_no_delete`). Unlike a document source, `message_id` is always
+    required — a message is never "purged to a degraded locator" the way a DocumentChunk can
+    be — so there is no chunk_id-style optional field here.
+
+    `trg_msgsu_validate_fields` (migration 0037) additionally verifies `source_role` against
+    the message's own real `role` column (see SourceRole's docstring) and, for `exact`
+    snapshots, that `content_text`/`content_hash` genuinely match `messages.content` — the same
+    rigor `DocumentSourceUnit` already applies to `document_chunks.text`.
+    """
+
+    __tablename__ = "message_source_units"
+
+    memory_source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_source_units.id"), primary_key=True
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    source_kind: Mapped[SourceKind] = mapped_column(Enum(SourceKind))
+
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("messages.id"), index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("conversations.id"), index=True)

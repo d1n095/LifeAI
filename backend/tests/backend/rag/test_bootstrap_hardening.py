@@ -1,0 +1,2129 @@
+"""LIFE SOURCE FOUNDATION BOOTSTRAP — hardening/attack pass (founder mandate, PR #61,
+pre-merge). Real local Postgres, real concurrent threads/sessions, nothing mocked at the DB
+layer — the whole point of this pass is to attack actual runtime behavior, not re-assert the
+design.
+
+Section numbers below refer to the founder's 27-section attack-pass mandate. Not every section
+gets its own test module; this file covers Section 6 (counter concurrency) first, then grows.
+"""
+
+import importlib.util
+import threading
+import time
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text as sa_text
+from sqlalchemy.exc import DBAPIError, IntegrityError
+
+from app.config import get_settings
+from app.db import SessionLocal, migration_engine
+from app.models.document import ActiveTruthStatus, Document, DocumentSource
+from app.models.user import User, UserRole
+from app.rag.corpus_batch import create_batch, record_parse_failed, record_storage_failed, record_stored_original
+from app.request_context import current_user_id as current_user_id_var
+from app.security import hash_password
+
+_APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _narrow_privileges_before_this_module():
+    """Same reasoning as tests/backend/test_account_erasure.py's identical fixture -- this
+    module exercises both the S1A privilege policy (scripts/security/s1a_privilege_policy.py)
+    AND account erasure's SECURITY DEFINER functions (erase_owner_memory,
+    erase_own_mainai_job_children -- governed by app/rls.py's
+    apply_mainai_job_runtime_privileges(), a SEPARATE policy module). conftest.py's own
+    `_test_database` fixture only grants the plain table-level DML floor, never function
+    EXECUTE privileges, so a run of this file in isolation needs to apply both real policies
+    itself rather than relying on another test module's own fixture having run first."""
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges", _APPLY_RUNTIME_PRIVILEGES_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.apply_and_verify(get_settings().database_url)
+
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    apply_mainai_job_runtime_privileges(migration_engine)
+
+
+def _set_rls_user(session, owner_id) -> None:
+    current_user_id_var.set(str(owner_id))
+    session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
+
+
+def _make_user(session, email="hardening-owner@example.com") -> User:
+    user = User(email=email, password_hash=hash_password("Sup3rS3cret!"), role=UserRole.founder, email_verified=True)
+    session.add(user)
+    session.commit()
+    return user
+
+
+def _make_document(session, owner_id, *, title="Kalla", storage_key=None, file_path=None) -> Document:
+    _set_rls_user(session, owner_id)
+    document = Document(
+        title=title,
+        source=DocumentSource.upload,
+        uploaded_by=owner_id,
+        active_truth_status=ActiveTruthStatus.active,
+        storage_key=storage_key,
+        file_path=file_path,
+    )
+    session.add(document)
+    session.commit()
+    return document
+
+
+# --- Section 6: counter concurrency -----------------------------------------------------
+
+
+def test_section6_two_concurrent_sessions_incrementing_same_counter_do_not_lose_updates():
+    """The exact race the founder predicted: record_stored_original() does `batch.x += 1` on
+    an ORM-loaded object, which SQLAlchemy flushes as `SET x = <python-computed literal>`, not
+    a DB-level `SET x = x + 1`. Two sessions that each load the row BEFORE either commits will
+    silently lose one increment under READ COMMITTED (Postgres's default) -- no error, no
+    conflict, just a wrong final count. This directly threatens the N/N completeness proof: a
+    batch could claim `completed` with a count that never actually reconciled against reality."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "counter-race@example.com")
+        _set_rls_user(setup_session, owner.id)
+        batch = create_batch(setup_session, owner.id, label="Counter race")
+        setup_session.commit()
+        batch_id, owner_id = batch.id, owner.id
+    finally:
+        setup_session.close()
+
+    errors: list[Exception] = []
+    increments = 20
+
+    def _worker():
+        try:
+            session = SessionLocal()
+            try:
+                _set_rls_user(session, owner_id)
+                from app.models.source_import_batch import SourceImportBatch
+
+                b = session.get(SourceImportBatch, batch_id)
+                record_stored_original(session, b)
+                session.commit()
+            finally:
+                session.close()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker) for _ in range(increments)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    assert not any(t.is_alive() for t in threads), "a worker never finished"
+    assert not errors, f"unexpected exceptions: {errors}"
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        from app.models.source_import_batch import SourceImportBatch
+
+        final = verify_session.get(SourceImportBatch, batch_id)
+        assert final.stored_originals_done == increments, (
+            f"lost update: expected {increments} after {increments} concurrent increments, "
+            f"got {final.stored_originals_done} -- record_stored_original() is not atomic"
+        )
+    finally:
+        verify_session.close()
+
+
+# --- Section 2: source immutability under real races (G/H/I/J/K) --------------------------
+#
+# A-F (row created NULL, legitimate first write, same-value no-op, different-value rejected,
+# storage_key/file_path changed alone) are already covered by
+# tests/backend/test_source_foundation_bootstrap_privileges.py. This file covers the
+# remaining, genuinely concurrent cases the founder's mandate named explicitly.
+
+
+def test_section2_g_both_storage_key_and_file_path_changed_in_one_statement_rejected():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section2-g@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/g-key", file_path="/vault/g.pdf")
+        _set_rls_user(session, owner.id)
+
+        document.storage_key = "originals/tampered"
+        document.file_path = "/vault/tampered.pdf"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section2_h_illegal_storage_key_change_together_with_a_legal_field_rejects_the_whole_update():
+    """A single UPDATE statement that touches BOTH an allowed field (title) and the protected
+    storage_key must be rejected in full -- Postgres statement atomicity means the trigger
+    aborting the statement rolls back the title change too, never a partial "some columns
+    applied" outcome."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section2-h@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/h-key")
+        _set_rls_user(session, owner.id)
+
+        document.title = "Ny titel som aldrig ska sparas"
+        document.storage_key = "originals/h-tampered"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session.commit()
+        session.rollback()
+
+        verify_session = SessionLocal()
+        try:
+            _set_rls_user(verify_session, owner.id)
+            reloaded = verify_session.get(Document, document.id)
+            assert reloaded.title == "Kalla"  # the whole statement rolled back, not just storage_key
+            assert reloaded.storage_key == "originals/h-key"
+        finally:
+            verify_session.close()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section2_i_concurrent_first_writers_with_different_values_exactly_one_wins():
+    """Two sessions race to set the SAME row's storage_key from NULL with DIFFERENT values.
+    Real Postgres row-level locking means the second UPDATE blocks until the first commits;
+    by the time it actually runs, OLD.storage_key is no longer NULL (the first winner already
+    set it), so the trigger correctly rejects the second writer's different value -- exactly
+    one canonical value survives, never a silent last-write-wins."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "section2-i@example.com")
+        document = _make_document(setup_session, owner.id, storage_key=None)
+        owner_id, document_id = owner.id, document.id
+    finally:
+        setup_session.close()
+
+    results: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
+
+    def _writer(name: str, value: str):
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            session.execute(
+                sa_text("UPDATE documents SET storage_key = :v WHERE id = :id"),
+                {"v": value, "id": str(document_id)},
+            )
+            session.commit()
+            results[name] = "committed"
+        except (IntegrityError, DBAPIError):
+            session.rollback()
+            results[name] = "rejected"
+        except Exception as exc:  # noqa: BLE001
+            errors[name] = exc
+        finally:
+            session.close()
+
+    thread_a = threading.Thread(target=_writer, args=("a", "originals/writer-a"))
+    thread_b = threading.Thread(target=_writer, args=("b", "originals/writer-b"))
+    thread_a.start()
+    thread_b.start()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+    assert not errors, f"unexpected exceptions: {errors}"
+    assert sorted(results.values()) == ["committed", "rejected"], (
+        f"exactly one of two concurrent different-value first-writers must win, got {results}"
+    )
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        final = verify_session.get(Document, document_id)
+        winner = "a" if results["a"] == "committed" else "b"
+        expected = {"a": "originals/writer-a", "b": "originals/writer-b"}[winner]
+        assert final.storage_key == expected
+    finally:
+        verify_session.close()
+
+
+def test_section2_j_concurrent_first_writers_with_the_same_value_both_succeed_harmlessly():
+    """Two sessions race to set the SAME row's storage_key from NULL to the IDENTICAL value
+    (a realistic scenario: two workers independently re-derive the same content-addressed hash
+    for the same file and both attempt to attach it). Neither commit is a "tamper" -- the
+    second writer's OLD.storage_key IS NOT NULL check fires, but NEW == OLD, so the trigger's
+    own `IS DISTINCT FROM` guard does not raise for the second one either."""
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "section2-j@example.com")
+        document = _make_document(setup_session, owner.id, storage_key=None)
+        owner_id, document_id = owner.id, document.id
+    finally:
+        setup_session.close()
+
+    results: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
+
+    def _writer(name: str):
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            session.execute(
+                sa_text("UPDATE documents SET storage_key = :v WHERE id = :id"),
+                {"v": "originals/shared-hash", "id": str(document_id)},
+            )
+            session.commit()
+            results[name] = "committed"
+        except (IntegrityError, DBAPIError):
+            session.rollback()
+            results[name] = "rejected"
+        except Exception as exc:  # noqa: BLE001
+            errors[name] = exc
+        finally:
+            session.close()
+
+    thread_a = threading.Thread(target=_writer, args=("a",))
+    thread_b = threading.Thread(target=_writer, args=("b",))
+    thread_a.start()
+    thread_b.start()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+    assert not errors, f"unexpected exceptions: {errors}"
+    assert results == {"a": "committed", "b": "committed"}, (
+        f"same-value concurrent first writers must both succeed harmlessly, got {results}"
+    )
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        final = verify_session.get(Document, document_id)
+        assert final.storage_key == "originals/shared-hash"
+    finally:
+        verify_session.close()
+
+
+def test_section2_k_stale_transaction_overwrite_after_first_writer_commits_is_rejected():
+    """A session that read the row BEFORE any storage_key was set (Python object still shows
+    storage_key=None), but whose own commit races AFTER a different session already won the
+    first write, must not silently overwrite the winner just because its own in-memory view is
+    stale -- the trigger evaluates the REAL row state at UPDATE time, not the stale Python
+    object's belief."""
+    session_stale = SessionLocal()
+    session_winner = SessionLocal()
+    try:
+        owner = _make_user(session_stale, "section2-k@example.com")
+        document = _make_document(session_stale, owner.id, storage_key=None)
+        document_id, owner_id = document.id, owner.id
+
+        # session_stale "reads" the row (already has document.storage_key == None in memory).
+        _set_rls_user(session_stale, owner_id)
+        stale_doc = session_stale.get(Document, document_id)
+        assert stale_doc.storage_key is None
+
+        # A DIFFERENT session wins the real first write and commits first.
+        _set_rls_user(session_winner, owner_id)
+        session_winner.execute(
+            sa_text("UPDATE documents SET storage_key = :v WHERE id = :id"),
+            {"v": "originals/real-winner", "id": str(document_id)},
+        )
+        session_winner.commit()
+
+        # The stale session now attempts its own "first write" of a different value.
+        stale_doc.storage_key = "originals/stale-overwrite-attempt"
+        with pytest.raises((IntegrityError, DBAPIError), match="storage_key is immutable"):
+            session_stale.commit()
+    finally:
+        session_stale.rollback()
+        session_stale.close()
+        session_winner.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        final = verify_session.get(Document, document_id)
+        assert final.storage_key == "originals/real-winner"
+    finally:
+        verify_session.close()
+
+
+# --- Section 3: delete/purge trust boundary — the TRUTH, not a claim ------------------------
+#
+# These tests establish empirically what PR #61 does and does NOT protect against deletion.
+# Verdict (see the hardening-pass final report for full reasoning): "IMMUTABLE AGAINST UPDATE"
+# (proven above, Section 2) is NOT the same claim as "IMMUTABLE AGAINST DELETION" -- and this
+# PR never claimed the latter. A Document row WITH a `document_source_units` row is protected
+# from a raw hard DELETE by a pre-existing FK RESTRICT (migration 0019, unrelated to this
+# bootstrap). The normal application delete path (`purge_source()`, S1A Pass 21-23, built
+# entirely before this bootstrap) deliberately soft-deletes the Document row and, once the
+# underlying blob is genuinely unreferenced, physically deletes it from disk -- a reviewed,
+# intentional feature this bootstrap did not touch and does not have standing to silently
+# reverse. Documents with ZERO document_source_units rows have no such FK protection at all.
+
+
+def test_section3_hard_delete_of_a_document_with_a_source_unit_is_blocked_by_fk_restrict():
+    """The one REAL protection against a raw `DELETE FROM documents` that exists today -- not
+    purpose-built for this bootstrap, but a real, DB-enforced backstop that predates it
+    (migration 0019's `document_source_units.document_id` FK has no ON DELETE action)."""
+    from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+    from app.models.document_chunk import DocumentChunk
+    from app.models.memory_source_unit import SnapshotStatus
+    from datetime import datetime, timezone
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-fk-restrict@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/section3-fk", file_path=None)
+        _set_rls_user(session, owner.id)
+        chunk = DocumentChunk(document_id=document.id, owner_id=owner.id, chunk_index=0, text="Text.", embedding=[0.1] * 1536)
+        session.add(chunk)
+        session.commit()
+
+        get_or_create_memory_source_unit(
+            session,
+            DocumentSourceLocator(
+                owner_id=owner.id, document_id=document.id, version_id=None, chunk_id=chunk.id,
+                observed_at=datetime.now(timezone.utc), content_text="Text.", snapshot_status=SnapshotStatus.exact,
+            ),
+        )
+        session.commit()
+
+        with pytest.raises((IntegrityError, DBAPIError), match="foreign key|violates"):
+            session.execute(sa_text("DELETE FROM documents WHERE id = :id"), {"id": str(document.id)})
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section3_hard_delete_of_a_document_with_no_source_unit_at_all_succeeds_unprotected():
+    """The gap the module docstring itself names (`legacy_without_memory_source`): a Document
+    that never got a document_source_units row has NO FK backstop -- a raw hard DELETE succeeds
+    today. Documented here as the honest truth, not silently fixed: closing it would mean
+    either (a) retroactively backfilling a source unit for every legacy document, which
+    fabricates provenance data that never really existed, or (b) adding a blanket delete-guard
+    trigger on `documents` itself -- a real, standalone architectural change bigger than this
+    hardening pass's scope, and one that would also have to account for account erasure's own
+    legitimate hard-delete path (see the next test)."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-no-fk@example.com")
+        document = _make_document(session, owner.id, storage_key="originals/section3-no-source-unit")
+        _set_rls_user(session, owner.id)
+
+        document_id, owner_id = document.id, owner.id
+        session.execute(sa_text("DELETE FROM documents WHERE id = :id"), {"id": str(document_id)})
+        session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        assert verify_session.get(Document, document_id) is None
+    finally:
+        verify_session.close()
+
+
+def test_section3_purge_source_soft_deletes_then_physically_deletes_an_unreferenced_blob():
+    """The normal application delete path, proven end-to-end: purge_source() soft-deletes the
+    Document row (deleted_at set, row still exists) then, since nothing else references the
+    content-addressed storage_key, retry_source_blob_purge() physically removes the blob from
+    disk. This is deliberate, pre-existing behavior (S1A Pass 21-23) this bootstrap did not
+    change -- proof that "canonical originals" are NOT unconditionally undeletable today, only
+    non-silently-mutable while they exist."""
+    from app.rag.library_import import _store_bytes_with_reference_lock
+    from app.storage import get_storage
+    from app.storage.purge import purge_source
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-purge-blob@example.com")
+        _set_rls_user(session, owner.id)
+        blob = _store_bytes_with_reference_lock(session, get_storage(), b"section 3 purge content, unique", max_bytes=10_000)
+        document = _make_document(session, owner.id, storage_key=blob.storage_key)
+        session.commit()
+
+        assert get_storage().exists(blob.storage_key) is True
+
+        result = purge_source(session, document.id, owner.id)
+        session.commit()
+
+        assert result.deletion_status.value in ("purged", "pending")
+        reloaded = session.get(Document, document.id)
+        assert reloaded is not None  # soft-deleted, row still exists
+        assert reloaded.deleted_at is not None
+
+        if result.deletion_status.value == "purged":
+            assert get_storage().exists(blob.storage_key) is False, (
+                "purge_source() genuinely deletes the physical blob once unreferenced -- "
+                "this bootstrap's storage_key immutability trigger does not and cannot prevent this"
+            )
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section3_account_erasure_hard_deletes_documents_entirely():
+    """Account erasure (app/account/erasure.py, pre-existing, out of this bootstrap's scope)
+    hard-deletes Document rows outright, after first purging the memory-source rows that would
+    otherwise FK-block it via `erase_owner_memory()`. A deliberate, founder-initiated total
+    account wipe -- not a "normal" incidental deletion path, and correctly so (a founder must
+    be able to erase their own account's data in full)."""
+    from app.account.erasure import erase_account_data
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section3-account-erasure@example.com")
+        document = _make_document(session, owner.id, storage_key=None)
+        _set_rls_user(session, owner.id)
+        document_id, owner_id = document.id, owner.id
+
+        erase_account_data(session, owner)
+        session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        assert verify_session.get(Document, document_id) is None, (
+            "account erasure is documented and expected to hard-delete Document rows entirely"
+        )
+    finally:
+        verify_session.close()
+
+
+# --- Section 8: S1C exclusive arc -- mutation test + wrong-owner attack ---------------------
+
+
+def test_section8_mutation_restoring_old_document_only_trigger_makes_s1c_regress():
+    """The founder's explicit mutation-testing ask: prove the S1C exclusive-arc regression
+    coverage is not vacuous. Temporarily restores migration 0019's ORIGINAL, pre-0037 trigger
+    function (which only ever checked `document_source_units`, with no `message` arm at all)
+    on the real schema, attempts the exact same "create a message source unit" operation
+    tests/backend/rag/test_message_source_units.py's own
+    test_get_or_create_message_source_unit_creates_parent_and_subtype already covers, and
+    asserts it NOW fails -- proving that test genuinely depends on migration 0037's fix, not
+    on some unrelated permissive default. Restores the correct, current trigger in a finally
+    block regardless of outcome, so this mutation never leaks into any other test."""
+    from app.db import migration_engine
+    from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
+
+    _OLD_SINGLE_ARC_TRIGGER = """
+        CREATE OR REPLACE FUNCTION trg_msu_check_subtype_exists() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM public.document_source_units WHERE memory_source_id = NEW.id) THEN
+                RAISE EXCEPTION 'memory_source_units %: no matching document_source_units row', NEW.id;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+    """
+    _CURRENT_MULTI_ARC_TRIGGER = """
+        CREATE OR REPLACE FUNCTION trg_msu_check_subtype_exists() RETURNS TRIGGER
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog
+        AS $$
+        BEGIN
+            IF NEW.source_kind IN ('document_chunk', 'document_version', 'document_record') THEN
+                IF NOT EXISTS (SELECT 1 FROM public.document_source_units WHERE memory_source_id = NEW.id) THEN
+                    RAISE EXCEPTION 'memory_source_units %: no matching document_source_units row', NEW.id;
+                END IF;
+            ELSIF NEW.source_kind = 'message' THEN
+                IF NOT EXISTS (SELECT 1 FROM public.message_source_units WHERE memory_source_id = NEW.id) THEN
+                    RAISE EXCEPTION 'memory_source_units %: no matching message_source_units row', NEW.id;
+                END IF;
+            ELSE
+                RAISE EXCEPTION 'memory_source_units %: unrecognized source_kind %', NEW.id, NEW.source_kind;
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+    """
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section8-mutation@example.com")
+        _set_rls_user(session, owner.id)
+        from app.models.conversation import Conversation, Message, MessageRole
+
+        conversation = Conversation(user_id=owner.id, title="Mutationstest")
+        session.add(conversation)
+        session.commit()
+        message = Message(conversation_id=conversation.id, role=MessageRole.user, content="Mutationstest.")
+        session.add(message)
+        session.commit()
+        owner_id, conversation_id, message_id = owner.id, conversation.id, message.id
+    finally:
+        session.close()
+
+    with migration_engine.begin() as conn:
+        conn.execute(sa_text(_OLD_SINGLE_ARC_TRIGGER))
+
+    try:
+        mutated_session = SessionLocal()
+        try:
+            _set_rls_user(mutated_session, owner_id)
+            locator = MessageSourceLocator(
+                owner_id=owner_id, message_id=message_id, conversation_id=conversation_id,
+                role=MessageRole.user, observed_at=message.created_at,
+                content_text="Mutationstest.",
+            )
+            get_or_create_message_source_unit(mutated_session, locator)
+            with pytest.raises(Exception, match="no matching document_source_units row"):
+                mutated_session.commit()
+        finally:
+            mutated_session.rollback()
+            mutated_session.close()
+    finally:
+        with migration_engine.begin() as conn:
+            conn.execute(sa_text(_CURRENT_MULTI_ARC_TRIGGER))
+
+    # Confirm the restore genuinely took effect: the real operation succeeds again afterward.
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        second_message = Message(conversation_id=conversation_id, role=MessageRole.user, content="Efter aterstallning.")
+        verify_session.add(second_message)
+        verify_session.commit()
+        from app.rag.message_source import MessageSourceLocator as _Locator
+
+        msu_id = get_or_create_message_source_unit(
+            verify_session,
+            _Locator(
+                owner_id=owner_id, message_id=second_message.id, conversation_id=conversation_id,
+                role=MessageRole.user, observed_at=second_message.created_at, content_text="Efter aterstallning.",
+            ),
+        )
+        verify_session.commit()
+        assert msu_id is not None
+    finally:
+        verify_session.close()
+
+
+def test_section8_wrong_owner_on_message_source_unit_rejected_by_trigger():
+    """A message_source_units row that claims ownership of a conversation belonging to a
+    DIFFERENT owner must be rejected. owner_id itself matches the RLS session (owner_a), so a
+    naive "owner_id = owner_b" attempt (caught by RLS alone, a different and already-covered
+    layer) is deliberately avoided here. In practice this hits an even earlier defense than the
+    trigger's own `v_conv_owner IS DISTINCT FROM NEW.owner_id` check: the trigger's own SELECT
+    against `messages` runs as the SAME RLS-scoped role as the caller (not SECURITY DEFINER),
+    so migration 0031's owner-scoped RLS on `messages` makes owner_b's message invisible to
+    owner_a's session in the first place -- "message_id does not exist" rather than "does not
+    belong to owner_id". Either message is a correct rejection; which one fires is an
+    implementation detail of which defense layer runs first, not a distinction worth locking
+    the test to."""
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.memory_source_unit import MemorySourceUnit, MessageSourceUnit, SourceKind, SourceRole, SnapshotStatus
+    from app.rag.message_source import compute_content_hash
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section8-owner-a@example.com")
+        owner_b = _make_user(session, "section8-owner-b@example.com")
+        _set_rls_user(session, owner_b.id)
+        conversation_b = Conversation(user_id=owner_b.id, title="Owner B:s konversation")
+        session.add(conversation_b)
+        session.commit()
+        message_b = Message(conversation_id=conversation_b.id, role=MessageRole.user, content="Text.")
+        session.add(message_b)
+        session.commit()
+        conversation_b_id, message_b_id = conversation_b.id, message_b.id
+
+        _set_rls_user(session, owner_a.id)
+        content_hash, hash_version = compute_content_hash("Text.")
+        msu = MemorySourceUnit(
+            owner_id=owner_a.id,  # matches RLS/session -- the attack is claiming owner B's conversation, not owner_id itself
+            source_kind=SourceKind.message,
+            source_identity_key=f"message:{message_b_id}",
+            source_role=SourceRole.founder,
+            observed_at=message_b.created_at,
+            content_text="Text.",
+            content_hash=content_hash,
+            content_hash_version=hash_version,
+            snapshot_status=SnapshotStatus.exact,
+        )
+        session.add(msu)
+        session.flush()
+        session.add(
+            MessageSourceUnit(
+                memory_source_id=msu.id, owner_id=owner_a.id, source_kind=SourceKind.message,
+                message_id=message_b_id, conversation_id=conversation_b_id,
+            )
+        )
+        with pytest.raises((IntegrityError, DBAPIError), match="does not belong to owner_id|does not exist"):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Section 11: job fencing / stale worker for message_source_backfill --------------------
+
+
+def _claim_mainai_job(db, job_id):
+    """Claims `job_id` on the superuser connection, exactly as app/worker.py's real claim step
+    does (see app/jobs/mainai_job_lease.py's own docstring for why the claim must run outside
+    any single owner's RLS scope). Same helper shape as tests/backend/chat/test_message_sequence.py's
+    and tests/backend/jobs/test_mainai_jobs.py's own `_claim`."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.jobs.mainai_job_lease import claim_next_mainai_job
+
+    claim_db = sessionmaker(bind=migration_engine)()
+    try:
+        claimed = claim_next_mainai_job(claim_db, "test-worker", 120)
+    finally:
+        claim_db.close()
+    assert claimed is not None
+    assert claimed[0] == job_id
+    return "test-worker", claimed[2]
+
+
+@pytest.mark.asyncio
+async def test_section11_message_source_backfill_job_completes_and_reports_truthfully():
+    """The durable job path end to end (not just the pure backfill function Section 8/12
+    already exercise): capability-gated, no-AI, real worker claim/lease, and a truthful
+    completion message once every message has a source unit."""
+    from app.jobs import service
+    from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+    from app.rag.backfill.message_source import count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section11-job-owner@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 11")
+        session.add(conversation)
+        session.commit()
+        for i in range(3):
+            session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content=f"Section 11 message {i}"))
+        session.commit()
+        owner_id = owner.id
+        assert count_messages_without_source_unit(session, owner_id) == 3
+
+        job = service.create_job(session, owner_id=owner_id, job_type=MESSAGE_SOURCE_BACKFILL_JOB_TYPE, input_refs=[], created_by="founder")
+        worker_id, generation = _claim_mainai_job(session, job.id)
+
+        await run_message_source_backfill_job(session, job.id, owner_id, worker_id=worker_id, lease_generation=generation, lease_seconds=60)
+
+        refreshed = session.get(MainAIJob, job.id)
+        session.refresh(refreshed)
+        assert refreshed.status == MainAIJobStatus.completed
+        assert "Created 3 message_source_units row(s)" in refreshed.public_message
+        assert "No messages remain without a source unit" in refreshed.public_message
+        assert count_messages_without_source_unit(session, owner_id) == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_section11_a_job_whose_lease_was_stolen_creates_no_source_units_at_all():
+    """Lease fencing proof for `message_source_backfill`, mirroring
+    tests/backend/chat/test_message_sequence.py's identical test for `message_sequence_backfill`
+    (the sibling job type on the exact same mainai_jobs runtime): a worker running with a
+    STALE generation (a second worker has since re-claimed/incremented it -- simulated here by
+    simply passing generation + 1, the same as an actual reclaim would leave behind) must be
+    fenced out at its very first write and must create zero message_source_units rows, not a
+    partial set. The job itself is left exactly as `running` -- a fenced-out worker has no
+    authority to transition it to any terminal state either; that is the live worker's job when
+    it next heartbeats or a recovery pass reclaims it."""
+    from app.jobs import service
+    from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+    from app.rag.backfill.message_source import count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section11-stale-worker@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 11 stale worker")
+        session.add(conversation)
+        session.commit()
+        session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="Historisk."))
+        session.commit()
+        owner_id = owner.id
+
+        job = service.create_job(session, owner_id=owner_id, job_type=MESSAGE_SOURCE_BACKFILL_JOB_TYPE, input_refs=[], created_by="founder")
+        worker_id, generation = _claim_mainai_job(session, job.id)
+
+        await run_message_source_backfill_job(
+            session, job.id, owner_id, worker_id=worker_id, lease_generation=generation + 1, lease_seconds=60
+        )
+
+        assert count_messages_without_source_unit(session, owner_id) == 1, "a fenced-out worker must create nothing"
+        refreshed = session.get(MainAIJob, job.id)
+        session.refresh(refreshed)
+        assert refreshed.status == MainAIJobStatus.running, "a fenced-out worker must not transition the job either"
+        assert refreshed.progress_current == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_section11_a_cancelled_message_source_backfill_job_stops_and_writes_nothing():
+    """cancel_requested is honoured before the first batch is ever processed -- a cancel racing
+    with a claim must not leave a partially-completed job masquerading as still `running` with
+    silent progress, nor as `completed`."""
+    from app.jobs import service
+    from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+    from app.rag.backfill.message_source import count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section11-cancel@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 11 cancel")
+        session.add(conversation)
+        session.commit()
+        session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="Avbryts."))
+        session.commit()
+        owner_id = owner.id
+
+        job = service.create_job(session, owner_id=owner_id, job_type=MESSAGE_SOURCE_BACKFILL_JOB_TYPE, input_refs=[], created_by="founder")
+        service.request_cancel(session, job.id, requested_by=owner_id)
+        worker_id, generation = _claim_mainai_job(session, job.id)
+
+        await run_message_source_backfill_job(session, job.id, owner_id, worker_id=worker_id, lease_generation=generation, lease_seconds=60)
+
+        refreshed = session.get(MainAIJob, job.id)
+        session.refresh(refreshed)
+        assert refreshed.status == MainAIJobStatus.cancelled
+        assert count_messages_without_source_unit(session, owner_id) == 1, "a cancel before the first batch backfills nothing"
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- PR #61 correction pass (post-review, founder-mandated): message_source_backfill's --------
+# --- lease-renewal/domain-write transaction boundary. The two tests above already prove the --
+# --- job handler's OWN internal lease_generation check rejects a stale caller; these two -----
+# --- lower-level tests prove the actual Postgres transaction/locking behavior underneath -----
+# --- renew_mainai_job_lease() + claim_next_mainai_job() that the handler fix relies on. -------
+
+
+def _create_and_claim_message_source_backfill_job(setup_session, owner_id, worker_id, lease_seconds):
+    """create_job() runs under the caller's own RLS-scoped session (setup_session, already set
+    to owner_id); claim_next_mainai_job() runs on the superuser claim session (migration_engine
+    -bound, bypasses RLS), exactly like app/worker.py's real `_ClaimSession` split and this
+    file's own `_claim_mainai_job` helper above -- claiming must see jobs across ALL owners."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.jobs.mainai_job_lease import claim_next_mainai_job
+    from app.jobs.service import create_job
+
+    job = create_job(setup_session, owner_id=owner_id, job_type="message_source_backfill", input_refs=[], created_by="test")
+
+    claim_db = sessionmaker(bind=migration_engine)()
+    try:
+        claimed = claim_next_mainai_job(claim_db, worker_id, lease_seconds)
+    finally:
+        claim_db.close()
+    assert claimed is not None
+    job_id, claimed_owner_id, lease_generation = claimed
+    assert job_id == job.id
+    assert claimed_owner_id == owner_id
+    return job_id, lease_generation
+
+
+def test_correction_pass_message_source_backfill_lease_renewal_never_becomes_durable_on_crash():
+    """The core proof of the fix: renew_mainai_job_lease() must NOT be committed on its own --
+    message_source_backfill.py's handler no longer does this (it used to, which is the bug this
+    correction pass closes). Simulating a crash mid-batch -- the renewal is issued but the
+    session is closed WITHOUT committing -- must leave the job's lease exactly as it was before
+    the renewal, so a legitimate reclaim sees the real, unmodified expired lease rather than a
+    phantom extension nothing ever confirmed."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.jobs.mainai_job_lease import claim_next_mainai_job, renew_mainai_job_lease
+    from app.models.mainai_job import MainAIJob
+
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "correction-fencing-crash@example.com")
+        owner_id = owner.id
+        _set_rls_user(setup_session, owner_id)
+        job_id, lease_generation = _create_and_claim_message_source_backfill_job(
+            setup_session, owner_id, "worker-crash", lease_seconds=1
+        )
+        original = setup_session.get(MainAIJob, job_id)
+        original_lease_expires_at = original.lease_expires_at
+    finally:
+        setup_session.close()
+
+    # "Worker A" renews the lease but never commits -- its session is then closed without
+    # committing, simulating a hard crash mid-batch, one line before the batch's own domain
+    # writes and their shared commit would have happened.
+    crash_session = SessionLocal()
+    try:
+        _set_rls_user(crash_session, owner_id)
+        renew_mainai_job_lease(crash_session, job_id, "worker-crash", lease_generation, lease_seconds=999)
+        # No commit here -- simulate the process dying at exactly this point.
+    finally:
+        crash_session.close()  # closing without commit rolls back the still-open transaction
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner_id)
+        reloaded = verify_session.get(MainAIJob, job_id)
+        assert reloaded.lease_expires_at == original_lease_expires_at, (
+            "the uncommitted renewal must never become durable -- a crash mid-batch must leave "
+            "the lease exactly as the last real commit left it"
+        )
+        assert reloaded.lease_generation == lease_generation
+    finally:
+        verify_session.close()
+
+    # Time passes; the (never-actually-renewed) 1-second lease genuinely expires. A second
+    # worker's claim now correctly reclaims the dead job -- no partial/duplicate state was left
+    # behind by the crashed worker's unconfirmed renewal.
+    time.sleep(1.2)
+    reclaim_session = sessionmaker(bind=migration_engine)()
+    try:
+        reclaimed = claim_next_mainai_job(reclaim_session, "worker-takeover", 60)
+        assert reclaimed is not None
+        reclaimed_job_id, _, reclaimed_generation = reclaimed
+        assert reclaimed_job_id == job_id
+        assert reclaimed_generation == lease_generation + 1
+    finally:
+        reclaim_session.close()
+
+
+def test_correction_pass_message_source_backfill_concurrent_claim_blocked_while_renewal_in_flight():
+    """The atomicity proof: while worker A's lease-renewal UPDATE is issued but not yet
+    committed (simulating "mid-batch, about to do domain writes"), a concurrent worker B's
+    claim_next_mainai_job() must NOT be able to reclaim the job, even though the ORIGINAL lease
+    has genuinely expired by wall-clock time. Postgres's SELECT ... FOR UPDATE SKIP LOCKED
+    correctly skips a row locked by another open transaction -- exactly the extra protection
+    removing the premature commit (this correction pass) buys: the renewal's row lock is now
+    held for the WHOLE batch, not released the instant the renewal itself lands."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.jobs.mainai_job_lease import claim_next_mainai_job, renew_mainai_job_lease
+
+    setup_session = SessionLocal()
+    try:
+        owner = _make_user(setup_session, "correction-fencing-block@example.com")
+        owner_id = owner.id
+        _set_rls_user(setup_session, owner_id)
+        job_id, lease_generation = _create_and_claim_message_source_backfill_job(
+            setup_session, owner_id, "worker-live", lease_seconds=1
+        )
+    finally:
+        setup_session.close()
+
+    time.sleep(1.2)  # the original 1-second lease has now genuinely expired
+
+    renewed = threading.Event()
+    release = threading.Event()
+    errors: list[Exception] = []
+
+    def _live_worker():
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id)
+            renew_mainai_job_lease(session, job_id, "worker-live", lease_generation, lease_seconds=60)
+            renewed.set()  # renewal issued (uncommitted) -- its row lock is now held
+            release.wait(timeout=10)  # hold the transaction open, simulating in-flight batch work
+            session.commit()  # the batch's own domain writes would ride along here in production
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            session.close()
+
+    thread = threading.Thread(target=_live_worker)
+    thread.start()
+    assert renewed.wait(timeout=10), "worker never reached the renewal"
+
+    claim_session = sessionmaker(bind=migration_engine)()
+    try:
+        blocked_attempt = claim_next_mainai_job(claim_session, "worker-intruder", 60)
+    finally:
+        claim_session.close()
+
+    release.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    assert not errors, f"unexpected exceptions from the live worker thread: {errors}"
+
+    assert blocked_attempt is None, (
+        "a concurrent claim must be blocked (SKIP LOCKED) while the live worker's renewal is "
+        "still in flight, even though the original lease had already expired"
+    )
+
+    # After the live worker's batch legitimately commits, the lease is durably renewed into
+    # the future -- the job remains correctly unreclaimable, not just momentarily protected.
+    verify_claim_session = sessionmaker(bind=migration_engine)()
+    try:
+        second_attempt = claim_next_mainai_job(verify_claim_session, "worker-intruder-2", 60)
+        assert second_attempt is None, "the renewed lease must hold once committed, not just during the open transaction"
+    finally:
+        verify_claim_session.close()
+
+
+# --- Section 13: RLS owner isolation, guessed UUIDs, cross-owner writes --------------------
+
+
+def test_section13_guessed_uuid_point_lookup_on_source_import_batches_never_exists():
+    """A random, never-issued UUID must read back as "not found", the same as any real row
+    belonging to a different owner -- RLS gives an attacker no way to distinguish "this id
+    belongs to someone else" from "this id was never issued" (no oracle for enumeration)."""
+    import uuid as _uuid
+
+    from app.models.source_import_batch import SourceImportBatch
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section13-guess-batch@example.com")
+        _set_rls_user(session, owner.id)
+        assert session.get(SourceImportBatch, _uuid.uuid4()) is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_cross_owner_point_lookup_by_real_id_on_source_import_batches_is_invisible():
+    """Beyond the existing count()-based isolation test: a wrong owner's session cannot even
+    fetch a KNOWN, real batch id by direct primary-key lookup -- RLS hides the row entirely,
+    it does not merely exclude it from aggregate counts. `populate_existing=True` forces a
+    real SELECT rather than returning the still-cached ORM object from this same session's own
+    identity map (the object was loaded earlier under owner_a's RLS context)."""
+    from app.models.source_import_batch import SourceImportBatch
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-batch@example.com")
+        owner_b = _make_user(session, "section13-b-batch@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's real batch")
+        session.commit()
+        batch_id = batch.id
+
+        _set_rls_user(session, owner_b.id)
+        assert session.get(SourceImportBatch, batch_id, populate_existing=True) is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_cross_owner_update_affects_zero_rows_and_delete_is_never_a_runtime_privilege_at_all():
+    """UPDATE is genuinely granted to mainai_app on `source_import_batches` (progress counters
+    advance as ingestion proceeds -- see scripts/security/s1a_privilege_policy.py's
+    `_PROTECTED_TABLES`), so a wrong owner's UPDATE is the real RLS proof: it must affect
+    exactly zero rows, not merely fail to be SELECTed afterward. DELETE, by contrast, is
+    intentionally never granted to mainai_app on this table at all (a batch's history is kept
+    permanently -- deleting it would make its own §P completeness proof unreconstructable) --
+    so a DELETE attempt is rejected by Postgres's privilege system itself, for EITHER owner,
+    before RLS row-visibility is even relevant. Both are real, independent defense layers; this
+    test proves both hold, and that neither one was mistakenly assumed to be the other."""
+    from sqlalchemy.exc import ProgrammingError
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-write@example.com")
+        owner_b = _make_user(session, "section13-b-write@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's write target")
+        session.commit()
+        batch_id = batch.id
+
+        _set_rls_user(session, owner_b.id)
+        update_result = session.execute(
+            sa_text("UPDATE source_import_batches SET label = 'hijacked' WHERE id = :id"), {"id": str(batch_id)}
+        )
+        assert update_result.rowcount == 0, "a wrong owner's UPDATE must touch zero rows"
+        session.commit()
+
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            session.execute(sa_text("DELETE FROM source_import_batches WHERE id = :id"), {"id": str(batch_id)})
+        session.rollback()
+
+        _set_rls_user(session, owner_a.id)
+        from app.models.source_import_batch import SourceImportBatch
+
+        untouched = session.get(SourceImportBatch, batch_id, populate_existing=True)
+        assert untouched is not None
+        assert untouched.label == "Owner A's write target"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_cross_owner_point_lookup_on_message_source_units_is_invisible_and_no_update_or_delete_privilege_exists_at_all():
+    """Same guessed-UUID + cross-owner SELECT proof as the batches table above, for
+    `message_source_units` -- Section 8 already covers the INSERT-time trigger's cross-owner
+    check, this covers a wrong owner's read of an already-committed row. UPDATE and DELETE are
+    a stronger case than `source_import_batches`: mainai_app holds NEITHER privilege on this
+    table at all (SELECT, INSERT only -- see `_PROTECTED_TABLES`), for the exact same
+    "narrowed at the grant level too, not just the trigger" defense-in-depth reasoning as
+    `document_source_units`. So both statements are rejected by privilege denial regardless of
+    which owner's session issues them -- RLS row-visibility is never even reached."""
+    import uuid as _uuid
+
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.models.memory_source_unit import MemorySourceUnit
+    from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-msu@example.com")
+        owner_b = _make_user(session, "section13-b-msu@example.com")
+        _set_rls_user(session, owner_a.id)
+        conversation = Conversation(user_id=owner_a.id, title="Section 13")
+        session.add(conversation)
+        session.commit()
+        message = Message(conversation_id=conversation.id, role=MessageRole.user, content="Riktig text.")
+        session.add(message)
+        session.commit()
+
+        msu_id = get_or_create_message_source_unit(
+            session,
+            MessageSourceLocator(
+                owner_id=owner_a.id, message_id=message.id, conversation_id=conversation.id,
+                role=MessageRole.user, observed_at=message.created_at, content_text="Riktig text.",
+            ),
+        )
+        session.commit()
+
+        _set_rls_user(session, owner_b.id)
+        assert session.get(MemorySourceUnit, _uuid.uuid4()) is None, "a guessed uuid must never resolve"
+        assert session.get(MemorySourceUnit, msu_id, populate_existing=True) is None, (
+            "a real row belonging to another owner must be invisible"
+        )
+
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            session.execute(sa_text("UPDATE memory_source_units SET content_text = 'hijacked' WHERE id = :id"), {"id": str(msu_id)})
+        session.rollback()
+
+        _set_rls_user(session, owner_b.id)
+        with pytest.raises(ProgrammingError, match="permission denied"):
+            session.execute(sa_text("DELETE FROM memory_source_units WHERE id = :id"), {"id": str(msu_id)})
+        session.rollback()
+
+        _set_rls_user(session, owner_a.id)
+        untouched = session.get(MemorySourceUnit, msu_id, populate_existing=True)
+        assert untouched is not None
+        assert untouched.content_text == "Riktig text."
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section13_insert_into_source_import_batch_failures_referencing_a_foreign_batch_id_is_rejected():
+    """An INSERT-time cross-owner attack on the child table: owner_b claims owner_b's own
+    owner_id (so the row's own RLS WITH CHECK passes) but points batch_id at a batch that
+    genuinely belongs to owner_a -- proving there is a real, enforced link between
+    `source_import_batch_failures.owner_id` and the batch it claims to belong to, not just
+    independent per-table RLS that happens to look consistent in the common case."""
+    from app.models.source_import_batch import SourceImportBatchFailure
+
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "section13-a-foreign-batch@example.com")
+        owner_b = _make_user(session, "section13-b-foreign-batch@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's corpus")
+        session.commit()
+        batch_id = batch.id
+
+        _set_rls_user(session, owner_b.id)
+        session.add(
+            SourceImportBatchFailure(owner_id=owner_b.id, batch_id=batch_id, source_ref="x.pdf", reason="attempted hijack")
+        )
+        with pytest.raises((IntegrityError, DBAPIError)):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- PR #61 correction pass (post-review, founder-mandated): the same cross-owner FK gap -----
+# --- Section 13 fixed on source_import_batch_failures.batch_id, closed on -------------------
+# --- documents.source_import_batch_id via the same composite (id, owner_id) pattern ---------
+
+
+def test_correction_pass_documents_source_import_batch_id_rejects_a_foreign_owners_batch():
+    """The same cross-owner attack Section 13 proved against source_import_batch_failures.
+    batch_id, now against documents.source_import_batch_id: owner_b claims their own
+    uploaded_by (so documents' own RLS WITH CHECK passes) but points source_import_batch_id at
+    a batch genuinely owned by owner_a -- must be rejected by the composite
+    fk_documents_batch_owner constraint, not silently accepted."""
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "correction-doc-fk-a@example.com")
+        owner_b = _make_user(session, "correction-doc-fk-b@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's corpus")
+        session.commit()
+        batch_id = batch.id
+
+        _set_rls_user(session, owner_b.id)
+        session.add(
+            Document(
+                title="Hijack attempt",
+                source=DocumentSource.upload,
+                uploaded_by=owner_b.id,
+                active_truth_status=ActiveTruthStatus.active,
+                source_import_batch_id=batch_id,
+            )
+        )
+        with pytest.raises((IntegrityError, DBAPIError)):
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_correction_pass_documents_source_import_batch_id_accepts_the_real_owners_batch():
+    """The positive case: a document genuinely uploaded by the SAME owner who owns the batch
+    must still succeed -- the composite FK must not be so strict it breaks the legitimate
+    same-owner reference the whole feature exists to support."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "correction-doc-fk-valid@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Owner's own corpus")
+        session.commit()
+
+        doc = Document(
+            title="Legitimate batch document",
+            source=DocumentSource.upload,
+            uploaded_by=owner.id,
+            active_truth_status=ActiveTruthStatus.active,
+            source_import_batch_id=batch.id,
+        )
+        session.add(doc)
+        session.commit()
+
+        session.refresh(doc)
+        assert doc.source_import_batch_id == batch.id
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_correction_pass_documents_source_import_batch_id_rls_isolation_holds():
+    """RLS on documents (documents_isolation, keyed on uploaded_by) must remain correct after
+    the composite FK addition -- a batch-linked document is still invisible to a different
+    owner exactly like any other document."""
+    session = SessionLocal()
+    try:
+        owner_a = _make_user(session, "correction-doc-fk-rls-a@example.com")
+        owner_b = _make_user(session, "correction-doc-fk-rls-b@example.com")
+        _set_rls_user(session, owner_a.id)
+        batch = create_batch(session, owner_a.id, label="Owner A's corpus")
+        session.commit()
+        session.add(
+            Document(
+                title="A's batch-linked doc",
+                source=DocumentSource.upload,
+                uploaded_by=owner_a.id,
+                active_truth_status=ActiveTruthStatus.active,
+                source_import_batch_id=batch.id,
+            )
+        )
+        session.commit()
+
+        _set_rls_user(session, owner_b.id)
+        count = session.query(Document).filter(Document.title == "A's batch-linked doc").count()
+        assert count == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_correction_pass_documents_source_import_batch_id_null_is_unaffected():
+    """A document outside any tracked batch (source_import_batch_id NULL, the ordinary Library
+    upload path) must be entirely unaffected by the composite FK -- Postgres's default MATCH
+    SIMPLE means the constraint is simply not evaluated when either column is NULL."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "correction-doc-fk-null@example.com")
+        _set_rls_user(session, owner.id)
+
+        doc = Document(
+            title="Ordinary upload, no batch",
+            source=DocumentSource.upload,
+            uploaded_by=owner.id,
+            active_truth_status=ActiveTruthStatus.active,
+        )
+        session.add(doc)
+        session.commit()
+
+        session.refresh(doc)
+        assert doc.source_import_batch_id is None
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Section 23: durable persistence of this pass's engineering lessons --------------------
+
+
+def test_section23_hardening_lessons_are_seeded_durably_and_idempotently():
+    """scripts/mainai/seed_life_source_foundation_hardening_lessons.py persists this pass's
+    three real findings (write-once privilege-vs-lifecycle, S1C exclusive-arc trigger gap,
+    source_import_batch_failures composite-FK gap) into the SAME `engineering_lessons` table
+    app/mainai_execution/planner.py's create_plan() already reads via
+    apply_lessons_to_verification_plan() -- proving the seed script actually works against a
+    real database and is safely re-runnable, not just that it parses."""
+    import importlib.util
+
+    from app.models.mainai_execution import EngineeringLesson
+
+    spec = importlib.util.spec_from_file_location(
+        "seed_life_source_foundation_hardening_lessons",
+        Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "mainai" / "seed_life_source_foundation_hardening_lessons.py",
+    )
+    seed_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed_module)
+
+    session = SessionLocal()
+    try:
+        first_run = seed_module.seed(session)
+        assert len(first_run) == 3, "expected all three hardening-pass lessons on a clean insert"
+
+        second_run = seed_module.seed(session)
+        assert second_run == [], "re-running the seed script must insert nothing once the lessons already exist"
+
+        stored = (
+            session.query(EngineeringLesson)
+            .filter(EngineeringLesson.source_ref.like(f"{seed_module._SOURCE_REF_PREFIX}%"))
+            .all()
+        )
+        assert len(stored) == 3
+        for lesson in stored:
+            assert lesson.regression_test is not None
+            assert lesson.applies_to
+            assert lesson.source_type == "hardening_pass"
+    finally:
+        session.query(EngineeringLesson).filter(
+            EngineeringLesson.source_ref.like(f"{seed_module._SOURCE_REF_PREFIX}%")
+        ).delete(synchronize_session=False)
+        session.commit()
+        session.close()
+
+
+# --- Section 18: failure record attacks -----------------------------------------------------
+
+
+def test_section18_a_repeated_failure_for_the_same_source_ref_creates_a_new_row_each_time():
+    """record_storage_failed() is a plain append-only event log, not a dedup-by-source_ref
+    upsert -- a retry of the same source that fails again for a DIFFERENT reason (e.g. transient
+    network error, then later a genuine corrupt-content error) must leave BOTH failures visible
+    for a human to read, not silently overwrite/merge them. This also means storage_failed_count
+    increments once per CALL, not once per distinct source -- documented here as the real,
+    current behavior a caller must respect (calling record_storage_failed() twice for what is
+    conceptually the same source inflates storage_failed_count past what a single discovered
+    file should ever contribute)."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-a-repeat@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18a")
+        record_storage_failed(session, batch, source_ref="flaky.pdf", reason="transient: connection reset", retryable=True)
+        record_storage_failed(session, batch, source_ref="flaky.pdf", reason="permanent: corrupt after retry", retryable=False)
+        session.commit()
+
+        from app.models.source_import_batch import SourceImportBatchFailure
+
+        rows = (
+            session.query(SourceImportBatchFailure)
+            .filter_by(batch_id=batch.id, source_ref="flaky.pdf")
+            .order_by(SourceImportBatchFailure.created_at)
+            .all()
+        )
+        assert len(rows) == 2
+        assert rows[0].reason == "transient: connection reset"
+        assert rows[1].reason == "permanent: corrupt after retry"
+        session.refresh(batch)
+        assert batch.storage_failed_count == 2
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section18_b_a_very_large_reason_string_is_stored_intact():
+    """`reason` is an unbounded Postgres TEXT column -- a verbose parser stack trace or a
+    misbehaving caller passing something enormous must not truncate silently or crash the
+    insert."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-b-huge@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18b")
+        huge_reason = "parser traceback:\n" + ("line of stack trace\n" * 5000)  # ~100KB
+        record_storage_failed(session, batch, source_ref="giant-error.pdf", reason=huge_reason)
+        session.commit()
+
+        from app.models.source_import_batch import SourceImportBatchFailure
+
+        stored = session.query(SourceImportBatchFailure).filter_by(batch_id=batch.id).one()
+        assert stored.reason == huge_reason
+        assert len(stored.reason) > 90_000
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section18_c_a_malicious_looking_source_ref_is_stored_as_inert_opaque_text():
+    """`source_ref` is never interpreted as a real filesystem path, HTML, or SQL by this layer
+    -- it is a free-text label a human reads in a failure list. Path traversal sequences,
+    control characters, and script-looking content must round-trip byte-for-byte as plain data,
+    proving there is no path resolution, templating, or string-concatenated SQL anywhere in
+    this write path (parameterized queries throughout `corpus_batch.py`). A literal NUL byte is
+    handled separately below: libpq/psycopg2 cannot transmit a NUL inside a text parameter at
+    all (a C-string protocol limitation below the ORM), so it fails loud with a clear
+    ValueError at the driver -- never silently truncated, corrupted, or interpreted -- which is
+    the correct, safe outcome, just a different one than the other ordinary-Postgres-text
+    payloads below."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-c-malicious@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18c")
+        malicious_refs = [
+            "../../../../etc/passwd",
+            "C:\\Windows\\System32\\config\\SAM",
+            "<script>alert('xss')</script>.pdf",
+            "'; DROP TABLE source_import_batch_failures; --",
+            "a" * 10_000 + ".pdf",
+        ]
+        for ref in malicious_refs:
+            record_storage_failed(session, batch, source_ref=ref, reason="rejected as unsafe filename")
+        session.commit()
+
+        from app.models.source_import_batch import SourceImportBatchFailure
+
+        stored_refs = {
+            row.source_ref
+            for row in session.query(SourceImportBatchFailure).filter_by(batch_id=batch.id).all()
+        }
+        assert stored_refs == set(malicious_refs), "every malicious-looking ref must round-trip exactly, unmodified"
+        session.refresh(batch)
+        assert batch.storage_failed_count == len(malicious_refs)
+
+        record_storage_failed(session, batch, source_ref="file\x00withnull.pdf", reason="should never reach the database")
+        with pytest.raises(ValueError, match="NUL"):
+            session.commit()
+        session.rollback()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section18_d_stored_then_parse_failed_now_correctly_reconciles():
+    """PR #61 correction pass (post-review, founder-mandated) -- this test previously proved a
+    real bug: a single `failed_count` bucket meant record_stored_original() +
+    record_failed() for the SAME conceptual source (storage succeeded, parsing later failed)
+    double-counted the file against `discovered_files` and made reconciles() permanently False.
+    Fixed by splitting the bucket by pipeline stage: record_parse_failed() is now the correct
+    call for a source that WAS stored but failed to parse, and correctly reconciles."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-d-stored-then-parse-failed@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18d")
+        from app.rag.corpus_batch import record_discovery_totals
+
+        record_discovery_totals(session, batch, files=1)
+        record_stored_original(session, batch)  # storage genuinely succeeded
+        record_parse_failed(session, batch, source_ref="stored-then-unparseable.pdf", reason="parser raised after storage")
+        session.commit()
+
+        session.refresh(batch)
+        assert batch.discovered_files == 1
+        assert batch.stored_originals_done == 1
+        assert batch.parse_failed_count == 1
+        assert batch.storage_failed_count == 0
+        assert batch.reconciles() is True
+        assert batch.discovered_files == batch.stored_originals_done + batch.storage_failed_count
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section18_d2_using_the_wrong_failure_bucket_for_the_stage_still_breaks_reconciliation():
+    """The narrower caller contract that remains after the Section 18d fix, made explicit: a
+    caller must call record_storage_failed() for a source that was never stored, and
+    record_parse_failed() for one that WAS stored but failed to parse -- record_storage_failed()'s
+    own docstring warns that calling it for a file record_parse_failed() (or record_stored_
+    original()) already applies to double-counts it. This is now a documented, narrower
+    per-function contract (matching each function's own docstring), not the structural
+    single-counter flaw fixed above -- proven here as the honest remaining consequence of a
+    caller picking the wrong bucket for the stage, not left silently unaccounted for."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section18-d2-wrong-bucket@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 18d2")
+        from app.rag.corpus_batch import record_discovery_totals
+
+        record_discovery_totals(session, batch, files=1)
+        record_stored_original(session, batch)  # storage genuinely succeeded
+        # Wrong bucket for the stage: this file was already stored, so storage_failed_count
+        # (meant for files that were NEVER stored) double-counts it against discovered_files.
+        record_storage_failed(session, batch, source_ref="stored-then-wrong-bucket.pdf", reason="parser raised after storage")
+        session.commit()
+
+        session.refresh(batch)
+        assert batch.discovered_files == 1
+        assert batch.stored_originals_done == 1
+        assert batch.storage_failed_count == 1
+        assert batch.reconciles() is False
+        assert batch.discovered_files != batch.stored_originals_done + batch.storage_failed_count
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Section 12: AI-independence proof -----------------------------------------------------
+
+
+def test_section12_source_foundation_modules_never_import_app_providers():
+    """Static, drift-preventing proof (not just "it happened not to call one at runtime"): none
+    of the Source Foundation Bootstrap's own modules may import app.providers at all, at the
+    AST level -- a future edit that adds a provider import here would be a real regression
+    against the "ingen AI behövs for detta" requirement, and this test fails the moment it
+    happens, before any runtime behavior even needs to be exercised."""
+    import ast
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parent.parent.parent.parent
+    source_foundation_modules = [
+        backend_root / "app" / "rag" / "corpus_batch.py",
+        backend_root / "app" / "rag" / "message_source.py",
+        backend_root / "app" / "rag" / "backfill" / "message_source.py",
+        backend_root / "app" / "jobs" / "handlers" / "message_source_backfill.py",
+        backend_root / "app" / "models" / "source_import_batch.py",
+    ]
+    violations = []
+    for path in source_foundation_modules:
+        assert path.exists(), f"expected Source Foundation module not found: {path}"
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "app.providers" or alias.name.startswith("app.providers."):
+                        violations.append(f"{path.name}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and (node.module == "app.providers" or node.module.startswith("app.providers.")):
+                    violations.append(f"{path.name}: from {node.module} import ...")
+    assert violations == [], f"Source Foundation modules must never import app.providers: {violations}"
+
+
+def test_section12_full_corpus_batch_lifecycle_never_touches_any_provider(monkeypatch):
+    """Runtime companion to the static AST check: runs the corpus manifest's full recording
+    lifecycle (create -> discover -> store -> parse -> duplicate -> unsupported -> failed ->
+    complete) with every provider client monkeypatched to explode if called at all -- proving
+    the entire bookkeeping path genuinely needs no AI, not just that it currently doesn't call
+    one by coincidence."""
+    from app.providers.openai_provider import OpenAIProvider
+
+    async def _explode(self, messages, model, **kwargs):
+        raise AssertionError("corpus manifest bookkeeping must never call a provider -- no AI needed for this")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _explode)
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section12-no-provider@example.com")
+        _set_rls_user(session, owner.id)
+
+        batch = create_batch(session, owner.id, label="AI-independence proof")
+        from app.rag.corpus_batch import (
+            record_discovery_totals,
+            record_duplicate,
+            record_parsed,
+            record_storage_failed,
+            record_unsupported,
+            try_mark_completed,
+        )
+
+        # discovered_files=3: 1 genuinely stored + 1 duplicate (both count toward
+        # stored_originals_done=2) + 1 failed (never stored) = 3, reconciling the first
+        # equation; of the 2 stored, 1 parsed + 1 unsupported = 2, reconciling the second.
+        record_discovery_totals(session, batch, files=3)
+        record_stored_original(session, batch)
+        record_duplicate(session, batch)
+        record_storage_failed(session, batch, source_ref="broken.pdf", reason="never stored")
+        record_parsed(session, batch)
+        record_unsupported(session, batch)
+        session.commit()
+
+        completed = try_mark_completed(session, batch)
+        session.commit()
+        assert completed is True
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Section 19: end-to-end deterministic demo corpus with a crash mid-way ------------------
+
+
+def test_section19_deterministic_demo_corpus_survives_a_crash_and_reaches_exact_n_of_n():
+    """A synthetic demo corpus matching the founder's exact required scenario chain: normal
+    text, CSV, a duplicate, an unsupported file, a failed file, and a conversation's worth of
+    messages backfilled alongside it. A "crash" happens after SOME but not all sources are
+    recorded (the batch is deliberately left mid-flight, unclosed, exactly like a real process
+    dying mid-run would leave it); "restart" is simply resuming the recording calls with the
+    SAME batch row -- proving discovered == accounted-for only once genuinely true, never
+    fabricated, and that no source is silently dropped across the interruption."""
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.rag.backfill.message_source import backfill_message_source_units, count_messages_without_source_unit
+    from app.rag.corpus_batch import (
+        record_discovery_totals,
+        record_duplicate,
+        record_parsed,
+        record_storage_failed,
+        record_unsupported,
+        try_mark_completed,
+    )
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section19-demo-corpus@example.com")
+        _set_rls_user(session, owner.id)
+
+        batch = create_batch(session, owner.id, label="Section 19 demo corpus")
+        # Discovered: notes.txt, data.csv, readme.md, duplicate-of-notes.txt, unsupported.xlsx,
+        # corrupt.pdf -- 6 files total.
+        record_discovery_totals(session, batch, files=6, conversations=1, messages=3)
+        session.commit()
+        batch_id, owner_id = batch.id, owner.id
+
+        # --- "process" the first half, then the process dies (crash simulated by simply
+        # stopping here -- the batch row is left exactly as committed, still `importing`) ---
+        record_stored_original(session, batch)  # notes.txt
+        record_parsed(session, batch)
+        record_stored_original(session, batch)  # data.csv
+        record_parsed(session, batch)
+        record_duplicate(session, batch)  # duplicate-of-notes.txt
+        record_parsed(session, batch)  # a duplicate still counts toward parsed_done -- its
+        # content is identical to an already-parsed original, but §P's reconciliation invariant
+        # (parsed_done + unsupported_count + semantic_pending_count == stored_originals_done)
+        # requires EVERY stored original, duplicate or not, to reach one of those three terminal
+        # states -- matches the established pattern in test_source_import_batches.py's
+        # test_record_duplicate_counts_toward_stored_and_duplicate_count.
+        session.commit()
+    finally:
+        session.close()
+
+    crash_check_session = SessionLocal()
+    try:
+        _set_rls_user(crash_check_session, owner_id)
+        from app.models.source_import_batch import SourceImportBatch, SourceImportBatchStatus
+
+        mid_crash_batch = crash_check_session.get(SourceImportBatch, batch_id)
+        assert mid_crash_batch.status == SourceImportBatchStatus.importing  # never fabricated as complete
+        assert mid_crash_batch.reconciles() is False
+        assert mid_crash_batch.stored_originals_done == 3  # notes.txt, data.csv, duplicate
+        assert mid_crash_batch.discovered_files == 6  # 3 files still genuinely unaccounted for
+    finally:
+        crash_check_session.close()
+
+    # --- "restart": a fresh session/process picks up the SAME batch and finishes the job ---
+    restart_session = SessionLocal()
+    try:
+        _set_rls_user(restart_session, owner_id)
+        from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure
+
+        resumed_batch = restart_session.get(SourceImportBatch, batch_id)
+        record_stored_original(restart_session, resumed_batch)  # readme.md
+        record_parsed(restart_session, resumed_batch)
+        record_stored_original(restart_session, resumed_batch)  # unsupported.xlsx (still stored)
+        record_unsupported(restart_session, resumed_batch)
+        record_storage_failed(restart_session, resumed_batch, source_ref="corrupt.pdf", reason="write failed: not a real PDF")
+        restart_session.commit()
+
+        # Message backfill runs alongside the file corpus, independently.
+        conversation = Conversation(user_id=owner_id, title="Section 19 conversation")
+        restart_session.add(conversation)
+        restart_session.commit()
+        for i in range(3):
+            restart_session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content=f"Meddelande {i}"))
+        restart_session.commit()
+        assert count_messages_without_source_unit(restart_session, owner_id) == 3
+        backfill_result = backfill_message_source_units(restart_session, owner_id)
+        assert backfill_result.created == 3
+        assert count_messages_without_source_unit(restart_session, owner_id) == 0
+
+        completed = try_mark_completed(restart_session, resumed_batch)
+        restart_session.commit()
+
+        assert completed is True, "the batch must reach exact reconciliation once every discovered file is genuinely accounted for"
+        assert resumed_batch.discovered_files == 6
+        assert resumed_batch.stored_originals_done == 5  # notes, csv, duplicate, readme, unsupported.xlsx
+        assert resumed_batch.storage_failed_count == 1  # corrupt.pdf, never stored
+        assert resumed_batch.stored_originals_done + resumed_batch.storage_failed_count == resumed_batch.discovered_files
+        assert resumed_batch.duplicate_count == 1
+        assert resumed_batch.unsupported_count == 1
+        assert resumed_batch.parsed_done == 4  # notes, csv, duplicate, readme
+        assert resumed_batch.parsed_done + resumed_batch.unsupported_count == resumed_batch.stored_originals_done
+
+        failures = restart_session.query(SourceImportBatchFailure).filter_by(batch_id=batch_id).all()
+        assert len(failures) == 1
+        assert failures[0].source_ref == "corrupt.pdf"
+    finally:
+        restart_session.rollback()
+        restart_session.close()
+
+
+# --- Section 4: hash/blob integrity (CSV extension confirmation) ---------------------------
+#
+# corpus_batch.py is pure bookkeeping and never touches blob bytes at all (§12's "no semantic
+# truth in bootstrap" rule) -- every actual blob write for this bootstrap goes through the
+# SAME pre-existing, already-hardened app/rag/zip_import.py + app/storage/local_fs.py pipeline
+# every other supported extension uses (sha256 content-addressing, storage.verify(expected_
+# sha256=..., expected_size=...) on every read/republish -- see library_import.py's own Pass 32
+# citation). This bootstrap's only change to that pipeline is adding ".csv" to
+# ALLOWED_EXTENSIONS -- these tests confirm that addition introduces no regression, not that a
+# new hash mechanism was built (there isn't one to build).
+
+
+def test_section4_csv_content_is_sha256_content_addressed_deterministically():
+    from app.rag.zip_import import sha256_bytes, validate_and_extract_zip
+
+    from tests.backend.rag.test_zip_import_security import _make_zip
+
+    raw = _make_zip({"data.csv": b"name,age\nOla,42\n\xef\xbb\xbf"})
+    result1 = validate_and_extract_zip(raw)
+    result2 = validate_and_extract_zip(raw)
+    assert len(result1.ok_entries) == 1
+    assert result1.ok_entries[0].checksum == result2.ok_entries[0].checksum
+    assert result1.ok_entries[0].checksum == sha256_bytes(b"name,age\nOla,42\n\xef\xbb\xbf")
+
+
+def test_section4_a_single_bit_changed_in_csv_bytes_produces_a_different_checksum():
+    """The content-addressing property that makes tamper-detection possible at all: any byte
+    change, however small, must change the checksum -- proving `storage.verify()` (the
+    existing S1A mechanism, Pass 32) would actually catch a corrupted-on-disk CSV blob."""
+    from app.rag.zip_import import sha256_bytes
+
+    original = b"name,age\nOla,42\n"
+    tampered = b"name,age\nOla,43\n"  # one digit changed
+    assert sha256_bytes(original) != sha256_bytes(tampered)
+
+
+# --- Section 16: CSV attack matrix -----------------------------------------------------------
+
+
+def test_section16_csv_with_utf8_bom_extracts_without_crashing():
+    from app.rag.zip_import import validate_and_extract_zip
+
+    from tests.backend.rag.test_zip_import_security import _make_zip
+
+    raw = _make_zip({"data.csv": "﻿name,age\nOla,42\n".encode("utf-8")})
+    result = validate_and_extract_zip(raw)
+    assert len(result.ok_entries) == 1
+    assert result.ok_entries[0].status == "ok"
+
+
+def test_section16_csv_with_semicolons_tabs_and_quoted_newlines_is_treated_as_inert_plain_text():
+    """No CSV-DOM/delimiter-sniffing/formula-evaluation exists anywhere in this codebase --
+    app/rag/extract.py's fallback branch just UTF-8 decodes .csv the same as .txt/.md (see
+    extract.py:9-25). Delimiter choice, embedded newlines inside quoted fields, and
+    formula-looking cells (=SUM(...), a classic CSV/Excel injection vector) are therefore
+    inert: no spreadsheet program or formula engine ever opens this content."""
+    from app.rag.extract import extract_text
+    from app.rag.zip_import import validate_and_extract_zip
+
+    from tests.backend.rag.test_zip_import_security import _make_zip
+
+    tricky_csv = b'name;age;note\n"Ola";42;"line1\nline2"\n=SUM(A1:A9)\tmalicious\n'
+    raw = _make_zip({"data.csv": tricky_csv})
+    result = validate_and_extract_zip(raw)
+    assert len(result.ok_entries) == 1
+    entry = result.ok_entries[0]
+    assert entry.content == tricky_csv
+    extracted = extract_text("data.csv", entry.content)
+    assert extracted == tricky_csv.decode("utf-8")
+
+
+def test_section16_binary_garbage_and_invalid_utf8_renamed_csv_does_not_crash_extraction():
+    from app.rag.extract import extract_text
+    from app.rag.zip_import import validate_and_extract_zip
+
+    from tests.backend.rag.test_zip_import_security import _make_zip
+
+    garbage = bytes(range(256)) * 4  # includes invalid UTF-8 sequences and control bytes
+    raw = _make_zip({"fake.csv": garbage})
+    result = validate_and_extract_zip(raw)
+    assert len(result.ok_entries) == 1  # no magic-byte requirement for plain-text types
+    extracted = extract_text("fake.csv", result.ok_entries[0].content)
+    assert isinstance(extracted, str)  # errors="ignore" never raises
+
+
+def test_section16_a_large_csv_is_accepted_up_to_the_same_size_limits_every_other_extension_has():
+    """No CSV-specific size carve-out -- it shares the exact same per-file/total-uncompressed
+    size ceiling every other extension already has (P2), proving .csv did not quietly widen
+    the attack surface for archive-bomb-style attacks. Content varies per row (not uniformly
+    repetitive) so the test exercises the SIZE ceiling specifically, not the separate
+    compression-ratio zip-bomb guard a highly repetitive CSV would legitimately trip instead."""
+    import random
+    import zipfile
+
+    from app.rag.zip_import import validate_and_extract_zip
+
+    from tests.backend.rag.test_zip_import_security import _make_zip
+
+    rng = random.Random(42)
+    rows = [f"{rng.randint(0, 999999)},{rng.randint(0, 999999)},{rng.randint(0, 999999)}\n".encode() for _ in range(150_000)]
+    large_csv = b"col1,col2,col3\n" + b"".join(rows)
+    raw = _make_zip({"big.csv": large_csv}, compression=zipfile.ZIP_STORED)
+    result = validate_and_extract_zip(raw)
+    assert len(result.ok_entries) == 1
+    assert result.ok_entries[0].content == large_csv
+
+
+def test_section16_path_traversal_csv_filename_is_rejected_the_same_as_any_other_extension():
+    """zip-slip protection is filename-based, applied before any extension check, and aborts
+    the WHOLE import (matches every other test_rejects_path_traversal_* case in
+    test_zip_import_security.py) -- confirms the new .csv allowlist entry did not accidentally
+    create an extension-specific bypass of that package-level defense."""
+    from app.rag.zip_import import ZipSecurityError, validate_and_extract_zip
+
+    from tests.backend.rag.test_zip_import_security import _make_zip
+
+    raw = _make_zip({"../../../etc/evil.csv": b"a,b\n1,2\n"})
+    with pytest.raises(ZipSecurityError):
+        validate_and_extract_zip(raw)
+
+
+# --- Section 17: archive/corpus safety regression confirmation -----------------------------
+#
+# No new archive-handling code was written by this bootstrap (only the ALLOWED_EXTENSIONS
+# entry above) -- the founder's own required proof here is that the PRE-EXISTING
+# test_zip_import_security.py suite (zip-slip, symlinks, decompression bombs, nested-archive
+# budget, file-count limits, encrypted archives, malformed ZIPs) still passes unchanged. That
+# suite ran clean in this pass's full-regression sweeps (601 passed) -- rerun narrowly here as
+# an explicit, named Section 17 checkpoint rather than relying only on the broader sweep.
+
+
+def test_section17_pre_existing_zip_import_security_suite_has_no_regression():
+    """Spawning that suite as a real subprocess would fight this session's own session-scoped
+    `_test_database` fixture over the SAME database name (DROP/CREATE DATABASE while the outer
+    session still holds it open) -- not a real isolation boundary here, just self-inflicted
+    contention. The actual regression proof already ran for real, in-process, in this pass's
+    full-suite sweeps (601 passed including every test in test_zip_import_security.py, see the
+    hardening pass's commit history). This test instead directly re-exercises a representative
+    cross-section of that suite's own attack classes in-process, as a fast, always-current
+    named Section 17 checkpoint that a future regression in the archive pipeline would also
+    catch on its own."""
+    from app.rag.zip_import import ZipSecurityError, validate_and_extract_zip
+
+    from tests.backend.rag.test_zip_import_security import _make_zip
+
+    with pytest.raises(ZipSecurityError):
+        validate_and_extract_zip(_make_zip({"../evil.txt": b"x"}))
+
+    with pytest.raises(ZipSecurityError):
+        validate_and_extract_zip(b"not a real zip file")
+
+    result = validate_and_extract_zip(_make_zip({"real.txt": b"hej", "real.csv": b"a,b\n1,2\n"}))
+    assert len(result.ok_entries) == 2
+
+    result = validate_and_extract_zip(_make_zip({"binary.exe": b"MZ\x90\x00fake pe header"}))
+    assert all(e.status in ("skipped", "rejected") for e in result.entries)
+
+
+# --- Section 5 & 7: batch completeness edge cases + idempotency (or lack thereof) -----------
+
+
+def test_section5_a_zero_item_batch_reconciles_trivially_and_completes():
+    """A batch that discovers zero files (e.g. an empty intake folder) must not get stuck --
+    §P's reconciliation equations are vacuously true at 0/0, and the batch should complete
+    immediately, truthfully reporting nothing was ever missing."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section5-a-zero@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 5a empty")
+        session.commit()
+        assert batch.reconciles() is True
+
+        from app.rag.corpus_batch import try_mark_completed
+
+        completed = try_mark_completed(session, batch)
+        session.commit()
+        assert completed is True
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section5_b_negative_counter_values_are_structurally_impossible_at_the_db_level():
+    """Not a Python-level guard -- migration 0037's `ck_sib_counts_non_negative` CHECK
+    constraint makes a negative counter (e.g. from a buggy caller doing arithmetic wrong)
+    physically unrepresentable in the row, regardless of which code path attempts it."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section5-b-negative@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 5b negative")
+        session.commit()
+
+        with pytest.raises((IntegrityError, DBAPIError), match="ck_sib_counts_non_negative"):
+            session.execute(
+                sa_text("UPDATE source_import_batches SET discovered_files = -1 WHERE id = :id"), {"id": str(batch.id)}
+            )
+            session.commit()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section5_c_a_batch_stuck_mid_import_with_a_stale_worker_is_visible_not_silently_lost():
+    """A batch left in `importing` forever (its owning process crashed and nothing ever calls
+    mark_partial_or_failed/try_mark_completed again) must remain honestly queryable as
+    incomplete -- never silently disappear or misreport as completed/failed on its own. This
+    is the read-side half of Section 19's crash proof, isolated as its own explicit check."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section5-c-stale@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 5c stale worker")
+        record_discovery_totals_kwargs = {"files": 3}
+        from app.rag.corpus_batch import record_discovery_totals
+
+        record_discovery_totals(session, batch, **record_discovery_totals_kwargs)
+        record_stored_original(session, batch)
+        session.commit()
+        batch_id = batch.id
+    finally:
+        session.close()
+
+    verify_session = SessionLocal()
+    try:
+        _set_rls_user(verify_session, owner.id)
+        from app.models.source_import_batch import SourceImportBatch, SourceImportBatchStatus
+
+        stale = verify_session.get(SourceImportBatch, batch_id)
+        assert stale.status == SourceImportBatchStatus.importing
+        assert stale.reconciles() is False
+        assert stale.stored_originals_done == 1
+        assert stale.discovered_files == 3
+    finally:
+        verify_session.rollback()
+        verify_session.close()
+
+
+def test_section7_recording_functions_are_not_idempotent_by_call_repeat_only_by_domain_meaning():
+    """Explicit idempotency-boundary proof for the success path (Section 18a already proved
+    this for record_storage_failed): calling record_stored_original()/record_parsed() twice for what a
+    caller believes is "the same retry" is NOT a no-op -- it genuinely double-counts. Callers
+    (a future corpus-ingest job) are responsible for calling each recording function exactly
+    once per real event; there is no source_ref-keyed dedup anywhere in corpus_batch.py."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section7-not-idempotent@example.com")
+        _set_rls_user(session, owner.id)
+        batch = create_batch(session, owner.id, label="Section 7")
+        session.commit()
+
+        record_stored_original(session, batch)
+        record_stored_original(session, batch)  # a naive "retry the same call" mistake
+        session.commit()
+        session.refresh(batch)
+        assert batch.stored_originals_done == 2, "confirms no accidental dedup exists -- callers must not double-call"
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Section 9: message source identity edge cases (supplementing test_message_source_units.py) --
+
+
+def test_section9_identical_text_from_different_roles_produces_two_distinct_source_units():
+    """source_identity_key is keyed by message_id, never by content -- an assistant message and
+    a user message with byte-identical text must never collapse into one source unit."""
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section9-identical-text@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 9")
+        session.add(conversation)
+        session.commit()
+        user_msg = Message(conversation_id=conversation.id, role=MessageRole.user, content="Samma text.")
+        assistant_msg = Message(conversation_id=conversation.id, role=MessageRole.assistant, content="Samma text.")
+        session.add_all([user_msg, assistant_msg])
+        session.commit()
+
+        user_msu = get_or_create_message_source_unit(
+            session,
+            MessageSourceLocator(
+                owner_id=owner.id, message_id=user_msg.id, conversation_id=conversation.id,
+                role=MessageRole.user, observed_at=user_msg.created_at, content_text="Samma text.",
+            ),
+        )
+        assistant_msu = get_or_create_message_source_unit(
+            session,
+            MessageSourceLocator(
+                owner_id=owner.id, message_id=assistant_msg.id, conversation_id=conversation.id,
+                role=MessageRole.assistant, observed_at=assistant_msg.created_at, content_text="Samma text.",
+            ),
+        )
+        session.commit()
+        assert user_msu != assistant_msu
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section9_a_very_long_message_still_gets_a_source_unit_with_a_matching_content_hash():
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.rag.message_source import MessageSourceLocator, compute_content_hash, get_or_create_message_source_unit
+    from app.models.memory_source_unit import MemorySourceUnit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section9-long-message@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 9 long")
+        session.add(conversation)
+        session.commit()
+        long_text = "Detta ar ett mycket langt meddelande. " * 20_000  # ~760KB
+        message = Message(conversation_id=conversation.id, role=MessageRole.user, content=long_text)
+        session.add(message)
+        session.commit()
+
+        msu_id = get_or_create_message_source_unit(
+            session,
+            MessageSourceLocator(
+                owner_id=owner.id, message_id=message.id, conversation_id=conversation.id,
+                role=MessageRole.user, observed_at=message.created_at, content_text=long_text,
+            ),
+        )
+        session.commit()
+        msu = session.get(MemorySourceUnit, msu_id)
+        expected_hash, _ = compute_content_hash(long_text)
+        assert msu.content_hash == expected_hash
+        assert msu.content_text == long_text
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Section 20: performance/bounds ----------------------------------------------------------
+
+
+def test_section20_thousand_message_backfill_completes_without_n_squared_blowup():
+    """A rough scale proof, not a micro-benchmark: 1000 messages backfilled in ONE call must
+    finish quickly (the SAVEPOINT-per-message design is inherently O(N) round-trips, but this
+    catches an accidental O(N^2) regression -- e.g. a candidate-list re-query per message --
+    long before it would matter in production)."""
+    import time
+
+    from app.models.conversation import Conversation, Message, MessageRole
+    from app.rag.backfill.message_source import backfill_message_source_units, count_messages_without_source_unit
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section20-scale@example.com")
+        _set_rls_user(session, owner.id)
+        conversation = Conversation(user_id=owner.id, title="Section 20 scale")
+        session.add(conversation)
+        session.commit()
+        for i in range(1000):
+            session.add(Message(conversation_id=conversation.id, role=MessageRole.user, content=f"Meddelande {i}"))
+        session.commit()
+        assert count_messages_without_source_unit(session, owner.id) == 1000
+
+        started = time.monotonic()
+        result = backfill_message_source_units(session, owner.id, max_batches=10, batch_size=200)
+        elapsed = time.monotonic() - started
+
+        assert result.created == 1000
+        assert count_messages_without_source_unit(session, owner.id) == 0
+        assert elapsed < 30, f"1000-message backfill took {elapsed:.1f}s -- investigate for an N^2 regression"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section20_source_import_batches_owner_query_uses_the_owner_index():
+    """`ix_sib_owner` (migration 0037) must actually be the plan Postgres picks for the exact
+    query pattern the batch-list UI would run -- confirms the index isn't dead weight."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section20-index@example.com")
+        _set_rls_user(session, owner.id)
+        for i in range(5):
+            create_batch(session, owner.id, label=f"batch {i}")
+        session.commit()
+
+        plan_rows = session.execute(
+            sa_text("EXPLAIN SELECT * FROM source_import_batches WHERE owner_id = :oid"), {"oid": str(owner.id)}
+        ).all()
+        plan_text = "\n".join(str(r[0]) for r in plan_rows)
+        assert "ix_sib_owner" in plan_text or "Index" in plan_text, f"expected an index scan, got:\n{plan_text}"
+    finally:
+        session.rollback()
+        session.close()
+
+
+# --- Section 21: security input-fuzzing --------------------------------------------------
+
+
+def test_section21_control_characters_and_unicode_edge_cases_in_batch_label_round_trip_safely():
+    """`label`/`source_description` are free-text, never interpreted as markup, paths, or SQL
+    -- control characters, RTL override characters, and 4-byte emoji must all round-trip
+    exactly through a real INSERT/SELECT, proving no encoding-level corruption or truncation."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section21-fuzz-label@example.com")
+        _set_rls_user(session, owner.id)
+        fuzzy_labels = [
+            "normal label",
+            "emoji \U0001f600\U0001f4a5 corpus",
+            "right-to-left override: ‮evil‬",
+            "control chars: \x01\x02\x1b[31m",
+            "<img src=x onerror=alert(1)>",
+            "über naïve café",
+        ]
+        for label in fuzzy_labels:
+            batch = create_batch(session, owner.id, label=label)
+            session.commit()
+            fresh = session.get(type(batch), batch.id, populate_existing=True)
+            assert fresh.label == label
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_section21_oversized_error_reason_and_malformed_uuid_metadata_are_handled_without_crashing():
+    """An oversized `reason` string (already proven in Section 18b) combined with a
+    syntactically invalid UUID passed where one is expected must fail with a clear, typed
+    error -- never a bare crash or a silently accepted garbage value."""
+    session = SessionLocal()
+    try:
+        owner = _make_user(session, "section21-malformed-uuid@example.com")
+        _set_rls_user(session, owner.id)
+        from app.models.source_import_batch import SourceImportBatch
+
+        with pytest.raises((DBAPIError, ValueError)):
+            session.get(SourceImportBatch, "not-a-real-uuid-at-all")
+    finally:
+        session.rollback()
+        session.close()

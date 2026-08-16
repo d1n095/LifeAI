@@ -68,6 +68,7 @@ from app.models.memory_source_unit import (
     LifecycleStatus,
     MemorySourceLifecycleEvent,
     MemorySourceUnit,
+    MessageSourceUnit,
     OccurredAtBasis,
     SnapshotStatus,
     SourceKind,
@@ -80,6 +81,7 @@ from app.models.provider_config import ProviderConfig
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
+from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure, SourceImportBatchStatus
 from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
@@ -155,6 +157,7 @@ __all__ = [
     "LifecycleStatus",
     "MemorySourceLifecycleEvent",
     "MemorySourceUnit",
+    "MessageSourceUnit",
     "OccurredAtBasis",
     "SnapshotStatus",
     "SourceKind",
@@ -171,6 +174,9 @@ __all__ = [
     "ProviderVerificationCheck",
     "RefreshToken",
     "RevokedAccessToken",
+    "SourceImportBatch",
+    "SourceImportBatchFailure",
+    "SourceImportBatchStatus",
     "SourceRelationship",
     "StorageDeletionReason",
     "StorageDeletionStatus",
