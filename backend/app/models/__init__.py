@@ -1,4 +1,20 @@
 from app.models.agent_task import AgentRole, AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from app.models.agent_coordination import (
+    AgentAdapterKind,
+    AgentScopeLease,
+    AgentScopeLeaseStatus,
+    AgentWorkAssignment,
+    AgentWorkAssignmentDependency,
+    AgentWorkAssignmentEvent,
+    AgentWorkAssignmentEventType,
+    CoordinationAgent,
+    CoordinationAgentStatus,
+    ParallelExplorationGroup,
+    ParallelExplorationGroupStatus,
+    WorkAssignmentReadWriteMode,
+    WorkAssignmentRole,
+    WorkAssignmentStatus,
+)
 from app.models.active_context import (
     ActiveContextEvent,
     ActiveContextMember,
@@ -143,6 +159,20 @@ from app.models.work_intelligence import (
 
 __all__ = [
     "AgentRole",
+    "AgentAdapterKind",
+    "AgentScopeLease",
+    "AgentScopeLeaseStatus",
+    "AgentWorkAssignment",
+    "AgentWorkAssignmentDependency",
+    "AgentWorkAssignmentEvent",
+    "AgentWorkAssignmentEventType",
+    "CoordinationAgent",
+    "CoordinationAgentStatus",
+    "ParallelExplorationGroup",
+    "ParallelExplorationGroupStatus",
+    "WorkAssignmentReadWriteMode",
+    "WorkAssignmentRole",
+    "WorkAssignmentStatus",
     "AgentTask",
     "AgentTaskEvent",
     "AgentTaskEventType",

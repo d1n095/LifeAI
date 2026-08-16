@@ -78,12 +78,19 @@ def _narrow_privileges_before_this_module():
     scripts/security/s1a_privilege_policy.py above. Production's real boot sequence (app/main.py's
     on_startup) always calls both; this fixture must too, or mainai_app has no EXECUTE on
     erase_own_mainai_job_children() in this module's tests and every erase_account_data() call
-    here fails with a permission error before any of its own assertions can run."""
+    here fails with a permission error before any of its own assertions can run.
+
+    Integration (agent-coordination): erase_account_data() now ALSO calls
+    erase_own_agent_coordination_children() (migration 0046) — governed by app/rls.py's
+    apply_mainai_execution_privileges(), the SAME ordering trap as the mainai-job-runtime note
+    above (see tests/backend/mainai/test_multi_agent_work_coordination.py's own identical
+    fixture) -- production's on_startup already calls this too."""
     module = _load_apply_runtime_privileges()
     module.apply_and_verify(get_settings().database_url)
-    from app.rls import apply_mainai_job_runtime_privileges
+    from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges
 
     apply_mainai_job_runtime_privileges(migration_engine)
+    apply_mainai_execution_privileges(migration_engine)
 
 
 def _set_rls_user(session, owner_id) -> None:

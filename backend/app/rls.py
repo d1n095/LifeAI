@@ -473,7 +473,23 @@ _MAINAI_EXECUTION_TABLES = (
     "strategy_synthesis_evaluation_links",
     "strategy_synthesis_lesson_links",
     "strategy_synthesis_events",
+    # Migration 0046 (Multi-Agent Work Coordination): coordination_agents is deliberately NOT
+    # here -- founder-wide, not owner-scoped, same reasoning engineering_lessons already
+    # documents for itself, so it is not part of this owner-scoped-table ownership check.
+    # The other four are ordinary mutable coordination tables (same baseline-CRUD,
+    # ownership-only treatment as mainai_task_worktrees/mainai_recovery_records) except
+    # agent_work_assignment_events, which is append-only and privilege-narrowed below exactly
+    # like mainai_task_events/mainai_recovery_events -- and this time actually wired in the
+    # SAME migration that creates it (see the Section 0033 P1 note above this policy already
+    # documents for what happens when that step is skipped).
+    "parallel_exploration_groups",
+    "agent_work_assignments",
+    "agent_work_assignment_dependencies",
+    "agent_scope_leases",
+    "agent_work_assignment_events",
 )
+
+_AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
@@ -539,6 +555,11 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {
         "name": "strategy_synthesis_conflict_update_guard", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {"name": "erase_own_agent_coordination_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "agent_work_assignment_events_deny_mutation", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
 ]
@@ -823,6 +844,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                       "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events"):
             conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON agent_work_assignment_events FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_agent_coordination_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -874,6 +897,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             *((table, frozenset({"SELECT", "INSERT"})) for table in (
                 "strategy_synthesis_inputs", "strategy_synthesis_materializations",
                 "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")),
+            ("agent_work_assignment_events", _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
