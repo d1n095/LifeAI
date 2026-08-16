@@ -1,14 +1,69 @@
 # Autonomous Gap → Child-Task Generation: Live Integration
 
-Branch: `claude/mainai-autonomous-gap-live-integration` (based on `claude/det-kommer-mer-879lcm`
-at `16a5da900f9d898de0d0b3c2b6a1b145443575aa`, the squash-merge of PR #78's gap-to-child-task
-primitive, Alembic head `0045`).
+Original integration: PR #79. Current hardening work is on
+`cursor/pr79-live-loop-hardening`.
 
-Wiring: `app/development_supervisor/service.py`'s `run_supervisor()` driver-result handling calls
-`app.autonomous_gap.service.handle_live_gap_signal()`. Primitives themselves are unchanged from
-`docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK.md` — this document covers only the LIVE call site, the
-new lineage-depth lookup it needed, and the 12 live end-to-end scenarios that prove it.
+Wiring: `app/development_supervisor/service.py`'s `run_supervisor()` driver/planner-result handling
+calls `app.autonomous_gap.service.handle_live_gap_signal()`. The PR #79 hardening also changes
+attempt-event persistence, lease fencing, fail-closed lineage, live bounds, auto-binding, and
+repair/resume behavior described below.
 Tests: `backend/tests/backend/mainai/test_autonomous_gap_live_integration.py`.
+
+## PR #79 live-loop hardening
+
+The hardened live path keeps semantic gap identity separate from execution attempts:
+`requested_by` is no longer stored in `LifeProblem.provenance`. Each attempt instead appends a
+`LifeProblemEvent(event_type="outcome_recorded", detail={"gap_attempt": true, "requested_by": ...})`
+carrying the worker identity (reusing an existing allowed event_type from migration 0042 — no new
+migration). A takeover by a differently named worker therefore converges on the same `LifeProblem`
+and child rather than raising a provenance conflict.
+
+Before either durable gap recording or child insertion, `require_live_gap_lease()` revalidates the
+operator context against the owner-scoped job, lock owner, running state, and lease generation.
+`GapLeaseLostError` is isolated by the Supervisor, so stale work inserts nothing while unrelated
+work remains eligible to continue.
+
+Lineage depth is owner-scoped and fail-closed. `_live_generation_depth(db, owner_id=..., task=...)`
+must resolve every `autonomous_gap_child:` event to exactly one parent `LifeProblem`; malformed,
+missing, or ambiguous lineage becomes `DEPTH_BOUND_REACHED`, never an implicit depth of zero.
+Live breadth counters also enforce `max_gaps_per_run`, `max_children_per_run`, and
+`max_unresolved_gaps` across Supervisor checkpoints.
+
+The Supervisor now derives a child `WorkBinding` from the gap's structured execution envelope.
+The derived binding deliberately has `candidate=None`: Safe Planner first tries its deterministic
+recipe registry with the live operator context, and only then reaches the separately authorized
+provider path. No caller or test has to hand-author a child `PlanCandidate` or `WorkBinding`, and
+this does not auto-approve the child.
+
+The deterministic calculator recipe recognizes the foundation instruction ("calculator",
+"verified test(s)", and "multiply"/"multiplication"), repairs or adds `multiply`, writes the
+focused test, verifies, stages, and commits within the path envelope. A completed repair child
+resumes its parked source task with a reverify-only candidate, so the original defective plan is
+not replayed.
+
+Structured signals now cover:
+
+- Driver `VERIFICATION_REQUIRED` and repairable `FAILED_NONRETRYABLE` failures.
+- Driver and Safe Planner pre-driver `CAPABILITY_MISSING`.
+- Concrete missing capability names only; absent/empty names fail closed through
+  `GapCapabilityError` and are never rewritten to `"unknown"`.
+- Structured deferred reason codes (`DEFERRED_VERIFICATION_REQUIRED`,
+  `DEFERRED_CAPABILITY_MISSING`, and related codes), not English substring classification.
+- The narrow path intersection of `WorkBinding.allowed_paths` and
+  `SupervisorScope.allowed_paths`.
+
+The approval boundary is unchanged: insertion is not execution approval. A generated child still
+returns `WAITING_APPROVAL` until `grant_task_approval()` records founder approval.
+
+### Merge readiness
+
+Hardening is implemented on `cursor/pr79-live-loop-hardening` stacked on PR #79 head
+`bed835a`. **No new Alembic migration** — attempt audit reuses `outcome_recorded` (head `0045`).
+
+Verified locally against Postgres: live hardening suite, PR #78 gap primitives, PR #77 partial
+plan insertion, Scoped Supervisor, Safe Planner, Provider-Assisted Planning, Development Driver,
+and Development Operator suites. Founder approval remains required for `repo_edit` under
+`autonomous_development_work`.
 
 ## Why this exists
 
@@ -40,9 +95,9 @@ AUTHORIZED GOAL
   -> the newly inserted child is an ordinary MainAITask row -- the NEXT run_supervisor()
      invocation's discover_candidates() finds it exactly like any other task (no special
      "discovery" code needed: it is discovered because it is a real row for the same goal_id)
-  -> a caller supplies a WorkBinding for the discovered child (same as any other task) and the
-     run continues: Safe Planner / Provider-Assisted Planning -> Development Driver -> Operator ->
-     verification -> reassess -> continue, within the SAME existing run bounds
+  -> the Supervisor derives a WorkBinding from structured gap provenance (`candidate=None`) and
+     the run continues: Safe Planner / Provider-Assisted Planning -> Development Driver -> Operator
+     -> verification -> reassess -> continue, within the SAME existing run bounds
 ```
 
 ## The smallest correct integration point (what was inspected first)
@@ -71,10 +126,8 @@ Before writing anything, the exact live handoff points were traced:
   driver-result branch. The gap outcome is folded into that SAME checkpoint's `state` dict under
   a new `"gap_generation"` key rather than a second checkpoint write — one checkpoint per
   Supervisor decision stays true.
-- `Safe Planner`/`Provider-Assisted Planning`'s own `CAPABILITY_MISSING` (`plan_founder_request()`/
-  `plan_with_provider()` returning `CAPABILITY_MISSING` before a driver plan even exists, i.e.
-  `planning.classification != "ACCEPTED"`) is a DIFFERENT, earlier-stage signal — deliberately NOT
-  wired in this pass. See "Explicit non-goals" below.
+- `Safe Planner`/`Provider-Assisted Planning`'s structured `CAPABILITY_MISSING`
+  (`planning.classification != "ACCEPTED"`) is also wired through the same bounded gap handler.
 
 ## Circular-import avoidance
 
@@ -109,7 +162,7 @@ not a terminal state that already carries its own explanation:
 | `WAITING_APPROVAL` | No | A founder decision is already pending; generating a competing gap-child would be noise, not new information. |
 | `EXTERNAL_REVIEW_REQUIRED` | No | Already routes to a human; a gap-generated child cannot substitute for that review. |
 | `BLOCKED` / `CANCELLED` / `ACTION_BOUND_REACHED` / `NEEDS_SELECTION` | No | Bound/administrative states, not evidence of a missing piece of work. |
-| Safe Planner's own `CAPABILITY_MISSING` (before a driver plan exists) | No (this pass) | See "Explicit non-goals." |
+| Safe Planner's own `CAPABILITY_MISSING` (before a driver plan exists) | **Yes** | The structured planning result carries a concrete `requested_capability`; absent names fail closed. |
 
 `handle_live_gap_signal(classification=...)` returns `None` immediately for anything outside
 `LIVE_GAP_SIGNAL_CLASSIFICATIONS` — verified directly (`test_non_gap_classifications_can_never_become_a_live_gap`).
@@ -193,10 +246,9 @@ PR #78 already documents — this pass adds no new state of its own:
   call for the identical gap return the SAME inserted task, not a second one. Proved by
   `test_interruption_after_insert_discovers_not_recreates`, which also runs the resumed child to
   completion to prove it is real, executable work.
-- **Stale worker**: lease fencing happens BEFORE the driver ever runs (`app.development_operator.service._require_context()`
-  raises `OperatorAuthorizationError("stale or absent MainAI job lease")` the moment
-  `job.lease_generation != context.lease_generation`) — gap generation is never even reached, so
-  there is nothing new to fence here. Proved by `test_stale_worker_lease_lost_before_driver_fails_closed`.
+- **Stale worker**: in addition to the Operator's normal checks, `require_live_gap_lease()` fences
+  the job immediately before durable gap work. A lease lost after the driver returns but before
+  insertion raises `GapLeaseLostError`; the Supervisor isolates it and inserts no problem or child.
 - **Founder correction racing gap handling**: `assess_gap_authority()`'s existing staleness check
   (`instruction_sha256(goal.original_instruction) != scope.authorized_instruction_sha256`) rejects
   generation with `NEEDS_AUTHORIZATION` the moment a correction lands, even if it lands AFTER the
@@ -272,9 +324,9 @@ mock of the live call site:
    `DEPTH_BOUND_REACHED`, checkpointed resumably, evidence preserved.
 10. **Self-Work** — the same verification-failure chain, run under an authorized self-improvement
     goal, no bypass.
-11. **No Human Job Translation** — the repair child's own `created` event and `LifeProblem`
-    provenance (`requested_by == "development-supervisor"`, not `"founder"`) prove it was produced
-    by the live signal and completed without a founder manually creating that child.
+11. **No Human Job Translation** — the repair child's own `created` event proves it was generated
+    from the canonical gap. Worker identity is recorded separately on `outcome_recorded`
+    `LifeProblemEvent` rows with `detail.gap_attempt=true`, not semantic `LifeProblem.provenance`.
 12. **No Top-Level Goal Creation** — `MainAIGoal` row count is unchanged before/after a full live
     gap-generation-and-repair cycle; the child is always subordinate to the SAME goal.
 
@@ -298,19 +350,12 @@ mock of the live call site:
 
 ## Migration
 
-None. Alembic head remains `0045`. `_live_generation_depth()` derives lineage entirely from
-existing `MainAITaskEvent.detail` JSON and `LifeProblem.provenance` JSON — no new column.
+**No new migration.** Alembic head remains `0045`. Attempt audit reuses the existing
+`outcome_recorded` event_type. `_live_generation_depth()` derives lineage entirely from existing
+`MainAITaskEvent.detail` JSON and `LifeProblem.provenance` JSON — no new column.
 
-## Explicit non-goals (this pass)
+## Explicit non-goals
 
-- **Safe Planner's own pre-driver `CAPABILITY_MISSING`** (`plan_founder_request()`/
-  `plan_with_provider()` returning `CAPABILITY_MISSING` before a `DevelopmentPlan` even exists,
-  i.e. `planning.classification != "ACCEPTED"`) is NOT wired to gap generation in this pass. It is
-  a structurally different signal — no `task.plan_id`-scoped `MainAIPlan` execution ever started,
-  and no `run_driver()` result exists to build a gap from the way `gap_from_capability_missing()`
-  does. Wiring it would need its own gap-construction function and its own live E2E, and none of
-  the founder's 12 required scenarios exercise it. Left as a clearly-named future extension point,
-  not silently folded into this pass's scope.
 - **"Missing prerequisite" / "unresolved dependency" as automatic LIVE triggers** — PR #78's
   primitive already supports these `evidence_kind`s when a caller constructs the `DiscoveredGap`
   directly (see `test_autonomous_gap_child_task.py`'s "Missing Prerequisite" scenario), but no
