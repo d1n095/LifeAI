@@ -169,6 +169,36 @@ def test_waiting_dependency_agent_status_and_block_reason(superuser_db, owner_id
     assert reviewer.status.value == "waiting_dependency"
 
 
+def test_manually_blocked_assignment_surfaces_the_callers_own_recorded_reason(superuser_db, owner_id):
+    """`blocked` is reached only through an explicit transition_status() call, never computed
+    by evaluate_assignment_readiness() itself -- when the coordinator finds no STRUCTURAL
+    blocker of its own (the common case: the caller blocked it for a reason outside this
+    module's own vocabulary, e.g. waiting on a founder decision), the reason must still come
+    from somewhere real, never silently report no reason at all for a row a human/process
+    explicitly marked blocked."""
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    transition_status(superuser_db, assignment=a, new_status="blocked", detail={"reason": "waiting_founder_decision"})
+
+    view = agent_runtime_snapshot(superuser_db, cursor, owner_id=owner_id)
+    assert view.runtime_status == RuntimeStatus.BLOCKED
+    assert view.current_assignments[0].block_outcome == "BLOCKED"
+    assert view.current_assignments[0].block_reason == "waiting_founder_decision"
+
+
+def test_manually_blocked_assignment_without_a_recorded_reason_still_reports_something(superuser_db, owner_id):
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    transition_status(superuser_db, assignment=a, new_status="blocked")  # no detail supplied
+
+    view = agent_runtime_snapshot(superuser_db, cursor, owner_id=owner_id)
+    assert view.current_assignments[0].block_outcome == "BLOCKED"
+    assert view.current_assignments[0].block_reason is not None
+    assert "no reason was recorded" in view.current_assignments[0].block_reason
+
+
 def test_offline_agent_status_from_registry_disabled(superuser_db, owner_id):
     cursor = _agent(superuser_db, "cursor-agent", status="disabled")
     view = agent_runtime_snapshot(superuser_db, cursor, owner_id=owner_id)

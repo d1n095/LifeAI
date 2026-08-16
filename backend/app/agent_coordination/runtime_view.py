@@ -29,6 +29,8 @@ from app.agent_coordination.service import (
 from app.models.agent_coordination import (
     AgentScopeLease,
     AgentWorkAssignment,
+    AgentWorkAssignmentEvent,
+    AgentWorkAssignmentEventType,
     CoordinationAgent,
     CoordinationAgentStatus,
     WorkAssignmentStatus,
@@ -115,7 +117,12 @@ class AssignmentRuntimeView:
     parallel_exploration_group_id: uuid.UUID | None
     upstream_pr_ref: str | None
     block_reason: str | None  # None when runtime_status carries no blocker (RUNNING/COMPLETED/...)
-    block_outcome: str | None  # the live CoordinatorDecision.outcome code, e.g. "WAITING_DEPENDENCY"
+    # The live CoordinatorDecision.outcome code (e.g. "WAITING_DEPENDENCY") for a structural
+    # blocker; for an explicit "blocked"/"changes_requested" status with no structural blocker
+    # of its own, the assignment's own status name uppercased (e.g. "BLOCKED"), with
+    # block_reason falling back to the caller-recorded reason on that status transition -- see
+    # _block_reason_for()'s own docstring.
+    block_outcome: str | None
     active_lease_id: uuid.UUID | None
     started_at: datetime | None
     completed_at: datetime | None
@@ -142,18 +149,54 @@ class AgentRuntimeView:
     current_assignments: tuple[AssignmentRuntimeView, ...]
 
 
+_MANUALLY_BLOCKED_STATUSES = frozenset({WorkAssignmentStatus.blocked, WorkAssignmentStatus.changes_requested})
+
+
+def _latest_status_changed_detail_reason(db: Session, assignment: AgentWorkAssignment) -> str | None:
+    """`blocked`/`changes_requested` are explicit, human/process-set statuses -- reached only
+    through a direct `transition_status(..., new_status="blocked", detail={"reason": ...})`
+    call, never computed by `evaluate_assignment_readiness()` itself. Its own structural checks
+    (dependency/duplicate/scope/staleness/availability) may legitimately find nothing wrong,
+    which must never be read as "this assignment isn't really blocked" -- the actual reason
+    (waiting for review/approval/a provider/an external resource/a branch-PR/a founder
+    decision/truly impossible -- whatever taxonomy the caller that blocked it used) lives in
+    the most recent `status_changed` event's own `detail`, in the SAME append-only event log
+    every other piece of this assignment's history already goes through. Never invented here."""
+
+    event = db.execute(
+        select(AgentWorkAssignmentEvent)
+        .where(
+            AgentWorkAssignmentEvent.assignment_id == assignment.id,
+            AgentWorkAssignmentEvent.event_type == AgentWorkAssignmentEventType.status_changed,
+        )
+        .order_by(AgentWorkAssignmentEvent.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if event is None:
+        return None
+    detail = event.detail or {}
+    return detail.get("reason") or detail.get("block_reason")
+
+
 def _block_reason_for(db: Session, assignment: AgentWorkAssignment) -> tuple[str | None, str | None]:
     """(None, None) for a status that carries no blocker (RUNNING/COMPLETED/FAILED/...);
     otherwise the LIVE CoordinatorDecision -- deterministic, never guessed, never a stale
     stored value that could drift from what evaluate_assignment_readiness() would say right
-    now if asked directly."""
+    now if asked directly -- UNLESS the assignment is explicitly `blocked`/`changes_requested`
+    and the coordinator finds no structural blocker of its own, in which case the reason falls
+    back to whatever the caller that blocked it actually recorded (see
+    `_latest_status_changed_detail_reason` above) rather than silently reporting no reason at
+    all for a row a human/process explicitly marked blocked."""
 
     if assignment.status in TERMINAL_WORK_ASSIGNMENT_STATUSES or assignment.status == WorkAssignmentStatus.running:
         return None, None
     decision: CoordinatorDecision = evaluate_assignment_readiness(db, assignment=assignment)
-    if decision.outcome == "ASSIGNABLE":
-        return None, None
-    return decision.outcome, decision.reason
+    if decision.outcome != "ASSIGNABLE":
+        return decision.outcome, decision.reason
+    if assignment.status in _MANUALLY_BLOCKED_STATUSES:
+        recorded_reason = _latest_status_changed_detail_reason(db, assignment)
+        return assignment.status.value.upper(), recorded_reason or f"assignment is '{assignment.status.value}'; no reason was recorded"
+    return None, None
 
 
 def assignment_runtime_view(
