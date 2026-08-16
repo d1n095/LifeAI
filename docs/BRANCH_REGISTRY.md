@@ -52,8 +52,10 @@ reconcileras.** Stackad hardening ovanpå mergad PR #79. Stänger live-handoff-l
 (auto-derive WorkBinding + `multiplication_repair` som **begränsat demo-recept**), P1
 idempotent takeover, lease-fencing med `SELECT … FOR UPDATE`, execution-time path intersection
 (`scope ∩ binding ∩ OperatorContext`), strukturerad reverify, breadth-counters per Supervisor-
-invocation. Ingen migration (Alembic head kvar **0046**). Merga INTE förrän CI grön och
-granskad.
+invocation. Ingen migration (Alembic head kvar **0046**). **CI:** `ci.yml` utökad så
+`push`/`pull_request` även täcker `cursor/**` och `codex/**` (plus befintliga `claude/**`)
+så stackade agent-PR:er får samma obligatoriska Actions-checks — infrastructure-only,
+ingen appbeteendeförändring. Merga INTE förrän CI grön och granskad.
 
 **PR #83/#84 (`claude/agent-runtime-control-plane` m.fl.) — Claude night-shift/observability.**
 Oberoende scope; rörs inte av den här stack-passet.
