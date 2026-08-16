@@ -48,14 +48,19 @@ Alembic single head **0046** (via PR #82). Se
 `docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
 
 **`cursor/pr79-live-loop-hardening` → `claude/det-kommer-mer-879lcm` (PR #80) — ÖPPEN,
-reconcileras.** Stackad hardening ovanpå mergad PR #79. Stänger live-handoff-luckan
-(auto-derive WorkBinding + `multiplication_repair` som **begränsat demo-recept**), P1
-idempotent takeover, lease-fencing med `SELECT … FOR UPDATE`, execution-time path intersection
-(`scope ∩ binding ∩ OperatorContext`), strukturerad reverify, breadth-counters per Supervisor-
-invocation. Ingen migration (Alembic head kvar **0046**). **CI:** `ci.yml` utökad så
-`push`/`pull_request` även täcker `cursor/**` och `codex/**` (plus befintliga `claude/**`)
-så stackade agent-PR:er får samma obligatoriska Actions-checks — infrastructure-only,
-ingen appbeteendeförändring. Merga INTE förrän CI grön och granskad.
+reconcileras.** Stackad hardening ovanpå mergad PR #79. Stänger live-handoff-luckan (auto-derive
+WorkBinding från strukturerad gap-envelope + `multiplication_repair` som **begränsat demo-
+recept**, inte generell autonomi), P1 idempotent takeover (`requested_by` →
+`LifeProblemEvent`/`outcome_recorded`), lease-fencing med `SELECT … FOR UPDATE` genom durabel
+gap/child-skrivning, fail-closed lineage depth, strukturerade deferred-koder, Safe Planner
+`CAPABILITY_MISSING`, FAILED_NONRETRYABLE-repair, **execution-time path intersection**
+(`scope ∩ binding ∩ OperatorContext` — binding kan inte breddas vid körning), re-verify från
+strukturerad failure evidence (inte calculator-global), breadth-counters **per Supervisor-
+invocation** (nollställs varje `run_supervisor`-anrop). Ingen migration (Alembic head kvar
+**0046**). **CI:** `ci.yml` utökad så `push`/`pull_request` även täcker `cursor/**` och
+`codex/**` (plus befintliga `claude/**`) så stackade agent-PR:er får samma obligatoriska
+Actions-checks — infrastructure-only, ingen appbeteendeförändring. Merga INTE förrän CI grön
+och granskad.
 
 **PR #83/#84 (`claude/agent-runtime-control-plane` m.fl.) — Claude night-shift/observability.**
 Oberoende scope; rörs inte av den här stack-passet.
