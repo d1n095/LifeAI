@@ -6,6 +6,65 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 57 (2026-08-16): `claude/multi-agent-work-coordination-foundation` — Multi-Agent Work Coordination-grunden, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
+
+Grundaren driver just nu flera agenter samtidigt mot samma repo: **Cursor Agent** härdar
+PR #79:s live-autonomiloop på `cursor/pr79-live-loop-hardening` (PR #80, stackad ovanpå PR
+#79) — `backend/app/autonomous_gap/**`, `development_supervisor/**`,
+`development_driver/**`, `development_operator/**`, `safe_planner/**` — i en EGEN worktree
+(`/Users/dennistorildson/Documents/LifeAI`). **Codex** är för närvarande otilldelad/IDLE.
+Den här branchen bygger den grund som ska låta Life själv veta VEM som jobbar, VAD, i VILKET
+repo/VILKEN branch/worktree/path-scope, med LÄS-/SKRIVrättighet, status, beroenden och
+blockerare — istället för att grundaren måste hålla reda på det manuellt (den här filens eget
+syfte idag, se filens inledning).
+
+**Hård gräns respekterad:** den här branchen har INTE rört, läst för att ändra, eller på annat
+sätt integrerat sig i `backend/app/autonomous_gap/**`, `development_supervisor/**`,
+`development_driver/**`, `development_operator/**` eller `safe_planner/**` — de fem
+sökvägarna är Cursors PR #79/#80-scope. De förekommer i den här branchens egen testsvit
+(`tests/backend/mainai/test_multi_agent_work_coordination.py::test_pr79_hardening_scenario_end_to_end`)
+enbart som DATA — strängar i en `allowed_paths`-lista som bevisar att coordinator-logiken
+korrekt skulle upptäcka/tillåta/blockera verkliga agent-tilldelningar mot exakt det scopet —
+aldrig som en import av eller ändring i de modulerna själva.
+
+Byggt: migration 0046 (`coordination_agents`, `parallel_exploration_groups`,
+`agent_work_assignments`, `agent_work_assignment_dependencies`, `agent_scope_leases`,
+`agent_work_assignment_events`), `app/models/agent_coordination.py`,
+`app/agent_coordination/{service,adapters}.py` (deterministisk path-prefix-konfliktdetektion,
+lease-fencing/takeover i `mainai_jobs.lease_generation`s exakta mönster, beroende-vänte/
+frisläpp, avsiktlig parallel-exploration, kapacitetsbevis via befintlig
+`app.intelligence_governance` — aldrig en andra task-kö eller ett andra godkännandegrind),
+`erase_own_agent_coordination_children()`-integration i `erase_account_data()`, RLS-policy i
+`app/rls.py`, samt `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md` (fullständig arkitektur). 29
+egna tester, alla gröna mot en riktig Postgres, inklusive ett end-to-end-scenario som just
+speglar den ovan beskrivna verkliga situationen (Cursor BUILDER, Claude REVIEWER, Codex på ett
+orelaterat område, sedan avsiktlig Cursor/Codex-konkurrens i isolerade worktrees).
+
+**Verklig regression hittad och fixad under verifieringen** (inte antagen korrekt från
+diff-läsningen): `erase_account_data()` anropar nu OCKSÅ
+`erase_own_agent_coordination_children()`, en SECURITY DEFINER-funktion vars EXECUTE-rättighet
+till `mainai_app` styrs av `app/rls.py`s `apply_mainai_execution_privileges()` — men
+`tests/backend/test_account_erasure.py`s egen privilege-primande fixture primade bara den
+äldre `apply_mainai_job_runtime_privileges()`. Alla 16 raderingstester i den filen föll med
+"permission denied for function erase_own_agent_coordination_children" tills fixturen
+utökades att prima båda (samma ordnings-fälla filens egen docstring redan varnar för på
+`apply_mainai_job_runtime_privileges`). Verifierat: `test_account_erasure.py` grön efteråt
+(3 kvarstående fel är obekräftade, förbefintliga, miljöspecifika — lokal Postgres kör
+`Europe/Stockholm` istället för CI:s UTC-container, orört av den här branchen).
+
+Full lokal verifiering: 29/29 nya tester, 67/70 `test_account_erasure.py` (3 kvarstående =
+samma förbefintliga tidszonsartefakt ovan), 163/166 `tests/backend/mainai/` (3 kvarstående =
+`rg`/ripgrep saknas lokalt, ett CI-installerat binärberoende i Cursors
+`development_operator`-scope, orört av den här branchen).
+
+**Beroenden:** Helt oberoende av Cursors PR #79/#80 — ingen delad kod, ingen delad migration
+(0046 är näst-senaste huvudgren-migrationen, 0045 → 0046, ingen kollision). Kan
+granskas/mergas i valfri ordning relativt PR #79/#80.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/multi-agent-work-coordination-foundation` | Öppnas denna session | Pushad, redo för granskning | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
+
 ## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
 
 **PR #60 — `claude/life-canonical-architecture-recovery` → `claude/det-kommer-mer-879lcm` —
