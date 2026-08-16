@@ -6,6 +6,72 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 58 (2026-08-17): `claude/agent-runtime-control-plane` — Agent Runtime Visibility & Deterministic Routing, förlängning av PR #82:s mergade grund, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
+
+Grundaren bad om en flerlagers "night shift"-insats för att flytta Life närmare att självt
+kunna samordna Claude Code/Cursor Agent/Codex: veta vem som gör vad, var, med vilken
+skrivbehörighet, förhindra kollisioner, hantera beroenden/väntetillstånd, samla
+prestationsbevis, och till sist ett deterministiskt routing-lager som svarar "vilken
+registrerad agent är kvalificerad för det här uppdraget" — allt uttryckligen ovanpå PR #82:s
+redan mergade grund, ALDRIG en parallell arkitektur.
+
+**Genomgång innan något byggdes** (enligt CLAUDE.md:s "kontrollera innan du börjar"): PR
+#82:s `AgentWorkAssignment`/`AgentScopeLease`/`CoordinationAgent` täcker redan det mesta av
+"vem gör vad var med vilken behörighet" och hela kollisionsdetekteringen (styrke-testad med
+`test_pr79_hardening_scenario_end_to_end`). Den genuina luckan var ett LÄS-lager (en samlad
+ögonblicksbild per agent/uppdrag, aldrig lagrad, alltid härledd) och ett deterministiskt
+routing-lager (som svarar VILKA agenter som är kvalificerade INNAN ett uppdrag skapas) — ingen
+av dem fanns. Ingen ny migration behövdes; Alembic-huvudet är fortsatt `0046`.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- `runtime_view.py` — `RuntimeStatus` (IDLE/RUNNING/WAITING_DEPENDENCY/WAITING_REVIEW/
+  REVIEWING/BLOCKED/COMPLETED/FAILED/OFFLINE), en deterministisk total mappning från den
+  kanoniska `WorkAssignmentStatus` (aldrig tvärtom — den kanoniska statusen bevaras alltid
+  ordagrant bredvid), `agent_runtime_snapshot()`/`all_agents_runtime_snapshot()`/
+  `work_registry_snapshot()`. Blockeringsorsak är ALDRIG lagrad — alltid den LEVANDE
+  `CoordinatorDecision` från `evaluate_assignment_readiness()`.
+- `routing.py` — `eligible_agents_for()`: deterministiskt filter (registerstatus →
+  läs/skriv-förmåga → nödvändiga capability-taggar → tillgänglighet → scope-konflikt),
+  `NEEDS_SELECTION` när fler än en agent är lika kvalificerad (denna funktion väljer ALDRIG
+  en vinnare), `SCOPE_CONFLICT` när den begärda skopan redan krockar med ett aktivt
+  skriv-lease. Ingen prestationsbaserad rankning — uttryckligen uppskjutet tills det finns
+  tillräckligt med verkliga bevis.
+- `service.py`: `scan_write_scope_conflict()` — den befintliga konfliktskanningen i
+  `evaluate_assignment_readiness()` extraherad till en delad, icke-låsande, icke-muterande
+  funktion (samma logik, verifierat beteendebevarande av samtliga 29 redan mergade PR
+  #82-tester) så både den befintliga per-uppdrag-kontrollen och det nya routing-lagrets
+  scope-kontroll delar EN implementation. `build_agent_outcome_payload()` — kanoniskt,
+  dokumenterat fältvokabulär (tester/varaktighet/kostnad/CI-utfall/granskningsdefekter/
+  omarbetning/scope-överträdelser/mergeutfall/verifierad kvalitet, allt valfritt) för
+  `record_assignment_outcome()`s payload — ingen ny lagring, `IntelligenceEvidence.payload`
+  är redan ostrukturerad JSON.
+- 19 nya tester (`tests/backend/mainai/test_agent_runtime_control_plane.py`), inklusive
+  `test_current_real_world_three_agent_state_end_to_end` som bevisar HELA det verkliga
+  nuläget end-to-end: Cursor RUNNING/WRITE på PR #80:s exakta path-scope, Claude RUNNING/WRITE
+  på just den här samordningsmodulen (genuint annan, icke-överlappande delsystem), Codex IDLE
+  — sedan en avvisad överlappande Claude/Codex-skrivbegäran mot Cursors scope, en tillåten
+  icke-överlappande begäran, en beroende granskare som släpps in i REVIEWING, ett
+  Claude-uppdrag grindat på Cursors avslutning som korrekt rapporterar WAITING_DEPENDENCY
+  medan Cursors eget arbete fortsätter opåverkat, och routing som fortsätter fungera normalt
+  för annat genomförbart arbete trots det blockerade uppdraget.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. De fem sökvägarna förekommer i det nya E2E-testet ENDAST som
+data — exakt samma mönster PR #82:s eget scenario-test redan etablerade.
+
+Full lokal verifiering: 19/19 nya tester, 182/185 (163 tidigare + 19 nya, minus 3
+förbefintliga `rg`-relaterade fel i Cursors eget scope, orörda) i hela
+`tests/backend/mainai/`, ruff rent, `git diff --check` rent, Alembic-huvud verifierat
+oförändrat vid `0046`.
+
+**Beroenden:** Bygger direkt ovanpå det mergade PR #82 (`claude/det-kommer-mer-879lcm` @
+`78f4eb0`). Helt oberoende av Cursors PR #79/#80 — ingen delad kod.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-runtime-control-plane` | Öppnas denna session | Pushad, redo för granskning | Agent Runtime Visibility & Deterministic Routing: `runtime_view.py`, `routing.py`, `scan_write_scope_conflict()`-refaktorering, `build_agent_outcome_payload()`, 19 tester, ingen ny migration | `claude/det-kommer-mer-879lcm` @ 78f4eb0 (efter PR #82) |
+
 ## Pass 57 (2026-08-16): `claude/multi-agent-work-coordination-foundation` — Multi-Agent Work Coordination-grunden, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
 Grundaren driver just nu flera agenter samtidigt mot samma repo: **Cursor Agent** härdar
@@ -63,7 +129,7 @@ granskas/mergas i valfri ordning relativt PR #79/#80.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/multi-agent-work-coordination-foundation` | Öppnas denna session | Pushad, redo för granskning | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
+| `claude/multi-agent-work-coordination-foundation` | [#82](https://github.com/d1n095/LifeAI/pull/82) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `78f4eb0`. CI grönt (en förbefintlig, orelaterad concurrency-flake i `test_library_import.py` bekräftad och grön vid omkörning). | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
 
 ## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
 

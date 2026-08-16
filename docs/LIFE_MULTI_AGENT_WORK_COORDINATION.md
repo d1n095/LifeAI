@@ -133,6 +133,64 @@ canonical work truth are kept strictly separate. Both calls are idempotent by co
 calling `record_assignment_execution` twice for the same assignment returns the same
 `IntelligenceExecution` row.
 
+## RUNTIME VISIBILITY & DETERMINISTIC ROUTING
+
+Extends the foundation above with a read-model and an eligibility-filter layer — no new
+tables, no migration. Both are pure functions over the five tables migration 0046 already
+created; nothing here is cached, stored, or duplicated.
+
+**`app.agent_coordination.runtime_view`** answers "what is every registered agent doing right
+now" and "who is doing what, where, with what authority" as a single deterministic snapshot.
+`RuntimeStatus` (`IDLE`/`RUNNING`/`WAITING_DEPENDENCY`/`WAITING_REVIEW`/`REVIEWING`/`BLOCKED`/
+`COMPLETED`/`FAILED`/`OFFLINE`) is a coarser, founder-facing VIEW derived by a deterministic,
+total mapping from the canonical `WorkAssignmentStatus` — never a replacement for it; every
+`AssignmentRuntimeView` carries the underlying canonical status verbatim alongside the mapped
+one. An agent's overall `runtime_status` is the highest-priority status across its current
+non-terminal assignments (`RUNNING > REVIEWING > WAITING_REVIEW > WAITING_DEPENDENCY >
+BLOCKED`, else `IDLE`); a registry-disabled/unavailable agent always reports `OFFLINE`,
+overriding even an assignment still mid-flight underneath it — disabling an agent is the
+founder's own emergency stop and must never be masked as "business as usual." A block/wait
+reason is never stored; it is the LIVE `CoordinatorDecision` from
+`evaluate_assignment_readiness()`, so it can never drift from what that function would say if
+asked directly. `agent_runtime_snapshot()`/`work_registry_snapshot()` both take an explicit
+`owner_id` and filter `agent_work_assignments` by it directly — defense in depth alongside RLS,
+matching this codebase's established doctrine — even though `coordination_agents` itself stays
+deliberately founder-wide and unfiltered.
+
+**`app.agent_coordination.routing`** answers "which currently registered agent(s) are eligible
+for this assignment" as a pure filter, in this fixed order: the reviewer/researcher-must-be-
+read_only invariant, a scope-conflict pre-check (`scan_write_scope_conflict()` — a refactor
+extracted from `evaluate_assignment_readiness()`'s own conflict-scan so both the existing
+per-assignment check and this pre-assignment eligibility check share ONE implementation,
+skipped entirely for `read_only` exactly like `acquire_lease()`'s own "rule 1"), then per
+candidate: registry status, read/write capability, required capability tags, and availability
+(`agent_availability()`). Every rejection is recorded with its concrete reason, never silently
+dropped. This is eligibility FILTERING, not selection authority — performance evidence never
+enters this decision (there isn't yet enough of it to be meaningful; see "Explicitly deferred"
+below), and ties return `NEEDS_SELECTION` rather than guessing a winner. Provider identity or a
+"trusted-sounding" agent name grants nothing here either, the same invariant
+`test_provider_identity_cannot_grant_authority` already proves at the assignment layer.
+
+**`app.agent_coordination.service.build_agent_outcome_payload`** is a canonical, documented
+field vocabulary (tests/duration/cost/CI outcome/review defects/severity/rework/scope
+violations/merge result/failure reason/verified quality — every field optional, omitted
+entirely when not supplied) for `record_assignment_outcome()`'s `payload` argument. It is a
+plain dict, not a new store — `IntelligenceEvidence.payload` is already unconstrained JSON —
+existing purely so every caller records outcome evidence using the SAME field names instead of
+each inventing its own ad hoc shape, which is what a future, evidence-driven Agent Capability
+Matrix would need to read consistently once there is enough accumulated evidence to be
+meaningful.
+
+`tests/backend/mainai/test_agent_runtime_control_plane.py`'s
+`test_current_real_world_three_agent_state_end_to_end` proves this layer end to end against the
+concrete situation it exists to represent: Cursor Agent `RUNNING`/`WRITE` on PR #80's live-loop
+paths, Claude Code `RUNNING`/`WRITE` on this very coordination module (a genuinely different,
+non-overlapping subsystem), Codex `IDLE` — then an overlapping Claude/Codex write request
+against Cursor's scope refused, a non-overlapping one allowed, a dependent reviewer released
+into `REVIEWING`, a Claude assignment gated on Cursor's completion correctly reported
+`WAITING_DEPENDENCY` while Cursor's own work continues unaffected, and routing still resolving
+normally for other feasible work despite that one blocked assignment.
+
 ## FUTURE AGENT RUNTIME INTEGRATION (explicitly deferred)
 
 `app.agent_coordination.adapters.AgentAdapter` is a `typing.Protocol` (not a base class
@@ -158,3 +216,13 @@ prevention, not execution.
   module's richer role set (TESTER/RESEARCHER/SYNTHESIZER map to their closest existing bucket
   for that table; this module's own, real role is preserved verbatim in that execution's
   `context`, which is unconstrained JSON).
+- Automatic selection among `eligible_agents_for()`'s `NEEDS_SELECTION` ties — that authority
+  belongs to the founder, or a future orchestration loop operating under explicit founder-set
+  policy, never this filter itself.
+- Evidence-driven ranking/scoring of agents by past performance — `build_agent_outcome_payload`
+  establishes the durable evidence vocabulary only; a Capability Matrix that actually reads it
+  is future work, gated on there being enough real evidence accumulated to be meaningful.
+- A stored, agent-level heartbeat column — `AgentRuntimeView.heartbeat_at` is derived from the
+  most recent `last_heartbeat_at` across an agent's own active leases (per-lease heartbeats
+  already exist); a dedicated agent-level column would be a second source of truth for
+  information the lease table already carries.

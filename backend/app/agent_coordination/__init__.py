@@ -1,3 +1,17 @@
+from app.agent_coordination.routing import (
+    CandidateRejection,
+    RoutingDecision,
+    eligible_agents_for,
+)
+from app.agent_coordination.runtime_view import (
+    AgentRuntimeView,
+    AssignmentRuntimeView,
+    RuntimeStatus,
+    agent_runtime_snapshot,
+    all_agents_runtime_snapshot,
+    assignment_runtime_view,
+    work_registry_snapshot,
+)
 from app.agent_coordination.service import (
     CoordinationError,
     CoordinatorDecision,
@@ -7,6 +21,7 @@ from app.agent_coordination.service import (
     LeaseStillLiveError,
     ScopeExpansionError,
     acquire_lease,
+    build_agent_outcome_payload,
     create_parallel_exploration_group,
     create_work_assignment,
     evaluate_assignment_readiness,
@@ -17,21 +32,32 @@ from app.agent_coordination.service import (
     register_agent,
     release_lease,
     renew_lease,
+    scan_write_scope_conflict,
     take_over_lease,
     transition_status,
 )
 
 __all__ = [
+    "AgentRuntimeView",
+    "AssignmentRuntimeView",
+    "CandidateRejection",
     "CoordinationError",
     "CoordinatorDecision",
     "DuplicateWorkError",
     "LeaseAcquisitionResult",
     "LeaseFencingError",
     "LeaseStillLiveError",
+    "RoutingDecision",
+    "RuntimeStatus",
     "ScopeExpansionError",
     "acquire_lease",
+    "agent_runtime_snapshot",
+    "all_agents_runtime_snapshot",
+    "assignment_runtime_view",
+    "build_agent_outcome_payload",
     "create_parallel_exploration_group",
     "create_work_assignment",
+    "eligible_agents_for",
     "evaluate_assignment_readiness",
     "paths_conflict",
     "paths_conflict_any",
@@ -40,6 +66,8 @@ __all__ = [
     "register_agent",
     "release_lease",
     "renew_lease",
+    "scan_write_scope_conflict",
     "take_over_lease",
     "transition_status",
+    "work_registry_snapshot",
 ]
