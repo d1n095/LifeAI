@@ -133,6 +133,12 @@ jobs:
           cache-dependency-path: backend/requirements-dev.txt
       - run: pip install -r requirements-dev.txt
         working-directory: backend
+      # Real binary the Development Operator's search_text() shells out to
+      # (app/development_operator/service.py) — not installed on the runner image by
+      # default. ruff (the other governed-capability binary, run_profile("ruff_check"))
+      # comes from requirements-dev.txt above, since it's pip-installable; rg is not.
+      - name: Install ripgrep (governed search_text capability)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       # tests/conftest.py creates its own throwaway database and the restricted runtime
       # role (idempotently — mirrors backend/db-init/01-app-role.sh) before applying every
       # Alembic migration; nothing extra to provision here beyond the Postgres server itself.
