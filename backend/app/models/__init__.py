@@ -113,6 +113,19 @@ from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
 from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure, SourceImportBatchStatus
+from app.models.strategy_evaluation import (
+    StrategyComparabilityAssessment,
+    StrategyComparison,
+    StrategyEfficiencyDelta,
+    StrategyEvaluationEvent,
+    StrategyExperiment,
+    StrategyExperimentComparison,
+    StrategyLearningLink,
+    StrategyLearningObservation,
+    StrategyPromotionCandidate,
+    StrategyPromotionComparison,
+    StrategyQualityAssessment,
+)
 from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
@@ -267,4 +280,15 @@ __all__ = [
     "WorkTraceEvent",
     "WorkVerificationObligation",
     "WorkVerificationObservation",
+    "StrategyComparabilityAssessment",
+    "StrategyComparison",
+    "StrategyEfficiencyDelta",
+    "StrategyEvaluationEvent",
+    "StrategyExperiment",
+    "StrategyExperimentComparison",
+    "StrategyLearningLink",
+    "StrategyLearningObservation",
+    "StrategyPromotionCandidate",
+    "StrategyPromotionComparison",
+    "StrategyQualityAssessment",
 ]
