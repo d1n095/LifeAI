@@ -30,6 +30,7 @@ from app.development_operator.service import (
     write_file,
 )
 from app.intelligence_governance import record_execution
+from app.mainai_execution.approval import grant_task_approval
 from app.mainai_execution.checkpoint import record_checkpoint
 from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
@@ -45,7 +46,7 @@ def _git(root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def _foundation(db, tmp_path):
+def _foundation(db, tmp_path, *, approved=True):
     owner = User(
         email=f"operator-{uuid.uuid4()}@example.com",
         password_hash="x",
@@ -58,6 +59,7 @@ def _foundation(db, tmp_path):
         title="operator",
         original_instruction="safe repository work",
         created_by="test",
+        approval_policy="autonomous_development_work",
     )
     db.add(goal)
     db.flush()
@@ -80,6 +82,8 @@ def _foundation(db, tmp_path):
     )
     db.add(task)
     db.flush()
+    if approved:
+        grant_task_approval(db, task=task, approved_by="test")
     job = MainAIJob(
         owner_id=owner.id,
         job_type="task_execution",

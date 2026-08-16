@@ -21,6 +21,7 @@ from app.development_supervisor.service import (
     validate_scope,
 )
 from app.intelligence_governance import record_execution
+from app.mainai_execution.approval import grant_task_approval
 from app.models.mainai_execution import (
     MainAICheckpoint,
     MainAIGoal,
@@ -55,7 +56,7 @@ class FailingProvider:
         raise ProviderError("quota exhausted", category="rate_limited")
 
 
-def _foundation(db, tmp_path, *, tied=False):
+def _foundation(db, tmp_path, *, tied=False, approved=True):
     owner = User(
         email=f"supervisor-{uuid.uuid4()}@example.com",
         password_hash="x",
@@ -70,7 +71,7 @@ def _foundation(db, tmp_path, *, tied=False):
         status=MainAIGoalStatus.running,
         current_plan_version=1,
         risk_level="low",
-        approval_policy="standard_repo_work",
+        approval_policy="autonomous_development_work",
         created_by="founder",
     )
     db.add(goal)
@@ -109,6 +110,9 @@ def _foundation(db, tmp_path, *, tied=False):
     )
     db.add_all([implementation, focused_test])
     db.flush()
+    if approved:
+        grant_task_approval(db, task=implementation, approved_by="founder")
+        grant_task_approval(db, task=focused_test, approved_by="founder")
     if not tied:
         db.add(
             MainAITaskDependency(
@@ -559,6 +563,7 @@ async def test_blocked_capability_gap_and_provider_outage_do_not_freeze_independ
     _, _, first, second, _, original, prepare, scope = _foundation(
         superuser_db, tmp_path, tied=True
     )
+    scope = replace(scope, provider_spend_authorized=True)
     first.priority = 20
     second.priority = 10
     provider_binding = WorkBinding(
@@ -751,3 +756,87 @@ async def test_authorized_self_work_uses_the_same_planner_driver_operator_and_ve
         )
         >= 4
     )
+
+
+# --- P1 approval-default regression coverage (founder review finding) -------------------
+#
+# A WorkBinding with no deterministic candidate falls through to plan_with_provider() -- a
+# real, billed external call. That is a spend decision distinct from approval_policy (which
+# only gates the MainAITask's own write/commit), so the founder must opt a scope into it via
+# scope.provider_spend_authorized explicitly. _foundation() above never sets it, so it
+# defaults closed for every test in this file except where it is asked for.
+
+
+@pytest.mark.asyncio
+async def test_provider_spend_denied_without_scope_authorization(superuser_db, tmp_path):
+    _, _, first, second, _, _, prepare, scope = _foundation(superuser_db, tmp_path, tied=True)
+    second.status = MainAITaskStatus.blocked
+    assert scope.provider_spend_authorized is False
+    unauthorized_provider_binding = WorkBinding(
+        first.id,
+        prepare,
+        None,
+        FailingProvider(),
+        provider_likely=True,
+        independent=False,
+        repository_identity=scope.repository_identity,
+        allowed_paths=scope.allowed_paths,
+    )
+    result = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(unauthorized_provider_binding,),
+        bounds=SupervisorBounds(max_jobs=1),
+    )
+    assert result.classification == "PROVIDER_SPEND_NOT_AUTHORIZED"
+    assert first.status != MainAITaskStatus.completed
+    checkpoints = (
+        superuser_db.execute(
+            select(MainAICheckpoint).where(MainAICheckpoint.goal_id == scope.goal_id)
+        )
+        .scalars()
+        .all()
+    )
+    assert any(
+        row.executor_state.get("phase") == "PROVIDER_SPEND_NOT_AUTHORIZED"
+        for row in checkpoints
+    )
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_provider_spend_does_not_freeze_independent_deterministic_work(
+    superuser_db, tmp_path
+):
+    _, _, first, second, _, original, prepare, scope = _foundation(
+        superuser_db, tmp_path, tied=True
+    )
+    first.priority = 20
+    second.priority = 10
+    assert scope.provider_spend_authorized is False
+    unauthorized_provider_binding = WorkBinding(
+        first.id,
+        prepare,
+        None,
+        FailingProvider(),
+        provider_likely=True,
+        independent=True,
+        repository_identity=scope.repository_identity,
+        allowed_paths=scope.allowed_paths,
+    )
+    independent = WorkBinding(
+        second.id,
+        prepare,
+        _independent_candidate(),
+        required_capabilities=("create_file", "run_focused_test"),
+        repository_identity=scope.repository_identity,
+        allowed_paths=scope.allowed_paths,
+    )
+    result = await run_supervisor(
+        superuser_db,
+        scope=scope,
+        bindings=(unauthorized_provider_binding, independent),
+        bounds=SupervisorBounds(max_jobs=2),
+    )
+    assert second.status == MainAITaskStatus.completed
+    assert first.status != MainAITaskStatus.completed
+    assert result.classification == "PROVIDER_SPEND_NOT_AUTHORIZED"

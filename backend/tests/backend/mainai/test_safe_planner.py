@@ -30,8 +30,8 @@ FOUNDER_REQUEST = (
 )
 
 
-def _scope(db, tmp_path, instruction=FOUNDER_REQUEST):
-    owner, goal, task, job, worktree, context = _foundation(db, tmp_path)
+def _scope(db, tmp_path, instruction=FOUNDER_REQUEST, *, approved=True):
+    owner, goal, task, job, worktree, context = _foundation(db, tmp_path, approved=approved)
     goal.original_instruction = instruction
     task.status = MainAITaskStatus.running
     task.verification_plan = [{"kind": "targeted_tests", "target": "test_calculator.py"}]
@@ -156,7 +156,7 @@ def test_unknown_capability_records_gap_without_inventing_tool(superuser_db, tmp
 def test_path_shell_approval_and_provider_candidate_cannot_bypass_validation(
     superuser_db, tmp_path
 ):
-    _, _, task, _, _, context, request = _scope(superuser_db, tmp_path)
+    _, _, task, _, _, context, request = _scope(superuser_db, tmp_path, approved=False)
     unsafe_path = _candidate(
         CandidateStep(
             "read",
