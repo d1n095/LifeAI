@@ -6,6 +6,53 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 65 (2026-08-17/18): `claude/adaptive-cognition-boundary` — Adaptive Cognition / Protected-vs-Adaptive Boundary (INGEN ny migration), stackad ovanpå PR #96 (`claude/agent-founder-memory` @ `8b55768`), egen worktree, tredje steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund — varför ingen ny grund byggdes:** en genomläsning av `docs/LIFE_SELF_OPTIMIZING_
+WORK_INTELLIGENCE.md`, `docs/LIFE_STRATEGY_EVALUATION_AND_PROMOTION.md` och `docs/LIFE_
+STRATEGY_SYNTHESIS_AND_IMPROVEMENT.md` (migrationerna 0043–0045) visade att uppdragets punkt 3
+("adaptiv kognition/meta-learning — resonemangsstrategier som kan versioneras/ersättas,
+spårade med kontext/antaganden/resultat/verifiering/kostnad/konfidens") REDAN, i stor
+utsträckning, är byggt: versionerade `work_strategies`, bevisbaserad jämförelse/experiment/
+befordran med full styrd livscykel (draft→ready→running→completed/failed/cancelled/
+invalidated; candidate→under_review→approved/rejected), aldrig en permanent vinnare. Det som
+GENUINT saknades var inte ny data-struktur utan ett explicit, korssystem-TEST som bevisar det
+denna dokumentation redan påstod i prosa ("No silent core self-modification is permitted";
+"Approval... has no code path that activates a strategy or rewrites production policy") — men
+aldrig testat mot ett ANNAT riktigt styrt delsystem utanför sin egen modul. Detta är exakt
+uppdragets punkt 4 (skyddade vs. adaptiva lager) och punkt 9.F (ett skyddat auktoritets-/
+säkerhetsregel kan aldrig tyst försvagas genom vanlig strategi-evolution).
+
+**Byggt** (`backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py`,
+INGEN ny migration, INGEN ny servicemodul):
+- Strukturellt bevis (AST-nivå, samma mönster som `docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md`
+  §3 redan etablerar för AI-oberoende-gränsen): `app.strategy_evaluation`/
+  `app.work_intelligence`/`app.strategy_synthesis` importerar INGENTING från
+  `app.agent_coordination` eller `app.mainai_execution.approval` — ingen kodväg kan nå
+  dispatch-/godkännandegrinden överhuvudtaget.
+- Beteendemässigt bevis: en strategi förd HELA vägen genom den riktiga evaluate→verify→
+  compare→promote→approve-pipelinen (migration 0043–0045, inga genvägar) lämnar ett riktigt
+  `AgentWorkAssignment`s dispatch-grind fortsatt `APPROVAL_REQUIRED` tills grundarens egen,
+  helt separata `grant_task_approval()` faktiskt anropas — den starkaste bevisning
+  strategilagret själv kan producera har NOLL effekt på endera grinden.
+- En kort ny sektion i `docs/LIFE_STRATEGY_EVALUATION_AND_PROMOTION.md` som dokumenterar
+  bevisen och länkar tillbaka till uppdraget.
+
+Full lokal verifiering: 3/3 nya tester, full `tests/backend/mainai/`-regression grön (samma
+förbefintliga `rg`-relaterade fel, orört), ruff rent, `git diff --check` rent, Alembic-huvud
+OFÖRÄNDRAT vid `0049` (denna branch lägger inte till något schema).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #96 (`claude/agent-founder-memory` @
+`8b55768`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/adaptive-cognition-boundary` | Öppnas denna session | Pushad, redo för granskning | Cross-system bevis att den adaptiva strategi-evolutionslagret (migration 0043–0045) aldrig kan nå eller försvaga grundarens godkännandegrind eller agent-dispatch-grinden — 3 nya tester, INGEN ny migration | `claude/agent-founder-memory` @ 8b55768 (stackad ovanpå PR #96) |
+
 ## Pass 64 (2026-08-17): `claude/agent-founder-memory` — Life Founder/User Memory foundation (migration 0049), stackad ovanpå PR #94 (`claude/agent-capability-reality` @ `b12ce9d`), egen worktree, andra steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS" — grundarens/projektets/världens/Lifes egna faktalager hålls semantiskt separata men länkbara
 
 **Bakgrund:** startade från den konkreta, redan bekräftade luckan (`founder_memory_notes`,
@@ -65,7 +112,7 @@ samma disciplin som redan tillämpades en gång i detta uppdrag (Pass 63).
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/agent-founder-memory` | Öppnas denna session | Pushad, redo för granskning | Life Founder/User Memory: `founder_memory_notes` (migration 0049), återanvänder migration 0042:s authority/basis-vokabulär, utökar `active_context`s centrala register med `founder_memory_note`, kontoraderingsintegration — 15 tester, EN ny migration | `claude/agent-capability-reality` @ b12ce9d (stackad ovanpå PR #94) |
+| `claude/agent-founder-memory` | [#96](https://github.com/d1n095/LifeAI/pull/96) | Pushad, CI grön förutom en 3x bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Life Founder/User Memory: `founder_memory_notes` (migration 0049), återanvänder migration 0042:s authority/basis-vokabulär, utökar `active_context`s centrala register med `founder_memory_note`, kontoraderingsintegration — 15 tester, EN ny migration | `claude/agent-capability-reality` @ b12ce9d (stackad ovanpå PR #94) |
 
 ## Pass 63 (2026-08-17): `claude/agent-capability-reality` — Life Capability Reality / Self-Model foundation (migration 0048), stackad ovanpå PR #90 (`claude/agent-execution-control` @ `20b90b9`), egen worktree, första steget i det NYA uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 

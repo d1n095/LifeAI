@@ -57,6 +57,23 @@ All 0044 records are owner scoped with composite owner-aware foreign keys, force
 
 The entire layer works with no Claude, Codex, OpenAI, local model, external LLM, or external API.
 
+## Protected-vs-adaptive boundary (cross-system, verified)
+
+This document's own prose already claimed "no code path that activates a strategy or rewrites
+production policy" -- `tests/backend/mainai/test_adaptive_cognition_protected_boundary.py`
+(added for the mission "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS") is the first
+test to prove that claim against a REAL, separate governed subsystem rather than only within
+this module's own tests. Two proofs: (1) a structural, AST-level check that
+`app.strategy_evaluation`/`app.work_intelligence`/`app.strategy_synthesis` import nothing from
+`app.agent_coordination` or `app.mainai_execution.approval` at all -- there is no code path
+capable of reaching the dispatch/approval gate in the first place, the same pattern
+`docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md` §3 already established for the AI-independence
+boundary; (2) a behavioral proof that a strategy taken all the way through this module's own
+real evaluate → verify → compare → promote → approve pipeline still leaves a real
+`AgentWorkAssignment`'s dispatch gate reporting `APPROVAL_REQUIRED` until the founder's own,
+completely separate `grant_task_approval()` is called -- the strongest evidence this module's
+own adaptive-cognition layer can produce has zero effect on either governed gate.
+
 ## Explicitly deferred
 
 - automatic production strategy activation or production policy mutation;
