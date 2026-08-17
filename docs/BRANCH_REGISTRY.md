@@ -6,12 +6,13 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-17) — integration @ `db6c719`
+## Aktiva PR:er (2026-08-18) — integration @ `060303a`
 
-**Integration tip:** `claude/det-kommer-mer-879lcm` @ `db6c719` (PR #92 merge).
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `060303a` (PR #93 merge).
 
 | PR | Merge SHA | Scope |
 |---|---|---|
+| [#93](https://github.com/d1n095/LifeAI/pull/93) | `060303a` | Cloud Agent `lifeos` password from `DATABASE_URL` |
 | [#92](https://github.com/d1n095/LifeAI/pull/92) | `db6c719` | Pytest DROP DATABASE terminates leftover backends at setup |
 | [#91](https://github.com/d1n095/LifeAI/pull/91) | `331cc99` | Cloud Agent worker + MAINAI_APP_PASSWORD from .env |
 | [#89](https://github.com/d1n095/LifeAI/pull/89) | `ea9470d` | Per-process local pytest DB/Redis isolation |
@@ -21,8 +22,9 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
 
-**`cursor/cloud-agent-lifeos-password-from-url` — ÖPPEN.** Cloud Agent `setup-services.sh`
-derives the `lifeos` superuser password from `DATABASE_URL` (no hardcoded `PASSWORD 'lifeos'`).
+**`cursor/health-worker-liveness-signal` → PR [#95](https://github.com/d1n095/LifeAI/pull/95) —
+ÖPPEN.** Public `/api/health` reports `worker: alive|unknown` without 503'ing a live API.
+Bas @ `060303a`. Oberoende av Claude runtime.
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
