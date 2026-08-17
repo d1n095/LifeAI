@@ -38,11 +38,13 @@ implementation is handed to it."""
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
+from app.agent_coordination.adapter_config import adapter_availability
 from app.agent_coordination.service import (
     OUTCOME_ASSIGNABLE,
     build_agent_outcome_payload,
@@ -82,12 +84,17 @@ OUTCOME_CAPABILITY_MISMATCH = "CAPABILITY_MISMATCH"
 OUTCOME_APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
 OUTCOME_SCOPE_NOT_EXPLICIT = "SCOPE_NOT_EXPLICIT"
 OUTCOME_REAL_PROVIDER_NOT_CONFIGURED = "REAL_PROVIDER_NOT_CONFIGURED"
+OUTCOME_ADAPTER_DISABLED = "ADAPTER_DISABLED"
+OUTCOME_ADAPTER_UNAVAILABLE = "ADAPTER_UNAVAILABLE"
+OUTCOME_ADAPTER_PROCESS_LOST = "ADAPTER_PROCESS_LOST"
+OUTCOME_ADAPTER_TIMEOUT = "ADAPTER_TIMEOUT"
 
 
 @dataclass(frozen=True)
 class DispatchDecision:
     outcome: str
     reason: str
+    attempt_id: uuid.UUID | None = None
 
 
 def evaluate_dispatch_readiness(
@@ -97,6 +104,7 @@ def evaluate_dispatch_readiness(
     agent: CoordinationAgent,
     required_capabilities: tuple[str, ...] = (),
     current_base_sha: str | None = None,
+    require_adapter_enabled: bool = False,
 ) -> DispatchDecision:
     """The FAIL-CLOSED gate a caller must pass immediately before actually invoking an
     adapter -- `dispatch_assignment()` below always calls this first and never skips it. Every
@@ -113,7 +121,16 @@ def evaluate_dispatch_readiness(
        declared `capabilities`.
     3. Explicit scope for writes -- a `read_write` dispatch requires BOTH `branch` and
        `worktree_path` already set on the assignment; neither may be inferred or left implicit.
-    4. Founder approval -- delegated entirely to
+    4. `require_adapter_enabled` (opt-in, default `False`) -- when a caller intends to dispatch
+       through a REAL adapter (via `app.agent_coordination.adapters.get_real_adapter()`), pass
+       `True` here to also gate on `app.agent_coordination.adapter_config.adapter_availability()`
+       for this exact agent: fails `ADAPTER_DISABLED` when the founder has not explicitly
+       enabled it, `ADAPTER_UNAVAILABLE` when enabled but the executable was not found. Default
+       `False` deliberately does NOT check this -- a caller intentionally dispatching through a
+       test-only fake adapter (see `tests/backend/mainai/test_agent_dispatch_foundation.py`'s
+       own `_FakeAgentAdapter`) is never forced to also satisfy real-adapter configuration that
+       has nothing to do with what it is actually about to call.
+    5. Founder approval -- delegated entirely to
        `app.mainai_execution.approval.require_task_approval()` when the assignment has a
        linked `task_id`. When it does NOT (an assignment ahead of a formal `MainAITask`) but
        `assignment.approval_required` is still set, there is no real gate to check against yet
@@ -132,6 +149,13 @@ def evaluate_dispatch_readiness(
         return DispatchDecision(
             OUTCOME_SCOPE_NOT_EXPLICIT, "a read_write dispatch requires an explicit branch AND worktree_path -- neither may be inferred"
         )
+
+    if require_adapter_enabled:
+        availability = adapter_availability(agent.agent_key)
+        if not availability.enabled:
+            return DispatchDecision(OUTCOME_ADAPTER_DISABLED, availability.reason)
+        if not availability.executable_found:
+            return DispatchDecision(OUTCOME_ADAPTER_UNAVAILABLE, availability.reason)
 
     if assignment.task_id is not None:
         task = db.get(MainAITask, assignment.task_id)
@@ -168,11 +192,15 @@ async def dispatch_assignment(
     adapter: "AgentAdapter",
     authority_envelope: dict | None = None,
     required_capabilities: tuple[str, ...] = (),
+    require_adapter_enabled: bool = False,
 ) -> DispatchDecision:
     """`dispatch(agent_id, assignment_id, authority_envelope)` -- the canonical control-plane
     entry point. ALWAYS re-runs `evaluate_dispatch_readiness()` immediately before touching the
     adapter (never trusts a decision computed earlier by a different call) -- on failure,
-    returns that decision WITHOUT calling the adapter or mutating the assignment at all.
+    returns that decision WITHOUT calling the adapter or mutating the assignment at all. Pass
+    `require_adapter_enabled=True` when `adapter` was obtained via
+    `app.agent_coordination.adapters.get_real_adapter()` -- see
+    `evaluate_dispatch_readiness()`'s own docstring for why this stays opt-in.
 
     `authority_envelope`, if supplied, is validated to be a SUBSET of the assignment's own
     already-narrowed `allowed_paths` -- a caller can never be handed more authority than the
@@ -184,24 +212,33 @@ async def dispatch_assignment(
     itself (its `allowed_paths`/`branch`/`worktree_path`, already the source of truth), not
     from a caller-supplied dict a future adapter could otherwise be tempted to trust as-is.
 
+    A fresh `attempt_id` is generated for every genuine invocation attempt (never for a
+    gate-rejected call, which never started anything) -- recorded on the DISPATCHING event and
+    returned in the decision, so a caller can correlate a specific attempt with its eventual
+    `DispatchResult` even if the SAME assignment is retried after a failure.
+
     Transitions `ready -> waiting_agent` ("DISPATCHING") BEFORE calling the adapter, and only
     to `running` AFTER `adapter.start_assignment()` returns without raising -- so an assignment
-    that failed to actually start is never left looking like it is running. On
-    `ProviderNotConfiguredError` (see `app.agent_coordination.adapters`), transitions to
-    `blocked` with a structured `REAL_PROVIDER_NOT_CONFIGURED` reason and returns that outcome.
-    On ANY OTHER exception from the adapter (a genuine bug in a real implementation, not the
-    documented not-configured signal), also transitions to `blocked` -- with a generic
-    `adapter_start_assignment_failed` reason -- before RE-RAISING the original exception, so
-    the caller still sees the real error, but the assignment is never left stuck in
-    `waiting_agent` indefinitely. `waiting_agent` maps to `RuntimeStatus.IDLE` in
-    `app.agent_coordination.runtime_view` -- a crashed dispatch left in that status would
-    silently read as "idle," never as "broken," which is exactly what this branch prevents.
-    NEVER silently reports success, never fabricates a running state for a dispatch that never
+    that failed to actually start is never left looking like it is running. Distinguishes,
+    never conflates:
+    - `ProviderNotConfiguredError` -- the adapter was never real (`REAL_PROVIDER_NOT_CONFIGURED`);
+    - `AdapterProcessLostError` -- the process could not be started or lost track of
+      (`ADAPTER_PROCESS_LOST`);
+    - `AdapterTimeoutError` -- the process exceeded its bound and was killed (`ADAPTER_TIMEOUT`);
+    - any OTHER exception -- a genuine, unanticipated adapter bug (`adapter_start_assignment_failed`).
+    EVERY one of these transitions the assignment to `blocked` with its own specific structured
+    reason before propagating (re-raising) the original exception, so the caller still sees the
+    real error, but the assignment is NEVER left stuck in `waiting_agent` indefinitely --
+    `waiting_agent` maps to `RuntimeStatus.IDLE` in `app.agent_coordination.runtime_view`, and a
+    crashed dispatch left there would silently read as "idle," never as "broken." NEVER
+    silently reports success, never fabricates a running state for a dispatch that never
     actually reached a real external agent."""
 
-    from app.agent_coordination.adapters import ProviderNotConfiguredError
+    from app.agent_coordination.adapters import AdapterProcessLostError, AdapterTimeoutError, ProviderNotConfiguredError
 
-    decision = evaluate_dispatch_readiness(db, assignment=assignment, agent=agent, required_capabilities=required_capabilities)
+    decision = evaluate_dispatch_readiness(
+        db, assignment=assignment, agent=agent, required_capabilities=required_capabilities, require_adapter_enabled=require_adapter_enabled
+    )
     if decision.outcome != OUTCOME_ASSIGNABLE:
         return decision
 
@@ -213,18 +250,37 @@ async def dispatch_assignment(
                 OUTCOME_SCOPE_NOT_EXPLICIT, f"authority_envelope requests paths outside the assignment's own allowed_paths: {escaping}"
             )
 
-    transition_status(db, assignment=assignment, new_status="waiting_agent", detail={"reason": "dispatching"})
+    attempt_id = uuid.uuid4()
+    transition_status(db, assignment=assignment, new_status="waiting_agent", detail={"reason": "dispatching", "attempt_id": str(attempt_id)})
     try:
         await adapter.start_assignment(assignment.id)
     except ProviderNotConfiguredError as exc:
-        transition_status(db, assignment=assignment, new_status="blocked", detail={"reason": OUTCOME_REAL_PROVIDER_NOT_CONFIGURED, "detail": str(exc)})
-        return DispatchDecision(OUTCOME_REAL_PROVIDER_NOT_CONFIGURED, str(exc))
+        transition_status(
+            db, assignment=assignment, new_status="blocked",
+            detail={"reason": OUTCOME_REAL_PROVIDER_NOT_CONFIGURED, "detail": str(exc), "attempt_id": str(attempt_id)},
+        )
+        return DispatchDecision(OUTCOME_REAL_PROVIDER_NOT_CONFIGURED, str(exc), attempt_id=attempt_id)
+    except AdapterProcessLostError as exc:
+        transition_status(
+            db, assignment=assignment, new_status="blocked",
+            detail={"reason": OUTCOME_ADAPTER_PROCESS_LOST, "detail": str(exc), "attempt_id": str(attempt_id)},
+        )
+        return DispatchDecision(OUTCOME_ADAPTER_PROCESS_LOST, str(exc), attempt_id=attempt_id)
+    except AdapterTimeoutError as exc:
+        transition_status(
+            db, assignment=assignment, new_status="blocked",
+            detail={"reason": OUTCOME_ADAPTER_TIMEOUT, "detail": str(exc), "attempt_id": str(attempt_id)},
+        )
+        return DispatchDecision(OUTCOME_ADAPTER_TIMEOUT, str(exc), attempt_id=attempt_id)
     except Exception as exc:
-        transition_status(db, assignment=assignment, new_status="blocked", detail={"reason": "adapter_start_assignment_failed", "detail": str(exc)})
+        transition_status(
+            db, assignment=assignment, new_status="blocked",
+            detail={"reason": "adapter_start_assignment_failed", "detail": str(exc), "attempt_id": str(attempt_id)},
+        )
         raise
 
-    transition_status(db, assignment=assignment, new_status="running")
-    return DispatchDecision(OUTCOME_ASSIGNABLE, "dispatched -- adapter confirmed start_assignment")
+    transition_status(db, assignment=assignment, new_status="running", detail={"attempt_id": str(attempt_id)})
+    return DispatchDecision(OUTCOME_ASSIGNABLE, "dispatched -- adapter confirmed start_assignment", attempt_id=attempt_id)
 
 
 # ============================================================================ 3: result
@@ -238,6 +294,8 @@ class DispatchResult:
     placeholder for what it did not observe" doctrine, reused here."""
 
     succeeded: bool
+    adapter_key: str | None = None  # which real provider (or "fake"/"not_configured") actually produced this
+    dispatch_attempt_id: uuid.UUID | None = None  # correlates with the DispatchDecision.attempt_id that started this run
     base_sha: str | None = None
     head_sha: str | None = None
     branch: str | None = None
@@ -290,6 +348,15 @@ def apply_dispatch_result(db: Session, *, assignment: AgentWorkAssignment, agent
         failure_reason=result.failure_reason,
         merge_result="merged" if (result.succeeded and result.pr_ref) else None,
     )
+    # Dispatch-specific correlation fields -- who actually ran this, and which specific
+    # attempt -- live alongside the canonical evidence vocabulary without widening
+    # build_agent_outcome_payload()'s own established signature (PR #83); merged in here,
+    # never silently dropped, never included when the caller didn't supply them (UNKNOWN
+    # stays UNKNOWN -- see this module's own DispatchResult docstring).
+    if result.adapter_key is not None:
+        payload["adapter_key"] = result.adapter_key
+    if result.dispatch_attempt_id is not None:
+        payload["dispatch_attempt_id"] = str(result.dispatch_attempt_id)
     record_assignment_outcome(db, assignment=assignment, evidence_kind="dispatch_result", payload=payload, deterministic=True)
 
     if result.succeeded:
@@ -298,3 +365,44 @@ def apply_dispatch_result(db: Session, *, assignment: AgentWorkAssignment, agent
         transition_status(db, assignment=assignment, new_status="blocked", detail={"reason": result.block_reason})
     else:
         transition_status(db, assignment=assignment, new_status="failed", detail={"reason": result.failure_reason or "unspecified failure"})
+
+
+# ============================================================================ 7: crash/lost-
+# process handling on the COLLECTION side (the companion to dispatch_assignment()'s own
+# handling on the START side)
+
+async def collect_dispatch_result(
+    db: Session, *, assignment: AgentWorkAssignment, agent: CoordinationAgent, adapter: "AgentAdapter", adapter_key: str | None = None,
+    dispatch_attempt_id: uuid.UUID | None = None,
+) -> DispatchDecision:
+    """Collects the adapter's own `AgentResult` and applies it via `apply_dispatch_result()` --
+    the companion to `dispatch_assignment()` for the OTHER end of a dispatch's lifecycle.
+    Distinguishes `AdapterProcessLostError`/`AdapterTimeoutError` here too -- a process that
+    disappeared or ran over its bound AFTER having started is exactly as real a failure as one
+    that never started, and must transition to `blocked` with its own specific reason, never be
+    silently left `running` or misread as `completed`.
+
+    If `apply_dispatch_result()` itself fails partway through (a genuine "agent completed but
+    result ingestion failed" case), nothing here catches that -- the caller's own transaction
+    boundary decides what happens next, and the assignment is left in whatever state it was
+    already durably in, never advanced to `completed` on a guess."""
+
+    from app.agent_coordination.adapters import AdapterProcessLostError, AdapterTimeoutError
+
+    try:
+        agent_result = await adapter.collect_result(assignment.id)
+    except AdapterProcessLostError as exc:
+        transition_status(db, assignment=assignment, new_status="blocked", detail={"reason": OUTCOME_ADAPTER_PROCESS_LOST, "detail": str(exc)})
+        return DispatchDecision(OUTCOME_ADAPTER_PROCESS_LOST, str(exc), attempt_id=dispatch_attempt_id)
+    except AdapterTimeoutError as exc:
+        transition_status(db, assignment=assignment, new_status="blocked", detail={"reason": OUTCOME_ADAPTER_TIMEOUT, "detail": str(exc)})
+        return DispatchDecision(OUTCOME_ADAPTER_TIMEOUT, str(exc), attempt_id=dispatch_attempt_id)
+
+    result = DispatchResult(
+        succeeded=agent_result.succeeded,
+        adapter_key=adapter_key,
+        dispatch_attempt_id=dispatch_attempt_id,
+        failure_reason=None if agent_result.succeeded else agent_result.summary,
+    )
+    apply_dispatch_result(db, assignment=assignment, agent=agent, result=result)
+    return DispatchDecision(OUTCOME_ASSIGNABLE, "result collected and applied", attempt_id=dispatch_attempt_id)

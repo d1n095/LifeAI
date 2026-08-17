@@ -1,9 +1,16 @@
+from app.agent_coordination.adapter_config import (
+    SUPPORTED_LOCAL_CLI_PROVIDERS,
+    AdapterAvailability,
+    adapter_availability,
+    real_adapter_config,
+)
 from app.agent_coordination.bootstrap import KNOWN_AGENT_DEFAULTS, bootstrap_known_agents
 from app.agent_coordination.dispatch import (
     DISPATCH_LIFECYCLE,
     DispatchDecision,
     DispatchResult,
     apply_dispatch_result,
+    collect_dispatch_result,
     dispatch_assignment,
     evaluate_dispatch_readiness,
 )
@@ -52,6 +59,8 @@ from app.agent_coordination.service import (
 
 __all__ = [
     "DISPATCH_LIFECYCLE",
+    "SUPPORTED_LOCAL_CLI_PROVIDERS",
+    "AdapterAvailability",
     "AgentRuntimeView",
     "AssignmentRuntimeView",
     "CandidateRejection",
@@ -70,12 +79,14 @@ __all__ = [
     "RuntimeStatus",
     "ScopeExpansionError",
     "acquire_lease",
+    "adapter_availability",
     "agent_runtime_snapshot",
     "all_agents_runtime_snapshot",
     "apply_dispatch_result",
     "assignment_runtime_view",
     "bootstrap_known_agents",
     "build_agent_outcome_payload",
+    "collect_dispatch_result",
     "create_parallel_exploration_group",
     "create_work_assignment",
     "dispatch_assignment",
@@ -86,6 +97,7 @@ __all__ = [
     "next_feasible_assignment_for_agent",
     "paths_conflict",
     "paths_conflict_any",
+    "real_adapter_config",
     "record_assignment_execution",
     "record_assignment_outcome",
     "register_agent",
