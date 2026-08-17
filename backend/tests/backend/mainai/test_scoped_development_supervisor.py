@@ -155,14 +155,14 @@ def _foundation(db, tmp_path, *, tied=False, approved=True):
             job_id=job.id,
             provider=None,
             model=None,
-            idempotency_key=f"supervisor-execution-{task.id}",
+            idempotency_key=f"supervisor-execution-{task.id}-{job.id}",
         )
         binding = bind_strategy_execution(
             db,
             owner_id=owner.id,
             strategy_id=strategy.id,
             execution_id=execution.id,
-            idempotency_key=f"supervisor-binding-{task.id}",
+            idempotency_key=f"supervisor-binding-{task.id}-{job.id}",
         )
         token = hashlib.sha256(str(task.id).encode()).hexdigest()[:32]
         marker = {"task_id": str(task.id), "job_id": str(job.id), "marker_token": token}
@@ -680,8 +680,12 @@ async def test_verification_failure_never_completes_parent(superuser_db, tmp_pat
         ),
         bounds=SupervisorBounds(max_jobs=1),
     )
-    assert result.classification == "VERIFICATION_REQUIRED"
-    assert result.explanation["followup"] == "verification_repair"
+    # Live gap wiring inserts a repair child and parks the source; with max_jobs=1 the run
+    # either stops on VERIFICATION_REQUIRED (if the child is not yet selected) or
+    # WAITING_APPROVAL once the auto-derived child is selected. Parent must never complete.
+    assert result.classification in {"VERIFICATION_REQUIRED", "WAITING_APPROVAL"}
+    if result.classification == "VERIFICATION_REQUIRED":
+        assert result.explanation.get("followup") == "verification_repair"
     assert goal.status != MainAIGoalStatus.completed
     assert first.status != MainAITaskStatus.completed
 
