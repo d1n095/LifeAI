@@ -72,8 +72,9 @@ returns `WAITING_APPROVAL` until `grant_task_approval()` records founder approva
 
 ### Merge readiness
 
-Hardening is implemented on `cursor/pr79-live-loop-hardening` stacked on PR #79 head
-`bed835a`. **No new Alembic migration** — attempt audit reuses `outcome_recorded` (head `0045`).
+Hardening is implemented on `cursor/pr79-live-loop-hardening` (PR #80), reconciled onto
+post-#79 mainline @ `69f30e0`. **No new Alembic migration** — attempt audit reuses
+`outcome_recorded` (head **0046**, via PR #82 Multi-Agent Work Coordination).
 
 Verified locally against Postgres: live hardening suite, PR #78 gap primitives, PR #77 partial
 plan insertion, Scoped Supervisor, Safe Planner, Provider-Assisted Planning, Development Driver,
@@ -365,7 +366,7 @@ mock of the live call site:
 
 ## Migration
 
-**No new migration.** Alembic head remains `0045`. Attempt audit reuses the existing
+**No new migration.** Alembic head remains **0046**. Attempt audit reuses the existing
 `outcome_recorded` event_type. `_live_generation_depth()` derives lineage entirely from existing
 `MainAITaskEvent.detail` JSON and `LifeProblem.provenance` JSON — no new column.
 
