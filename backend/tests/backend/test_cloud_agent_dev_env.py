@@ -125,7 +125,7 @@ def test_install_sh_does_not_hardcode_app_database_url_independently_of_mainai_a
     assert "APP_DATABASE_URL=postgresql://mainai_app:" not in script
 
 
-def test_derive_app_database_url_matches_ensure_app_role(monkeypatch):
+def test_derive_app_database_url_matches_ensure_app_role():
     security_dir = REPO_ROOT / "backend" / "scripts" / "security"
     sys.path.insert(0, str(security_dir))
     import ensure_app_role  # noqa: E402
