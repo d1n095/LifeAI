@@ -94,6 +94,26 @@ ingen delad kod, ingen delad migration (0046 = 0045 → 0046, ingen kollision). 
 
 ## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
 
+**Verktygs-/miljöbranch — `cursor/cloud-agent-dev-environment-91c1` →
+`claude/det-kommer-mer-879lcm` — ÖPPEN, DRAFT, FRISTÅENDE (2026-08-16).** Lägger till
+Cloud Agent-utvecklingsmiljön under `.cursor/` (`environment.json` + `install.sh` +
+`setup-services.sh` + `start.sh`) så att en agent-VM automatiskt får hela stacken körande:
+Postgres 16 + pgvector och Redis installerade via apt (ingen Docker/systemd i VM:en, tjänsterna
+startas direkt via `pg_ctlcluster`/`redis-server`), backend-venv + `requirements-dev.txt`,
+frontend `npm ci` + Playwright-Chromium, en dev-only `backend/.env` (genereras bara om den
+saknas, aldrig committad — `.gitignore` täcker den), samt idempotent roll-/databas-provisionering
+(`lifeos`-superuser + begränsad `mainai_app`-runtime-roll, exakt som `backend/db-init/01-app-role.sh`),
+`alembic upgrade head` och `apply_runtime_privileges.py`. Terminalerna kör backend (uvicorn :8000)
+och frontend (`next dev` :3000, same-origin-proxy). **Ingen applikationskod ändrad** — helt disjunkt
+filuppsättning (`.cursor/` + den här registerentryn), inget beroende av PR #60/#61 eller
+codex-brancherna, kan granskas och mergas oberoende. Verifierat på VM:en: backend-sviterna
+`tests/backend` (1521 passed, 1 skip), `tests/security` + `tests/account` (77 passed), frontend
+`tsc`/`eslint`/`next build` gröna, och ett manuellt end-to-end-flöde genom en riktig webbläsare
+(founder-login → dashboard → adminpanel → chatt). Enda kvarstående testfel är samma redan
+dokumenterade, pre-existing filsystems-trådrace
+(`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`) som är grön i CI och orörd
+av den här branchen.
+
 **PR #60 — `claude/life-canonical-architecture-recovery` → `claude/det-kommer-mer-879lcm` —
 ÖPPEN, DRAFT, medvetet FRYST.** "PROVISIONAL CANONICAL ARCHITECTURE / BOOTSTRAP MAP" — fyra
 arkitekturdokument (`docs/LIFE_CANONICAL_ARCHITECTURE.md`,
