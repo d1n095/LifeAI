@@ -6,6 +6,71 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 60 (2026-08-17): `claude/agent-dispatch-foundation` — Bounded Dispatch Foundation (real agent bootstrap + fail-closed dispatch gate + provider-neutral adapter contract), stackad ovanpå PR #84, egen worktree parallellt med Cursors PR #79/#80
+
+Nästa lager i natt-passets uppdrag: vändningen från "Life vet vem som borde göra vad" (PR
+#83/#84) till en riktig, granskningsbar dispatch — utan att någonsin ge mer befogenhet än
+samordningslagret redan uttryckligen beviljat. Byggt strikt ovanpå redan mergad/granskad kod
+— ingen ny planerare, övervakare, uppgiftssystem, godkännandesystem eller register.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- `bootstrap.py` — `bootstrap_known_agents()`: idempotent registrering av Claude Code/Cursor
+  Agent/Codex via `register_agent()`s befintliga upsert. Endast identitet/förmåga/konfig —
+  ALDRIG en hemlighet eller ett maskinspecifikt token. Konservativa, verkligt kända
+  förmågetaggar (`repo_edit`/`read_only_review`/`run_tests`) — aldrig en uppfunnen
+  prestandarankning. Medvetet INTE kopplad till automatisk app-uppstart — att seeda faktiska
+  grundardata är ett beslut, inte mekanisk infrastruktur.
+- `dispatch.py` — `DISPATCH_LIFECYCLE`: namngivna alias mot den REDAN BEFINTLIGA
+  `WorkAssignmentStatus` (DISPATCHING återanvänder `waiting_agent`), aldrig en ny kolumn.
+  `evaluate_dispatch_readiness()`: den skarpa fail-closed-grinden precis före en riktig
+  anrops-invokering — kräver strikt `ASSIGNABLE` (inte `LEASE_REQUIRED`, till skillnad från
+  `next_feasible_assignment_for_agent()`s egen urvalstolerans), plus kapacitetsmatchning,
+  explicit branch+worktree för skrivning, och grundargodkännande — delegerat helt till
+  `app.mainai_execution.approval.require_task_approval()`, den RIKTIGA grinden, aldrig
+  återimplementerad. `dispatch_assignment()`: den kanoniska
+  `dispatch(agent_id, assignment_id, authority_envelope)`-kontrollpunkten — `authority_envelope`
+  valideras som en DELMÄNGD av uppdragets redan begränsade `allowed_paths`, aldrig tvärtom.
+  `DispatchResult`/`apply_dispatch_result()`: strukturerad resultatåterkoppling genom
+  BEFINTLIGA bevis-/tillståndsprimitiver, aldrig en fabricerad kvalitetspoäng.
+- `adapters.py` (utökad, inte nyskapad) — `NotConfiguredAdapter`/`ProviderNotConfiguredError`:
+  den RIKTIGA standardadaptern tills en genuin, separat granskad Agent Runtime finns. Öppnar
+  ingen subprocess, gör inget nätverksanrop, läser ingen hemlighet — rapporterar alltid
+  `REAL_PROVIDER_NOT_CONFIGURED`, låtsas ALDRIG lyckas.
+
+**Genuin säkerhetsgranskning** (fristående adversarial-granskning, samma mönster som
+tidigare pass i det här natt-passet, men den mest säkerhetskänsliga koden hittills eftersom
+det här är första gången ett "riktig befogenhet att agera"-lager byggs): hittade INGEN
+befogenhetseskalering, men en verklig P1 — ett oväntat adapterfel (INTE
+`ProviderNotConfiguredError`) lämnade uppdraget permanent fast i `waiting_agent`
+("DISPATCHING") utan att någonsin nå `blocked`, vilket `runtime_view.py` kartlägger till
+`RuntimeStatus.IDLE` — en kraschad dispatch skulle tyst läsas som "ledig", aldrig som
+"trasig". Fixat: alla oväntade adapterfel fångas nu, uppdraget flyttas till `blocked` med en
+strukturerad orsak, INNAN det ursprungliga felet återkastas. Samt en P2 (task/goal-uppslag
+som ger `None` trots satt `task_id` föll tyst igenom istället för att fail-closed — fixat)
+och två P3 (en icke-bärande testassertion gjord meningsfull; `authority_envelope`s nuvarande
+icke-bärande status i produktionskoden nu explicit dokumenterad).
+
+Full lokal verifiering: 22/22 nya tester (inklusive ett verkligt E2E-scenario som utökar
+samma situation som PR #83/#84s egna: Cursor upptagen på PR #79/#80s exakta sökvägar, Claude
+fri efter PR #84, Codex ledig — Life ser överlappet avvisas, väljer Claude för ett genuint
+orelaterat uppdrag, skapar dispatchen, avvisar en krockande dispatch igen VID GRINDEN
+(försvar i djupled, inte bara vid routing), dispatchar den icke-krockande genom en falsk
+adapter, och bokför resultatet — utan att uppdragets `allowed_paths` någonsin breddas), 223/226
+i hela `tests/backend/mainai/` (201 tidigare + 22 nya, minus 3 förbefintliga `rg`-relaterade
+fel i Cursors eget scope, orörda), ruff rent, `git diff --check` rent, Alembic-huvud
+verifierat oförändrat vid `0046`.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #84 (`claude/agent-work-selection` @
+`046679c`). Helt oberoende av Cursors PR #79/#80.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-dispatch-foundation` | Öppnas denna session | Pushad, redo för granskning | Real agent bootstrap (`bootstrap.py`) + fail-closed dispatch-grind + `dispatch()`-kontrollpunkt + `NotConfiguredAdapter` (`dispatch.py`, `adapters.py`) — 22 tester, ingen ny migration | `claude/agent-work-selection` @ 046679c (stackad ovanpå PR #84) |
+
 ## Pass 59 (2026-08-17): `claude/agent-work-selection` — next_feasible_assignment_for_agent() + idle_agents_with_next_assignment(), stackad ovanpå PR #83, egen worktree parallellt med Cursors PR #79/#80
 
 Fortsättning av natt-passets uppdrag efter att PR #83 (Pass 58 nedan) blev CI-grön och

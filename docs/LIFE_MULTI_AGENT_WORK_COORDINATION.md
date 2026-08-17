@@ -233,17 +233,90 @@ into `REVIEWING`, a Claude assignment gated on Cursor's completion correctly rep
 `WAITING_DEPENDENCY` while Cursor's own work continues unaffected, and routing still resolving
 normally for other feasible work despite that one blocked assignment.
 
-## FUTURE AGENT RUNTIME INTEGRATION (explicitly deferred)
+## BOUNDED DISPATCH FOUNDATION
+
+Turns a routing decision ("agent X should do assignment Y next") into a real, auditable
+dispatch, without granting any authority the coordination layer did not already, explicitly
+grant. Three pieces, all pure reuse — no new tables, no new registry, no new task/job/approval
+system.
+
+**`app.agent_coordination.bootstrap.bootstrap_known_agents`** idempotently registers Life's
+actual, currently-used worker identities (Claude Code, Cursor Agent, Codex) via
+`register_agent()`'s own upsert-by-`agent_key` — never a new registry. Represents
+identity/capability/config only; never a credential, secret, or machine-specific token (nothing
+here reads an environment variable or a secrets store). Capabilities are the conservative,
+currently-known-true shape of each agent's role — interactive CLI-driven repo editing,
+read-only review, running tests — never an invented performance ranking. Deliberately NOT
+wired into automatic app boot: seeding actual founder-facing data about which real agents
+exist is a decision, not mechanical infrastructure, and stays an explicit, callable action.
+
+**`app.agent_coordination.dispatch.DISPATCH_LIFECYCLE`** maps the founder's own requested
+naming (PROPOSED/READY/DISPATCHING/RUNNING/COMPLETED/FAILED/CANCELLED/BLOCKED) onto the
+ALREADY EXISTING `WorkAssignmentStatus` — `DISPATCHING` reuses `waiting_agent` (ready,
+allocated, not yet confirmed started — exactly what that status has always meant), never a
+new column. "AUTHORIZED" has no status of its own: it is exactly "ready AND passes
+`evaluate_dispatch_readiness()`'s approval check," computed at read time, never stored — the
+same "derived, never stored" doctrine `runtime_view`'s own block-reason handling already
+establishes.
+
+**`evaluate_dispatch_readiness()`** is the fail-closed gate immediately before any real
+invocation. Layers strictly on top of `evaluate_assignment_readiness()` (which alone must
+report `ASSIGNABLE`, not merely `LEASE_REQUIRED` — a dispatch is about to actually invoke a
+real agent and must already hold its write lease, unlike `next_feasible_assignment_for_agent`'s
+own selection-time tolerance for that outcome), then adds: capability match, an explicit
+branch+worktree for any `read_write` dispatch, and founder approval — delegated entirely to
+`app.mainai_execution.approval.require_task_approval()`, the real gate, never reimplemented.
+When an assignment has no linked `task_id` but `approval_required` is set, there is no real
+gate to check against yet — fails closed rather than treating "nothing to check" as "approved."
+
+**`dispatch_assignment(db, assignment=, agent=, adapter=, authority_envelope=)`** is the
+`dispatch(agent_id, assignment_id, authority_envelope)` control-plane entry point. Always
+re-runs `evaluate_dispatch_readiness()` immediately before touching the adapter — on failure,
+the adapter is never called and nothing is mutated. `authority_envelope`, if supplied, is
+validated to be a subset of the assignment's own already-narrowed `allowed_paths` — an adapter
+implementation is never trusted to self-limit; this function enforces the boundary itself.
+Transitions `ready -> waiting_agent` (DISPATCHING) before calling the adapter, and only to
+`running` after `adapter.start_assignment()` returns without raising. On
+`ProviderNotConfiguredError`, transitions to `blocked` with a structured
+`REAL_PROVIDER_NOT_CONFIGURED` reason — never silently reports success, never leaves an
+assignment looking like it is running when nothing real happened.
+
+**`app.agent_coordination.adapters.NotConfiguredAdapter`** is the REAL default `AgentAdapter`
+for every provider until a genuine, separately-reviewed Agent Runtime exists — it implements
+the full Protocol shape but every method that would touch an external agent raises
+`ProviderNotConfiguredError`. It opens no subprocess, makes no network call, and reads no
+credential, by construction.
+
+**`DispatchResult`/`apply_dispatch_result()`** is the structured result handoff — base/head
+sha, branch, worktree, changed paths, tests, CI refs, PR ref, duration/cost, all optional and
+recorded verbatim, never interpreted into a fabricated quality score. Recorded through the
+EXISTING `record_assignment_execution()`/`record_assignment_outcome()`/
+`build_agent_outcome_payload()` primitives PR #83 already built, and transitioned through the
+EXISTING state machine (`transition_status()`) — never a raw status write, never a second
+evidence store.
+
+`tests/backend/mainai/test_agent_dispatch_foundation.py`'s
+`test_current_real_world_dispatch_scenario_end_to_end` proves the whole chain against the
+concrete situation this foundation exists to represent: Cursor busy on PR #79/#80's exact
+paths, Claude free after PR #84, Codex idle — Life sees the overlap refused, selects Claude for
+a genuinely unrelated task, creates the dispatch (a real `AgentWorkAssignment`, never a second
+representation), refuses a colliding dispatch attempt again at the gate (defense in depth, not
+just at routing time), dispatches the non-overlapping one through a fake adapter (no real
+provider configured yet), and records its result — all without the assignment's own
+`allowed_paths` ever changing from what was granted at creation.
+
+## FUTURE AGENT RUNTIME INTEGRATION (still explicitly deferred)
 
 `app.agent_coordination.adapters.AgentAdapter` is a `typing.Protocol` (not a base class
 instances are required to inherit from), the same pattern
 `app.provider_planning.service.PlanningAdapter` already establishes for provider-assisted
-planning. A concrete implementation — actually driving Claude Code/Cursor Agent/Codex CLIs or
-APIs against an assignment — is deliberately out of scope for this foundation PR. It would need
-its own, separately reviewed PR to add: process/session management, credential handling
-(outside this codebase entirely), output streaming, and cancellation semantics. None of that
-belongs in a coordination-layer foundation whose entire job is bookkeeping and conflict
-prevention, not execution.
+planning. A CONCRETE implementation — actually driving Claude Code/Cursor Agent/Codex CLIs or
+APIs against an assignment — remains deliberately out of scope; `NotConfiguredAdapter` above is
+the honest, fail-closed default until one exists. A real implementation would need its own,
+separately reviewed PR to add: process/session management, credential handling (outside this
+codebase entirely), output streaming, and cancellation semantics. None of that belongs in a
+coordination-layer foundation whose entire job is bookkeeping, conflict prevention, and bounded
+dispatch orchestration — never execution itself.
 
 ## EXPLICITLY DEFERRED
 
@@ -268,3 +341,7 @@ prevention, not execution.
   most recent `last_heartbeat_at` across an agent's own active leases (per-lease heartbeats
   already exist); a dedicated agent-level column would be a second source of truth for
   information the lease table already carries.
+- Wiring `bootstrap_known_agents()` into automatic application boot — remains an explicit,
+  founder-invoked action; see that function's own module docstring for why.
+- A real `AgentAdapter` implementation for any provider — `NotConfiguredAdapter` is the honest
+  default until one exists; see "Future Agent Runtime integration" above.

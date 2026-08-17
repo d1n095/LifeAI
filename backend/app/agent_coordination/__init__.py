@@ -1,3 +1,12 @@
+from app.agent_coordination.bootstrap import KNOWN_AGENT_DEFAULTS, bootstrap_known_agents
+from app.agent_coordination.dispatch import (
+    DISPATCH_LIFECYCLE,
+    DispatchDecision,
+    DispatchResult,
+    apply_dispatch_result,
+    dispatch_assignment,
+    evaluate_dispatch_readiness,
+)
 from app.agent_coordination.routing import (
     CandidateRejection,
     IdleAgentNextWork,
@@ -42,13 +51,17 @@ from app.agent_coordination.service import (
 )
 
 __all__ = [
+    "DISPATCH_LIFECYCLE",
     "AgentRuntimeView",
     "AssignmentRuntimeView",
     "CandidateRejection",
     "CoordinationError",
     "CoordinatorDecision",
+    "DispatchDecision",
+    "DispatchResult",
     "DuplicateWorkError",
     "IdleAgentNextWork",
+    "KNOWN_AGENT_DEFAULTS",
     "LeaseAcquisitionResult",
     "LeaseFencingError",
     "LeaseStillLiveError",
@@ -59,12 +72,16 @@ __all__ = [
     "acquire_lease",
     "agent_runtime_snapshot",
     "all_agents_runtime_snapshot",
+    "apply_dispatch_result",
     "assignment_runtime_view",
+    "bootstrap_known_agents",
     "build_agent_outcome_payload",
     "create_parallel_exploration_group",
     "create_work_assignment",
+    "dispatch_assignment",
     "eligible_agents_for",
     "evaluate_assignment_readiness",
+    "evaluate_dispatch_readiness",
     "idle_agents_with_next_assignment",
     "next_feasible_assignment_for_agent",
     "paths_conflict",
