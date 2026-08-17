@@ -24,6 +24,13 @@ set -a
 . "$ENV_FILE"
 set +a
 : "${MAINAI_APP_PASSWORD:?MAINAI_APP_PASSWORD must be set in backend/.env}"
+: "${DATABASE_URL:?DATABASE_URL must be set in backend/.env}"
+
+# Derive the lifeos superuser password and database name from DATABASE_URL (same
+# credentials Alembic will use). Never echo DATABASE_URL or the password.
+eval "$(python3 "$REPO/.cursor/parse_database_url.py")"
+: "${LIFEOS_PASSWORD:?failed to parse lifeos password from DATABASE_URL}"
+: "${LIFEOS_DB:?failed to parse database name from DATABASE_URL}"
 
 echo "--> Ensuring Postgres 16 cluster is online"
 if ! pg_lsclusters -h 2>/dev/null | awk '$1=="16" && $2=="main" {print $4}' | grep -q online; then
@@ -66,14 +73,17 @@ fi
 echo "--> Provisioning roles (lifeos superuser + restricted mainai_app runtime role)"
 # Mirrors backend/db-init/01-app-role.sh: `lifeos` owns the schema and runs migrations; the
 # non-superuser `mainai_app` role is what the app queries through so Row-Level Security is
-# actually enforced (a superuser bypasses RLS). Password is :'app_pw' from MAINAI_APP_PASSWORD
-# (psql variable, not interpolated into SQL text).
-sudo -u postgres psql -v ON_ERROR_STOP=1 -v app_pw="$MAINAI_APP_PASSWORD" <<'SQL'
+# actually enforced (a superuser bypasses RLS). Passwords are psql variables
+# (:'lifeos_pw' from DATABASE_URL, :'app_pw' from MAINAI_APP_PASSWORD) — never interpolated
+# into SQL text and never logged.
+sudo -u postgres psql -v ON_ERROR_STOP=1 \
+  -v lifeos_pw="$LIFEOS_PASSWORD" \
+  -v app_pw="$MAINAI_APP_PASSWORD" <<'SQL'
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='lifeos') THEN
-    CREATE ROLE lifeos LOGIN SUPERUSER PASSWORD 'lifeos';
+    CREATE ROLE lifeos LOGIN SUPERUSER PASSWORD :'lifeos_pw';
   ELSE
-    ALTER ROLE lifeos LOGIN SUPERUSER PASSWORD 'lifeos';
+    ALTER ROLE lifeos LOGIN SUPERUSER PASSWORD :'lifeos_pw';
   END IF;
 END $$;
 DO $$ BEGIN
@@ -85,13 +95,14 @@ DO $$ BEGIN
 END $$;
 SQL
 
-echo "--> Ensuring the lifeos database exists"
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='lifeos'" | grep -q 1; then
-  sudo -u postgres createdb -O lifeos lifeos
+echo "--> Ensuring the configured database exists"
+if ! sudo -u postgres psql -v ON_ERROR_STOP=1 -v db_name="$LIFEOS_DB" \
+  -tAc "SELECT 1 FROM pg_database WHERE datname = :'db_name'" | grep -q 1; then
+  sudo -u postgres createdb -O lifeos "$LIFEOS_DB"
 fi
 
 echo "--> Granting the restricted runtime role (SELECT/INSERT/UPDATE/DELETE only — never TRUNCATE)"
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d lifeos <<'SQL'
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d "$LIFEOS_DB" <<'SQL'
 GRANT USAGE ON SCHEMA public TO mainai_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;

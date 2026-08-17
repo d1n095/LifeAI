@@ -3,16 +3,25 @@
 These are file-level proofs, not live VM boots: a Cloud Agent that starts FastAPI and
 Next.js but never `python -m app.worker` leaves import jobs, MainAI jobs, and the
 account-erasure storage-deletion outbox permanently pending. A bootstrap that hardcodes
-the `mainai_app` password independently of backend/.env silently breaks RLS-scoped runtime
-connections as soon as MAINAI_APP_PASSWORD differs.
+role passwords independently of backend/.env silently breaks connections as soon as
+DATABASE_URL or MAINAI_APP_PASSWORD differs.
 """
 
 from pathlib import Path
 import json
+import os
 import re
+import subprocess
+import sys
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CURSOR_DIR = REPO_ROOT / ".cursor"
+
+# Import without adding .cursor to the app package path permanently.
+sys.path.insert(0, str(CURSOR_DIR))
+from parse_database_url import parse_lifeos_database_url  # noqa: E402
 
 
 def test_cloud_agent_environment_starts_the_durable_worker():
@@ -33,3 +42,70 @@ def test_setup_services_uses_env_password_not_a_hardcoded_app_role_secret():
         "second hardcoded secret that can drift from APP_DATABASE_URL"
     )
     assert "PASSWORD :'app_pw'" in script
+
+
+def test_setup_services_uses_database_url_not_a_hardcoded_lifeos_password():
+    script = (CURSOR_DIR / "setup-services.sh").read_text()
+    assert "parse_database_url.py" in script
+    assert "PASSWORD :'lifeos_pw'" in script
+    assert not re.search(r"PASSWORD 'lifeos'", script), (
+        "lifeos superuser password must come from DATABASE_URL, not a hardcoded secret"
+    )
+
+
+@pytest.mark.parametrize(
+    "url, password, db_name",
+    [
+        ("postgresql://lifeos:lifeos@localhost:5432/lifeos", "lifeos", "lifeos"),
+        ("postgresql://lifeos:s3cret%40pw@localhost:5432/lifeos_dev", "s3cret@pw", "lifeos_dev"),
+    ],
+)
+def test_parse_lifeos_database_url_accepts_canonical_urls(url, password, db_name):
+    assert parse_lifeos_database_url(url) == (password, db_name)
+
+
+@pytest.mark.parametrize(
+    "url, match",
+    [
+        ("", "postgresql://"),
+        ("postgresql://mainai_app:x@localhost:5432/lifeos", "must be lifeos"),
+        ("postgresql://lifeos@localhost:5432/lifeos", "must include a password"),
+        ("postgresql://lifeos:pw@localhost:5432/", "database name"),
+        ("postgresql://lifeos:pw@localhost:5432/lifeos;DROP", "simple identifier"),
+    ],
+)
+def test_parse_lifeos_database_url_rejects_malformed_or_wrong_role(url, match):
+    with pytest.raises(ValueError, match=match):
+        parse_lifeos_database_url(url)
+
+
+def test_parse_database_url_cli_never_prints_url_or_password_on_stderr():
+    env = {**os.environ, "DATABASE_URL": "postgresql://lifeos:super-secret@localhost:5432/lifeos"}
+    proc = subprocess.run(
+        [sys.executable, str(CURSOR_DIR / "parse_database_url.py")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0
+    assert "LIFEOS_PASSWORD=" in proc.stdout
+    assert "LIFEOS_DB=lifeos" in proc.stdout
+    assert "super-secret" not in proc.stderr
+    assert "DATABASE_URL" not in proc.stderr
+    assert "postgresql://" not in proc.stderr
+
+
+def test_parse_database_url_cli_fails_closed_without_leaking_url():
+    env = {**os.environ, "DATABASE_URL": "postgresql://mainai_app:leaked-pw@localhost:5432/lifeos"}
+    proc = subprocess.run(
+        [sys.executable, str(CURSOR_DIR / "parse_database_url.py")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 1
+    assert "leaked-pw" not in proc.stderr
+    assert "postgresql://" not in proc.stderr
+    assert "must be lifeos" in proc.stderr
