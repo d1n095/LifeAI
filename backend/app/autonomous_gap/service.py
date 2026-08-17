@@ -44,17 +44,31 @@ primitives composed this way need no additional state of their own: replaying th
 discover -> record -> assess -> insert pipeline for the exact same gap (whether because the same
 gap was independently discovered twice, or because a resume replays it after an interruption)
 converges on the same LifeProblem row and the same canonical inserted MainAITask row(s), with no
-extra bookkeeping required in this module."""
+extra bookkeeping required in this module.
+
+LIVE WIRING: `handle_live_gap_signal()` is the one function `app.development_supervisor.service`'s
+`run_supervisor()` loop calls, directly inside its own driver-result handling, to turn a
+`VERIFICATION_REQUIRED` or `CAPABILITY_MISSING` driver classification into a gap -- see that
+module's own docstring at the call site for exactly which two branches call in and why no others
+do. This makes `app.development_supervisor.service` depend on THIS module, which is why
+`SupervisorScope`'s shape is duck-typed here (accessed by attribute only, `from __future__ import
+annotations` keeps the `SupervisorScope` type hint from ever being evaluated at import time) and
+`RISK_ORDER` is duplicated rather than imported -- the reverse import direction (this module
+importing FROM development_supervisor.service, as PR #78 originally did) would now be a genuine
+circular import."""
+
+from __future__ import annotations
 
 import hashlib
 import json
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.development_supervisor.service import RISK_ORDER, SupervisorScope
 from app.mainai_execution.checkpoint import record_checkpoint
 from app.mainai_execution.plan_insertion import (
     ExistingTaskDependencyEdge,
@@ -67,9 +81,18 @@ from app.models.mainai_execution import (
     MainAIGoalRiskLevel,
     MainAIPlan,
     MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
 )
 from app.models.problem_learning import LifeProblem
 from app.problem_learning.service import create_problem
+
+if TYPE_CHECKING:
+    from app.development_supervisor.service import SupervisorScope
+
+# Mirrors app/development_supervisor/service.py's identically-named dict -- duplicated, not
+# imported, per this module's own "LIVE WIRING" docstring note above.
+RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 # Mirrors app/safe_planner/service.py's identically-named frozensets (already duplicated a
 # second time in app/mainai_execution/plan_insertion.py and a third time in
@@ -473,3 +496,147 @@ def run_gap_generation(
             break
 
     return GapGenerationRunResult(outcomes=outcomes, stopped_reason=stopped_reason)
+
+
+# ================================================================== LIVE WIRING
+#
+# The only two driver-result classifications app.development_supervisor.service.run_supervisor()
+# calls into this module for -- see that module's own call site for the exact branches. No other
+# classification (WAITING_PROVIDER, WAITING_APPROVAL, PROVIDER_SPEND_NOT_AUTHORIZED, NEEDS_*,
+# OUT_OF_SCOPE, RUN_BOUND_REACHED, ...) is a structured, durable gap signal -- those are either
+# transient waits a retry can resolve on its own, or terminal states that already carry their own
+# explanation and require no further action from this module.
+LIVE_GAP_SIGNAL_CLASSIFICATIONS = frozenset({"VERIFICATION_REQUIRED", "CAPABILITY_MISSING"})
+
+
+def _live_generation_depth(db: Session, *, task: MainAITask) -> int:
+    """`gap_from_verification_required()`/`gap_from_capability_missing()` build a fresh
+    `DiscoveredGap` from `task` alone, with no lineage of their own -- without this lookup every
+    live-detected gap would default to `generation_depth=0` even when `task` IS ITSELF a
+    previously gap-generated repair/capability child, letting a repeated live gap chain (a
+    repair child that later fails verification again, generating its own repair, ...) run
+    forever, never reaching `GapGenerationBounds`/`DEFAULT_MAX_GENERATION_DEPTH`.
+
+    Derives depth from data this module already writes durably -- no new column, no migration:
+    a gap-generated task's own `created` MainAITaskEvent carries the
+    `autonomous_gap_child:<problem idempotency_key>` `insertion_idempotency_key`
+    `insert_plan_tasks()` stores for every task it creates (see plan_insertion.py's own
+    docstring); stripping the `autonomous_gap_child:` prefix recovers the parent LifeProblem's
+    `idempotency_key`, and that problem's own `provenance["generation_depth"]` (set by
+    `record_gap()`) is this task's ancestor depth. An ordinary, non-gap-generated task (no such
+    prefix, or no `created` event at all -- should not happen but fails safe) is depth 0."""
+    prefix = "autonomous_gap_child:"
+    event = db.execute(
+        select(MainAITaskEvent)
+        .where(
+            MainAITaskEvent.task_id == task.id,
+            MainAITaskEvent.event_type == MainAITaskEventType.created,
+        )
+        .order_by(MainAITaskEvent.created_at.asc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if event is None:
+        return 0
+    key = (event.detail or {}).get("insertion_idempotency_key", "")
+    if not key.startswith(prefix):
+        return 0
+    parent_problem = db.execute(
+        select(LifeProblem).where(LifeProblem.idempotency_key == key[len(prefix):])
+    ).scalar_one_or_none()
+    if parent_problem is None:
+        return 0
+    return int((parent_problem.provenance or {}).get("generation_depth", 0)) + 1
+
+
+def gap_from_verification_required(*, db: Session, scope: SupervisorScope, goal: MainAIGoal, task: MainAITask) -> DiscoveredGap:
+    """The live counterpart to this module's own `verification_failure` evidence_kind -- built
+    from the REAL classification `app.development_driver.service.run_driver()` already returned,
+    never from raw logs or provider prose. The repair child is independent new work: it does not
+    depend on `task` itself, since `task` may be `failed`/terminal by the time this runs, and
+    `insert_plan_tasks()` refuses a dependency on a task that can never complete.
+
+    Deliberately excludes anything that varies between retries of the SAME underlying failure
+    (e.g. `run_driver()`'s own per-attempt `driver.checkpoint_id`) from every field that feeds
+    `record_gap()`'s idempotency identity (`reason`/`required_outcome`/`source_ref` -- see
+    `_gap_identity_key()`) -- content here is a pure function of `(task.id, task.description)`,
+    so a stale worker retrying the identical task after a lease loss, or the Supervisor being
+    invoked again after a crash, converges on the exact same LifeProblem/child rather than
+    minting a new one each time. `create_problem()`'s own idempotency check would otherwise
+    reject a replay whose `provenance` differs from the first call as a semantic conflict
+    (`ProblemLearningError`), not silently accept it."""
+    return DiscoveredGap(
+        gap_type="verification_failure",
+        evidence_kind="verification_failure",
+        parent_goal_id=goal.id,
+        reason=f"Task {task.id} ('{task.description}') did not reach verified completion; bounded repair required.",
+        required_outcome=f"Repair the verification failure blocking: {task.description}",
+        task_type="repo_edit",
+        source_task_id=task.id,
+        repository_identity=scope.repository_identity,
+        allowed_paths=scope.allowed_paths,
+        risk_level=task.risk_level,
+        source_type="mainai_supervisor_verification_required",
+        source_ref=f"mainai_task:{task.id}:verification_required",
+        generation_depth=_live_generation_depth(db, task=task),
+    )
+
+
+def gap_from_capability_missing(*, db: Session, scope: SupervisorScope, goal: MainAIGoal, task: MainAITask, capability: str) -> DiscoveredGap:
+    """The live counterpart to this module's own `capability_missing` evidence_kind -- built
+    from the REAL `capability` name `run_driver()` already reported (surfaced by
+    `app.development_operator.service`'s `OperatorCapabilityMissing`/`capability_missing()`),
+    never from raw logs or provider prose. `required_capabilities` is deliberately left empty:
+    it names capabilities the REMEDIATION needs (ordinary repo-edit capabilities, already within
+    any properly-scoped goal's envelope), not the missing capability itself -- the child's whole
+    job is to ADD that capability, so requiring it as a precondition would be circular.
+
+    Same retry-stability property as `gap_from_verification_required()` above -- content is a
+    pure function of `(task.id, task.description, capability)`, nothing per-attempt."""
+    return DiscoveredGap(
+        gap_type="capability_missing",
+        evidence_kind="capability_missing",
+        parent_goal_id=goal.id,
+        reason=f"Execution of task {task.id} ('{task.description}') reported a missing capability: {capability}.",
+        required_outcome=f"Add deterministic support for the missing capability: {capability}",
+        task_type="repo_edit",
+        source_task_id=task.id,
+        repository_identity=scope.repository_identity,
+        allowed_paths=scope.allowed_paths,
+        risk_level=MainAIGoalRiskLevel.medium,
+        source_type="mainai_supervisor_capability_missing",
+        source_ref=f"mainai_task:{task.id}:capability_missing:{capability}",
+        generation_depth=_live_generation_depth(db, task=task),
+    )
+
+
+def handle_live_gap_signal(
+    db: Session,
+    *,
+    scope: SupervisorScope,
+    goal: MainAIGoal,
+    plan: MainAIPlan,
+    task: MainAITask,
+    classification: str,
+    capability: str | None = None,
+    requested_by: str,
+) -> GapOutcome | None:
+    """The one live-wiring entry point `run_supervisor()` calls, directly inside its own
+    driver-result handling. Given a driver-result `classification` the Supervisor just received,
+    decides whether it is one of the recognized, structured gap signals
+    (`LIVE_GAP_SIGNAL_CLASSIFICATIONS`) and -- if so -- runs the FULL
+    record_gap -> assess_gap_authority -> insert_plan_tasks chain via
+    `generate_child_task_for_gap()`, inheriting every guarantee that function already has
+    (idempotent, concurrency-safe, fails closed on stale/insufficient authority, never bypasses
+    insert_plan_tasks(), never creates a MainAIGoal).
+
+    Returns `None` for any classification not in `LIVE_GAP_SIGNAL_CLASSIFICATIONS` -- the
+    caller's existing behavior for every other classification (WAITING_PROVIDER,
+    WAITING_APPROVAL, NEEDS_*, OUT_OF_SCOPE, ...) is completely unchanged; this function is
+    purely additive at its one call site, never a replacement for existing branches."""
+    if classification not in LIVE_GAP_SIGNAL_CLASSIFICATIONS:
+        return None
+    if classification == "VERIFICATION_REQUIRED":
+        gap = gap_from_verification_required(db=db, scope=scope, goal=goal, task=task)
+    else:
+        gap = gap_from_capability_missing(db=db, scope=scope, goal=goal, task=task, capability=capability or "unknown")
+    return generate_child_task_for_gap(db, scope=scope, goal=goal, plan=plan, gap=gap, requested_by=requested_by)
