@@ -13,6 +13,7 @@ Override locally with LIFEAI_TEST_DATABASE_NAME when a stable name is preferred.
 """
 
 import os
+import re
 import tempfile
 
 _test_db_name = os.environ.get("LIFEAI_TEST_DATABASE_NAME", f"lifeos_test_{os.getpid()}")
@@ -56,6 +57,22 @@ def _server_dsn(database_url: str, dbname: str = "postgres") -> str:
     return f"postgresql://{auth}@{parsed.hostname}:{parsed.port or 5432}/{dbname}"
 
 
+def _force_drop_database(cur, db_name: str) -> None:
+    """Terminate other backends on `db_name`, then DROP DATABASE IF EXISTS.
+
+    Session setup used to DROP without this, so a leftover connection from a crashed
+    pytest (or a second process on a shared LIFEAI_TEST_DATABASE_NAME) raised ObjectInUse
+    before the suite could even start. Teardown already terminated; setup must too.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_]+", db_name):
+        raise ValueError(f"refusing to drop a non-identifier database name: {db_name!r}")
+    cur.execute(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()",
+        (db_name,),
+    )
+    cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _test_database():
     """Creates a dedicated, disposable test database, applies every Alembic migration
@@ -74,7 +91,7 @@ def _test_database():
     admin_conn = psycopg2.connect(_server_dsn(settings.database_url))
     admin_conn.autocommit = True
     with admin_conn.cursor() as cur:
-        cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+        _force_drop_database(cur, db_name)
         cur.execute(f'CREATE DATABASE "{db_name}"')
         cur.execute(
             "SELECT 1 FROM pg_roles WHERE rolname = %s",
@@ -120,14 +137,7 @@ def _test_database():
     cleanup_conn = psycopg2.connect(_server_dsn(settings.database_url))
     cleanup_conn.autocommit = True
     with cleanup_conn.cursor() as cur:
-        # The app's own module-level SQLAlchemy engines (app/db.py) hold pooled connections
-        # open for the whole process and are never explicitly disposed between tests — drop
-        # any remaining backends on this database before dropping the database itself.
-        cur.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()",
-            (db_name,),
-        )
-        cur.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+        _force_drop_database(cur, db_name)
     cleanup_conn.close()
 
 
