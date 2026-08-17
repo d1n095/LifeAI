@@ -6,29 +6,23 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-17) — integration @ `ea9470d`
+## Aktiva PR:er (2026-08-17) — integration @ `db6c719`
 
-**Integration tip:** `claude/det-kommer-mer-879lcm` @ `ea9470d` (PR #89 merge).
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `db6c719` (PR #92 merge).
 
 | PR | Merge SHA | Scope |
 |---|---|---|
+| [#92](https://github.com/d1n095/LifeAI/pull/92) | `db6c719` | Pytest DROP DATABASE terminates leftover backends at setup |
+| [#91](https://github.com/d1n095/LifeAI/pull/91) | `331cc99` | Cloud Agent worker + MAINAI_APP_PASSWORD from .env |
 | [#89](https://github.com/d1n095/LifeAI/pull/89) | `ea9470d` | Per-process local pytest DB/Redis isolation |
 | [#81](https://github.com/d1n095/LifeAI/pull/81) | `a67225a` | Cloud Agent dev environment (`.cursor/`) |
-| [#88](https://github.com/d1n095/LifeAI/pull/88) | `2c9cf62` | BRANCH_REGISTRY conflict-marker hotfix |
 | [#80](https://github.com/d1n095/LifeAI/pull/80) | `9c0b389` | Live-loop hardening |
 | [#86](https://github.com/d1n095/LifeAI/pull/86) | `fc7af1b` | Storage reference/erasure race |
 
 Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
 
-<<<<<<< HEAD
-**`cursor/cloud-agent-worker-and-role-password` — ÖPPEN.** Cloud Agent VM: start durable
-worker; `setup-services.sh` uses `MAINAI_APP_PASSWORD` from `.env` (no hardcoded app-role
-password). Independent of Claude runtime stack.
-=======
-**`cursor/pytest-drop-terminate-backends` — ÖPPEN.** Pytest session setup terminates leftover
-backends before DROP DATABASE (ObjectInUse at suite start). Independent of Claude runtime
-and of PR #91 (Cloud Agent worker).
->>>>>>> ee8597c (Terminate leftover backends before pytest DROP DATABASE at session start.)
+**`cursor/cloud-agent-lifeos-password-from-url` — ÖPPEN.** Cloud Agent `setup-services.sh`
+derives the `lifeos` superuser password from `DATABASE_URL` (no hardcoded `PASSWORD 'lifeos'`).
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
