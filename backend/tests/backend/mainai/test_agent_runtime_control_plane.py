@@ -729,3 +729,36 @@ def test_next_feasible_assignment_owner_isolation(superuser_db, make_verified_us
     _set_rls_user(superuser_db, user_b.id)
     decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=user_b.id)
     assert decision.outcome == OUTCOME_NO_FEASIBLE_ASSIGNMENT  # user_a's ready assignment must never surface for user_b
+
+
+def test_next_feasible_assignment_excludes_waiting_agent_status_entirely(superuser_db, owner_id):
+    """'waiting_agent' (ready, allocated, but not yet claimed by this agent -- see
+    WorkAssignmentStatus's own docstring) is excluded by the query itself, not merely skipped
+    during the assignability scan -- it must never appear in `skipped` either, since the query
+    never even candidates it."""
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    transition_status(superuser_db, assignment=a, new_status="waiting_agent")
+    assert a.status.value == "waiting_agent"
+
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_NO_FEASIBLE_ASSIGNMENT
+    assert decision.assignment_id is None
+    assert decision.skipped == ()  # excluded at the query level, never even reaches the scan
+
+
+def test_next_feasible_assignment_read_only_found_via_assignable_never_lease_required(superuser_db, owner_id):
+    """LEASE_REQUIRED is a read_write-only concept (evaluate_assignment_readiness() nests that
+    check entirely inside its own read_write branch) -- a read_only 'ready' assignment with no
+    lease at all must be found via plain ASSIGNABLE, not by the LEASE_REQUIRED carve-out this
+    function's docstring claims exists only for read_write."""
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    claude = _agent(superuser_db, "claude-code")
+    reviewer = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=claude, role="reviewer", mode="read_only", paths=[])
+    assert reviewer.status.value == "ready"
+
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=claude.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_ASSIGNMENT_FOUND
+    assert decision.assignment_id == reviewer.id
+    assert decision.skipped == ()
