@@ -20,9 +20,15 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
 
+<<<<<<< HEAD
 **`cursor/cloud-agent-worker-and-role-password` — ÖPPEN.** Cloud Agent VM: start durable
 worker; `setup-services.sh` uses `MAINAI_APP_PASSWORD` from `.env` (no hardcoded app-role
 password). Independent of Claude runtime stack.
+=======
+**`cursor/pytest-drop-terminate-backends` — ÖPPEN.** Pytest session setup terminates leftover
+backends before DROP DATABASE (ObjectInUse at suite start). Independent of Claude runtime
+and of PR #91 (Cloud Agent worker).
+>>>>>>> ee8597c (Terminate leftover backends before pytest DROP DATABASE at session start.)
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
