@@ -4,20 +4,29 @@ Env vars are set BEFORE any `app.*` import — app.config.get_settings() is `@lr
 whatever is in os.environ the first time it's called wins for the rest of the process. CI
 (and local runs) can still override any of these by exporting them before invoking pytest;
 os.environ.setdefault() only fills in what isn't already set.
+
+Local multi-worktree safety: when DATABASE_URL is not preset, the default database name is
+`lifeos_test_<pid>` so two agents/worktrees running pytest concurrently against the same local
+Postgres no longer fight over DROP DATABASE on a shared `lifeos_test` (ObjectInUse). CI
+continues to set DATABASE_URL explicitly to the fixed `lifeos_test` name in each job container.
+Override locally with LIFEAI_TEST_DATABASE_NAME when a stable name is preferred.
 """
 
 import os
 import tempfile
 
-os.environ.setdefault("DATABASE_URL", "postgresql://lifeos@localhost:5433/lifeos_test")
-os.environ.setdefault("APP_DATABASE_URL", "postgresql://mainai_app:mainai_app_pw@localhost:5433/lifeos_test")
+_test_db_name = os.environ.get("LIFEAI_TEST_DATABASE_NAME", f"lifeos_test_{os.getpid()}")
+_redis_db = int(os.environ.get("LIFEAI_TEST_REDIS_DB", str(1 + (os.getpid() % 14))))
+
+os.environ.setdefault("DATABASE_URL", f"postgresql://lifeos@localhost:5433/{_test_db_name}")
+os.environ.setdefault("APP_DATABASE_URL", f"postgresql://mainai_app:mainai_app_pw@localhost:5433/{_test_db_name}")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-pytest")
 os.environ.setdefault("FOUNDER_EMAIL", "founder@lifeos.local")
 os.environ.setdefault("FOUNDER_PASSWORD", "TestFounderPassword123!")
 os.environ.setdefault("FRONTEND_ORIGINS", "http://127.0.0.1:3020")
 os.environ.setdefault("PUBLIC_APP_URL", "http://127.0.0.1:3020")
 os.environ.setdefault("ENABLE_SCHEDULED_CLEANUP", "false")  # tests trigger cleanup explicitly
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")  # DB 1, kept apart from dev's DB 0
+os.environ.setdefault("REDIS_URL", f"redis://localhost:6379/{_redis_db}")  # isolated per pytest process; dev uses DB 0
 os.environ.setdefault("OPENAI_API_KEY", "fake-key-for-tests")
 # Life Library durable-worker package: a disposable directory outside the repo, unique per
 # test-process invocation (tempfile.mkdtemp, not a fixed path) so parallel/rerun test
