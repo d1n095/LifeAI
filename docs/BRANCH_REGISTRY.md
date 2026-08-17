@@ -6,7 +6,7 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Pass 59 (2026-08-17): `claude/agent-work-selection` — next_feasible_assignment_for_agent(), stackad ovanpå PR #83, egen worktree parallellt med Cursors PR #79/#80
+## Pass 59 (2026-08-17): `claude/agent-work-selection` — next_feasible_assignment_for_agent() + idle_agents_with_next_assignment(), stackad ovanpå PR #83, egen worktree parallellt med Cursors PR #79/#80
 
 Fortsättning av natt-passets uppdrag efter att PR #83 (Pass 58 nedan) blev CI-grön och
 väntar på granskning: den sista uttryckligen efterfrågade biten av routing-lagret som PR #83
@@ -40,10 +40,27 @@ huvudet fortsatt `0046`. 8 nya tester i den befintliga
 två distinkta "hoppa över"-scenarier (kö-nivå vs. skannings-nivå), agent-isolering och
 ägar-isolering.
 
-Full lokal verifiering: 8/8 nya tester, 61/61 (53 tidigare + 8 nya) i den samordnade
-testsviten, 195/198 (187 tidigare + 8 nya, minus 3 förbefintliga `rg`-relaterade fel i
-Cursors eget scope, orörda) i hela `tests/backend/mainai/`, ruff rent, `git diff --check`
-rent, Alembic-huvud verifierat oförändrat vid `0046`.
+**Andra självgranskningsomgången i samma pass** (samma mönster som PR #83:s eget första
+granskningsvarv): en fristående adversarial-granskning av `next_feasible_assignment_for_agent()`
+hittade inga P0/P1, men två genuina täckningsluckor — inget test bevisade att `waiting_agent`-
+status utesluts redan på fråge-nivå (inte bara under genomförbarhetsskanningen), och inget
+test bevisade att ett `read_only`-uppdrag hittas via ren `ASSIGNABLE` (inte
+`LEASE_REQUIRED`-undantaget, som bara gäller `read_write`). Båda tillagda.
+
+Efter granskningen byggdes ÄNNU en avgränsad, säker utökning i samma öppna PR (inte en ny
+PR, eftersom den direkt komponerar det redan byggda utan att införa någon ny arkitektur):
+`idle_agents_with_next_assignment()` — det enda anropet som svarar "vem är ledig just nu, och
+vad ska var och en av dem göra härnäst", en ren komposition av `all_agents_runtime_snapshot()`
+(vem är ledig) och `next_feasible_assignment_for_agent()` (vad den ska göra) — aldrig en ny
+datakälla eller beslutsregel. 4 nya tester, inklusive ett som speglar exakt samma verkliga
+nuläge (Cursor RUNNING på PR #80:s paths, Claude RUNNING på just den här modulen, Codex ledig
+med kö) som PR #83:s eget E2E-test.
+
+Full lokal verifiering (efter samtliga tre commits i den här branchen): 14/14 nya tester
+(8 + 2 täckningsfixar + 4), 67/67 i den samordnade testsviten, 201/204 (187 tidigare + 14 nya,
+minus 3 förbefintliga `rg`-relaterade fel i Cursors eget scope, orörda) i hela
+`tests/backend/mainai/`, ruff rent, `git diff --check` rent, Alembic-huvud verifierat
+oförändrat vid `0046`.
 
 **Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
 `development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
@@ -56,7 +73,7 @@ bygger vidare på `routing.py`s redan befintliga funktioner. Helt oberoende av C
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/agent-work-selection` | Öppnas denna session | Pushad, redo för granskning | `next_feasible_assignment_for_agent()` -- given en agent, vilket av dess egna uppdrag ska den ta upp härnäst; 8 tester, ingen ny migration | `claude/agent-runtime-control-plane` @ 11c261e (stackad ovanpå PR #83) |
+| `claude/agent-work-selection` | [#84](https://github.com/d1n095/LifeAI/pull/84) | Pushad, redo för granskning | `next_feasible_assignment_for_agent()` + `idle_agents_with_next_assignment()` -- given en agent, vilket uppdrag härnäst; given ägaren, vilka lediga agenter + vad de ska göra; 14 tester, ingen ny migration | `claude/agent-runtime-control-plane` @ 11c261e (stackad ovanpå PR #83) |
 
 ## Pass 58 (2026-08-17): `claude/agent-runtime-control-plane` — Agent Runtime Visibility & Deterministic Routing, förlängning av PR #82:s mergade grund, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 

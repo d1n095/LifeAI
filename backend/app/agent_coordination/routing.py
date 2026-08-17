@@ -12,7 +12,14 @@ Life orchestration loop operating under founder-set policy) makes the final choi
 eligible after every filter -- this module never guesses a winner, and provider identity or
 "trusted-sounding" agent names grant nothing (the same invariant
 app.agent_coordination.service's own `test_provider_identity_cannot_grant_authority` already
-proves at the assignment layer)."""
+proves at the assignment layer).
+
+Also provides the INVERSE direction -- `next_feasible_assignment_for_agent()`: given a known
+agent, which of its OWN already-assigned work it should pick up next -- and
+`idle_agents_with_next_assignment()`, the single-call composition of "who is free right now,
+and what should each of them do next" over `app.agent_coordination.runtime_view`'s own
+snapshot. Both stay read-only and never select a winner among ambiguous candidates any more
+than the work->agent direction above does."""
 
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agent_coordination.runtime_view import AgentRuntimeView, RuntimeStatus, all_agents_runtime_snapshot
 from app.agent_coordination.service import (
     OUTCOME_ASSIGNABLE,
     OUTCOME_LEASE_REQUIRED,
@@ -244,3 +252,39 @@ def next_feasible_assignment_for_agent(db: Session, *, agent_id: uuid.UUID, owne
         OUTCOME_NO_FEASIBLE_ASSIGNMENT, skipped=tuple(skipped),
         reason=f"agent has {len(candidates)} 'ready' assignment(s) but none are assignable right now",
     )
+
+
+@dataclass(frozen=True)
+class IdleAgentNextWork:
+    agent: AgentRuntimeView
+    next_assignment: NextAssignmentDecision
+
+
+def idle_agents_with_next_assignment(
+    db: Session, *, owner_id: uuid.UUID, agent_ids: list[uuid.UUID] | None = None
+) -> list[IdleAgentNextWork]:
+    """The single-call answer to "who is free right now, and what should each of them do
+    next" -- exactly what a founder (or a future orchestration loop under founder-set policy)
+    needs to actually put an idle agent back to work, without querying the registry and then
+    the selector separately for every agent by hand.
+
+    A pure composition of two already-independently-tested primitives --
+    `app.agent_coordination.runtime_view.all_agents_runtime_snapshot()` (WHO is idle) and
+    `next_feasible_assignment_for_agent()` above (WHAT that agent should do next) -- never a
+    new data source, never a new decision rule of its own. Only agents whose
+    `runtime_status == RuntimeStatus.IDLE` are included; a `RUNNING`/`REVIEWING`/`BLOCKED`/
+    `OFFLINE`/etc. agent is busy or unavailable, not "idle with nothing to do," and is
+    correctly omitted rather than included with a hollow decision.
+
+    An idle agent CAN still appear here with `next_assignment.outcome ==
+    NO_FEASIBLE_ASSIGNMENT` -- that is itself meaningful (genuinely idle, genuinely nothing to
+    give it), distinct from not appearing at all."""
+
+    snapshot = all_agents_runtime_snapshot(db, owner_id=owner_id, agent_ids=agent_ids)
+    idle = [view for view in snapshot if view.runtime_status == RuntimeStatus.IDLE]
+    return [
+        IdleAgentNextWork(
+            agent=view, next_assignment=next_feasible_assignment_for_agent(db, agent_id=view.agent_id, owner_id=owner_id)
+        )
+        for view in idle
+    ]

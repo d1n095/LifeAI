@@ -201,6 +201,18 @@ hold from an individual AGENT's own point of view, not just the coordinator's. N
 anything — selecting a next assignment and actually starting it (`acquire_lease()` +
 `transition_status()`) remain separate, deliberate caller actions.
 
+**`app.agent_coordination.routing.idle_agents_with_next_assignment`** is the single-call
+composition of the two directions above with `runtime_view`'s own snapshot — "who is free
+right now, and what should each of them do next," exactly what a founder (or a future
+orchestration loop under founder-set policy) needs to actually put an idle agent back to work
+without querying the registry and then the selector separately for every agent by hand. Only
+truly `RuntimeStatus.IDLE` agents are included — `RUNNING`/`REVIEWING`/`BLOCKED`/`OFFLINE`/etc.
+are busy or unavailable, not "idle with nothing to do," and are correctly omitted rather than
+included with a hollow decision. An idle agent CAN still appear with
+`NO_FEASIBLE_ASSIGNMENT` — that is itself meaningful (genuinely free, genuinely nothing to
+give it), distinct from not appearing at all. A pure composition, never a new data source or
+decision rule of its own.
+
 **`app.agent_coordination.service.build_agent_outcome_payload`** is a canonical, documented
 field vocabulary (tests/duration/cost/CI outcome/review defects/severity/rework/scope
 violations/merge result/failure reason/verified quality — every field optional, omitted

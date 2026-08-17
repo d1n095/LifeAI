@@ -1,8 +1,10 @@
 from app.agent_coordination.routing import (
     CandidateRejection,
+    IdleAgentNextWork,
     NextAssignmentDecision,
     RoutingDecision,
     eligible_agents_for,
+    idle_agents_with_next_assignment,
     next_feasible_assignment_for_agent,
 )
 from app.agent_coordination.runtime_view import (
@@ -46,6 +48,7 @@ __all__ = [
     "CoordinationError",
     "CoordinatorDecision",
     "DuplicateWorkError",
+    "IdleAgentNextWork",
     "LeaseAcquisitionResult",
     "LeaseFencingError",
     "LeaseStillLiveError",
@@ -62,6 +65,7 @@ __all__ = [
     "create_work_assignment",
     "eligible_agents_for",
     "evaluate_assignment_readiness",
+    "idle_agents_with_next_assignment",
     "next_feasible_assignment_for_agent",
     "paths_conflict",
     "paths_conflict_any",

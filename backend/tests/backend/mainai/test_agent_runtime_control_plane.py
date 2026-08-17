@@ -25,6 +25,7 @@ from app.agent_coordination.routing import (
     OUTCOME_NONE_AVAILABLE,
     OUTCOME_SCOPE_CONFLICT,
     eligible_agents_for,
+    idle_agents_with_next_assignment,
     next_feasible_assignment_for_agent,
 )
 from app.agent_coordination.runtime_view import (
@@ -762,3 +763,80 @@ def test_next_feasible_assignment_read_only_found_via_assignable_never_lease_req
     assert decision.outcome == OUTCOME_ASSIGNMENT_FOUND
     assert decision.assignment_id == reviewer.id
     assert decision.skipped == ()
+
+
+# ============================================================================ 7: idle agents +
+# next assignment -- the single-call "who is free, what should they do" composition
+
+def test_idle_agents_with_next_assignment_only_includes_truly_idle_agents(superuser_db, owner_id):
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")  # will be RUNNING
+    claude = _agent(superuser_db, "claude-code")  # will be IDLE, nothing to do
+    codex = _agent(superuser_db, "codex", status="disabled")  # will be OFFLINE
+
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    _lease(superuser_db, a, cursor, branch="cursor/x", worktree="/tmp/wt-idle-summary", paths=["backend/app/**"])
+    transition_status(superuser_db, assignment=a, new_status="running")
+
+    results = idle_agents_with_next_assignment(superuser_db, owner_id=owner_id, agent_ids=[cursor.id, claude.id, codex.id])
+    agent_keys = {r.agent.agent_key for r in results}
+    assert agent_keys == {claude.agent_key}  # cursor is RUNNING, codex is OFFLINE -- both excluded
+
+
+def test_idle_agents_with_next_assignment_finds_the_right_work_per_agent(superuser_db, owner_id):
+    goal, _plan, (task_a, task_b) = _goal_plan_task(superuser_db, owner_id, task_count=2)
+    cursor = _agent(superuser_db, "cursor-agent")
+    claude = _agent(superuser_db, "claude-code")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_a, agent=cursor, role="builder", mode="read_write", paths=["backend/app/finance/**"])
+    b = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_b, agent=claude, role="builder", mode="read_write", paths=["frontend/**"])
+
+    results = idle_agents_with_next_assignment(superuser_db, owner_id=owner_id, agent_ids=[cursor.id, claude.id])
+    by_key = {r.agent.agent_key: r for r in results}
+    assert by_key[cursor.agent_key].next_assignment.assignment_id == a.id
+    assert by_key[claude.agent_key].next_assignment.assignment_id == b.id
+    assert by_key[cursor.agent_key].next_assignment.outcome == OUTCOME_ASSIGNMENT_FOUND
+
+
+def test_idle_agents_with_next_assignment_reports_genuinely_idle_with_nothing_to_do(superuser_db, owner_id):
+    """An idle agent with an empty queue still appears -- NO_FEASIBLE_ASSIGNMENT is itself
+    meaningful (genuinely free, genuinely nothing to give it), distinct from not appearing."""
+    codex = _agent(superuser_db, "codex")
+    results = idle_agents_with_next_assignment(superuser_db, owner_id=owner_id, agent_ids=[codex.id])
+    assert len(results) == 1
+    assert results[0].agent.agent_key == codex.agent_key
+    assert results[0].next_assignment.outcome == OUTCOME_NO_FEASIBLE_ASSIGNMENT
+
+
+def test_idle_agents_with_next_assignment_current_real_world_state(superuser_db, owner_id):
+    """Mirrors the same concrete situation the E2E test above proves end to end: Cursor
+    RUNNING on PR #80 paths, Claude RUNNING on this coordination module, Codex IDLE with
+    unrelated work already queued -- the summary must show exactly Codex, with exactly its own
+    queued assignment, and nothing else."""
+    goal, _plan, (cursor_task, claude_task, codex_task) = _goal_plan_task(superuser_db, owner_id, task_count=3)
+    cursor = _agent(superuser_db, "cursor-agent")
+    claude = _agent(superuser_db, "claude-code")
+    codex = _agent(superuser_db, "codex")
+
+    cursor_assignment = _assign(
+        superuser_db, owner_id=owner_id, goal=goal, task=cursor_task, agent=cursor, role="builder", mode="read_write",
+        paths=["backend/app/autonomous_gap/**", "backend/app/development_supervisor/**"],
+    )
+    _lease(superuser_db, cursor_assignment, cursor, branch="cursor/pr79-live-loop-hardening", worktree="/tmp/wt-idle-real-cursor", paths=cursor_assignment.allowed_paths)
+    transition_status(superuser_db, assignment=cursor_assignment, new_status="running")
+
+    claude_assignment = _assign(
+        superuser_db, owner_id=owner_id, goal=goal, task=claude_task, agent=claude, role="builder", mode="read_write",
+        paths=["backend/app/agent_coordination/**"],
+    )
+    _lease(superuser_db, claude_assignment, claude, branch="claude/agent-work-selection", worktree="/tmp/wt-idle-real-claude", paths=claude_assignment.allowed_paths)
+    transition_status(superuser_db, assignment=claude_assignment, new_status="running")
+
+    codex_assignment = _assign(
+        superuser_db, owner_id=owner_id, goal=goal, task=codex_task, agent=codex, role="builder", mode="read_write",
+        paths=["frontend/app/unrelated-area/**"],
+    )
+
+    results = idle_agents_with_next_assignment(superuser_db, owner_id=owner_id, agent_ids=[cursor.id, claude.id, codex.id])
+    assert len(results) == 1
+    assert results[0].agent.agent_key == codex.agent_key
+    assert results[0].next_assignment.assignment_id == codex_assignment.id
