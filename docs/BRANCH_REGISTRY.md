@@ -6,6 +6,67 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 64 (2026-08-17): `claude/agent-founder-memory` — Life Founder/User Memory foundation (migration 0049), stackad ovanpå PR #94 (`claude/agent-capability-reality` @ `b12ce9d`), egen worktree, andra steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS" — grundarens/projektets/världens/Lifes egna faktalager hålls semantiskt separata men länkbara
+
+**Bakgrund:** startade från den konkreta, redan bekräftade luckan (`founder_memory_notes`,
+designad i `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.3/P6, fortfarande obyggd enligt
+både den designen och `docs/LIFE_REQUIREMENT_TRACEABILITY.md` §8). Innan kod skrevs
+inspekterades: `LifeProblemDecision`/`LifeProblem` (migration 0042 — fel form, kräver
+`problem_id`), `LifeIntent` (migration 0041 — den STRUKTURERADE mål-spårningsentiteten,
+inte samma sak som en rå, attribuerad utsaga), `app.context.resolver` (den befintliga,
+icke-beständiga "aldrig infererat känslotillstånd"-precedenten), och — den viktigaste
+upptäckten — `app.active_context.service`s redan befintliga CENTRALA
+objekt-referens-register (`SUPPORTED_TYPES`/`_owned_row()`/`_require_ref()`), redan
+återanvänt av `memory_threads`/`work_intelligence`/`life_intents`/`problem_learning`.
+
+**Byggt** (`backend/app/founder_memory/`, migration 0049):
+- `founder_memory_notes` — en muterbar rad per faktum (samma strukturella roll som
+  `LifeProblemDecision` redan spelar): `note_type`
+  (decision/correction/preference/goal/recurring_pattern/observation/unknown), `content`
+  (ALDRIG omskrivet på plats), `status` (active/superseded/disputed/unknown), `authority`/
+  `basis` (ÅTERANVÄNDER migration 0042:s exakta vokabulärer verbatim, ingen ny konkurrerande
+  taxonomi), `confidence`, `supersedes_note_id` (självreferens, aldrig en cykel),
+  `idempotency_key`. Privilegie-begränsad likadant som `life_problem_decisions`: `mainai_app`
+  har ENDAST SELECT/INSERT/UPDATE, radering går ENDAST via
+  `erase_own_founder_memory_children()`.
+- `service.py` — `record_founder_memory()` (den enda skrivvägen, härleder ALDRIG authority/
+  basis själv, idempotent), `mark_founder_memory_disputed()`, `get_founder_memory()`/
+  `list_founder_memory()`.
+- Utökade `app.active_context.service`s CENTRALA register med EXAKT en ny post,
+  `founder_memory_note` — samma mekanism, ingen ny länkningsmekanism. Krävde att bredda
+  SAMMA tre CHECK-constraints migration 0042 senast breddade
+  (`active_context_sets.anchor_type`/`active_context_members.object_type`/
+  `memory_thread_members.member_kind`) med ett värde vardera — det etablerade mönstret.
+
+**Bevisat via tester (kravlista G.1–G.8 från uppdraget):** assistent-förslag blir aldrig
+tyst ett grundarbeslut (skild `authority`); inferered preferens blir aldrig tyst explicit;
+en senare korrigering ersätter (`supersedes_note_id`) en tidigare preferens MEDAN båda
+posterna bevaras oförändrade; en grundarpreferens kan länkas till ett projektbeslut
+(`life_problem_decisions`) via SAMMA `memory_threads`-mekanism UTAN att någotdera bli det
+andra; saknad/osäker data förblir `unknown`; INGEN vokabulär någonstans i denna grund
+namnger känslo-/psykologiskt tillstånd (samma strukturella bevis-mönster som
+`app.context.resolver`s egna `test_never_infers_emotional_or_psychological_state`); källtext
+omskrivs aldrig — varken vid repris av samma idempotency-nyckel eller vid supersedering.
+
+Full lokal verifiering: 15/15 nya tester, 47/47 i det delade `tests/backend/context/`
+(active_context/memory_threads/problem_learning — inga regressioner av
+register-utökningen), full `tests/backend/mainai/`-regression grön (samma förbefintliga
+`rg`-relaterade fel, orört), ruff rent, `git diff --check` rent, Alembic-huvud verifierat
+vid `0049` (EN ny migration).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd. Arbetet flyttades
+till en EGEN branch/PR (denna) istället för att bli en commit på det redan öppna PR #94 —
+samma disciplin som redan tillämpades en gång i detta uppdrag (Pass 63).
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #94 (`claude/agent-capability-reality`
+@ `b12ce9d`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-founder-memory` | Öppnas denna session | Pushad, redo för granskning | Life Founder/User Memory: `founder_memory_notes` (migration 0049), återanvänder migration 0042:s authority/basis-vokabulär, utökar `active_context`s centrala register med `founder_memory_note`, kontoraderingsintegration — 15 tester, EN ny migration | `claude/agent-capability-reality` @ b12ce9d (stackad ovanpå PR #94) |
+
 ## Pass 63 (2026-08-17): `claude/agent-capability-reality` — Life Capability Reality / Self-Model foundation (migration 0048), stackad ovanpå PR #90 (`claude/agent-execution-control` @ `20b90b9`), egen worktree, första steget i det NYA uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund — research innan kod:** innan någon kod skrevs gjordes en grundlig genomgång av
@@ -72,7 +133,7 @@ endast läst som referens och krediterad i denna PR:s egen dokumentation.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/agent-capability-reality` | Öppnas denna session | Pushad, redo för granskning | Life Capability Reality / Self-Model: `capability_records`/`capability_observation_events` (migration 0048), evidence-backed status (`verified_available`/`configured_unavailable`/`configured_disabled`/`planned`/`unknown`), `agent_coordination`-bridge, kontoraderingsintegration — 16 tester, EN ny migration | `claude/agent-execution-control` @ 20b90b9 (stackad ovanpå PR #90) |
+| `claude/agent-capability-reality` | [#94](https://github.com/d1n095/LifeAI/pull/94) | Pushad, CI grön förutom en bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Life Capability Reality / Self-Model: `capability_records`/`capability_observation_events` (migration 0048), evidence-backed status (`verified_available`/`configured_unavailable`/`configured_disabled`/`planned`/`unknown`), `agent_coordination`-bridge, kontoraderingsintegration — 16 tester, EN ny migration | `claude/agent-execution-control` @ 20b90b9 (stackad ovanpå PR #90) |
 
 ## Pass 62 (2026-08-17): `claude/agent-execution-control` — Interactive Agent Execution Control Foundation (output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + grundarkontrollerad credential-referens/env-allowlist), stackad ovanpå det NU MERGADE PR #87 (`claude/agent-dispatch-foundation` @ `caeb550`), egen worktree parallellt med Cursors PR #79/#80/#81
 

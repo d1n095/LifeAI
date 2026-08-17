@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.active_context import ActiveContextEvent, ActiveContextMember, ActiveContextSet
 from app.models.conversation import Conversation, Message
 from app.models.document import Document
+from app.models.founder_memory import FounderMemoryNote
 from app.models.intelligence_governance import (
     IntelligenceEvidence,
     IntelligenceExecution,
@@ -46,7 +47,7 @@ SUPPORTED_TYPES = frozenset({
     "intelligence_interpretation", "intelligence_idea", "project", "project_note", "memory_thread",
     "life_intent", "life_intent_blocker", "life_problem", "life_problem_approach",
     "life_solution_component", "life_problem_assumption", "life_problem_decision",
-    "life_approach_outcome",
+    "life_approach_outcome", "founder_memory_note",
 })
 ANCHOR_TYPES = SUPPORTED_TYPES | {"explicit_topic"}
 
@@ -104,6 +105,7 @@ def _owned_row(db: Session, owner_id: uuid.UUID, ref: _Ref):
         "life_problem_assumption": (LifeProblemAssumption, LifeProblemAssumption.owner_id),
         "life_problem_decision": (LifeProblemDecision, LifeProblemDecision.owner_id),
         "life_approach_outcome": (LifeApproachOutcome, LifeApproachOutcome.owner_id),
+        "founder_memory_note": (FounderMemoryNote, FounderMemoryNote.owner_id),
     }
     if ref.object_type in mappings:
         model, owner_column = mappings[ref.object_type]
@@ -181,6 +183,8 @@ def _edges(db: Session, owner_id: uuid.UUID, ref: _Ref, row: object) -> list[_Ed
             IntelligenceIdeaLesson.owner_id == owner_id, IntelligenceIdeaLesson.idea_id == ref.object_id)).scalars()
         for lesson_id in lessons:
             add("engineering_lesson", lesson_id, "engineering_lesson")
+    elif ref.object_type == "founder_memory_note":
+        add("founder_memory_note", row.supersedes_note_id, "supersedes")
     return edge
 
 

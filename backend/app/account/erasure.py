@@ -610,6 +610,12 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # this call too (capability_records.agent_id merely references it, never owns it).
         db.execute(sa_text("SELECT erase_own_capability_reality_children()"))
 
+        # --- Life Founder/User Memory (migration 0049, see docs/LIFE_FOUNDER_MEMORY.md):
+        # founder_memory_notes has DELETE revoked from mainai_app outside this one narrow
+        # SECURITY DEFINER function, same "deletion only through the authorized erasure path"
+        # shape as founder_memory_notes' own closest precedent, life_problem_decisions.
+        db.execute(sa_text("SELECT erase_own_founder_memory_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.
