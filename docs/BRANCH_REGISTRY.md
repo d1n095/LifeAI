@@ -6,12 +6,13 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-17) — integration @ `a67225a`
+## Aktiva PR:er (2026-08-17) — integration @ `ea9470d`
 
-**Integration tip:** `claude/det-kommer-mer-879lcm` @ `a67225a` (PR #81 merge).
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `ea9470d` (PR #89 merge).
 
 | PR | Merge SHA | Scope |
 |---|---|---|
+| [#89](https://github.com/d1n095/LifeAI/pull/89) | `ea9470d` | Per-process local pytest DB/Redis isolation |
 | [#81](https://github.com/d1n095/LifeAI/pull/81) | `a67225a` | Cloud Agent dev environment (`.cursor/`) |
 | [#88](https://github.com/d1n095/LifeAI/pull/88) | `2c9cf62` | BRANCH_REGISTRY conflict-marker hotfix |
 | [#80](https://github.com/d1n095/LifeAI/pull/80) | `9c0b389` | Live-loop hardening |
@@ -19,8 +20,9 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
 
-**`cursor/pytest-per-process-test-database` — ÖPPEN.** Per-process default pytest DB/Redis
-isolation for multi-worktree local runs (`backend/tests/conftest.py` only).
+**`cursor/cloud-agent-worker-and-role-password` — ÖPPEN.** Cloud Agent VM: start durable
+worker; `setup-services.sh` uses `MAINAI_APP_PASSWORD` from `.env` (no hardcoded app-role
+password). Independent of Claude runtime stack.
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
