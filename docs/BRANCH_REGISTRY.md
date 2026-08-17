@@ -6,6 +6,24 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82
+
+**`claude/mainai-autonomous-gap-live-integration` → `claude/det-kommer-mer-879lcm` (PR #79)
+— ÖPPEN, reconcilerad.** Live-wiring av autonomous gap → child task in i Supervisor
+(`handle_live_gap_signal`). Grenad ursprungligen från `16a5da9` (efter PR #78); tip före
+reconcile: `bed835a`. **2026-08-17:** mergad med current mainline
+`78f4eb0` (PR #82 / Multi-Agent Work Coordination, migration **0046**). Ingen ny migration
+från PR #79 — Alembic single head är **0046**. PR #82:s `app/agent_coordination/**` och
+`0046_multi_agent_work_coordination.py` är intakta. Se
+`docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
+
+**`cursor/pr79-live-loop-hardening` → PR #79 (PR #80) — FRYST tills PR #79 är godkänd.**
+Head kvar `1d3ebff1c4e185490c5cde1e284bfd2ca87561f2`. Rebasa/retargeta INTE förrän PR #79
+reconcile är granskad. Merga INTE PR #80 före PR #79.
+
+**PR #83 (`claude/agent-runtime-control-plane`) — Claude night-shift/observability.**
+Oberoende scope; rörs inte av den här reconcile-passet.
+
 ## Pass 57 (2026-08-16): `claude/multi-agent-work-coordination-foundation` — Multi-Agent Work Coordination-grunden, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
 Grundaren driver just nu flera agenter samtidigt mot samma repo: **Cursor Agent** härdar
@@ -57,13 +75,16 @@ samma förbefintliga tidszonsartefakt ovan), 163/166 `tests/backend/mainai/` (3 
 `rg`/ripgrep saknas lokalt, ett CI-installerat binärberoende i Cursors
 `development_operator`-scope, orört av den här branchen).
 
-**Beroenden:** Helt oberoende av Cursors PR #79/#80 — ingen delad kod, ingen delad migration
-(0046 är näst-senaste huvudgren-migrationen, 0045 → 0046, ingen kollision). Kan
-granskas/mergas i valfri ordning relativt PR #79/#80.
+**Beroenden (historiskt + uppdaterat 2026-08-17):** Byggdes oberoende av Cursors PR #79/#80 —
+ingen delad kod, ingen delad migration (0046 = 0045 → 0046, ingen kollision). **PR #82 är nu
+mergad i mainline (`78f4eb0`).** PR #79 har därefter reconcilerats mot den tippen (merge,
+ingen ny migration). PR #80 förblir fryst på `1d3ebff` tills PR #79 är godkänd.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/multi-agent-work-coordination-foundation` | Öppnas denna session | Pushad, redo för granskning | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
+| `claude/multi-agent-work-coordination-foundation` | [#82](https://github.com/d1n095/LifeAI/pull/82) | **Mergad** i `claude/det-kommer-mer-879lcm` @ `78f4eb0` | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
+| `claude/mainai-autonomous-gap-live-integration` | [#79](https://github.com/d1n095/LifeAI/pull/79) | Öppen, reconcilerad mot mainline inkl. 0046 | Live gap→child wiring in i Supervisor | mainline @ `78f4eb0` |
+| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | Fryst tills #79 godkänd | Live-loop hardening (P1 path/lease) | PR #79 @ `bed835a` (oförändrad tills vidare) |
 
 ## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
 
