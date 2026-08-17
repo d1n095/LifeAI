@@ -600,6 +600,16 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # owner's personal data, same as engineering_lessons.
         db.execute(sa_text("SELECT erase_own_agent_coordination_children()"))
 
+        # --- Life Capability Reality / Self-Model (migration 0048, see
+        # docs/LIFE_CAPABILITY_REALITY.md): capability_observation_events is append-only at
+        # the DB level, same "no DELETE privilege at all outside this one narrow SECURITY
+        # DEFINER function" shape as agent_work_assignment_events above. This single call
+        # deletes both the append-only observation history and the live capability_records
+        # rows for this owner -- takes NO owner argument, same reasoning as
+        # erase_own_agent_coordination_children() above. coordination_agents is untouched by
+        # this call too (capability_records.agent_id merely references it, never owns it).
+        db.execute(sa_text("SELECT erase_own_capability_reality_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.
