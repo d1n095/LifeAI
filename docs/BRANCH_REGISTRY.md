@@ -6,65 +6,30 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-<<<<<<< HEAD
-## Aktiva PR:er (2026-08-17) — PR #80 fryst; storage-race fix separat
+## Aktiva PR:er (2026-08-17) — PR #80 + #86 mergade
 
-**PR #80 — FRYST, CODE-READY @ `5b9257b`.** Rör INTE i PR #80-worktree. Väntar på den här
-CI-flake-fixen + oberoende granskning.
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `9c0b389`.
 
-**`cursor/storage-reference-erasure-race-fix` → `claude/det-kommer-mer-879lcm` — ÖPPEN.**
-Separat fysisk worktree (`/Users/dennistorildson/Documents/LifeAI-storage-race`). Fixar
-återkommande storage/account-erasure-race i
-`test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_never_race_unsafely`.
-Scope: `app/storage/references.py`, `app/account/erasure.py`, `app/rag/library_import.py`
-(endast `_store_bytes_with_reference_lock`), tester. Ingen migration (Alembic **0046**). Rör
-INTE PR #80-stack, `agent_coordination/**`, PR #83/#84.
+| PR | Merge SHA | Scope |
+|---|---|---|
+| [#80](https://github.com/d1n095/LifeAI/pull/80) | `9c0b389` | Live-loop hardening: path/lease intersection, breadth counters, demo-recept, CI `cursor/**` filters |
+| [#86](https://github.com/d1n095/LifeAI/pull/86) | `fc7af1b` | Storage reference/erasure race (Pass 33 retain + outbox reload) |
+| [#79](https://github.com/d1n095/LifeAI/pull/79) | `69f30e0` | Live gap→child wiring |
+| [#82](https://github.com/d1n095/LifeAI/pull/82) | `78f4eb0` | Multi-Agent Work Coordination (Alembic **0046**) |
 
-**PR #79 — MERGAD** @ `69f30e0`. **PR #82 — MERGAD** @ `78f4eb0`.
+Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch stack**
+(Claude-owned; Cursor rör inte).
 
-| Branch | PR | Status | Scope | Bas |
-|---|---|---|---|---|
-| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | Fryst CODE-READY @ `5b9257b` | Live-loop hardening | mainline @ `69f30e0` |
-| `cursor/storage-reference-erasure-race-fix` | TBD | Öppen | Storage reference/erasure race | mainline @ `69f30e0` |
+**`cursor/cloud-agent-dev-environment-91c1` (PR #81) — ÖPPEN.** Dev-env chore (`.cursor/`),
+oberoende scope — triage/reconcile pågår.
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
-**`claude/mainai-autonomous-gap-live-integration` → `claude/det-kommer-mer-879lcm` (PR #79)
-— MERGAD @ `69f30e0`.** Live-wiring av autonomous gap → child task in i Supervisor
-(`handle_live_gap_signal`). Alembic single head **0046** (via PR #82). Se
+**`claude/mainai-autonomous-gap-live-integration` (PR #79) — MERGAD @ `69f30e0`.** Se
 `docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
-
-**`cursor/pr79-live-loop-hardening` (PR #80) — FRYST CODE-READY @ `5b9257b`.** Merga INTE
-förrän storage-race CI-blocker är löst och granskad.
 
 **PR #83 (`claude/agent-runtime-control-plane`) — Claude night-shift/observability.**
-Oberoende scope; rörs inte av den här branchen.
-=======
-## Aktiva PR:er (2026-08-17) — PR #79 mergad; PR #80 reconcileras
-
-**PR #79 — MERGAD** i `claude/det-kommer-mer-879lcm` @ `69f30e0` (2026-08-17). Live-wiring av
-autonomous gap → child task in i Supervisor (`handle_live_gap_signal`). Ingen ny migration —
-Alembic single head **0046** (via PR #82). Se
-`docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
-
-**`cursor/pr79-live-loop-hardening` → `claude/det-kommer-mer-879lcm` (PR #80) — ÖPPEN,
-reconcileras.** Stackad hardening ovanpå mergad PR #79. Stänger live-handoff-luckan (auto-derive
-WorkBinding från strukturerad gap-envelope + `multiplication_repair` som **begränsat demo-
-recept**, inte generell autonomi), P1 idempotent takeover (`requested_by` →
-`LifeProblemEvent`/`outcome_recorded`), lease-fencing med `SELECT … FOR UPDATE` genom durabel
-gap/child-skrivning, fail-closed lineage depth, strukturerade deferred-koder, Safe Planner
-`CAPABILITY_MISSING`, FAILED_NONRETRYABLE-repair, **execution-time path intersection**
-(`scope ∩ binding ∩ OperatorContext` — binding kan inte breddas vid körning), re-verify från
-strukturerad failure evidence (inte calculator-global), breadth-counters **per Supervisor-
-invocation** (nollställs varje `run_supervisor`-anrop). Ingen migration (Alembic head kvar
-**0046**). **CI:** `ci.yml` utökad så `push`/`pull_request` även täcker `cursor/**` och
-`codex/**` (plus befintliga `claude/**`) så stackade agent-PR:er får samma obligatoriska
-Actions-checks — infrastructure-only, ingen appbeteendeförändring. Merga INTE förrän CI grön
-och granskad.
-
-**PR #83/#84 (`claude/agent-runtime-control-plane` m.fl.) — Claude night-shift/observability.**
-Oberoende scope; rörs inte av den här stack-passet.
->>>>>>> 3158e73 (Document PR #79 hardening stack in the branch registry)
+Oberoende scope.
 
 ## Pass 57 (2026-08-16): `claude/multi-agent-work-coordination-foundation` — Multi-Agent Work Coordination-grunden, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
