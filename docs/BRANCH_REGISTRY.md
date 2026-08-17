@@ -6,22 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-17) — PR #80 + #86 mergade
+## Aktiva PR:er (2026-08-17) — integration @ `a67225a`
 
-**Integration tip:** `claude/det-kommer-mer-879lcm` @ `9c0b389`.
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `a67225a` (PR #81 merge).
 
 | PR | Merge SHA | Scope |
 |---|---|---|
-| [#80](https://github.com/d1n095/LifeAI/pull/80) | `9c0b389` | Live-loop hardening: path/lease intersection, breadth counters, demo-recept, CI `cursor/**` filters |
-| [#86](https://github.com/d1n095/LifeAI/pull/86) | `fc7af1b` | Storage reference/erasure race (Pass 33 retain + outbox reload) |
-| [#79](https://github.com/d1n095/LifeAI/pull/79) | `69f30e0` | Live gap→child wiring |
-| [#82](https://github.com/d1n095/LifeAI/pull/82) | `78f4eb0` | Multi-Agent Work Coordination (Alembic **0046**) |
+| [#81](https://github.com/d1n095/LifeAI/pull/81) | `a67225a` | Cloud Agent dev environment (`.cursor/`) |
+| [#88](https://github.com/d1n095/LifeAI/pull/88) | `2c9cf62` | BRANCH_REGISTRY conflict-marker hotfix |
+| [#80](https://github.com/d1n095/LifeAI/pull/80) | `9c0b389` | Live-loop hardening |
+| [#86](https://github.com/d1n095/LifeAI/pull/86) | `fc7af1b` | Storage reference/erasure race |
 
-Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch stack**
-(Claude-owned; Cursor rör inte).
+Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
 
-**`cursor/cloud-agent-dev-environment-91c1` (PR #81) — ÖPPEN.** Dev-env chore (`.cursor/`),
-oberoende scope — triage/reconcile pågår.
+**`cursor/pytest-per-process-test-database` — ÖPPEN.** Per-process default pytest DB/Redis
+isolation for multi-worktree local runs (`backend/tests/conftest.py` only).
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
