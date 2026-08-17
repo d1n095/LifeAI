@@ -11,6 +11,7 @@ from typing import Callable
 
 from sqlalchemy import select
 
+from app.autonomous_gap.service import handle_live_gap_signal
 from app.development_driver.service import run_driver
 from app.development_operator.service import DEVELOPMENT_CAPABILITIES
 from app.intelligence_governance import record_evidence
@@ -21,6 +22,7 @@ from app.models.mainai_execution import (
     MainAICheckpoint,
     MainAIGoal,
     MainAIGoalStatus,
+    MainAIPlan,
     MainAITask,
     MainAITaskStatus,
 )
@@ -264,6 +266,17 @@ def select_candidate(assessments):
                 "CAPABILITY_MISSING",
                 "a bounded candidate has a durable capability gap",
             )
+        # Mirrors the CAPABILITY_MISSING branch immediately above -- a deferred verification
+        # failure (app.autonomous_gap.service's live wiring defers-and-continues it, same as
+        # CAPABILITY_MISSING, when the binding is independent) must resurface as its own
+        # VERIFICATION_REQUIRED classification once no other candidate remains actionable,
+        # never fall through to the generic BLOCKED below.
+        if any("verification" in item.reason for item in assessments):
+            return (
+                None,
+                "VERIFICATION_REQUIRED",
+                "a bounded candidate requires verification repair",
+            )
         # Checked before the generic "provider" branch below: an authorization gap is not an
         # outage -- retrying will never resolve it, unlike WAITING_PROVIDER, so it must not be
         # bucketed into the same classification a caller might just retry against.
@@ -448,6 +461,9 @@ async def run_supervisor(
                 assessments,
                 selection_reason,
                 cp,
+                followup="verification_repair"
+                if classification == "VERIFICATION_REQUIRED"
+                else None,
             )
         task = db.execute(
             select(MainAITask).where(
@@ -620,6 +636,25 @@ async def run_supervisor(
                 task.blocker_reason = (
                     "verification failed or remains incomplete; bounded repair required"
                 )
+            # LIVE GAP -> CHILD-TASK WIRING: the only two driver classifications
+            # app.autonomous_gap.service.LIVE_GAP_SIGNAL_CLASSIFICATIONS recognizes as
+            # structured, durable gap evidence. gap_outcome is None for every other
+            # classification (WAITING_PROVIDER, WAITING_APPROVAL, ...) -- this call is purely
+            # additive and never changes what driver.classification itself is. Recorded
+            # unconditionally (not gated on binding.independent) -- the gap is real evidence
+            # regardless of whether OTHER candidates can proceed independently of this one;
+            # `binding.independent` below still governs only whether the RUN continues past
+            # this task, exactly as it already did before this wiring existed.
+            gap_outcome = handle_live_gap_signal(
+                db,
+                scope=scope,
+                goal=goal,
+                plan=db.get(MainAIPlan, task.plan_id),
+                task=task,
+                classification=driver.classification,
+                capability=driver.detail.get("requested_capability") if driver.classification == "CAPABILITY_MISSING" else None,
+                requested_by=worker_id,
+            )
             cp = _checkpoint(
                 db,
                 goal=goal,
@@ -633,11 +668,28 @@ async def run_supervisor(
                     "followup": "verification_repair"
                     if driver.classification == "VERIFICATION_REQUIRED"
                     else None,
+                    "gap_generation": None
+                    if gap_outcome is None
+                    else {
+                        "classification": gap_outcome.classification,
+                        "problem_id": str(gap_outcome.problem.id) if gap_outcome.problem else None,
+                        "inserted_task_ids": [str(t.id) for t in gap_outcome.inserted_tasks] if gap_outcome.inserted_tasks else [],
+                    },
                 },
             )
-            if driver.classification == "CAPABILITY_MISSING" and binding.independent:
+            # Both VERIFICATION_REQUIRED and CAPABILITY_MISSING defer-and-continue when this
+            # binding is independent -- unrelated candidates (including a just-inserted repair
+            # or capability-development child, once it exists) keep making progress in the SAME
+            # run rather than the whole run ending on one task's failure. VERIFICATION_REQUIRED
+            # did not have this defer-and-continue branch before this wiring (only
+            # CAPABILITY_MISSING did) -- extended to match, since a verification failure that
+            # generates a real repair child needs the SAME "goal continues" behavior the
+            # founder's live-loop requirement describes, not a full run stop.
+            if driver.classification in {"CAPABILITY_MISSING", "VERIFICATION_REQUIRED"} and binding.independent:
                 deferred[task.id] = (
-                    f"capability missing: {driver.detail.get('capability', 'unknown')}"
+                    f"capability missing: {driver.detail.get('requested_capability', 'unknown')}"
+                    if driver.classification == "CAPABILITY_MISSING"
+                    else "verification failed or remains incomplete; bounded repair required"
                 )
                 continue
             return _result(
