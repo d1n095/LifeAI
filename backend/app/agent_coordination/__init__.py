@@ -1,7 +1,9 @@
 from app.agent_coordination.routing import (
     CandidateRejection,
+    NextAssignmentDecision,
     RoutingDecision,
     eligible_agents_for,
+    next_feasible_assignment_for_agent,
 )
 from app.agent_coordination.runtime_view import (
     AgentRuntimeView,
@@ -47,6 +49,7 @@ __all__ = [
     "LeaseAcquisitionResult",
     "LeaseFencingError",
     "LeaseStillLiveError",
+    "NextAssignmentDecision",
     "RoutingDecision",
     "RuntimeStatus",
     "ScopeExpansionError",
@@ -59,6 +62,7 @@ __all__ = [
     "create_work_assignment",
     "eligible_agents_for",
     "evaluate_assignment_readiness",
+    "next_feasible_assignment_for_agent",
     "paths_conflict",
     "paths_conflict_any",
     "record_assignment_execution",

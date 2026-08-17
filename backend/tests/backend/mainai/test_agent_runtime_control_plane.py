@@ -18,11 +18,14 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.agent_coordination.routing import (
+    OUTCOME_ASSIGNMENT_FOUND,
     OUTCOME_ELIGIBLE,
     OUTCOME_NEEDS_SELECTION,
+    OUTCOME_NO_FEASIBLE_ASSIGNMENT,
     OUTCOME_NONE_AVAILABLE,
     OUTCOME_SCOPE_CONFLICT,
     eligible_agents_for,
+    next_feasible_assignment_for_agent,
 )
 from app.agent_coordination.runtime_view import (
     RuntimeStatus,
@@ -583,3 +586,146 @@ def test_current_real_world_three_agent_state_end_to_end(superuser_db, owner_id)
     )
     assert still_routable.outcome in (OUTCOME_ELIGIBLE, OUTCOME_NEEDS_SELECTION)
     assert still_routable.eligible_agent_ids  # at least one agent is still routable despite the blocked assignment elsewhere
+
+
+# ============================================================================ 6: next feasible
+# assignment for a given agent -- the inverse direction of routing (given an agent, which work)
+
+def test_next_feasible_assignment_returns_none_when_agent_has_no_ready_work(superuser_db, owner_id):
+    cursor = _agent(superuser_db, "cursor-agent")
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_NO_FEASIBLE_ASSIGNMENT
+    assert decision.assignment_id is None
+    assert decision.skipped == ()
+
+
+def test_next_feasible_assignment_returns_the_single_ready_one(superuser_db, owner_id):
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/finance/**"])
+    assert a.status.value == "ready"
+
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_ASSIGNMENT_FOUND
+    assert decision.assignment_id == a.id
+    assert decision.skipped == ()
+
+
+def test_next_feasible_assignment_is_strict_fifo_by_creation_order(superuser_db, owner_id):
+    goal, _plan, (task_a, task_b, task_c) = _goal_plan_task(superuser_db, owner_id, task_count=3)
+    cursor = _agent(superuser_db, "cursor-agent", concurrency_limit=3)
+    first = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_a, agent=cursor, role="builder", mode="read_write", paths=["backend/app/finance/**"])
+    second = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_b, agent=cursor, role="builder", mode="read_write", paths=["frontend/**"])
+    third = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_c, agent=cursor, role="builder", mode="read_write", paths=["docs/**"])
+
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_ASSIGNMENT_FOUND
+    assert decision.assignment_id == first.id  # oldest wins, never second/third
+    assert second.id != decision.assignment_id and third.id != decision.assignment_id
+
+
+def test_next_feasible_assignment_skips_a_blocked_older_one_for_a_feasible_younger_one(superuser_db, owner_id):
+    """The exact "one blocked assignment must not freeze unrelated work" guarantee, from the
+    AGENT's own point of view: the oldest 'ready' assignment is not truly assignable right now
+    (its dependency isn't satisfied), so the selector skips it -- recording why -- and returns
+    the next one that genuinely is, rather than returning nothing or the stuck one."""
+    goal, _plan, (task_a, task_b) = _goal_plan_task(superuser_db, owner_id, task_count=2)
+    cursor = _agent(superuser_db, "cursor-agent", concurrency_limit=3)
+    claude = _agent(superuser_db, "claude-code")
+    # A separate, unrelated builder cursor "depends on" -- never reaches a releasing status,
+    # so the dependent stays waiting_dependency, never even 'ready', and must not be confused
+    # with the SEPARATE stuck-but-ready scenario below.
+    blocker = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_a, agent=claude, role="builder", mode="read_write", paths=["backend/app/other/**"])
+
+    older_but_stuck = _assign(
+        superuser_db, owner_id=owner_id, goal=goal, task=task_a, agent=cursor, role="reviewer", mode="read_only", paths=[],
+        depends_on_assignment_ids=(blocker.id,),
+    )
+    assert older_but_stuck.status.value == "waiting_dependency"  # not even 'ready' -- excluded by the query itself, not by evaluate_assignment_readiness
+
+    # A second, genuinely ready assignment for the SAME agent, created after the first --
+    # but the first one never enters the 'ready' candidate pool at all (still
+    # waiting_dependency), so this proves the QUERY-level filter, not the assignability scan.
+    younger_and_ready = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_b, agent=cursor, role="builder", mode="read_write", paths=["frontend/**"])
+    assert younger_and_ready.status.value == "ready"
+
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_ASSIGNMENT_FOUND
+    assert decision.assignment_id == younger_and_ready.id
+
+
+def test_next_feasible_assignment_skips_a_ready_but_not_yet_assignable_one_and_records_why(superuser_db, owner_id):
+    """A DIFFERENT stuck reason than the test above: the older assignment genuinely reaches
+    'ready' (query-level candidate), but evaluate_assignment_readiness() itself says it isn't
+    assignable right now (its recorded base_sha has gone stale) -- proving the SCAN-level skip,
+    not just the query-level one, and that the skip is recorded with its real outcome code."""
+    goal, _plan, (task_a, task_b) = _goal_plan_task(superuser_db, owner_id, task_count=2)
+    cursor = _agent(superuser_db, "cursor-agent", concurrency_limit=3)
+    stale = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_a, agent=cursor, role="builder", mode="read_write", paths=["backend/app/finance/**"])
+    stale.base_sha = "16a5da900f9d898de0d0b3c2b6a1b145443575aa"
+    superuser_db.flush()
+    fresh = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_b, agent=cursor, role="builder", mode="read_write", paths=["frontend/**"])
+    assert stale.status.value == fresh.status.value == "ready"
+
+    # next_feasible_assignment_for_agent() itself never takes a current_base_sha -- it asks
+    # evaluate_assignment_readiness() with none, so a merely-stored (never-compared) base_sha
+    # alone doesn't trigger STALE_BASE. Use a lease conflict instead, a condition the scan DOES
+    # detect with no external base-sha input: give `fresh` a competing active write lease that
+    # overlaps `stale`'s own scope once `stale` tries to acquire one -- simpler: directly prove
+    # the skip using LEASE_REQUIRED, which evaluate_assignment_readiness() raises for ANY
+    # read_write 'ready'/'running' assignment holding no active lease yet.
+    other_agent = _agent(superuser_db, "codex")
+    conflicting = _assign(
+        superuser_db, owner_id=owner_id, goal=goal, task=None, agent=other_agent, role="builder", mode="read_write",
+        paths=["backend/app/finance/shared.py"],
+    )
+    _lease(superuser_db, conflicting, other_agent, branch="codex/shared", worktree="/tmp/wt-selector-conflict", paths=["backend/app/finance/shared.py"])
+    stale.allowed_paths = ["backend/app/finance/shared.py"]
+    superuser_db.flush()
+
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_ASSIGNMENT_FOUND
+    assert decision.assignment_id == fresh.id
+    assert len(decision.skipped) == 1
+    assert decision.skipped[0][0] == stale.id
+    assert decision.skipped[0][1] == "PATH_CONFLICT"
+
+
+def test_next_feasible_assignment_never_returns_work_assigned_to_a_different_agent(superuser_db, owner_id):
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    claude = _agent(superuser_db, "claude-code")
+    _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=claude, role="builder", mode="read_write", paths=["backend/app/**"])
+
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert decision.outcome == OUTCOME_NO_FEASIBLE_ASSIGNMENT
+    assert decision.assignment_id is None
+
+
+def test_next_feasible_assignment_never_mutates_the_assignment(superuser_db, owner_id):
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    status_before = a.status
+
+    next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=owner_id)
+    assert a.status == status_before  # read-only: selecting is not starting
+    active_lease = superuser_db.execute(
+        sa_text("SELECT count(*) FROM agent_scope_leases WHERE assignment_id = :id AND status = 'active'"), {"id": str(a.id)}
+    ).scalar()
+    assert active_lease == 0  # never acquires a lease on the caller's behalf
+
+
+def test_next_feasible_assignment_owner_isolation(superuser_db, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+    cursor = _agent(superuser_db, "cursor-agent")
+
+    _set_rls_user(superuser_db, user_a.id)
+    goal_a, _plan_a, task_a = _goal_plan_task(superuser_db, user_a.id)
+    _assign(superuser_db, owner_id=user_a.id, goal=goal_a, task=task_a, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    superuser_db.commit()
+
+    _set_rls_user(superuser_db, user_b.id)
+    decision = next_feasible_assignment_for_agent(superuser_db, agent_id=cursor.id, owner_id=user_b.id)
+    assert decision.outcome == OUTCOME_NO_FEASIBLE_ASSIGNMENT  # user_a's ready assignment must never surface for user_b

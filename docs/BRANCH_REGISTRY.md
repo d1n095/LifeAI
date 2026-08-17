@@ -6,6 +6,58 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 59 (2026-08-17): `claude/agent-work-selection` — next_feasible_assignment_for_agent(), stackad ovanpå PR #83, egen worktree parallellt med Cursors PR #79/#80
+
+Fortsättning av natt-passets uppdrag efter att PR #83 (Pass 58 nedan) blev CI-grön och
+väntar på granskning: den sista uttryckligen efterfrågade biten av routing-lagret som PR #83
+inte byggde — inte "given ett uppdrag, vilken agent" (det är `eligible_agents_for()`, redan
+klart) utan den OMVÄNDA riktningen: "given en agent (typiskt en som just blev ledig), vilket
+av dess EGNA redan tilldelade uppdrag ska den ta upp härnäst" — det som konkret gör "en
+blockerad tilldelning ska INTE frysa orelaterat arbete" sant ur en enskild AGENTS eget
+perspektiv, inte bara ur samordnarens.
+
+**Genuin design-upptäckt under eget testskrivande** (inte antagen korrekt från
+implementationen): ett färskt `read_write`/`ready`-uppdrag rapporterar ALLTID
+`LEASE_REQUIRED` från `evaluate_assignment_readiness()` tills ett lease faktiskt hämtats —
+det är inte en verklig blockerare, det är bara namnet på anroparens egen nästa steg
+(`acquire_lease()`). Den första implementationen krävde strikt `ASSIGNABLE` och skulle därför
+ha rapporterat "inget genomförbart uppdrag" för praktiskt taget VARJE färskt skrivuppdrag
+någonsin skapat — upptäckt av ett eget test som medvetet höll implementationen ärlig, fixat
+innan commit genom att uttryckligen behandla `LEASE_REQUIRED` som "hittat", inte "hoppa
+över", med fullt dokumenterad motivering.
+
+**Byggt** (`backend/app/agent_coordination/routing.py`): `next_feasible_assignment_for_agent()`
+— strikt FIFO efter `created_at` (ingen prioritets- eller kapacitetspoängsättning — det vore
+exakt den "rankningsmotor byggd på otillräckliga bevis" den här modulen redan vägrar bygga),
+skannar i ordning och returnerar den första `ASSIGNABLE`/`LEASE_REQUIRED`, hoppar över och
+BOKFÖR (aldrig tyst) varje genuint fastnat uppdrag (`STALE_BASE`, en dupliceradupptäckt
+i efterhand, `AGENT_UNAVAILABLE`, `PATH_CONFLICT`, m.fl.) utan att diskvalificera nästa i
+kön. Returnerar aldrig uppdrag tilldelade en ANNAN agent (ingen tyst omtilldelning). Muterar
+aldrig något — att välja och att faktiskt starta (`acquire_lease()` +
+`transition_status()`) förblir separata, medvetna anroparsteg. Ingen ny migration, Alembic-
+huvudet fortsatt `0046`. 8 nya tester i den befintliga
+`test_agent_runtime_control_plane.py` (samma fil PR #83 redan äger), inklusive FIFO-ordning,
+två distinkta "hoppa över"-scenarier (kö-nivå vs. skannings-nivå), agent-isolering och
+ägar-isolering.
+
+Full lokal verifiering: 8/8 nya tester, 61/61 (53 tidigare + 8 nya) i den samordnade
+testsviten, 195/198 (187 tidigare + 8 nya, minus 3 förbefintliga `rg`-relaterade fel i
+Cursors eget scope, orörda) i hela `tests/backend/mainai/`, ruff rent, `git diff --check`
+rent, Alembic-huvud verifierat oförändrat vid `0046`.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #83 (`claude/agent-runtime-control-plane`
+@ `11c261e`) — grenad från den branchen, inte från integrationsgrenen direkt, eftersom den
+bygger vidare på `routing.py`s redan befintliga funktioner. Helt oberoende av Cursors PR
+#79/#80.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-work-selection` | Öppnas denna session | Pushad, redo för granskning | `next_feasible_assignment_for_agent()` -- given en agent, vilket av dess egna uppdrag ska den ta upp härnäst; 8 tester, ingen ny migration | `claude/agent-runtime-control-plane` @ 11c261e (stackad ovanpå PR #83) |
+
 ## Pass 58 (2026-08-17): `claude/agent-runtime-control-plane` — Agent Runtime Visibility & Deterministic Routing, förlängning av PR #82:s mergade grund, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
 Grundaren bad om en flerlagers "night shift"-insats för att flytta Life närmare att självt

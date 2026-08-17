@@ -184,6 +184,23 @@ below), and ties return `NEEDS_SELECTION` rather than guessing a winner. Provide
 "trusted-sounding" agent name grants nothing here either, the same invariant
 `test_provider_identity_cannot_grant_authority` already proves at the assignment layer.
 
+**`app.agent_coordination.routing.next_feasible_assignment_for_agent`** answers the INVERSE
+question — "given a known agent (typically one that just went idle), which of its OWN
+already-assigned `ready` work should it pick up next" — the complementary direction to
+`eligible_agents_for()`'s "given work, which agent." Strict FIFO by `created_at`; no priority
+or capability-fit scoring (that would be exactly the "ranking engine built on insufficient
+evidence" this module already refuses to build). Scans in order and returns the first
+assignment `evaluate_assignment_readiness()` calls `ASSIGNABLE` **or** `LEASE_REQUIRED` —
+`LEASE_REQUIRED` is deliberately treated as "found," not "skip," since a fresh `read_write`
+`ready` assignment always reports it until a lease is acquired; that is simply naming the
+caller's own very next step, not a real blocker. A genuinely stuck assignment ahead in the
+queue (stale base, a surfaced duplicate, agent unavailability) never disqualifies a feasible
+one behind it — every skip is recorded with its real `CoordinatorDecision.outcome`, never
+silently dropped. This is what lets "one blocked assignment must not freeze unrelated work"
+hold from an individual AGENT's own point of view, not just the coordinator's. Never mutates
+anything — selecting a next assignment and actually starting it (`acquire_lease()` +
+`transition_status()`) remain separate, deliberate caller actions.
+
 **`app.agent_coordination.service.build_agent_outcome_payload`** is a canonical, documented
 field vocabulary (tests/duration/cost/CI outcome/review defects/severity/rework/scope
 violations/merge result/failure reason/verified quality — every field optional, omitted
