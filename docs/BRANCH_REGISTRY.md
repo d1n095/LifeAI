@@ -6,23 +6,38 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82
+## Aktiva PR:er (2026-08-17) — PR #80 fryst; storage-race fix separat
+
+**PR #80 — FRYST, CODE-READY @ `5b9257b`.** Rör INTE i PR #80-worktree. Väntar på den här
+CI-flake-fixen + oberoende granskning.
+
+**`cursor/storage-reference-erasure-race-fix` → `claude/det-kommer-mer-879lcm` — ÖPPEN.**
+Separat fysisk worktree (`/Users/dennistorildson/Documents/LifeAI-storage-race`). Fixar
+återkommande storage/account-erasure-race i
+`test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_never_race_unsafely`.
+Scope: `app/storage/references.py`, `app/account/erasure.py`, `app/rag/library_import.py`
+(endast `_store_bytes_with_reference_lock`), tester. Ingen migration (Alembic **0046**). Rör
+INTE PR #80-stack, `agent_coordination/**`, PR #83/#84.
+
+**PR #79 — MERGAD** @ `69f30e0`. **PR #82 — MERGAD** @ `78f4eb0`.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | Fryst CODE-READY @ `5b9257b` | Live-loop hardening | mainline @ `69f30e0` |
+| `cursor/storage-reference-erasure-race-fix` | TBD | Öppen | Storage reference/erasure race | mainline @ `69f30e0` |
+
+## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
 **`claude/mainai-autonomous-gap-live-integration` → `claude/det-kommer-mer-879lcm` (PR #79)
-— ÖPPEN, reconcilerad.** Live-wiring av autonomous gap → child task in i Supervisor
-(`handle_live_gap_signal`). Grenad ursprungligen från `16a5da9` (efter PR #78); tip före
-reconcile: `bed835a`. **2026-08-17:** mergad med current mainline
-`78f4eb0` (PR #82 / Multi-Agent Work Coordination, migration **0046**). Ingen ny migration
-från PR #79 — Alembic single head är **0046**. PR #82:s `app/agent_coordination/**` och
-`0046_multi_agent_work_coordination.py` är intakta. Se
+— MERGAD @ `69f30e0`.** Live-wiring av autonomous gap → child task in i Supervisor
+(`handle_live_gap_signal`). Alembic single head **0046** (via PR #82). Se
 `docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
 
-**`cursor/pr79-live-loop-hardening` → PR #79 (PR #80) — FRYST tills PR #79 är godkänd.**
-Head kvar `1d3ebff1c4e185490c5cde1e284bfd2ca87561f2`. Rebasa/retargeta INTE förrän PR #79
-reconcile är granskad. Merga INTE PR #80 före PR #79.
+**`cursor/pr79-live-loop-hardening` (PR #80) — FRYST CODE-READY @ `5b9257b`.** Merga INTE
+förrän storage-race CI-blocker är löst och granskad.
 
 **PR #83 (`claude/agent-runtime-control-plane`) — Claude night-shift/observability.**
-Oberoende scope; rörs inte av den här reconcile-passet.
+Oberoende scope; rörs inte av den här branchen.
 
 ## Pass 57 (2026-08-16): `claude/multi-agent-work-coordination-foundation` — Multi-Agent Work Coordination-grunden, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
