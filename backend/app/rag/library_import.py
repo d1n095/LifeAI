@@ -43,7 +43,7 @@ from app.rag.ingest import index_document
 from app.rag import media_import
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
 from app.storage import StorageBackend, StorageError, get_storage
-from app.storage.references import acquire_storage_key_lock, storage_key_still_referenced
+from app.storage.references import acquire_storage_key_lock, retain_pending_rejected_upload_cleanup_tasks, storage_key_still_referenced
 
 logger = logging.getLogger("mainai.rag.library_import")
 
@@ -187,8 +187,10 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
     a genuinely-published blob apart from a same-path file whose bytes don't actually match
     this content's hash."""
     blob = _store_bytes(storage, content, max_bytes=max_bytes)
+
     acquire_storage_key_lock(db, blob.storage_key)
     if storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
+        retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
         return blob
 
     # Lost the race, or the blob at this key is corrupt: a concurrent purge/erasure's
@@ -205,6 +207,7 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
             f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
             f"fortfarande inte den förväntade sha256:n efter återpublicering."
         )
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     return blob
 
 
