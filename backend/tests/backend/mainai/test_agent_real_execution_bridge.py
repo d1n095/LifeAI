@@ -169,6 +169,16 @@ def test_adapter_availability_unsupported_provider_fails_closed():
 
 
 def test_real_adapter_config_requires_enabled_and_executable_and_args_template(monkeypatch):
+    """Uses a deterministic, always-present executable (`shutil.which` itself is patched, not
+    relied on to genuinely find a real 'codex' binary) -- this must pass identically whether or
+    not the actual codex CLI happens to be installed on the machine running the test."""
+    import shutil
+
+    import app.agent_coordination.adapter_config as adapter_config_module
+
+    real_true_path = shutil.which("true")
+    monkeypatch.setattr(adapter_config_module.shutil, "which", lambda name: real_true_path if name == "codex" else None)
+
     monkeypatch.delenv("LIFE_AGENT_ADAPTER_ENABLED__CODEX", raising=False)
     monkeypatch.delenv("LIFE_AGENT_ADAPTER_ARGS__CODEX", raising=False)
     assert real_adapter_config("codex") is None  # disabled
