@@ -10,6 +10,10 @@
     {
       "name": "frontend (Next.js :3000)",
       "command": "cd frontend && INTERNAL_API_URL=http://localhost:8000 exec npx next dev -p 3000"
+    },
+    {
+      "name": "worker (imports/jobs/storage outbox)",
+      "command": "cd backend && source .venv/bin/activate && exec python -m app.worker"
     }
   ],
   "ports": [

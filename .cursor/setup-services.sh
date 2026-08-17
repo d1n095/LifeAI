@@ -9,6 +9,21 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$REPO/backend/.env"
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "backend/.env is missing — run .cursor/install.sh first" >&2
+  exit 1
+fi
+
+# Role passwords MUST come from the same .env the app will load. Hardcoding `mainai_app`
+# here while APP_DATABASE_URL / MAINAI_APP_PASSWORD can differ (or be edited later) produced
+# a silent auth mismatch: migrations ran as lifeos, then the API/worker failed as mainai_app.
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+: "${MAINAI_APP_PASSWORD:?MAINAI_APP_PASSWORD must be set in backend/.env}"
 
 echo "--> Ensuring Postgres 16 cluster is online"
 if ! pg_lsclusters -h 2>/dev/null | awk '$1=="16" && $2=="main" {print $4}' | grep -q online; then
@@ -21,16 +36,39 @@ if ! redis-cli ping >/dev/null 2>&1; then
 fi
 
 echo "--> Waiting for Postgres to accept connections"
+ready=0
 for _ in $(seq 1 30); do
-  if sudo -u postgres pg_isready -q; then break; fi
+  if sudo -u postgres pg_isready -q; then
+    ready=1
+    break
+  fi
   sleep 1
 done
+if [ "$ready" -ne 1 ]; then
+  echo "Postgres did not become ready" >&2
+  exit 1
+fi
+
+echo "--> Waiting for Redis to accept connections"
+redis_ready=0
+for _ in $(seq 1 30); do
+  if redis-cli ping >/dev/null 2>&1; then
+    redis_ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$redis_ready" -ne 1 ]; then
+  echo "Redis did not become ready" >&2
+  exit 1
+fi
 
 echo "--> Provisioning roles (lifeos superuser + restricted mainai_app runtime role)"
 # Mirrors backend/db-init/01-app-role.sh: `lifeos` owns the schema and runs migrations; the
 # non-superuser `mainai_app` role is what the app queries through so Row-Level Security is
-# actually enforced (a superuser bypasses RLS). Passwords match backend/.env's connection URLs.
-sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+# actually enforced (a superuser bypasses RLS). Password is :'app_pw' from MAINAI_APP_PASSWORD
+# (psql variable, not interpolated into SQL text).
+sudo -u postgres psql -v ON_ERROR_STOP=1 -v app_pw="$MAINAI_APP_PASSWORD" <<'SQL'
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='lifeos') THEN
     CREATE ROLE lifeos LOGIN SUPERUSER PASSWORD 'lifeos';
@@ -40,9 +78,9 @@ DO $$ BEGIN
 END $$;
 DO $$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='mainai_app') THEN
-    CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app';
+    CREATE ROLE mainai_app LOGIN PASSWORD :'app_pw';
   ELSE
-    ALTER ROLE mainai_app LOGIN PASSWORD 'mainai_app';
+    ALTER ROLE mainai_app LOGIN PASSWORD :'app_pw';
   END IF;
 END $$;
 SQL
@@ -65,10 +103,6 @@ echo "--> Applying migrations (alembic upgrade head) + runtime privilege policy"
 cd "$REPO/backend"
 # shellcheck disable=SC1091
 . .venv/bin/activate
-set -a
-# shellcheck disable=SC1091
-. ./.env
-set +a
 alembic upgrade head
 python scripts/security/apply_runtime_privileges.py
 
