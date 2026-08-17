@@ -287,6 +287,13 @@ class AgentWorkAssignmentEventType(str, enum.Enum):
     dependency_satisfied = "dependency_satisfied"
     evidence_recorded = "evidence_recorded"
     conflict_detected = "conflict_detected"
+    # Migration 0047: the durable audit trail for structured execution-control events
+    # (status/progress/tool_action/heartbeat/partial_result/final_result) -- see
+    # app.agent_coordination.execution_control.record_execution_event(). Raw stdout/stderr
+    # volume is deliberately NOT recorded through this event type by default (see that
+    # module's own docstring for why); only its arrival TIME is (AgentDispatchExecution
+    # .last_output_at below).
+    execution_observed = "execution_observed"
 
 
 class AgentWorkAssignmentEvent(Base):
@@ -301,6 +308,72 @@ class AgentWorkAssignmentEvent(Base):
     event_type: Mapped[AgentWorkAssignmentEventType] = mapped_column(Enum(AgentWorkAssignmentEventType))
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["assignment_id", "owner_id"], ["agent_work_assignments.id", "agent_work_assignments.owner_id"], ondelete="CASCADE"
+        ),
+    )
+
+
+class ExecutionAdapterState(str, enum.Enum):
+    """The live state of ONE dispatch attempt's underlying process/session -- distinct from
+    `WorkAssignmentStatus` (the canonical, coarser assignment-level state machine) the same way
+    `AgentScopeLeaseStatus` is distinct from it. Never itself authorizes a
+    `transition_status()` call -- see app.agent_coordination.execution_control's own module
+    docstring for how the two stay in sync without becoming a second source of truth."""
+
+    starting = "starting"
+    running = "running"
+    exited = "exited"
+    lost = "lost"
+    timeout = "timeout"
+    cancelled = "cancelled"
+
+
+class ExecutionResultIngestionStatus(str, enum.Enum):
+    """Distinguishes "the process finished" from "Life has durably recorded what it produced"
+    -- see requirement 7's own "completed-but-ingestion-failed" case. `failed` here means
+    ingestion itself broke (a DB error, a malformed result), never that the AGENT's own work
+    failed (that is `AgentResult.succeeded=False`, recorded verbatim once ingestion DOES
+    succeed)."""
+
+    pending = "pending"
+    ingested = "ingested"
+    failed = "failed"
+
+
+class AgentDispatchExecution(Base):
+    """The live, mutable tracking row for ONE dispatch attempt (migration 0047) --
+    `attempt_id` correlates with `app.agent_coordination.dispatch.DispatchDecision.attempt_id`.
+    Distinct from `AgentWorkAssignmentEvent` (append-only HISTORY) the same way
+    `AgentScopeLease` is distinct from `AgentWorkAssignment` -- this row is UPDATED in place as
+    a real process runs (`last_heartbeat_at`, `last_output_at`, `adapter_state`), it is not a
+    log. One row per attempt: an assignment retried after a failure gets a SECOND row with its
+    own fresh `attempt_id`, never overwrites the previous attempt's own row.
+
+    `process_ref` is an opaque, adapter-supplied identifier (a PID, a session token STRING) --
+    informational/correlation only, exactly like `CoordinationAgent.model_hint`; never a
+    credential, by construction (nothing in this codebase ever writes a secret into it)."""
+
+    __tablename__ = "agent_dispatch_executions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    assignment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    attempt_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, index=True)
+    adapter_key: Mapped[str] = mapped_column(String(64))
+    process_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    adapter_state: Mapped[ExecutionAdapterState] = mapped_column(Enum(ExecutionAdapterState), default=ExecutionAdapterState.starting)
+    result_ingestion_status: Mapped[ExecutionResultIngestionStatus] = mapped_column(
+        Enum(ExecutionResultIngestionStatus), default=ExecutionResultIngestionStatus.pending
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_output_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
         ForeignKeyConstraint(

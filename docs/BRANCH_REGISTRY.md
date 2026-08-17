@@ -6,6 +6,72 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 62 (2026-08-17): `claude/agent-execution-control` — Interactive Agent Execution Control Foundation (output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + grundarkontrollerad credential-referens/env-allowlist), stackad ovanpå det NU MERGADE PR #87 (`claude/agent-dispatch-foundation` @ `caeb550`), egen worktree parallellt med Cursors PR #79/#80/#81
+
+Nästa lager i natt-passets uppdrag: vändningen från "start-then-collect" (PR #85–87) till en
+providerneutral EXEKVERINGS-KONTROLLMODELL som kan spåra en riktig, långkörande
+agent-process/session — utan att bygga en andra övervakare och utan att någonsin fabricera en
+`completed`-status. Byggt strikt ovanpå redan mergad/granskad kod.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- Migration 0047 — EN ny tabell `agent_dispatch_executions` (levande, muterbar
+  spårningsrad per dispatch-FÖRSÖK, motsvarar `dispatch.DispatchDecision.attempt_id`,
+  distinkt från den append-only `agent_work_assignment_events` på samma sätt som
+  `agent_scope_leases` är distinkt från `agent_work_assignments`) + EN ny
+  event-type-CHECK-constraint-utökning (`execution_observed` — vanlig `varchar`+CHECK, INGEN
+  nativ Postgres-enum, så inget `ALTER TYPE` behövdes).
+- `execution_control.py` (ny) — `ExecutionEvent`/`record_execution_event()`: strukturerade
+  händelser (status/progress/tool_action/heartbeat/partial_result/final_result) ALLTID
+  bokförda durabelt; rå stdout/stderr ENDAST tidsstämplad (`last_output_at`) som standard,
+  aldrig bokförd, om inte anroparen uttryckligen ber om det. `AdapterCapabilities`
+  (`adapters.py`, utökad) + `send_execution_instruction()`/`cancel_execution()`/
+  `resume_execution()`: kontrollerar respektive flagga INNAN adaptern överhuvudtaget anropas —
+  ett ostött anrop returnerar en strukturerad `UNSUPPORTED_CAPABILITY`, aldrig ett kastat
+  `NotImplementedError`. `reconcile_execution_state()`: observerar och klassificerar ENDAST
+  (process fortfarande igång / avslutad-men-ej-bokförd / avslutad-och-bokförd /
+  adapter frånkopplad / session förlorad / resultat otillgängligt) — ÄNDRAR ALDRIG
+  uppdragets `status` själv; endast `collect_dispatch_result()` (via `apply_dispatch_result()`)
+  får någonsin flytta ett uppdrag till `completed`. `collect_and_ingest_execution_result()`:
+  omsluter `dispatch.collect_dispatch_result()` (återuppfinner aldrig dess egen
+  kraschhantering) och speglar utfallet på spårningsraden.
+- `adapter_config.py` (utökad) — `credential_reference()`: en OPAK, grundarangiven
+  referensETIKETT (aldrig en hemlighet) via `LIFE_AGENT_ADAPTER_CREDENTIAL_REF__<KEY>` — `None`
+  betyder "olöst / konfiguration krävs", eftersom denna kodbas inte har någon
+  hemlighetslagringsbackend alls. `resolve_adapter_env()`: vidarebefordrar ENDAST de
+  omgivningsvariabel-NAMN grundaren uttryckligen tillåtlistat via
+  `LIFE_AGENT_ADAPTER_ENV_ALLOWLIST__<KEY>` — aldrig ett blint arv av hela processmiljön;
+  `get_real_adapter()` använder nu detta som standard när `env` utelämnas.
+
+**En verklig, självupptäckt regression fixad under egen verifiering** (inte av en extern
+granskning): `tests/backend/mainai/test_multi_agent_work_coordination.py::
+test_no_automatic_merge_or_deploy_capability` (PR #82:s EGEN styrningsvakt — ett exakt
+mängd-test på `AgentAdapter`s metodnamn, avsett att kräva medveten bekräftelse för varje
+framtida utökning) misslyckades korrekt eftersom `control_capabilities()` är en genuin, avsedd
+utökning av kontraktet — testet uppdaterades för att uttryckligen bekräfta den nya metoden
+(fortfarande disjunkt från `merge`/`deploy`/`push`/`force_push`/`delete_branch`), inte
+kringgånget.
+
+Full lokal verifiering: 24/24 nya tester (`test_agent_execution_control.py`, inklusive ett
+fullständigt E2E-kontrollflöde: dispatch → RUNNING → output/heartbeat → instruktion
+skickad/avvisad → resultat bokfört → `completed`, samt separata scenarier för förlorad
+process, timeout och avbrytning — ingen riktig Claude Code/Cursor Agent/Codex-invokering
+någonstans i denna branch), full `tests/backend/mainai/`-regression grön (utöver samma 1
+förbefintliga `rg`-relaterade fel i Cursors eget `development_operator`-scope, orört), ruff
+rent, `git diff --check` rent, Alembic-huvud verifierat vid `0047` (EN ny migration,
+narrowly-scoped enligt uppdragets egen tillåtelse för detta pass).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd. Ingen produktions-
+eller deploy-yta rörd. Inget andra samordnings-/övervakningssystem skapat.
+
+**Beroenden:** Stackad ovanpå det NU MERGADE PR #87 (`claude/agent-dispatch-foundation` @
+`caeb550`). Helt oberoende av Cursors PR #79/#80/#81.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-execution-control` | Öppnas denna session | Pushad, redo för granskning | Output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + credential-referens/env-allowlist (`execution_control.py` ny, `adapters.py`/`adapter_config.py` utökade, migration 0047) — 24 tester, EN ny migration | `claude/agent-dispatch-foundation` @ caeb550 (efter PR #87) |
+
 ## Pass 61 (2026-08-17): `claude/agent-real-execution-bridge` — Founder-Controlled Real-Agent Execution Bridge (fem-vägs adapter-tillgänglighet + EN bunden riktig subprocess-adapter + krasch/timeout på båda sidor av dispatch-livscykeln), stackad ovanpå PR #85, egen worktree parallellt med Cursors PR #79/#80
 
 Nästa lager i natt-passets uppdrag: vändningen från "skapa en bunden dispatch-post" (PR #85)
@@ -96,9 +162,16 @@ eller deploy-yta rörd. Inget andra samordnings-/övervakningssystem skapat.
 **Beroenden:** Stackad ovanpå det ännu ej mergade PR #85 (`claude/agent-dispatch-foundation`
 @ `93cf08f`). Helt oberoende av Cursors PR #79/#80.
 
+**UPPDATERING (Pass 62, 2026-08-17):** PR #87 granskad (oberoende, read-only, andra
+granskningsrundan) — INGEN P0/P1, 5 P2 (defense-in-depth-anteckningar, ingen exploaterbar väg
+via den avsedda API-ytan `get_real_adapter()` → `dispatch_assignment()`, se Pass 62:s egen
+granskningssammanfattning) — och MERGAD: mergecommit `caeb550deec505221d6f9ab044f9eb5ac68f03d6`
+in i `claude/agent-dispatch-foundation` (fortfarande PR #85:s egen, ännu ej mergade branch mot
+huvudgrenen — detta var en intern stack-merge, inte en merge mot mainline).
+
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/agent-real-execution-bridge` | Öppnas denna session | Pushad, redo för granskning | Fem-vägs adapter-tillgänglighet (`adapter_config.py`) + EN bunden riktig subprocess-adapter `LocalCLIAdapter` + krasch/timeout-hantering på båda sidor av dispatch-livscykeln (`adapters.py`, `dispatch.py`) — 22 tester, ingen ny migration, ingen riktig agent-invokering utförd | `claude/agent-dispatch-foundation` @ 93cf08f (stackad ovanpå PR #85) |
+| `claude/agent-real-execution-bridge` | [#87](https://github.com/d1n095/LifeAI/pull/87) | **MERGAD** (`caeb550`) in i `claude/agent-dispatch-foundation` | Fem-vägs adapter-tillgänglighet (`adapter_config.py`) + EN bunden riktig subprocess-adapter `LocalCLIAdapter` + krasch/timeout-hantering på båda sidor av dispatch-livscykeln (`adapters.py`, `dispatch.py`) — 22 tester, ingen ny migration, ingen riktig agent-invokering utförd | `claude/agent-dispatch-foundation` @ 93cf08f (stackad ovanpå PR #85) |
 
 ## Pass 60 (2026-08-17): `claude/agent-dispatch-foundation` — Bounded Dispatch Foundation (real agent bootstrap + fail-closed dispatch gate + provider-neutral adapter contract), stackad ovanpå PR #84, egen worktree parallellt med Cursors PR #79/#80
 

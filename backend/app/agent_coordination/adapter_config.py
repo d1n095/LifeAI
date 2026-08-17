@@ -53,6 +53,8 @@ _ENV_COMMAND = "LIFE_AGENT_ADAPTER_COMMAND__{key}"
 _ENV_ARGS_TEMPLATE = "LIFE_AGENT_ADAPTER_ARGS__{key}"  # space-separated argv template, founder-supplied
 _ENV_TIMEOUT_SECONDS = "LIFE_AGENT_ADAPTER_TIMEOUT_SECONDS__{key}"
 _ENV_CREDENTIALS_CONFIRMED = "LIFE_AGENT_ADAPTER_CREDENTIALS_CONFIRMED__{key}"
+_ENV_CREDENTIAL_REF = "LIFE_AGENT_ADAPTER_CREDENTIAL_REF__{key}"  # an opaque LABEL, never a secret
+_ENV_ENV_ALLOWLIST = "LIFE_AGENT_ADAPTER_ENV_ALLOWLIST__{key}"  # comma-separated ambient VAR NAMES
 
 _DEFAULT_TIMEOUT_SECONDS = 900  # a bound always applies; 15 minutes if the founder sets none
 
@@ -131,3 +133,36 @@ def real_adapter_config(provider_key: str) -> tuple[str, tuple[str, ...], int] |
     except ValueError:
         timeout_seconds = _DEFAULT_TIMEOUT_SECONDS
     return availability.executable_path, args_template, timeout_seconds
+
+
+def credential_reference(provider_key: str) -> str | None:
+    """Returns an opaque, founder-supplied credential REFERENCE identifier -- e.g. a label
+    like `"vault:codex-oauth"` naming which credential a future secret-storage integration
+    would need to resolve -- NEVER the secret itself. This module has no secret-storage
+    backend of any kind; a non-`None` return value means "unresolved / config-required," not
+    "usable." Always `None` unless the founder explicitly sets
+    `LIFE_AGENT_ADAPTER_CREDENTIAL_REF__<KEY>`; this function performs no lookup, no file
+    read, no network call -- reading a single plain environment variable is its entire
+    behavior."""
+
+    env_key = _env_key(provider_key)
+    ref = os.environ.get(_ENV_CREDENTIAL_REF.format(key=env_key), "").strip()
+    return ref or None
+
+
+def resolve_adapter_env(provider_key: str) -> dict[str, str]:
+    """Selectively forwards ONLY the ambient environment variables the founder has explicitly
+    allowlisted for this exact provider, via `LIFE_AGENT_ADAPTER_ENV_ALLOWLIST__<KEY>` -- a
+    comma-separated list of VARIABLE NAMES, never values, never a path, never a secret in
+    itself. Never a blind inheritance of this process's own full environment (see
+    `app.agent_coordination.adapters.LocalCLIAdapter`'s own docstring on why that would risk
+    leaking unrelated secrets this adapter has no business seeing). A name in the allowlist
+    that happens not to be set in `os.environ` is simply absent from the result -- never an
+    error, never a fabricated empty-string value. Performs no file read, no secret-store
+    lookup, no scanning of any kind -- reads only names the founder explicitly listed, from
+    the current process's own already-present environment."""
+
+    env_key = _env_key(provider_key)
+    allowlist_raw = os.environ.get(_ENV_ENV_ALLOWLIST.format(key=env_key), "")
+    names = [name.strip() for name in allowlist_raw.split(",") if name.strip()]
+    return {name: os.environ[name] for name in names if name in os.environ}
