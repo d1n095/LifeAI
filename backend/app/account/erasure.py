@@ -588,6 +588,18 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         db.execute(sa_text("SELECT erase_own_mainai_job_children()"))
         db.query(MainAIJob).filter_by(owner_id=owner_id).delete(synchronize_session=False)
 
+        # --- Multi-Agent Work Coordination foundation (migration 0046, see
+        # docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md): agent_work_assignment_events is
+        # append-only at the DB level, same "no DELETE privilege at all outside this one
+        # narrow SECURITY DEFINER function" shape as mainai_job_events above. This single call
+        # deletes the WHOLE owner-scoped coordination family (events, leases, dependency
+        # edges, assignments, parallel-exploration groups) -- takes NO owner argument, same
+        # "no parameter this call site could ever get wrong" reasoning as
+        # erase_own_mainai_job_children() above. coordination_agents (the agent REGISTRY
+        # itself) is deliberately untouched: it is founder-wide system knowledge, not this
+        # owner's personal data, same as engineering_lessons.
+        db.execute(sa_text("SELECT erase_own_agent_coordination_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.
