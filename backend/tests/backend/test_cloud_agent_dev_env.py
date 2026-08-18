@@ -32,9 +32,9 @@ from sync_app_database_url import sync_env_file  # noqa: E402
 def test_cloud_agent_environment_starts_the_durable_worker():
     spec = json.loads((CURSOR_DIR / "environment.json").read_text())
     commands = [terminal["command"] for terminal in spec["terminals"]]
-    assert any("python -m app.worker" in command for command in commands), (
-        "Cloud Agent environment.json must start app.worker — otherwise library imports, "
-        "MainAI jobs, and storage_deletion_tasks never run in this VM"
+    assert any("run-worker.sh" in cmd or "python -m app.worker" in cmd for cmd in commands), (
+        "Cloud Agent environment.json must start app.worker (directly or via run-worker.sh) "
+        "— otherwise library imports, MainAI jobs, and storage_deletion_tasks never run in this VM"
     )
 
 
@@ -233,3 +233,30 @@ def test_derive_pytest_env_cli_never_prints_secrets_on_stderr():
     assert "super-secret" not in proc.stderr
     assert "app-pw" not in proc.stderr
     assert "postgresql://" not in proc.stderr
+
+
+# --- Worker auto-restart wrapper ---
+
+
+def test_environment_json_worker_terminal_uses_restart_wrapper():
+    """The worker terminal must use run-worker.sh (restart-on-crash), not bare `python -m`."""
+    env_json = json.loads((CURSOR_DIR / "environment.json").read_text())
+    worker_terminals = [t for t in env_json["terminals"] if "worker" in t["name"].lower()]
+    assert len(worker_terminals) == 1
+    cmd = worker_terminals[0]["command"]
+    assert "run-worker.sh" in cmd
+    assert "python -m app.worker" not in cmd
+
+
+def test_run_worker_script_restarts_on_nonzero_exit():
+    """run-worker.sh must restart on non-zero exit and stop on exit 0."""
+    script = (CURSOR_DIR / "run-worker.sh").read_text()
+    assert "while true" in script
+    assert "break" in script
+    assert "$?" in script or "exit_code" in script
+
+
+def test_run_worker_script_respects_graceful_shutdown():
+    """Exit code 0 (graceful shutdown via SIGTERM handler) must NOT trigger a restart."""
+    script = (CURSOR_DIR / "run-worker.sh").read_text()
+    assert "exit_code -eq 0" in script
