@@ -49,7 +49,6 @@ FOUNDER_PASSWORD=DevFounderPass123!
 MAINAI_APP_PASSWORD=mainai_app
 
 DATABASE_URL=postgresql://lifeos:lifeos@localhost:5432/lifeos
-APP_DATABASE_URL=postgresql://mainai_app:mainai_app@localhost:5432/lifeos
 REDIS_URL=redis://localhost:6379/0
 
 DEFAULT_LLM_PROVIDER=openai
@@ -76,6 +75,11 @@ STORAGE_ROOT=$HOME/.lifeai-dev/uploads
 PROJECT_ROOT=$REPO
 EOF
   echo "    wrote $ENV_FILE"
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  python3 "$REPO/.cursor/sync_app_database_url.py" "$ENV_FILE"
 else
   echo "    $ENV_FILE already exists — left untouched"
 fi

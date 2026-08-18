@@ -21,7 +21,9 @@ CURSOR_DIR = REPO_ROOT / ".cursor"
 
 # Import without adding .cursor to the app package path permanently.
 sys.path.insert(0, str(CURSOR_DIR))
+from derive_app_database_url import derive_app_database_url  # noqa: E402
 from parse_database_url import parse_lifeos_database_url  # noqa: E402
+from sync_app_database_url import sync_env_file  # noqa: E402
 
 
 def test_cloud_agent_environment_starts_the_durable_worker():
@@ -109,3 +111,68 @@ def test_parse_database_url_cli_fails_closed_without_leaking_url():
     assert "leaked-pw" not in proc.stderr
     assert "postgresql://" not in proc.stderr
     assert "must be lifeos" in proc.stderr
+
+
+def test_setup_services_syncs_app_database_url_from_mainai_app_password():
+    script = (CURSOR_DIR / "setup-services.sh").read_text()
+    assert "sync_app_database_url.py" in script
+    assert "APP_DATABASE_URL must be set after sync" in script
+
+
+def test_install_sh_does_not_hardcode_app_database_url_independently_of_mainai_app_password():
+    script = (CURSOR_DIR / "install.sh").read_text()
+    assert "sync_app_database_url.py" in script
+    assert "APP_DATABASE_URL=postgresql://mainai_app:" not in script
+
+
+def test_derive_app_database_url_matches_ensure_app_role():
+    security_dir = REPO_ROOT / "backend" / "scripts" / "security"
+    sys.path.insert(0, str(security_dir))
+    import ensure_app_role  # noqa: E402
+
+    database_url = "postgresql://lifeos:lifeos@localhost:5432/lifeos"
+    app_password = "s3cret@pw"
+    assert derive_app_database_url(database_url, app_password) == ensure_app_role._derive_app_database_url(
+        database_url, app_password
+    )
+
+
+def test_sync_env_file_rewrites_drifted_app_database_url_without_logging_secrets(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "DATABASE_URL=postgresql://lifeos:lifeos@localhost:5432/lifeos\n"
+        "MAINAI_APP_PASSWORD=rotated-pw\n"
+        "APP_DATABASE_URL=postgresql://mainai_app:stale-pw@localhost:5432/lifeos\n"
+    )
+    changed = sync_env_file(
+        env_path,
+        database_url="postgresql://lifeos:lifeos@localhost:5432/lifeos",
+        app_password="rotated-pw",
+    )
+    assert changed is True
+    updated = env_path.read_text()
+    assert "APP_DATABASE_URL=postgresql://mainai_app:rotated-pw@localhost:5432/lifeos" in updated
+    assert "stale-pw" not in updated
+
+
+def test_sync_app_database_url_cli_never_prints_password_on_stderr(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "DATABASE_URL=postgresql://lifeos:lifeos@localhost:5432/lifeos\n"
+        "MAINAI_APP_PASSWORD=super-secret\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, str(CURSOR_DIR / "sync_app_database_url.py"), str(env_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "DATABASE_URL": "postgresql://lifeos:lifeos@localhost:5432/lifeos",
+            "MAINAI_APP_PASSWORD": "super-secret",
+        },
+    )
+    assert proc.returncode == 0
+    assert "super-secret" not in proc.stderr
+    assert "postgresql://" not in proc.stderr
+    assert "APP_DATABASE_URL=postgresql://mainai_app:super-secret@localhost:5432/lifeos" in env_path.read_text()

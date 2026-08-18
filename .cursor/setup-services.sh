@@ -32,6 +32,14 @@ eval "$(python3 "$REPO/.cursor/parse_database_url.py")"
 : "${LIFEOS_PASSWORD:?failed to parse lifeos password from DATABASE_URL}"
 : "${LIFEOS_DB:?failed to parse database name from DATABASE_URL}"
 
+echo "--> Syncing APP_DATABASE_URL with MAINAI_APP_PASSWORD (same derivation as production worker)"
+python3 "$REPO/.cursor/sync_app_database_url.py" "$ENV_FILE"
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+: "${APP_DATABASE_URL:?APP_DATABASE_URL must be set after sync — check DATABASE_URL and MAINAI_APP_PASSWORD}"
+
 echo "--> Ensuring Postgres 16 cluster is online"
 if ! pg_lsclusters -h 2>/dev/null | awk '$1=="16" && $2=="main" {print $4}' | grep -q online; then
   sudo pg_ctlcluster 16 main start
