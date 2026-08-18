@@ -45,7 +45,7 @@ if [ ! -f "$ENV_FILE" ]; then
 ENVIRONMENT=development
 SECRET_KEY=dev-only-secret-key-not-for-production-change-me
 FOUNDER_EMAIL=founder@lifeos.local
-FOUNDER_PASSWORD=DevFounderPass123!
+FOUNDER_PASSWORD=TestFounderPassword123!
 MAINAI_APP_PASSWORD=mainai_app
 
 DATABASE_URL=postgresql://lifeos:lifeos@localhost:5432/lifeos
