@@ -24,6 +24,7 @@ CANONICAL_FOUNDER_PASSWORD = "TestFounderPassword123!"
 # Import without adding .cursor to the app package path permanently.
 sys.path.insert(0, str(CURSOR_DIR))
 from derive_app_database_url import derive_app_database_url  # noqa: E402
+from derive_pytest_env import derive_pytest_database_urls  # noqa: E402
 from parse_database_url import parse_lifeos_database_url  # noqa: E402
 from sync_app_database_url import sync_env_file  # noqa: E402
 
@@ -184,3 +185,51 @@ def test_sync_app_database_url_cli_never_prints_password_on_stderr(tmp_path):
     assert "super-secret" not in proc.stderr
     assert "postgresql://" not in proc.stderr
     assert "APP_DATABASE_URL=postgresql://mainai_app:super-secret@localhost:5432/lifeos" in env_path.read_text()
+
+
+def test_run_backend_tests_script_derives_pytest_env_from_backend_dotenv():
+    script = (CURSOR_DIR / "run-backend-tests.sh").read_text()
+    assert "derive_pytest_env.py" in script
+    assert "backend/.env" in script
+    assert 'exec pytest "$@"' in script
+
+
+def test_derive_pytest_env_uses_cloud_agent_postgres_not_conftest_5433_default():
+    database_url = "postgresql://lifeos:lifeos@localhost:5432/lifeos"
+    app_password = "mainai_app"
+    test_db = "lifeos_test_999"
+    admin_url, app_url = derive_pytest_database_urls(database_url, app_password, test_db)
+    assert admin_url == "postgresql://lifeos:lifeos@localhost:5432/lifeos_test_999"
+    assert app_url == "postgresql://mainai_app:mainai_app@localhost:5432/lifeos_test_999"
+    assert ":5433/" not in admin_url
+
+
+@pytest.mark.parametrize("bad_name", ["", "lifeos;drop", "lifeos-test"])
+def test_derive_pytest_env_rejects_non_identifier_test_database_names(bad_name):
+    with pytest.raises(ValueError, match="simple identifier"):
+        derive_pytest_database_urls(
+            "postgresql://lifeos:lifeos@localhost:5432/lifeos",
+            "mainai_app",
+            bad_name,
+        )
+
+
+def test_derive_pytest_env_cli_never_prints_secrets_on_stderr():
+    proc = subprocess.run(
+        [sys.executable, str(CURSOR_DIR / "derive_pytest_env.py")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "DATABASE_URL": "postgresql://lifeos:super-secret@localhost:5432/lifeos",
+            "MAINAI_APP_PASSWORD": "app-pw",
+            "LIFEAI_TEST_DATABASE_NAME": "lifeos_test_cli",
+        },
+    )
+    assert proc.returncode == 0
+    assert "DATABASE_URL=" in proc.stdout
+    assert "APP_DATABASE_URL=" in proc.stdout
+    assert "super-secret" not in proc.stderr
+    assert "app-pw" not in proc.stderr
+    assert "postgresql://" not in proc.stderr

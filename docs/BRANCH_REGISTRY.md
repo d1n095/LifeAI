@@ -25,8 +25,11 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
 
-**`cursor/cloud-agent-founder-password-canonical` — ÖPPEN (lokal).** Cloud Agent
-`install.sh` uses the same dev founder password as `tests/conftest.py` / smoke tests.
+**`cursor/registry-post-99` → PR [#100](https://github.com/d1n095/LifeAI/pull/100) — ÖPPEN (CI
+retrigger).** Registry tip @ `8ab69f5`.
+
+**`cursor/cloud-agent-pytest-env` — ÖPPEN (lokal).** `.cursor/run-backend-tests.sh` derives
+pytest DB URLs from `backend/.env` (Cloud Agent :5432 + password auth, not conftest :5433).
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
