@@ -63,13 +63,13 @@ koordineringspunkt för framtiden.
 `c0b9333`). Helt oberoende av Cursors PR #79/#80/#81/#92.
 
 **OBS — sex PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 →
-(denna, öppnas snart). Rekommenderas starkt att grundaren granskar/mergar i den ordningen
-innan ytterligare steg läggs på — arbetet fortsätter enligt uttrycklig instruktion att inte
-pausa i onödan.
+[#104](https://github.com/d1n095/LifeAI/pull/104). Rekommenderas starkt att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — arbetet fortsätter enligt
+uttrycklig instruktion att inte pausa i onödan.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/cognition-foundation-review` | Öppnas denna session | Pushad, redo för granskning | Adversarial granskning av #94→#102 (dokument, 8 fynd) + migration 0051 (`capability_record` i active_context-registret) + 11 nya tester (RLS-beteende + active_context-koppling) + `list_current_founder_memory()` | `claude/corpus-trial-harness` @ c0b9333 (stackad ovanpå PR #102) |
+| `claude/cognition-foundation-review` | [#104](https://github.com/d1n095/LifeAI/pull/104) | Pushad, CI körs | Adversarial granskning av #94→#102 (dokument, 8 fynd) + migration 0051 (`capability_record` i active_context-registret) + 11 nya tester (RLS-beteende + active_context-koppling) + `list_current_founder_memory()` | `claude/corpus-trial-harness` @ c0b9333 (stackad ovanpå PR #102) |
 
 ## Pass 67 (2026-08-18): `claude/corpus-trial-harness` — Life Corpus Trial Harness (INGEN ny migration), stackad ovanpå PR #101 (`claude/causal-diagnosis-interface` @ `49d1f3d`), egen worktree, femte steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
