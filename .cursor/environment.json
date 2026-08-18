@@ -13,7 +13,7 @@
     },
     {
       "name": "worker (imports/jobs/storage outbox)",
-      "command": "cd backend && source .venv/bin/activate && exec python -m app.worker"
+      "command": "exec .cursor/run-worker.sh"
     }
   ],
   "ports": [
