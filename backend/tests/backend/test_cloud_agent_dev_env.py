@@ -24,7 +24,7 @@ CANONICAL_FOUNDER_PASSWORD = "TestFounderPassword123!"
 # Import without adding .cursor to the app package path permanently.
 sys.path.insert(0, str(CURSOR_DIR))
 from derive_app_database_url import derive_app_database_url  # noqa: E402
-from derive_pytest_env import derive_pytest_database_urls  # noqa: E402
+from derive_pytest_env import derive_pytest_database_urls, read_env_keys  # noqa: E402
 from parse_database_url import parse_lifeos_database_url  # noqa: E402
 from sync_app_database_url import sync_env_file  # noqa: E402
 
@@ -189,9 +189,26 @@ def test_sync_app_database_url_cli_never_prints_password_on_stderr(tmp_path):
 
 def test_run_backend_tests_script_derives_pytest_env_from_backend_dotenv():
     script = (CURSOR_DIR / "run-backend-tests.sh").read_text()
-    assert "derive_pytest_env.py" in script
-    assert "backend/.env" in script
+    assert 'derive_pytest_env.py" "$ENV_FILE"' in script
     assert 'exec pytest "$@"' in script
+    assert '. "$ENV_FILE"' not in script, (
+        "run-backend-tests.sh must not source the full dev .env into pytest — REDIS_URL db 0 "
+        "and STORAGE_ROOT would bypass conftest isolation defaults"
+    )
+
+
+def test_read_env_keys_reads_only_requested_database_credentials(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "REDIS_URL=redis://localhost:6379/0\n"
+        "DATABASE_URL=postgresql://lifeos:lifeos@localhost:5432/lifeos\n"
+        "MAINAI_APP_PASSWORD=mainai_app\n"
+        "STORAGE_ROOT=/home/dev/uploads\n"
+    )
+    vals = read_env_keys(env_path)
+    assert set(vals) == {"DATABASE_URL", "MAINAI_APP_PASSWORD"}
+    assert vals["DATABASE_URL"].startswith("postgresql://lifeos:")
+    assert vals["MAINAI_APP_PASSWORD"] == "mainai_app"
 
 
 def test_derive_pytest_env_uses_cloud_agent_postgres_not_conftest_5433_default():

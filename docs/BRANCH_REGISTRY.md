@@ -6,12 +6,14 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-18) — integration @ `8ab69f5`
+## Aktiva PR:er (2026-08-18) — integration @ `d6fde39`
 
-**Integration tip:** `claude/det-kommer-mer-879lcm` @ `8ab69f5` (PR #99 merge).
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `d6fde39` (PR #103 merge).
 
 | PR | Merge SHA | Scope |
 |---|---|---|
+| [#103](https://github.com/d1n095/LifeAI/pull/103) | `d6fde39` | Cloud Agent `.cursor/run-backend-tests.sh` for :5432 password auth |
+| [#100](https://github.com/d1n095/LifeAI/pull/100) | `689cb1f` | Registry tip post-#99 @ `8ab69f5` |
 | [#99](https://github.com/d1n095/LifeAI/pull/99) | `8ab69f5` | Cloud Agent founder password matches pytest harness |
 | [#97](https://github.com/d1n095/LifeAI/pull/97) | `5a9cb99` | Cloud Agent sync `APP_DATABASE_URL` from `MAINAI_APP_PASSWORD` |
 | [#95](https://github.com/d1n095/LifeAI/pull/95) | `98f308b` | Public `/api/health` worker liveness (`alive`/`unknown`, no 503) |
@@ -25,11 +27,8 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
 
-**`cursor/registry-post-99` → PR [#100](https://github.com/d1n095/LifeAI/pull/100) — ÖPPEN (CI
-retrigger).** Registry tip @ `8ab69f5`.
-
-**`cursor/cloud-agent-pytest-env` — ÖPPEN (lokal).** `.cursor/run-backend-tests.sh` derives
-pytest DB URLs from `backend/.env` (Cloud Agent :5432 + password auth, not conftest :5433).
+**`cursor/cloud-agent-pytest-isolation` — ÖPPEN (lokal).** Fix #103 regression: do not source
+full dev `.env` into pytest (preserve conftest Redis/storage isolation).
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
