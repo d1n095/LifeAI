@@ -6,6 +6,66 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 71 (2026-08-18): `claude/founder-memory-signal-staging` — Candidate Learning Signals (migration 0053) + "never automate" wording audit + Source Vault future-compatibility review, stackad ovanpå PR #110 (`claude/corpus-trial-problem-learning` @ `04a0b67`), egen worktree, nionde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund — grundarens direktiv:** (1) koppla INTE `chat.py`s resolver-markörer direkt in i
+`founder_memory`-sanning — stående princip SIGNAL PRODUCER != TRUTH WRITER, med en fyrastegs
+arkitektur (källhändelse → bevarad källreferens → kandidat-lärsignal →
+bevis/klassificeringssteg → härledd grundarkunskap ENDAST när motiverat); (2) granska all
+"never automate"-formulering adversariellt — nuvarande begränsningar ("inte autonomt
+betrodd ännu") får INTE av misstag bli permanenta arkitekturförbud om den verkliga avsikten
+bara är att kräva styrning; (3) inspektera Source Vault-arkitekturen för framtida
+kompatibilitet FÖRE storskalig korpus-inmatning, utan att bygga ett stort lagringssystem nu.
+
+**Byggt (1) — `backend/app/founder_memory_signals/`, migration 0053:**
+- `candidate_learning_signals` — NY tabell, MEDVETET utan `authority`/`basis`-kolumner
+  (en rad här är ALDRIG ett påstående om världen, bara ett påstående att en signalproducent
+  märkte något). `record_candidate_signal()` — den enda skrivvägen, säker att anropa från en
+  live observationell hot path. `promote_candidate_signal()` — DEN ENDA vägen till en riktig
+  `FounderMemoryNote`, kräver ALLTID anroparens egen explicita `authority`/`basis`, ALDRIG
+  signalens egen `classifier_confidence` tyst kopierad in — bevisat direkt av ett dedikerat
+  test. `dismiss_candidate_signal()` — raderar aldrig, markerar bara granskad-och-avvisad.
+- `app/routers/chat.py` kopplad LIVE: `resolve_context()`s klassificering (redan live,
+  "purely observational") skriver nu en kandidatsignal för `INTENT_EXPLICIT_MEMORY`/
+  `INTENT_CORRECTION`/`INTENT_IDEA_WORTH_SAVING` — ALDRIG till `founder_memory_notes` direkt.
+  Inpackad i try/except: ett fel här kan ALDRIG förstöra chatt-svaret. 90/90 befintliga
+  chatt-tester gröna efteråt (ingen regression på denna live hot path), plus 5+2 nya tester
+  som bevisar kopplingen (inklusive att ett fel svaljs tyst, aldrig kraschar anroparen).
+
+**Byggt (2) — "never automate"-formulering omskriven i 4 dokument** (`LIFE_CAPABILITY_
+REALITY.md`, `LIFE_CAUSAL_DIAGNOSIS_INTERFACE.md`, `LIFE_CORPUS_TRIAL_HARNESS.md`,
+`LIFE_FOUNDER_MEMORY.md`): varje "deliberately never built" ersatt med en explicit "Protected
+vs. current-scope"-distinktion — genuint permanenta invarianter (fabricering, auktoritets-
+läckage, tyst inferens-till-sanning, permission-bypass) förblir starkt formulerade; allt annat
+omformulerat till "inte byggt i detta bootstrap-steg, med ett konkret villkor för när det
+SKULLE vara säkert att bygga senare" — utan att någon kod ändrats, bara ärlighet om vad som
+faktiskt är förbjudet kontra bara obyggt än.
+
+**Byggt (3) — `docs/LIFE_SOURCE_VAULT_FUTURE_COMPATIBILITY.md`** (rent granskningsdokument,
+INGEN kodändring): bekräftade att nuvarande lagringsarkitektur (`app/storage/`,
+content-addressed sha256, redan abstraherad bakom `StorageBackend`-gränssnittet, dedup via
+referensräkning, strömmande atomära skrivningar) redan är väl positionerad för framtida
+hashing/dedup/chunking/compression/encryption/cold-storage UTAN kodändring nu — abstraktionen
+själv är redan det som krävs. EN specifik risk dokumenterad för framtiden (inte åtgärdad nu):
+en naiv framtida helfil-kryptering skulle återskapa exakt den "jätte-krypterade-blob"-
+antimönster grundaren varnade för — måste vara sub-fil-granulär när kryptering väl byggs.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. `app/routers/chat.py` är INTE i den listan och rördes medvetet, med
+full regressionstäckning av den befintliga svit som redan täcker den filen.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #110 (`claude/corpus-trial-problem-
+learning` @ `04a0b67`). Helt oberoende av Cursors PR #79/#80/#81/#92/#105/#107.
+
+**OBS — nio PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 → #104 →
+#108 → #110 → (denna, öppnas snart). Grundaren har nu explicit bett om att stacken
+integreras/mergas i beroendeordning härnäst, inte staplas ytterligare i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/founder-memory-signal-staging` | Öppnas denna session | Pushad, redo för granskning | Candidate Learning Signals (migration 0053, SIGNAL PRODUCER != TRUTH WRITER, live chat.py-koppling) + never-automate-formulering i 4 dokument + Source Vault framtida kompatibilitetsgranskning (inget kodbygge) | `claude/corpus-trial-problem-learning` @ 04a0b67 (stackad ovanpå PR #110) |
+
 ## Pass 70 (2026-08-18): `claude/corpus-trial-problem-learning` — wire `app.problem_learning` into corpus trial harness fixtures (INGEN ny migration), stackad ovanpå PR #108 (`claude/corpus-trial-run-history` @ `b4502f7`), egen worktree, åttonde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund:** sista kvarvarande "Explicitly deferred"-punkten från PR #102s egen dokumentation

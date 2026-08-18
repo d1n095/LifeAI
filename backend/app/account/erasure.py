@@ -627,6 +627,12 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # this one narrow SECURITY DEFINER function, same as capability_observation_events.
         db.execute(sa_text("SELECT erase_own_corpus_trial_run_children()"))
 
+        # --- Life Candidate Learning Signals (migration 0053, see docs/LIFE_FOUNDER_MEMORY.md's
+        # "Candidate learning signals" section): candidate_learning_signals has DELETE revoked
+        # from mainai_app the same way founder_memory_notes/diagnosis_records do, deletion only
+        # through this one narrow SECURITY DEFINER function.
+        db.execute(sa_text("SELECT erase_own_candidate_learning_signal_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.

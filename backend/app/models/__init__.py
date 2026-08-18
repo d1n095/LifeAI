@@ -31,6 +31,13 @@ from app.models.capability_reality import (
     CapabilityObservationEvent,
     CapabilityRecord,
 )
+from app.models.candidate_learning_signal import (
+    CANDIDATE_SIGNAL_CONFIDENCES,
+    CANDIDATE_SIGNAL_KINDS,
+    CANDIDATE_SIGNAL_SOURCE_TYPES,
+    CANDIDATE_SIGNAL_STATUSES,
+    CandidateLearningSignal,
+)
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
@@ -211,6 +218,11 @@ __all__ = [
     "CAPABILITY_STATUSES",
     "CapabilityObservationEvent",
     "CapabilityRecord",
+    "CANDIDATE_SIGNAL_CONFIDENCES",
+    "CANDIDATE_SIGNAL_KINDS",
+    "CANDIDATE_SIGNAL_SOURCE_TYPES",
+    "CANDIDATE_SIGNAL_STATUSES",
+    "CandidateLearningSignal",
     "ClaimRelationship",
     "CompanyInfo",
     "Conversation",

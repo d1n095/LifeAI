@@ -110,15 +110,42 @@ capability.
 
 ## Explicitly deferred layers
 
-- Automatic capability discovery (scanning the filesystem/environment and inventing capability
-  records without an explicit caller assertion) — deliberately never built; see Principles.
+Not built in this bootstrap increment -- current LIMITATIONS, not permanent architectural
+prohibitions. Read alongside the "Protected vs. current-scope" note below: none of these are
+forbidden forever; each is "not autonomously trusted yet," and each has a concrete condition
+under which it could be safely built later without weakening any protected invariant.
+
+- Automatic capability discovery (scanning the filesystem/environment and writing capability
+  records without today's explicit caller assertion) — not built now. A future scanner remains
+  possible PROVIDED it is itself the explicit caller: it must assert `basis="deterministic"`
+  honestly (a real scan IS deterministic evidence, not a guess) and never claim
+  `authority="founder"` for something no founder asserted. The thing actually prohibited is
+  silently inventing a record with no caller-asserted classification at all -- not automation
+  itself.
 - Automatic capability scoring/ranking across capabilities — this foundation records facts, it
-  does not rank them.
+  does not rank them, in this increment. A future ranking layer is possible; it would consume
+  `capability_records` as read-only input and write its OWN separate, clearly-labeled output,
+  never overwrite a capability's own recorded status/authority.
 - A UI surface for founders to browse capability reality (data + service layer only, matching
   every other "foundation" layer in this codebase).
 - Wiring capability-gap detection into an automatic self-improvement trigger — see the separate,
-  not-yet-built controlled self-improvement loop this foundation is a prerequisite for.
+  not-yet-built controlled self-improvement loop this foundation is a prerequisite for. The
+  prerequisite is proof, not a ban: this becomes safe once that loop exists AND can show its own
+  actions stay inside the protected/adaptive boundary `docs/LIFE_STRATEGY_EVALUATION_AND_
+  PROMOTION.md`'s own "Protected-vs-adaptive boundary" section already establishes.
 - A generic tool/module installation lifecycle (`installation_source`, `update_policy`,
   `uninstall_behavior` as sketched in `docs/LIFE_CANONICAL_ARCHITECTURE.md` §H's own provisional
   design) — this migration ships the smaller, evidence/status-focused subset of that sketch;
   the installation-lifecycle fields remain future work, not silently assumed unnecessary.
+
+## Protected vs. current-scope (not the same thing)
+
+The truly permanent invariants this foundation must never violate, at any future automation
+level: never fabricate a capability observation with no real evidence behind it; never let an
+automated process claim `authority="founder"`; never bypass permission/authority checks
+elsewhere in the system because a capability record says something is "available"; never
+silently overwrite an existing observation's history (`capability_observation_events` stays
+append-only regardless of who or what is writing to `capability_records`). Everything in
+"Explicitly deferred layers" above is a current-scope limitation bounded by those invariants,
+not a separate, harder wall -- "not autonomously trusted yet" is not the same claim as "must
+never exist."

@@ -512,6 +512,11 @@ _MAINAI_EXECUTION_TABLES = (
     # -- privilege-narrowed below exactly like them (DB trigger enforces append-only, not just
     # GRANT/REVOKE), wired in the same migration that creates it.
     "corpus_trial_runs",
+    # Migration 0053 (Life Candidate Learning Signals): candidate_learning_signals plays the
+    # SAME structural role founder_memory_notes/diagnosis_records already play -- a mutable row
+    # whose status transitions in place (unreviewed -> promoted/dismissed), never rewritten
+    # content, deletion only through the SECURITY DEFINER erasure path.
+    "candidate_learning_signals",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -601,6 +606,7 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "name": "corpus_trial_runs_deny_mutation", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
+    {"name": "erase_own_candidate_learning_signal_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -893,6 +899,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_diagnosis_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON corpus_trial_runs FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_corpus_trial_run_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON candidate_learning_signals FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_candidate_learning_signal_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -949,6 +957,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("founder_memory_notes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("diagnosis_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("corpus_trial_runs", _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES),
+            ("candidate_learning_signals", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
