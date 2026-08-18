@@ -503,6 +503,10 @@ _MAINAI_EXECUTION_TABLES = (
     # revoked, UPDATE kept for status transitions) since both are history-preserving fact
     # records where deletion must go exclusively through the SECURITY DEFINER erasure path.
     "founder_memory_notes",
+    # Migration 0050 (Life Causal Diagnosis Interface): diagnosis_records plays the SAME
+    # structural role founder_memory_notes/life_problem_decisions already play -- same
+    # privilege narrowing (DELETE revoked, UPDATE kept for epistemic_stage transitions).
+    "diagnosis_records",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -585,6 +589,7 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "mainai_app_execute": False, "security_definer": False,
     },
     {"name": "erase_own_founder_memory_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_diagnosis_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -873,6 +878,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_capability_reality_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_memory_notes FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_founder_memory_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON diagnosis_records FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_diagnosis_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -927,6 +934,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("agent_work_assignment_events", _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES),
             ("capability_observation_events", _CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES),
             ("founder_memory_notes", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("diagnosis_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

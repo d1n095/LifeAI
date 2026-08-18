@@ -6,6 +6,62 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 66 (2026-08-18): `claude/causal-diagnosis-interface` — Life Causal Diagnosis Interface (migration 0050), stackad ovanpå PR #98 (`claude/adaptive-cognition-boundary` @ `b7c1c6b`), egen worktree, fjärde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** genomgång av `EngineeringLesson.root_cause` (migration 0032 — fritext, skrivet
+FÖRST efter att en lektion redan är helt förstådd, inget mellansteg för en obevisad hypotes)
+och `RecoveryClassification` (migration 0033 — en ANNAN, smalare taxonomi om hur mycket av en
+död agents arbete som gick att rädda, inte en generell felorsakstaxonomi) bekräftade: ingen
+strukturerad, sluten kausal-kategori-taxonomi existerar någonstans, och ingenting skiljer
+"observerat" från "misstänkt orsak" från "bevisad orsak" som tre genuint separata
+epistemiska tillstånd. Detta är uppdragets punkt 6 (`En misslyckad steg betyder INTE
+automatiskt att kodändringen är dålig`).
+
+**Byggt** (`backend/app/diagnosis/`, migration 0050):
+- `diagnosis_records` — samma strukturella roll som `founder_memory_notes`/
+  `life_problem_decisions` redan spelar: `observation` (ALDRIG omskrivet, det faktiskt
+  observerade), `hypothesis_category` (nio bootstrap-exempel: code_regression/
+  concurrency_timing/stale_state/environment_configuration/external_service_failure/
+  dependency_failure/authorization_blocker/missing_capability/unknown — utökningsbar, ingen
+  permanent taxonomi), `epistemic_stage` (observed/hypothesis/proven_cause/ruled_out),
+  `authority`/`basis` (ÅTERANVÄNDER migration 0042:s vokabulär för TREDJE gången i denna
+  kodbas), `supersedes_diagnosis_id`. HÅRD REGEL, strukturell inte bara dokumenterad:
+  `epistemic_stage='proven_cause'` KRÄVER en riktig `proven_evidence_id`
+  (`intelligence_evidence`)-referens — en CHECK-constraint, inte bara anropardisciplin.
+- `service.py` — `record_diagnosis()` (den enda skrivvägen), `prove_diagnosis_cause()` (ENDA
+  vägen till `proven_cause`, kräver riktigt bevis), `rule_out_diagnosis()`,
+  `list_unresolved_diagnoses()`.
+- Utökade `app.active_context.service`s centrala register med `diagnosis_record` (samma
+  mekanism som redan utökats en gång för `founder_memory_note`).
+
+**Bevisat via tester:** uppdragets eget konkreta exempel ("PR:ns tester gröna + GitHub API
+503 under merge -> extern/transient blockerare-kandidat, ALDRIG kod-regression") kodat
+ordagrant som ett testfall; en `proven_cause`-övergång utan bevis avvisas av databasen
+sjölv; en senare omprövning ersätter en tidigare diagnos medan båda bevaras oförändrade;
+`rule_out_diagnosis()` raderar aldrig, markerar bara avvisad.
+
+Full lokal verifiering: 11/11 nya tester, 43/43 i den delade registret
+(`tests/backend/context/` — inga regressioner), full `tests/backend/mainai/`-regression
+grön (samma förbefintliga `rg`-relaterade fel, orört), ruff rent, `git diff --check` rent,
+Alembic-huvud verifierat vid `0050` (EN ny migration).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #98 (`claude/adaptive-cognition-boundary`
+@ `b7c1c6b`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — fyra PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → (denna, öppnas). Var
+och en är oberoende grön (bortsett från samma bekräftat orelaterade CI-flake) och granskad,
+men beror på varandra i ordning. Rekommenderas att grundaren granskar/mergar i den
+ordningen innan ytterligare steg läggs på — flaggat här enligt registrets egna princip, men
+arbetet fortsätter enligt uttrycklig instruktion att inte pausa i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/causal-diagnosis-interface` | Öppnas denna session | Pushad, redo för granskning | Life Causal Diagnosis Interface: `diagnosis_records` (migration 0050), observed/hypothesis/proven_cause/ruled_out som skilda epistemiska tillstånd, `proven_cause` DB-tvingat kräva riktigt bevis, återanvänder migration 0042:s authority/basis-vokabulär — 11 tester, EN ny migration | `claude/adaptive-cognition-boundary` @ b7c1c6b (stackad ovanpå PR #98) |
+
 ## Pass 65 (2026-08-17/18): `claude/adaptive-cognition-boundary` — Adaptive Cognition / Protected-vs-Adaptive Boundary (INGEN ny migration), stackad ovanpå PR #96 (`claude/agent-founder-memory` @ `8b55768`), egen worktree, tredje steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund — varför ingen ny grund byggdes:** en genomläsning av `docs/LIFE_SELF_OPTIMIZING_
@@ -51,7 +107,7 @@ OFÖRÄNDRAT vid `0049` (denna branch lägger inte till något schema).
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/adaptive-cognition-boundary` | Öppnas denna session | Pushad, redo för granskning | Cross-system bevis att den adaptiva strategi-evolutionslagret (migration 0043–0045) aldrig kan nå eller försvaga grundarens godkännandegrind eller agent-dispatch-grinden — 3 nya tester, INGEN ny migration | `claude/agent-founder-memory` @ 8b55768 (stackad ovanpå PR #96) |
+| `claude/adaptive-cognition-boundary` | [#98](https://github.com/d1n095/LifeAI/pull/98) | Pushad, CI grön förutom en 3x bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Cross-system bevis att den adaptiva strategi-evolutionslagret (migration 0043–0045) aldrig kan nå eller försvaga grundarens godkännandegrind eller agent-dispatch-grinden — 3 nya tester, INGEN ny migration | `claude/agent-founder-memory` @ 8b55768 (stackad ovanpå PR #96) |
 
 ## Pass 64 (2026-08-17): `claude/agent-founder-memory` — Life Founder/User Memory foundation (migration 0049), stackad ovanpå PR #94 (`claude/agent-capability-reality` @ `b12ce9d`), egen worktree, andra steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS" — grundarens/projektets/världens/Lifes egna faktalager hålls semantiskt separata men länkbara
 

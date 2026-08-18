@@ -616,6 +616,11 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # shape as founder_memory_notes' own closest precedent, life_problem_decisions.
         db.execute(sa_text("SELECT erase_own_founder_memory_children()"))
 
+        # --- Life Causal Diagnosis Interface (migration 0050, see docs/LIFE_CAUSAL_DIAGNOSIS_
+        # INTERFACE.md): diagnosis_records has DELETE revoked from mainai_app the same way,
+        # deletion only through this one narrow SECURITY DEFINER function.
+        db.execute(sa_text("SELECT erase_own_diagnosis_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.
