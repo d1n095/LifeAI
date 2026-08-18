@@ -5,7 +5,7 @@
   "terminals": [
     {
       "name": "backend (FastAPI :8000)",
-      "command": "cd backend && source .venv/bin/activate && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      "command": "exec .cursor/run-backend.sh"
     },
     {
       "name": "frontend (Next.js :3000)",

@@ -260,3 +260,31 @@ def test_run_worker_script_respects_graceful_shutdown():
     """Exit code 0 (graceful shutdown via SIGTERM handler) must NOT trigger a restart."""
     script = (CURSOR_DIR / "run-worker.sh").read_text()
     assert "exit_code -eq 0" in script
+
+
+# --- Backend auto-restart wrapper ---
+
+
+def test_environment_json_backend_terminal_uses_restart_wrapper():
+    """The backend terminal must use run-backend.sh (restart-on-crash), not bare uvicorn."""
+    env_json = json.loads((CURSOR_DIR / "environment.json").read_text())
+    backend_terminals = [t for t in env_json["terminals"] if "backend" in t["name"].lower()]
+    assert len(backend_terminals) == 1
+    cmd = backend_terminals[0]["command"]
+    assert "run-backend.sh" in cmd
+    assert "uvicorn" not in cmd
+
+
+def test_run_backend_script_has_bounded_failure_limit():
+    """run-backend.sh must stop after consecutive failures to avoid masking deterministic bugs."""
+    script = (CURSOR_DIR / "run-backend.sh").read_text()
+    assert "MAX_CONSECUTIVE_FAILURES" in script
+    assert "consecutive_failures" in script
+    assert "Stopping" in script or "stopping" in script
+
+
+def test_run_backend_script_resets_backoff_after_successful_run():
+    """If uvicorn ran for >60s (was serving), backoff resets — it's a transient crash, not startup failure."""
+    script = (CURSOR_DIR / "run-backend.sh").read_text()
+    assert "run_duration" in script
+    assert "delay=1" in script
