@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.active_context import ActiveContextEvent, ActiveContextMember, ActiveContextSet
+from app.models.capability_reality import CapabilityRecord
 from app.models.conversation import Conversation, Message
 from app.models.diagnosis import DiagnosisRecord
 from app.models.document import Document
@@ -48,7 +49,7 @@ SUPPORTED_TYPES = frozenset({
     "intelligence_interpretation", "intelligence_idea", "project", "project_note", "memory_thread",
     "life_intent", "life_intent_blocker", "life_problem", "life_problem_approach",
     "life_solution_component", "life_problem_assumption", "life_problem_decision",
-    "life_approach_outcome", "founder_memory_note", "diagnosis_record",
+    "life_approach_outcome", "founder_memory_note", "diagnosis_record", "capability_record",
 })
 ANCHOR_TYPES = SUPPORTED_TYPES | {"explicit_topic"}
 
@@ -108,6 +109,7 @@ def _owned_row(db: Session, owner_id: uuid.UUID, ref: _Ref):
         "life_approach_outcome": (LifeApproachOutcome, LifeApproachOutcome.owner_id),
         "founder_memory_note": (FounderMemoryNote, FounderMemoryNote.owner_id),
         "diagnosis_record": (DiagnosisRecord, DiagnosisRecord.owner_id),
+        "capability_record": (CapabilityRecord, CapabilityRecord.owner_id),
     }
     if ref.object_type in mappings:
         model, owner_column = mappings[ref.object_type]
@@ -190,6 +192,8 @@ def _edges(db: Session, owner_id: uuid.UUID, ref: _Ref, row: object) -> list[_Ed
     elif ref.object_type == "diagnosis_record":
         add("diagnosis_record", row.supersedes_diagnosis_id, "supersedes")
         add("intelligence_evidence", row.proven_evidence_id, "proven_by")
+    elif ref.object_type == "capability_record":
+        add("intelligence_evidence", row.last_verification_evidence_id, "verified_by")
     return edge
 
 

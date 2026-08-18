@@ -122,3 +122,18 @@ def list_founder_memory(
     if authority is not None:
         stmt = stmt.where(FounderMemoryNote.authority == authority)
     return list(db.execute(stmt.order_by(FounderMemoryNote.observed_at)).scalars().all())
+
+
+def list_current_founder_memory(db: Session, *, owner_id: uuid.UUID, note_type: str | None = None) -> list[FounderMemoryNote]:
+    """The safe-by-default entry point: only `status="active"` notes -- excludes both
+    `superseded` (replaced by a newer note) and `disputed` (the founder's own truth is now in
+    question). `list_founder_memory()` remains available for audit/history views that
+    deliberately want everything including superseded/disputed rows; this is the one a caller
+    reaches for by default so a disputed or superseded note is never silently treated as
+    current just because a status filter was forgotten. Mirrors `app.diagnosis.service.
+    list_current_diagnoses()`'s same "give me what's currently true" role for the sibling
+    foundation -- the two are NOT interchangeable (see that function's own docstring on why
+    `ruled_out` and `disputed` mean different things for currency), but both exist so neither
+    foundation's own safe default is one status filter a caller has to remember to add."""
+
+    return list_founder_memory(db, owner_id=owner_id, note_type=note_type, status="active")
