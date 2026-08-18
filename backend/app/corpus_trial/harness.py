@@ -1,14 +1,15 @@
-"""Runs `fixtures.CORPUS` through the REAL `app.founder_memory`/`app.diagnosis` recording
-APIs (never a mock, never a direct DB write) and scores the result against `scoring.py`'s
-structural invariants. See docs/LIFE_CORPUS_TRIAL_HARNESS.md for the full rationale --
-this is the minimal evaluation harness foundation for a later, real, controlled mixed-corpus
-trial; it does NOT ingest the founder's actual corpus."""
+"""Runs `fixtures.CORPUS` through the REAL `app.founder_memory`/`app.diagnosis`/`app.
+problem_learning` recording APIs (never a mock, never a direct DB write) and scores the
+result against `scoring.py`'s structural invariants. See docs/LIFE_CORPUS_TRIAL_HARNESS.md
+for the full rationale -- this is the minimal evaluation harness foundation for a later, real,
+controlled mixed-corpus trial; it does NOT ingest the founder's actual corpus."""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.corpus_trial.fixtures import CORPUS, CorpusItem
@@ -27,8 +28,10 @@ from app.founder_memory import (
     record_founder_memory,
 )
 from app.intelligence_governance import record_evidence, record_execution
+from app.models.problem_learning import LifeProblemDecision
+from app.problem_learning.service import create_problem, record_decision
 
-_TEXT_FIELD = {"founder_memory": "content", "diagnosis": "observation"}
+_TEXT_FIELD = {"founder_memory": "content", "diagnosis": "observation", "problem_learning": "decision"}
 
 
 @dataclass
@@ -67,6 +70,7 @@ def run_trial(db: Session, *, owner_id: uuid.UUID, evidence_task_id: uuid.UUID, 
     expect_contradicted: dict[str, bool] = {}
     systems_by_key: dict[str, str] = {}
     confidence_submitted_by_key: dict[str, float | None] = {}
+    problem_id_by_key: dict[str, uuid.UUID] = {}
     evidence = None
 
     for item in items:
@@ -74,8 +78,16 @@ def run_trial(db: Session, *, owner_id: uuid.UUID, evidence_task_id: uuid.UUID, 
         if item.action == "record":
             if item.system == "founder_memory":
                 row = record_founder_memory(db, owner_id=owner_id, idempotency_key=f"corpus-trial:{item.key}", **item.kwargs)
-            else:
+            elif item.system == "diagnosis":
                 row = record_diagnosis(db, owner_id=owner_id, idempotency_key=f"corpus-trial:{item.key}", **item.kwargs)
+            else:
+                decision_kwargs = {k: v for k, v in item.kwargs.items() if k not in ("problem_title", "problem_description")}
+                problem = create_problem(
+                    db, owner_id=owner_id, title=item.kwargs["problem_title"], description=item.kwargs["problem_description"],
+                    idempotency_key=f"corpus-trial:{item.key}:problem",
+                )
+                problem_id_by_key[item.key] = problem.id
+                row = record_decision(db, owner_id=owner_id, problem_id=problem.id, idempotency_key=f"corpus-trial:{item.key}", **decision_kwargs)
             rows_by_key[item.key] = row
             supersedes_by_key[item.key] = None
             confidence_submitted_by_key[item.key] = item.kwargs.get("confidence")
@@ -83,8 +95,14 @@ def run_trial(db: Session, *, owner_id: uuid.UUID, evidence_task_id: uuid.UUID, 
             old = rows_by_key[item.supersedes_key]
             if item.system == "founder_memory":
                 row = record_founder_memory(db, owner_id=owner_id, idempotency_key=f"corpus-trial:{item.key}", supersedes_note_id=old.id, **item.kwargs)
-            else:
+            elif item.system == "diagnosis":
                 row = record_diagnosis(db, owner_id=owner_id, idempotency_key=f"corpus-trial:{item.key}", supersedes_diagnosis_id=old.id, **item.kwargs)
+            else:
+                problem_id_by_key[item.key] = problem_id_by_key[item.supersedes_key]
+                row = record_decision(
+                    db, owner_id=owner_id, problem_id=problem_id_by_key[item.key], idempotency_key=f"corpus-trial:{item.key}",
+                    supersedes_decision_id=old.id, **item.kwargs,
+                )
             rows_by_key[item.key] = row
             supersedes_by_key[item.key] = item.supersedes_key
             confidence_submitted_by_key[item.key] = item.kwargs.get("confidence")
@@ -115,14 +133,21 @@ def run_trial(db: Session, *, owner_id: uuid.UUID, evidence_task_id: uuid.UUID, 
         system = systems_by_key[key]
         text_field = _TEXT_FIELD[system]
         submitted_text = item.kwargs.get(text_field, getattr(rows_by_key[key], text_field))
+        has_confidence = True
         if system == "founder_memory":
             fresh = get_founder_memory(db, owner_id=owner_id, note_id=rows_by_key[key].id)
             is_current = fresh.id in current_founder_ids
             is_contradicted = fresh.status == "disputed"
-        else:
+        elif system == "diagnosis":
             fresh = get_diagnosis(db, owner_id=owner_id, diagnosis_id=rows_by_key[key].id)
             is_current = fresh.id in current_diagnosis_ids
             is_contradicted = fresh.epistemic_stage == "ruled_out"
+        else:
+            fresh = db.execute(select(LifeProblemDecision).where(
+                LifeProblemDecision.id == rows_by_key[key].id, LifeProblemDecision.owner_id == owner_id)).scalar_one()
+            is_current = fresh.status == "active"
+            is_contradicted = False  # no in-place "mark contradicted without a replacement" path exists for this system
+            has_confidence = False  # LifeProblemDecision has no confidence column
 
         old_key = supersedes_by_key.get(key)
         old_id = str(rows_by_key[old_key].id) if old_key else None
@@ -133,9 +158,10 @@ def run_trial(db: Session, *, owner_id: uuid.UUID, evidence_task_id: uuid.UUID, 
                 system=system, record_id=str(fresh.id), text_submitted=submitted_text, text_read_back=read_back_text,
                 authority_submitted=item.kwargs.get("authority", "unknown"), authority_read_back=fresh.authority,
                 basis_submitted=item.kwargs.get("basis", "unknown"), basis_read_back=fresh.basis,
-                confidence_submitted=confidence_submitted_by_key[key], confidence_read_back=float(fresh.confidence) if fresh.confidence is not None else None,
+                confidence_submitted=confidence_submitted_by_key[key] if has_confidence else None,
+                confidence_read_back=(float(fresh.confidence) if has_confidence and fresh.confidence is not None else None),
                 supersedes_id=old_id, is_current=is_current, is_contradicted=is_contradicted,
-                contradiction_text_read_back=read_back_text, contradiction_excludes_currency=(system == "founder_memory"),
+                contradiction_text_read_back=read_back_text, contradiction_excludes_currency=(system != "diagnosis"),
                 extra={"expected_contradicted": expect_contradicted.get(key, False)},
             )
         )

@@ -1,14 +1,24 @@
 """A small, deliberately mixed, deliberately adversarial test corpus for the Life Corpus
 Trial Harness -- NOT the founder's real corpus (that ingestion stays explicitly deferred, see
 docs/LIFE_CORPUS_TRIAL_HARNESS.md). Every item below is plain Python data, replayed through
-the REAL `app.founder_memory`/`app.diagnosis` recording APIs by `harness.py` -- nothing here
-talks to the database directly, so the trial exercises the actual production code path, not a
-mock of it.
+the REAL `app.founder_memory`/`app.diagnosis`/`app.problem_learning` recording APIs by
+`harness.py` -- nothing here talks to the database directly, so the trial exercises the
+actual production code path, not a mock of it.
 
 The corpus is "mixed" on purpose: it interleaves a founder decision, an AI suggestion, an
 inferred pattern, an explicitly unknown-provenance statement, a founder correction that
-supersedes an earlier note, a disputed note, a proven diagnosis, a ruled-out diagnosis, and a
-diagnosis correction -- so no single scoring dimension in `scoring.py` can pass by accident."""
+supersedes an earlier note, a disputed note, a proven diagnosis, a ruled-out diagnosis, a
+diagnosis correction, and a project decision later reconsidered -- so no single scoring
+dimension in `scoring.py` can pass by accident.
+
+`app.problem_learning` (migration 0042, predates this mission) was deliberately left out of
+the bootstrap corpus in PR #102 -- its own docs/LIFE_CORPUS_TRIAL_HARNESS.md named this as a
+"natural, narrow future addition, not a redesign." It already has its own supersession
+discipline (`record_decision()` auto-flips an old row's `status` to `superseded`, the SAME
+"contradiction excludes currency" semantics `founder_memory_notes` uses, not `diagnosis_
+records`' different one) and its own `active_decision()` current-state query, so exercising
+it here needed no new plumbing in `scoring.py` -- only new fixture items and a third `system`
+branch in `harness.py`."""
 
 from __future__ import annotations
 
@@ -19,7 +29,7 @@ from typing import Any, Literal
 @dataclass
 class CorpusItem:
     key: str  # stable fixture label, used as the idempotency key
-    system: Literal["founder_memory", "diagnosis"]
+    system: Literal["founder_memory", "diagnosis", "problem_learning"]
     action: Literal["record", "dispute", "supersede", "prove", "rule_out"]
     kwargs: dict[str, Any] = field(default_factory=dict)
     supersedes_key: str | None = None  # references another item's `key`, resolved at run time
@@ -152,6 +162,30 @@ CORPUS: list[CorpusItem] = [
             observation="Re-investigated: a shared test fixture leaks connection pool slots under concurrency.",
             hypothesis_category="concurrency_timing",
             epistemic_stage="hypothesis",
+        ),
+    ),
+    # A project decision -- a genuinely different system (app.problem_learning, migration
+    # 0042, predates this mission) exercised for the first time by this harness.
+    CorpusItem(
+        key="problem-decision-database-choice",
+        system="problem_learning",
+        action="record",
+        kwargs=dict(
+            problem_title="Choose a database for the new ingestion module.",
+            problem_description="Need a storage backend for the new document-ingestion pipeline.",
+            decision="Use Postgres for the new module.",
+            authority="founder", basis="manual", status="active",
+        ),
+    ),
+    # Later reconsidered -- supersedes the earlier decision on the SAME problem.
+    CorpusItem(
+        key="problem-decision-database-choice-reconsidered",
+        system="problem_learning",
+        action="supersede",
+        supersedes_key="problem-decision-database-choice",
+        kwargs=dict(
+            decision="Reconsidered: use SQLite for the module's local cache instead, keep Postgres for the rest.",
+            authority="founder", basis="manual", status="active",
         ),
     ),
 ]

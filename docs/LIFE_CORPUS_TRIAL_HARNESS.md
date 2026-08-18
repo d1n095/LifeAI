@@ -39,6 +39,21 @@ included unless something has superseded them -- by design, reaching a resolved 
 an observation is not the same as that observation being replaced by a different one; the
 diagnosis reaching resolution is still the current, up-to-date understanding of that lineage.
 
+## A third system: `app.problem_learning`
+
+Deliberately left out of the bootstrap corpus at first (see PR #102's own "Explicitly
+deferred" note, now resolved). `app.problem_learning` (migration 0042, predates this mission)
+already has its own `record_decision()` auto-supersession (the SAME "contradiction excludes
+currency" semantics `founder_memory_notes` uses, not `diagnosis_records`' different one) and
+its own `active_decision()` current-state query -- no new plumbing was needed in `scoring.py`
+to exercise it, only two new fixture items and a third `system` branch in `harness.py`. Its
+object graph is heavier (`LifeProblem` -> `LifeProblemDecision`, versus `founder_memory`/
+`diagnosis`'s flat records), and it has no in-place "mark contradicted without a replacement"
+transition the way `mark_founder_memory_disputed()`/`rule_out_diagnosis()` do -- every status
+change there is a brand-new superseding row, so the bundled fixtures exercise recording and
+supersession for this system, not the `contradiction_detection` dimension specifically (the
+other two systems already prove that dimension is a real, working check).
+
 ## Principles
 
 - **Real code paths, not mocks.** `harness.py` replays the corpus through
@@ -107,13 +122,6 @@ in the same table without needing a separate one per corpus version).
   synthetic, small, and deliberately adversarial, never real founder material.
 - **A UI surface showing trial history.** Data + service layer only, matching every other
   "foundation" layer in this codebase.
-- **`app.problem_learning` (life_problems/life_problem_decisions, migration 0042) is not
-  wired into the bundled fixtures.** It already has its own `active_decision()` current-state
-  query and the same supersession discipline, so it needs no new plumbing -- but its object
-  graph (problem -> approach/component -> decision) is heavier than `founder_memory`/
-  `diagnosis`'s flat records, and folding it into this bootstrap increment's fixtures was not
-  necessary to prove the seven dimensions. Extending the harness's fixture set to exercise it
-  is a natural, narrow future addition, not a redesign.
 - **Automatic contradiction DETECTION** (noticing on its own that two recorded facts
   conflict) -- still deliberately never built, consistent with every other foundation in this
   mission; the harness only scores whether an EXPLICIT contradiction (a caller calling
