@@ -77,16 +77,36 @@ violations; `TrialReport.summary` gives a per-dimension PASS/FAIL(count) view.
 `record_evidence`, to ground the corpus's own `prove_diagnosis_cause` step in a real evidence
 row -- the harness fabricates no evidence of its own).
 
+## Trial run history (migration 0052)
+
+`run_trial()` itself stays pure -- no DB write beyond the corpus recording it already requires
+to run. `app.corpus_trial.record_trial_run()` is a separate, explicit, opt-in step that
+persists a durable snapshot of one `TrialReport` to `corpus_trial_runs`: `corpus_label`,
+`record_count`, `passed`, `dimension_summary` (the PASS/FAIL(count) view), `violation_counts`.
+Never a copy of the corpus or the `founder_memory_notes`/`diagnosis_records` rows the trial
+exercised -- those remain independently queryable in their own tables. Idempotent by
+construction, same discipline as every other recording function in this mission.
+
+Deliberately NOT shaped like `capability_records`/`founder_memory_notes`/`diagnosis_records`:
+a trial run is not a provenance CLAIM about the world (no founder statement, no inference), so
+it has no `authority`/`basis` columns and does not reuse migration 0042's vocabulary. It IS an
+append-only execution/evidence record structurally, so it reuses THAT pattern instead --
+`capability_observation_events`'s DB-trigger-enforced append-only guarantee (a direct
+UPDATE/DELETE is rejected even for a superuser session, not just hidden by RLS), not
+`founder_memory_notes`/`diagnosis_records`'s mutable-with-narrowed-privileges pattern. A
+corrected or re-run trial is always a NEW row.
+
+`app.corpus_trial.list_trial_runs()` -- the read path, optionally filtered by `corpus_label`
+(so a bootstrap-fixtures run and a later, differently-labeled corpus's runs stay distinguishable
+in the same table without needing a separate one per corpus version).
+
 ## Explicitly deferred
 
 - **Ingesting the founder's real corpus.** This harness exists so that trial can eventually
   happen safely and be scored -- it is not that trial. The bundled `fixtures.CORPUS` is
   synthetic, small, and deliberately adversarial, never real founder material.
-- **A persisted trial-run record / history of past trial scores.** `run_trial()` returns an
-  in-memory `TrialReport`; nothing about a trial run is written to the database. Once a real
-  trial is closer, a durable record of trial runs (reusing the same authority/basis/provenance
-  discipline as every other foundation here) is a natural, small follow-up -- not built now.
-  A UI surface showing trial history is out of scope for the same reason.
+- **A UI surface showing trial history.** Data + service layer only, matching every other
+  "foundation" layer in this codebase.
 - **`app.problem_learning` (life_problems/life_problem_decisions, migration 0042) is not
   wired into the bundled fixtures.** It already has its own `active_decision()` current-state
   query and the same supersession discipline, so it needs no new plumbing -- but its object
