@@ -6,6 +6,48 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 70 (2026-08-18): `claude/corpus-trial-problem-learning` — wire `app.problem_learning` into corpus trial harness fixtures (INGEN ny migration), stackad ovanpå PR #108 (`claude/corpus-trial-run-history` @ `b4502f7`), egen worktree, åttonde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** sista kvarvarande "Explicitly deferred"-punkten från PR #102s egen dokumentation
+— `app.problem_learning` (migration 0042, föregår detta uppdrag) lämnades medvetet utanför
+bootstrap-korpusen eftersom dess objektgraf (problem → approach/component → decision) är
+tyngre än `founder_memory`/`diagnosis`s platta poster.
+
+**Byggt** (`backend/app/corpus_trial/fixtures.py`/`harness.py`, INGEN ny migration):
+- Två nya korpusposter (ett projektbeslut, senare omprövat via supersession) + en tredje
+  `system`-gren i `harness.py`. Behövde INGEN ny logik i `scoring.py` — `record_decision()`
+  har redan samma "contradiction excludes currency"-semantik som `founder_memory_notes`
+  (INTE `diagnosis_records`s annorlunda variant), och sin egen `active_decision()`-fråga.
+- Verklig skillnad hittad och hanterad explicit: `LifeProblemDecision` saknar `confidence`-
+  kolumn OCH har ingen in-place "markera motsagd utan ersättning"-övergång (till skillnad
+  från `mark_founder_memory_disputed()`/`rule_out_diagnosis()`) — varje statusändring där är
+  en helt ny superseding-rad. `harness.py`s ögonblicksbildskonstruktion skyddar nu
+  confidence-åtkomst per system istället för att anta att alla system har den kolumnen.
+
+**Bevisat via tester:** nytt test bevisar att `app.problem_learning` verkligen körs, inte bara
+deklareras som ett stött `system`-värde — riktiga `LifeProblem`/`LifeProblemDecision`-rader
+finns efter en körning, med korrigeringen som korrekt superseder originalet på SAMMA problem
+medan originalets text förblir orörd. Full lokal regression: 385 gröna (samma förbefintliga
+`rg`-relaterade fel, orört).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Verifierat: Cursors två öppna PR:er (#105 `cursor/cloud-agent-
+pytest-isolation`, #107 `cursor/cloud-agent-backend-auto-restart`) rör ingen migration och
+ingen fil denna branch också rör.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #108 (`claude/corpus-trial-run-history`
+@ `b4502f7`). Helt oberoende av Cursors PR #79/#80/#81/#92/#105/#107.
+
+**OBS — åtta PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 → #104 →
+#108 → [#110](https://github.com/d1n095/LifeAI/pull/110). Rekommenderas starkt att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — arbetet fortsätter enligt
+uttrycklig instruktion att inte pausa i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/corpus-trial-problem-learning` | [#110](https://github.com/d1n095/LifeAI/pull/110) | Pushad, CI körs | Wire `app.problem_learning` in i corpus trial harness fixtures, INGEN ny migration, 1 nytt test | `claude/corpus-trial-run-history` @ b4502f7 (stackad ovanpå PR #108) |
+
 ## Pass 69 (2026-08-18): `claude/corpus-trial-run-history` — Life Corpus Trial Run History (migration 0052), stackad ovanpå PR #104 (`claude/cognition-foundation-review` @ `83a8b8e`), egen worktree, sjunde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund:** `docs/LIFE_CORPUS_TRIAL_HARNESS.md`s egen "Explicitly deferred"-sektion namngav
