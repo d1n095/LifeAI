@@ -6,12 +6,13 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-18) — integration @ `5a9cb99`
+## Aktiva PR:er (2026-08-18) — integration @ `8ab69f5`
 
-**Integration tip:** `claude/det-kommer-mer-879lcm` @ `5a9cb99` (PR #97 merge).
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `8ab69f5` (PR #99 merge).
 
 | PR | Merge SHA | Scope |
 |---|---|---|
+| [#99](https://github.com/d1n095/LifeAI/pull/99) | `8ab69f5` | Cloud Agent founder password matches pytest harness |
 | [#97](https://github.com/d1n095/LifeAI/pull/97) | `5a9cb99` | Cloud Agent sync `APP_DATABASE_URL` from `MAINAI_APP_PASSWORD` |
 | [#95](https://github.com/d1n095/LifeAI/pull/95) | `98f308b` | Public `/api/health` worker liveness (`alive`/`unknown`, no 503) |
 | [#93](https://github.com/d1n095/LifeAI/pull/93) | `060303a` | Cloud Agent `lifeos` password from `DATABASE_URL` |
