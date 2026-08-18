@@ -135,3 +135,20 @@ def list_unresolved_diagnoses(db: Session, *, owner_id: uuid.UUID) -> list[Diagn
 
     stmt = select(DiagnosisRecord).where(DiagnosisRecord.owner_id == owner_id, DiagnosisRecord.epistemic_stage.in_(("observed", "hypothesis")))
     return list(db.execute(stmt.order_by(DiagnosisRecord.observed_at)).scalars().all())
+
+
+def list_current_diagnoses(db: Session, *, owner_id: uuid.UUID) -> list[DiagnosisRecord]:
+    """The latest diagnosis in each supersession lineage -- unlike `founder_memory_notes` and
+    `life_problem_decisions`, superseding a diagnosis does NOT flip the old row's own
+    `epistemic_stage` (see `record_diagnosis()`'s own docstring: superseding is a fact about
+    the new row, never a mutation of the old one), so "what do we currently believe" has no
+    single status column to filter on here -- it means "not itself named as the
+    `supersedes_diagnosis_id` of any other row for this owner." Ruled-out and proven rows stay
+    included if nothing has superseded them; combine with `epistemic_stage` filtering at the
+    call site for "current AND unresolved.\""""
+
+    superseded_ids = select(DiagnosisRecord.supersedes_diagnosis_id).where(
+        DiagnosisRecord.owner_id == owner_id, DiagnosisRecord.supersedes_diagnosis_id.is_not(None)
+    )
+    stmt = select(DiagnosisRecord).where(DiagnosisRecord.owner_id == owner_id, DiagnosisRecord.id.not_in(superseded_ids))
+    return list(db.execute(stmt.order_by(DiagnosisRecord.observed_at)).scalars().all())

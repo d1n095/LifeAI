@@ -6,6 +6,7 @@ doctrine."""
 from app.diagnosis.service import (
     DiagnosisError,
     get_diagnosis,
+    list_current_diagnoses,
     list_diagnoses,
     list_unresolved_diagnoses,
     prove_diagnosis_cause,
@@ -16,6 +17,7 @@ from app.diagnosis.service import (
 __all__ = [
     "DiagnosisError",
     "get_diagnosis",
+    "list_current_diagnoses",
     "list_diagnoses",
     "list_unresolved_diagnoses",
     "prove_diagnosis_cause",
