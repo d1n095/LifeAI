@@ -52,15 +52,24 @@ Alembic-huvud verifierat vid `0050` (EN ny migration).
 **Beroenden:** Stackad ovanpå det ännu ej mergade PR #98 (`claude/adaptive-cognition-boundary`
 @ `b7c1c6b`). Helt oberoende av Cursors PR #79/#80/#81/#92.
 
-**OBS — fyra PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → (denna, öppnas). Var
-och en är oberoende grön (bortsett från samma bekräftat orelaterade CI-flake) och granskad,
-men beror på varandra i ordning. Rekommenderas att grundaren granskar/mergar i den
-ordningen innan ytterligare steg läggs på — flaggat här enligt registrets egna princip, men
-arbetet fortsätter enligt uttrycklig instruktion att inte pausa i onödan.
+**OBS — fyra PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101. Var och en är
+oberoende grön (bortsett från samma bekräftat orelaterade CI-flake, plus en NY men bekräftat
+orelaterad `test_autonomous_gap_child_task.py`-timingflake i #101:s regressionskörning — se
+nedan) och granskad, men beror på varandra i ordning. Rekommenderas att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — flaggat här enligt
+registrets egna princip, men arbetet fortsätter enligt uttrycklig instruktion att inte
+pausa i onödan.
+
+**Ny bekräftat orelaterad testflake upptäckt i #101:s fulla `tests/backend/mainai/`-regression:**
+`test_autonomous_gap_child_task.py::test_security_concurrent_gap_generation_for_the_same_gap_
+produces_exactly_one_canonical_child` (Cursor-ägt scope, aldrig rört av denna branch).
+Bekräftad orelaterad genom att den passerar både isolerat och som del av hela sin egen
+testfil (22/22) — denna branchs diff rör aldrig `app/autonomous_gap/**`. Timingkänslig,
+samma mönster som de redan kända `test_account_erasure.py`-flakesen tidigare i sessionen.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/causal-diagnosis-interface` | Öppnas denna session | Pushad, redo för granskning | Life Causal Diagnosis Interface: `diagnosis_records` (migration 0050), observed/hypothesis/proven_cause/ruled_out som skilda epistemiska tillstånd, `proven_cause` DB-tvingat kräva riktigt bevis, återanvänder migration 0042:s authority/basis-vokabulär — 11 tester, EN ny migration | `claude/adaptive-cognition-boundary` @ b7c1c6b (stackad ovanpå PR #98) |
+| `claude/causal-diagnosis-interface` | [#101](https://github.com/d1n095/LifeAI/pull/101) | Pushad, CI körs | Life Causal Diagnosis Interface: `diagnosis_records` (migration 0050), observed/hypothesis/proven_cause/ruled_out som skilda epistemiska tillstånd, `proven_cause` DB-tvingat kräva riktigt bevis, återanvänder migration 0042:s authority/basis-vokabulär — 11 tester, EN ny migration | `claude/adaptive-cognition-boundary` @ b7c1c6b (stackad ovanpå PR #98) |
 
 ## Pass 65 (2026-08-17/18): `claude/adaptive-cognition-boundary` — Adaptive Cognition / Protected-vs-Adaptive Boundary (INGEN ny migration), stackad ovanpå PR #96 (`claude/agent-founder-memory` @ `8b55768`), egen worktree, tredje steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
