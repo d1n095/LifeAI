@@ -18,6 +18,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CURSOR_DIR = REPO_ROOT / ".cursor"
+# Canonical dev founder password — must match tests/conftest.py setdefault and smoke/E2E tests.
+CANONICAL_FOUNDER_PASSWORD = "TestFounderPassword123!"
 
 # Import without adding .cursor to the app package path permanently.
 sys.path.insert(0, str(CURSOR_DIR))
@@ -123,6 +125,12 @@ def test_install_sh_does_not_hardcode_app_database_url_independently_of_mainai_a
     script = (CURSOR_DIR / "install.sh").read_text()
     assert "sync_app_database_url.py" in script
     assert "APP_DATABASE_URL=postgresql://mainai_app:" not in script
+
+
+def test_install_sh_uses_canonical_founder_password_matching_pytest_harness():
+    script = (CURSOR_DIR / "install.sh").read_text()
+    assert f"FOUNDER_PASSWORD={CANONICAL_FOUNDER_PASSWORD}" in script
+    assert "DevFounderPass" not in script
 
 
 def test_derive_app_database_url_matches_ensure_app_role():
