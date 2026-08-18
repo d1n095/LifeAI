@@ -57,9 +57,9 @@ de två systemen till en falsk gemensam definition.
 **Beroenden:** Stackad ovanpå det ännu ej mergade PR #101 (`claude/causal-diagnosis-interface`
 @ `49d1f3d`). Helt oberoende av Cursors PR #79/#80/#81/#92.
 
-**OBS — fem PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → (denna, öppnas
-snart). Rekommenderas att grundaren granskar/mergar i den ordningen innan ytterligare steg
-läggs på — arbetet fortsätter enligt uttrycklig instruktion att inte pausa i onödan.
+**OBS — fem PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → [#102](https://github.com/d1n095/LifeAI/pull/102).
+Rekommenderas att grundaren granskar/mergar i den ordningen innan ytterligare steg läggs på —
+arbetet fortsätter enligt uttrycklig instruktion att inte pausa i onödan.
 
 ## Pass 66 (2026-08-18): `claude/causal-diagnosis-interface` — Life Causal Diagnosis Interface (migration 0050), stackad ovanpå PR #98 (`claude/adaptive-cognition-boundary` @ `b7c1c6b`), egen worktree, fjärde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
