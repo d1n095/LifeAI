@@ -59,12 +59,12 @@ full regressionstäckning av den befintliga svit som redan täcker den filen.
 learning` @ `04a0b67`). Helt oberoende av Cursors PR #79/#80/#81/#92/#105/#107.
 
 **OBS — nio PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 → #104 →
-#108 → #110 → (denna, öppnas snart). Grundaren har nu explicit bett om att stacken
-integreras/mergas i beroendeordning härnäst, inte staplas ytterligare i onödan.
+#108 → #110 → [#113](https://github.com/d1n095/LifeAI/pull/113). Grundaren har nu explicit
+bett om att stacken integreras/mergas i beroendeordning härnäst, inte staplas ytterligare.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/founder-memory-signal-staging` | Öppnas denna session | Pushad, redo för granskning | Candidate Learning Signals (migration 0053, SIGNAL PRODUCER != TRUTH WRITER, live chat.py-koppling) + never-automate-formulering i 4 dokument + Source Vault framtida kompatibilitetsgranskning (inget kodbygge) | `claude/corpus-trial-problem-learning` @ 04a0b67 (stackad ovanpå PR #110) |
+| `claude/founder-memory-signal-staging` | [#113](https://github.com/d1n095/LifeAI/pull/113) | Pushad, CI körs | Candidate Learning Signals (migration 0053, SIGNAL PRODUCER != TRUTH WRITER, live chat.py-koppling) + never-automate-formulering i 4 dokument + Source Vault framtida kompatibilitetsgranskning (inget kodbygge) | `claude/corpus-trial-problem-learning` @ 04a0b67 (stackad ovanpå PR #110) |
 
 ## Pass 70 (2026-08-18): `claude/corpus-trial-problem-learning` — wire `app.problem_learning` into corpus trial harness fixtures (INGEN ny migration), stackad ovanpå PR #108 (`claude/corpus-trial-run-history` @ `b4502f7`), egen worktree, åttonde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
