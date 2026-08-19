@@ -6,7 +6,7 @@ without building that subsystem now. These tests read source/docstrings, not liv
 
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 STORAGE_BASE = REPO_ROOT / "backend/app/storage/base.py"
 DOCUMENT_MODEL = REPO_ROOT / "backend/app/models/document.py"
 SCHEMAS = REPO_ROOT / "backend/app/schemas.py"
