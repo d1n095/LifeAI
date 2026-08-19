@@ -391,6 +391,15 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     return detail
 
 
+def _document_is_media_source(document: Document) -> bool:
+    """True when this document is an audio/video source the /media endpoint may serve.
+    Text/document imports also get storage_key — that alone does not make them media."""
+    if document.media_duration_seconds is not None or document.media_blob is not None:
+        return True
+    media_type = document.media_type or ""
+    return media_type.startswith("audio/") or media_type.startswith("video/")
+
+
 def _read_document_media_bytes(document: Document) -> bytes | None:
     """Return playable media bytes for a document. Prefer content-addressed durable storage
     (storage_key) — the canonical original — over legacy in-DB media_blob duplicates."""
@@ -434,7 +443,7 @@ def get_source_media(source_id: uuid.UUID, db: Session = Depends(get_db), user: 
     like it does everywhere else in this router, not just a "hidden from listings" soft
     block."""
     document = _visible_document_query(db, user.id).filter(Document.id == source_id).first()
-    if document is None:
+    if document is None or not _document_is_media_source(document):
         raise HTTPException(status_code=404, detail="Ingen mediefil hittades för den här källan.")
 
     media_bytes = _read_document_media_bytes(document)

@@ -162,6 +162,9 @@ class Document(Base):
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     content_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Derived UI/corpus-review cache (~1000 chars of extracted text), NOT canonical source
+    # truth — originals live at storage_key. Future encryption-only vault sources must not
+    # populate this without an explicit preview-derivation policy.
     status: Mapped[IndexStatus] = mapped_column(Enum(IndexStatus), default=IndexStatus.received)
     chunk_count: Mapped[int] = mapped_column(default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

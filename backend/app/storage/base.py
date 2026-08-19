@@ -13,10 +13,15 @@ Every implementation must uphold the same contract:
   - `storage_key` values are never derived from user-controlled filenames — see
     LocalFilesystemStorage's key-validation for the path-traversal/symlink defense this
     enables.
-  - Stored bytes are always the ORIGINAL content (never derived indexes/chunks). Future
+    - Stored bytes are always the ORIGINAL content (never derived indexes/chunks). Future
     compression or encryption are separate envelope/metadata concerns applied around this
     layer — encryption is not compression, and neither changes the content hash of the
     underlying source bytes this interface addresses.
+  - `sha256` / `Document.checksum` always identify canonical plaintext source bytes, never
+    stored envelope bytes — one invariant for dedup, provenance, and future key rotation.
+  - `open_read()` returns decrypted plaintext to callers today (whole-blob). Future chunk/
+    range reads and envelope metadata (format version, compression scheme, key reference id)
+    belong in this interface or a decorator implementing it — not scattered in import callers.
 """
 
 from abc import ABC, abstractmethod
@@ -50,8 +55,8 @@ class StorageSizeLimitExceeded(StorageError):
 @dataclass(frozen=True)
 class StoredBlob:
     storage_key: str
-    sha256: str
-    size_bytes: int
+    sha256: str  # SHA-256 of canonical PLAINTEXT source bytes — dedup/provenance identity.
+    size_bytes: int  # Plaintext byte length; never encrypted/compressed envelope size.
 
 
 class StorageBackend(ABC):
