@@ -13,7 +13,7 @@ Every implementation must uphold the same contract:
   - `storage_key` values are never derived from user-controlled filenames — see
     LocalFilesystemStorage's key-validation for the path-traversal/symlink defense this
     enables.
-    - Stored bytes are always the ORIGINAL content (never derived indexes/chunks). Future
+  - Stored bytes are always the ORIGINAL content (never derived indexes/chunks). Future
     compression or encryption are separate envelope/metadata concerns applied around this
     layer — encryption is not compression, and neither changes the content hash of the
     underlying source bytes this interface addresses.
