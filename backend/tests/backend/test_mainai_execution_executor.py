@@ -199,7 +199,16 @@ def test_retry_task_rejects_any_non_retryable_status(db_session, owner_id, statu
         executor.retry_task(db_session, task=task)
 
 
-@pytest.mark.parametrize("status", [MainAITaskStatus.pending, MainAITaskStatus.ready, MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed])
+@pytest.mark.parametrize(
+    "status",
+    [
+        MainAITaskStatus.pending,
+        MainAITaskStatus.ready,
+        MainAITaskStatus.blocked,
+        MainAITaskStatus.retryable_failed,
+        MainAITaskStatus.waiting_external,
+    ],
+)
 def test_cancel_task_cancels_a_not_yet_running_task_and_cascade_cancels_its_dependents(db_session, owner_id, status):
     goal = _goal(db_session, owner_id)
     planner.create_plan(

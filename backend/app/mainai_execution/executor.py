@@ -53,7 +53,15 @@ def _lock_task(db: Session, task_id: uuid.UUID) -> MainAITask:
 # handled differently (and honestly documented as a real V0.1 limitation) rather than
 # pretending this function can stop it.
 _CANCELLABLE_MAINAI_TASK_STATUSES = frozenset(
-    {MainAITaskStatus.pending, MainAITaskStatus.ready, MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed}
+    {
+        MainAITaskStatus.pending,
+        MainAITaskStatus.ready,
+        MainAITaskStatus.blocked,
+        MainAITaskStatus.retryable_failed,
+        # waiting_external has no producer/poll clock yet, but if a row is ever in that
+        # status it must remain founder-cancellable — otherwise the goal can never close.
+        MainAITaskStatus.waiting_external,
+    }
 )
 
 
