@@ -58,6 +58,33 @@ def test_the_bootstrap_corpus_scores_clean_on_every_dimension(superuser_db):
     }
 
 
+def test_the_bootstrap_corpus_exercises_all_three_systems_including_problem_learning(superuser_db):
+    """Proves app.problem_learning is genuinely exercised by the harness, not just declared as
+    a supported `system` value -- real LifeProblem/LifeProblemDecision rows exist afterward,
+    with the correction correctly superseding the original decision on the SAME problem."""
+
+    from app.models.problem_learning import LifeProblem, LifeProblemDecision
+
+    owner, task = _owner_and_task(superuser_db)
+    superuser_db.commit()
+
+    run_trial(superuser_db, owner_id=owner.id, evidence_task_id=task.id)
+    superuser_db.commit()
+
+    problems = superuser_db.query(LifeProblem).filter_by(owner_id=owner.id).all()
+    decisions = superuser_db.query(LifeProblemDecision).filter_by(owner_id=owner.id).all()
+    assert len(problems) == 1
+    assert len(decisions) == 2
+
+    original = next(d for d in decisions if d.supersedes_decision_id is None)
+    corrected = next(d for d in decisions if d.supersedes_decision_id is not None)
+    assert corrected.supersedes_decision_id == original.id
+    assert corrected.problem_id == original.problem_id == problems[0].id
+    assert original.status == "superseded"  # auto-flipped, never rewritten in place
+    assert corrected.status == "active"
+    assert original.decision != corrected.decision  # the original text survives, untouched
+
+
 def test_running_the_trial_twice_for_different_owners_never_cross_contaminates(superuser_db):
     owner_a, task_a = _owner_and_task(superuser_db)
     owner_b, task_b = _owner_and_task(superuser_db)
