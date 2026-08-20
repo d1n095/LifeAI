@@ -862,15 +862,12 @@ async def test_run_corpus_review_job_never_promotes_a_proposal_to_a_knowledge_cl
 
 
 @pytest.mark.asyncio
-async def test_run_corpus_review_job_records_a_per_document_skip_on_provider_error_and_still_completes(
+async def test_run_corpus_review_job_marks_failed_when_every_document_provider_fails(
     db_session, superuser_db, make_verified_user, monkeypatch
 ):
-    """Founder re-review round (PR #36): a provider failure for ONE document no longer fails
-    the WHOLE job — it's recorded as a `document_skipped` event (reason `provider_failed`,
-    safe error_category, never raw exception text) and the job still reaches `completed`,
-    honestly reporting that document as not reviewed in the completion message. Mixed outcomes
-    within a single run (some documents reviewed, some provider-failed) are the expected case,
-    not a systemic failure — see corpus_review.py's module docstring."""
+    """All-provider-failed runs must land on `failed` (retryable), not `completed`.
+    Completing with zero reviews previously disabled admin retry (retry_job rejects completed).
+    Mixed outcomes (some reviewed, some provider_failed) still complete — see sibling test."""
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_permanent_error())
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
@@ -881,9 +878,8 @@ async def test_run_corpus_review_job_records_a_per_document_skip_on_provider_err
     await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
     job = superuser_db.get(MainAIJob, job.id)
-    assert job.status == MainAIJobStatus.completed
-    assert "1 failed" in job.public_message
-    assert "Traceback" not in (job.public_message or "")
+    assert job.status == MainAIJobStatus.failed
+    assert job.error_category == MainAIJobErrorCategory.transient_io
 
     events = superuser_db.execute(
         sa_text("SELECT event_type, detail FROM mainai_job_events WHERE job_id = :j AND event_type = 'document_skipped'"), {"j": str(job.id)}
@@ -897,6 +893,10 @@ async def test_run_corpus_review_job_records_a_per_document_skip_on_provider_err
 
     proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
     assert proposal_count == 0
+
+    # Founder retry affordance is open again.
+    retried = service.retry_job(db_session, job.id, requested_by=user.id)
+    assert retried.status == MainAIJobStatus.queued
 
 
 @pytest.mark.asyncio

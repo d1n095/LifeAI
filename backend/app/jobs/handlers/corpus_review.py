@@ -36,11 +36,13 @@ for that one document specifically. Every non-reviewed outcome now gets its own
 `provider_failed`), and the final completion message reports the real breakdown — reviewed,
 skipped-deleted, unavailable, and provider-failed counts against the job's fixed snapshot
 total — never a single number that blurs "actually reviewed" with "counted as done because we
-moved on". A provider failure for ONE document no longer aborts the whole job (mixed outcomes
-in a single run — some documents reviewed, some failed — are the normal, expected case for a
-real provider having a bad moment on one call, not a systemic failure); only a genuinely
-unexpected error (a bug, not a per-document content/provider problem) still fails the job as a
-whole, via mark_failed.
+moved on". A provider failure for ONE document no longer aborts the whole job when OTHER
+documents were successfully reviewed (mixed outcomes in a single run are the expected case);
+but if EVERY document in the run failed via provider (reviewed_count == 0 and at least one
+provider_failed), the job is marked `failed` with a retryable category so the founder can use
+"Försök igen" instead of being stuck on a terminal `completed` with zero proposals. Only a
+genuinely unexpected error (a bug, not a per-document content/provider problem) still fails
+the job mid-loop via mark_failed.
 """
 
 import logging
@@ -291,7 +293,22 @@ async def run_corpus_review_job(
             if provider_failed_count:
                 detail_parts.append(f"{provider_failed_count} failed")
             parts.append(f"{skipped_total} not reviewed ({', '.join(detail_parts)}).")
+        public_message = " ".join(parts)
+        # All-provider-failed runs must stay retryable. Completing with zero reviews made
+        # admin "Försök igen" impossible (retry_job only accepts status=failed).
+        if reviewed_count == 0 and provider_failed_count > 0:
+            try:
+                mark_failed(
+                    db,
+                    job,
+                    worker_id=worker_id,
+                    lease_generation=lease_generation,
+                    error_category=MainAIJobErrorCategory.transient_io,
+                )
+            except JobLeaseLostError:
+                _lease_lost("mark_failed:all_provider_failed")
+            return
         try:
-            mark_completed(db, job, worker_id=worker_id, lease_generation=lease_generation, public_message=" ".join(parts))
+            mark_completed(db, job, worker_id=worker_id, lease_generation=lease_generation, public_message=public_message)
         except JobLeaseLostError:
             _lease_lost("mark_completed")
