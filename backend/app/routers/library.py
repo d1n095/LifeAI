@@ -391,6 +391,32 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     return detail
 
 
+def _document_is_media_source(document: Document) -> bool:
+    """True when this document is an audio/video source the /media endpoint may serve.
+    Text/document imports also get storage_key — that alone does not make them media."""
+    if document.media_duration_seconds is not None or document.media_blob is not None:
+        return True
+    media_type = document.media_type or ""
+    return media_type.startswith("audio/") or media_type.startswith("video/")
+
+
+def _read_document_media_bytes(document: Document) -> bytes | None:
+    """Return playable media bytes for a document. Prefer content-addressed durable storage
+    (storage_key) — the canonical original — over legacy in-DB media_blob duplicates."""
+    if document.storage_key:
+        storage = get_storage()
+        try:
+            with storage.open_read(document.storage_key) as handle:
+                return handle.read()
+        except FileNotFoundError:
+            pass
+        except StorageError:
+            return None
+    if document.media_blob is not None:
+        return document.media_blob
+    return None
+
+
 @router.get(
     "/{source_id}/media",
     # response_class=Response (not the default JSONResponse) is what stops FastAPI from
@@ -409,15 +435,21 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     },
 )
 def get_source_media(source_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
-    """STEG 13: streams the raw bytes an audio/video import kept (Document.media_blob, see
-    app/rag/media_import.py) back to an <audio>/<video> element. Same RLS-scoped,
-    deleted_at-excluding query every other source-detail route uses — a deleted or
-    someone-else's source 404s here exactly like it does everywhere else in this router, not
-    just a "hidden from listings" soft block."""
+    """STEG 13: streams the raw bytes of an audio/video import back to an <audio>/<video>
+    element. Reads from the content-addressed original at Document.storage_key (see
+    app/storage/local_fs.py); falls back to legacy Document.media_blob only for rows
+    imported before that path existed. Same RLS-scoped, deleted_at-excluding query every
+    other source-detail route uses — a deleted or someone-else's source 404s here exactly
+    like it does everywhere else in this router, not just a "hidden from listings" soft
+    block."""
     document = _visible_document_query(db, user.id).filter(Document.id == source_id).first()
-    if document is None or document.media_blob is None:
+    if document is None or not _document_is_media_source(document):
         raise HTTPException(status_code=404, detail="Ingen mediefil hittades för den här källan.")
-    return Response(content=document.media_blob, media_type=document.media_type or "application/octet-stream")
+
+    media_bytes = _read_document_media_bytes(document)
+    if media_bytes is None:
+        raise HTTPException(status_code=404, detail="Ingen mediefil hittades för den här källan.")
+    return Response(content=media_bytes, media_type=document.media_type or "application/octet-stream")
 
 
 @router.delete("/{source_id}")

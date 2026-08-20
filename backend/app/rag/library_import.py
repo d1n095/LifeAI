@@ -490,11 +490,8 @@ async def _import_one_file(
         import_job_id=import_job_id,
         imported_at=datetime.utcnow(),
         status=IndexStatus.received,
-        # STEG 13: media_blob is kept for now (the in-DB copy the player reads back from
-        # today) — storage_key below is the SEPARATE, durable-on-disk copy every document
-        # gets, superseding media_blob as the actual durability guarantee; not removing
-        # media_blob yet is a deliberate no-behavior-change choice for this package.
-        media_blob=content if media_kind is not None else None,
+        # Original bytes are durably stored at storage_key below — do NOT duplicate them in
+        # media_blob (legacy in-DB copy kept only for pre-migration rows; see Document.media_blob).
     )
     db.add(document)
     db.commit()
