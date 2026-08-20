@@ -6,6 +6,61 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 67 (2026-08-18): `claude/corpus-trial-harness` — Life Corpus Trial Harness (INGEN ny migration), stackad ovanpå PR #101 (`claude/causal-diagnosis-interface` @ `49d1f3d`), egen worktree, femte steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** uppdragets punkt 7 — bygg INTE grundarens riktiga korpus-inmatning ännu, bygg
+ett minimalt utvärderingsverktyg (harness) som kan poängsätta källbevarande/attribution/
+beslut-vs-idé-vs-förslag-vs-fakta-vs-inferens-distinktion/motsägelsedetektion/
+supersession-detektion/osäkerhetsbevarande/nulägesrekonstruktion mot en medvetet blandad
+testkorpus, utan att överanpassa till en fejkad korpus så att bara fixtures går igenom.
+Genomgång bekräftade: `app.founder_memory` (0049) och `app.diagnosis` (0050) redan täcker
+nästan allt detta strukturellt — det som saknades var själva testkörnings-/pointsättnings-
+mekanismen, INTE en ny lagringsplats. Ingen ny migration byggd, `app/corpus_trial/` återanvänder
+befintliga tabeller helt.
+
+**Byggt** (`backend/app/corpus_trial/`):
+- `fixtures.py` — en liten, medvetet blandad OCH adversarial testkorpus (grundardecision,
+  AI-förslag, inferrerat mönster, EXPLICIT okänd proveniens som LÅTER säker text men måste
+  förbli `authority=unknown`, en grundarrättelse som superseder ett tidigare mönster, en
+  disputerad anteckning, en bevisad diagnos [uppdragets eget 503-exempel återanvänt], en
+  ruled-out diagnos, en diagnoskorrigering via supersession) — ren Python-data, ingen DB.
+- `harness.py` — `run_trial()` spelar upp korpusen genom de RIKTIGA inspelnings-API:erna
+  (`record_founder_memory`/`mark_founder_memory_disputed`/`record_diagnosis`/
+  `prove_diagnosis_cause`/`rule_out_diagnosis`), aldrig en mock, och läser sedan tillbaka
+  varje rad från databasen för att bygga poängsättningsunderlag.
+- `scoring.py` — sju STRUKTURELLA poängsättningsfunktioner (inga hårdkodade förväntade
+  ID:n/texter) — samma kontroll skulle fånga samma sorts fel på en helt annan korpus. Varje
+  funktion har ett eget fristående test som matar in en medvetet korrumperad ögonblicksbild
+  och bekräftar att den fångas — beviser att poängsättningen är en riktig kontroll, inte en
+  gummistämpel som bara råkar passera de medföljande fixturerna.
+- Genuin liten lucka hittad och åtgärdad: `app.diagnosis.service.list_current_diagnoses()`
+  (NY funktion, ingen ny migration) — `founder_memory_notes`/`life_problem_decisions` vänder
+  redan automatiskt gammal rads `status` till `superseded`, men `diagnosis_records` gör
+  MEDVETET inte det (supersession är en fakta om den NYA raden, aldrig en mutation av den
+  gamla — se migration 0050:s egen docstring), så det fanns ingen fråga för "senaste diagnosen
+  i varje supersession-lineage" förrän nu.
+
+**Bevisat via tester:** 20 nya tester (2 end-to-end-körningar av hela korpusen genom riktig DB
++ 7 fristående negativa scorer-tester, ett per dimension) — alla gröna. En verklig designnyans
+hittades och löstes medvetet under byggandet: `diagnosis_records`s `ruled_out` betyder INTE
+detsamma som `founder_memory_notes`s `disputed` för "vad är aktuellt just nu" — en ruled-out
+diagnos ÄR fortfarande den aktuella, uppdaterade förståelsen av den lineagen (den har nått en
+löst status om SAMMA observation, inte ersatts av en annan fakta), medan en disputerad
+grundaranteckning MEDVETET exkluderas från "aktiv". Detta kodades som ett explicit,
+systemmedvetet fält (`contradiction_excludes_currency`) snarare än att gömmas eller att tvinga
+de två systemen till en falsk gemensam definition.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #101 (`claude/causal-diagnosis-interface`
+@ `49d1f3d`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — fem PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → [#102](https://github.com/d1n095/LifeAI/pull/102).
+Rekommenderas att grundaren granskar/mergar i den ordningen innan ytterligare steg läggs på —
+arbetet fortsätter enligt uttrycklig instruktion att inte pausa i onödan.
+
 ## Pass 66 (2026-08-18): `claude/causal-diagnosis-interface` — Life Causal Diagnosis Interface (migration 0050), stackad ovanpå PR #98 (`claude/adaptive-cognition-boundary` @ `b7c1c6b`), egen worktree, fjärde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund:** genomgång av `EngineeringLesson.root_cause` (migration 0032 — fritext, skrivet
