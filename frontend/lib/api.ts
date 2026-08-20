@@ -912,6 +912,8 @@ export const api = {
   mainaiJobs: (limit = 20, offset = 0) => request<MainAIJob[]>(`/api/mainai/jobs?limit=${limit}&offset=${offset}`),
   mainaiJobDetail: (id: string) => request<MainAIJobDetail>(`/api/mainai/jobs/${id}`),
   mainaiJobProposals: (id: string) => request<MainAIJobProposal[]>(`/api/mainai/jobs/${id}/proposals`),
+  mainaiDismissProposal: (jobId: string, proposalId: string) =>
+    request<MainAIJobProposal>(`/api/mainai/jobs/${jobId}/proposals/${proposalId}/dismiss`, { method: "POST" }),
   mainaiCreateJob: (payload: { job_type: string; input_refs: { type: string; id: string }[]; idempotency_key?: string }) =>
     request<MainAIJob>("/api/mainai/jobs", { method: "POST", body: JSON.stringify(payload) }),
   mainaiCancelJob: (id: string) => request<MainAIJob>(`/api/mainai/jobs/${id}/cancel`, { method: "POST" }),

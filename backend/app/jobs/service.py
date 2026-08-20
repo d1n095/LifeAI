@@ -31,6 +31,8 @@ from app.models.mainai_job import (
     MainAIJobErrorCategory,
     MainAIJobEvent,
     MainAIJobEventType,
+    MainAIJobProposal,
+    MainAIJobProposalStatus,
     MainAIJobStatus,
 )
 
@@ -387,6 +389,38 @@ def list_job_events(db: Session, job_id: uuid.UUID, *, limit: int = 200) -> list
     )
 
 
+class ProposalNotFoundError(Exception):
+    pass
+
+
+def dismiss_proposal(db: Session, *, job_id: uuid.UUID, proposal_id: uuid.UUID) -> MainAIJobProposal:
+    """Founder-gated actuator for the ONLY mutable proposal transition the DB allows
+    (`proposed` → `dismissed`, migration 0027). Corpus review writes proposals as
+    SIGNAL, never truth (`MainAIJobProposal` docstring / corpus_review module header);
+    without this path the designed lifecycle had no production caller — GET listed
+    proposals forever as `proposed`, and the admin UI already rendered "Avfärdat"
+    for a state nothing could set.
+
+    Does NOT promote into KnowledgeClaim / goals / founder memory. Text and provenance
+    columns are untouched (trigger rejects any other column change). Idempotent on an
+    already-dismissed proposal: returns the row unchanged rather than 409, so a
+    double-click / retry cannot invent a second transition."""
+    get_job(db, job_id)  # RLS-scoped 404 if job is not this owner's
+    proposal = db.get(MainAIJobProposal, proposal_id, populate_existing=True)
+    if proposal is None or proposal.job_id != job_id:
+        raise ProposalNotFoundError(str(proposal_id))
+    if proposal.status == MainAIJobProposalStatus.dismissed:
+        return proposal
+    if proposal.status != MainAIJobProposalStatus.proposed:
+        raise InvalidJobTransitionError(
+            f"Cannot dismiss a proposal in status '{proposal.status.value}'."
+        )
+    proposal.status = MainAIJobProposalStatus.dismissed
+    db.flush()
+    db.refresh(proposal)
+    return proposal
+
+
 def request_cancel(db: Session, job_id: uuid.UUID, *, requested_by: uuid.UUID, request=None) -> MainAIJob:
     """Sets cancel_requested only — the actual transition to `cancelled` happens inside the
     job's own processing loop (app/jobs/handlers/corpus_review.py), between batches, so a job is
@@ -660,7 +694,9 @@ __all__ = [
     "InvalidJobTransitionError",
     "JobLeaseLostError",
     "JobNotFoundError",
+    "ProposalNotFoundError",
     "create_job",
+    "dismiss_proposal",
     "get_job",
     "list_job_events",
     "list_jobs",
