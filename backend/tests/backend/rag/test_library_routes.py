@@ -617,6 +617,45 @@ def test_media_source_serves_playable_bytes_via_media_endpoint(client):
     assert res.headers["content-type"] == "audio/mpeg"
 
 
+def test_new_media_import_persists_original_at_storage_key_not_media_blob(client, superuser_db):
+    """Regression: media originals must live in content-addressed storage only — not duplicated
+    as plaintext in documents.media_blob (preserves future encryption envelope path)."""
+    csrf = _login(client)
+    job = _import_and_wait(client, csrf, "clip.mp3", VALID_MP3, "audio/mpeg")
+    source_id = uuid.UUID(job["file_results"][0]["source_id"])
+
+    from app.models.document import Document
+
+    document = superuser_db.query(Document).filter(Document.id == source_id).one()
+    assert document.storage_key is not None
+    assert document.media_blob is None
+
+
+def test_media_endpoint_falls_back_to_legacy_media_blob_when_storage_key_missing(client, superuser_db):
+    """Rows imported before storage_key existed may still have media_blob — serve them."""
+    from app.models.document import Document, DocumentSource, IndexStatus
+
+    csrf = _login(client)
+    owner_id = uuid.UUID(client.get("/api/auth/me").json()["id"])
+
+    document = Document(
+        title="legacy clip",
+        source=DocumentSource.upload,
+        uploaded_by=owner_id,
+        checksum="abc",
+        media_type="audio/mpeg",
+        status=IndexStatus.indexed,
+        media_blob=VALID_MP3,
+        storage_key=None,
+    )
+    superuser_db.add(document)
+    superuser_db.commit()
+
+    res = client.get(f"/api/library/{document.id}/media", headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+    assert res.content == VALID_MP3
+
+
 def test_media_endpoint_404s_for_a_text_source(client):
     csrf = _login(client)
     job = _import_and_wait(client, csrf, "notes.txt", b"vanlig text, inget ljud har")

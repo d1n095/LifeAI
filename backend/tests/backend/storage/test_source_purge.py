@@ -1838,6 +1838,36 @@ def test_every_storage_write_stream_reference_is_on_the_known_write_path_registr
 # that durable retry contract end-to-end, not just that a row got inserted.
 
 
+def test_retain_pending_rejected_upload_cleanup_tasks_supersedes_outstanding_rows(superuser_db):
+    from app.storage.references import enqueue_rejected_upload_cleanup_task, retain_pending_rejected_upload_cleanup_tasks
+
+    storage_key = _store_real_blob(b"pass 33 retain supersedes outstanding cleanup tasks")
+    enqueue_rejected_upload_cleanup_task(storage_key)
+
+    retained = retain_pending_rejected_upload_cleanup_tasks(storage_key)
+    assert retained == 1
+
+    row = superuser_db.execute(
+        sa_text("SELECT status FROM storage_deletion_tasks WHERE storage_key = :key"),
+        {"key": storage_key},
+    ).one()
+    assert row[0] == "retained_shared"
+
+
+def test_retain_pending_rejected_upload_cleanup_tasks_leaves_terminal_tasks_unchanged(superuser_db):
+    from app.storage.references import enqueue_rejected_upload_cleanup_task, retain_pending_rejected_upload_cleanup_tasks
+
+    storage_key = _store_real_blob(b"pass 33 retain leaves terminal tasks alone")
+    enqueue_rejected_upload_cleanup_task(storage_key)
+    superuser_db.execute(
+        sa_text("UPDATE storage_deletion_tasks SET status = 'purged' WHERE storage_key = :key"),
+        {"key": storage_key},
+    )
+    superuser_db.commit()
+
+    assert retain_pending_rejected_upload_cleanup_tasks(storage_key) == 0
+
+
 def test_enqueue_rejected_upload_cleanup_task_creates_exactly_one_pending_task(superuser_db):
     storage_key = _store_real_blob(b"pass 31 point 1 test A: single enqueue")
 
