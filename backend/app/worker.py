@@ -481,9 +481,20 @@ class Worker:
         for a founder to find.
 
         Per-record isolation, same as every other tick in this method group: one record's
-        failure is logged and never stops the batch."""
+        failure is logged and never stops the batch.
+
+        Detection covers BOTH TaskLiveness.dead shapes that leave a task stuck `running`:
+          - classic: job still `running` with an expired lease (migration 0034 reclaim exclusion)
+          - terminal-without-finalize: job already `failed`/`completed`/`cancelled` while the
+            owning task never left `running` (e.g. worker generic handler marked the job
+            failed without `_finalize_task_outcome()`). The classic query alone misses these;
+            without this second scan they stay permanently stuck with only founder
+            POST /tasks/{id}/recover as a path -- and even that used to fail at
+            mark_job_superseded() until that fence accepted the terminal-without-finalize case.
+        """
         now = datetime.utcnow()
-        dead_jobs = (
+        dead_jobs_by_id: dict = {}
+        lease_dead = (
             db.query(MainAIJob)
             .filter(
                 MainAIJob.job_type == "task_execution",
@@ -495,7 +506,34 @@ class Worker:
             .limit(self._MAX_AUTO_RECOVERY_SCANS_PER_TICK)
             .all()
         )
-        for job in dead_jobs:
+        for job in lease_dead:
+            dead_jobs_by_id[job.id] = job
+
+        remaining = self._MAX_AUTO_RECOVERY_SCANS_PER_TICK - len(dead_jobs_by_id)
+        if remaining > 0:
+            # Task stuck running; linked job already terminal — TaskLiveness.dead shape #2.
+            terminal_without_finalize = (
+                db.query(MainAIJob)
+                .join(MainAITask, MainAITask.mainai_job_id == MainAIJob.id)
+                .filter(
+                    MainAIJob.job_type == "task_execution",
+                    MainAIJob.status.in_(
+                        (
+                            MainAIJobStatus.failed,
+                            MainAIJobStatus.completed,
+                            MainAIJobStatus.cancelled,
+                        )
+                    ),
+                    MainAITask.status == MainAITaskStatus.running,
+                )
+                .order_by(MainAIJob.completed_at.asc().nullsfirst(), MainAIJob.id.asc())
+                .limit(remaining)
+                .all()
+            )
+            for job in terminal_without_finalize:
+                dead_jobs_by_id.setdefault(job.id, job)
+
+        for job in dead_jobs_by_id.values():
             task = db.query(MainAITask).filter(MainAITask.mainai_job_id == job.id).one_or_none()
             if task is None or task.status != MainAITaskStatus.running:
                 continue
