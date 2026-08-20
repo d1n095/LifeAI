@@ -34,6 +34,13 @@ from app.models.capability_reality import (
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
+from app.models.diagnosis import (
+    DIAGNOSIS_AUTHORITIES,
+    DIAGNOSIS_BASES,
+    DIAGNOSIS_CATEGORIES,
+    DIAGNOSIS_EPISTEMIC_STAGES,
+    DiagnosisRecord,
+)
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
@@ -207,6 +214,11 @@ __all__ = [
     "CompanyInfo",
     "Conversation",
     "Message",
+    "DIAGNOSIS_AUTHORITIES",
+    "DIAGNOSIS_BASES",
+    "DIAGNOSIS_CATEGORIES",
+    "DIAGNOSIS_EPISTEMIC_STAGES",
+    "DiagnosisRecord",
     "Document",
     "DocumentChunk",
     "EmailVerificationToken",
