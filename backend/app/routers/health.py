@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.jobs.heartbeat import worker_process_alive
 
 logger = logging.getLogger("mainai.health")
 settings = get_settings()
@@ -52,12 +53,18 @@ def health(response: Response, db: Session = Depends(get_db)):
     reach FastAPI.
 
     Never leaks *why* something failed: connection details and the exact exception are
-    logged server-side only (see _check_database/_check_redis above) — the response body is
-    the same two words either way, deliberately generic so a client (or an attacker probing
-    this endpoint) learns nothing about internal infrastructure from a failure.
+    logged server-side only (see _check_database/_check_redis above) — a 503 body stays
+    `{"status": "unavailable"}` with no extra fields.
+
+    When healthy, also reports `worker`: `alive` if the process-level Redis heartbeat
+    (app/jobs/heartbeat.py) is present, else `unknown`. Missing worker never 503s this
+    endpoint — an idle API without a worker is still a live API; founder ops_status remains
+    the place that classifies unreachable workers. `unknown` is the only negative this
+    public probe is allowed to say (the heartbeat helper never returns False).
     """
     healthy = _check_database(db) and _check_redis()
     if not healthy:
         response.status_code = 503
         return {"status": "unavailable"}
-    return {"status": "ok"}
+    worker = "alive" if worker_process_alive() is True else "unknown"
+    return {"status": "ok", "worker": worker}
