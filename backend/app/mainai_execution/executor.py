@@ -53,7 +53,18 @@ def _lock_task(db: Session, task_id: uuid.UUID) -> MainAITask:
 # handled differently (and honestly documented as a real V0.1 limitation) rather than
 # pretending this function can stop it.
 _CANCELLABLE_MAINAI_TASK_STATUSES = frozenset(
-    {MainAITaskStatus.pending, MainAITaskStatus.ready, MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed}
+    {
+        MainAITaskStatus.pending,
+        MainAITaskStatus.ready,
+        MainAITaskStatus.blocked,
+        MainAITaskStatus.retryable_failed,
+        # waiting_external is a RESERVED scaffold status (V0.3): there is still no production
+        # producer, MainAITaskWait source type, poll clock, or resume path. Cancel-only keeps
+        # a stray row from permanently stranding a goal; it does NOT make the state
+        # operational. Do not invent a free-floating poller — extend MainAITaskWait +
+        # _poll_mainai_task_waits (mirror waiting_ci) when a real external detector exists.
+        MainAITaskStatus.waiting_external,
+    }
 )
 
 
