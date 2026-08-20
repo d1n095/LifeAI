@@ -13,6 +13,7 @@ from app.capability_reality import record_capability_observation
 from app.founder_memory import (
     FounderMemoryError,
     get_founder_memory,
+    list_current_founder_memory,
     list_founder_memory,
     mark_founder_memory_disputed,
     record_founder_memory,
@@ -181,6 +182,36 @@ def test_mark_founder_memory_disputed_never_deletes_or_rewrites_content(superuse
     superuser_db.commit()
     assert disputed.status == "disputed"
     assert disputed.content == "Original statement."
+
+
+def test_list_current_founder_memory_excludes_both_superseded_and_disputed(superuser_db):
+    """The safe-by-default entry point added alongside the adversarial cross-stack review
+    (docs/LIFE_COGNITION_FOUNDATION_REVIEW_2026-08-18.md): a careless caller reaching for
+    "what's current" must never get a superseded OR a disputed note back just because they
+    forgot to pass status="active" to list_founder_memory() themselves."""
+
+    owner = _owner(superuser_db)
+    active = record_founder_memory(superuser_db, owner_id=owner.id, note_type="preference", content="Still true.", idempotency_key="cur-active")
+    superuser_db.commit()
+    superseded_original = record_founder_memory(superuser_db, owner_id=owner.id, note_type="preference", content="Old.", idempotency_key="cur-old")
+    superuser_db.commit()
+    record_founder_memory(
+        superuser_db, owner_id=owner.id, note_type="correction", content="New.", idempotency_key="cur-new",
+        supersedes_note_id=superseded_original.id,
+    )
+    disputed_note = record_founder_memory(superuser_db, owner_id=owner.id, note_type="observation", content="In question.", idempotency_key="cur-disp")
+    superuser_db.commit()
+    mark_founder_memory_disputed(superuser_db, owner_id=owner.id, note_id=disputed_note.id)
+    superuser_db.commit()
+
+    current_ids = {n.id for n in list_current_founder_memory(superuser_db, owner_id=owner.id)}
+    assert active.id in current_ids
+    assert superseded_original.id not in current_ids
+    assert disputed_note.id not in current_ids
+
+    # note_type filtering composes correctly with the status="active" filter underneath.
+    preferences_only = {n.id for n in list_current_founder_memory(superuser_db, owner_id=owner.id, note_type="preference")}
+    assert preferences_only == {active.id}
 
 
 # ============================================================================ Requirement D /

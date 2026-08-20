@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -11,9 +12,18 @@ from typing import Callable
 
 from sqlalchemy import select
 
-from app.autonomous_gap.service import handle_live_gap_signal
+from app.autonomous_gap.service import (
+    GapGenerationBounds,
+    GapGenerationError,
+    GapLeaseLostError,
+    derive_work_binding_for_gap_child,
+    gap_problem_for_child_task,
+    handle_live_gap_signal,
+    is_gap_generated_child,
+    resume_source_after_repair,
+)
 from app.development_driver.service import run_driver
-from app.development_operator.service import DEVELOPMENT_CAPABILITIES
+from app.development_operator.service import DEVELOPMENT_CAPABILITIES, OperatorContext
 from app.intelligence_governance import record_evidence
 from app.life_intents.service import IntentError, evaluate_feasibility
 from app.mainai_execution.approval import ApprovalRequiredError
@@ -30,11 +40,16 @@ from app.models.mainai_job import MainAIJob
 from app.models.work_intelligence import WorkStrategyExecution
 from app.provider_planning.service import PlanningAdapter, plan_with_provider
 from app.safe_planner.service import (
+    CandidateStep,
+    CandidateValidationError,
     FounderPlanningRequest,
     PlanCandidate,
+    PlanningResult,
+    build_multiplication_repair_candidate,
     plan_founder_request,
 )
 
+logger = logging.getLogger("mainai.development_supervisor")
 
 AUTHORIZED_KINDS = frozenset(
     {"founder_requirement", "founder_decision", "founder_correction", "authorized_goal"}
@@ -44,9 +59,141 @@ TERMINAL = frozenset(
     {MainAITaskStatus.completed, MainAITaskStatus.failed, MainAITaskStatus.cancelled}
 )
 
+# Structured deferred reason codes -- never classify by English substring matching alone.
+DEFERRED_CAPABILITY_MISSING = "CAPABILITY_MISSING"
+DEFERRED_VERIFICATION_REQUIRED = "VERIFICATION_REQUIRED"
+DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED = "PROVIDER_SPEND_NOT_AUTHORIZED"
+DEFERRED_WAITING_PROVIDER = "WAITING_PROVIDER"
+DEFERRED_GAP_GENERATION_ERROR = "GAP_GENERATION_ERROR"
+
+DEFERRED_REASON_MESSAGES = {
+    DEFERRED_CAPABILITY_MISSING: "capability missing; bounded capability child required or authorization pending",
+    DEFERRED_VERIFICATION_REQUIRED: "verification failed or remains incomplete; bounded repair required",
+    DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED: "provider-assisted planning is not authorized for this scope",
+    DEFERRED_WAITING_PROVIDER: "provider planning is unavailable",
+    DEFERRED_GAP_GENERATION_ERROR: "gap generation failed closed; unrelated work may continue",
+}
+
 
 class SupervisorError(RuntimeError):
     pass
+
+
+def _intersect_path_envelopes(*path_sets: tuple[str, ...]) -> tuple[str, ...]:
+    nonempty = [tuple(paths) for paths in path_sets if paths]
+    if not nonempty:
+        return ()
+    current = set(nonempty[0])
+    for paths in nonempty[1:]:
+        current &= set(paths)
+    return tuple(sorted(current))
+
+
+def bind_execution_context(
+    *,
+    scope: SupervisorScope,
+    binding: WorkBinding,
+    context: OperatorContext,
+) -> OperatorContext:
+    """Fail-closed path authority: OperatorContext may never exceed WorkBinding or scope.
+
+    effective_allowed_paths = intersection(scope, binding, context).
+    Never silently broadens the binding. Empty intersection rejects execution.
+    """
+    binding_paths = tuple(binding.allowed_paths or ())
+    if not binding_paths:
+        raise SupervisorError("WorkBinding.allowed_paths is required for execution")
+    effective = _intersect_path_envelopes(
+        tuple(scope.allowed_paths),
+        binding_paths,
+        tuple(context.allowed_paths or scope.allowed_paths),
+    )
+    if not effective:
+        raise SupervisorError(
+            "effective path envelope is empty after intersecting SupervisorScope, "
+            "WorkBinding, and OperatorContext allowed_paths"
+        )
+    # Reject any context path that escapes the binding (do not keep extras).
+    if set(context.allowed_paths or ()) - set(binding_paths):
+        # Narrow safely to the intersection rather than aborting ordinary prepare_context
+        # helpers that hand a broader parent envelope — but never add paths beyond binding.
+        pass
+    if not set(effective).issubset(set(binding_paths)):
+        raise SupervisorError("effective paths escape WorkBinding.allowed_paths")
+    if not set(effective).issubset(set(scope.allowed_paths)):
+        raise SupervisorError("effective paths escape SupervisorScope.allowed_paths")
+    return replace(context, allowed_paths=effective)
+
+
+def _reverify_candidate_for_source(*, source: MainAITask, problem) -> PlanCandidate:
+    """Build a re-verify-only candidate from structured gap evidence — never invent calculator tests."""
+    envelope = ((problem.provenance or {}).get("execution_envelope") or {}) if problem is not None else {}
+    contract = envelope.get("reverify") if isinstance(envelope, dict) else None
+    if not isinstance(contract, dict):
+        raise SupervisorError(
+            "unsupported re-verification: gap envelope lacks a structured reverify contract"
+        )
+    capability = contract.get("capability")
+    if capability == "run_focused_test":
+        arguments = contract.get("arguments") or []
+        if not isinstance(arguments, list) or not arguments:
+            raise SupervisorError(
+                "unsupported re-verification: focused-test contract missing arguments"
+            )
+        profile = contract.get("profile_name") or "focused_pytest"
+        return PlanCandidate(
+            interpretation="re-verify original work after autonomous repair",
+            requested_outcome="original verification passes on the repaired repository",
+            rationale="run the structured verification contract from the gap envelope only",
+            steps=(
+                CandidateStep(
+                    "verify",
+                    "run structured focused verification",
+                    "pytest pass",
+                    "run_focused_test",
+                    {
+                        "profile_name": profile,
+                        "arguments": [str(item) for item in arguments],
+                    },
+                    required_risk="LOCAL_EXECUTION",
+                    verification_required=True,
+                ),
+                CandidateStep(
+                    "gate",
+                    "evaluate verification evidence",
+                    "verification pass",
+                    "verification_evaluate",
+                    depends_on=("verify",),
+                ),
+            ),
+        )
+    if capability == "run_static_check":
+        return PlanCandidate(
+            interpretation="re-verify original work after autonomous repair",
+            requested_outcome="original static verification passes",
+            rationale="run the structured static-check contract from the gap envelope only",
+            steps=(
+                CandidateStep(
+                    "verify",
+                    "run structured static check",
+                    "static pass",
+                    "run_static_check",
+                    {},
+                    required_risk="LOCAL_EXECUTION",
+                    verification_required=True,
+                ),
+                CandidateStep(
+                    "gate",
+                    "evaluate verification evidence",
+                    "verification pass",
+                    "verification_evaluate",
+                    depends_on=("verify",),
+                ),
+            ),
+        )
+    raise SupervisorError(
+        f"unsupported re-verification capability '{capability}'; refusing calculator-global fallback"
+    )
 
 
 @dataclass(frozen=True)
@@ -96,6 +243,11 @@ class WorkBinding:
     provider_likely: bool = False
     repository_identity: str = ""
     allowed_paths: tuple[str, ...] = ()
+    # Gap-derived children may use Safe Planner's deterministic recipe registry when
+    # candidate is None. Ordinary caller-supplied bindings without a candidate still require
+    # explicit provider_spend_authorized before any billed provider call -- they must not
+    # silently pick up a registry recipe that happens to match the goal instruction.
+    allow_deterministic_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -108,6 +260,7 @@ class CandidateAssessment:
     priority: int
     source: str = "mainai_task"
     expected_contribution: str = ""
+    deferred_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -254,40 +407,37 @@ def discover_candidates(db, *, scope, bindings, bounds):
 def select_candidate(assessments):
     actionable = [item for item in assessments if item.actionable]
     if not actionable:
-        if any("out_of_scope" in item.reason for item in assessments):
+        codes = {item.deferred_code for item in assessments if item.deferred_code}
+        if "out_of_scope" in " ".join(item.reason for item in assessments) or any(
+            "out_of_scope" in item.reason for item in assessments
+        ):
             return (
                 None,
                 "OUT_OF_SCOPE",
                 "candidate repository/path scope is unauthorized",
             )
-        if any("capability" in item.reason for item in assessments):
+        if DEFERRED_CAPABILITY_MISSING in codes:
             return (
                 None,
                 "CAPABILITY_MISSING",
                 "a bounded candidate has a durable capability gap",
             )
-        # Mirrors the CAPABILITY_MISSING branch immediately above -- a deferred verification
-        # failure (app.autonomous_gap.service's live wiring defers-and-continues it, same as
-        # CAPABILITY_MISSING, when the binding is independent) must resurface as its own
-        # VERIFICATION_REQUIRED classification once no other candidate remains actionable,
-        # never fall through to the generic BLOCKED below.
-        if any("verification" in item.reason for item in assessments):
+        if DEFERRED_VERIFICATION_REQUIRED in codes:
             return (
                 None,
                 "VERIFICATION_REQUIRED",
                 "a bounded candidate requires verification repair",
             )
-        # Checked before the generic "provider" branch below: an authorization gap is not an
-        # outage -- retrying will never resolve it, unlike WAITING_PROVIDER, so it must not be
-        # bucketed into the same classification a caller might just retry against.
-        if any("not authorized" in item.reason for item in assessments):
+        if DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED in codes:
             return (
                 None,
                 "PROVIDER_SPEND_NOT_AUTHORIZED",
                 "provider-assisted planning is not authorized for this scope",
             )
-        if any("provider" in item.reason for item in assessments):
+        if DEFERRED_WAITING_PROVIDER in codes:
             return None, "WAITING_PROVIDER", "provider-dependent work is waiting"
+        if DEFERRED_GAP_GENERATION_ERROR in codes:
+            return None, "BLOCKED", "gap generation failed closed with no other actionable work"
         return None, "BLOCKED", "no bounded candidate is currently actionable"
     highest = max(item.priority for item in actionable)
     tied = [item for item in actionable if item.priority == highest]
@@ -298,6 +448,64 @@ def select_candidate(assessments):
             "materially tied tasks have equal canonical priority",
         )
     return tied[0], "SELECTED", "highest-priority actionable canonical task"
+
+
+def _augment_bindings_with_gap_children(db, *, scope, bindings: tuple[WorkBinding, ...]) -> tuple[WorkBinding, ...]:
+    """Close the live handoff: discover gap-generated children and derive WorkBindings from
+    structured gap evidence. Does not invent PlanCandidates or auto-approve."""
+    if not bindings:
+        return bindings
+    prepare = bindings[0].prepare_context
+    known = {binding.task_id: binding for binding in bindings}
+    tasks = (
+        db.execute(
+            select(MainAITask).where(
+                MainAITask.owner_id == scope.owner_id,
+                MainAITask.goal_id == scope.goal_id,
+                MainAITask.status.in_(
+                    [
+                        MainAITaskStatus.ready,
+                        MainAITaskStatus.pending,
+                        MainAITaskStatus.running,
+                        MainAITaskStatus.blocked,
+                    ]
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    derived: list[WorkBinding] = []
+    for task in tasks:
+        if task.id in known:
+            continue
+        if not is_gap_generated_child(db, owner_id=scope.owner_id, task=task):
+            continue
+        binding = derive_work_binding_for_gap_child(
+            db, scope=scope, task=task, prepare_context=prepare
+        )
+        if binding is not None:
+            derived.append(binding)
+            known[task.id] = binding
+    if not derived:
+        return bindings
+    return bindings + tuple(derived)
+
+
+def _apply_deferred(assessments, deferred: dict[uuid.UUID, str]):
+    return tuple(
+        replace(
+            item,
+            actionable=False,
+            deferred_code=deferred[item.task_id],
+            reason=DEFERRED_REASON_MESSAGES.get(
+                deferred[item.task_id], deferred[item.task_id]
+            ),
+        )
+        if item.task_id in deferred
+        else item
+        for item in assessments
+    )
 
 
 def _checkpoint(db, *, goal, task, job_id, phase, state):
@@ -365,9 +573,22 @@ async def run_supervisor(
     bindings: tuple[WorkBinding, ...],
     bounds: SupervisorBounds | None = None,
     worker_id: str = "development-supervisor",
+    gap_bounds: GapGenerationBounds | None = None,
 ):
-    """Select and execute bounded existing work; every effect remains below Safe Planner."""
+    """Select and execute bounded existing work; every effect remains below Safe Planner.
+
+    Gap children inserted mid-run are auto-bound from structured LifeProblem provenance so the
+    live loop does not require founder/test job translation of WorkBinding/PlanCandidate.
+    Founder approval policy remains authoritative at dispatch.
+
+    Breadth counters (`gaps_recorded_this_run`, `children_inserted_this_run`,
+    `unresolved_gaps_this_run`) are **per Supervisor invocation**: each call to
+    `run_supervisor` starts them at zero. Prior checkpoints may still record the counters for
+    observability of that invocation, but they are not restored across calls. Resume of
+    completed_task_ids remains checkpoint-based.
+    """
     bounds = bounds or SupervisorBounds()
+    gap_bounds = gap_bounds or GapGenerationBounds()
     if not 1 <= bounds.max_jobs <= 20 or bounds.max_elapsed_seconds < 1:
         raise SupervisorError("supervisor execution bounds are invalid")
     started = time.monotonic()
@@ -378,9 +599,84 @@ async def run_supervisor(
     selected = [uuid.UUID(value) for value in prior.get("completed_task_ids", [])]
     completed_jobs = len(selected)
     jobs_this_run = 0
+    bindings = _augment_bindings_with_gap_children(db, scope=scope, bindings=bindings)
     binding_map = {binding.task_id: binding for binding in bindings}
     last_candidates = ()
     deferred: dict[uuid.UUID, str] = {}
+    # Per-invocation breadth bounds (not sticky across Supervisor calls).
+    gaps_recorded_this_run = 0
+    children_inserted_this_run = 0
+    unresolved_gaps_this_run = 0
+
+    def _gap_state_extra(gap_outcome):
+        return {
+            "gaps_recorded_this_run": gaps_recorded_this_run,
+            "children_inserted_this_run": children_inserted_this_run,
+            "unresolved_gaps_this_run": unresolved_gaps_this_run,
+            "gap_generation": None
+            if gap_outcome is None
+            else {
+                "classification": gap_outcome.classification,
+                "problem_id": str(gap_outcome.problem.id) if gap_outcome.problem else None,
+                "inserted_task_ids": (
+                    [str(t.id) for t in gap_outcome.inserted_tasks]
+                    if gap_outcome.inserted_tasks
+                    else []
+                ),
+            },
+        }
+
+    def _invoke_live_gap(
+        *,
+        task,
+        classification,
+        capability,
+        context,
+        binding,
+        driver_detail,
+        plan,
+    ):
+        nonlocal gaps_recorded_this_run, children_inserted_this_run, unresolved_gaps_this_run, bindings, binding_map
+        try:
+            gap_outcome = handle_live_gap_signal(
+                db,
+                scope=scope,
+                goal=goal,
+                plan=plan,
+                task=task,
+                classification=classification,
+                capability=capability,
+                requested_by=worker_id,
+                operator_context=context,
+                binding_paths=binding.allowed_paths,
+                source_job_id=context.job_id,
+                driver_detail=driver_detail or {},
+                bounds=gap_bounds,
+                gaps_recorded_this_run=gaps_recorded_this_run,
+                children_inserted_this_run=children_inserted_this_run,
+                unresolved_gaps_this_run=unresolved_gaps_this_run,
+            )
+        except GapLeaseLostError as exc:
+            logger.warning("gap generation lease fence tripped: %s", exc)
+            return GapLeaseLostError.__name__, None
+        except GapGenerationError as exc:
+            logger.warning("gap generation failed closed without stopping run: %s", exc)
+            return DEFERRED_GAP_GENERATION_ERROR, None
+        except Exception as exc:  # noqa: BLE001 -- isolate unrelated feasible work
+            logger.exception("unexpected gap generation error isolated: %s", exc)
+            return DEFERRED_GAP_GENERATION_ERROR, None
+
+        if gap_outcome is None:
+            return None, None
+        gaps_recorded_this_run += 1
+        if gap_outcome.classification == "ACCEPTED" and gap_outcome.inserted_tasks:
+            children_inserted_this_run += 1
+            bindings = _augment_bindings_with_gap_children(db, scope=scope, bindings=bindings)
+            binding_map = {binding.task_id: binding for binding in bindings}
+        elif gap_outcome.classification != "ACCEPTED":
+            unresolved_gaps_this_run += 1
+        return None, gap_outcome
+
     while (
         jobs_this_run < bounds.max_jobs
         and time.monotonic() - started < bounds.max_elapsed_seconds
@@ -396,15 +692,12 @@ async def run_supervisor(
                 reason,
                 prior_cp,
             )
+        bindings = _augment_bindings_with_gap_children(db, scope=scope, bindings=bindings)
+        binding_map = {binding.task_id: binding for binding in bindings}
         assessments = discover_candidates(
             db, scope=scope, bindings=bindings, bounds=bounds
         )
-        assessments = tuple(
-            replace(item, actionable=False, reason=deferred[item.task_id])
-            if item.task_id in deferred
-            else item
-            for item in assessments
-        )
+        assessments = _apply_deferred(assessments, deferred)
         last_candidates = assessments
         choice, classification, selection_reason = select_candidate(assessments)
         if choice is None:
@@ -451,6 +744,9 @@ async def run_supervisor(
                     "completed_task_ids": [str(value) for value in selected],
                     "candidate_task_ids": [str(item.task_id) for item in assessments],
                     "reason": selection_reason,
+                    "gaps_recorded_this_run": gaps_recorded_this_run,
+                    "children_inserted_this_run": children_inserted_this_run,
+                    "unresolved_gaps_this_run": unresolved_gaps_this_run,
                 },
             )
             return _result(
@@ -495,6 +791,7 @@ async def run_supervisor(
                 state={
                     "completed_task_ids": [str(value) for value in selected],
                     "selected_task_id": str(task.id),
+                    **_gap_state_extra(None),
                 },
             )
             return _result(
@@ -512,11 +809,11 @@ async def run_supervisor(
             or context.task_id != task.id
             or context.job_id != job.id
             or str(context.repository_root.resolve()) != scope.repository_identity
-            or not set(context.allowed_paths).issubset(set(scope.allowed_paths))
         ):
             raise SupervisorError(
                 "execution context escapes authorized owner/repository scope"
             )
+        context = bind_execution_context(scope=scope, binding=binding, context=context)
         strategy_execution = db.execute(
             select(WorkStrategyExecution).where(
                 WorkStrategyExecution.id == context.strategy_execution_id,
@@ -554,6 +851,10 @@ async def run_supervisor(
             contradiction_refs=binding.contradiction_refs,
             max_context_members=bounds.max_context_members,
         )
+        # Explicit candidate always goes through Safe Planner validation.
+        # Gap-derived bindings may use deterministic Safe Planner recipes (no provider spend).
+        # Ordinary candidate=None bindings still require provider_spend_authorized before any
+        # billed provider call -- they must not silently inherit a matching registry recipe.
         if binding.candidate is not None:
             planning = plan_founder_request(
                 db,
@@ -561,13 +862,67 @@ async def run_supervisor(
                 operator_context=context,
                 candidate=binding.candidate,
             )
+        elif binding.allow_deterministic_fallback:
+            recipe_candidate = None
+            problem = gap_problem_for_child_task(
+                db, owner_id=scope.owner_id, task=task
+            )
+            recipe = (
+                ((problem.provenance or {}).get("execution_envelope") or {}).get(
+                    "repair_recipe"
+                )
+                if problem is not None
+                else None
+            )
+            try:
+                if recipe == "multiplication_repair":
+                    recipe_candidate = build_multiplication_repair_candidate(context)
+                planning = plan_founder_request(
+                    db,
+                    request=request,
+                    operator_context=context,
+                    candidate=recipe_candidate,
+                )
+            except CandidateValidationError as exc:
+                planning = PlanningResult(
+                    "OUT_OF_SCOPE",
+                    {
+                        "reason": str(exc),
+                        "repair_recipe": recipe,
+                    },
+                )
+            if planning.classification == "WAITING_PROVIDER":
+                if not scope.provider_spend_authorized:
+                    cp = _checkpoint(
+                        db,
+                        goal=goal,
+                        task=task,
+                        job_id=job.id,
+                        phase="PROVIDER_SPEND_NOT_AUTHORIZED",
+                        state={
+                            "completed_task_ids": [str(value) for value in selected],
+                            "selected_task_id": str(task.id),
+                        },
+                    )
+                    if binding.independent:
+                        deferred[task.id] = DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED
+                        continue
+                    return _result(
+                        "PROVIDER_SPEND_NOT_AUTHORIZED",
+                        goal,
+                        completed_jobs,
+                        selected,
+                        assessments,
+                        "provider-assisted planning requires scope.provider_spend_authorized=True",
+                        cp,
+                    )
+                planning = await plan_with_provider(
+                    db,
+                    request=request,
+                    operator_context=context,
+                    adapter=binding.provider_adapter,
+                )
         elif not scope.provider_spend_authorized:
-            # binding.candidate is None -> this task has no deterministic plan and would
-            # otherwise fall through to plan_with_provider(), a real billed external call.
-            # A scope not explicitly authorized for provider spend must never reach that call
-            # -- deny it the same shape as WAITING_PROVIDER/CAPABILITY_MISSING (deferred if
-            # other work is independent, else a durable classification), never a silent AUTO
-            # fallback (founder P1 review finding).
             cp = _checkpoint(
                 db,
                 goal=goal,
@@ -580,7 +935,7 @@ async def run_supervisor(
                 },
             )
             if binding.independent:
-                deferred[task.id] = "provider-assisted planning is not authorized for this scope"
+                deferred[task.id] = DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED
                 continue
             return _result(
                 "PROVIDER_SPEND_NOT_AUTHORIZED",
@@ -599,6 +954,18 @@ async def run_supervisor(
                 adapter=binding.provider_adapter,
             )
         if planning.classification != "ACCEPTED" or planning.plan is None:
+            gap_outcome = None
+            gap_error = None
+            if planning.classification == "CAPABILITY_MISSING":
+                gap_error, gap_outcome = _invoke_live_gap(
+                    task=task,
+                    classification="CAPABILITY_MISSING",
+                    capability=(planning.explanation or {}).get("requested_capability"),
+                    context=context,
+                    binding=binding,
+                    driver_detail=planning.explanation or {},
+                    plan=db.get(MainAIPlan, task.plan_id),
+                )
             cp = _checkpoint(
                 db,
                 goal=goal,
@@ -611,13 +978,21 @@ async def run_supervisor(
                     "planning_checkpoint_id": str(planning.checkpoint_id)
                     if planning.checkpoint_id
                     else None,
+                    **_gap_state_extra(gap_outcome),
+                    "gap_generation_error": gap_error,
                 },
             )
+            if gap_error == GapLeaseLostError.__name__:
+                deferred[task.id] = DEFERRED_GAP_GENERATION_ERROR
+                continue
             if planning.classification == "WAITING_PROVIDER" and binding.independent:
-                deferred[task.id] = "provider planning is unavailable"
+                deferred[task.id] = DEFERRED_WAITING_PROVIDER
                 continue
             if planning.classification == "CAPABILITY_MISSING" and binding.independent:
-                deferred[task.id] = "capability missing in provider plan"
+                deferred[task.id] = DEFERRED_CAPABILITY_MISSING
+                continue
+            if gap_error == DEFERRED_GAP_GENERATION_ERROR and binding.independent:
+                deferred[task.id] = DEFERRED_GAP_GENERATION_ERROR
                 continue
             return _result(
                 planning.classification,
@@ -632,28 +1007,23 @@ async def run_supervisor(
             )
         driver = run_driver(db, context=context, plan=planning.plan)
         if driver.classification != "COMPLETE":
-            if driver.classification == "VERIFICATION_REQUIRED":
-                task.blocker_reason = (
-                    "verification failed or remains incomplete; bounded repair required"
-                )
-            # LIVE GAP -> CHILD-TASK WIRING: the only two driver classifications
-            # app.autonomous_gap.service.LIVE_GAP_SIGNAL_CLASSIFICATIONS recognizes as
-            # structured, durable gap evidence. gap_outcome is None for every other
-            # classification (WAITING_PROVIDER, WAITING_APPROVAL, ...) -- this call is purely
-            # additive and never changes what driver.classification itself is. Recorded
-            # unconditionally (not gated on binding.independent) -- the gap is real evidence
-            # regardless of whether OTHER candidates can proceed independently of this one;
-            # `binding.independent` below still governs only whether the RUN continues past
-            # this task, exactly as it already did before this wiring existed.
-            gap_outcome = handle_live_gap_signal(
-                db,
-                scope=scope,
-                goal=goal,
-                plan=db.get(MainAIPlan, task.plan_id),
+            if driver.classification in {
+                "VERIFICATION_REQUIRED",
+                "FAILED_NONRETRYABLE",
+            }:
+                task.blocker_reason = DEFERRED_REASON_MESSAGES[DEFERRED_VERIFICATION_REQUIRED]
+            gap_error, gap_outcome = _invoke_live_gap(
                 task=task,
                 classification=driver.classification,
-                capability=driver.detail.get("requested_capability") if driver.classification == "CAPABILITY_MISSING" else None,
-                requested_by=worker_id,
+                capability=(
+                    driver.detail.get("requested_capability")
+                    if driver.classification == "CAPABILITY_MISSING"
+                    else None
+                ),
+                context=context,
+                binding=binding,
+                driver_detail=driver.detail or {},
+                plan=db.get(MainAIPlan, task.plan_id),
             )
             cp = _checkpoint(
                 db,
@@ -666,31 +1036,25 @@ async def run_supervisor(
                     "selected_task_id": str(task.id),
                     "driver_checkpoint_id": str(driver.checkpoint_id),
                     "followup": "verification_repair"
-                    if driver.classification == "VERIFICATION_REQUIRED"
+                    if driver.classification
+                    in {"VERIFICATION_REQUIRED", "FAILED_NONRETRYABLE"}
                     else None,
-                    "gap_generation": None
-                    if gap_outcome is None
-                    else {
-                        "classification": gap_outcome.classification,
-                        "problem_id": str(gap_outcome.problem.id) if gap_outcome.problem else None,
-                        "inserted_task_ids": [str(t.id) for t in gap_outcome.inserted_tasks] if gap_outcome.inserted_tasks else [],
-                    },
+                    **_gap_state_extra(gap_outcome),
+                    "gap_generation_error": gap_error,
                 },
             )
-            # Both VERIFICATION_REQUIRED and CAPABILITY_MISSING defer-and-continue when this
-            # binding is independent -- unrelated candidates (including a just-inserted repair
-            # or capability-development child, once it exists) keep making progress in the SAME
-            # run rather than the whole run ending on one task's failure. VERIFICATION_REQUIRED
-            # did not have this defer-and-continue branch before this wiring (only
-            # CAPABILITY_MISSING did) -- extended to match, since a verification failure that
-            # generates a real repair child needs the SAME "goal continues" behavior the
-            # founder's live-loop requirement describes, not a full run stop.
-            if driver.classification in {"CAPABILITY_MISSING", "VERIFICATION_REQUIRED"} and binding.independent:
-                deferred[task.id] = (
-                    f"capability missing: {driver.detail.get('requested_capability', 'unknown')}"
-                    if driver.classification == "CAPABILITY_MISSING"
-                    else "verification failed or remains incomplete; bounded repair required"
-                )
+            deferable = driver.classification in {
+                "CAPABILITY_MISSING",
+                "VERIFICATION_REQUIRED",
+                "FAILED_NONRETRYABLE",
+            } or gap_error is not None
+            if deferable and binding.independent:
+                if gap_error == GapLeaseLostError.__name__ or gap_error == DEFERRED_GAP_GENERATION_ERROR:
+                    deferred[task.id] = DEFERRED_GAP_GENERATION_ERROR
+                elif driver.classification == "CAPABILITY_MISSING":
+                    deferred[task.id] = DEFERRED_CAPABILITY_MISSING
+                else:
+                    deferred[task.id] = DEFERRED_VERIFICATION_REQUIRED
                 continue
             return _result(
                 driver.classification,
@@ -701,12 +1065,59 @@ async def run_supervisor(
                 "child work did not reach verified completion",
                 cp,
                 followup="verification_repair"
-                if driver.classification == "VERIFICATION_REQUIRED"
+                if driver.classification
+                in {"VERIFICATION_REQUIRED", "FAILED_NONRETRYABLE"}
                 else None,
             )
         selected.append(task.id)
         completed_jobs += 1
         jobs_this_run += 1
+        if is_gap_generated_child(db, owner_id=scope.owner_id, task=task):
+            resumed = resume_source_after_repair(
+                db, owner_id=scope.owner_id, repair_child=task
+            )
+            if resumed is not None:
+                deferred.pop(resumed.id, None)
+                existing = binding_map.get(resumed.id)
+                repair_problem = gap_problem_for_child_task(
+                    db, owner_id=scope.owner_id, task=task
+                )
+                reverify = _reverify_candidate_for_source(
+                    source=resumed, problem=repair_problem
+                )
+                envelope_paths = tuple(
+                    ((repair_problem.provenance or {}).get("execution_envelope") or {}).get(
+                        "allowed_paths"
+                    )
+                    or scope.allowed_paths
+                ) if repair_problem is not None else tuple(scope.allowed_paths)
+                if existing is not None:
+                    updated = replace(
+                        existing,
+                        candidate=reverify,
+                        allowed_paths=existing.allowed_paths or envelope_paths,
+                    )
+                    binding_map[resumed.id] = updated
+                    bindings = tuple(
+                        binding_map.get(item.task_id, item) for item in bindings
+                    )
+                else:
+                    derived = WorkBinding(
+                        task_id=resumed.id,
+                        prepare_context=bindings[0].prepare_context,
+                        candidate=reverify,
+                        required_capabilities=("run_focused_test", "run_static_check"),
+                        expected_contribution="re-verify original work after repair",
+                        independent=True,
+                        repository_identity=scope.repository_identity,
+                        allowed_paths=envelope_paths or tuple(scope.allowed_paths),
+                    )
+                    bindings = bindings + (derived,)
+                    binding_map[resumed.id] = derived
+            bindings = _augment_bindings_with_gap_children(
+                db, scope=scope, bindings=bindings
+            )
+            binding_map = {binding.task_id: binding for binding in bindings}
         prior_cp = _checkpoint(
             db,
             goal=goal,
@@ -717,6 +1128,9 @@ async def run_supervisor(
                 "completed_task_ids": [str(value) for value in selected],
                 "last_verified_task_id": str(task.id),
                 "selection_reason": selection_reason,
+                "gaps_recorded_this_run": gaps_recorded_this_run,
+                "children_inserted_this_run": children_inserted_this_run,
+                "unresolved_gaps_this_run": unresolved_gaps_this_run,
             },
         )
     return _result(
