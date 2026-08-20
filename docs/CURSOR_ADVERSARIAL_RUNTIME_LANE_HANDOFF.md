@@ -1,7 +1,10 @@
 # Cursor adversarial runtime lane — final handoff (2026-08-20)
 
-**Status:** `CURSOR ADVERSARIAL LANE COMPLETE` (handoff ready).  
-**Not claimed:** `LIFE CONTROLLED AUTONOMY COMPLETE`.
+**Status:** `ADVERSARIAL INVESTIGATION COMPLETE` + `HANDOFF COMPLETE` (#135).  
+**Not claimed:** `LIFE CONTROLLED AUTONOMY COMPLETE`.  
+**Also not claimed for #131–#134 until each is true:** `PR CI GREEN` → `PR MERGED` → `COMPOSED ON CURRENT TIP` → `RUNTIME/E2E PROVEN`.
+
+Completion-state precision: `INVESTIGATION COMPLETE` ≠ `PR IMPLEMENTED` ≠ `CI GREEN` ≠ `MERGED` ≠ `COMPOSED AND PROVEN`.
 
 This document freezes evidence for Claude/MainAI. Refresh SHAs against GitHub before acting —  
 `YOUR LAST REPORT != CURRENT REALITY`.
@@ -97,7 +100,7 @@ Cursor must **not** build a competing knowledge→goal bridge.
 
 ## H. Highest-risk unresolved defects
 
-1. **Supervisor / Safe Planner / gap / driver** — full chain implemented, **zero** production router/worker callers → autonomy illusion. Severity: P0 autonomy. Safe to fix now only with explicit founder trigger design (not cognition bridge).
+1. **Supervisor / Safe Planner / gap / driver** — full chain implemented, **zero** production router/worker callers → autonomy illusion. Severity: **P1 autonomy-chain blocker** (not P0). Architectural importance alone is not P0 — reserve P0 for data loss/corruption, cross-owner exposure, authorization bypass, irreversible destructive effects, or uncontrolled external effects. Safe to fix only with explicit founder trigger design (not a cognition bridge).
 2. **Documents BackgroundTasks indexing** — process death loses work after Document commit. Severity: P1 durability. Safe narrow fix: ImportJob pattern.
 3. **Goal status lie** — tasks `waiting_ci` while goal stays `running`; `MainAIGoalStatus.waiting` unwired. Severity: P2 honesty.
 4. **Dual AgentTask / MainAITask** — approved agent work does not satisfy MainAI tasks. Severity: P1 architecture; do not invent semantics.
