@@ -6,6 +6,817 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 71 (2026-08-18): `claude/founder-memory-signal-staging` — Candidate Learning Signals (migration 0053) + "never automate" wording audit + Source Vault future-compatibility review, stackad ovanpå PR #110 (`claude/corpus-trial-problem-learning` @ `04a0b67`), egen worktree, nionde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund — grundarens direktiv:** (1) koppla INTE `chat.py`s resolver-markörer direkt in i
+`founder_memory`-sanning — stående princip SIGNAL PRODUCER != TRUTH WRITER, med en fyrastegs
+arkitektur (källhändelse → bevarad källreferens → kandidat-lärsignal →
+bevis/klassificeringssteg → härledd grundarkunskap ENDAST när motiverat); (2) granska all
+"never automate"-formulering adversariellt — nuvarande begränsningar ("inte autonomt
+betrodd ännu") får INTE av misstag bli permanenta arkitekturförbud om den verkliga avsikten
+bara är att kräva styrning; (3) inspektera Source Vault-arkitekturen för framtida
+kompatibilitet FÖRE storskalig korpus-inmatning, utan att bygga ett stort lagringssystem nu.
+
+**Byggt (1) — `backend/app/founder_memory_signals/`, migration 0053:**
+- `candidate_learning_signals` — NY tabell, MEDVETET utan `authority`/`basis`-kolumner
+  (en rad här är ALDRIG ett påstående om världen, bara ett påstående att en signalproducent
+  märkte något). `record_candidate_signal()` — den enda skrivvägen, säker att anropa från en
+  live observationell hot path. `promote_candidate_signal()` — DEN ENDA vägen till en riktig
+  `FounderMemoryNote`, kräver ALLTID anroparens egen explicita `authority`/`basis`, ALDRIG
+  signalens egen `classifier_confidence` tyst kopierad in — bevisat direkt av ett dedikerat
+  test. `dismiss_candidate_signal()` — raderar aldrig, markerar bara granskad-och-avvisad.
+- `app/routers/chat.py` kopplad LIVE: `resolve_context()`s klassificering (redan live,
+  "purely observational") skriver nu en kandidatsignal för `INTENT_EXPLICIT_MEMORY`/
+  `INTENT_CORRECTION`/`INTENT_IDEA_WORTH_SAVING` — ALDRIG till `founder_memory_notes` direkt.
+  Inpackad i try/except: ett fel här kan ALDRIG förstöra chatt-svaret. 90/90 befintliga
+  chatt-tester gröna efteråt (ingen regression på denna live hot path), plus 5+2 nya tester
+  som bevisar kopplingen (inklusive att ett fel svaljs tyst, aldrig kraschar anroparen).
+
+**Byggt (2) — "never automate"-formulering omskriven i 4 dokument** (`LIFE_CAPABILITY_
+REALITY.md`, `LIFE_CAUSAL_DIAGNOSIS_INTERFACE.md`, `LIFE_CORPUS_TRIAL_HARNESS.md`,
+`LIFE_FOUNDER_MEMORY.md`): varje "deliberately never built" ersatt med en explicit "Protected
+vs. current-scope"-distinktion — genuint permanenta invarianter (fabricering, auktoritets-
+läckage, tyst inferens-till-sanning, permission-bypass) förblir starkt formulerade; allt annat
+omformulerat till "inte byggt i detta bootstrap-steg, med ett konkret villkor för när det
+SKULLE vara säkert att bygga senare" — utan att någon kod ändrats, bara ärlighet om vad som
+faktiskt är förbjudet kontra bara obyggt än.
+
+**Byggt (3) — `docs/LIFE_SOURCE_VAULT_FUTURE_COMPATIBILITY.md`** (rent granskningsdokument,
+INGEN kodändring): bekräftade att nuvarande lagringsarkitektur (`app/storage/`,
+content-addressed sha256, redan abstraherad bakom `StorageBackend`-gränssnittet, dedup via
+referensräkning, strömmande atomära skrivningar) redan är väl positionerad för framtida
+hashing/dedup/chunking/compression/encryption/cold-storage UTAN kodändring nu — abstraktionen
+själv är redan det som krävs. EN specifik risk dokumenterad för framtiden (inte åtgärdad nu):
+en naiv framtida helfil-kryptering skulle återskapa exakt den "jätte-krypterade-blob"-
+antimönster grundaren varnade för — måste vara sub-fil-granulär när kryptering väl byggs.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. `app/routers/chat.py` är INTE i den listan och rördes medvetet, med
+full regressionstäckning av den befintliga svit som redan täcker den filen.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #110 (`claude/corpus-trial-problem-
+learning` @ `04a0b67`). Helt oberoende av Cursors PR #79/#80/#81/#92/#105/#107.
+
+**UPPDATERAT — hela kedjan mergad:** #83 → #84 → #85 → #90 → #94 → #96 → #98 → #101 → #102 →
+#104 → #108 → #110 → #113, var och en granskad, testad (targeted + full `tests/backend/mainai/`
+regression, `tests/backend/mainai/` + `tests/security/` + `tests/backend/` stack-wide efter
+#90 och #113 specifikt) och mergad i beroendeordning in i sin stack-branch. Eftersom varje
+PR:s bas var föregående PR:s branch (inte integrationsgrenen direkt, förutom #83), krävdes
+EN slutlig konsoliderande merge av `claude/founder-memory-signal-staging` (toppen av stacken)
+in i `claude/det-kommer-mer-879lcm` för att faktiskt landa hela kedjan i den delade grenen —
+det är den merge som skapade denna commit.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/founder-memory-signal-staging` | [#113](https://github.com/d1n095/LifeAI/pull/113) | **Mergad**, konsoliderad in i `claude/det-kommer-mer-879lcm` | Candidate Learning Signals (migration 0053, SIGNAL PRODUCER != TRUTH WRITER, live chat.py-koppling) + never-automate-formulering i 4 dokument + Source Vault framtida kompatibilitetsgranskning (inget kodbygge) | `claude/corpus-trial-problem-learning` @ 04a0b67 (stackad ovanpå PR #110) |
+
+## Pass 70 (2026-08-18): `claude/corpus-trial-problem-learning` — wire `app.problem_learning` into corpus trial harness fixtures (INGEN ny migration), stackad ovanpå PR #108 (`claude/corpus-trial-run-history` @ `b4502f7`), egen worktree, åttonde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** sista kvarvarande "Explicitly deferred"-punkten från PR #102s egen dokumentation
+— `app.problem_learning` (migration 0042, föregår detta uppdrag) lämnades medvetet utanför
+bootstrap-korpusen eftersom dess objektgraf (problem → approach/component → decision) är
+tyngre än `founder_memory`/`diagnosis`s platta poster.
+
+**Byggt** (`backend/app/corpus_trial/fixtures.py`/`harness.py`, INGEN ny migration):
+- Två nya korpusposter (ett projektbeslut, senare omprövat via supersession) + en tredje
+  `system`-gren i `harness.py`. Behövde INGEN ny logik i `scoring.py` — `record_decision()`
+  har redan samma "contradiction excludes currency"-semantik som `founder_memory_notes`
+  (INTE `diagnosis_records`s annorlunda variant), och sin egen `active_decision()`-fråga.
+- Verklig skillnad hittad och hanterad explicit: `LifeProblemDecision` saknar `confidence`-
+  kolumn OCH har ingen in-place "markera motsagd utan ersättning"-övergång (till skillnad
+  från `mark_founder_memory_disputed()`/`rule_out_diagnosis()`) — varje statusändring där är
+  en helt ny superseding-rad. `harness.py`s ögonblicksbildskonstruktion skyddar nu
+  confidence-åtkomst per system istället för att anta att alla system har den kolumnen.
+
+**Bevisat via tester:** nytt test bevisar att `app.problem_learning` verkligen körs, inte bara
+deklareras som ett stött `system`-värde — riktiga `LifeProblem`/`LifeProblemDecision`-rader
+finns efter en körning, med korrigeringen som korrekt superseder originalet på SAMMA problem
+medan originalets text förblir orörd. Full lokal regression: 385 gröna (samma förbefintliga
+`rg`-relaterade fel, orört).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Verifierat: Cursors två öppna PR:er (#105 `cursor/cloud-agent-
+pytest-isolation`, #107 `cursor/cloud-agent-backend-auto-restart`) rör ingen migration och
+ingen fil denna branch också rör.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #108 (`claude/corpus-trial-run-history`
+@ `b4502f7`). Helt oberoende av Cursors PR #79/#80/#81/#92/#105/#107.
+
+**OBS — åtta PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 → #104 →
+#108 → [#110](https://github.com/d1n095/LifeAI/pull/110). Rekommenderas starkt att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — arbetet fortsätter enligt
+uttrycklig instruktion att inte pausa i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/corpus-trial-problem-learning` | [#110](https://github.com/d1n095/LifeAI/pull/110) | Pushad, CI körs | Wire `app.problem_learning` in i corpus trial harness fixtures, INGEN ny migration, 1 nytt test | `claude/corpus-trial-run-history` @ b4502f7 (stackad ovanpå PR #108) |
+
+## Pass 69 (2026-08-18): `claude/corpus-trial-run-history` — Life Corpus Trial Run History (migration 0052), stackad ovanpå PR #104 (`claude/cognition-foundation-review` @ `83a8b8e`), egen worktree, sjunde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** `docs/LIFE_CORPUS_TRIAL_HARNESS.md`s egen "Explicitly deferred"-sektion namngav
+redan detta som naturligt nästa litet steg: `run_trial()` (PR #102) returnerar bara en
+in-memory `TrialReport`, ingenting om en körning överlever Python-processen som körde den.
+Vald som nästa steg EFTER granskningen (Pass 68) eftersom den egna dokumentationen redan
+föreslog den, inget nytt scope uppfanns — och EFTER att medvetet ha avstått från att bygga
+`chat.py`-bryggan (Fynd 2 i granskningen kräver ett grundarbeslut, inte kod).
+
+**Byggt** (`backend/app/corpus_trial/persistence.py`, migration 0052):
+- `corpus_trial_runs` — EN ny tabell, `record_trial_run()` (idempotent, sparar EN ögonblicksbild
+  av en `TrialReport`: `corpus_label`/`record_count`/`passed`/`dimension_summary`/
+  `violation_counts` — ALDRIG en kopia av korpusen eller de underliggande `founder_memory_notes`/
+  `diagnosis_records`-raderna), `list_trial_runs()`.
+- MEDVETET annorlunda form än `capability_records`/`founder_memory_notes`/`diagnosis_records`:
+  en körning är INGET proveniens-påstående om världen (inget grundarord, ingen inferens), så
+  INGA `authority`/`basis`-kolumner, återanvänder INTE migration 0042:s vokabulär. Återanvänder
+  istället `capability_observation_events`s DB-trigger-tvingade append-only-garanti (en direkt
+  UPDATE/DELETE avvisas även för en superuser-session, inte bara dold av RLS).
+
+**Bevisat via tester:** 15 nya tester, inklusive ett direkt bevis att tabellen verkligen är
+append-only (inte bara RLS-dold) genom att en superuser-session försöker UPDATE/DELETE direkt,
+samt 2 beteendemässiga RLS-tester via den begränsade `mainai_app`-rollen — tillämpar samma
+disciplin Pass 68:s granskning just etablerade, istället för att lämna DENNA grunds eget
+RLS-påstående obevisat på samma sätt granskningen hittade för de tre andra.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #104 (`claude/cognition-foundation-review`
+@ `83a8b8e`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — sju PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 → #104 →
+[#108](https://github.com/d1n095/LifeAI/pull/108). Rekommenderas starkt att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — arbetet fortsätter enligt
+uttrycklig instruktion att inte pausa i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/corpus-trial-run-history` | [#108](https://github.com/d1n095/LifeAI/pull/108) | Pushad, CI körs | Life Corpus Trial Run History: `corpus_trial_runs` (migration 0052), append-only, `record_trial_run()`/`list_trial_runs()`, 15 nya tester | `claude/cognition-foundation-review` @ 83a8b8e (stackad ovanpå PR #104) |
+
+## Pass 68 (2026-08-18): `claude/cognition-foundation-review` — Adversarial cross-stack review of PR #94→#96→#98→#101→#102 + remediation (migration 0051), stackad ovanpå PR #102 (`claude/corpus-trial-harness` @ `c0b9333`), egen worktree, sjätte steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** grundaren bad explicit om en grundlig, icke-medhållande adversarial granskning
+av hela den staplade grunden innan fler steg läggs på — duplicerade minnesmodeller,
+källa-vs-härledd-kontaminering, auktoritetsläckage, UNKNOWN/disputed-hantering, supersession,
+ägarisolering, migrationsordning, rollback, dold koppling mellan staplade PR:er, tester som
+bara speglar implementationen, påståenden bredare än beviset, och om hela stacken faktiskt
+komponerar rent. Se `docs/LIFE_COGNITION_FOUNDATION_REVIEW_2026-08-18.md` för fullständiga
+resultat (8 namngivna fynd, verifierade direkt mot en riktig lokal Postgres — inte gissade).
+
+**Viktigaste fyndet:** INGEN av de tre nya grunderna (capability_reality, founder_memory,
+diagnosis) anropas från någon riktig, icke-test-kod ännu — bekräftat genom att grep:a hela
+`app/`-trädet. Detta är strukturellt, inte ett misstag: de naturliga inkopplingspunkterna
+(`safe_planner`, `provider_planning`, `development_supervisor`, `agent_coordination`) är alla
+Cursor-ägda. Ett konkret, redan-bevisat inkopplingsställe hittades ändå (`app.context.
+resolver` är redan live i `app/routers/chat.py`, "purely observational" med avsikt) — men en
+naiv 1:1-koppling till `founder_memory` skulle skapa brus (resolverns egna korrigerings-markörer
+inkluderar mycket vanliga korta ord som "nej "/"fel,"), så bryggan kräver ett medvetet
+designbeslut, inte bara kod. Byggd INTE i detta pass — dokumenterad som nästa konkreta steg.
+
+**Åtgärdat i detta pass (migration 0051, INGEN ny tabell):**
+- `capability_record` var aldrig inkopplad i `app.active_context.service`s centrala register
+  (till skillnad från `founder_memory_note`/`diagnosis_record`, som båda var det) — odokumenterad
+  inkonsekvens, inte ett medvetet beslut. Åtgärdat: samma tre CHECK-constraints utökade en
+  gång till, `active_context/service.py` utökad med samma mönster, 4 nya tester.
+- INGET test bevisade RLS BETEENDEMÄSSIGT (via den begränsade `mainai_app`-rollen) för
+  `capability_records`/`founder_memory_notes`/`diagnosis_records` — alla tre grundernas egna
+  testfiler använde bara `superuser_db`, som förbigår RLS helt. Åtgärdat: 7 nya tester i
+  `tests/security/test_rls_isolation_cognition_foundation.py`, samma etablerade mönster som
+  `test_rls_isolation.py`. Alla 7 gröna — RLS var aldrig faktiskt trasig, men påståendet var
+  obevisat innan detta.
+- `list_current_founder_memory()` (ny funktion, ingen migration) — `list_founder_memory()`
+  hade inget säkert default-anrop ("bara det som gäller nu"), till skillnad från `diagnosis`s
+  nyligen tillagda `list_current_diagnoses()`.
+
+**Bekräftat KORREKT (inte bara antaget):** full `alembic upgrade head` → `downgrade 0047` →
+`upgrade head`-cykel lyckades utan manuell inblandning; RLS+forced RLS på, korrekta policies,
+och privilegier verifierade direkt mot en riktig Postgres för alla tre nya tabeller;
+authority/basis har NOT NULL DEFAULT 'unknown' på DDL-nivå, inte bara Python-nivå, plus
+CHECK-tvingad vokabulär och idempotenskonflikt-avvisning som täcker authority/basis; ingen
+dokumentation överdriver operationell status.
+
+**Naming collision hittad, ej åtgärdad (Cursor-ägd fil):**
+`app.safe_planner.service.record_capability_gap()` (per-planeringsförsök checkpoint) och
+`app.capability_reality.service.record_capability_gap()` (varaktig, ägarscopad fakta) delar
+namn men är helt frikopplade — safe_planners RIKTIGA, LIVE capability-gap-upptäckter
+uppdaterar aldrig `capability_records`. Dokumenterat som konkret, namngiven
+koordineringspunkt för framtiden.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd (endast läst för granskningen). Cursors worktree/branch inte använd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #102 (`claude/corpus-trial-harness` @
+`c0b9333`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — sex PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 →
+[#104](https://github.com/d1n095/LifeAI/pull/104). Rekommenderas starkt att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — arbetet fortsätter enligt
+uttrycklig instruktion att inte pausa i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/cognition-foundation-review` | [#104](https://github.com/d1n095/LifeAI/pull/104) | Pushad, CI körs | Adversarial granskning av #94→#102 (dokument, 8 fynd) + migration 0051 (`capability_record` i active_context-registret) + 11 nya tester (RLS-beteende + active_context-koppling) + `list_current_founder_memory()` | `claude/corpus-trial-harness` @ c0b9333 (stackad ovanpå PR #102) |
+
+## Pass 67 (2026-08-18): `claude/corpus-trial-harness` — Life Corpus Trial Harness (INGEN ny migration), stackad ovanpå PR #101 (`claude/causal-diagnosis-interface` @ `49d1f3d`), egen worktree, femte steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** uppdragets punkt 7 — bygg INTE grundarens riktiga korpus-inmatning ännu, bygg
+ett minimalt utvärderingsverktyg (harness) som kan poängsätta källbevarande/attribution/
+beslut-vs-idé-vs-förslag-vs-fakta-vs-inferens-distinktion/motsägelsedetektion/
+supersession-detektion/osäkerhetsbevarande/nulägesrekonstruktion mot en medvetet blandad
+testkorpus, utan att överanpassa till en fejkad korpus så att bara fixtures går igenom.
+Genomgång bekräftade: `app.founder_memory` (0049) och `app.diagnosis` (0050) redan täcker
+nästan allt detta strukturellt — det som saknades var själva testkörnings-/pointsättnings-
+mekanismen, INTE en ny lagringsplats. Ingen ny migration byggd, `app/corpus_trial/` återanvänder
+befintliga tabeller helt.
+
+**Byggt** (`backend/app/corpus_trial/`):
+- `fixtures.py` — en liten, medvetet blandad OCH adversarial testkorpus (grundardecision,
+  AI-förslag, inferrerat mönster, EXPLICIT okänd proveniens som LÅTER säker text men måste
+  förbli `authority=unknown`, en grundarrättelse som superseder ett tidigare mönster, en
+  disputerad anteckning, en bevisad diagnos [uppdragets eget 503-exempel återanvänt], en
+  ruled-out diagnos, en diagnoskorrigering via supersession) — ren Python-data, ingen DB.
+- `harness.py` — `run_trial()` spelar upp korpusen genom de RIKTIGA inspelnings-API:erna
+  (`record_founder_memory`/`mark_founder_memory_disputed`/`record_diagnosis`/
+  `prove_diagnosis_cause`/`rule_out_diagnosis`), aldrig en mock, och läser sedan tillbaka
+  varje rad från databasen för att bygga poängsättningsunderlag.
+- `scoring.py` — sju STRUKTURELLA poängsättningsfunktioner (inga hårdkodade förväntade
+  ID:n/texter) — samma kontroll skulle fånga samma sorts fel på en helt annan korpus. Varje
+  funktion har ett eget fristående test som matar in en medvetet korrumperad ögonblicksbild
+  och bekräftar att den fångas — beviser att poängsättningen är en riktig kontroll, inte en
+  gummistämpel som bara råkar passera de medföljande fixturerna.
+- Genuin liten lucka hittad och åtgärdad: `app.diagnosis.service.list_current_diagnoses()`
+  (NY funktion, ingen ny migration) — `founder_memory_notes`/`life_problem_decisions` vänder
+  redan automatiskt gammal rads `status` till `superseded`, men `diagnosis_records` gör
+  MEDVETET inte det (supersession är en fakta om den NYA raden, aldrig en mutation av den
+  gamla — se migration 0050:s egen docstring), så det fanns ingen fråga för "senaste diagnosen
+  i varje supersession-lineage" förrän nu.
+
+**Bevisat via tester:** 20 nya tester (2 end-to-end-körningar av hela korpusen genom riktig DB
++ 7 fristående negativa scorer-tester, ett per dimension) — alla gröna. En verklig designnyans
+hittades och löstes medvetet under byggandet: `diagnosis_records`s `ruled_out` betyder INTE
+detsamma som `founder_memory_notes`s `disputed` för "vad är aktuellt just nu" — en ruled-out
+diagnos ÄR fortfarande den aktuella, uppdaterade förståelsen av den lineagen (den har nått en
+löst status om SAMMA observation, inte ersatts av en annan fakta), medan en disputerad
+grundaranteckning MEDVETET exkluderas från "aktiv". Detta kodades som ett explicit,
+systemmedvetet fält (`contradiction_excludes_currency`) snarare än att gömmas eller att tvinga
+de två systemen till en falsk gemensam definition.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #101 (`claude/causal-diagnosis-interface`
+@ `49d1f3d`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — fem PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → [#102](https://github.com/d1n095/LifeAI/pull/102).
+Rekommenderas att grundaren granskar/mergar i den ordningen innan ytterligare steg läggs på —
+arbetet fortsätter enligt uttrycklig instruktion att inte pausa i onödan.
+
+## Pass 66 (2026-08-18): `claude/causal-diagnosis-interface` — Life Causal Diagnosis Interface (migration 0050), stackad ovanpå PR #98 (`claude/adaptive-cognition-boundary` @ `b7c1c6b`), egen worktree, fjärde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** genomgång av `EngineeringLesson.root_cause` (migration 0032 — fritext, skrivet
+FÖRST efter att en lektion redan är helt förstådd, inget mellansteg för en obevisad hypotes)
+och `RecoveryClassification` (migration 0033 — en ANNAN, smalare taxonomi om hur mycket av en
+död agents arbete som gick att rädda, inte en generell felorsakstaxonomi) bekräftade: ingen
+strukturerad, sluten kausal-kategori-taxonomi existerar någonstans, och ingenting skiljer
+"observerat" från "misstänkt orsak" från "bevisad orsak" som tre genuint separata
+epistemiska tillstånd. Detta är uppdragets punkt 6 (`En misslyckad steg betyder INTE
+automatiskt att kodändringen är dålig`).
+
+**Byggt** (`backend/app/diagnosis/`, migration 0050):
+- `diagnosis_records` — samma strukturella roll som `founder_memory_notes`/
+  `life_problem_decisions` redan spelar: `observation` (ALDRIG omskrivet, det faktiskt
+  observerade), `hypothesis_category` (nio bootstrap-exempel: code_regression/
+  concurrency_timing/stale_state/environment_configuration/external_service_failure/
+  dependency_failure/authorization_blocker/missing_capability/unknown — utökningsbar, ingen
+  permanent taxonomi), `epistemic_stage` (observed/hypothesis/proven_cause/ruled_out),
+  `authority`/`basis` (ÅTERANVÄNDER migration 0042:s vokabulär för TREDJE gången i denna
+  kodbas), `supersedes_diagnosis_id`. HÅRD REGEL, strukturell inte bara dokumenterad:
+  `epistemic_stage='proven_cause'` KRÄVER en riktig `proven_evidence_id`
+  (`intelligence_evidence`)-referens — en CHECK-constraint, inte bara anropardisciplin.
+- `service.py` — `record_diagnosis()` (den enda skrivvägen), `prove_diagnosis_cause()` (ENDA
+  vägen till `proven_cause`, kräver riktigt bevis), `rule_out_diagnosis()`,
+  `list_unresolved_diagnoses()`.
+- Utökade `app.active_context.service`s centrala register med `diagnosis_record` (samma
+  mekanism som redan utökats en gång för `founder_memory_note`).
+
+**Bevisat via tester:** uppdragets eget konkreta exempel ("PR:ns tester gröna + GitHub API
+503 under merge -> extern/transient blockerare-kandidat, ALDRIG kod-regression") kodat
+ordagrant som ett testfall; en `proven_cause`-övergång utan bevis avvisas av databasen
+sjölv; en senare omprövning ersätter en tidigare diagnos medan båda bevaras oförändrade;
+`rule_out_diagnosis()` raderar aldrig, markerar bara avvisad.
+
+Full lokal verifiering: 11/11 nya tester, 43/43 i den delade registret
+(`tests/backend/context/` — inga regressioner), full `tests/backend/mainai/`-regression
+grön (samma förbefintliga `rg`-relaterade fel, orört), ruff rent, `git diff --check` rent,
+Alembic-huvud verifierat vid `0050` (EN ny migration).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #98 (`claude/adaptive-cognition-boundary`
+@ `b7c1c6b`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — fyra PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101. Var och en är
+oberoende grön (bortsett från samma bekräftat orelaterade CI-flake, plus en NY men bekräftat
+orelaterad `test_autonomous_gap_child_task.py`-timingflake i #101:s regressionskörning — se
+nedan) och granskad, men beror på varandra i ordning. Rekommenderas att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — flaggat här enligt
+registrets egna princip, men arbetet fortsätter enligt uttrycklig instruktion att inte
+pausa i onödan.
+
+**Ny bekräftat orelaterad testflake upptäckt i #101:s fulla `tests/backend/mainai/`-regression:**
+`test_autonomous_gap_child_task.py::test_security_concurrent_gap_generation_for_the_same_gap_
+produces_exactly_one_canonical_child` (Cursor-ägt scope, aldrig rört av denna branch).
+Bekräftad orelaterad genom att den passerar både isolerat och som del av hela sin egen
+testfil (22/22) — denna branchs diff rör aldrig `app/autonomous_gap/**`. Timingkänslig,
+samma mönster som de redan kända `test_account_erasure.py`-flakesen tidigare i sessionen.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/causal-diagnosis-interface` | [#101](https://github.com/d1n095/LifeAI/pull/101) | Pushad, CI körs | Life Causal Diagnosis Interface: `diagnosis_records` (migration 0050), observed/hypothesis/proven_cause/ruled_out som skilda epistemiska tillstånd, `proven_cause` DB-tvingat kräva riktigt bevis, återanvänder migration 0042:s authority/basis-vokabulär — 11 tester, EN ny migration | `claude/adaptive-cognition-boundary` @ b7c1c6b (stackad ovanpå PR #98) |
+
+## Pass 65 (2026-08-17/18): `claude/adaptive-cognition-boundary` — Adaptive Cognition / Protected-vs-Adaptive Boundary (INGEN ny migration), stackad ovanpå PR #96 (`claude/agent-founder-memory` @ `8b55768`), egen worktree, tredje steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund — varför ingen ny grund byggdes:** en genomläsning av `docs/LIFE_SELF_OPTIMIZING_
+WORK_INTELLIGENCE.md`, `docs/LIFE_STRATEGY_EVALUATION_AND_PROMOTION.md` och `docs/LIFE_
+STRATEGY_SYNTHESIS_AND_IMPROVEMENT.md` (migrationerna 0043–0045) visade att uppdragets punkt 3
+("adaptiv kognition/meta-learning — resonemangsstrategier som kan versioneras/ersättas,
+spårade med kontext/antaganden/resultat/verifiering/kostnad/konfidens") REDAN, i stor
+utsträckning, är byggt: versionerade `work_strategies`, bevisbaserad jämförelse/experiment/
+befordran med full styrd livscykel (draft→ready→running→completed/failed/cancelled/
+invalidated; candidate→under_review→approved/rejected), aldrig en permanent vinnare. Det som
+GENUINT saknades var inte ny data-struktur utan ett explicit, korssystem-TEST som bevisar det
+denna dokumentation redan påstod i prosa ("No silent core self-modification is permitted";
+"Approval... has no code path that activates a strategy or rewrites production policy") — men
+aldrig testat mot ett ANNAT riktigt styrt delsystem utanför sin egen modul. Detta är exakt
+uppdragets punkt 4 (skyddade vs. adaptiva lager) och punkt 9.F (ett skyddat auktoritets-/
+säkerhetsregel kan aldrig tyst försvagas genom vanlig strategi-evolution).
+
+**Byggt** (`backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py`,
+INGEN ny migration, INGEN ny servicemodul):
+- Strukturellt bevis (AST-nivå, samma mönster som `docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md`
+  §3 redan etablerar för AI-oberoende-gränsen): `app.strategy_evaluation`/
+  `app.work_intelligence`/`app.strategy_synthesis` importerar INGENTING från
+  `app.agent_coordination` eller `app.mainai_execution.approval` — ingen kodväg kan nå
+  dispatch-/godkännandegrinden överhuvudtaget.
+- Beteendemässigt bevis: en strategi förd HELA vägen genom den riktiga evaluate→verify→
+  compare→promote→approve-pipelinen (migration 0043–0045, inga genvägar) lämnar ett riktigt
+  `AgentWorkAssignment`s dispatch-grind fortsatt `APPROVAL_REQUIRED` tills grundarens egen,
+  helt separata `grant_task_approval()` faktiskt anropas — den starkaste bevisning
+  strategilagret själv kan producera har NOLL effekt på endera grinden.
+- En kort ny sektion i `docs/LIFE_STRATEGY_EVALUATION_AND_PROMOTION.md` som dokumenterar
+  bevisen och länkar tillbaka till uppdraget.
+
+Full lokal verifiering: 3/3 nya tester, full `tests/backend/mainai/`-regression grön (samma
+förbefintliga `rg`-relaterade fel, orört), ruff rent, `git diff --check` rent, Alembic-huvud
+OFÖRÄNDRAT vid `0049` (denna branch lägger inte till något schema).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #96 (`claude/agent-founder-memory` @
+`8b55768`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/adaptive-cognition-boundary` | [#98](https://github.com/d1n095/LifeAI/pull/98) | Pushad, CI grön förutom en 3x bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Cross-system bevis att den adaptiva strategi-evolutionslagret (migration 0043–0045) aldrig kan nå eller försvaga grundarens godkännandegrind eller agent-dispatch-grinden — 3 nya tester, INGEN ny migration | `claude/agent-founder-memory` @ 8b55768 (stackad ovanpå PR #96) |
+
+## Pass 64 (2026-08-17): `claude/agent-founder-memory` — Life Founder/User Memory foundation (migration 0049), stackad ovanpå PR #94 (`claude/agent-capability-reality` @ `b12ce9d`), egen worktree, andra steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS" — grundarens/projektets/världens/Lifes egna faktalager hålls semantiskt separata men länkbara
+
+**Bakgrund:** startade från den konkreta, redan bekräftade luckan (`founder_memory_notes`,
+designad i `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.3/P6, fortfarande obyggd enligt
+både den designen och `docs/LIFE_REQUIREMENT_TRACEABILITY.md` §8). Innan kod skrevs
+inspekterades: `LifeProblemDecision`/`LifeProblem` (migration 0042 — fel form, kräver
+`problem_id`), `LifeIntent` (migration 0041 — den STRUKTURERADE mål-spårningsentiteten,
+inte samma sak som en rå, attribuerad utsaga), `app.context.resolver` (den befintliga,
+icke-beständiga "aldrig infererat känslotillstånd"-precedenten), och — den viktigaste
+upptäckten — `app.active_context.service`s redan befintliga CENTRALA
+objekt-referens-register (`SUPPORTED_TYPES`/`_owned_row()`/`_require_ref()`), redan
+återanvänt av `memory_threads`/`work_intelligence`/`life_intents`/`problem_learning`.
+
+**Byggt** (`backend/app/founder_memory/`, migration 0049):
+- `founder_memory_notes` — en muterbar rad per faktum (samma strukturella roll som
+  `LifeProblemDecision` redan spelar): `note_type`
+  (decision/correction/preference/goal/recurring_pattern/observation/unknown), `content`
+  (ALDRIG omskrivet på plats), `status` (active/superseded/disputed/unknown), `authority`/
+  `basis` (ÅTERANVÄNDER migration 0042:s exakta vokabulärer verbatim, ingen ny konkurrerande
+  taxonomi), `confidence`, `supersedes_note_id` (självreferens, aldrig en cykel),
+  `idempotency_key`. Privilegie-begränsad likadant som `life_problem_decisions`: `mainai_app`
+  har ENDAST SELECT/INSERT/UPDATE, radering går ENDAST via
+  `erase_own_founder_memory_children()`.
+- `service.py` — `record_founder_memory()` (den enda skrivvägen, härleder ALDRIG authority/
+  basis själv, idempotent), `mark_founder_memory_disputed()`, `get_founder_memory()`/
+  `list_founder_memory()`.
+- Utökade `app.active_context.service`s CENTRALA register med EXAKT en ny post,
+  `founder_memory_note` — samma mekanism, ingen ny länkningsmekanism. Krävde att bredda
+  SAMMA tre CHECK-constraints migration 0042 senast breddade
+  (`active_context_sets.anchor_type`/`active_context_members.object_type`/
+  `memory_thread_members.member_kind`) med ett värde vardera — det etablerade mönstret.
+
+**Bevisat via tester (kravlista G.1–G.8 från uppdraget):** assistent-förslag blir aldrig
+tyst ett grundarbeslut (skild `authority`); inferered preferens blir aldrig tyst explicit;
+en senare korrigering ersätter (`supersedes_note_id`) en tidigare preferens MEDAN båda
+posterna bevaras oförändrade; en grundarpreferens kan länkas till ett projektbeslut
+(`life_problem_decisions`) via SAMMA `memory_threads`-mekanism UTAN att någotdera bli det
+andra; saknad/osäker data förblir `unknown`; INGEN vokabulär någonstans i denna grund
+namnger känslo-/psykologiskt tillstånd (samma strukturella bevis-mönster som
+`app.context.resolver`s egna `test_never_infers_emotional_or_psychological_state`); källtext
+omskrivs aldrig — varken vid repris av samma idempotency-nyckel eller vid supersedering.
+
+Full lokal verifiering: 15/15 nya tester, 47/47 i det delade `tests/backend/context/`
+(active_context/memory_threads/problem_learning — inga regressioner av
+register-utökningen), full `tests/backend/mainai/`-regression grön (samma förbefintliga
+`rg`-relaterade fel, orört), ruff rent, `git diff --check` rent, Alembic-huvud verifierat
+vid `0049` (EN ny migration).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd. Arbetet flyttades
+till en EGEN branch/PR (denna) istället för att bli en commit på det redan öppna PR #94 —
+samma disciplin som redan tillämpades en gång i detta uppdrag (Pass 63).
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #94 (`claude/agent-capability-reality`
+@ `b12ce9d`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-founder-memory` | [#96](https://github.com/d1n095/LifeAI/pull/96) | Pushad, CI grön förutom en 3x bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Life Founder/User Memory: `founder_memory_notes` (migration 0049), återanvänder migration 0042:s authority/basis-vokabulär, utökar `active_context`s centrala register med `founder_memory_note`, kontoraderingsintegration — 15 tester, EN ny migration | `claude/agent-capability-reality` @ b12ce9d (stackad ovanpå PR #94) |
+
+## Pass 63 (2026-08-17): `claude/agent-capability-reality` — Life Capability Reality / Self-Model foundation (migration 0048), stackad ovanpå PR #90 (`claude/agent-execution-control` @ `20b90b9`), egen worktree, första steget i det NYA uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund — research innan kod:** innan någon kod skrevs gjordes en grundlig genomgång av
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` och den ännu ÖPPNA, INTE MERGADE PR #60
+(`claude/life-canonical-architecture-recovery` — `docs/LIFE_CANONICAL_ARCHITECTURE.md`,
+`docs/LIFE_REQUIREMENT_TRACEABILITY.md`, `docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md`,
+`docs/LIFE_SOURCE_VAULT_AND_MEMORY_ARCHITECTURE.md`) samt de faktiska befintliga
+migrationerna 0037–0047. Bekräftat: (1) ett generellt capability-register var GENUINT
+SAKNAT (flaggat "MISSING entirely" i PR #60:s §H, ingen dubblett av något redan byggt),
+(2) `authority`-vokabulären `founder | repeated_founder_preference | deterministic_source
+| inferred_pattern | ai_interpretation | unknown` redan etablerad av migration 0042
+(`life_problems`/`life_problem_decisions`) och återanvänd verbatim, (3)
+`intelligence_evidence` (migration 0038) och `coordination_agents` (migration 0046) är de
+rätta befintliga strukturerna att referera, aldrig duplicera.
+
+**En process-avvikelse, hanterad transparent:** en forkad research-subagent gick UTÖVER
+sitt uttryckliga "pure research, no code"-uppdrag och byggde en fullständig
+implementation (migration + modell + service + bridge + tester) innan den kunde stoppas —
+den avslutades av ett eget infrastrukturfel (API-timeout, "computer went to sleep")
+mitt i, inte av stopp-signalen. Istället för att kasta arbetet gjordes en fullständig,
+oberoende adversarial granskning av VARJE rad (samma rigör som en extern PR skulle
+fått, inklusive att köra hela testsviten för första gången — koden hade ALDRIG körts
+innan): två verkliga buggar hittades och fixades (en test-helper som använde felaktiga
+`MainAITask`-fält/statusvärden; en händelseetikett som felaktigt märkte en
+"ingenting-ändrades"-observation som `status_changed`, fixat med ett nytt, ärligt
+sjätte vokabulärvärde `observation_reasserted` + två nya regressionstester), plus
+saknad dokumentation (`docs/LIFE_CAPABILITY_REALITY.md`) färdigställdes manuellt.
+Arbetet flyttades dessutom till en EGEN, ny branch/PR (denna) istället för att av
+misstag bli en ny commit på det redan öppna PR #90 — en genuint separat funktion
+förtjänar sin egen branch, inte en påbyggnad på en redan pushad, orelaterad PR.
+
+**Byggt** (`backend/app/capability_reality/`, migration 0048):
+- `capability_records` (levande, muterbar rad per `(owner_id, capability_key)`) +
+  `capability_observation_events` (append-only, DB-trigger-skyddad) — samma
+  bevisade lever-rad-plus-händelselogg-uppdelning som redan visats två gånger
+  (`agent_scope_leases`/`agent_work_assignment_events` migration 0046,
+  `agent_dispatch_executions`/samma händelsetabell migration 0047).
+- `service.py` — `record_capability_observation()` (den enda skrivvägen, härleder
+  ALDRIG `status` själv), `record_capability_gap()` (kan bara någonsin producera
+  `status="planned"`), `get_capability_reality()`/`list_capability_records()`/
+  `list_capability_gaps()`.
+- `agent_bridge.py` — `sync_agent_adapter_capability()`: en ren översättning av
+  `app.agent_coordination.adapter_config.adapter_availability()`s egna fakta till en
+  capability-observation, återimplementerar ingenting, kan ALDRIG producera
+  `verified_available` (en aktiverad+hittad exekverbar är fortfarande inte verifiering).
+- `erase_own_capability_reality_children()` kopplad in i `erase_account_data()`.
+
+Full lokal verifiering: 16/16 nya tester (inklusive de två regressionstesterna för
+granskningens egna fynd), full `tests/backend/mainai/`-regression grön (301 passed, 1
+förbefintligt `rg`-relaterat fel i Cursors eget `development_operator`-scope, orört),
+ruff rent, `git diff --check` rent, Alembic-huvud verifierat vid `0048`. Tre
+förbefintliga, orelaterade `test_account_erasure.py`-fel (timing-känsliga,
+bekräftat identiska med eller utan denna branchs ändringar via `git stash`-jämförelse
+mot PR #90:s redan pushade tip) noterade men inte åtgärdade — utanför denna PR:s scope.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch (inkl. PR #92, CI-infra-arbete) inte
+använd eller rörd. Ingen kod från PR #60 (fortfarande DRAFT/design-only) kopierad —
+endast läst som referens och krediterad i denna PR:s egen dokumentation.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #90 (`claude/agent-execution-control`
+@ `20b90b9`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-capability-reality` | [#94](https://github.com/d1n095/LifeAI/pull/94) | Pushad, CI grön förutom en bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Life Capability Reality / Self-Model: `capability_records`/`capability_observation_events` (migration 0048), evidence-backed status (`verified_available`/`configured_unavailable`/`configured_disabled`/`planned`/`unknown`), `agent_coordination`-bridge, kontoraderingsintegration — 16 tester, EN ny migration | `claude/agent-execution-control` @ 20b90b9 (stackad ovanpå PR #90) |
+
+## Pass 62 (2026-08-17): `claude/agent-execution-control` — Interactive Agent Execution Control Foundation (output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + grundarkontrollerad credential-referens/env-allowlist), stackad ovanpå det NU MERGADE PR #87 (`claude/agent-dispatch-foundation` @ `caeb550`), egen worktree parallellt med Cursors PR #79/#80/#81
+
+Nästa lager i natt-passets uppdrag: vändningen från "start-then-collect" (PR #85–87) till en
+providerneutral EXEKVERINGS-KONTROLLMODELL som kan spåra en riktig, långkörande
+agent-process/session — utan att bygga en andra övervakare och utan att någonsin fabricera en
+`completed`-status. Byggt strikt ovanpå redan mergad/granskad kod.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- Migration 0047 — EN ny tabell `agent_dispatch_executions` (levande, muterbar
+  spårningsrad per dispatch-FÖRSÖK, motsvarar `dispatch.DispatchDecision.attempt_id`,
+  distinkt från den append-only `agent_work_assignment_events` på samma sätt som
+  `agent_scope_leases` är distinkt från `agent_work_assignments`) + EN ny
+  event-type-CHECK-constraint-utökning (`execution_observed` — vanlig `varchar`+CHECK, INGEN
+  nativ Postgres-enum, så inget `ALTER TYPE` behövdes).
+- `execution_control.py` (ny) — `ExecutionEvent`/`record_execution_event()`: strukturerade
+  händelser (status/progress/tool_action/heartbeat/partial_result/final_result) ALLTID
+  bokförda durabelt; rå stdout/stderr ENDAST tidsstämplad (`last_output_at`) som standard,
+  aldrig bokförd, om inte anroparen uttryckligen ber om det. `AdapterCapabilities`
+  (`adapters.py`, utökad) + `send_execution_instruction()`/`cancel_execution()`/
+  `resume_execution()`: kontrollerar respektive flagga INNAN adaptern överhuvudtaget anropas —
+  ett ostött anrop returnerar en strukturerad `UNSUPPORTED_CAPABILITY`, aldrig ett kastat
+  `NotImplementedError`. `reconcile_execution_state()`: observerar och klassificerar ENDAST
+  (process fortfarande igång / avslutad-men-ej-bokförd / avslutad-och-bokförd /
+  adapter frånkopplad / session förlorad / resultat otillgängligt) — ÄNDRAR ALDRIG
+  uppdragets `status` själv; endast `collect_dispatch_result()` (via `apply_dispatch_result()`)
+  får någonsin flytta ett uppdrag till `completed`. `collect_and_ingest_execution_result()`:
+  omsluter `dispatch.collect_dispatch_result()` (återuppfinner aldrig dess egen
+  kraschhantering) och speglar utfallet på spårningsraden.
+- `adapter_config.py` (utökad) — `credential_reference()`: en OPAK, grundarangiven
+  referensETIKETT (aldrig en hemlighet) via `LIFE_AGENT_ADAPTER_CREDENTIAL_REF__<KEY>` — `None`
+  betyder "olöst / konfiguration krävs", eftersom denna kodbas inte har någon
+  hemlighetslagringsbackend alls. `resolve_adapter_env()`: vidarebefordrar ENDAST de
+  omgivningsvariabel-NAMN grundaren uttryckligen tillåtlistat via
+  `LIFE_AGENT_ADAPTER_ENV_ALLOWLIST__<KEY>` — aldrig ett blint arv av hela processmiljön;
+  `get_real_adapter()` använder nu detta som standard när `env` utelämnas.
+
+**En verklig, självupptäckt regression fixad under egen verifiering** (inte av en extern
+granskning): `tests/backend/mainai/test_multi_agent_work_coordination.py::
+test_no_automatic_merge_or_deploy_capability` (PR #82:s EGEN styrningsvakt — ett exakt
+mängd-test på `AgentAdapter`s metodnamn, avsett att kräva medveten bekräftelse för varje
+framtida utökning) misslyckades korrekt eftersom `control_capabilities()` är en genuin, avsedd
+utökning av kontraktet — testet uppdaterades för att uttryckligen bekräfta den nya metoden
+(fortfarande disjunkt från `merge`/`deploy`/`push`/`force_push`/`delete_branch`), inte
+kringgånget.
+
+Full lokal verifiering: 24/24 nya tester (`test_agent_execution_control.py`, inklusive ett
+fullständigt E2E-kontrollflöde: dispatch → RUNNING → output/heartbeat → instruktion
+skickad/avvisad → resultat bokfört → `completed`, samt separata scenarier för förlorad
+process, timeout och avbrytning — ingen riktig Claude Code/Cursor Agent/Codex-invokering
+någonstans i denna branch), full `tests/backend/mainai/`-regression grön (utöver samma 1
+förbefintliga `rg`-relaterade fel i Cursors eget `development_operator`-scope, orört), ruff
+rent, `git diff --check` rent, Alembic-huvud verifierat vid `0047` (EN ny migration,
+narrowly-scoped enligt uppdragets egen tillåtelse för detta pass).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd. Ingen produktions-
+eller deploy-yta rörd. Inget andra samordnings-/övervakningssystem skapat.
+
+**Beroenden:** Stackad ovanpå det NU MERGADE PR #87 (`claude/agent-dispatch-foundation` @
+`caeb550`). Helt oberoende av Cursors PR #79/#80/#81.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-execution-control` | [#90](https://github.com/d1n095/LifeAI/pull/90) | Pushad, CI grön förutom en 3x bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + credential-referens/env-allowlist (`execution_control.py` ny, `adapters.py`/`adapter_config.py` utökade, migration 0047) — 24 tester, EN ny migration | `claude/agent-dispatch-foundation` @ caeb550 (efter PR #87) |
+
+## Pass 61 (2026-08-17): `claude/agent-real-execution-bridge` — Founder-Controlled Real-Agent Execution Bridge (fem-vägs adapter-tillgänglighet + EN bunden riktig subprocess-adapter + krasch/timeout på båda sidor av dispatch-livscykeln), stackad ovanpå PR #85, egen worktree parallellt med Cursors PR #79/#80
+
+Nästa lager i natt-passets uppdrag: vändningen från "skapa en bunden dispatch-post" (PR #85)
+till "faktiskt invokera en riktig, konfigurerad lokal CLI-agent" — utan att uppfinna en
+autentiseringsuppgift och utan att någonsin tyst bredda befogenhet. Byggt strikt ovanpå redan
+mergad/granskad kod — ingen ny adapter-registry, ingen andra dispatch-grind.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- `adapter_config.py` (ny) — fem DISTINKTA fakta om en provider, aldrig sammanblandade:
+  `supported` (kodnivå, sant oavsett lokal maskin), `executable_found` (`shutil.which()` —
+  ENDAST detektion, aldrig i sig en auktorisation att invokera), `credentials_state` (alltid
+  `"unknown"` om inte grundaren uttryckligen sätter
+  `LIFE_AGENT_ADAPTER_CREDENTIALS_CONFIRMED__<KEY>` — ingen automatisk
+  autentiseringsuppgifts-upptäckt), `enabled` (grundarens egna uttryckliga opt-in,
+  `LIFE_AGENT_ADAPTER_ENABLED__<KEY>=true`, standard `False`), och `dispatch_authorized`
+  (beräknad separat per uppdrag av `evaluate_dispatch_readiness()`, helt utanför denna
+  moduls scope). `real_adapter_config()` returnerar en riktig konfiguration ENDAST när
+  `enabled=True` OCH exekverbar hittad OCH grundaren uttryckligen satt
+  `LIFE_AGENT_ADAPTER_ARGS__<KEY>` — hittar aldrig på CLI-flaggor själv. Ingen miljövariabel
+  denna modul läser är någonsin en hemlighet, autentiseringsuppgift eller sessions-token.
+- `adapters.py` (utökad, inte nyskapad) — `LocalCLIAdapter`: DEN ENA bundna,
+  providerneutrala RIKTIGA adaptern — samma subprocess-mekanism betjänar Claude Code, Cursor
+  Agent och Codex, aldrig en per-provider-duplicerad implementation. Alltid begränsad: exakt
+  uppdragets egen `worktree_path` som `cwd`, en riktig alltid-närvarande `timeout_seconds` via
+  `asyncio.wait_for()` (processen dödas vid överskridning), `argv` i listform via
+  `asyncio.create_subprocess_exec()` — ALDRIG `shell=True`, ingen kodväg kapabel till fri
+  skal-passthrough, minimerad `env` (aldrig processens egen fulla miljö). `send_instruction()`/
+  `resume()` är medvetet `NotImplementedError` — detta är en bunden, engångs,
+  icke-interaktiv invokering. `AdapterProcessLostError`/`AdapterTimeoutError`: nya, ärliga
+  krasch-/timeout-signaler, distinkta från `ProviderNotConfiguredError` och från ett vanligt
+  icke-noll-exitkod. `get_real_adapter()`: grundarkontrollerad fabrik — returnerar en riktig
+  `LocalCLIAdapter` ENDAST när varje förutsättning är uppfylld, annars alltid
+  `NotConfiguredAdapter`.
+- `dispatch.py` (utökad) — `evaluate_dispatch_readiness(..., require_adapter_enabled=True)`:
+  opt-in extra grindkontroll (standard `False`, så falska testadaptrar aldrig tvingas
+  uppfylla riktig adapterkonfiguration) — `ADAPTER_DISABLED`/`ADAPTER_UNAVAILABLE` vid
+  fail-closed. `dispatch_assignment()` särskiljer nu, aldrig sammanblandar, varje
+  krascharsak på START-sidan (`ProviderNotConfiguredError`/`AdapterProcessLostError`/
+  `AdapterTimeoutError`/varje annat oväntat fel) — vart och ett flyttar uppdraget till
+  `blocked` med sin egen strukturerade orsak innan det ursprungliga felet återkastas, aldrig
+  kvarlämnat i `waiting_agent`. Ett färskt `attempt_id` genereras för varje genuint
+  invokeringsförsök. Ny funktion `collect_dispatch_result()`: motparten på
+  INSAMLINGS-sidan — särskiljer samma krasch-/timeout-fel efter att en process väl startat,
+  applicerar annars det observerade `AgentResult` genom BEFINTLIGA `apply_dispatch_result()`.
+  `DispatchResult` fick `adapter_key`/`dispatch_attempt_id` — vilken riktig provider (eller
+  `"fake"`/`"not_configured"`) som faktiskt producerade ett givet resultat.
+
+**Verifierat direkt mot den lokala maskinen** (inte en mock): `claude`, `cursor-agent` och
+`codex` är alla genuint installerade på denna maskin, men INGEN är aktiverad som standard —
+`test_no_real_provider_is_enabled_by_default` bevisar detta mot verklig `PATH`-uppslagning.
+
+**Ingen riktig extern agent-invokering skedde i denna branch eller dess tester.**
+Subprocess-MEKANISMEN bevisas mot ofarliga, redan installerade systembinärer (`/bin/echo`,
+en obefintlig sökväg, en medvetet kort `sleep`-timeout) — aldrig mot en riktig kodningsagent-
+CLI. Den verkliga E2E-testen (`test_current_real_world_dispatch_scenario_with_full_gate_coverage`)
+utökar samma Cursor-upptagen/Claude-fri/Codex-ledig-scenario som PR #83–85 redan bevisar,
+med varje enskild grindavvisning (sökvägskonflikt, fel worktree, saknat godkännande,
+avaktiverad adapter, otillgänglig adapter, föråldrad `base_sha`) bevisad mot verklig
+samordningsdata — men den faktiska dispatch-progressionen går genom den deterministiska
+falska adaptern (uttryckligen sanktionerad för automatiserade tester), aldrig en riktig
+provider.
+
+**Två verkliga buggar hittade och fixade under egen testning** (inte av en extern
+granskning): (1) ett test lämnade uppdraget i `running`-status för en mellanliggande
+grindkontroll utan att det behövdes (leasen ensam räckte för `LEASE_REQUIRED`-kontrollen),
+vilket senare gjorde den riktiga `dispatch_assignment()`s egna `ready -> waiting_agent`-
+övergång ogiltig — testets egna felaktiga tillståndshantering, inte en bugg i
+produktionskoden; (2) ett test förväntade sig att `dispatch_assignment()` skulle KASTA
+`AdapterProcessLostError`, men funktionen fångar avsiktligt denna typ av fel internt och
+returnerar ett strukturerat `DispatchDecision` istället (endast genuint oväntade fel
+återkastas) — testets egen felaktiga förväntan, korrigerad för att matcha den redan
+avsiktliga, dokumenterade designen.
+
+Full lokal verifiering: 22/22 nya tester (egen körning), 261 passed / 1 failed i hela
+`tests/backend/mainai/` (262 totalt, inklusive de 22 nya) — det enda felet är samma
+förbefintliga `rg`-relaterade fel i Cursors eget `development_operator`-scope
+(`FileNotFoundError: 'rg'`, en lokal miljöberoende, inte en regression — verifierat direkt att
+`app/development_operator/` är helt orörd av denna branchs diff), ruff rent (efter
+`ruff check --fix` för oanvända importer i testfilen + `dataclasses.field` i `dispatch.py`,
+plus en manuell F841-fix), `git diff --check` rent, Alembic-huvud verifierat oförändrat vid
+`0046` (ingen ny migration — denna gren utökar inget schema).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd. Ingen produktions-
+eller deploy-yta rörd. Inget andra samordnings-/övervakningssystem skapat.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #85 (`claude/agent-dispatch-foundation`
+@ `93cf08f`). Helt oberoende av Cursors PR #79/#80.
+
+**UPPDATERING (Pass 62, 2026-08-17):** PR #87 granskad (oberoende, read-only, andra
+granskningsrundan) — INGEN P0/P1, 5 P2 (defense-in-depth-anteckningar, ingen exploaterbar väg
+via den avsedda API-ytan `get_real_adapter()` → `dispatch_assignment()`, se Pass 62:s egen
+granskningssammanfattning) — och MERGAD: mergecommit `caeb550deec505221d6f9ab044f9eb5ac68f03d6`
+in i `claude/agent-dispatch-foundation` (fortfarande PR #85:s egen, ännu ej mergade branch mot
+huvudgrenen — detta var en intern stack-merge, inte en merge mot mainline).
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-real-execution-bridge` | [#87](https://github.com/d1n095/LifeAI/pull/87) | **MERGAD** (`caeb550`) in i `claude/agent-dispatch-foundation` | Fem-vägs adapter-tillgänglighet (`adapter_config.py`) + EN bunden riktig subprocess-adapter `LocalCLIAdapter` + krasch/timeout-hantering på båda sidor av dispatch-livscykeln (`adapters.py`, `dispatch.py`) — 22 tester, ingen ny migration, ingen riktig agent-invokering utförd | `claude/agent-dispatch-foundation` @ 93cf08f (stackad ovanpå PR #85) |
+
+## Pass 60 (2026-08-17): `claude/agent-dispatch-foundation` — Bounded Dispatch Foundation (real agent bootstrap + fail-closed dispatch gate + provider-neutral adapter contract), stackad ovanpå PR #84, egen worktree parallellt med Cursors PR #79/#80
+
+Nästa lager i natt-passets uppdrag: vändningen från "Life vet vem som borde göra vad" (PR
+#83/#84) till en riktig, granskningsbar dispatch — utan att någonsin ge mer befogenhet än
+samordningslagret redan uttryckligen beviljat. Byggt strikt ovanpå redan mergad/granskad kod
+— ingen ny planerare, övervakare, uppgiftssystem, godkännandesystem eller register.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- `bootstrap.py` — `bootstrap_known_agents()`: idempotent registrering av Claude Code/Cursor
+  Agent/Codex via `register_agent()`s befintliga upsert. Endast identitet/förmåga/konfig —
+  ALDRIG en hemlighet eller ett maskinspecifikt token. Konservativa, verkligt kända
+  förmågetaggar (`repo_edit`/`read_only_review`/`run_tests`) — aldrig en uppfunnen
+  prestandarankning. Medvetet INTE kopplad till automatisk app-uppstart — att seeda faktiska
+  grundardata är ett beslut, inte mekanisk infrastruktur.
+- `dispatch.py` — `DISPATCH_LIFECYCLE`: namngivna alias mot den REDAN BEFINTLIGA
+  `WorkAssignmentStatus` (DISPATCHING återanvänder `waiting_agent`), aldrig en ny kolumn.
+  `evaluate_dispatch_readiness()`: den skarpa fail-closed-grinden precis före en riktig
+  anrops-invokering — kräver strikt `ASSIGNABLE` (inte `LEASE_REQUIRED`, till skillnad från
+  `next_feasible_assignment_for_agent()`s egen urvalstolerans), plus kapacitetsmatchning,
+  explicit branch+worktree för skrivning, och grundargodkännande — delegerat helt till
+  `app.mainai_execution.approval.require_task_approval()`, den RIKTIGA grinden, aldrig
+  återimplementerad. `dispatch_assignment()`: den kanoniska
+  `dispatch(agent_id, assignment_id, authority_envelope)`-kontrollpunkten — `authority_envelope`
+  valideras som en DELMÄNGD av uppdragets redan begränsade `allowed_paths`, aldrig tvärtom.
+  `DispatchResult`/`apply_dispatch_result()`: strukturerad resultatåterkoppling genom
+  BEFINTLIGA bevis-/tillståndsprimitiver, aldrig en fabricerad kvalitetspoäng.
+- `adapters.py` (utökad, inte nyskapad) — `NotConfiguredAdapter`/`ProviderNotConfiguredError`:
+  den RIKTIGA standardadaptern tills en genuin, separat granskad Agent Runtime finns. Öppnar
+  ingen subprocess, gör inget nätverksanrop, läser ingen hemlighet — rapporterar alltid
+  `REAL_PROVIDER_NOT_CONFIGURED`, låtsas ALDRIG lyckas.
+
+**Genuin säkerhetsgranskning** (fristående adversarial-granskning, samma mönster som
+tidigare pass i det här natt-passet, men den mest säkerhetskänsliga koden hittills eftersom
+det här är första gången ett "riktig befogenhet att agera"-lager byggs): hittade INGEN
+befogenhetseskalering, men en verklig P1 — ett oväntat adapterfel (INTE
+`ProviderNotConfiguredError`) lämnade uppdraget permanent fast i `waiting_agent`
+("DISPATCHING") utan att någonsin nå `blocked`, vilket `runtime_view.py` kartlägger till
+`RuntimeStatus.IDLE` — en kraschad dispatch skulle tyst läsas som "ledig", aldrig som
+"trasig". Fixat: alla oväntade adapterfel fångas nu, uppdraget flyttas till `blocked` med en
+strukturerad orsak, INNAN det ursprungliga felet återkastas. Samt en P2 (task/goal-uppslag
+som ger `None` trots satt `task_id` föll tyst igenom istället för att fail-closed — fixat)
+och två P3 (en icke-bärande testassertion gjord meningsfull; `authority_envelope`s nuvarande
+icke-bärande status i produktionskoden nu explicit dokumenterad).
+
+Full lokal verifiering: 22/22 nya tester (inklusive ett verkligt E2E-scenario som utökar
+samma situation som PR #83/#84s egna: Cursor upptagen på PR #79/#80s exakta sökvägar, Claude
+fri efter PR #84, Codex ledig — Life ser överlappet avvisas, väljer Claude för ett genuint
+orelaterat uppdrag, skapar dispatchen, avvisar en krockande dispatch igen VID GRINDEN
+(försvar i djupled, inte bara vid routing), dispatchar den icke-krockande genom en falsk
+adapter, och bokför resultatet — utan att uppdragets `allowed_paths` någonsin breddas), 223/226
+i hela `tests/backend/mainai/` (201 tidigare + 22 nya, minus 3 förbefintliga `rg`-relaterade
+fel i Cursors eget scope, orörda), ruff rent, `git diff --check` rent, Alembic-huvud
+verifierat oförändrat vid `0046`.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #84 (`claude/agent-work-selection` @
+`046679c`). Helt oberoende av Cursors PR #79/#80.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-dispatch-foundation` | Öppnas denna session | Pushad, redo för granskning | Real agent bootstrap (`bootstrap.py`) + fail-closed dispatch-grind + `dispatch()`-kontrollpunkt + `NotConfiguredAdapter` (`dispatch.py`, `adapters.py`) — 22 tester, ingen ny migration | `claude/agent-work-selection` @ 046679c (stackad ovanpå PR #84) |
+
+## Pass 59 (2026-08-17): `claude/agent-work-selection` — next_feasible_assignment_for_agent() + idle_agents_with_next_assignment(), stackad ovanpå PR #83, egen worktree parallellt med Cursors PR #79/#80
+
+Fortsättning av natt-passets uppdrag efter att PR #83 (Pass 58 nedan) blev CI-grön och
+väntar på granskning: den sista uttryckligen efterfrågade biten av routing-lagret som PR #83
+inte byggde — inte "given ett uppdrag, vilken agent" (det är `eligible_agents_for()`, redan
+klart) utan den OMVÄNDA riktningen: "given en agent (typiskt en som just blev ledig), vilket
+av dess EGNA redan tilldelade uppdrag ska den ta upp härnäst" — det som konkret gör "en
+blockerad tilldelning ska INTE frysa orelaterat arbete" sant ur en enskild AGENTS eget
+perspektiv, inte bara ur samordnarens.
+
+**Genuin design-upptäckt under eget testskrivande** (inte antagen korrekt från
+implementationen): ett färskt `read_write`/`ready`-uppdrag rapporterar ALLTID
+`LEASE_REQUIRED` från `evaluate_assignment_readiness()` tills ett lease faktiskt hämtats —
+det är inte en verklig blockerare, det är bara namnet på anroparens egen nästa steg
+(`acquire_lease()`). Den första implementationen krävde strikt `ASSIGNABLE` och skulle därför
+ha rapporterat "inget genomförbart uppdrag" för praktiskt taget VARJE färskt skrivuppdrag
+någonsin skapat — upptäckt av ett eget test som medvetet höll implementationen ärlig, fixat
+innan commit genom att uttryckligen behandla `LEASE_REQUIRED` som "hittat", inte "hoppa
+över", med fullt dokumenterad motivering.
+
+**Byggt** (`backend/app/agent_coordination/routing.py`): `next_feasible_assignment_for_agent()`
+— strikt FIFO efter `created_at` (ingen prioritets- eller kapacitetspoängsättning — det vore
+exakt den "rankningsmotor byggd på otillräckliga bevis" den här modulen redan vägrar bygga),
+skannar i ordning och returnerar den första `ASSIGNABLE`/`LEASE_REQUIRED`, hoppar över och
+BOKFÖR (aldrig tyst) varje genuint fastnat uppdrag (`STALE_BASE`, en dupliceradupptäckt
+i efterhand, `AGENT_UNAVAILABLE`, `PATH_CONFLICT`, m.fl.) utan att diskvalificera nästa i
+kön. Returnerar aldrig uppdrag tilldelade en ANNAN agent (ingen tyst omtilldelning). Muterar
+aldrig något — att välja och att faktiskt starta (`acquire_lease()` +
+`transition_status()`) förblir separata, medvetna anroparsteg. Ingen ny migration, Alembic-
+huvudet fortsatt `0046`. 8 nya tester i den befintliga
+`test_agent_runtime_control_plane.py` (samma fil PR #83 redan äger), inklusive FIFO-ordning,
+två distinkta "hoppa över"-scenarier (kö-nivå vs. skannings-nivå), agent-isolering och
+ägar-isolering.
+
+**Andra självgranskningsomgången i samma pass** (samma mönster som PR #83:s eget första
+granskningsvarv): en fristående adversarial-granskning av `next_feasible_assignment_for_agent()`
+hittade inga P0/P1, men två genuina täckningsluckor — inget test bevisade att `waiting_agent`-
+status utesluts redan på fråge-nivå (inte bara under genomförbarhetsskanningen), och inget
+test bevisade att ett `read_only`-uppdrag hittas via ren `ASSIGNABLE` (inte
+`LEASE_REQUIRED`-undantaget, som bara gäller `read_write`). Båda tillagda.
+
+Efter granskningen byggdes ÄNNU en avgränsad, säker utökning i samma öppna PR (inte en ny
+PR, eftersom den direkt komponerar det redan byggda utan att införa någon ny arkitektur):
+`idle_agents_with_next_assignment()` — det enda anropet som svarar "vem är ledig just nu, och
+vad ska var och en av dem göra härnäst", en ren komposition av `all_agents_runtime_snapshot()`
+(vem är ledig) och `next_feasible_assignment_for_agent()` (vad den ska göra) — aldrig en ny
+datakälla eller beslutsregel. 4 nya tester, inklusive ett som speglar exakt samma verkliga
+nuläge (Cursor RUNNING på PR #80:s paths, Claude RUNNING på just den här modulen, Codex ledig
+med kö) som PR #83:s eget E2E-test.
+
+Full lokal verifiering (efter samtliga tre commits i den här branchen): 14/14 nya tester
+(8 + 2 täckningsfixar + 4), 67/67 i den samordnade testsviten, 201/204 (187 tidigare + 14 nya,
+minus 3 förbefintliga `rg`-relaterade fel i Cursors eget scope, orörda) i hela
+`tests/backend/mainai/`, ruff rent, `git diff --check` rent, Alembic-huvud verifierat
+oförändrat vid `0046`.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #83 (`claude/agent-runtime-control-plane`
+@ `11c261e`) — grenad från den branchen, inte från integrationsgrenen direkt, eftersom den
+bygger vidare på `routing.py`s redan befintliga funktioner. Helt oberoende av Cursors PR
+#79/#80.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-work-selection` | [#84](https://github.com/d1n095/LifeAI/pull/84) | Pushad, redo för granskning | `next_feasible_assignment_for_agent()` + `idle_agents_with_next_assignment()` -- given en agent, vilket uppdrag härnäst; given ägaren, vilka lediga agenter + vad de ska göra; 14 tester, ingen ny migration | `claude/agent-runtime-control-plane` @ 11c261e (stackad ovanpå PR #83) |
+
 ## Cursor adversarial runtime lane — HANDOFF (2026-08-20)
 
 **Full freeze:** `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md`
@@ -14,9 +825,9 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Tip at handoff write:** refresh `claude/det-kommer-mer-879lcm` (was `8641ea8` / #130). Alembic **0046**.
 
-**Cursor closing PRs:** #131 waiting_external cancel · #132 lease expire · #133 retain-after-ref · #134 verification→lesson. Merge order #131→#134 after tip moves.
+**Cursor closing PRs:** #131 waiting_external cancel (merged) · #132 lease expire · #133 retain-after-ref · #134 verification→lesson.
 
-**Claude-owned (Cursor read-only):** claims→interpretation→knowledge→goal (#113/#110/#60).
+**Claude-owned (Cursor read-only):** claims→interpretation→knowledge→goal — still unbuilt (see `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md` §G/§L). All 13 Claude PRs in this mission's chain (#83→#94→#96→#98→#101→#102→#104→#108→#110→#113, plus #90) are now merged into their stacked branches and consolidated into this integration branch via a single final merge — see the Pass 71 entry above for the full chain summary.
 
 ---
 

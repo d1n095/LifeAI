@@ -607,6 +607,39 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # owner's personal data, same as engineering_lessons.
         db.execute(sa_text("SELECT erase_own_agent_coordination_children()"))
 
+        # --- Life Capability Reality / Self-Model (migration 0048, see
+        # docs/LIFE_CAPABILITY_REALITY.md): capability_observation_events is append-only at
+        # the DB level, same "no DELETE privilege at all outside this one narrow SECURITY
+        # DEFINER function" shape as agent_work_assignment_events above. This single call
+        # deletes both the append-only observation history and the live capability_records
+        # rows for this owner -- takes NO owner argument, same reasoning as
+        # erase_own_agent_coordination_children() above. coordination_agents is untouched by
+        # this call too (capability_records.agent_id merely references it, never owns it).
+        db.execute(sa_text("SELECT erase_own_capability_reality_children()"))
+
+        # --- Life Founder/User Memory (migration 0049, see docs/LIFE_FOUNDER_MEMORY.md):
+        # founder_memory_notes has DELETE revoked from mainai_app outside this one narrow
+        # SECURITY DEFINER function, same "deletion only through the authorized erasure path"
+        # shape as founder_memory_notes' own closest precedent, life_problem_decisions.
+        db.execute(sa_text("SELECT erase_own_founder_memory_children()"))
+
+        # --- Life Causal Diagnosis Interface (migration 0050, see docs/LIFE_CAUSAL_DIAGNOSIS_
+        # INTERFACE.md): diagnosis_records has DELETE revoked from mainai_app the same way,
+        # deletion only through this one narrow SECURITY DEFINER function.
+        db.execute(sa_text("SELECT erase_own_diagnosis_children()"))
+
+        # --- Life Corpus Trial Run History (migration 0052, see docs/LIFE_CORPUS_TRIAL_
+        # HARNESS.md): corpus_trial_runs is append-only (DB trigger enforces this even for
+        # UPDATE, unlike diagnosis_records/founder_memory_notes above), deletion only through
+        # this one narrow SECURITY DEFINER function, same as capability_observation_events.
+        db.execute(sa_text("SELECT erase_own_corpus_trial_run_children()"))
+
+        # --- Life Candidate Learning Signals (migration 0053, see docs/LIFE_FOUNDER_MEMORY.md's
+        # "Candidate learning signals" section): candidate_learning_signals has DELETE revoked
+        # from mainai_app the same way founder_memory_notes/diagnosis_records do, deletion only
+        # through this one narrow SECURITY DEFINER function.
+        db.execute(sa_text("SELECT erase_own_candidate_learning_signal_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.

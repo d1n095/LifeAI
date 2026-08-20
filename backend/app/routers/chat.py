@@ -7,6 +7,7 @@ assistant's response for an already-persisted user message — it creates or upd
 one assistant `MessageModel` row (enforced by migration 0016's partial unique index on
 `in_reply_to_id`), never a second, duplicate reply."""
 
+import logging
 import uuid
 from datetime import datetime
 
@@ -15,9 +16,17 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.context.resolver import ConversationMessage, resolve_context
+from app.context.resolver import (
+    INTENT_CORRECTION,
+    INTENT_EXPLICIT_MEMORY,
+    INTENT_IDEA_WORTH_SAVING,
+    ContextResolution,
+    ConversationMessage,
+    resolve_context,
+)
 from app.db import get_db
 from app.deps import require_founder
+from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
@@ -33,6 +42,17 @@ from app.rag.trust import assess_confidence, build_trust_instructions, detect_cl
 from app.schemas import ChatMessageIn, ChatMessageOut, ContextStatusOut, SourceRef
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(require_founder)])
+
+logger = logging.getLogger(__name__)
+
+# Resolver intents worth capturing as a candidate learning signal -- SIGNAL PRODUCER != TRUTH
+# WRITER (see app/founder_memory_signals/service.py's own module docstring): this maps a
+# resolver intent to a signal_kind, nothing more. It never touches founder_memory_notes.
+_SIGNAL_WORTHY_INTENTS = {
+    INTENT_EXPLICIT_MEMORY: "explicit_memory_candidate",
+    INTENT_CORRECTION: "correction_candidate",
+    INTENT_IDEA_WORTH_SAVING: "idea_candidate",
+}
 
 SYSTEM_PROMPT = (
     "Du är MainAI, grundarens Founder AI — inte en delad eller allmän assistent. Svara "
@@ -57,6 +77,31 @@ _RETRYABLE_ERROR_CATEGORIES = {"unreachable", "rate_limited"}
 
 def _get_or_create_reply_slot(db: Session, user_message_id: uuid.UUID) -> MessageModel | None:
     return db.query(MessageModel).filter_by(in_reply_to_id=user_message_id).first()
+
+
+def _record_candidate_signal_if_worth_noticing(
+    db: Session, *, owner_id: uuid.UUID, user_message: MessageModel, context_resolution: ContextResolution
+) -> None:
+    """Purely observational, same doctrine as `resolve_context()` itself (see the comment
+    above its call site): never changes the chat response, never raises into the caller. Writes
+    ONLY to `candidate_learning_signals` -- a staging table nothing treats as founder truth --
+    never to `founder_memory_notes`. See docs/LIFE_FOUNDER_MEMORY.md's "Candidate learning
+    signals" section: SIGNAL PRODUCER != TRUTH WRITER."""
+
+    signal_kind = _SIGNAL_WORTHY_INTENTS.get(context_resolution.intent)
+    if signal_kind is None:
+        return
+    try:
+        record_candidate_signal(
+            db, owner_id=owner_id, signal_kind=signal_kind, source_message_id=user_message.id,
+            classifier_strategy="context_resolver_v1", classifier_confidence=context_resolution.confidence,
+            classifier_reasoning=context_resolution.reasoning,
+            idempotency_key=f"chat-resolver:{user_message.id}",
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("failed to record candidate learning signal for message %s (non-fatal)", user_message.id, exc_info=True)
 
 
 async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> ChatMessageOut:
@@ -147,6 +192,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     context_resolution = resolve_context(
         user_message.content, [ConversationMessage(role=m.role.value, content=m.content, created_at=m.created_at) for m in history]
     )
+    _record_candidate_signal_if_worth_noticing(db, owner_id=user.id, user_message=user_message, context_resolution=context_resolution)
 
     system_content = (
         f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
