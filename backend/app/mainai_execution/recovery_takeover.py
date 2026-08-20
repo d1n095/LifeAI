@@ -22,13 +22,15 @@ formally switches over. Orchestrates, in this exact order:
      determines WHAT to salvage before this function ever runs; only the physical act of
      writing those checkpoints needs the new job's id to exist, which step 2 just created.
   4. mark_job_superseded() (app/jobs/mainai_job_lease.py) — the dead job's honest terminal
-     outcome. Re-verifies atomically that it is STILL `running` with a genuinely expired lease
-     before writing anything; refuses (surfacing as TakeoverError here) if that is no longer
-     true — e.g. a concurrent takeover already superseded it, or it was somehow not actually
-     dead. This is the fencing half of "old executor becomes authoritative-dead": once
-     superseded, `status != 'running'` for every check that matters (renew_mainai_job_lease's
-     own WHERE clause, the checkpoint fencing in execution_job.py) — a worker that was somehow
-     still alive and tries to act on it from this point on is rejected exactly like any other
+     outcome. Re-verifies atomically that it is STILL either (a) `running` with a genuinely
+     expired lease, or (b) already terminal (`failed`/`completed`/`cancelled`) while the
+     owning task remains stuck `running` (TaskLiveness.dead without finalize) before writing
+     anything; refuses (surfacing as TakeoverError here) if that is no longer true — e.g. a
+     concurrent takeover already superseded it, or it was somehow not actually dead. This is
+     the fencing half of "old executor becomes authoritative-dead": once superseded,
+     `status != 'running'` for every check that matters (renew_mainai_job_lease's own WHERE
+     clause, the checkpoint fencing in execution_job.py) — a worker that was somehow still
+     alive and tries to act on it from this point on is rejected exactly like any other
      stale-lease write.
   5. The recovery record itself moves detected->...->classified->taking_over->taken_over, with
      `takeover_executor`/`takeover_job_id` recorded — a durable, append-only

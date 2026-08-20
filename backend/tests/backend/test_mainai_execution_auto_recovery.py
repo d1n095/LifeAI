@@ -167,6 +167,78 @@ async def test_auto_recovery_tick_never_touches_a_job_whose_lease_has_not_expire
 
 
 @pytest.mark.asyncio
+async def test_auto_recovery_tick_recovers_terminal_job_with_task_still_stuck_running(
+    db_session, superuser_db, owner_id, monkeypatch
+):
+    """TaskLiveness.dead shape #2: job already terminal (worker generic handler marked it
+    failed) while MainAITask stayed `running` because `_finalize_task_outcome()` never ran.
+    The classic lease-expired query misses this entirely; without the second scan the task
+    stays stuck forever and even founder /recover used to fail at mark_job_superseded()."""
+    call_counter = [0]
+
+    async def _counting_chat(self, messages, model, **kwargs):
+        call_counter[0] += 1
+        return ChatResult(content="Analysen visar inga problem.", provider="openai", model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _counting_chat)
+
+    task, _goal, dead_job = _dispatch_and_claim(db_session, superuser_db, owner_id, task_type="read_only_audit")
+    dead_job_id = dead_job.id
+
+    # Simulate the pre-finalize crash window: job becomes failed, task left running.
+    superuser_db.execute(
+        sa_text(
+            """
+            UPDATE mainai_jobs
+            SET status = 'failed',
+                completed_at = now(),
+                error_category = 'unexpected',
+                public_message = 'simulated worker generic failure'
+            WHERE id = :id
+            """
+        ),
+        {"id": str(dead_job_id)},
+    )
+    superuser_db.commit()
+    _set_rls_user(db_session, owner_id)
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.running
+
+    worker = Worker()
+    await worker._advance_mainai_execution_auto_recovery(superuser_db)
+
+    record = superuser_db.query(MainAIRecoveryRecord).filter(MainAIRecoveryRecord.job_id == dead_job_id).one()
+    assert record.classification == RecoveryClassification.nothing_done
+    assert record.status == MainAIRecoveryStatus.completed
+
+    superuser_db.expire_all()
+    old_job_row = superuser_db.execute(
+        sa_text("SELECT status, superseded_by_job_id FROM mainai_jobs WHERE id = :id"),
+        {"id": str(dead_job_id)},
+    ).one()
+    assert old_job_row[0] == "superseded"
+    assert old_job_row[1] is not None
+
+    from app.mainai_execution.execution_job import run_task_execution_job
+
+    new_job_id = old_job_row[1]
+    _, _, generation = claim_next_mainai_job(superuser_db, "recovery-worker-terminal", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(
+        db_session,
+        new_job_id,
+        owner_id,
+        worker_id="recovery-worker-terminal",
+        lease_generation=generation,
+        lease_seconds=120,
+    )
+
+    assert call_counter[0] == 1
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.completed
+
+
+@pytest.mark.asyncio
 async def test_auto_recovery_tick_classifies_but_never_auto_approves_pushed_no_pr(db_session, superuser_db, owner_id, monkeypatch, tmp_path):
     """A classification that requires founder approval must be classified (that half IS
     unattended-safe -- it's read-only evidence gathering) but the tick must never call

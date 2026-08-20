@@ -147,24 +147,65 @@ def mark_job_superseded(db: Session, *, job_id: uuid.UUID, superseded_by_job_id:
     to verify -- by construction there is no legitimate CURRENT claimant to fence against
     (task_execution jobs are structurally excluded from `claim_next_mainai_job()`'s reclaim
     branch, see that module's `_CLAIM_SQL`), so the only real safety condition is re-verified
-    here atomically instead: the job must still be `running` with a lease that has genuinely
-    expired. A job that is still within its lease window (a legitimately busy worker, not a
-    dead one) or already terminal raises JobNotSupersedableError with NOTHING written -- this
-    is the one operation in the whole recovery pipeline that is closest to being destructive
-    (it retires a job row for good), so it fails closed rather than trusting the caller's own
-    belief that the job is dead."""
+    here atomically instead.
+
+    Two TaskLiveness.dead shapes are accepted (and nothing else):
+
+      1. Classic stale lease: status still `running`, lease genuinely expired.
+      2. Terminal-without-finalize: job already reached `failed`/`completed`/`cancelled`
+         (e.g. worker generic `except Exception` marked the job failed while
+         `_finalize_task_outcome()` never ran) AND a `mainai_recovery_records` row for
+         this job is currently at status `taking_over` — set by execute_takeover() after
+         reset/dispatch/salvage and immediately before this fence. The task itself is no
+         longer `running` on this job by then (reset moved it to `ready`, dispatch
+         retargeted `mainai_job_id`), so the recovery-record gate is the durable proof
+         that a takeover is in flight rather than an attempt to rewrite an already-
+         finalized failure. Migration 0034's CHECK requires `superseded_by_job_id` iff
+         `status = 'superseded'`, so the already-terminal row must move to `superseded`
+         to record the replacement link — the recovery record keeps the prior
+         classification/evidence.
+
+    A job still within its lease window, or an already-terminal job whose task was
+    properly finalized (task not `running`), raises JobNotSupersedableError with NOTHING
+    written -- this is the one operation in the whole recovery pipeline that is closest to
+    being destructive (it retires a job row for good), so it fails closed rather than
+    trusting the caller's own belief that the job is dead."""
     result = db.execute(
         text("""
             UPDATE mainai_jobs
             SET status = 'superseded',
-                completed_at = now(),
+                completed_at = COALESCE(completed_at, now()),
                 superseded_by_job_id = :superseded_by_job_id
             WHERE id = :job_id
-              AND status = 'running'
-              AND lease_expires_at IS NOT NULL
-              AND lease_expires_at < now()
+              AND (
+                (
+                  status = 'running'
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at < now()
+                )
+                OR (
+                  -- Terminal-without-finalize: job already left `running` (worker marked it
+                  -- failed/completed/cancelled) while the task was stuck. By the time
+                  -- execute_takeover() reaches this fence, reset_task_for_takeover() has
+                  -- already moved the task off `running` and dispatch_ready_task() has
+                  -- retargeted mainai_job_id at the replacement — so we cannot re-check
+                  -- "task still running on this job". Instead require an in-progress
+                  -- recovery record at `taking_over` (set by execute_takeover immediately
+                  -- before this call) so a random already-finalized failure cannot be
+                  -- rewritten as superseded without the recovery pipeline.
+                  status IN ('failed', 'completed', 'cancelled')
+                  AND EXISTS (
+                    SELECT 1 FROM mainai_recovery_records r
+                    WHERE r.job_id = mainai_jobs.id
+                      AND r.status = 'taking_over'
+                  )
+                )
+              )
         """),
         {"job_id": str(job_id), "superseded_by_job_id": str(superseded_by_job_id)},
     )
     if result.rowcount == 0:
-        raise JobNotSupersedableError(f"Job {job_id} is not a dead, expired-lease running job -- refusing to supersede it.")
+        raise JobNotSupersedableError(
+            f"Job {job_id} is not a dead expired-lease running job, nor an already-terminal "
+            f"job whose owning task is still stuck running -- refusing to supersede it."
+        )
