@@ -46,7 +46,7 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.development_supervisor.service import SupervisorBounds, SupervisorScope, discover_candidates
-from app.mainai_execution import approval, planner
+from app.mainai_execution import approval, lessons, planner
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.mainai_execution.plan_insertion import (
@@ -57,7 +57,14 @@ from app.mainai_execution.plan_insertion import (
     PlanInsertionValidationError,
     insert_plan_tasks,
 )
-from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask, MainAITaskDependency, MainAITaskStatus
+from app.models.mainai_execution import (
+    EngineeringLessonSeverity,
+    MainAIGoal,
+    MainAIPlan,
+    MainAITask,
+    MainAITaskDependency,
+    MainAITaskStatus,
+)
 from app.request_context import current_user_id as current_user_id_var
 
 
@@ -884,3 +891,52 @@ def test_security_no_self_work_bypass_regardless_of_source_type(db_session, owne
 
     with pytest.raises(ApprovalRequiredError):
         approval.require_task_approval(db_session, task=new_task, goal_approval_policy=goal.approval_policy)
+
+
+def test_insert_applies_active_lessons_like_create_plan(db_session, owner_id):
+    """Partial insertion must not bypass lesson binding that create_plan already applies.
+    A repo_edit insert with an empty verification_plan still inherits the owner's active
+    regression lesson and records lessons_applied on the created event."""
+    lesson = lessons.record_lesson(
+        db_session,
+        problem="A repo_edit task once shipped without running its own regression test.",
+        root_cause="Planner did not attach a targeted_tests step for repo_edit by default.",
+        affected_component="mainai_execution.plan_insertion",
+        severity=EngineeringLessonSeverity.medium,
+        evidence="Regression for insert_plan_tasks lesson bypass.",
+        fix="Always attach the relevant regression test to repo_edit tasks touching this area.",
+        general_rule="A repo_edit task must always verify itself with a real targeted test.",
+        applies_to=["repo_edit"],
+        source_type="branch_registry_pass",
+        source_ref="plan_insertion lesson binding",
+        created_by="test",
+        first_seen_at=datetime.utcnow(),
+        regression_test="tests/backend/test_lesson_regression.py",
+    )
+    db_session.commit()
+
+    goal, plan = _goal_and_plan(db_session, owner_id)
+
+    inserted = insert_plan_tasks(
+        db_session,
+        goal=goal,
+        plan=plan,
+        authority_kind="founder_requirement",
+        authorized_instruction_sha256=_auth_hash(goal),
+        idempotency_key="lesson-binding-insert-1",
+        tasks=[InsertedTaskSpec(description="Edit a file", task_type="repo_edit")],
+        source_type="founder_action",
+        source_ref="test",
+        reason="prove lesson binding on insertion",
+        requested_by="test",
+    )
+    db_session.commit()
+
+    new_task = inserted[0]
+    assert {"kind": "targeted_tests", "target": "tests/backend/test_lesson_regression.py"} in new_task.verification_plan
+
+    created_event = db_session.execute(
+        sa_text("SELECT detail FROM mainai_task_events WHERE task_id = :t AND event_type = 'created'"),
+        {"t": str(new_task.id)},
+    ).scalar_one()
+    assert created_event["lessons_applied"] == [str(lesson.id)]

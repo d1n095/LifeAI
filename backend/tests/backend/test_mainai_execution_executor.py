@@ -200,7 +200,7 @@ def test_retry_task_rejects_any_non_retryable_status(db_session, owner_id, statu
 
 
 @pytest.mark.parametrize("status", [MainAITaskStatus.pending, MainAITaskStatus.ready, MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed])
-def test_cancel_task_cancels_a_not_yet_running_task_and_blocks_its_dependents(db_session, owner_id, status):
+def test_cancel_task_cancels_a_not_yet_running_task_and_cascade_cancels_its_dependents(db_session, owner_id, status):
     goal = _goal(db_session, owner_id)
     planner.create_plan(
         db_session,
@@ -222,7 +222,48 @@ def test_cancel_task_cancels_a_not_yet_running_task_and_blocks_its_dependents(db
     assert MainAITaskEventType.cancelled.value in _events(db_session, task.id)
 
     db_session.refresh(dependent)
-    assert dependent.status == MainAITaskStatus.blocked  # never falsely left `pending` forever
+    # Cascade: cancelled deps must not leave dependents blocked forever (goal would never
+    # reach a terminal task set for record_final_report).
+    assert dependent.status == MainAITaskStatus.cancelled
+    cascade_detail = db_session.execute(
+        sa_text(
+            "SELECT detail FROM mainai_task_events WHERE task_id = :id AND event_type = 'cancelled' "
+            "AND detail->>'kind' = 'cascade_from_cancelled_dependency'"
+        ),
+        {"id": str(dependent.id)},
+    ).scalar_one()
+    assert cascade_detail["kind"] == "cascade_from_cancelled_dependency"
+
+
+def test_cancel_task_cascade_lets_record_final_report_close_the_goal(db_session, owner_id):
+    """Without cascade, dependents stayed blocked and the goal could never become terminal."""
+    from app.mainai_execution import final_report
+    from app.models.mainai_execution import MainAIGoalStatus
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="cancel closes goal",
+        tasks=[
+            PlannedTaskSpec(description="A", task_type="read_only_audit"),
+            PlannedTaskSpec(description="B", task_type="read_only_audit", depends_on=[0]),
+        ],
+        created_by="test",
+    )
+    db_session.commit()
+    a, _b = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+
+    executor.cancel_task(db_session, task=a, cancelled_by="founder", reason="stop goal")
+    db_session.commit()
+
+    report = final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+    db_session.refresh(goal)
+
+    assert all(t["task_outcome"] in ("cancelled",) for t in report["tasks"])
+    assert goal.status == MainAIGoalStatus.failed
+    assert goal.final_outcome is not None
 
 
 def test_cancel_task_rejects_a_running_task(db_session, owner_id):

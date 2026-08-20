@@ -23,8 +23,10 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document, IndexStatus
 from app.models.document_chunk import DocumentChunk
+from app.models.provider_verification import VerificationResult
 from app.providers.registry import resolve_active
 from app.providers.transcription import TranscriptSegment, resolve_transcription_provider
+from app.providers.verification import classify_provider_exception, ensure_verified
 
 logger = logging.getLogger("mainai.rag.media_import")
 
@@ -161,7 +163,7 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
         transcript = await provider.transcribe(raw, filename, media_kind)
         timed_chunks = chunk_segments(transcript.segments)
         if not timed_chunks:
-            document.status = IndexStatus.failed
+            document.status = IndexStatus.extraction_failed
             document.error_message = "Ingen transkription kunde skapas."
             db.add(document)
             db.commit()
@@ -171,7 +173,42 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
         db.add(document)
         db.commit()
         embed_provider, model = resolve_active(db, role="embedding")
-        vectors = await embed_provider.embed([c.text for c in timed_chunks], model=model)
+
+        # Same pre-flight gate as app/rag/ingest.py's index_document: never attempt embed()
+        # when the provider is unverified, and never persist str(exc) (Gemini embeds keys in URLs).
+        verification = await ensure_verified(db, role="embedding")
+        if verification.result != VerificationResult.ok:
+            document.status = (
+                IndexStatus.awaiting_provider
+                if verification.result == VerificationResult.not_configured
+                else IndexStatus.blocked_provider
+            )
+            preview = " ".join(c.text for c in timed_chunks)[:1000]
+            document.content_preview = preview
+            resumable = document.import_job_id is not None or bool(document.storage_key)
+            if resumable:
+                document.error_message = (
+                    f"{verification.message} Filen är säkert lagrad och bearbetas automatiskt så "
+                    "snart leverantören svarar."
+                )
+            else:
+                document.error_message = (
+                    f"{verification.message} Indexering pausad — ingen durable ImportJob/"
+                    "storage_key finns för automatisk återstart. Importera igen när "
+                    "leverantören är tillgänglig."
+                )
+            db.add(document)
+            db.commit()
+            return
+
+        try:
+            vectors = await embed_provider.embed([c.text for c in timed_chunks], model=model)
+        except Exception as exc:  # noqa: BLE001 - post-preflight embed failure
+            document.status = IndexStatus.indexing_failed
+            document.error_message = classify_provider_exception(exc).message
+            db.add(document)
+            db.commit()
+            return
 
         rows = [
             DocumentChunk(
@@ -194,9 +231,10 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
         document.media_duration_seconds = transcript.duration_seconds
         document.transcript_provider = transcript.provider
         document.error_message = None
-    except Exception as exc:  # noqa: BLE001 - surface any transcription/indexing failure on the document row
+        db.add(document)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 - transcription/orchestration failure; never str(exc)
         document.status = IndexStatus.failed
-        document.error_message = str(exc)
-    finally:
+        document.error_message = classify_provider_exception(exc).message
         db.add(document)
         db.commit()
