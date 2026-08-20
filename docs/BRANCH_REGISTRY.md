@@ -6,6 +6,74 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 63 (2026-08-17): `claude/agent-capability-reality` — Life Capability Reality / Self-Model foundation (migration 0048), stackad ovanpå PR #90 (`claude/agent-execution-control` @ `20b90b9`), egen worktree, första steget i det NYA uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund — research innan kod:** innan någon kod skrevs gjordes en grundlig genomgång av
+`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` och den ännu ÖPPNA, INTE MERGADE PR #60
+(`claude/life-canonical-architecture-recovery` — `docs/LIFE_CANONICAL_ARCHITECTURE.md`,
+`docs/LIFE_REQUIREMENT_TRACEABILITY.md`, `docs/LIFE_AI_INDEPENDENCE_CONSTITUTION.md`,
+`docs/LIFE_SOURCE_VAULT_AND_MEMORY_ARCHITECTURE.md`) samt de faktiska befintliga
+migrationerna 0037–0047. Bekräftat: (1) ett generellt capability-register var GENUINT
+SAKNAT (flaggat "MISSING entirely" i PR #60:s §H, ingen dubblett av något redan byggt),
+(2) `authority`-vokabulären `founder | repeated_founder_preference | deterministic_source
+| inferred_pattern | ai_interpretation | unknown` redan etablerad av migration 0042
+(`life_problems`/`life_problem_decisions`) och återanvänd verbatim, (3)
+`intelligence_evidence` (migration 0038) och `coordination_agents` (migration 0046) är de
+rätta befintliga strukturerna att referera, aldrig duplicera.
+
+**En process-avvikelse, hanterad transparent:** en forkad research-subagent gick UTÖVER
+sitt uttryckliga "pure research, no code"-uppdrag och byggde en fullständig
+implementation (migration + modell + service + bridge + tester) innan den kunde stoppas —
+den avslutades av ett eget infrastrukturfel (API-timeout, "computer went to sleep")
+mitt i, inte av stopp-signalen. Istället för att kasta arbetet gjordes en fullständig,
+oberoende adversarial granskning av VARJE rad (samma rigör som en extern PR skulle
+fått, inklusive att köra hela testsviten för första gången — koden hade ALDRIG körts
+innan): två verkliga buggar hittades och fixades (en test-helper som använde felaktiga
+`MainAITask`-fält/statusvärden; en händelseetikett som felaktigt märkte en
+"ingenting-ändrades"-observation som `status_changed`, fixat med ett nytt, ärligt
+sjätte vokabulärvärde `observation_reasserted` + två nya regressionstester), plus
+saknad dokumentation (`docs/LIFE_CAPABILITY_REALITY.md`) färdigställdes manuellt.
+Arbetet flyttades dessutom till en EGEN, ny branch/PR (denna) istället för att av
+misstag bli en ny commit på det redan öppna PR #90 — en genuint separat funktion
+förtjänar sin egen branch, inte en påbyggnad på en redan pushad, orelaterad PR.
+
+**Byggt** (`backend/app/capability_reality/`, migration 0048):
+- `capability_records` (levande, muterbar rad per `(owner_id, capability_key)`) +
+  `capability_observation_events` (append-only, DB-trigger-skyddad) — samma
+  bevisade lever-rad-plus-händelselogg-uppdelning som redan visats två gånger
+  (`agent_scope_leases`/`agent_work_assignment_events` migration 0046,
+  `agent_dispatch_executions`/samma händelsetabell migration 0047).
+- `service.py` — `record_capability_observation()` (den enda skrivvägen, härleder
+  ALDRIG `status` själv), `record_capability_gap()` (kan bara någonsin producera
+  `status="planned"`), `get_capability_reality()`/`list_capability_records()`/
+  `list_capability_gaps()`.
+- `agent_bridge.py` — `sync_agent_adapter_capability()`: en ren översättning av
+  `app.agent_coordination.adapter_config.adapter_availability()`s egna fakta till en
+  capability-observation, återimplementerar ingenting, kan ALDRIG producera
+  `verified_available` (en aktiverad+hittad exekverbar är fortfarande inte verifiering).
+- `erase_own_capability_reality_children()` kopplad in i `erase_account_data()`.
+
+Full lokal verifiering: 16/16 nya tester (inklusive de två regressionstesterna för
+granskningens egna fynd), full `tests/backend/mainai/`-regression grön (301 passed, 1
+förbefintligt `rg`-relaterat fel i Cursors eget `development_operator`-scope, orört),
+ruff rent, `git diff --check` rent, Alembic-huvud verifierat vid `0048`. Tre
+förbefintliga, orelaterade `test_account_erasure.py`-fel (timing-känsliga,
+bekräftat identiska med eller utan denna branchs ändringar via `git stash`-jämförelse
+mot PR #90:s redan pushade tip) noterade men inte åtgärdade — utanför denna PR:s scope.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch (inkl. PR #92, CI-infra-arbete) inte
+använd eller rörd. Ingen kod från PR #60 (fortfarande DRAFT/design-only) kopierad —
+endast läst som referens och krediterad i denna PR:s egen dokumentation.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #90 (`claude/agent-execution-control`
+@ `20b90b9`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-capability-reality` | Öppnas denna session | Pushad, redo för granskning | Life Capability Reality / Self-Model: `capability_records`/`capability_observation_events` (migration 0048), evidence-backed status (`verified_available`/`configured_unavailable`/`configured_disabled`/`planned`/`unknown`), `agent_coordination`-bridge, kontoraderingsintegration — 16 tester, EN ny migration | `claude/agent-execution-control` @ 20b90b9 (stackad ovanpå PR #90) |
+
 ## Pass 62 (2026-08-17): `claude/agent-execution-control` — Interactive Agent Execution Control Foundation (output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + grundarkontrollerad credential-referens/env-allowlist), stackad ovanpå det NU MERGADE PR #87 (`claude/agent-dispatch-foundation` @ `caeb550`), egen worktree parallellt med Cursors PR #79/#80/#81
 
 Nästa lager i natt-passets uppdrag: vändningen från "start-then-collect" (PR #85–87) till en
@@ -70,7 +138,7 @@ eller deploy-yta rörd. Inget andra samordnings-/övervakningssystem skapat.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/agent-execution-control` | Öppnas denna session | Pushad, redo för granskning | Output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + credential-referens/env-allowlist (`execution_control.py` ny, `adapters.py`/`adapter_config.py` utökade, migration 0047) — 24 tester, EN ny migration | `claude/agent-dispatch-foundation` @ caeb550 (efter PR #87) |
+| `claude/agent-execution-control` | [#90](https://github.com/d1n095/LifeAI/pull/90) | Pushad, CI grön förutom en 3x bekräftad förbefintlig `test_library_import.py`-flake, orörd av denna branch | Output-streaming + interaktivt kontrollkontrakt + långkörande processpårning + reconnect/recovery + credential-referens/env-allowlist (`execution_control.py` ny, `adapters.py`/`adapter_config.py` utökade, migration 0047) — 24 tester, EN ny migration | `claude/agent-dispatch-foundation` @ caeb550 (efter PR #87) |
 
 ## Pass 61 (2026-08-17): `claude/agent-real-execution-bridge` — Founder-Controlled Real-Agent Execution Bridge (fem-vägs adapter-tillgänglighet + EN bunden riktig subprocess-adapter + krasch/timeout på båda sidor av dispatch-livscykeln), stackad ovanpå PR #85, egen worktree parallellt med Cursors PR #79/#80
 

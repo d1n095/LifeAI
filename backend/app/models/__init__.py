@@ -24,6 +24,13 @@ from app.models.active_context import (
     ContextMemberState,
 )
 from app.models.audit import AuditLog
+from app.models.capability_reality import (
+    CAPABILITY_AUTHORITIES,
+    CAPABILITY_OBSERVATION_EVENT_TYPES,
+    CAPABILITY_STATUSES,
+    CapabilityObservationEvent,
+    CapabilityRecord,
+)
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
@@ -184,6 +191,11 @@ __all__ = [
     "ContextBasis",
     "ContextMemberState",
     "AuditLog",
+    "CAPABILITY_AUTHORITIES",
+    "CAPABILITY_OBSERVATION_EVENT_TYPES",
+    "CAPABILITY_STATUSES",
+    "CapabilityObservationEvent",
+    "CapabilityRecord",
     "ClaimRelationship",
     "CompanyInfo",
     "Conversation",

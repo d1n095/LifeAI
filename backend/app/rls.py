@@ -492,9 +492,16 @@ _MAINAI_EXECUTION_TABLES = (
     # agent_scope_leases above) -- it is NOT append-only, so it needs no privilege-narrowing
     # entry in the loop below.
     "agent_dispatch_executions",
+    # Migration 0048 (Life Capability Reality / Self-Model): capability_records is an ordinary
+    # mutable table (same baseline-CRUD, ownership-only treatment as agent_dispatch_executions
+    # above); capability_observation_events is append-only and privilege-narrowed below exactly
+    # like agent_work_assignment_events, wired in the same migration that creates it.
+    "capability_records",
+    "capability_observation_events",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
+_CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
@@ -565,6 +572,11 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_agent_coordination_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {
         "name": "agent_work_assignment_events_deny_mutation", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {"name": "erase_own_capability_reality_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "capability_observation_events_deny_mutation", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
 ]
@@ -851,6 +863,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON agent_work_assignment_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_agent_coordination_children() TO mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON capability_observation_events FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_capability_reality_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -903,6 +917,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 "strategy_synthesis_inputs", "strategy_synthesis_materializations",
                 "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")),
             ("agent_work_assignment_events", _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES),
+            ("capability_observation_events", _CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
