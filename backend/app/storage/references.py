@@ -274,6 +274,50 @@ class DeleteIfUnreferencedOutcome(str, enum.Enum):
     failed_not_queued = "failed_not_queued"
 
 
+def retain_pending_rejected_upload_cleanup_tasks(storage_key: str) -> int:
+    """Pass 33: supersede stale `rejected_upload_cleanup` tasks when a persistent writer
+    reclaims a content-addressed key under `acquire_storage_key_lock()`.
+
+    Those tasks are enqueued when a blob correctly appeared unreferenced (e.g. an empty upload
+    rejected before any Document/ImportJob row existed). A concurrent writer can legitimately
+    need the SAME key again moments later via `store_content_with_reference_lock()` or
+    `_store_bytes_with_reference_lock()` -- the advisory lock closes the physical delete TOCTOU
+    until the writer's transaction commits, but `attempt_storage_deletion_task()` used to
+    still observe the stale `pending` row once it acquired the lock AFTER that commit if the
+    caller had not yet persisted a DB reference (or, in the worst case, if the writer's
+    reference row and the cleanup task raced on two connections).
+
+    Marking outstanding cleanup tasks `retained_shared` here -- while the CALLER's session
+    STILL holds `acquire_storage_key_lock()` for this exact key -- gives the outbox worker a
+    durable, terminal-success signal that the blob must survive, without weakening the global
+    reference check or adding sleeps/retries.
+
+    Runs on `_MaintenanceSession` (mainai_app has zero direct privileges on
+    `storage_deletion_tasks`). Does NOT take `acquire_storage_key_lock()` itself -- the caller
+    must already hold it so a concurrent `attempt_storage_deletion_task()` remains blocked at
+    its own lock acquisition until this function returns and the caller commits or rolls back."""
+    db = _MaintenanceSession()
+    try:
+        result = db.execute(
+            sa_text("""
+                UPDATE storage_deletion_tasks
+                SET status = 'retained_shared',
+                    last_error = NULL,
+                    completed_at = now(),
+                    updated_at = now(),
+                    next_attempt_at = NULL
+                WHERE storage_key = :storage_key
+                  AND reason = 'rejected_upload_cleanup'
+                  AND status IN ('pending', 'processing', 'failed')
+            """),
+            {"storage_key": storage_key},
+        )
+        db.commit()
+        return int(result.rowcount or 0)
+    finally:
+        db.close()
+
+
 def enqueue_rejected_upload_cleanup_task(storage_key: str) -> uuid.UUID:
     """Pass 31 (a sixth founder review round): creates a durable `storage_deletion_tasks` row
     (`reason='rejected_upload_cleanup'`) so `app/worker.py`'s existing retry loop -- the SAME
@@ -517,6 +561,7 @@ def store_content_with_reference_lock(
 
     acquire_storage_key_lock(db, blob.storage_key)
     if storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
+        retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
         return blob
 
     # Lost the race, or the blob at this key is corrupt: either something else's reference
@@ -534,6 +579,7 @@ def store_content_with_reference_lock(
             f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
             f"fortfarande inte den förväntade sha256:n efter återpublicering."
         )
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     return blob
 
 

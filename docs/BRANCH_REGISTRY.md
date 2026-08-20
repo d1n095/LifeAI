@@ -324,6 +324,53 @@ löst genom att behålla båda sidornas nya avsnitt, i linje med "Merge-regeln":
 förebyggande ombasering gjordes förrän det faktiska beroendet (den delade filen) faktiskt
 hade en verklig konflikt att lösa.
 
+## Aktiva PR:er (2026-08-20) — integration @ `d50ec18`
+
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `d50ec18` (PR #112 merge). Uppdaterad
+vid mergningen av PR #83 (denna branch) — samma väntade, rena textkonflikt i just den här
+filen, löst genom att behålla båda sidornas avsnitt och lägga till de två senaste raderna
+(#111, #112) som tillkommit sedan förra registerposten (@ `68ee1eb`).
+
+| PR | Merge SHA | Scope |
+|---|---|---|
+| [#112](https://github.com/d1n095/LifeAI/pull/112) | `d50ec18` | Serve media originals from storage_key, stop DB plaintext duplicate |
+| [#111](https://github.com/d1n095/LifeAI/pull/111) | `4fce583` | Registry tip post-#105/#106/#109 @ `68ee1eb` |
+| [#109](https://github.com/d1n095/LifeAI/pull/109) | `68ee1eb` | Cloud Agent backend (uvicorn) auto-restart on crash |
+| [#106](https://github.com/d1n095/LifeAI/pull/106) | `789881f` | Cloud Agent worker auto-restart on crash |
+| [#105](https://github.com/d1n095/LifeAI/pull/105) | `6ad7fcd` | Cloud Agent pytest env isolation fix |
+| [#103](https://github.com/d1n095/LifeAI/pull/103) | `d6fde39` | Cloud Agent `.cursor/run-backend-tests.sh` for :5432 password auth |
+| [#100](https://github.com/d1n095/LifeAI/pull/100) | `689cb1f` | Registry tip post-#99 @ `8ab69f5` |
+| [#99](https://github.com/d1n095/LifeAI/pull/99) | `8ab69f5` | Cloud Agent founder password matches pytest harness |
+| [#97](https://github.com/d1n095/LifeAI/pull/97) | `5a9cb99` | Cloud Agent sync `APP_DATABASE_URL` from `MAINAI_APP_PASSWORD` |
+| [#95](https://github.com/d1n095/LifeAI/pull/95) | `98f308b` | Public `/api/health` worker liveness (`alive`/`unknown`, no 503) |
+| [#93](https://github.com/d1n095/LifeAI/pull/93) | `060303a` | Cloud Agent `lifeos` password from `DATABASE_URL` |
+| [#92](https://github.com/d1n095/LifeAI/pull/92) | `db6c719` | Pytest DROP DATABASE terminates leftover backends at setup |
+| [#91](https://github.com/d1n095/LifeAI/pull/91) | `331cc99` | Cloud Agent worker + MAINAI_APP_PASSWORD from .env |
+| [#89](https://github.com/d1n095/LifeAI/pull/89) | `ea9470d` | Per-process local pytest DB/Redis isolation |
+| [#81](https://github.com/d1n095/LifeAI/pull/81) | `a67225a` | Cloud Agent dev environment (`.cursor/`) |
+| [#80](https://github.com/d1n095/LifeAI/pull/80) | `9c0b389` | Live-loop hardening |
+| [#86](https://github.com/d1n095/LifeAI/pull/86) | `fc7af1b` | Storage reference/erasure race |
+
+Alembic single head **0046** (PR #112 added no migration — confirmed via diff, only
+interface docstrings + `document.py`/`library_import.py`/`routers/library.py` changes, no
+`alembic/versions/` file touched).
+
+**Claude night-shift stack now merging, i beroendeordning, in i denna gren:** PR #83
+(denna) → #84 → #85 → #90 → #94 → #96 → #98 → #101 → #102 → #104 → #108 → #110 → #113.
+Verifierat noll fil-överlapp med PR #112 (endast delad fil: denna registerpost). PR #114
+(oberoende, `claude/library-import-race-investigation` @ integration-tippen direkt, CI
+grönt) kan mergas när som helst, ingen beroenderelation till stacken ovan.
+
+No open Cursor-owned PRs targeting integration (as of this pass).
+
+## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
+
+**`claude/mainai-autonomous-gap-live-integration` (PR #79) — MERGAD @ `69f30e0`.** Se
+`docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
+
+**PR #83 (`claude/agent-runtime-control-plane`) — Claude night-shift/observability.**
+Oberoende scope.
+
 ## Pass 57 (2026-08-16): `claude/multi-agent-work-coordination-foundation` — Multi-Agent Work Coordination-grunden, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
 Grundaren driver just nu flera agenter samtidigt mot samma repo: **Cursor Agent** härdar
@@ -376,17 +423,36 @@ samma förbefintliga tidszonsartefakt ovan), 163/166 `tests/backend/mainai/` (3 
 `development_operator`-scope, orört av den här branchen).
 
 **Beroenden (historiskt + uppdaterat 2026-08-17):** Byggdes oberoende av Cursors PR #79/#80 —
-ingen delad kod, ingen delad migration (0046 = 0045 → 0046, ingen kollision). **PR #82 är nu
-mergad i mainline (`78f4eb0`).** PR #79 har därefter reconcilerats mot den tippen (merge,
-ingen ny migration). PR #80 förblir fryst på `1d3ebff` tills PR #79 är godkänd.
+ingen delad kod, ingen delad migration (0046 = 0045 → 0046, ingen kollision). **PR #82 mergad
+(`78f4eb0`). PR #79 mergad (`69f30e0`).** PR #80 reconcileras nu mot post-#79 mainline.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
 | `claude/multi-agent-work-coordination-foundation` | [#82](https://github.com/d1n095/LifeAI/pull/82) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `78f4eb0`. CI grönt (en förbefintlig, orelaterad concurrency-flake i `test_library_import.py` bekräftad och grön vid omkörning). | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
 | `claude/mainai-autonomous-gap-live-integration` | [#79](https://github.com/d1n095/LifeAI/pull/79) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `69f30e0` (2026-08-17T07:04:08Z) | Live gap→child wiring in i Supervisor | mainline @ `78f4eb0` |
-| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | Olåst — PR #79 mergad. Fristående adversarial-granskning av Claude (2026-08-17): inga P0/P1 kvarstår, CODE-READY | Live-loop hardening (P1 path/lease) | PR #79 @ `bed835a` |
+| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | **Mergad** @ `9c0b389` — PR #79 mergad. Fristående adversarial-granskning av Claude (2026-08-17): inga P0/P1 kvarstod. | Live-loop hardening (P1 path/lease) | PR #79 @ `bed835a` |
 
 ## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
+
+**Verktygs-/miljöbranch — `cursor/cloud-agent-dev-environment-91c1` →
+`claude/det-kommer-mer-879lcm` — ÖPPEN, DRAFT, FRISTÅENDE (2026-08-16).** Lägger till
+Cloud Agent-utvecklingsmiljön under `.cursor/` (`environment.json` + `install.sh` +
+`setup-services.sh` + `start.sh`) så att en agent-VM automatiskt får hela stacken körande:
+Postgres 16 + pgvector och Redis installerade via apt (ingen Docker/systemd i VM:en, tjänsterna
+startas direkt via `pg_ctlcluster`/`redis-server`), backend-venv + `requirements-dev.txt`,
+frontend `npm ci` + Playwright-Chromium, en dev-only `backend/.env` (genereras bara om den
+saknas, aldrig committad — `.gitignore` täcker den), samt idempotent roll-/databas-provisionering
+(`lifeos`-superuser + begränsad `mainai_app`-runtime-roll, exakt som `backend/db-init/01-app-role.sh`),
+`alembic upgrade head` och `apply_runtime_privileges.py`. Terminalerna kör backend (uvicorn :8000)
+och frontend (`next dev` :3000, same-origin-proxy). **Ingen applikationskod ändrad** — helt disjunkt
+filuppsättning (`.cursor/` + den här registerentryn), inget beroende av PR #60/#61 eller
+codex-brancherna, kan granskas och mergas oberoende. Verifierat på VM:en: backend-sviterna
+`tests/backend` (1521 passed, 1 skip), `tests/security` + `tests/account` (77 passed), frontend
+`tsc`/`eslint`/`next build` gröna, och ett manuellt end-to-end-flöde genom en riktig webbläsare
+(founder-login → dashboard → adminpanel → chatt). Enda kvarstående testfel är samma redan
+dokumenterade, pre-existing filsystems-trådrace
+(`test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk`) som är grön i CI och orörd
+av den här branchen.
 
 **PR #60 — `claude/life-canonical-architecture-recovery` → `claude/det-kommer-mer-879lcm` —
 ÖPPEN, DRAFT, medvetet FRYST.** "PROVISIONAL CANONICAL ARCHITECTURE / BOOTSTRAP MAP" — fyra

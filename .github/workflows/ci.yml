@@ -2,9 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main, "claude/**"]
+    # Agent coding branches need the same required checks as mainline pushes.
+    # Explicit prefixes (not a catch-all) — GitHub branch filters have no brace-expansion.
+    branches: [main, "claude/**", "cursor/**", "codex/**"]
   pull_request:
-    branches: [main]
+    # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*) receive
+    # the same required Actions checks as PRs into main. Does not weaken or skip any job.
+    branches: [main, "claude/**", "cursor/**", "codex/**"]
 
 # Cancel superseded runs on the same branch/PR to keep the queue short.
 concurrency:
