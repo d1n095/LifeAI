@@ -337,6 +337,13 @@ def attempt_storage_deletion_task(db: Session, task: StorageDeletionTask) -> Non
         return
 
     acquire_storage_key_lock(db, task.storage_key)
+    # Pass 33: a concurrent writer may have superseded this task via
+    # retain_pending_rejected_upload_cleanup_tasks() while we blocked on the advisory lock --
+    # reload before mutating or deleting so a stale in-memory `pending` never wins.
+    db.refresh(task)
+    if task.status in (StorageDeletionStatus.purged, StorageDeletionStatus.retained_shared):
+        return
+
     task.status = StorageDeletionStatus.processing
     task.attempt_count += 1
     task.completed_at = None

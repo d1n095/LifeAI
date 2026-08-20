@@ -571,8 +571,13 @@ def safe_provider_prompt(request: FounderPlanningRequest, context_refs: list[dic
     }
 
 
-def deterministic_candidate(instruction: str) -> PlanCandidate | None:
-    """A tiny explicit recipe registry, not semantic inference or a generic prose executor."""
+def deterministic_candidate(instruction: str, operator_context=None) -> PlanCandidate | None:
+    """A tiny explicit recipe registry, not semantic inference or a generic prose executor.
+
+    Only the historical subtract recipe is matched here so `plan_with_provider()` planning_mode
+    continues to require provider assistance for ordinary multiplication goals. Gap-child
+    handoff uses `build_multiplication_repair_candidate()` directly."""
+    del operator_context  # reserved for callers that already selected a concrete recipe
     normalized = " ".join(instruction.lower().split())
     if "calculator" not in normalized or "subtract" not in normalized or "focused test" not in normalized:
         return None
@@ -594,6 +599,119 @@ def deterministic_candidate(instruction: str) -> PlanCandidate | None:
     )
 
 
+def build_multiplication_repair_candidate(operator_context=None) -> PlanCandidate:
+    """Bounded *demo* multiply repair recipe for the autonomous-gap live handoff.
+
+    Proves envelope → WorkBinding → registered PlanCandidate wiring. Requires the effective
+    OperatorContext path envelope to already authorize both `calculator.py` and
+    `test_calculator.py`; never silently broadens authority to write the test file.
+    """
+    required_paths = ("calculator.py", "test_calculator.py")
+    if operator_context is not None:
+        allowed = tuple(operator_context.allowed_paths or ())
+        if allowed and not set(required_paths).issubset(set(allowed)):
+            raise CandidateValidationError(
+                "multiplication_repair requires calculator.py and test_calculator.py in the "
+                "effective OperatorContext path envelope; refusing to broaden binding scope"
+            )
+    test = (
+        "from calculator import multiply\n\n"
+        "def test_multiply():\n"
+        "    assert multiply(3, 4) == 12\n"
+    )
+    original = "def add(left, right):\n    return left + right\n"
+    test_exists = False
+    test_before = None
+    if operator_context is not None:
+        calc = operator_context.repository_root / "calculator.py"
+        if calc.is_file():
+            original = calc.read_text(encoding="utf-8")
+        test_path = operator_context.repository_root / "test_calculator.py"
+        if test_path.is_file():
+            test_exists = True
+            test_before = hashlib.sha256(test_path.read_bytes()).hexdigest()
+    if "def multiply" in original and "return left * right" in original:
+        updated = original
+    elif "def multiply" in original:
+        updated = original.split("def multiply", 1)[0].rstrip() + (
+            "\n\ndef multiply(left, right):\n    return left * right\n"
+        )
+    else:
+        updated = original.rstrip() + "\n\ndef multiply(left, right):\n    return left * right\n"
+    expected = hashlib.sha256(original.encode()).hexdigest()
+    test_step = CandidateStep(
+        "test",
+        "create or repair focused multiplication test",
+        "test hash",
+        "patch_file" if test_exists else "create_file",
+        {
+            "path": "test_calculator.py",
+            "content": test,
+            "expected_sha256": test_before,
+        },
+        depends_on=("patch",),
+        required_risk=operator.LOCAL_WRITE,
+    )
+    return PlanCandidate(
+        interpretation="Add one deterministic integer multiplication helper and its focused test.",
+        requested_outcome="A verified multiply helper in the authorized disposable repository.",
+        rationale="Use the registered bounded calculator multiplication recipe.",
+        facts=("The requested behavior is deterministic integer multiplication.",),
+        assumptions=("calculator.py already exists; test_calculator.py is an authorized path.",),
+        exclusions=("No merge, deploy, push, dependency installation, or unrelated edits.",),
+        steps=(
+            CandidateStep(
+                "patch",
+                "append or repair multiplication helper",
+                "source hash",
+                "patch_file",
+                {
+                    "path": "calculator.py",
+                    "content": updated,
+                    "expected_sha256": expected,
+                },
+                required_risk=operator.LOCAL_WRITE,
+            ),
+            test_step,
+            CandidateStep(
+                "verify",
+                "run focused multiplication test",
+                "pytest exit zero",
+                "run_focused_test",
+                {"profile_name": "focused_pytest", "arguments": ["test_calculator.py"]},
+                depends_on=("test",),
+                required_risk=operator.LOCAL_EXECUTION,
+                verification_required=True,
+            ),
+            CandidateStep(
+                "gate",
+                "evaluate required deterministic evidence",
+                "verification checkpoint",
+                "verification_evaluate",
+                depends_on=("verify",),
+            ),
+            CandidateStep(
+                "stage",
+                "stage scoped changes",
+                "staged diff",
+                "stage_scoped_changes",
+                {"paths": ["calculator.py", "test_calculator.py"]},
+                depends_on=("gate",),
+                required_risk=operator.LOCAL_WRITE,
+            ),
+            CandidateStep(
+                "commit",
+                "commit scoped changes",
+                "commit sha",
+                "commit_scoped_changes",
+                {"message": "Add multiplication helper"},
+                depends_on=("stage",),
+                required_risk=operator.LOCAL_WRITE,
+            ),
+        ),
+    )
+
+
 def plan_founder_request(db, *, request, operator_context, candidate=None):
     authority = assess_authority(db, request)
     if authority:
@@ -603,7 +721,9 @@ def plan_founder_request(db, *, request, operator_context, candidate=None):
         detail = {"reason": "founder text requests forbidden operational effects", "forbidden": FORBIDDEN_WORDS.findall(request.original_instruction), "safe_subset": None}
         cp = _checkpoint(db, request, goal, task, "UNSAFE_REQUEST", detail)
         return PlanningResult("UNSAFE_REQUEST", detail, checkpoint_id=cp.id)
-    selected = candidate or deterministic_candidate(request.original_instruction)
+    selected = candidate or deterministic_candidate(
+        request.original_instruction, operator_context
+    )
     if selected is None:
         goal, task, _ = _load_scope(db, request)
         detail = {"reason": "deterministic planning recipe is unavailable", "unresolved": request.requested_outcome or request.original_instruction[:500]}
