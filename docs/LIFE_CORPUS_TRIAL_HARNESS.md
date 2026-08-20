@@ -123,7 +123,12 @@ in the same table without needing a separate one per corpus version).
 - **A UI surface showing trial history.** Data + service layer only, matching every other
   "foundation" layer in this codebase.
 - **Automatic contradiction DETECTION** (noticing on its own that two recorded facts
-  conflict) -- still deliberately never built, consistent with every other foundation in this
-  mission; the harness only scores whether an EXPLICIT contradiction (a caller calling
-  `mark_founder_memory_disputed`/`rule_out_diagnosis`) is handled correctly, never whether the
-  system notices contradictions itself.
+  conflict) -- not built now; the harness only scores whether an EXPLICIT contradiction (a
+  caller calling `mark_founder_memory_disputed`/`rule_out_diagnosis`) is handled correctly,
+  never whether the system notices contradictions itself. Not a permanent prohibition: a
+  future detector remains possible provided its output is itself a candidate signal (see
+  docs/LIFE_FOUNDER_MEMORY.md's "Candidate learning signals" section) surfaced for review, not
+  an automatic `mark_founder_memory_disputed()`/`rule_out_diagnosis()` call with no human or
+  reviewed step in between -- silently flipping a record's status because a heuristic thinks
+  two facts disagree would be exactly the kind of unreviewed inference-to-truth promotion this
+  whole mission exists to prevent.

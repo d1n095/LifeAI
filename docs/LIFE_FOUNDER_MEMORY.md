@@ -97,22 +97,95 @@ is only ever possible through `erase_own_founder_memory_children()`, wired into
   same key with different field values raises rather than silently picking a winner.
 - `mark_founder_memory_disputed()` -- the explicit "this note's own truth is now in question"
   transition, when there is not yet a clear replacement note to supersede it with.
-- `get_founder_memory()` / `list_founder_memory()` -- read paths, filterable by
-  `note_type`/`status`/`authority`.
+- `get_founder_memory()` / `list_founder_memory()` / `list_current_founder_memory()` -- read
+  paths, filterable by `note_type`/`status`/`authority`. `list_current_founder_memory()` is the
+  safe-by-default entry point: only `status="active"` notes, excluding both `superseded` and
+  `disputed`.
+
+## Candidate learning signals (migration 0053)
+
+Founder direction, standing principle: **SIGNAL PRODUCER != TRUTH WRITER.** A live signal
+producer (currently `app.context.resolver`, wired into `app/routers/chat.py`, "purely
+observational" by its own code comment) must never write directly into
+`founder_memory_notes` -- that table is what other code will eventually treat as trusted
+founder truth, and `resolver.py`'s own docstring is explicit that its classifications are "a
+heuristic first pass," with documented false-positive/negative trade-offs (its correction-
+marker vocabulary includes very common short words like `"nej "`/`"fel,"`). A naive 1:1 wiring
+would flood the trust boundary this whole foundation exists to protect.
+
+The correct architecture instead has FOUR distinct stages, and this migration adds the one
+that was missing:
+
+```
+conversation/source event         (a chat message -- already durable, app.routers.chat)
+  -> preserved source reference   (messages.id -- already exists, no new mechanism)
+  -> candidate learning signal    (NEW: candidate_learning_signals, migration 0053)
+  -> evidence/classification stage (a human, or a future reviewed process, examines the signal)
+  -> derived founder knowledge    (record_founder_memory(), ONLY when a reviewer explicitly
+                                    asserts authority/basis -- never automatic)
+```
+
+`candidate_learning_signals` deliberately has NO `authority`/`basis` columns at all -- a row
+here is never a claim about the world, only a claim that a signal producer noticed something.
+`app.founder_memory_signals.record_candidate_signal()` is wired live into `app/routers/chat.py`
+(fires for `INTENT_EXPLICIT_MEMORY`/`INTENT_CORRECTION`/`INTENT_IDEA_WORTH_SAVING`), wrapped so
+a failure to record a signal can never break the chat response -- same "core behavior doesn't
+depend on it" doctrine `resolve_context()` itself already established. It is safe to run
+unattended precisely BECAUSE it never asserts truth: capturing noise in a staging table
+explicitly designed to hold candidates is expected and harmless; the harm this migration
+prevents is specifically writing that same noise into `founder_memory_notes`.
+
+`app.founder_memory_signals.promote_candidate_signal()` is the ONLY path from a candidate
+signal to a real `FounderMemoryNote` -- and it ALWAYS requires the caller's own explicit
+`authority`/`basis`, never the signal's own `classifier_confidence` copied in. A `classifier_
+confidence="high"` correction-marker match is still, at most, evidence that a human should
+look at the signal; promoting it to `authority="founder"` remains a deliberate, reviewed act
+every time, proven directly by `tests/backend/mainai/test_candidate_learning_signals.py::
+test_promoting_a_signal_requires_the_callers_own_explicit_authority_never_the_classifiers_
+confidence`.
+
+`dismiss_candidate_signal()` marks a signal reviewed-and-rejected (e.g. a casual "nej" that
+was never a real correction) without deleting it -- durable proof it was considered, so the
+same noise is not re-surfaced for review indefinitely.
+
+**What remains a future, not-yet-built step, deliberately:** the "evidence/classification
+stage" today is a human looking at `list_unreviewed_candidate_signals()` and calling
+`promote_candidate_signal()` or `dismiss_candidate_signal()` themselves -- no automated review
+process exists yet. Building one later is not prohibited (see "Protected vs. current-scope"
+below); it would itself be just another caller of `promote_candidate_signal()`, still required
+to supply its own honest `authority`/`basis` (never `"founder"` for something no founder
+actually said), never a bypass of that function.
 
 ## Explicitly deferred layers
 
-- Automatic classification of conversation turns into founder-memory notes (wiring
-  `app.context.resolver`'s own intent classifications into automatic `record_founder_memory()`
-  calls) -- this foundation is the durable layer a caller writes to; deciding WHEN to write
-  remains a separate, not-yet-built integration.
+Not built in this bootstrap increment -- current limitations, not permanent prohibitions,
+except where explicitly noted as a genuinely permanent invariant.
+
+- **RESOLVED, see "Candidate learning signals" above**: `app.context.resolver`'s intent
+  classifications ARE now wired live, but into `candidate_learning_signals`, never directly
+  into `record_founder_memory()` -- the "deciding WHEN to write" step this bullet used to defer
+  is exactly the staging/review boundary that section describes, not skipped.
 - Promoting a `note_type="goal"` note into a real, structured `LifeIntent` -- the linking
-  mechanism (`memory_threads`) exists; automatic promotion does not.
-- A UI surface for founders to browse/correct their own recorded memory (data + service layer
-  only, matching every other "foundation" layer in this codebase).
-- Any mechanism that lets a founder preference automatically become a binding project
-  requirement -- this foundation's entire point is preventing exactly that collapse; any future
-  "founder preference informed this project decision" step remains an explicit, human or
-  reviewed action recorded on the PROJECT side (e.g. a `LifeProblemDecision`'s own `provenance`
-  referencing the founder-memory note's id), never an automatic write from one table into the
-  other.
+  mechanism (`memory_threads`) exists; automatic promotion does not. Same shape as candidate-
+  signal promotion above: a future automated proposer remains possible, but the actual write
+  into `LifeIntent` stays an explicit, reviewed act.
+- A UI surface for founders to browse/correct their own recorded memory, or to review
+  `candidate_learning_signals` (data + service layer only, matching every other "foundation"
+  layer in this codebase).
+- An automated "evidence/classification stage" that calls `promote_candidate_signal()`/
+  `dismiss_candidate_signal()` without a human in the loop -- see "Candidate learning signals"
+  above for why this is a current limitation, not a permanent ban.
+
+## Protected vs. current-scope (not the same thing)
+
+Permanent, at any future automation level: no mechanism may let a founder preference
+automatically become a binding project requirement -- this foundation's entire point is
+preventing exactly that collapse; a future "founder preference informed this project decision"
+step remains an explicit, human or reviewed action recorded on the PROJECT side (e.g. a
+`LifeProblemDecision`'s own `provenance` referencing the founder-memory note's id), never an
+automatic write from one table into the other. No mechanism may let `authority="founder"` be
+asserted by anything other than a genuine, reviewed determination that the founder actually
+said or decided something -- a classifier's own confidence in ITS OWN heuristic is never
+sufficient. `content` is never rewritten in place regardless of who or what is calling
+`record_founder_memory()`. Everything in "Explicitly deferred layers" above is a current-scope
+limitation inside these bounds.

@@ -84,12 +84,34 @@ holds exactly `SELECT, INSERT, UPDATE`; deletion only through
 
 ## Explicitly deferred
 
+Not built in this bootstrap increment -- current limitations, not permanent prohibitions. See
+"Protected vs. current-scope" below for the distinction and why it matters.
+
 - Automatic classification of a failure into a `hypothesis_category` (reading a stack trace or
-  CI log and guessing the cause) -- deliberately never built; see Principles.
+  CI log and proposing a cause) -- not built now. A future classifier remains possible PROVIDED
+  it writes with `authority` honestly reflecting that an automated process produced it (`ai_
+  interpretation` or `inferred_pattern`, never `founder` or `deterministic_source`) and
+  `epistemic_stage="hypothesis"` -- never `proven_cause` (already impossible regardless: the DB
+  CHECK constraint refuses that transition without a real evidence reference no matter who or
+  what is calling `record_diagnosis()`).
 - Wiring diagnosis records automatically into `EngineeringLesson` creation -- the link is a
-  future, explicit, human-or-reviewed action, never automatic promotion.
+  future, explicit, human-or-reviewed action, never SILENT automatic promotion. A reviewed
+  automated proposal (e.g. a governed process drafting a candidate lesson for human
+  confirmation) is a different, safe thing from an automatic write with no review step; only
+  the latter is what stays prohibited.
 - A UI surface for founders to browse open diagnoses (data + service layer only, matching
   every other "foundation" layer in this codebase).
 - Automatic root-cause search/correlation across multiple diagnosis records (e.g. "this same
   `external_service_failure` category has recurred five times this week") -- this module
-  records facts; pattern detection across them is future, separate work.
+  records facts; pattern detection across them is future, separate work, and would itself
+  produce a new `hypothesis`-stage diagnosis (or a candidate signal, see docs/LIFE_FOUNDER_
+  MEMORY.md's "Candidate learning signals" section for the analogous pattern), never a silent
+  `proven_cause`.
+
+## Protected vs. current-scope (not the same thing)
+
+Permanent, at any future automation level: never fabricate a `proven_cause` without a real
+evidence reference (DB-enforced); never let an automated classifier claim `authority="founder"`
+or `authority="deterministic_source"` for something it merely inferred; never rewrite
+`observation` in place. Everything above is a current-scope limitation inside those bounds --
+"not autonomously trusted yet" is not "must never exist."
