@@ -1361,6 +1361,95 @@ def test_mainai_job_proposals_rejects_editing_proposal_text(db_session, superuse
     assert text_value == "original"
 
 
+def test_dismiss_proposal_service_closes_the_designed_lifecycle(db_session, superuser_db, make_verified_user):
+    """Production actuator for proposed→dismissed — without this, corpus_review proposals
+    sat forever as proposed with no founder path to close them (and without promoting to
+    KnowledgeClaim)."""
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _set_rls_user(db_session, user.id)
+    job = service.create_job(
+        db_session,
+        owner_id=user.id,
+        job_type="corpus_review",
+        input_refs=[{"type": "document", "id": str(doc.id)}],
+        created_by="founder",
+    )
+    db_session.add(
+        MainAIJobProposal(
+            job_id=job.id,
+            owner_id=user.id,
+            proposal_type="review_finding",
+            proposal_text="signal only",
+        )
+    )
+    db_session.commit()
+    proposal_id = superuser_db.execute(
+        sa_text("SELECT id FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}
+    ).scalar()
+
+    dismissed = service.dismiss_proposal(db_session, job_id=job.id, proposal_id=proposal_id)
+    db_session.commit()
+    assert dismissed.status.value == "dismissed"
+
+    # Idempotent: second call does not invent a reverse transition or error.
+    again = service.dismiss_proposal(db_session, job_id=job.id, proposal_id=proposal_id)
+    assert again.status.value == "dismissed"
+    text_value = superuser_db.execute(
+        sa_text("SELECT proposal_text FROM mainai_job_proposals WHERE id = :i"),
+        {"i": str(proposal_id)},
+    ).scalar()
+    assert text_value == "signal only"
+
+
+def test_dismiss_proposal_api_and_cross_owner_404(client, db_session, make_verified_user):
+    from app.founder import FOUNDER_USER_ID
+
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+    doc = _make_indexed_document(db_session, FOUNDER_USER_ID)
+    _set_rls_user(db_session, FOUNDER_USER_ID)
+    job = service.create_job(
+        db_session,
+        owner_id=FOUNDER_USER_ID,
+        job_type="corpus_review",
+        input_refs=[{"type": "document", "id": str(doc.id)}],
+        created_by="founder",
+    )
+    proposal = MainAIJobProposal(
+        job_id=job.id,
+        owner_id=FOUNDER_USER_ID,
+        proposal_type="review_finding",
+        proposal_text="api dismiss",
+    )
+    db_session.add(proposal)
+    db_session.commit()
+
+    res = client.post(
+        f"/api/mainai/jobs/{job.id}/proposals/{proposal.id}/dismiss",
+        headers=headers,
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "dismissed"
+    assert res.json()["proposal_text"] == "api dismiss"
+
+    # Wrong job_id for an otherwise-real proposal id → 404 (no cross-job leak).
+    other = service.create_job(
+        db_session,
+        owner_id=FOUNDER_USER_ID,
+        job_type="corpus_review",
+        input_refs=[{"type": "document", "id": str(doc.id)}],
+        created_by="founder",
+        idempotency_key="other-job-for-dismiss-404",
+    )
+    db_session.commit()
+    mistmatch = client.post(
+        f"/api/mainai/jobs/{other.id}/proposals/{proposal.id}/dismiss",
+        headers=headers,
+    )
+    assert mistmatch.status_code == 404
+
+
 def test_mainai_job_proposals_mainai_app_lacks_delete_privilege(db_session, superuser_db, make_verified_user):
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
