@@ -7,9 +7,10 @@ import { api, EngineeringLesson, MainAIGoal, MainAIGoalDetail, MainAIGoalReport,
 // backend/app/mainai_execution/*). Deliberately plain, function-before-design, same
 // convention as /admin/jobs: real, persisted goal/task state polled from the server, never an
 // animated stand-in for progress that isn't actually known yet. A goal created here has NO
-// plan until "Skapa plan (AI)" is pressed; once it does, app/worker.py's own auto-advance tick
-// dispatches every `ready` task automatically -- there is no "run now" button here because
-// there is nothing for it to do that the worker doesn't already do on its own next poll cycle.
+// plan until "Skapa plan (AI)" is pressed; once it does, app/worker.py's auto-advance tick
+// dispatches every clear-to-run `ready` task, and its finalize tick closes goals whose every
+// task is already terminal (same `record_final_report` path as GET report). There is no
+// "run now" button here because those clocks already own unattended progress.
 
 const TASK_STATUS_LABELS: Record<string, string> = {
   pending: "Väntar på beroende",
