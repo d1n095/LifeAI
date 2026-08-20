@@ -5,8 +5,6 @@ applying the discipline docs/LIFE_COGNITION_FOUNDATION_REVIEW_2026-08-18.md's Fi
 established: every new owner-scoped table gets a real behavioral proof, not just a structural
 one, from the moment it is added."""
 
-import uuid
-
 from sqlalchemy import text
 
 from app.founder_memory_signals import record_candidate_signal
