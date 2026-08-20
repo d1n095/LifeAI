@@ -6,6 +6,62 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 73 (2026-08-21): `claude/work-candidates-goal-bridge` — Work Candidates / Knowledge→Goal Bridge (migration 0055), grenad direkt från integrationsgrenen @ `71c39a8` (PR #138 mergad), andra steget i "COMPOSED SYSTEM CLOSING PHASE"
+
+**Bakgrund:** PR #138 (Pass 72, Project Entities/Interpretation Queue) mergad @ `71c39a8`.
+Nästa bevisade lucka i kedjan `claims → interpretation → structured knowledge → justified
+work`: `project_entities` fanns nu, men ingenting kopplade en betrodd `ProjectEntity` till
+`MainAIGoal`. Grundarens uttryckliga distinktion: DERIVED WORK CANDIDATE != AUTHORIZED WORK
+!= EXECUTABLE WORK — en bra härledning ger inte exekveringsauktoritet.
+
+**Byggt (migration 0055, `backend/app/work_candidates/`):** samma SIGNAL PRODUCER != TRUTH
+WRITER-arkitektur en gång till, en nivå längre ner i kedjan — `work_candidates`
+(kandidatlager) → `authorize_work_candidate()` (DEN ENDA vägen vidare, kräver ALLTID
+anroparens egen explicita `authorized_by`) → **anropar den redan BEFINTLIGA, redan styrda
+`app.mainai_execution.planner.create_goal()`** — återimplementerar eller duplicerar ALDRIG
+den funktionens egen approval-policy/risk-level-semantik, samma `create_goal()` som
+`app/routers/mainai_execution.py`s `Depends(require_founder)`-skyddade route redan använder.
+
+**LIVE koppling:** `app/project_entities/service.py`s `promote_interpretation_proposal()`
+(redan live sedan PR #138) skriver nu en work-candidate-kandidat när den nypromoverade
+entitetens `entity_type` är `idea`/`decision`/`task_reference`. Använder en SAVEPOINT
+(`db.begin_nested()`), INTE en topp-nivå commit/rollback — eftersom
+`promote_interpretation_proposal()` själv aldrig commitar (lämnar det åt sin egen anropare),
+skulle en vanlig commit/rollback här antingen commit:a anroparens öppna transaktion i förtid
+eller, vid fel, rulla tillbaka SJÄLVA entitets-/proposal-promoveringen — samma etablerade
+SAVEPOINT-mönster som `app/rag/memory_source.py` redan använder. Bevisat av
+`tests/backend/mainai/test_project_entity_work_candidate_capture.py`, inklusive garantin att
+ett fel isoleras till just SAVEPOINT:en, aldrig promoveringen.
+
+**Viktigt granskningsfynd under arbetet:** mina egna första testhjälpfunktioner
+(`_owner_with_entity`/`_entity_for`) använde `entity_type="decision"` som default — vilket
+gjorde att DEN LIVE KOPPLINGEN JAG PRECIS BYGGDE automatiskt skapade en extra work-candidate-
+rad varje gång hjälpfunktionen anropades, och fick två av mina egna nya tester att
+misslyckas (räknade fel antal rader). Detta var INTE en bugg i produktionskoden — kopplingen
+fungerade exakt som avsett — utan ett testdesign-förbiseende. Fixat genom att ändra
+hjälpfunktionernas default till `entity_type="vision_statement"` (en icke-actionable typ),
+så att RLS-/domän-testerna förblir isolerade till det de faktiskt testar, medan den dedikerade
+kopplings-testfilen är den enda som medvetet utnyttjar och verifierar auto-skapandet.
+
+**Klassificerade men INTE byggda luckor** (se `docs/LIFE_WORK_CANDIDATES.md`s sista avsnitt):
+`AgentTask ↔ MainAITask`-dubbelspåret (bekräftat via direkt kodinspektion: `AgentTask` saknar
+`owner_id` helt och har ingen länk till `MainAITask`) — ett genuint produkt-/arkitekturbeslut,
+inte något denna grund tyst löser. Supervisor-produktionsingången (`eligible MainAI work` →
+ingen produktionsanropare → `run_supervisor()`) — `app/development_supervisor/service.py`
+ligger innanför uppdragets egen hårda gräns, orörd, bekräftat via direkt inspektion.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Noll filöverlapp med Cursors fyra öppna PR:er (#132/#133/#134/#136).
+
+**Beroenden:** Grenad direkt från integrationsgrenen `claude/det-kommer-mer-879lcm` @
+`71c39a8` (efter att PR #138 faktiskt mergats — inte i förväg). Helt oberoende av Cursors
+#132/#133/#134/#136.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/work-candidates-goal-bridge` | (öppnas) | Lokalt verifierad, redo att pushas | Work Candidates / Knowledge→Goal Bridge (migration 0055, live koppling från project_entities-promotion till en styrd `create_goal()`-anrop, INGEN automatisk auktorisering) | `claude/det-kommer-mer-879lcm` @ 71c39a8 |
+
 ## Pass 72 (2026-08-21): `claude/project-entities-interpretation` — Project Entities / Interpretation Queue (migration 0054, P4), stackad direkt ovanpå den mergade integrationsgrenen @ `d44648c`, första steget i "COMPOSED SYSTEM CLOSING PHASE"
 
 **Bakgrund:** hela 13-PR-kedjan (#83→#113) + konsoliderande merge (PR #137) landade i

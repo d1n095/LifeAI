@@ -527,6 +527,11 @@ _MAINAI_EXECUTION_TABLES = (
     "project_entities",
     "interpretation_proposals",
     "project_entity_relationships",
+    # Migration 0055 (Life Work Candidates): work_candidates plays the SAME structural role
+    # founder_memory_notes/project_entities already play -- a mutable row whose status
+    # transitions in place (unreviewed -> authorized/dismissed/superseded), never rewritten
+    # content, deletion only through the SECURITY DEFINER erasure path.
+    "work_candidates",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -915,6 +920,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON interpretation_proposals FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entity_relationships FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_project_entities_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_candidates FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_work_candidates_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -975,6 +982,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("project_entities", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("interpretation_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),
+            ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
