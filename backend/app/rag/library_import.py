@@ -459,8 +459,18 @@ async def _import_one_file(
 
     classification_raw = manifest_entry.get("classification")
     classification = classification_raw if classification_raw in VALID_CLASSIFICATIONS else KnowledgeClassification.general.value
+    # Epistemic fail-closed: an unrecognized active_truth_status must NEVER elevate to
+    # `active` (the most privileged trust class — see app/rag/trust.py). Missing status on
+    # ordinary single-file uploads (empty manifest_entry) still defaults to `active` so
+    # founder-direct library uploads remain current-truth by default; only an EXPLICIT but
+    # invalid value fails closed to `proposed`.
     truth_status_raw = manifest_entry.get("active_truth_status")
-    truth_status = truth_status_raw if truth_status_raw in VALID_TRUTH_STATUSES else ActiveTruthStatus.active.value
+    if truth_status_raw is None:
+        truth_status = ActiveTruthStatus.active.value
+    elif truth_status_raw in VALID_TRUTH_STATUSES:
+        truth_status = truth_status_raw
+    else:
+        truth_status = ActiveTruthStatus.proposed.value
 
     declared_checksum = manifest_entry.get("checksum")
     if declared_checksum and declared_checksum != checksum:
