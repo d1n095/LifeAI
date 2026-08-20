@@ -1,0 +1,23 @@
+{
+  "name": "Life OS / MainAI",
+  "install": ".cursor/install.sh",
+  "start": ".cursor/start.sh",
+  "terminals": [
+    {
+      "name": "backend (FastAPI :8000)",
+      "command": "exec .cursor/run-backend.sh"
+    },
+    {
+      "name": "frontend (Next.js :3000)",
+      "command": "cd frontend && INTERNAL_API_URL=http://localhost:8000 exec npx next dev -p 3000"
+    },
+    {
+      "name": "worker (imports/jobs/storage outbox)",
+      "command": "exec .cursor/run-worker.sh"
+    }
+  ],
+  "ports": [
+    { "name": "Frontend (Next.js)", "port": 3000 },
+    { "name": "Backend (FastAPI)", "port": 8000 }
+  ]
+}

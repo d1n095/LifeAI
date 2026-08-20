@@ -505,7 +505,15 @@ def run_driver(
                     "VERIFY",
                     "VERIFICATION_REQUIRED",
                     len(state["completed"]),
-                    {},
+                    {
+                        "verification_passed": False,
+                        "failed_capability": "verification_evaluate",
+                        "capability": "verification_evaluate",
+                        "verification_required": True,
+                        "operator_action_ids": [
+                            item["trace_event_id"] for item in required
+                        ],
+                    },
                     cp.id,
                 )
             state["completed"].append(
@@ -576,6 +584,17 @@ def run_driver(
             if retryable:
                 state["next_step"] -= 1
             classification = "FAILED_RETRYABLE" if retryable else "FAILED_NONRETRYABLE"
+            failure_detail = dict(result.detail or {})
+            failure_detail.setdefault("capability", step.capability)
+            failure_detail.setdefault("failed_capability", step.capability)
+            failure_detail.setdefault("verification_required", step.verification_required)
+            failure_detail.setdefault("result", result.result)
+            failure_detail.setdefault("trace_event_id", str(result.trace_event_id))
+            failure_detail.setdefault("step_arguments", dict(step.arguments or {}))
+            if "path" in (step.arguments or {}):
+                failure_detail.setdefault("path", step.arguments.get("path"))
+            if "paths" in (step.arguments or {}):
+                failure_detail.setdefault("paths", step.arguments.get("paths"))
             cp = _checkpoint(
                 db,
                 context,
@@ -586,7 +605,7 @@ def run_driver(
                 state=state,
             )
             return DriverResult(
-                "FAILED", classification, len(state["completed"]), result.detail, cp.id
+                "FAILED", classification, len(state["completed"]), failure_detail, cp.id
             )
 
     if state.get("pending_provider"):
@@ -624,7 +643,16 @@ def run_driver(
             state=state,
         )
         return DriverResult(
-            "VERIFY", "VERIFICATION_REQUIRED", len(state["completed"]), {}, cp.id
+            "VERIFY",
+            "VERIFICATION_REQUIRED",
+            len(state["completed"]),
+            {
+                "verification_passed": False,
+                "failed_capability": "verification_evaluate",
+                "capability": "verification_evaluate",
+                "verification_required": True,
+            },
+            cp.id,
         )
     _finalize_task_outcome(
         db,
