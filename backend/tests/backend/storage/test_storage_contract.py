@@ -29,7 +29,8 @@ def test_stored_blob_sha256_is_plaintext_content_identity():
 
 def test_document_content_preview_documented_as_derived_not_canonical():
     text = DOCUMENT_MODEL.read_text()
-    assert "NOT canonical source truth" in text
+    assert "NOT canonical source" in text
+    assert "truth" in text  # comment spans two lines in document.py
     assert "storage_key" in text
 
 
