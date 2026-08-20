@@ -647,6 +647,14 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # up via ON DELETE CASCADE from project_entities, no separate call needed.
         db.execute(sa_text("SELECT erase_own_project_entities_children()"))
 
+        # --- Life Work Candidates (migration 0055, see docs/LIFE_WORK_CANDIDATES.md):
+        # work_candidates has DELETE revoked from mainai_app the same way, deletion only
+        # through this one narrow SECURITY DEFINER function. Called explicitly here for the
+        # same clarity every other foundation's erasure call has, even though
+        # work_candidates.source_entity_id's ON DELETE CASCADE from project_entities would
+        # also remove these rows once erase_own_project_entities_children() runs above.
+        db.execute(sa_text("SELECT erase_own_work_candidates_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.

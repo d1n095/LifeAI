@@ -13,6 +13,7 @@ self-report) is never silently copied into the entity's `authority`. A
 `authority="deterministic_source"` unless a human reviewer explicitly asserts otherwise --
 promotion is where that judgment call belongs, never automatic."""
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,52 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.project_entities import InterpretationProposal, ProjectEntity, ProjectEntityRelationship
+
+logger = logging.getLogger(__name__)
+
+# The subset of entity_type this codebase's own plan (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md
+# §4.2's own "task_reference-typen länkar till en BEFINTLIG Task-rad" note) treats as
+# potentially actionable work, as opposed to a plain recorded fact (vision_statement,
+# open_question) -- the exact subset migration 0055's own module docstring routes into
+# app.work_candidates.
+_ACTIONABLE_ENTITY_TYPES = {"idea", "decision", "task_reference"}
+
+
+def _record_work_candidate_if_actionable(db: Session, *, owner_id: uuid.UUID, entity: ProjectEntity) -> None:
+    """Purely observational, same doctrine as app/rag/claims.py's own interpretation-proposal
+    integration one level up: never changes promote_interpretation_proposal()'s own result,
+    never raises into the caller. Writes ONLY to work_candidates -- a staging table nothing
+    treats as authorized work -- never calls create_goal(). See migration 0055's own module
+    docstring: DERIVED WORK CANDIDATE != AUTHORIZED WORK != EXECUTABLE WORK.
+
+    Uses a SAVEPOINT (db.begin_nested()), not a top-level commit/rollback -- unlike the
+    claims.py/chat.py call sites, promote_interpretation_proposal() itself never commits
+    (leaves that to ITS OWN caller, same as promote_candidate_signal()), so a plain
+    db.commit()/db.rollback() here would either surprise-commit the caller's still-open
+    transaction or, on failure, roll back the entity/proposal promotion this function is
+    supposed to be a side effect OF, not a co-equal risk to. A SAVEPOINT failure rolls back
+    only this nested unit of work, exactly like app/rag/memory_source.py's own established
+    SAVEPOINT precedent."""
+
+    if entity.entity_type not in _ACTIONABLE_ENTITY_TYPES:
+        return
+    try:
+        from app.work_candidates import record_work_candidate
+
+        savepoint = db.begin_nested()
+        try:
+            record_work_candidate(
+                db, owner_id=owner_id, source_entity_id=entity.id, title=entity.title,
+                rationale=entity.summary, classifier_strategy="project_entity_promotion_v1",
+                classifier_confidence=entity.confidence,
+                idempotency_key=f"project-entity-promotion:{entity.id}",
+            )
+            savepoint.commit()
+        except Exception:
+            savepoint.rollback()
+            raise
+    except Exception:
+        logger.warning("failed to record work candidate for project entity %s (non-fatal)", entity.id, exc_info=True)
 
 
 class ProjectEntityError(ValueError):
@@ -137,6 +184,7 @@ def promote_interpretation_proposal(
     row.promoted_to_entity_id = entity.id
     row.updated_at = datetime.utcnow()
     db.flush()
+    _record_work_candidate_if_actionable(db, owner_id=owner_id, entity=entity)
     return row, entity
 
 
