@@ -97,15 +97,29 @@ def apply_lessons_to_verification_plan(db: Session, *, task_type: str, verificat
     auto-recording) that becomes a `targeted_tests` argv. create_plan() validates AI-
     proposed verification targets BEFORE this function runs, so an unsafe lesson target
     previously bypassed plan-time fail-closed and only failed at the subprocess boundary.
-    Validate (or skip) here so plan persistence never records an absolute/`..` path."""
+    Validate (or skip) here so plan persistence never records an absolute/`..` path.
+
+    Conflict candidates (same affected_component + overlapping applies_to) are skipped
+    deterministically until the async conflict tick (or founder review) resolves them.
+    Applying BOTH sides of an unresolved candidate pair would inject contradictory
+    regression targets; the AI judgment path must not be required for this safety gate.
+    """
+    from app.mainai_execution.lesson_conflicts import find_conflict_candidate_pairs
     from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 
     lessons = lookup_lessons(db, applies_to_any=[task_type])
+    conflicted_ids: set[uuid.UUID] = set()
+    for a, b in find_conflict_candidate_pairs(db, lessons=lessons):
+        conflicted_ids.add(a.id)
+        conflicted_ids.add(b.id)
+
     existing_targets = {step.get("target") for step in verification_plan if step.get("kind") == "targeted_tests"}
 
     augmented = list(verification_plan)
     applied_lesson_ids: list[uuid.UUID] = []
     for lesson in lessons:
+        if lesson.id in conflicted_ids:
+            continue
         if not lesson.regression_test or lesson.regression_test in existing_targets:
             continue
         try:
