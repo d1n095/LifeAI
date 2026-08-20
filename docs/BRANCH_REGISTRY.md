@@ -6,6 +6,71 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 68 (2026-08-18): `claude/cognition-foundation-review` — Adversarial cross-stack review of PR #94→#96→#98→#101→#102 + remediation (migration 0051), stackad ovanpå PR #102 (`claude/corpus-trial-harness` @ `c0b9333`), egen worktree, sjätte steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** grundaren bad explicit om en grundlig, icke-medhållande adversarial granskning
+av hela den staplade grunden innan fler steg läggs på — duplicerade minnesmodeller,
+källa-vs-härledd-kontaminering, auktoritetsläckage, UNKNOWN/disputed-hantering, supersession,
+ägarisolering, migrationsordning, rollback, dold koppling mellan staplade PR:er, tester som
+bara speglar implementationen, påståenden bredare än beviset, och om hela stacken faktiskt
+komponerar rent. Se `docs/LIFE_COGNITION_FOUNDATION_REVIEW_2026-08-18.md` för fullständiga
+resultat (8 namngivna fynd, verifierade direkt mot en riktig lokal Postgres — inte gissade).
+
+**Viktigaste fyndet:** INGEN av de tre nya grunderna (capability_reality, founder_memory,
+diagnosis) anropas från någon riktig, icke-test-kod ännu — bekräftat genom att grep:a hela
+`app/`-trädet. Detta är strukturellt, inte ett misstag: de naturliga inkopplingspunkterna
+(`safe_planner`, `provider_planning`, `development_supervisor`, `agent_coordination`) är alla
+Cursor-ägda. Ett konkret, redan-bevisat inkopplingsställe hittades ändå (`app.context.
+resolver` är redan live i `app/routers/chat.py`, "purely observational" med avsikt) — men en
+naiv 1:1-koppling till `founder_memory` skulle skapa brus (resolverns egna korrigerings-markörer
+inkluderar mycket vanliga korta ord som "nej "/"fel,"), så bryggan kräver ett medvetet
+designbeslut, inte bara kod. Byggd INTE i detta pass — dokumenterad som nästa konkreta steg.
+
+**Åtgärdat i detta pass (migration 0051, INGEN ny tabell):**
+- `capability_record` var aldrig inkopplad i `app.active_context.service`s centrala register
+  (till skillnad från `founder_memory_note`/`diagnosis_record`, som båda var det) — odokumenterad
+  inkonsekvens, inte ett medvetet beslut. Åtgärdat: samma tre CHECK-constraints utökade en
+  gång till, `active_context/service.py` utökad med samma mönster, 4 nya tester.
+- INGET test bevisade RLS BETEENDEMÄSSIGT (via den begränsade `mainai_app`-rollen) för
+  `capability_records`/`founder_memory_notes`/`diagnosis_records` — alla tre grundernas egna
+  testfiler använde bara `superuser_db`, som förbigår RLS helt. Åtgärdat: 7 nya tester i
+  `tests/security/test_rls_isolation_cognition_foundation.py`, samma etablerade mönster som
+  `test_rls_isolation.py`. Alla 7 gröna — RLS var aldrig faktiskt trasig, men påståendet var
+  obevisat innan detta.
+- `list_current_founder_memory()` (ny funktion, ingen migration) — `list_founder_memory()`
+  hade inget säkert default-anrop ("bara det som gäller nu"), till skillnad från `diagnosis`s
+  nyligen tillagda `list_current_diagnoses()`.
+
+**Bekräftat KORREKT (inte bara antaget):** full `alembic upgrade head` → `downgrade 0047` →
+`upgrade head`-cykel lyckades utan manuell inblandning; RLS+forced RLS på, korrekta policies,
+och privilegier verifierade direkt mot en riktig Postgres för alla tre nya tabeller;
+authority/basis har NOT NULL DEFAULT 'unknown' på DDL-nivå, inte bara Python-nivå, plus
+CHECK-tvingad vokabulär och idempotenskonflikt-avvisning som täcker authority/basis; ingen
+dokumentation överdriver operationell status.
+
+**Naming collision hittad, ej åtgärdad (Cursor-ägd fil):**
+`app.safe_planner.service.record_capability_gap()` (per-planeringsförsök checkpoint) och
+`app.capability_reality.service.record_capability_gap()` (varaktig, ägarscopad fakta) delar
+namn men är helt frikopplade — safe_planners RIKTIGA, LIVE capability-gap-upptäckter
+uppdaterar aldrig `capability_records`. Dokumenterat som konkret, namngiven
+koordineringspunkt för framtiden.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd (endast läst för granskningen). Cursors worktree/branch inte använd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #102 (`claude/corpus-trial-harness` @
+`c0b9333`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — sex PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 →
+[#104](https://github.com/d1n095/LifeAI/pull/104). Rekommenderas starkt att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — arbetet fortsätter enligt
+uttrycklig instruktion att inte pausa i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/cognition-foundation-review` | [#104](https://github.com/d1n095/LifeAI/pull/104) | Pushad, CI körs | Adversarial granskning av #94→#102 (dokument, 8 fynd) + migration 0051 (`capability_record` i active_context-registret) + 11 nya tester (RLS-beteende + active_context-koppling) + `list_current_founder_memory()` | `claude/corpus-trial-harness` @ c0b9333 (stackad ovanpå PR #102) |
+
 ## Pass 67 (2026-08-18): `claude/corpus-trial-harness` — Life Corpus Trial Harness (INGEN ny migration), stackad ovanpå PR #101 (`claude/causal-diagnosis-interface` @ `49d1f3d`), egen worktree, femte steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund:** uppdragets punkt 7 — bygg INTE grundarens riktiga korpus-inmatning ännu, bygg
