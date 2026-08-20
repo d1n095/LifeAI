@@ -162,6 +162,9 @@ class Document(Base):
     category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     content_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Derived UI/corpus-review cache (~1000 chars of extracted text), NOT canonical source
+    # truth — originals live at storage_key. Future encryption-only vault sources must not
+    # populate this without an explicit preview-derivation policy.
     status: Mapped[IndexStatus] = mapped_column(Enum(IndexStatus), default=IndexStatus.received)
     chunk_count: Mapped[int] = mapped_column(default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -202,6 +205,11 @@ class Document(Base):
     # can actually serve them back to an <audio>/<video> element. ONLY ever set for a media
     # import (app/rag/library_import.py's media_kind branch) — every text/document import
     # leaves this NULL, exactly as small as before this column existed.
+    # STEG 13 legacy: `media_blob` held a duplicate in-DB copy for the media player.
+    # New imports store originals ONLY at `storage_key` (content-addressed durable storage);
+    # GET /api/library/{id}/media reads from storage_key first, falling back to media_blob
+    # for rows imported before this change. Keeping the column (no migration) preserves
+    # backward compatibility without persisting unnecessary plaintext on new imports.
     media_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     # --- Life Library durable-worker package (app/storage/, app/worker.py) ---
