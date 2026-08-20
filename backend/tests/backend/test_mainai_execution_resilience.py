@@ -403,12 +403,19 @@ def test_record_final_report_marks_the_goal_failed_if_any_task_ends_up_failed(db
 # ---------------------------------------------------------------- E. lessons.py
 
 
-def _record_lesson(db_session, *, applies_to, regression_test=None, severity=EngineeringLessonSeverity.medium):
+def _record_lesson(
+    db_session,
+    *,
+    applies_to,
+    regression_test=None,
+    severity=EngineeringLessonSeverity.medium,
+    affected_component="mainai_execution.planner",
+):
     return lessons.record_lesson(
         db_session,
         problem="A repo_edit task once shipped without running its own regression test.",
         root_cause="Planner did not attach a targeted_tests step for repo_edit by default.",
-        affected_component="mainai_execution.planner",
+        affected_component=affected_component,
         severity=severity,
         evidence="See PR history for the incident this codifies.",
         fix="Always attach the relevant regression test to repo_edit tasks touching this area.",
@@ -472,14 +479,75 @@ def test_apply_lessons_to_verification_plan_skips_unsafe_regression_targets(db_s
     apply, so an absolute/`..` regression_test on a lesson previously bypassed that gate and
     only failed at the subprocess boundary. Unsafe lesson targets must be skipped, never
     persisted onto the plan."""
-    _record_lesson(db_session, applies_to=["repo_edit"], regression_test=bad_target)
-    safe = _record_lesson(db_session, applies_to=["repo_edit"], regression_test="tests/backend/test_safe.py")
+    _record_lesson(db_session, applies_to=["repo_edit"], regression_test=bad_target, affected_component="mainai_execution.planner.bad")
+    safe = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_safe.py",
+        affected_component="mainai_execution.planner.safe",
+    )
     db_session.commit()
 
     plan, applied_ids = lessons.apply_lessons_to_verification_plan(db_session, task_type="repo_edit", verification_plan=[])
 
     assert plan == [{"kind": "targeted_tests", "target": "tests/backend/test_safe.py"}]
     assert applied_ids == [safe.id]
+
+
+def test_apply_lessons_skips_deterministic_conflict_candidate_pairs(db_session, owner_id):
+    """Unresolved conflict candidates must not both inject regression tests at plan time.
+    Same affected_component + overlapping applies_to is enough to quarantine both until the
+    async conflict tick (or founder) resolves them — no AI judgment required for the gate."""
+    a = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_a.py",
+        affected_component="mainai_execution.verify",
+    )
+    b = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_b.py",
+        affected_component="mainai_execution.verify",
+    )
+    alone = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_alone.py",
+        affected_component="mainai_execution.planner.unrelated",
+    )
+    db_session.commit()
+
+    plan, applied_ids = lessons.apply_lessons_to_verification_plan(db_session, task_type="repo_edit", verification_plan=[])
+
+    assert plan == [{"kind": "targeted_tests", "target": "tests/backend/test_alone.py"}]
+    assert applied_ids == [alone.id]
+    assert a.id not in applied_ids and b.id not in applied_ids
+
+
+def test_apply_lessons_does_not_over_block_unrelated_components_sharing_applies_to(db_session, owner_id):
+    """Adversarial #130: broad applies_to alone must NOT quarantine lessons.
+    Conflict candidates require the SAME affected_component; two lessons tagged repo_edit
+    but scoped to different components must both still apply."""
+    first = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_first.py",
+        affected_component="mainai_execution.planner",
+    )
+    second = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_second.py",
+        affected_component="mainai_execution.executor",
+    )
+    db_session.commit()
+
+    plan, applied_ids = lessons.apply_lessons_to_verification_plan(db_session, task_type="repo_edit", verification_plan=[])
+
+    assert {"kind": "targeted_tests", "target": "tests/backend/test_first.py"} in plan
+    assert {"kind": "targeted_tests", "target": "tests/backend/test_second.py"} in plan
+    assert set(applied_ids) == {first.id, second.id}
 
 
 def test_create_plan_is_actually_influenced_by_a_real_previously_recorded_lesson(db_session, owner_id):
