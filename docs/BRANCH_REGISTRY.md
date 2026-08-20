@@ -6,6 +6,20 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Cursor adversarial runtime lane — HANDOFF (2026-08-20)
+
+**Full freeze:** `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md`
+
+**Lane:** `CURSOR ADVERSARIAL LANE COMPLETE` ≠ Life controlled autonomy complete.
+
+**Tip at handoff write:** refresh `claude/det-kommer-mer-879lcm` (was `8641ea8` / #130). Alembic **0046**.
+
+**Cursor closing PRs:** #131 waiting_external cancel · #132 lease expire · #133 retain-after-ref · #134 verification→lesson. Merge order #131→#134 after tip moves.
+
+**Claude-owned (Cursor read-only):** claims→interpretation→knowledge→goal (#113/#110/#60).
+
+---
+
 ## Pass 58 (2026-08-17): `claude/agent-runtime-control-plane` — Agent Runtime Visibility & Deterministic Routing, förlängning av PR #82:s mergade grund, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
 Grundaren bad om en flerlagers "night shift"-insats för att flytta Life närmare att självt
