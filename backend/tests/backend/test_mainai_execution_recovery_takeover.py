@@ -5,6 +5,8 @@ evidence forward, the dead job is fenced (`superseded`), and a worker can then a
 and run the NEW job to completion using the salvaged evidence (never recomputing a checkpoint
 that already existed)."""
 
+from datetime import datetime
+
 import pytest
 from sqlalchemy import text as sa_text
 
@@ -396,6 +398,109 @@ def test_mark_job_superseded_refuses_a_job_that_is_not_genuinely_dead(db_session
 
     row = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :id"), {"id": str(job.id)}).one()
     assert row[0] == "running"  # untouched
+
+
+def test_mark_job_superseded_accepts_already_terminal_job_during_takeover(
+    db_session, superuser_db, owner_id
+):
+    """Terminal-without-finalize fence: job failed, recovery record at taking_over."""
+    from app.models.mainai_recovery import MainAIRecoveryRecord, MainAIRecoveryStatus
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="single task",
+        tasks=[planner.PlannedTaskSpec(description="do it", task_type="read_only_audit", verification_plan=[])],
+        created_by="test",
+    )
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    dead_job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    claim_next_mainai_job(superuser_db, "dead-worker", 120)
+
+    superuser_db.execute(
+        sa_text(
+            """
+            UPDATE mainai_jobs
+            SET status = 'failed', completed_at = now(), error_category = 'unexpected'
+            WHERE id = :id
+            """
+        ),
+        {"id": str(dead_job.id)},
+    )
+    # Replacement job must exist for the FK on superseded_by_job_id.
+    replacement = executor.dispatch_ready_task(
+        db_session,
+        task=executor.reset_task_for_takeover(db_session, task=task),
+        goal=goal,
+        dispatched_by="recovery-test",
+    )
+    db_session.add(
+        MainAIRecoveryRecord(
+            task_id=task.id,
+            owner_id=owner_id,
+            job_id=dead_job.id,
+            status=MainAIRecoveryStatus.taking_over,
+            detected_at=datetime.utcnow(),
+        )
+    )
+    db_session.commit()
+
+    mark_job_superseded(superuser_db, job_id=dead_job.id, superseded_by_job_id=replacement.id)
+    superuser_db.commit()
+
+    row = superuser_db.execute(
+        sa_text("SELECT status, superseded_by_job_id FROM mainai_jobs WHERE id = :id"),
+        {"id": str(dead_job.id)},
+    ).one()
+    assert row[0] == "superseded"
+    assert str(row[1]) == str(replacement.id)
+
+
+def test_mark_job_superseded_refuses_already_terminal_job_without_takeover_in_flight(
+    db_session, superuser_db, owner_id
+):
+    """A honestly-failed job with no taking_over recovery record must NOT be rewritable."""
+    import uuid
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="single task",
+        tasks=[planner.PlannedTaskSpec(description="do it", task_type="read_only_audit", verification_plan=[])],
+        created_by="test",
+    )
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    claim_next_mainai_job(superuser_db, "dead-worker", 120)
+
+    superuser_db.execute(
+        sa_text(
+            """
+            UPDATE mainai_jobs
+            SET status = 'failed', completed_at = now(), error_category = 'unexpected'
+            WHERE id = :id
+            """
+        ),
+        {"id": str(job.id)},
+    )
+    superuser_db.execute(
+        sa_text("UPDATE mainai_tasks SET status = 'failed', completed_at = now() WHERE id = :id"),
+        {"id": str(task.id)},
+    )
+    superuser_db.commit()
+
+    with pytest.raises(JobNotSupersedableError):
+        mark_job_superseded(superuser_db, job_id=job.id, superseded_by_job_id=uuid.uuid4())
+    superuser_db.rollback()
+
+    row = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :id"), {"id": str(job.id)}).one()
+    assert row[0] == "failed"
 
 
 @pytest.mark.asyncio

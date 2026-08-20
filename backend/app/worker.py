@@ -45,8 +45,9 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
-from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
-from app.mainai_execution.executor import dispatch_ready_task, retry_task
+from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
+from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
+from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
 from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
 from app.mainai_execution.recovery_classifier import classify_recovery_record
@@ -177,6 +178,23 @@ async def process_claimed_mainai_job(
                 logger.warning("Worker %s: mainai_job %s's capability '%s' is no longer available at execution time.", worker_id, job_id, job.job_type)
                 record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
                 mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.capability_unavailable)
+                # task_execution already moved the owning MainAITask to `running` at dispatch.
+                # Without finalize here the task stays running on a terminal job until the
+                # delayed auto-recovery scan (#115) — fail closed immediately instead.
+                if job.job_type == "task_execution":
+                    task = task_for_job(db, job)
+                    if task is not None and task.status == MainAITaskStatus.running:
+                        _finalize_task_outcome(
+                            db,
+                            task,
+                            passed=False,
+                            evidence={
+                                "error": "capability_unavailable",
+                                "job_type": job.job_type,
+                                "mainai_job_id": str(job.id),
+                            },
+                        )
+                        db.commit()
                 return
         if job is not None and job.job_type == "corpus_review":
             record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
@@ -481,9 +499,20 @@ class Worker:
         for a founder to find.
 
         Per-record isolation, same as every other tick in this method group: one record's
-        failure is logged and never stops the batch."""
+        failure is logged and never stops the batch.
+
+        Detection covers BOTH TaskLiveness.dead shapes that leave a task stuck `running`:
+          - classic: job still `running` with an expired lease (migration 0034 reclaim exclusion)
+          - terminal-without-finalize: job already `failed`/`completed`/`cancelled` while the
+            owning task never left `running` (e.g. worker generic handler marked the job
+            failed without `_finalize_task_outcome()`). The classic query alone misses these;
+            without this second scan they stay permanently stuck with only founder
+            POST /tasks/{id}/recover as a path -- and even that used to fail at
+            mark_job_superseded() until that fence accepted the terminal-without-finalize case.
+        """
         now = datetime.utcnow()
-        dead_jobs = (
+        dead_jobs_by_id: dict = {}
+        lease_dead = (
             db.query(MainAIJob)
             .filter(
                 MainAIJob.job_type == "task_execution",
@@ -495,7 +524,34 @@ class Worker:
             .limit(self._MAX_AUTO_RECOVERY_SCANS_PER_TICK)
             .all()
         )
-        for job in dead_jobs:
+        for job in lease_dead:
+            dead_jobs_by_id[job.id] = job
+
+        remaining = self._MAX_AUTO_RECOVERY_SCANS_PER_TICK - len(dead_jobs_by_id)
+        if remaining > 0:
+            # Task stuck running; linked job already terminal — TaskLiveness.dead shape #2.
+            terminal_without_finalize = (
+                db.query(MainAIJob)
+                .join(MainAITask, MainAITask.mainai_job_id == MainAIJob.id)
+                .filter(
+                    MainAIJob.job_type == "task_execution",
+                    MainAIJob.status.in_(
+                        (
+                            MainAIJobStatus.failed,
+                            MainAIJobStatus.completed,
+                            MainAIJobStatus.cancelled,
+                        )
+                    ),
+                    MainAITask.status == MainAITaskStatus.running,
+                )
+                .order_by(MainAIJob.completed_at.asc().nullsfirst(), MainAIJob.id.asc())
+                .limit(remaining)
+                .all()
+            )
+            for job in terminal_without_finalize:
+                dead_jobs_by_id.setdefault(job.id, job)
+
+        for job in dead_jobs_by_id.values():
             task = db.query(MainAITask).filter(MainAITask.mainai_job_id == job.id).one_or_none()
             if task is None or task.status != MainAITaskStatus.running:
                 continue
@@ -560,6 +616,35 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-replan MainAIGoal %s.", self.worker_id, goal.id)
 
+    # How many active goals this worker tries to close via record_final_report per poll cycle.
+    _MAX_GOAL_FINALIZE_SCANS_PER_TICK = 10
+
+    def _finalize_mainai_execution_goals(self, db: Session) -> None:
+        """Close goals whose every task is already terminal.
+
+        Task auto-advance / retry / recovery / replan ticks move *tasks*, but until this
+        tick nothing in the worker ever called `record_final_report` — that lived only on
+        GET `/goals/{id}/report`. A fully finished graph could therefore stay `running`
+        with `final_outcome` null forever unless a human opened the report. Same bounded
+        active-goal scan + per-goal isolation as `_advance_mainai_execution_replan`.
+        """
+        goals = (
+            db.query(MainAIGoal)
+            .filter(MainAIGoal.status.in_(ACTIVE_MAINAI_GOAL_STATUSES))
+            .order_by(MainAIGoal.created_at.asc())
+            .limit(self._MAX_GOAL_FINALIZE_SCANS_PER_TICK)
+            .all()
+        )
+        for goal in goals:
+            try:
+                before = goal.status
+                record_final_report(db, goal=goal)
+                if goal.status != before:
+                    db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to finalize MainAIGoal %s.", self.worker_id, goal.id)
+
     # V0.3: how many active engineering lessons this worker inspects for conflicts per poll
     # cycle -- a real, bounded scan, same reasoning as every other tick's own limit above. This
     # table is founder-wide (not owner-scoped), so a single global bounded query covers it --
@@ -615,6 +700,7 @@ class Worker:
             self._advance_mainai_execution_retries(claim_db)
             await self._advance_mainai_execution_auto_recovery(claim_db)
             await self._advance_mainai_execution_replan(claim_db)
+            self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)

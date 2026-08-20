@@ -91,17 +91,45 @@ def apply_lessons_to_verification_plan(db: Session, *, task_type: str, verificat
     it) -- called once per planned task from planner.py's create_plan(), never from the
     executor (a lesson influences what gets PLANNED, not what an already-dispatched task does
     on the fly, which would be an untracked runtime behavior change instead of a durable,
-    reviewable planning decision)."""
+    reviewable planning decision).
+
+    Hardening: `regression_test` is lesson-authored content (seed scripts, future
+    auto-recording) that becomes a `targeted_tests` argv. create_plan() validates AI-
+    proposed verification targets BEFORE this function runs, so an unsafe lesson target
+    previously bypassed plan-time fail-closed and only failed at the subprocess boundary.
+    Validate (or skip) here so plan persistence never records an absolute/`..` path.
+
+    Conflict candidates (same affected_component + overlapping applies_to) are skipped
+    deterministically until the async conflict tick (or founder review) resolves them.
+    Applying BOTH sides of an unresolved candidate pair would inject contradictory
+    regression targets; the AI judgment path must not be required for this safety gate.
+    """
+    from app.mainai_execution.lesson_conflicts import find_conflict_candidate_pairs
+    from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
+
     lessons = lookup_lessons(db, applies_to_any=[task_type])
+    conflicted_ids: set[uuid.UUID] = set()
+    for a, b in find_conflict_candidate_pairs(db, lessons=lessons):
+        conflicted_ids.add(a.id)
+        conflicted_ids.add(b.id)
+
     existing_targets = {step.get("target") for step in verification_plan if step.get("kind") == "targeted_tests"}
 
     augmented = list(verification_plan)
     applied_lesson_ids: list[uuid.UUID] = []
     for lesson in lessons:
+        if lesson.id in conflicted_ids:
+            continue
         if not lesson.regression_test or lesson.regression_test in existing_targets:
             continue
-        augmented.append({"kind": "targeted_tests", "target": lesson.regression_test})
-        existing_targets.add(lesson.regression_test)
+        try:
+            target = validate_targeted_tests_target(lesson.regression_test)
+        except VerificationStepError:
+            # Fail closed for this lesson only — do not abort the whole plan, and do not
+            # inject the unsafe target. A bad seed/auto lesson must never widen argv scope.
+            continue
+        augmented.append({"kind": "targeted_tests", "target": target})
+        existing_targets.add(target)
         applied_lesson_ids.append(lesson.id)
 
     return augmented, applied_lesson_ids

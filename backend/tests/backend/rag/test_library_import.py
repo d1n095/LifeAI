@@ -936,7 +936,23 @@ def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_n
     path account-erasure's own durable outbox worker uses (attempt_storage_deletion_task()),
     not just delete_if_unreferenced() directly -- proving both routes into a physical delete
     respect the identical storage-key lock, run several times so a real Postgres advisory lock
-    (not manual signaling) decides who actually goes first each time."""
+    (not manual signaling) decides who actually goes first each time.
+
+    Investigated 2026-08-19 as a recurring CI flake (always reported on "attempt 0" of the
+    four-iteration loop, never 1-3): manually traced both possible advisory-lock orderings
+    against the actual production code (writer-wins-first, already covered by Pass 33's own
+    deterministic test below; worker-wins-first, NOT previously covered) -- both conclude
+    correctly. Added `test_store_bytes_with_reference_lock_outbox_worker_wins_lock_first_
+    writer_must_republish` as a fully deterministic (no threading.Barrier, no timing
+    dependency) regression for the previously-uncovered ordering; it passes reliably. This
+    test itself also passed 10/10 in a tight local loop against a fast, low-latency local
+    Postgres. Both results point away from a correctness bug in the reviewed locking protocol
+    (migrations 0020/0021, Pass 26/27/28/31/32/33) and toward a CI-environment-specific
+    test-harness timing artifact (most plausibly thread/connection-pool cold-start skewing
+    which side of the barrier-released race actually runs first, specifically on this test's
+    FIRST iteration) -- not something a change to the account-erasure/storage locking code
+    itself would fix. Left as-is rather than randomly tuning barrier/join timeouts with no way
+    to verify locally whether a change actually helps."""
     from sqlalchemy.orm import sessionmaker
 
     from app.db import migration_engine
@@ -1047,6 +1063,61 @@ def test_store_bytes_with_reference_lock_writer_wins_lock_first_outbox_worker_mu
     assert not t_writer.is_alive() and not t_worker.is_alive()
     assert get_storage().exists(storage_key) is True
     assert worker_outcome["status"] == StorageDeletionStatus.retained_shared
+
+
+def test_store_bytes_with_reference_lock_outbox_worker_wins_lock_first_writer_must_republish():
+    """Deterministic regression for Test D's OTHER failure mode (the mirror of the
+    writer-wins-first test above): the outbox worker acquires the lock, finds no DB reference
+    yet, and physically deletes the blob -- fully completing and committing -- BEFORE the
+    writer even attempts to reclaim the same content-addressed key. Proves
+    `_store_bytes_with_reference_lock()`'s own "lost the race, republish under lock" fallback
+    (app/rag/library_import.py) correctly recovers the blob regardless of which side actually
+    wins the advisory lock, not just the writer-wins ordering Pass 33's own deterministic test
+    already covers. Run sequentially (worker fully finishes before the writer starts) rather
+    than with real thread concurrency -- this is the maximally deterministic version of
+    "worker wins," and removes timing as a variable entirely: if this passes reliably but the
+    original barrier-based Test D still flakes in CI, the flake is not this specific ordering
+    going wrong, narrowing where a future investigation should look instead of leaving it as an
+    unexamined assumption."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+    from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
+    from app.account.erasure import attempt_storage_deletion_task
+    from app.storage.references import enqueue_rejected_upload_cleanup_task
+
+    _AdminSession = sessionmaker(bind=migration_engine)
+
+    content = f"pass 33-prime worker wins first {uuid.uuid4().hex}".encode()
+    storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
+    operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+
+    db_worker = _AdminSession()
+    try:
+        task = db_worker.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).one()
+        attempt_storage_deletion_task(db_worker, task)
+        db_worker.refresh(task)
+        worker_status = task.status
+    finally:
+        db_worker.close()
+
+    # The worker must have genuinely, physically deleted the blob for this to be a real test
+    # of the reclaim path below -- not a no-op.
+    assert worker_status == StorageDeletionStatus.purged
+    assert get_storage().exists(storage_key) is False
+
+    db_writer = SessionLocal()
+    try:
+        blob = _store_bytes_with_reference_lock(db_writer, get_storage(), content, max_bytes=len(content) + 10)
+        db_writer.commit()
+    finally:
+        db_writer.close()
+
+    assert blob.storage_key == storage_key
+    assert get_storage().exists(storage_key) is True, (
+        "the writer's own reclaim-under-lock fallback must republish a blob the outbox worker "
+        "already deleted before the writer ever started"
+    )
 
 
 @pytest.mark.asyncio

@@ -374,7 +374,34 @@ async def test_a_document_with_no_provider_configured_gets_awaiting_provider_not
     db_session.refresh(doc)
     assert doc.status == IndexStatus.awaiting_provider
     assert doc.error_message is not None
-    assert "lagrad" in doc.error_message  # reassures the founder nothing was lost
+    # No ImportJob/storage_key → must NOT claim automatic worker resume.
+    assert "automatisk återstart" in doc.error_message or "ingen durable" in doc.error_message
+    assert doc.content_preview is not None
+    assert "Riktigt textinnehall" in doc.content_preview
+
+
+@pytest.mark.asyncio
+async def test_provider_pause_with_storage_key_still_claims_auto_resume(db_session, make_verified_user, monkeypatch):
+    """Library-import-shaped docs (durable storage_key) keep the automatic-resume promise."""
+    monkeypatch.setattr(get_settings(), "openai_api_key", None)
+    user, _ = make_verified_user()
+    _set_rls_owner(db_session, user.id)
+    doc = Document(
+        uploaded_by=user.id,
+        title="t.txt",
+        original_filename="t.txt",
+        checksum="c" * 64,
+        storage_key=f"{user.id}/objects/c{'0' * 63}",
+    )
+    db_session.add(doc)
+    db_session.commit()
+
+    await index_document(db_session, doc, "Riktigt textinnehall att indexera.")
+
+    db_session.refresh(doc)
+    assert doc.status == IndexStatus.awaiting_provider
+    assert "bearbetas automatiskt" in doc.error_message
+    assert doc.content_preview is not None
 
 
 @pytest.mark.asyncio

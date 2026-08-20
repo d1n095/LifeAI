@@ -164,6 +164,19 @@ export default function MainAIJobsPage() {
     }
   }
 
+  async function dismissProposal(jobId: string, proposalId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.mainaiDismissProposal(jobId, proposalId);
+      setProposals((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-8">
       <div className="flex items-start justify-between gap-4">
@@ -362,7 +375,19 @@ export default function MainAIJobsPage() {
                   <ul className="space-y-2 max-h-64 overflow-y-auto">
                     {proposals.map((p) => (
                       <li key={p.id} className="rounded-lg border border-border/60 p-3 text-xs">
-                        <div className="text-white/40">{p.status === "proposed" ? "Föreslaget" : "Avfärdat"}</div>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-white/40">{p.status === "proposed" ? "Föreslaget" : "Avfärdat"}</div>
+                          {p.status === "proposed" && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => dismissProposal(selected.id, p.id)}
+                              className="text-xs rounded border border-border px-2 py-0.5 disabled:opacity-30"
+                            >
+                              Avfärda
+                            </button>
+                          )}
+                        </div>
                         <div className="text-white/70 mt-1 whitespace-pre-wrap">{p.proposal_text}</div>
                       </li>
                     ))}

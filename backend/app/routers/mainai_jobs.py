@@ -101,6 +101,29 @@ def list_job_proposals(job_id: uuid.UUID, db: Session = Depends(get_db), user: U
     )
 
 
+@router.post("/{job_id}/proposals/{proposal_id}/dismiss", response_model=MainAIJobProposalOut)
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def dismiss_job_proposal(
+    job_id: uuid.UUID,
+    proposal_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Closes the designed `proposed` → `dismissed` lifecycle for a corpus_review proposal.
+    Does not promote the proposal into KnowledgeClaim or any other founder truth."""
+    try:
+        proposal = service.dismiss_proposal(db, job_id=job_id, proposal_id=proposal_id)
+        db.commit()
+    except service.JobNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.") from exc
+    except service.ProposalNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found.") from exc
+    except service.InvalidJobTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return proposal
+
+
 @router.post("/{job_id}/cancel", response_model=MainAIJobOut)
 @limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 def cancel_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):

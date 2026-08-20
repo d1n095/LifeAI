@@ -58,13 +58,18 @@ full regressionstäckning av den befintliga svit som redan täcker den filen.
 **Beroenden:** Stackad ovanpå det ännu ej mergade PR #110 (`claude/corpus-trial-problem-
 learning` @ `04a0b67`). Helt oberoende av Cursors PR #79/#80/#81/#92/#105/#107.
 
-**OBS — nio PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 → #104 →
-#108 → #110 → [#113](https://github.com/d1n095/LifeAI/pull/113). Grundaren har nu explicit
-bett om att stacken integreras/mergas i beroendeordning härnäst, inte staplas ytterligare.
+**UPPDATERAT — hela kedjan mergad:** #83 → #84 → #85 → #90 → #94 → #96 → #98 → #101 → #102 →
+#104 → #108 → #110 → #113, var och en granskad, testad (targeted + full `tests/backend/mainai/`
+regression, `tests/backend/mainai/` + `tests/security/` + `tests/backend/` stack-wide efter
+#90 och #113 specifikt) och mergad i beroendeordning in i sin stack-branch. Eftersom varje
+PR:s bas var föregående PR:s branch (inte integrationsgrenen direkt, förutom #83), krävdes
+EN slutlig konsoliderande merge av `claude/founder-memory-signal-staging` (toppen av stacken)
+in i `claude/det-kommer-mer-879lcm` för att faktiskt landa hela kedjan i den delade grenen —
+det är den merge som skapade denna commit.
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/founder-memory-signal-staging` | [#113](https://github.com/d1n095/LifeAI/pull/113) | Pushad, CI körs | Candidate Learning Signals (migration 0053, SIGNAL PRODUCER != TRUTH WRITER, live chat.py-koppling) + never-automate-formulering i 4 dokument + Source Vault framtida kompatibilitetsgranskning (inget kodbygge) | `claude/corpus-trial-problem-learning` @ 04a0b67 (stackad ovanpå PR #110) |
+| `claude/founder-memory-signal-staging` | [#113](https://github.com/d1n095/LifeAI/pull/113) | **Mergad**, konsoliderad in i `claude/det-kommer-mer-879lcm` | Candidate Learning Signals (migration 0053, SIGNAL PRODUCER != TRUTH WRITER, live chat.py-koppling) + never-automate-formulering i 4 dokument + Source Vault framtida kompatibilitetsgranskning (inget kodbygge) | `claude/corpus-trial-problem-learning` @ 04a0b67 (stackad ovanpå PR #110) |
 
 ## Pass 70 (2026-08-18): `claude/corpus-trial-problem-learning` — wire `app.problem_learning` into corpus trial harness fixtures (INGEN ny migration), stackad ovanpå PR #108 (`claude/corpus-trial-run-history` @ `b4502f7`), egen worktree, åttonde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
@@ -811,6 +816,20 @@ bygger vidare på `routing.py`s redan befintliga funktioner. Helt oberoende av C
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
 | `claude/agent-work-selection` | [#84](https://github.com/d1n095/LifeAI/pull/84) | Pushad, redo för granskning | `next_feasible_assignment_for_agent()` + `idle_agents_with_next_assignment()` -- given en agent, vilket uppdrag härnäst; given ägaren, vilka lediga agenter + vad de ska göra; 14 tester, ingen ny migration | `claude/agent-runtime-control-plane` @ 11c261e (stackad ovanpå PR #83) |
+
+## Cursor adversarial runtime lane — HANDOFF (2026-08-20)
+
+**Full freeze:** `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md`
+
+**Lane:** `CURSOR ADVERSARIAL LANE COMPLETE` ≠ Life controlled autonomy complete.
+
+**Tip at handoff write:** refresh `claude/det-kommer-mer-879lcm` (was `8641ea8` / #130). Alembic **0046**.
+
+**Cursor closing PRs:** #131 waiting_external cancel (merged) · #132 lease expire · #133 retain-after-ref · #134 verification→lesson.
+
+**Claude-owned (Cursor read-only):** claims→interpretation→knowledge→goal — still unbuilt (see `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md` §G/§L). All 13 Claude PRs in this mission's chain (#83→#94→#96→#98→#101→#102→#104→#108→#110→#113, plus #90) are now merged into their stacked branches and consolidated into this integration branch via a single final merge — see the Pass 71 entry above for the full chain summary.
+
+---
 
 ## Pass 58 (2026-08-17): `claude/agent-runtime-control-plane` — Agent Runtime Visibility & Deterministic Routing, förlängning av PR #82:s mergade grund, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 

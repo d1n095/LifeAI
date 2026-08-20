@@ -459,8 +459,18 @@ async def _import_one_file(
 
     classification_raw = manifest_entry.get("classification")
     classification = classification_raw if classification_raw in VALID_CLASSIFICATIONS else KnowledgeClassification.general.value
+    # Epistemic fail-closed: an unrecognized active_truth_status must NEVER elevate to
+    # `active` (the most privileged trust class — see app/rag/trust.py). Missing status on
+    # ordinary single-file uploads (empty manifest_entry) still defaults to `active` so
+    # founder-direct library uploads remain current-truth by default; only an EXPLICIT but
+    # invalid value fails closed to `proposed`.
     truth_status_raw = manifest_entry.get("active_truth_status")
-    truth_status = truth_status_raw if truth_status_raw in VALID_TRUTH_STATUSES else ActiveTruthStatus.active.value
+    if truth_status_raw is None:
+        truth_status = ActiveTruthStatus.active.value
+    elif truth_status_raw in VALID_TRUTH_STATUSES:
+        truth_status = truth_status_raw
+    else:
+        truth_status = ActiveTruthStatus.proposed.value
 
     declared_checksum = manifest_entry.get("checksum")
     if declared_checksum and declared_checksum != checksum:
@@ -692,12 +702,15 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
     claimed by a different worker at the same time, and without this lock both could pass
     _import_one_file's duplicate-checksum check before either commits its new Document row.
 
+    If Redis is unreachable (`JobLockUnavailable`), this function FAILS CLOSED by re-raising
+    — `app/jobs/retry.py` already classifies that as transient, so the worker retries with
+    backoff instead of racing without coordination. Contended locks (`acquire() is False`)
+    still fail the job as a permanent "identical import already in progress" outcome.
+
     Never raises for a normal per-file failure (those become FileOutcome entries); DOES
-    raise for a genuine, unexpected orchestration-level error. Unlike the old synchronous-
-    BackgroundTask design, this function itself does NOT retry — app/worker.py's caller owns
-    the retry/backoff loop (app/jobs/retry.py, reused unchanged), since the worker is what
-    now decides whether to keep this job claimed for a local retry or let it go back to
-    `pending` for any worker to reclaim on the next poll.
+    raise for a genuine, unexpected orchestration-level error AND for JobLockUnavailable.
+    Unlike the old synchronous-BackgroundTask design, this function itself does NOT retry —
+    app/worker.py's caller owns the retry/backoff loop (app/jobs/retry.py, reused unchanged).
     """
     _set_rls_owner(db, owner_id)
     job = db.get(ImportJob, job_id)
@@ -708,17 +721,18 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
 
     lock_key = f"import:{owner_id}:{job.source_checksum or job_id}"
     lock = JobLock(lock_key, lease_seconds=60)
-    # None = "couldn't even check" (Redis unreachable) — proceed without coordination rather
-    # than blocking every import whenever Redis happens to be down (see app/limiter.py's
-    # identical in-memory-fallback philosophy for rate limiting). False = another worker
-    # genuinely holds this exact (owner, content) lock right now — a real, expected outcome
-    # of concurrency, not a degraded-Redis situation.
-    lock_held: bool | None
+    # JobLockUnavailable means Redis itself is unreachable — FAIL CLOSED, do not proceed.
+    # Proceeding without the (owner, checksum) lock was a documented fail-open that allowed
+    # two ImportJob rows for byte-identical content (claimed by different workers) to both
+    # pass the duplicate-checksum check and commit two Document rows. JobLockUnavailable is
+    # already classified transient in app/jobs/retry.py; re-raising lets process_claimed_job
+    # retry/backoff until Redis returns, instead of racing without coordination.
+    # False = another worker genuinely holds this exact (owner, content) lock right now —
+    # a real concurrency outcome, not degraded Redis.
     try:
         lock_held = lock.acquire()
-    except JobLockUnavailable as exc:
-        logger.warning("Jobblås otillgängligt (%s) — fortsätter utan distribuerad koordinering.", exc)
-        lock_held = None
+    except JobLockUnavailable:
+        raise
 
     if lock_held is False:
         job.status = ImportJobStatus.failed

@@ -33,7 +33,7 @@ export default function AgentOrchestrationPage() {
   const [testPassed, setTestPassed] = useState(true);
   const [testOutput, setTestOutput] = useState("");
   const [branchName, setBranchName] = useState("");
-  const [baseBranch, setBaseBranch] = useState("claude/det-kommer-mer-879lcm");
+  const [baseBranch, setBaseBranch] = useState("main");
 
   async function refreshTasks() {
     try {

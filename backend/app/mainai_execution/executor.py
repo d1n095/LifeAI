@@ -13,7 +13,15 @@ from sqlalchemy.orm import Session
 from app.jobs import service as mainai_jobs_service
 from app.mainai_execution.approval import require_task_approval
 from app.mainai_execution.graph import recompute_task_readiness
-from app.models.mainai_execution import RETRYABLE_MAINAI_TASK_STATUSES, MainAIGoal, MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_execution import (
+    RETRYABLE_MAINAI_TASK_STATUSES,
+    MainAIGoal,
+    MainAITask,
+    MainAITaskDependency,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
 from app.models.mainai_job import MainAIJob
 
 
@@ -45,8 +53,79 @@ def _lock_task(db: Session, task_id: uuid.UUID) -> MainAITask:
 # handled differently (and honestly documented as a real V0.1 limitation) rather than
 # pretending this function can stop it.
 _CANCELLABLE_MAINAI_TASK_STATUSES = frozenset(
-    {MainAITaskStatus.pending, MainAITaskStatus.ready, MainAITaskStatus.blocked, MainAITaskStatus.retryable_failed}
+    {
+        MainAITaskStatus.pending,
+        MainAITaskStatus.ready,
+        MainAITaskStatus.blocked,
+        MainAITaskStatus.retryable_failed,
+        # waiting_external is a RESERVED scaffold status (V0.3): there is still no production
+        # producer, MainAITaskWait source type, poll clock, or resume path. Cancel-only keeps
+        # a stray row from permanently stranding a goal; it does NOT make the state
+        # operational. Do not invent a free-floating poller — extend MainAITaskWait +
+        # _poll_mainai_task_waits (mirror waiting_ci) when a real external detector exists.
+        MainAITaskStatus.waiting_external,
+    }
 )
+
+
+def _cascade_cancel_dependents_blocked_by_cancelled(
+    db: Session, *, goal_id: uuid.UUID, cancelled_by: str, reason: str
+) -> None:
+    """After a founder cancel, `recompute_task_readiness` marks dependents `blocked`.
+    Unlike a permanent `failed` dependency (which can trigger replan), a cancelled
+    dependency has no automatic recovery — leaving dependents blocked strands the goal
+    (`blocked` is non-terminal, so `record_final_report` never closes it). Cascade-cancel
+    those blocked tasks until the graph stabilizes."""
+    cascade_reason = reason or "Dependency cancelled."
+    while True:
+        blocked = (
+            db.execute(
+                select(MainAITask).where(
+                    MainAITask.goal_id == goal_id, MainAITask.status == MainAITaskStatus.blocked
+                )
+            )
+            .scalars()
+            .all()
+        )
+        progressed = False
+        for blocked_task in blocked:
+            dep_ids = (
+                db.execute(
+                    select(MainAITaskDependency.depends_on_task_id).where(
+                        MainAITaskDependency.task_id == blocked_task.id
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not dep_ids:
+                continue
+            dep_statuses = (
+                db.execute(select(MainAITask.status).where(MainAITask.id.in_(dep_ids))).scalars().all()
+            )
+            if MainAITaskStatus.cancelled not in dep_statuses:
+                continue
+            blocked_task.status = MainAITaskStatus.cancelled
+            blocked_task.completed_at = datetime.utcnow()
+            blocked_task.next_retry_at = None
+            blocked_task.blocker_reason = cascade_reason
+            db.add(
+                MainAITaskEvent(
+                    task_id=blocked_task.id,
+                    owner_id=blocked_task.owner_id,
+                    event_type=MainAITaskEventType.cancelled,
+                    detail={
+                        "cancelled_by": cancelled_by,
+                        "reason": cascade_reason,
+                        "kind": "cascade_from_cancelled_dependency",
+                    },
+                )
+            )
+            progressed = True
+        if not progressed:
+            break
+        db.flush()
+        recompute_task_readiness(db, goal_id=goal_id)
 
 
 class TaskNotRetryableError(Exception):
@@ -270,6 +349,9 @@ def cancel_task(
         )
         db.flush()
         recompute_task_readiness(db, goal_id=task.goal_id)
+        _cascade_cancel_dependents_blocked_by_cancelled(
+            db, goal_id=task.goal_id, cancelled_by=cancelled_by, reason=reason
+        )
         return task
 
     if task.status not in _CANCELLABLE_MAINAI_TASK_STATUSES:
@@ -286,4 +368,7 @@ def cancel_task(
     )
     db.flush()
     recompute_task_readiness(db, goal_id=task.goal_id)
+    _cascade_cancel_dependents_blocked_by_cancelled(
+        db, goal_id=task.goal_id, cancelled_by=cancelled_by, reason=reason
+    )
     return task
