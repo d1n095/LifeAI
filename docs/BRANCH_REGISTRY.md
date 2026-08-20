@@ -6,12 +6,107 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-18) — integration @ `68ee1eb`
+## Pass 58 (2026-08-17): `claude/agent-runtime-control-plane` — Agent Runtime Visibility & Deterministic Routing, förlängning av PR #82:s mergade grund, byggd i egen worktree parallellt med Cursors PR #79/#80-härdning
 
-**Integration tip:** `claude/det-kommer-mer-879lcm` @ `68ee1eb` (PR #109 merge).
+Grundaren bad om en flerlagers "night shift"-insats för att flytta Life närmare att självt
+kunna samordna Claude Code/Cursor Agent/Codex: veta vem som gör vad, var, med vilken
+skrivbehörighet, förhindra kollisioner, hantera beroenden/väntetillstånd, samla
+prestationsbevis, och till sist ett deterministiskt routing-lager som svarar "vilken
+registrerad agent är kvalificerad för det här uppdraget" — allt uttryckligen ovanpå PR #82:s
+redan mergade grund, ALDRIG en parallell arkitektur.
+
+**Genomgång innan något byggdes** (enligt CLAUDE.md:s "kontrollera innan du börjar"): PR
+#82:s `AgentWorkAssignment`/`AgentScopeLease`/`CoordinationAgent` täcker redan det mesta av
+"vem gör vad var med vilken behörighet" och hela kollisionsdetekteringen (styrke-testad med
+`test_pr79_hardening_scenario_end_to_end`). Den genuina luckan var ett LÄS-lager (en samlad
+ögonblicksbild per agent/uppdrag, aldrig lagrad, alltid härledd) och ett deterministiskt
+routing-lager (som svarar VILKA agenter som är kvalificerade INNAN ett uppdrag skapas) — ingen
+av dem fanns. Ingen ny migration behövdes; Alembic-huvudet är fortsatt `0046`.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- `runtime_view.py` — `RuntimeStatus` (IDLE/RUNNING/WAITING_DEPENDENCY/WAITING_REVIEW/
+  REVIEWING/BLOCKED/COMPLETED/FAILED/OFFLINE), en deterministisk total mappning från den
+  kanoniska `WorkAssignmentStatus` (aldrig tvärtom — den kanoniska statusen bevaras alltid
+  ordagrant bredvid), `agent_runtime_snapshot()`/`all_agents_runtime_snapshot()`/
+  `work_registry_snapshot()`. Blockeringsorsak är ALDRIG lagrad — alltid den LEVANDE
+  `CoordinatorDecision` från `evaluate_assignment_readiness()`.
+- `routing.py` — `eligible_agents_for()`: deterministiskt filter (registerstatus →
+  läs/skriv-förmåga → nödvändiga capability-taggar → tillgänglighet → scope-konflikt),
+  `NEEDS_SELECTION` när fler än en agent är lika kvalificerad (denna funktion väljer ALDRIG
+  en vinnare), `SCOPE_CONFLICT` när den begärda skopan redan krockar med ett aktivt
+  skriv-lease. Ingen prestationsbaserad rankning — uttryckligen uppskjutet tills det finns
+  tillräckligt med verkliga bevis.
+- `service.py`: `scan_write_scope_conflict()` — den befintliga konfliktskanningen i
+  `evaluate_assignment_readiness()` extraherad till en delad, icke-låsande, icke-muterande
+  funktion (samma logik, verifierat beteendebevarande av samtliga 29 redan mergade PR
+  #82-tester) så både den befintliga per-uppdrag-kontrollen och det nya routing-lagrets
+  scope-kontroll delar EN implementation. `build_agent_outcome_payload()` — kanoniskt,
+  dokumenterat fältvokabulär (tester/varaktighet/kostnad/CI-utfall/granskningsdefekter/
+  omarbetning/scope-överträdelser/mergeutfall/verifierad kvalitet, allt valfritt) för
+  `record_assignment_outcome()`s payload — ingen ny lagring, `IntelligenceEvidence.payload`
+  är redan ostrukturerad JSON.
+- 19 nya tester (`tests/backend/mainai/test_agent_runtime_control_plane.py`), inklusive
+  `test_current_real_world_three_agent_state_end_to_end` som bevisar HELA det verkliga
+  nuläget end-to-end: Cursor RUNNING/WRITE på PR #80:s exakta path-scope, Claude RUNNING/WRITE
+  på just den här samordningsmodulen (genuint annan, icke-överlappande delsystem), Codex IDLE
+  — sedan en avvisad överlappande Claude/Codex-skrivbegäran mot Cursors scope, en tillåten
+  icke-överlappande begäran, en beroende granskare som släpps in i REVIEWING, ett
+  Claude-uppdrag grindat på Cursors avslutning som korrekt rapporterar WAITING_DEPENDENCY
+  medan Cursors eget arbete fortsätter opåverkat, och routing som fortsätter fungera normalt
+  för annat genomförbart arbete trots det blockerade uppdraget.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. De fem sökvägarna förekommer i det nya E2E-testet ENDAST som
+data — exakt samma mönster PR #82:s eget scenario-test redan etablerade.
+
+Full lokal verifiering: 19/19 nya tester, 182/185 (163 tidigare + 19 nya, minus 3
+förbefintliga `rg`-relaterade fel i Cursors eget scope, orörda) i hela
+`tests/backend/mainai/`, ruff rent, `git diff --check` rent, Alembic-huvud verifierat
+oförändrat vid `0046`.
+
+**Beroenden:** Bygger direkt ovanpå det mergade PR #82 (`claude/det-kommer-mer-879lcm` @
+`78f4eb0`). Helt oberoende av Cursors PR #79/#80 — ingen delad kod.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-runtime-control-plane` | [#83](https://github.com/d1n095/LifeAI/pull/83) | Pushad, redo för granskning | Agent Runtime Visibility & Deterministic Routing: `runtime_view.py`, `routing.py`, `scan_write_scope_conflict()`-refaktorering, `build_agent_outcome_payload()`, 19 tester, ingen ny migration | `claude/det-kommer-mer-879lcm` @ 78f4eb0 (efter PR #82) |
+
+## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82, sedan mergad
+
+**`claude/mainai-autonomous-gap-live-integration` → `claude/det-kommer-mer-879lcm` (PR #79)
+— MERGAD.** Live-wiring av autonomous gap → child task in i Supervisor
+(`handle_live_gap_signal`). Grenad ursprungligen från `16a5da9` (efter PR #78); tip före
+reconcile: `bed835a`. Reconcilerades mot mainline `78f4eb0` (PR #82 / Multi-Agent Work
+Coordination, migration **0046** — ingen ny migration från PR #79, Alembic single head
+förblev **0046**, PR #82:s `app/agent_coordination/**` intakt), **mergad
+2026-08-17T07:04:08Z**, merge-commit `69f30e0`. Se
+`docs/LIFE_AUTONOMOUS_GAP_TO_CHILD_TASK_LIVE_INTEGRATION.md`.
+
+**`cursor/pr79-live-loop-hardening` (PR #80) — nu OLÅST, PR #79 är mergad.** Head
+`1d3ebff1c4e185490c5cde1e284bfd2ca87561f2`. Kan nu granskas/mergas oberoende (se Claudes
+egen fristående adversarial-granskning av PR #80 samma dag — inga P0/P1 kvarstår).
+
+**PR #83–85 (`claude/agent-runtime-control-plane` → `claude/agent-work-selection` →
+`claude/agent-dispatch-foundation`) — Claude natt-pass, oberoende stack.** Rörs inte av PR
+#79:s mergning — noll fil-överlapp bekräftat vid varje steg, förutom just den här delade
+filen (`docs/BRANCH_REGISTRY.md`), som gav en väntad, ren textkonflikt när PR #83:s branch
+uppdaterades mot den nya integrationstippen (`69f30e0`) efter att PR #79 faktiskt mergat —
+löst genom att behålla båda sidornas nya avsnitt, i linje med "Merge-regeln": ingen
+förebyggande ombasering gjordes förrän det faktiska beroendet (den delade filen) faktiskt
+hade en verklig konflikt att lösa.
+
+## Aktiva PR:er (2026-08-20) — integration @ `d50ec18`
+
+**Integration tip:** `claude/det-kommer-mer-879lcm` @ `d50ec18` (PR #112 merge). Uppdaterad
+vid mergningen av PR #83 (denna branch) — samma väntade, rena textkonflikt i just den här
+filen, löst genom att behålla båda sidornas avsnitt och lägga till de två senaste raderna
+(#111, #112) som tillkommit sedan förra registerposten (@ `68ee1eb`).
 
 | PR | Merge SHA | Scope |
 |---|---|---|
+| [#112](https://github.com/d1n095/LifeAI/pull/112) | `d50ec18` | Serve media originals from storage_key, stop DB plaintext duplicate |
+| [#111](https://github.com/d1n095/LifeAI/pull/111) | `4fce583` | Registry tip post-#105/#106/#109 @ `68ee1eb` |
 | [#109](https://github.com/d1n095/LifeAI/pull/109) | `68ee1eb` | Cloud Agent backend (uvicorn) auto-restart on crash |
 | [#106](https://github.com/d1n095/LifeAI/pull/106) | `789881f` | Cloud Agent worker auto-restart on crash |
 | [#105](https://github.com/d1n095/LifeAI/pull/105) | `6ad7fcd` | Cloud Agent pytest env isolation fix |
@@ -28,9 +123,17 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 | [#80](https://github.com/d1n095/LifeAI/pull/80) | `9c0b389` | Live-loop hardening |
 | [#86](https://github.com/d1n095/LifeAI/pull/86) | `fc7af1b` | Storage reference/erasure race |
 
-Alembic single head **0046**. **PR #83/#84/#85/#87 — Claude agent-runtime/dispatch** (Claude-owned).
+Alembic single head **0046** (PR #112 added no migration — confirmed via diff, only
+interface docstrings + `document.py`/`library_import.py`/`routers/library.py` changes, no
+`alembic/versions/` file touched).
 
-No open Cursor-owned PRs targeting integration.
+**Claude night-shift stack now merging, i beroendeordning, in i denna gren:** PR #83
+(denna) → #84 → #85 → #90 → #94 → #96 → #98 → #101 → #102 → #104 → #108 → #110 → #113.
+Verifierat noll fil-överlapp med PR #112 (endast delad fil: denna registerpost). PR #114
+(oberoende, `claude/library-import-race-investigation` @ integration-tippen direkt, CI
+grönt) kan mergas när som helst, ingen beroenderelation till stacken ovan.
+
+No open Cursor-owned PRs targeting integration (as of this pass).
 
 ## Aktiva PR:er (2026-08-17) — PR #79 reconcilerad mot mainline efter PR #82 (historisk)
 
@@ -97,9 +200,9 @@ ingen delad kod, ingen delad migration (0046 = 0045 → 0046, ingen kollision). 
 
 | Branch | PR | Status | Scope | Bas |
 |---|---|---|---|---|
-| `claude/multi-agent-work-coordination-foundation` | [#82](https://github.com/d1n095/LifeAI/pull/82) | **Mergad** @ `78f4eb0` | Multi-Agent Work Coordination, migration 0046 | mainline |
-| `claude/mainai-autonomous-gap-live-integration` | [#79](https://github.com/d1n095/LifeAI/pull/79) | **Mergad** @ `69f30e0` | Live gap→child wiring | mainline inkl. 0046 |
-| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | Reconcileras | Live-loop hardening (P1 path/lease) | mainline @ `69f30e0` |
+| `claude/multi-agent-work-coordination-foundation` | [#82](https://github.com/d1n095/LifeAI/pull/82) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `78f4eb0`. CI grönt (en förbefintlig, orelaterad concurrency-flake i `test_library_import.py` bekräftad och grön vid omkörning). | Multi-Agent Work Coordination-grund: migration 0046, `app/agent_coordination/`, `app/models/agent_coordination.py`, erasure-/RLS-integration, `docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md`, 29 tester | `claude/det-kommer-mer-879lcm` @ 16a5da9 (efter PR #78) |
+| `claude/mainai-autonomous-gap-live-integration` | [#79](https://github.com/d1n095/LifeAI/pull/79) | **Mergad** i `claude/det-kommer-mer-879lcm`, merge-commit `69f30e0` (2026-08-17T07:04:08Z) | Live gap→child wiring in i Supervisor | mainline @ `78f4eb0` |
+| `cursor/pr79-live-loop-hardening` | [#80](https://github.com/d1n095/LifeAI/pull/80) | **Mergad** @ `9c0b389` — PR #79 mergad. Fristående adversarial-granskning av Claude (2026-08-17): inga P0/P1 kvarstod. | Live-loop hardening (P1 path/lease) | PR #79 @ `bed835a` |
 
 ## Aktiva PR:er just nu (2026-08-12): #60 (design/provisional, fryst) + #61 (kod, redo för granskning)
 

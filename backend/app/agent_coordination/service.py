@@ -535,6 +535,47 @@ def _shares_parallel_exploration_group(db: Session, *, group_id: uuid.UUID | Non
     return other is not None and other.parallel_exploration_group_id == group_id
 
 
+def scan_write_scope_conflict(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    repository_identity: str,
+    branch: str | None,
+    worktree_path: str | None,
+    allowed_paths: list[str] | tuple[str, ...],
+    parallel_exploration_group_id: uuid.UUID | None = None,
+    exclude_assignment_id: uuid.UUID | None = None,
+) -> tuple[str | None, AgentScopeLease | None]:
+    """Read-only scan for whether a `read_write` scope would conflict with any OTHER currently
+    active write lease on the same repository -- the exact conflict rule
+    `evaluate_assignment_readiness()`/`acquire_lease()` both enforce, factored out here so a
+    caller that does not yet have an `AgentWorkAssignment` row
+    (`app.agent_coordination.routing`'s eligibility check, run BEFORE an assignment exists) can
+    ask the same question in advance, deterministically, without creating anything. Returns
+    `(outcome, conflicting_lease)` where `outcome` is one of `OUTCOME_WORKTREE_CONFLICT`/
+    `OUTCOME_PATH_CONFLICT`/`None`. Never locks, never mutates -- `acquire_lease()` takes its
+    own `FOR UPDATE` lock separately at the moment it actually commits to a lease; this function
+    is advisory only, exactly like `evaluate_assignment_readiness()`'s own read-only contract."""
+
+    others = [
+        lease
+        for lease in _active_leases_for_repo(db, owner_id=owner_id, repository_identity=repository_identity)
+        if lease.assignment_id != exclude_assignment_id
+    ]
+    if branch or worktree_path:
+        for lease in others:
+            if lease.branch == branch or lease.worktree_path == worktree_path:
+                return OUTCOME_WORKTREE_CONFLICT, lease
+    for lease in others:
+        if lease.mode != WorkAssignmentReadWriteMode.read_write:
+            continue
+        if _shares_parallel_exploration_group(db, group_id=parallel_exploration_group_id, other_assignment_id=lease.assignment_id):
+            continue
+        if paths_conflict_any(allowed_paths, lease.allowed_paths):
+            return OUTCOME_PATH_CONFLICT, lease
+    return None, None
+
+
 def evaluate_assignment_readiness(
     db: Session, *, assignment: AgentWorkAssignment, current_base_sha: str | None = None
 ) -> CoordinatorDecision:
@@ -575,21 +616,20 @@ def evaluate_assignment_readiness(
         return CoordinatorDecision(OUTCOME_DUPLICATE_WORK, f"assignment {duplicate.id} already covers this canonical work")
 
     if assignment.read_write_mode == WorkAssignmentReadWriteMode.read_write:
-        others = [
-            lease
-            for lease in _active_leases_for_repo(db, owner_id=assignment.owner_id, repository_identity=assignment.repository_identity)
-            if lease.assignment_id != assignment.id
-        ]
-        for lease in others:
-            if lease.branch == assignment.branch or lease.worktree_path == assignment.worktree_path:
-                if assignment.branch or assignment.worktree_path:
-                    return CoordinatorDecision(OUTCOME_WORKTREE_CONFLICT, f"lease {lease.id} already holds this branch/worktree")
-        write_leases = [lease for lease in others if lease.mode == WorkAssignmentReadWriteMode.read_write]
-        for lease in write_leases:
-            if _shares_parallel_exploration_group(db, group_id=assignment.parallel_exploration_group_id, other_assignment_id=lease.assignment_id):
-                continue
-            if paths_conflict_any(assignment.allowed_paths, lease.allowed_paths):
-                return CoordinatorDecision(OUTCOME_PATH_CONFLICT, f"lease {lease.id}'s write scope overlaps this assignment's allowed_paths")
+        conflict_outcome, conflicting_lease = scan_write_scope_conflict(
+            db,
+            owner_id=assignment.owner_id,
+            repository_identity=assignment.repository_identity,
+            branch=assignment.branch,
+            worktree_path=assignment.worktree_path,
+            allowed_paths=assignment.allowed_paths,
+            parallel_exploration_group_id=assignment.parallel_exploration_group_id,
+            exclude_assignment_id=assignment.id,
+        )
+        if conflict_outcome == OUTCOME_WORKTREE_CONFLICT:
+            return CoordinatorDecision(OUTCOME_WORKTREE_CONFLICT, f"lease {conflicting_lease.id} already holds this branch/worktree")
+        if conflict_outcome == OUTCOME_PATH_CONFLICT:
+            return CoordinatorDecision(OUTCOME_PATH_CONFLICT, f"lease {conflicting_lease.id}'s write scope overlaps this assignment's allowed_paths")
 
         own_lease = db.execute(
             select(AgentScopeLease).where(AgentScopeLease.assignment_id == assignment.id, AgentScopeLease.status == AgentScopeLeaseStatus.active)
@@ -867,3 +907,50 @@ def record_assignment_outcome(
     )
     _record_event(db, assignment, event_type=AgentWorkAssignmentEventType.evidence_recorded, detail={"evidence_id": str(evidence.id), "evidence_kind": evidence_kind})
     return evidence.id
+
+
+def build_agent_outcome_payload(
+    *,
+    tests_passed: bool | None = None,
+    tests_run: int | None = None,
+    tests_failed: int | None = None,
+    duration_seconds: float | None = None,
+    cost_tokens: int | None = None,
+    cost_usd: float | None = None,
+    ci_conclusion: str | None = None,
+    review_defects_found: int | None = None,
+    max_defect_severity: str | None = None,
+    rework_required: bool | None = None,
+    scope_violation: bool | None = None,
+    merge_result: str | None = None,
+    failure_reason: str | None = None,
+    verified_quality: str | None = None,
+) -> dict[str, Any]:
+    """Canonical, documented payload vocabulary for `record_assignment_outcome()`'s `payload`
+    argument -- a plain dict (`IntelligenceEvidence.payload` is unconstrained JSON, see that
+    table's own docstring in migration 0038), never a new store or schema of its own. Exists so
+    every caller records agent-outcome evidence using the SAME field names instead of each
+    inventing its own ad hoc shape -- a future, evidence-driven Agent Capability Matrix would
+    read exactly this vocabulary once there is enough of it accumulated to be meaningful (see
+    docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md's explicit "durable evidence foundation first,
+    never a ranking engine built on insufficient data" note). Every field is optional and
+    omitted entirely from the returned dict when not supplied -- a caller records only what it
+    actually observed, never a fabricated placeholder for what it did not."""
+
+    payload = {
+        "tests_passed": tests_passed,
+        "tests_run": tests_run,
+        "tests_failed": tests_failed,
+        "duration_seconds": duration_seconds,
+        "cost_tokens": cost_tokens,
+        "cost_usd": cost_usd,
+        "ci_conclusion": ci_conclusion,
+        "review_defects_found": review_defects_found,
+        "max_defect_severity": max_defect_severity,
+        "rework_required": rework_required,
+        "scope_violation": scope_violation,
+        "merge_result": merge_result,
+        "failure_reason": failure_reason,
+        "verified_quality": verified_quality,
+    }
+    return {key: value for key, value in payload.items() if value is not None}
