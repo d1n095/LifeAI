@@ -6,6 +6,64 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 72 (2026-08-21): `claude/project-entities-interpretation` — Project Entities / Interpretation Queue (migration 0054, P4), stackad direkt ovanpå den mergade integrationsgrenen @ `d44648c`, första steget i "COMPOSED SYSTEM CLOSING PHASE"
+
+**Bakgrund:** hela 13-PR-kedjan (#83→#113) + konsoliderande merge (PR #137) landade i
+`claude/det-kommer-mer-879lcm` @ `d44648c`. Grundarens uttryckliga direktiv: gå från
+foundation-merge-läge till att faktiskt sluta ihop MainAI som ett sammanhängande system,
+med den bevisade `claims → interpretation/project_entities → justified knowledge → goal`-
+luckan som första mål. Bekräftad genom direkt källsökning (INTE gissning): `project_entities`/
+`interpretation_proposals` fanns ingenstans i kodbasen — bara en enda kommentarrad i
+`app/models/knowledge_claim.py` som pekade framåt mot P4. Oberoende bekräftat av Cursors
+egen `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md` §G/§L ("Cursor has stopped writing
+Claude-owned architecture").
+
+**Byggt (migration 0054, `backend/app/project_entities/`):** samma bevisade SIGNAL PRODUCER
+!= TRUTH WRITER-arkitektur migration 0053 (Candidate Learning Signals) redan etablerade,
+applicerad på projektförståelse istället för grundarminne — `interpretation_proposals`
+(kandidatlager, INGA authority/basis-kolumner alls, strukturellt aldrig ett påstående om
+projektet) → `promote_interpretation_proposal()` (DEN ENDA vägen till `project_entities`,
+kräver ALLTID anroparens egen explicita `authority`/`basis`) → `project_entities`
+(betrodd, ägar-scopad, evidens-länkad kunskap, återanvänder EXAKT samma authority/basis-
+vokabulär som migration 0049/0050). `project_entity_relationships` speglar den redan
+befintliga `claim_relationships`-tabellen (migration 0007) exakt.
+
+**LIVE koppling, inte bara testad i isolation:** `app/rag/claims.py`s redan live
+`extract_claims_for_document()` (anropas efter varje lyckad import via
+`app/rag/library_import.py`) skriver nu en interpretation-proposal-kandidat för varje
+extraherad claim vars `claim_type` är `idea`/`decision`/`task_reference` — ALDRIG till
+`project_entities` direkt. Inpackad i try/except: ett fel här kan ALDRIG förstöra
+claim-extraktionen. 51/51 befintliga claim-tester gröna efteråt (ingen regression), plus
+3 nya tester som bevisar kopplingen (inklusive att ett fel svaljs tyst, aldrig kraschar
+anroparen) i `tests/backend/rag/test_claim_interpretation_proposal_capture.py`.
+
+**RLS/erasure:** `app/rls.py` utökad (privilege-narrowing + erasure-funktions-GRANT),
+`app/account/erasure.py` utökad med `erase_own_project_entities_children()`-anropet.
+4 nya behavioral RLS-tester i `tests/security/test_rls_isolation_project_entities.py`,
+14 nya domäntester i `tests/backend/mainai/test_project_entities.py` (idempotens,
+authority/basis-frikoppling från classifier_confidence, dubbel-promotion-skydd, dismiss,
+supersession, relationship-hantering).
+
+**Explicit INTE byggt i denna PR** (se `docs/LIFE_PROJECT_ENTITIES_INTERPRETATION.md`):
+ingen "Tolkningskö"-UI, ingen embedding-baserad relationsupptäckt, ingen automatisk
+promotion, och framför allt: ingen `knowledge → goal`-brygga ännu — det är nästa, separata
+steg, medvetet inte hopblandat med detta.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Verifierat: Cursors fyra öppna PR:er vid tidpunkten (#132 lease
+expire, #133 retain-after-ref, #134 verification→lesson, #136 handoff-doc) rör
+`app/agent_coordination/service.py`, `app/worker.py`, `app/project_memory.py` — noll
+filöverlapp med denna branchs diff.
+
+**Beroenden:** Grenad direkt från den mergade integrationsgrenen `claude/det-kommer-mer-
+879lcm` @ `d44648c` (INTE stackad ovanpå ännu en ogranskad branch — hela 13-PR-kedjan är
+redan inne). Helt oberoende av Cursors #132/#133/#134/#136.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/project-entities-interpretation` | (öppnas) | Lokalt verifierad, redo att pushas | Project Entities / Interpretation Queue (migration 0054, P4: claims→interpretation→structured knowledge, live claims.py-koppling, INGEN knowledge→goal-brygga ännu) | `claude/det-kommer-mer-879lcm` @ d44648c |
+
 ## Pass 71 (2026-08-18): `claude/founder-memory-signal-staging` — Candidate Learning Signals (migration 0053) + "never automate" wording audit + Source Vault future-compatibility review, stackad ovanpå PR #110 (`claude/corpus-trial-problem-learning` @ `04a0b67`), egen worktree, nionde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund — grundarens direktiv:** (1) koppla INTE `chat.py`s resolver-markörer direkt in i

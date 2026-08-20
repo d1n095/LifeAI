@@ -517,6 +517,16 @@ _MAINAI_EXECUTION_TABLES = (
     # whose status transitions in place (unreviewed -> promoted/dismissed), never rewritten
     # content, deletion only through the SECURITY DEFINER erasure path.
     "candidate_learning_signals",
+    # Migration 0054 (Life Project Entities / Interpretation Queue): project_entities and
+    # interpretation_proposals play the SAME structural role founder_memory_notes/
+    # candidate_learning_signals already play -- mutable rows whose status transitions in
+    # place, deletion only through the SECURITY DEFINER erasure path.
+    # project_entity_relationships is append-only (an edge either exists or it doesn't, same
+    # treatment as capability_observation_events/agent_work_assignment_events), cleaned up
+    # only via ON DELETE CASCADE from project_entities' own erasure.
+    "project_entities",
+    "interpretation_proposals",
+    "project_entity_relationships",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -901,6 +911,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_corpus_trial_run_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON candidate_learning_signals FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_candidate_learning_signal_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entities FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON interpretation_proposals FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entity_relationships FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_project_entities_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -958,6 +972,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("diagnosis_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("corpus_trial_runs", _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES),
             ("candidate_learning_signals", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("project_entities", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("interpretation_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
