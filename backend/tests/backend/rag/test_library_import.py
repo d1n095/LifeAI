@@ -991,6 +991,64 @@ def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_n
         )
 
 
+def test_store_bytes_with_reference_lock_writer_wins_lock_first_outbox_worker_must_not_delete():
+    """Pass 33 deterministic regression for Test D's writer-wins-first failure mode: the writer
+    holds the advisory lock through verify BEFORE the outbox worker can delete, then commits
+    without ever setting Document.storage_key (the narrow helper-only window). Without
+    superseding stale rejected_upload_cleanup tasks, the worker would correctly observe no DB
+    reference after the writer's commit and delete a blob the writer just reclaimed."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+    from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
+    from app.account.erasure import attempt_storage_deletion_task
+    from app.storage.references import enqueue_rejected_upload_cleanup_task
+
+    _AdminSession = sessionmaker(bind=migration_engine)
+
+    content = f"pass 33 test D-prime writer wins first {uuid.uuid4().hex}".encode()
+    storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
+    operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+
+    writer_verified = threading.Event()
+    writer_may_commit = threading.Event()
+    worker_outcome: dict[str, StorageDeletionStatus] = {}
+
+    def _writer():
+        db = SessionLocal()
+        try:
+            _store_bytes_with_reference_lock(db, get_storage(), content, max_bytes=len(content) + 10)
+            writer_verified.set()
+            writer_may_commit.wait(timeout=5)
+            db.commit()
+        finally:
+            db.close()
+
+    def _outbox_worker():
+        db = _AdminSession()
+        try:
+            assert writer_verified.wait(timeout=5), "writer never reached verify under lock"
+            task = db.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).one()
+            attempt_storage_deletion_task(db, task)
+            db.refresh(task)
+            worker_outcome["status"] = task.status
+        finally:
+            db.close()
+
+    t_writer = threading.Thread(target=_writer)
+    t_worker = threading.Thread(target=_outbox_worker)
+    t_writer.start()
+    t_worker.start()
+    assert writer_verified.wait(timeout=5)
+    writer_may_commit.set()
+    t_writer.join(timeout=10)
+    t_worker.join(timeout=10)
+
+    assert not t_writer.is_alive() and not t_worker.is_alive()
+    assert get_storage().exists(storage_key) is True
+    assert worker_outcome["status"] == StorageDeletionStatus.retained_shared
+
+
 @pytest.mark.asyncio
 async def test_two_concurrent_jobs_uploading_identical_content_both_succeed_without_deadlock(db_session, make_verified_user):
     """Test E (founder's lettering): two REAL, fully concurrent run_import_job() calls (two
