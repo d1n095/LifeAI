@@ -6,6 +6,165 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 61 (2026-08-17): `claude/agent-real-execution-bridge` — Founder-Controlled Real-Agent Execution Bridge (fem-vägs adapter-tillgänglighet + EN bunden riktig subprocess-adapter + krasch/timeout på båda sidor av dispatch-livscykeln), stackad ovanpå PR #85, egen worktree parallellt med Cursors PR #79/#80
+
+Nästa lager i natt-passets uppdrag: vändningen från "skapa en bunden dispatch-post" (PR #85)
+till "faktiskt invokera en riktig, konfigurerad lokal CLI-agent" — utan att uppfinna en
+autentiseringsuppgift och utan att någonsin tyst bredda befogenhet. Byggt strikt ovanpå redan
+mergad/granskad kod — ingen ny adapter-registry, ingen andra dispatch-grind.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- `adapter_config.py` (ny) — fem DISTINKTA fakta om en provider, aldrig sammanblandade:
+  `supported` (kodnivå, sant oavsett lokal maskin), `executable_found` (`shutil.which()` —
+  ENDAST detektion, aldrig i sig en auktorisation att invokera), `credentials_state` (alltid
+  `"unknown"` om inte grundaren uttryckligen sätter
+  `LIFE_AGENT_ADAPTER_CREDENTIALS_CONFIRMED__<KEY>` — ingen automatisk
+  autentiseringsuppgifts-upptäckt), `enabled` (grundarens egna uttryckliga opt-in,
+  `LIFE_AGENT_ADAPTER_ENABLED__<KEY>=true`, standard `False`), och `dispatch_authorized`
+  (beräknad separat per uppdrag av `evaluate_dispatch_readiness()`, helt utanför denna
+  moduls scope). `real_adapter_config()` returnerar en riktig konfiguration ENDAST när
+  `enabled=True` OCH exekverbar hittad OCH grundaren uttryckligen satt
+  `LIFE_AGENT_ADAPTER_ARGS__<KEY>` — hittar aldrig på CLI-flaggor själv. Ingen miljövariabel
+  denna modul läser är någonsin en hemlighet, autentiseringsuppgift eller sessions-token.
+- `adapters.py` (utökad, inte nyskapad) — `LocalCLIAdapter`: DEN ENA bundna,
+  providerneutrala RIKTIGA adaptern — samma subprocess-mekanism betjänar Claude Code, Cursor
+  Agent och Codex, aldrig en per-provider-duplicerad implementation. Alltid begränsad: exakt
+  uppdragets egen `worktree_path` som `cwd`, en riktig alltid-närvarande `timeout_seconds` via
+  `asyncio.wait_for()` (processen dödas vid överskridning), `argv` i listform via
+  `asyncio.create_subprocess_exec()` — ALDRIG `shell=True`, ingen kodväg kapabel till fri
+  skal-passthrough, minimerad `env` (aldrig processens egen fulla miljö). `send_instruction()`/
+  `resume()` är medvetet `NotImplementedError` — detta är en bunden, engångs,
+  icke-interaktiv invokering. `AdapterProcessLostError`/`AdapterTimeoutError`: nya, ärliga
+  krasch-/timeout-signaler, distinkta från `ProviderNotConfiguredError` och från ett vanligt
+  icke-noll-exitkod. `get_real_adapter()`: grundarkontrollerad fabrik — returnerar en riktig
+  `LocalCLIAdapter` ENDAST när varje förutsättning är uppfylld, annars alltid
+  `NotConfiguredAdapter`.
+- `dispatch.py` (utökad) — `evaluate_dispatch_readiness(..., require_adapter_enabled=True)`:
+  opt-in extra grindkontroll (standard `False`, så falska testadaptrar aldrig tvingas
+  uppfylla riktig adapterkonfiguration) — `ADAPTER_DISABLED`/`ADAPTER_UNAVAILABLE` vid
+  fail-closed. `dispatch_assignment()` särskiljer nu, aldrig sammanblandar, varje
+  krascharsak på START-sidan (`ProviderNotConfiguredError`/`AdapterProcessLostError`/
+  `AdapterTimeoutError`/varje annat oväntat fel) — vart och ett flyttar uppdraget till
+  `blocked` med sin egen strukturerade orsak innan det ursprungliga felet återkastas, aldrig
+  kvarlämnat i `waiting_agent`. Ett färskt `attempt_id` genereras för varje genuint
+  invokeringsförsök. Ny funktion `collect_dispatch_result()`: motparten på
+  INSAMLINGS-sidan — särskiljer samma krasch-/timeout-fel efter att en process väl startat,
+  applicerar annars det observerade `AgentResult` genom BEFINTLIGA `apply_dispatch_result()`.
+  `DispatchResult` fick `adapter_key`/`dispatch_attempt_id` — vilken riktig provider (eller
+  `"fake"`/`"not_configured"`) som faktiskt producerade ett givet resultat.
+
+**Verifierat direkt mot den lokala maskinen** (inte en mock): `claude`, `cursor-agent` och
+`codex` är alla genuint installerade på denna maskin, men INGEN är aktiverad som standard —
+`test_no_real_provider_is_enabled_by_default` bevisar detta mot verklig `PATH`-uppslagning.
+
+**Ingen riktig extern agent-invokering skedde i denna branch eller dess tester.**
+Subprocess-MEKANISMEN bevisas mot ofarliga, redan installerade systembinärer (`/bin/echo`,
+en obefintlig sökväg, en medvetet kort `sleep`-timeout) — aldrig mot en riktig kodningsagent-
+CLI. Den verkliga E2E-testen (`test_current_real_world_dispatch_scenario_with_full_gate_coverage`)
+utökar samma Cursor-upptagen/Claude-fri/Codex-ledig-scenario som PR #83–85 redan bevisar,
+med varje enskild grindavvisning (sökvägskonflikt, fel worktree, saknat godkännande,
+avaktiverad adapter, otillgänglig adapter, föråldrad `base_sha`) bevisad mot verklig
+samordningsdata — men den faktiska dispatch-progressionen går genom den deterministiska
+falska adaptern (uttryckligen sanktionerad för automatiserade tester), aldrig en riktig
+provider.
+
+**Två verkliga buggar hittade och fixade under egen testning** (inte av en extern
+granskning): (1) ett test lämnade uppdraget i `running`-status för en mellanliggande
+grindkontroll utan att det behövdes (leasen ensam räckte för `LEASE_REQUIRED`-kontrollen),
+vilket senare gjorde den riktiga `dispatch_assignment()`s egna `ready -> waiting_agent`-
+övergång ogiltig — testets egna felaktiga tillståndshantering, inte en bugg i
+produktionskoden; (2) ett test förväntade sig att `dispatch_assignment()` skulle KASTA
+`AdapterProcessLostError`, men funktionen fångar avsiktligt denna typ av fel internt och
+returnerar ett strukturerat `DispatchDecision` istället (endast genuint oväntade fel
+återkastas) — testets egen felaktiga förväntan, korrigerad för att matcha den redan
+avsiktliga, dokumenterade designen.
+
+Full lokal verifiering: 22/22 nya tester (egen körning), 261 passed / 1 failed i hela
+`tests/backend/mainai/` (262 totalt, inklusive de 22 nya) — det enda felet är samma
+förbefintliga `rg`-relaterade fel i Cursors eget `development_operator`-scope
+(`FileNotFoundError: 'rg'`, en lokal miljöberoende, inte en regression — verifierat direkt att
+`app/development_operator/` är helt orörd av denna branchs diff), ruff rent (efter
+`ruff check --fix` för oanvända importer i testfilen + `dataclasses.field` i `dispatch.py`,
+plus en manuell F841-fix), `git diff --check` rent, Alembic-huvud verifierat oförändrat vid
+`0046` (ingen ny migration — denna gren utökar inget schema).
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd. Ingen produktions-
+eller deploy-yta rörd. Inget andra samordnings-/övervakningssystem skapat.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #85 (`claude/agent-dispatch-foundation`
+@ `93cf08f`). Helt oberoende av Cursors PR #79/#80.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-real-execution-bridge` | Öppnas denna session | Pushad, redo för granskning | Fem-vägs adapter-tillgänglighet (`adapter_config.py`) + EN bunden riktig subprocess-adapter `LocalCLIAdapter` + krasch/timeout-hantering på båda sidor av dispatch-livscykeln (`adapters.py`, `dispatch.py`) — 22 tester, ingen ny migration, ingen riktig agent-invokering utförd | `claude/agent-dispatch-foundation` @ 93cf08f (stackad ovanpå PR #85) |
+
+## Pass 60 (2026-08-17): `claude/agent-dispatch-foundation` — Bounded Dispatch Foundation (real agent bootstrap + fail-closed dispatch gate + provider-neutral adapter contract), stackad ovanpå PR #84, egen worktree parallellt med Cursors PR #79/#80
+
+Nästa lager i natt-passets uppdrag: vändningen från "Life vet vem som borde göra vad" (PR
+#83/#84) till en riktig, granskningsbar dispatch — utan att någonsin ge mer befogenhet än
+samordningslagret redan uttryckligen beviljat. Byggt strikt ovanpå redan mergad/granskad kod
+— ingen ny planerare, övervakare, uppgiftssystem, godkännandesystem eller register.
+
+**Byggt** (`backend/app/agent_coordination/`):
+- `bootstrap.py` — `bootstrap_known_agents()`: idempotent registrering av Claude Code/Cursor
+  Agent/Codex via `register_agent()`s befintliga upsert. Endast identitet/förmåga/konfig —
+  ALDRIG en hemlighet eller ett maskinspecifikt token. Konservativa, verkligt kända
+  förmågetaggar (`repo_edit`/`read_only_review`/`run_tests`) — aldrig en uppfunnen
+  prestandarankning. Medvetet INTE kopplad till automatisk app-uppstart — att seeda faktiska
+  grundardata är ett beslut, inte mekanisk infrastruktur.
+- `dispatch.py` — `DISPATCH_LIFECYCLE`: namngivna alias mot den REDAN BEFINTLIGA
+  `WorkAssignmentStatus` (DISPATCHING återanvänder `waiting_agent`), aldrig en ny kolumn.
+  `evaluate_dispatch_readiness()`: den skarpa fail-closed-grinden precis före en riktig
+  anrops-invokering — kräver strikt `ASSIGNABLE` (inte `LEASE_REQUIRED`, till skillnad från
+  `next_feasible_assignment_for_agent()`s egen urvalstolerans), plus kapacitetsmatchning,
+  explicit branch+worktree för skrivning, och grundargodkännande — delegerat helt till
+  `app.mainai_execution.approval.require_task_approval()`, den RIKTIGA grinden, aldrig
+  återimplementerad. `dispatch_assignment()`: den kanoniska
+  `dispatch(agent_id, assignment_id, authority_envelope)`-kontrollpunkten — `authority_envelope`
+  valideras som en DELMÄNGD av uppdragets redan begränsade `allowed_paths`, aldrig tvärtom.
+  `DispatchResult`/`apply_dispatch_result()`: strukturerad resultatåterkoppling genom
+  BEFINTLIGA bevis-/tillståndsprimitiver, aldrig en fabricerad kvalitetspoäng.
+- `adapters.py` (utökad, inte nyskapad) — `NotConfiguredAdapter`/`ProviderNotConfiguredError`:
+  den RIKTIGA standardadaptern tills en genuin, separat granskad Agent Runtime finns. Öppnar
+  ingen subprocess, gör inget nätverksanrop, läser ingen hemlighet — rapporterar alltid
+  `REAL_PROVIDER_NOT_CONFIGURED`, låtsas ALDRIG lyckas.
+
+**Genuin säkerhetsgranskning** (fristående adversarial-granskning, samma mönster som
+tidigare pass i det här natt-passet, men den mest säkerhetskänsliga koden hittills eftersom
+det här är första gången ett "riktig befogenhet att agera"-lager byggs): hittade INGEN
+befogenhetseskalering, men en verklig P1 — ett oväntat adapterfel (INTE
+`ProviderNotConfiguredError`) lämnade uppdraget permanent fast i `waiting_agent`
+("DISPATCHING") utan att någonsin nå `blocked`, vilket `runtime_view.py` kartlägger till
+`RuntimeStatus.IDLE` — en kraschad dispatch skulle tyst läsas som "ledig", aldrig som
+"trasig". Fixat: alla oväntade adapterfel fångas nu, uppdraget flyttas till `blocked` med en
+strukturerad orsak, INNAN det ursprungliga felet återkastas. Samt en P2 (task/goal-uppslag
+som ger `None` trots satt `task_id` föll tyst igenom istället för att fail-closed — fixat)
+och två P3 (en icke-bärande testassertion gjord meningsfull; `authority_envelope`s nuvarande
+icke-bärande status i produktionskoden nu explicit dokumenterad).
+
+Full lokal verifiering: 22/22 nya tester (inklusive ett verkligt E2E-scenario som utökar
+samma situation som PR #83/#84s egna: Cursor upptagen på PR #79/#80s exakta sökvägar, Claude
+fri efter PR #84, Codex ledig — Life ser överlappet avvisas, väljer Claude för ett genuint
+orelaterat uppdrag, skapar dispatchen, avvisar en krockande dispatch igen VID GRINDEN
+(försvar i djupled, inte bara vid routing), dispatchar den icke-krockande genom en falsk
+adapter, och bokför resultatet — utan att uppdragets `allowed_paths` någonsin breddas), 223/226
+i hela `tests/backend/mainai/` (201 tidigare + 22 nya, minus 3 förbefintliga `rg`-relaterade
+fel i Cursors eget scope, orörda), ruff rent, `git diff --check` rent, Alembic-huvud
+verifierat oförändrat vid `0046`.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Cursors worktree/branch inte använd eller rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #84 (`claude/agent-work-selection` @
+`046679c`). Helt oberoende av Cursors PR #79/#80.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/agent-dispatch-foundation` | Öppnas denna session | Pushad, redo för granskning | Real agent bootstrap (`bootstrap.py`) + fail-closed dispatch-grind + `dispatch()`-kontrollpunkt + `NotConfiguredAdapter` (`dispatch.py`, `adapters.py`) — 22 tester, ingen ny migration | `claude/agent-work-selection` @ 046679c (stackad ovanpå PR #84) |
+
 ## Pass 59 (2026-08-17): `claude/agent-work-selection` — next_feasible_assignment_for_agent() + idle_agents_with_next_assignment(), stackad ovanpå PR #83, egen worktree parallellt med Cursors PR #79/#80
 
 Fortsättning av natt-passets uppdrag efter att PR #83 (Pass 58 nedan) blev CI-grön och
