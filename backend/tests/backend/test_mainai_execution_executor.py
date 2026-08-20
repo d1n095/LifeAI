@@ -275,6 +275,30 @@ def test_cancel_task_cascade_lets_record_final_report_close_the_goal(db_session,
     assert goal.final_outcome is not None
 
 
+def test_waiting_external_has_no_production_producer_in_app_code():
+    """AUTONOMY BLOCKER (runtime clock sweep): waiting_external must stay unset in app/**
+    until a real MainAITaskWait source + poll/resume exist. Cancel (#131) is not a clock."""
+    from pathlib import Path
+
+    app_root = Path(__file__).resolve().parents[2] / "app"
+    offenders: list[str] = []
+    needles = (
+        ".status = MainAITaskStatus.waiting_external",
+        ".status=MainAITaskStatus.waiting_external",
+        "status=MainAITaskStatus.waiting_external",
+        'status="waiting_external"',
+        "status='waiting_external'",
+    )
+    for path in app_root.rglob("*.py"):
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if any(needle in stripped for needle in needles):
+                offenders.append(f"{path.relative_to(app_root)}:{i}:{stripped}")
+    assert offenders == [], "production writer for waiting_external appeared:\n" + "\n".join(offenders)
+
+
 def test_cancel_task_rejects_a_running_task(db_session, owner_id):
     goal = _goal(db_session, owner_id)
     task = _single_task_plan(db_session, goal)

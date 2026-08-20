@@ -58,8 +58,11 @@ _CANCELLABLE_MAINAI_TASK_STATUSES = frozenset(
         MainAITaskStatus.ready,
         MainAITaskStatus.blocked,
         MainAITaskStatus.retryable_failed,
-        # waiting_external has no producer/poll clock yet, but if a row is ever in that
-        # status it must remain founder-cancellable — otherwise the goal can never close.
+        # waiting_external is a RESERVED scaffold status (V0.3): there is still no production
+        # producer, MainAITaskWait source type, poll clock, or resume path. Cancel-only keeps
+        # a stray row from permanently stranding a goal; it does NOT make the state
+        # operational. Do not invent a free-floating poller — extend MainAITaskWait +
+        # _poll_mainai_task_waits (mirror waiting_ci) when a real external detector exists.
         MainAITaskStatus.waiting_external,
     }
 )
