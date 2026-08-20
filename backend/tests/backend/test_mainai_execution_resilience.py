@@ -525,6 +525,31 @@ def test_apply_lessons_skips_deterministic_conflict_candidate_pairs(db_session, 
     assert a.id not in applied_ids and b.id not in applied_ids
 
 
+def test_apply_lessons_does_not_over_block_unrelated_components_sharing_applies_to(db_session, owner_id):
+    """Adversarial #130: broad applies_to alone must NOT quarantine lessons.
+    Conflict candidates require the SAME affected_component; two lessons tagged repo_edit
+    but scoped to different components must both still apply."""
+    first = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_first.py",
+        affected_component="mainai_execution.planner",
+    )
+    second = _record_lesson(
+        db_session,
+        applies_to=["repo_edit"],
+        regression_test="tests/backend/test_second.py",
+        affected_component="mainai_execution.executor",
+    )
+    db_session.commit()
+
+    plan, applied_ids = lessons.apply_lessons_to_verification_plan(db_session, task_type="repo_edit", verification_plan=[])
+
+    assert {"kind": "targeted_tests", "target": "tests/backend/test_first.py"} in plan
+    assert {"kind": "targeted_tests", "target": "tests/backend/test_second.py"} in plan
+    assert set(applied_ids) == {first.id, second.id}
+
+
 def test_create_plan_is_actually_influenced_by_a_real_previously_recorded_lesson(db_session, owner_id):
     """The founder's explicit demo requirement: at least one real previous lesson must
     influence planning or verification -- not a loose AI summary with no source and no
