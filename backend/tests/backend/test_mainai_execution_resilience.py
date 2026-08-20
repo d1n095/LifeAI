@@ -466,6 +466,22 @@ def test_apply_lessons_to_verification_plan_ignores_a_lesson_for_a_different_tas
     assert applied_ids == []
 
 
+@pytest.mark.parametrize("bad_target", ["/etc/passwd", "../secrets.py", "tests/../../etc/shadow", ""])
+def test_apply_lessons_to_verification_plan_skips_unsafe_regression_targets(db_session, owner_id, bad_target):
+    """Plan-time fail-closed: create_plan validates AI verification targets before lesson
+    apply, so an absolute/`..` regression_test on a lesson previously bypassed that gate and
+    only failed at the subprocess boundary. Unsafe lesson targets must be skipped, never
+    persisted onto the plan."""
+    _record_lesson(db_session, applies_to=["repo_edit"], regression_test=bad_target)
+    safe = _record_lesson(db_session, applies_to=["repo_edit"], regression_test="tests/backend/test_safe.py")
+    db_session.commit()
+
+    plan, applied_ids = lessons.apply_lessons_to_verification_plan(db_session, task_type="repo_edit", verification_plan=[])
+
+    assert plan == [{"kind": "targeted_tests", "target": "tests/backend/test_safe.py"}]
+    assert applied_ids == [safe.id]
+
+
 def test_create_plan_is_actually_influenced_by_a_real_previously_recorded_lesson(db_session, owner_id):
     """The founder's explicit demo requirement: at least one real previous lesson must
     influence planning or verification -- not a loose AI summary with no source and no
