@@ -487,6 +487,11 @@ _MAINAI_EXECUTION_TABLES = (
     "agent_work_assignment_dependencies",
     "agent_scope_leases",
     "agent_work_assignment_events",
+    # Migration 0047 (Interactive Agent Execution Control): agent_dispatch_executions is an
+    # ordinary mutable table (same baseline-CRUD, ownership-only treatment as
+    # agent_scope_leases above) -- it is NOT append-only, so it needs no privilege-narrowing
+    # entry in the loop below.
+    "agent_dispatch_executions",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})

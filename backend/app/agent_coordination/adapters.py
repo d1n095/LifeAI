@@ -49,6 +49,24 @@ class AgentResult:
     summary: str = ""
 
 
+@dataclass(frozen=True)
+class AdapterCapabilities:
+    """What an adapter INSTANCE actually declares it can do -- a truthful, per-provider fact,
+    never a wishful default. `app.agent_coordination.execution_control` fails closed on every
+    one of these: attempting `send_instruction()` against an adapter that declares
+    `supports_instruction=False` is rejected as `UNSUPPORTED_CAPABILITY` before the adapter's
+    own method is ever called, never a silent no-op and never a raised
+    `NotImplementedError` a caller would have to specifically catch. Do not pretend every
+    provider exposes the same fidelity -- an honest `False` here is correct, not a
+    limitation to work around."""
+
+    supports_streaming: bool = False
+    supports_instruction: bool = False
+    supports_resume: bool = False
+    supports_cancel: bool = False
+    supports_structured_events: bool = False
+
+
 class AgentAdapter(Protocol):
     """One adapter per `CoordinationAgent` kind. A concrete implementation is NOT part of this
     foundation -- see module docstring."""
@@ -56,6 +74,8 @@ class AgentAdapter(Protocol):
     async def health(self) -> AgentHealth: ...
 
     def capabilities(self) -> tuple[str, ...]: ...
+
+    def control_capabilities(self) -> AdapterCapabilities: ...
 
     async def start_assignment(self, assignment_id: UUID) -> None: ...
 
@@ -96,6 +116,9 @@ class NotConfiguredAdapter:
 
     def capabilities(self) -> tuple[str, ...]:
         return ()
+
+    def control_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities()  # every flag False -- there is nothing here capable of any of them
 
     async def start_assignment(self, assignment_id: UUID) -> None:
         raise ProviderNotConfiguredError(
@@ -180,6 +203,14 @@ class LocalCLIAdapter:
     def capabilities(self) -> tuple[str, ...]:
         return ("repo_edit", "read_only_review", "run_tests")
 
+    def control_capabilities(self) -> AdapterCapabilities:
+        # Single-shot/non-interactive by construction (see class docstring): only cancel()
+        # (SIGTERM against a tracked, still-running process) is genuinely supported. No
+        # streaming, no mid-run instructions, no resume, no structured events beyond the plain
+        # AgentObservation observe() already returns -- an honest reflection of what this
+        # class's own methods actually do, not a wishful default.
+        return AdapterCapabilities(supports_cancel=True)
+
     async def start_assignment(self, assignment_id: UUID) -> None:
         argv = [self._executable, *self._args_template]
         try:
@@ -234,12 +265,21 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     `NotConfiguredAdapter` -- the same honest, fail-closed default -- in every other case.
     NEVER silently substitutes a fake/mock adapter; callers that want deterministic test
     behavior construct their own fake explicitly (see
-    tests/backend/mainai/test_agent_dispatch_foundation.py's own `_FakeAgentAdapter`)."""
+    tests/backend/mainai/test_agent_dispatch_foundation.py's own `_FakeAgentAdapter`).
 
-    from app.agent_coordination.adapter_config import real_adapter_config
+    When `env` is not explicitly supplied, defaults to
+    `app.agent_coordination.adapter_config.resolve_adapter_env(provider_key)` -- the founder's
+    own explicit per-provider allowlist of ambient variable NAMES, never a blind inheritance of
+    this process's full environment. Passing `env={}` explicitly still means "no environment at
+    all," exactly as before -- only an OMITTED `env` triggers the allowlist default."""
+
+    from app.agent_coordination.adapter_config import real_adapter_config, resolve_adapter_env
 
     config = real_adapter_config(provider_key)
     if config is None:
         return NotConfiguredAdapter(provider_key=provider_key)
     executable, args_template, timeout_seconds = config
-    return LocalCLIAdapter(provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds, env=env)
+    resolved_env = resolve_adapter_env(provider_key) if env is None else env
+    return LocalCLIAdapter(
+        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds, env=resolved_env
+    )
