@@ -36,6 +36,7 @@ inte en extern tjänst" grundprincip for the full principle this is measured aga
     docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §8's build order), not part of this slice.
 """
 
+import re
 import uuid
 from datetime import datetime
 
@@ -64,6 +65,21 @@ REVIEW_AGENT_SYSTEM_PROMPT = (
     "exakt 'VERDICT: approved' eller 'VERDICT: needs_correction' eller 'VERDICT: rejected', "
     "följt av en motivering."
 )
+
+_REVIEW_VERDICT_RE = re.compile(r"^verdict:\s*(approved|rejected|needs_correction)\s*$")
+
+
+def _parse_review_verdict(first_line: str) -> str:
+    """Fail-closed parse of the review agent's mandated first line.
+
+    Substring checks (`"approved" in line`) previously treated `VERDICT: not approved` and
+    `unapproved` as approvals. Only an exact `VERDICT: <token>` line may grant a verdict;
+    anything else is `needs_correction`.
+    """
+    match = _REVIEW_VERDICT_RE.match(first_line.strip().lower())
+    if match is None:
+        return "needs_correction"
+    return match.group(1)
 
 
 def create_agent_task(
@@ -235,13 +251,14 @@ async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str) -> A
     messages = [Message(role="system", content=REVIEW_AGENT_SYSTEM_PROMPT), Message(role="user", content=review_prompt)]
     result, attempted = await chat_with_fallback(db, messages)
 
-    first_line = result.content.strip().splitlines()[0].strip().lower() if result.content.strip() else ""
-    if "approved" in first_line:
-        verdict, new_status = "approved", AgentTaskStatus.reviewed_approved
-    elif "rejected" in first_line:
-        verdict, new_status = "rejected", AgentTaskStatus.reviewed_rejected
+    first_line = result.content.strip().splitlines()[0].strip() if result.content.strip() else ""
+    verdict = _parse_review_verdict(first_line)
+    if verdict == "approved":
+        new_status = AgentTaskStatus.reviewed_approved
+    elif verdict == "rejected":
+        new_status = AgentTaskStatus.reviewed_rejected
     else:
-        verdict, new_status = "needs_correction", AgentTaskStatus.reviewed_needs_correction
+        new_status = AgentTaskStatus.reviewed_needs_correction
 
     # Never approve without green tests, regardless of what the review agent's text says —
     # a hard backstop, not just a prompt instruction (CLAUDE.md: "MainAI får inte godkänna...

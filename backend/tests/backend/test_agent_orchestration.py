@@ -166,6 +166,32 @@ async def test_review_task_records_rejected_verdict(db_session, monkeypatch):
     assert get_task(db_session, task.id).status == AgentTaskStatus.reviewed_rejected
 
 
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        "VERDICT: not approved",
+        "VERDICT: unapproved",
+        "VERDICT: disapproved",
+        "I think this is approved",
+        "VERDICT: APPROVED with notes",
+        "",
+    ],
+)
+@pytest.mark.asyncio
+async def test_review_task_fail_closed_on_non_exact_approved_phrasing(db_session, monkeypatch, first_line):
+    """Substring 'approved' must never grant reviewed_approved — only exact VERDICT: approved."""
+    body = first_line if first_line else "(no verdict line)"
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat(f"{body}\nLooks fine."))
+    task = _make_task(db_session)
+    await dispatch_task(db_session, task.id, dispatched_by="test")
+    record_test_results(db_session, task.id, passed=True, output="ok", recorded_by="test")
+
+    event = await review_task(db_session, task.id, reviewed_by="test")
+
+    assert event.payload["verdict"] == "needs_correction"
+    assert get_task(db_session, task.id).status == AgentTaskStatus.reviewed_needs_correction
+
+
 # --- D. GitHub PR preparation --------------------------------------------------------------
 
 
