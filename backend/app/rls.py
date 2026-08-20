@@ -498,6 +498,11 @@ _MAINAI_EXECUTION_TABLES = (
     # like agent_work_assignment_events, wired in the same migration that creates it.
     "capability_records",
     "capability_observation_events",
+    # Migration 0049 (Life Founder/User Memory): founder_memory_notes plays the SAME structural
+    # role life_problem_decisions already plays -- privilege-narrowed the same way (DELETE
+    # revoked, UPDATE kept for status transitions) since both are history-preserving fact
+    # records where deletion must go exclusively through the SECURITY DEFINER erasure path.
+    "founder_memory_notes",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -579,6 +584,7 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "name": "capability_observation_events_deny_mutation", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
+    {"name": "erase_own_founder_memory_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -865,6 +871,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_agent_coordination_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON capability_observation_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_capability_reality_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_memory_notes FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_founder_memory_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -918,6 +926,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")),
             ("agent_work_assignment_events", _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES),
             ("capability_observation_events", _CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES),
+            ("founder_memory_notes", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
