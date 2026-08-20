@@ -194,6 +194,48 @@ def test_stale_lease_rejected(superuser_db, owner_id):
         renew_lease(superuser_db, lease_id=lease.id, owner_id=owner_id, agent_id=cursor.id, lease_generation=lease.lease_generation, ttl_seconds=60)
 
 
+def test_stale_active_lease_does_not_block_unrelated_acquire(superuser_db, owner_id):
+    """Runtime clock sweep: expired-but-still-active must not forever PATH_CONFLICT new work."""
+    from app.agent_coordination.service import expire_stale_active_leases
+    from app.models.agent_coordination import AgentScopeLeaseStatus
+
+    goal, _plan, (task_a, task_b) = _goal_plan_task(superuser_db, owner_id, task_count=2)
+    cursor = _agent(superuser_db, "cursor-agent")
+    codex = _agent(superuser_db, "codex")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_a, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    b = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task_b, agent=codex, role="builder", mode="read_write", paths=["backend/app/**"])
+    stale = _lease(superuser_db, a, cursor, branch="cursor/stale", worktree="/tmp/wt-stale-a", paths=["backend/app/**"], ttl_seconds=1).lease
+    stale.expires_at = datetime.utcnow() - timedelta(seconds=5)
+    superuser_db.flush()
+
+    result = _lease(superuser_db, b, codex, branch="codex/fresh", worktree="/tmp/wt-fresh-b", paths=["backend/app/**"])
+    assert result.outcome == "ACQUIRED"
+    assert result.lease is not None
+
+    n = expire_stale_active_leases(superuser_db)
+    superuser_db.commit()
+    superuser_db.refresh(stale)
+    assert n >= 1
+    assert stale.status == AgentScopeLeaseStatus.released
+
+
+def test_expire_stale_active_leases_is_idempotent(superuser_db, owner_id):
+    from app.agent_coordination.service import expire_stale_active_leases
+    from app.models.agent_coordination import AgentScopeLeaseStatus
+
+    goal, _plan, task = _goal_plan_task(superuser_db, owner_id)
+    cursor = _agent(superuser_db, "cursor-agent")
+    a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
+    lease = _lease(superuser_db, a, cursor, branch="cursor/x", worktree="/tmp/wt-exp", paths=["backend/app/**"], ttl_seconds=1).lease
+    lease.expires_at = datetime.utcnow() - timedelta(seconds=5)
+    superuser_db.flush()
+    assert expire_stale_active_leases(superuser_db) == 1
+    superuser_db.commit()
+    superuser_db.refresh(lease)
+    assert lease.status == AgentScopeLeaseStatus.released
+    assert expire_stale_active_leases(superuser_db) == 0
+
+
 def test_lease_takeover_fences_old_worker(superuser_db, owner_id):
     goal, _plan, (task_a, task_b) = _goal_plan_task(superuser_db, owner_id, task_count=2)
     cursor = _agent(superuser_db, "cursor-agent")
