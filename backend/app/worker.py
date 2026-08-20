@@ -45,8 +45,8 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
-from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
-from app.mainai_execution.executor import dispatch_ready_task, retry_task
+from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
+from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
 from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
 from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
@@ -178,6 +178,23 @@ async def process_claimed_mainai_job(
                 logger.warning("Worker %s: mainai_job %s's capability '%s' is no longer available at execution time.", worker_id, job_id, job.job_type)
                 record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
                 mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.capability_unavailable)
+                # task_execution already moved the owning MainAITask to `running` at dispatch.
+                # Without finalize here the task stays running on a terminal job until the
+                # delayed auto-recovery scan (#115) — fail closed immediately instead.
+                if job.job_type == "task_execution":
+                    task = task_for_job(db, job)
+                    if task is not None and task.status == MainAITaskStatus.running:
+                        _finalize_task_outcome(
+                            db,
+                            task,
+                            passed=False,
+                            evidence={
+                                "error": "capability_unavailable",
+                                "job_type": job.job_type,
+                                "mainai_job_id": str(job.id),
+                            },
+                        )
+                        db.commit()
                 return
         if job is not None and job.job_type == "corpus_review":
             record_claimed(db, job, worker_id=worker_id, lease_generation=lease_generation)
