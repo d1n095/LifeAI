@@ -6,6 +6,48 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 69 (2026-08-18): `claude/corpus-trial-run-history` — Life Corpus Trial Run History (migration 0052), stackad ovanpå PR #104 (`claude/cognition-foundation-review` @ `83a8b8e`), egen worktree, sjunde steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
+
+**Bakgrund:** `docs/LIFE_CORPUS_TRIAL_HARNESS.md`s egen "Explicitly deferred"-sektion namngav
+redan detta som naturligt nästa litet steg: `run_trial()` (PR #102) returnerar bara en
+in-memory `TrialReport`, ingenting om en körning överlever Python-processen som körde den.
+Vald som nästa steg EFTER granskningen (Pass 68) eftersom den egna dokumentationen redan
+föreslog den, inget nytt scope uppfanns — och EFTER att medvetet ha avstått från att bygga
+`chat.py`-bryggan (Fynd 2 i granskningen kräver ett grundarbeslut, inte kod).
+
+**Byggt** (`backend/app/corpus_trial/persistence.py`, migration 0052):
+- `corpus_trial_runs` — EN ny tabell, `record_trial_run()` (idempotent, sparar EN ögonblicksbild
+  av en `TrialReport`: `corpus_label`/`record_count`/`passed`/`dimension_summary`/
+  `violation_counts` — ALDRIG en kopia av korpusen eller de underliggande `founder_memory_notes`/
+  `diagnosis_records`-raderna), `list_trial_runs()`.
+- MEDVETET annorlunda form än `capability_records`/`founder_memory_notes`/`diagnosis_records`:
+  en körning är INGET proveniens-påstående om världen (inget grundarord, ingen inferens), så
+  INGA `authority`/`basis`-kolumner, återanvänder INTE migration 0042:s vokabulär. Återanvänder
+  istället `capability_observation_events`s DB-trigger-tvingade append-only-garanti (en direkt
+  UPDATE/DELETE avvisas även för en superuser-session, inte bara dold av RLS).
+
+**Bevisat via tester:** 15 nya tester, inklusive ett direkt bevis att tabellen verkligen är
+append-only (inte bara RLS-dold) genom att en superuser-session försöker UPDATE/DELETE direkt,
+samt 2 beteendemässiga RLS-tester via den begränsade `mainai_app`-rollen — tillämpar samma
+disciplin Pass 68:s granskning just etablerade, istället för att lämna DENNA grunds eget
+RLS-påstående obevisat på samma sätt granskningen hittade för de tre andra.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd.
+
+**Beroenden:** Stackad ovanpå det ännu ej mergade PR #104 (`claude/cognition-foundation-review`
+@ `83a8b8e`). Helt oberoende av Cursors PR #79/#80/#81/#92.
+
+**OBS — sju PR:er nu staplade, ingen mergad än:** #94 → #96 → #98 → #101 → #102 → #104 →
+[#108](https://github.com/d1n095/LifeAI/pull/108). Rekommenderas starkt att grundaren
+granskar/mergar i den ordningen innan ytterligare steg läggs på — arbetet fortsätter enligt
+uttrycklig instruktion att inte pausa i onödan.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/corpus-trial-run-history` | [#108](https://github.com/d1n095/LifeAI/pull/108) | Pushad, CI körs | Life Corpus Trial Run History: `corpus_trial_runs` (migration 0052), append-only, `record_trial_run()`/`list_trial_runs()`, 15 nya tester | `claude/cognition-foundation-review` @ 83a8b8e (stackad ovanpå PR #104) |
+
 ## Pass 68 (2026-08-18): `claude/cognition-foundation-review` — Adversarial cross-stack review of PR #94→#96→#98→#101→#102 + remediation (migration 0051), stackad ovanpå PR #102 (`claude/corpus-trial-harness` @ `c0b9333`), egen worktree, sjätte steget i uppdraget "LIFE SELF-MODEL, ADAPTIVE COGNITION & CORPUS READINESS"
 
 **Bakgrund:** grundaren bad explicit om en grundlig, icke-medhållande adversarial granskning

@@ -628,6 +628,12 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # deletion only through this one narrow SECURITY DEFINER function.
         db.execute(sa_text("SELECT erase_own_diagnosis_children()"))
 
+        # --- Life Corpus Trial Run History (migration 0052, see docs/LIFE_CORPUS_TRIAL_
+        # HARNESS.md): corpus_trial_runs is append-only (DB trigger enforces this even for
+        # UPDATE, unlike diagnosis_records/founder_memory_notes above), deletion only through
+        # this one narrow SECURITY DEFINER function, same as capability_observation_events.
+        db.execute(sa_text("SELECT erase_own_corpus_trial_run_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.

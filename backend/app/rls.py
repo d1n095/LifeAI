@@ -507,10 +507,16 @@ _MAINAI_EXECUTION_TABLES = (
     # structural role founder_memory_notes/life_problem_decisions already play -- same
     # privilege narrowing (DELETE revoked, UPDATE kept for epistemic_stage transitions).
     "diagnosis_records",
+    # Migration 0052 (Life Corpus Trial Run History): corpus_trial_runs is append-only, same
+    # structural role capability_observation_events/agent_work_assignment_events already play
+    # -- privilege-narrowed below exactly like them (DB trigger enforces append-only, not just
+    # GRANT/REVOKE), wired in the same migration that creates it.
+    "corpus_trial_runs",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 _CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
+_CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
@@ -590,6 +596,11 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {"name": "erase_own_founder_memory_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "erase_own_diagnosis_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_corpus_trial_run_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "corpus_trial_runs_deny_mutation", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -880,6 +891,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_founder_memory_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON diagnosis_records FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_diagnosis_children() TO mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON corpus_trial_runs FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_corpus_trial_run_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -935,6 +948,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("capability_observation_events", _CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES),
             ("founder_memory_notes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("diagnosis_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("corpus_trial_runs", _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
