@@ -47,6 +47,7 @@ from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task
+from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
 from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
 from app.mainai_execution.recovery_classifier import classify_recovery_record
@@ -598,6 +599,35 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-replan MainAIGoal %s.", self.worker_id, goal.id)
 
+    # How many active goals this worker tries to close via record_final_report per poll cycle.
+    _MAX_GOAL_FINALIZE_SCANS_PER_TICK = 10
+
+    def _finalize_mainai_execution_goals(self, db: Session) -> None:
+        """Close goals whose every task is already terminal.
+
+        Task auto-advance / retry / recovery / replan ticks move *tasks*, but until this
+        tick nothing in the worker ever called `record_final_report` — that lived only on
+        GET `/goals/{id}/report`. A fully finished graph could therefore stay `running`
+        with `final_outcome` null forever unless a human opened the report. Same bounded
+        active-goal scan + per-goal isolation as `_advance_mainai_execution_replan`.
+        """
+        goals = (
+            db.query(MainAIGoal)
+            .filter(MainAIGoal.status.in_(ACTIVE_MAINAI_GOAL_STATUSES))
+            .order_by(MainAIGoal.created_at.asc())
+            .limit(self._MAX_GOAL_FINALIZE_SCANS_PER_TICK)
+            .all()
+        )
+        for goal in goals:
+            try:
+                before = goal.status
+                record_final_report(db, goal=goal)
+                if goal.status != before:
+                    db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to finalize MainAIGoal %s.", self.worker_id, goal.id)
+
     # V0.3: how many active engineering lessons this worker inspects for conflicts per poll
     # cycle -- a real, bounded scan, same reasoning as every other tick's own limit above. This
     # table is founder-wide (not owner-scoped), so a single global bounded query covers it --
@@ -653,6 +683,7 @@ class Worker:
             self._advance_mainai_execution_retries(claim_db)
             await self._advance_mainai_execution_auto_recovery(claim_db)
             await self._advance_mainai_execution_replan(claim_db)
+            self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
