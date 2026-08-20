@@ -64,6 +64,7 @@ def _index_in_background(document_id: uuid.UUID, text_content: str) -> None:
     import asyncio
 
     from app.db import SessionLocal
+    from app.request_context import current_user_id as current_user_id_var
 
     async def run():
         db = SessionLocal()
@@ -74,8 +75,11 @@ def _index_in_background(document_id: uuid.UUID, text_content: str) -> None:
             # A background task's fresh SessionLocal() never goes through
             # app/deps.py's get_current_user — nothing else sets app.current_user_id for
             # this session, so document_chunks_isolation (app/rls.py) would reject every
-            # write here (NULL current_user_id matches nothing) without this explicit call.
-            # See app/rag/ingest.py's index_document docstring.
+            # write here (NULL current_user_id matches nothing) without an explicit bind.
+            # SET LOCAL alone is not enough: index_document commits mid-flight, and
+            # app/db.py's after_begin only re-applies RLS from the contextvar (same trap
+            # app/rag/library_import.py's _set_rls_owner documents).
+            current_user_id_var.set(str(document.uploaded_by))
             db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(document.uploaded_by)})
             await index_document(db, document, text_content)
         finally:
