@@ -52,6 +52,7 @@ from sqlalchemy import select, text as sa_text
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
+from app.mainai_execution.lessons import apply_lessons_to_verification_plan
 from app.mainai_execution.planner import KNOWN_TASK_TYPES, _detect_cycle
 from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 from app.models.mainai_execution import (
@@ -458,8 +459,16 @@ def insert_plan_tasks(
 
     # ---- Everything validated -- persist. Flush only; caller owns the commit (same
     # convention planner.py's create_plan() and executor.py's dispatch_ready_task() follow).
+    # Same lesson-binding as create_plan: inserted tasks must not bypass known regression
+    # lessons just because they arrived via partial insertion rather than a full replan.
     persisted: list[MainAITask] = []
+    applied_lessons_by_task: list[list] = []
     for spec in tasks_t:
+        verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
+            db,
+            verification_plan=list(spec.verification_plan),
+            task_type=spec.task_type,
+        )
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
@@ -470,11 +479,12 @@ def insert_plan_tasks(
             priority=spec.priority,
             risk_level=spec.risk_level,
             approval_required=spec.approval_required,
-            verification_plan=list(spec.verification_plan),
+            verification_plan=verification_plan,
             max_attempts=spec.max_attempts,
         )
         db.add(task)
         persisted.append(task)
+        applied_lessons_by_task.append(applied_lesson_ids)
     db.flush()
 
     for i, spec in enumerate(tasks_t):
@@ -495,24 +505,28 @@ def insert_plan_tasks(
         )
 
     for i, task in enumerate(persisted):
+        detail = {
+            "plan_version": plan.version,
+            "insertion_idempotency_key": idempotency_key,
+            "insertion_semantic_hash": semantic_hash,
+            "insertion_task_id": str(task.id),
+            "insertion_task_index": i,
+            "authority_kind": authority_kind,
+            "source_type": source_type,
+            "source_ref": source_ref,
+            "reason": reason,
+            "requested_by": requested_by,
+            "kind": "partial_plan_insertion",
+        }
+        applied_lesson_ids = applied_lessons_by_task[i]
+        if applied_lesson_ids:
+            detail["lessons_applied"] = [str(lesson_id) for lesson_id in applied_lesson_ids]
         db.add(
             MainAITaskEvent(
                 task_id=task.id,
                 owner_id=task.owner_id,
                 event_type=MainAITaskEventType.created,
-                detail={
-                    "plan_version": plan.version,
-                    "insertion_idempotency_key": idempotency_key,
-                    "insertion_semantic_hash": semantic_hash,
-                    "insertion_task_id": str(task.id),
-                    "insertion_task_index": i,
-                    "authority_kind": authority_kind,
-                    "source_type": source_type,
-                    "source_ref": source_ref,
-                    "reason": reason,
-                    "requested_by": requested_by,
-                    "kind": "partial_plan_insertion",
-                },
+                detail=detail,
             )
         )
 
