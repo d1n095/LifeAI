@@ -56,11 +56,11 @@ async def upload_document(
 
     record_audit(db, user_id=user.id, action="document_upload", entity_type="document", entity_id=str(document.id), request=request)
 
-    background_tasks.add_task(_index_in_background, document.id, text_content)
+    background_tasks.add_task(_index_in_background, document.id, text_content, user.id)
     return document
 
 
-def _index_in_background(document_id: uuid.UUID, text_content: str) -> None:
+def _index_in_background(document_id: uuid.UUID, text_content: str, owner_id: uuid.UUID) -> None:
     import asyncio
 
     from app.db import SessionLocal
@@ -69,18 +69,17 @@ def _index_in_background(document_id: uuid.UUID, text_content: str) -> None:
     async def run():
         db = SessionLocal()
         try:
+            # Bind RLS BEFORE the document SELECT — under documents_isolation a fresh
+            # SessionLocal with NULL current_user_id cannot see the row at all, so the old
+            # "load then SET LOCAL" order silently no-op'd. owner_id comes from the request
+            # that enqueued this task (same pattern as library_import's known job owner).
+            current_user_id_var.set(str(owner_id))
+            db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
             document = db.get(Document, document_id)
             if document is None or document.uploaded_by is None:
                 return
-            # A background task's fresh SessionLocal() never goes through
-            # app/deps.py's get_current_user — nothing else sets app.current_user_id for
-            # this session, so document_chunks_isolation (app/rls.py) would reject every
-            # write here (NULL current_user_id matches nothing) without an explicit bind.
-            # SET LOCAL alone is not enough: index_document commits mid-flight, and
-            # app/db.py's after_begin only re-applies RLS from the contextvar (same trap
-            # app/rag/library_import.py's _set_rls_owner documents).
-            current_user_id_var.set(str(document.uploaded_by))
-            db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(document.uploaded_by)})
+            if document.uploaded_by != owner_id:
+                return
             await index_document(db, document, text_content)
         finally:
             db.close()

@@ -49,7 +49,7 @@ def test_documents_upload_background_indexer_survives_mid_flight_commits(db_sess
     # Match a fresh background task: no request-scoped owner left in this process.
     current_user_id_var.set(None)
 
-    _index_in_background(doc_id, "Enough text content for the legacy upload indexer to chunk and embed.")
+    _index_in_background(doc_id, "Enough text content for the legacy upload indexer to chunk and embed.", user.id)
 
     current_user_id_var.set(str(user.id))
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
