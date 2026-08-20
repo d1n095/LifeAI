@@ -61,9 +61,14 @@ async def index_document(db: Session, document: Document, text_content: str) -> 
 
         # P1: a real pre-flight check — never just is_configured() — BEFORE the actual
         # embed() call is ever attempted. A provider that isn't verified pauses the document
-        # on awaiting_provider/blocked_provider instead of attempting (and failing) the call;
-        # app/worker.py's poll loop re-verifies periodically and requeues paused jobs
-        # automatically once this returns ok again — no re-upload, no exception raised here.
+        # on awaiting_provider/blocked_provider instead of attempting (and failing) the call.
+        #
+        # Auto-resume is ONLY true for ImportJob-backed library imports: app/worker.py's
+        # `_requeue_blocked_jobs` / `_reconcile_orphaned_documents` requeue knowledge_import_jobs
+        # rows. Workbench save and /api/documents/upload call index_document with request-
+        # scoped text and no ImportJob — claiming "bearbetas automatiskt" there was a false
+        # capability. Persist content_preview before pausing so at least a durable excerpt
+        # survives when the in-memory text_content evaporates with the request.
         verification = await ensure_verified(db, role="embedding")
         if verification.result != VerificationResult.ok:
             document.status = (
@@ -71,10 +76,19 @@ async def index_document(db: Session, document: Document, text_content: str) -> 
                 if verification.result == VerificationResult.not_configured
                 else IndexStatus.blocked_provider
             )
-            document.error_message = (
-                f"{verification.message} Filen är säkert lagrad och bearbetas automatiskt så "
-                "snart leverantören svarar."
-            )
+            document.content_preview = text_content[:1000]
+            resumable = document.import_job_id is not None or bool(document.storage_key)
+            if resumable:
+                document.error_message = (
+                    f"{verification.message} Filen är säkert lagrad och bearbetas automatiskt så "
+                    "snart leverantören svarar."
+                )
+            else:
+                document.error_message = (
+                    f"{verification.message} Indexering pausad — ingen durable ImportJob/"
+                    "storage_key finns för automatisk återstart. Spara eller importera igen "
+                    "när leverantören är tillgänglig."
+                )
             db.add(document)
             db.commit()
             return
