@@ -42,7 +42,7 @@ from app.models.project_memory import (
     SideIssueClassification,
 )
 from app.storage import get_storage
-from app.storage.references import store_content_with_reference_lock
+from app.storage.references import retain_pending_rejected_upload_cleanup_tasks, store_content_with_reference_lock
 
 MAX_BRIEF_BYTES = 2 * 1024 * 1024  # a resumption brief is text; 2MB is already generous
 MAX_DOC_BYTES = 10 * 1024 * 1024  # a governing doc is text; 10MB is already generous
@@ -224,6 +224,7 @@ def ingest_doc(db: Session, *, relative_path: str, ingested_by: str) -> ProjectS
     db.add(source)
     db.commit()
     db.refresh(source)
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     return source
 
 
@@ -486,6 +487,7 @@ def ingest_system_map(db: Session, *, ingested_by: str) -> ProjectSource:
     db.add(source)
     db.commit()
     db.refresh(source)
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     return source
 
 
@@ -761,6 +763,7 @@ def create_checkpoint(
 
     db.commit()
     db.refresh(checkpoint)
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     return checkpoint
 
 
