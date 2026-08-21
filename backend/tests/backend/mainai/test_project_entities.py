@@ -226,8 +226,10 @@ def test_mark_project_entity_superseded_never_deletes_or_mutates_content(superus
         superuser_db, owner_id=owner.id, proposal_id=proposal2.id, entity_type="decision",
         title="Reconsidered: use SQLite for local cache instead.",
         authority="founder", basis="manual", entity_idempotency_key="super-entity-2",
+        supersedes_entity_id=old_entity.id,
     )
     superuser_db.commit()
+    assert new_entity.supersedes_entity_id == old_entity.id  # the actual durable historical edge
 
     mark_project_entity_superseded(superuser_db, owner_id=owner.id, entity_id=old_entity.id, superseded_by_entity_id=new_entity.id)
     superuser_db.commit()
@@ -235,6 +237,37 @@ def test_mark_project_entity_superseded_never_deletes_or_mutates_content(superus
     refetched_old = get_project_entity(superuser_db, owner_id=owner.id, entity_id=old_entity.id)
     assert refetched_old.status == "superseded"
     assert refetched_old.title == "Use Postgres."  # content untouched, never rewritten
+
+
+def test_mark_project_entity_superseded_fails_closed_when_the_link_was_never_actually_set(superuser_db):
+    """Regression for a real bug: mark_project_entity_superseded() used to accept
+    superseded_by_entity_id and silently ignore it, so this call would have wrongly
+    succeeded and left the durable historical edge missing."""
+
+    owner, claim = _owner_with_claim(superuser_db)
+    superuser_db.commit()
+    proposal1 = record_interpretation_proposal(superuser_db, owner_id=owner.id, source_claim_id=claim.id, proposed_entity_type="decision", idempotency_key="super-fc-1")
+    superuser_db.commit()
+    _, old_entity = promote_interpretation_proposal(
+        superuser_db, owner_id=owner.id, proposal_id=proposal1.id, entity_type="decision", title="x",
+        authority="founder", basis="manual", entity_idempotency_key="super-fc-entity-1",
+    )
+    superuser_db.commit()
+
+    proposal2 = record_interpretation_proposal(superuser_db, owner_id=owner.id, source_claim_id=claim.id, proposed_entity_type="decision", idempotency_key="super-fc-2")
+    superuser_db.commit()
+    _, new_entity_without_link = promote_interpretation_proposal(
+        superuser_db, owner_id=owner.id, proposal_id=proposal2.id, entity_type="decision", title="y",
+        authority="founder", basis="manual", entity_idempotency_key="super-fc-entity-2",
+        # deliberately NOT passing supersedes_entity_id
+    )
+    superuser_db.commit()
+
+    with pytest.raises(ProjectEntityError):
+        mark_project_entity_superseded(superuser_db, owner_id=owner.id, entity_id=old_entity.id, superseded_by_entity_id=new_entity_without_link.id)
+
+    refetched_old = get_project_entity(superuser_db, owner_id=owner.id, entity_id=old_entity.id)
+    assert refetched_old.status != "superseded"  # the failed call must not have partially applied
 
 
 def test_list_current_project_entities_excludes_superseded(superuser_db):
@@ -253,6 +286,7 @@ def test_list_current_project_entities_excludes_superseded(superuser_db):
     _, new_entity = promote_interpretation_proposal(
         superuser_db, owner_id=owner.id, proposal_id=proposal2.id, entity_type="decision", title="Still relevant.",
         authority="founder", basis="manual", entity_idempotency_key="current-entity-new",
+        supersedes_entity_id=old_entity.id,
     )
     superuser_db.commit()
     mark_project_entity_superseded(superuser_db, owner_id=owner.id, entity_id=old_entity.id, superseded_by_entity_id=new_entity.id)
@@ -297,3 +331,67 @@ def test_record_and_list_entity_relationships(superuser_db):
     # visible from either side of the edge
     rels_from_decision = list_entity_relationships(superuser_db, owner_id=owner.id, entity_id=decision.id)
     assert len(rels_from_decision) == 1
+
+
+# --- adversarial: cross-owner reference integrity (migration 0056) -------------------------
+#
+# Founder review found migration 0054 repeated a defect class app.models.knowledge_claim.
+# KnowledgeClaim's own module docstring already documents: a bare FK proves the referenced
+# row EXISTS, not that it belongs to the SAME owner. These tests prove the service layer now
+# fails closed for exactly that attack -- constructing an owner-A row that references an
+# owner-B claim/entity -- distinct from (and not covered by) the existing RLS tests, which
+# only prove a user cannot write a row with someone else's owner_id, not that a row cannot
+# reference someone else's object by UUID.
+
+
+def test_recording_an_interpretation_proposal_for_another_owners_claim_fails_closed(superuser_db):
+    owner_a, claim_a = _owner_with_claim(superuser_db)
+    owner_b, _ = _owner_with_claim(superuser_db)
+    superuser_db.commit()
+
+    with pytest.raises(ProjectEntityError):
+        record_interpretation_proposal(superuser_db, owner_id=owner_b.id, source_claim_id=claim_a.id, proposed_entity_type="decision", idempotency_key="xowner-claim-1")
+
+
+def test_promoting_a_proposal_that_supersedes_another_owners_entity_fails_closed(superuser_db):
+    owner_a, claim_a = _owner_with_claim(superuser_db)
+    owner_b, claim_b = _owner_with_claim(superuser_db)
+    superuser_db.commit()
+
+    proposal_a = record_interpretation_proposal(superuser_db, owner_id=owner_a.id, source_claim_id=claim_a.id, proposed_entity_type="decision", idempotency_key="xowner-super-a")
+    superuser_db.commit()
+    _, entity_a = promote_interpretation_proposal(
+        superuser_db, owner_id=owner_a.id, proposal_id=proposal_a.id, entity_type="decision", title="owner a's decision",
+        authority="founder", basis="manual", entity_idempotency_key="xowner-super-entity-a",
+    )
+    superuser_db.commit()
+
+    proposal_b = record_interpretation_proposal(superuser_db, owner_id=owner_b.id, source_claim_id=claim_b.id, proposed_entity_type="decision", idempotency_key="xowner-super-b")
+    superuser_db.commit()
+
+    with pytest.raises(ProjectEntityError):
+        promote_interpretation_proposal(
+            superuser_db, owner_id=owner_b.id, proposal_id=proposal_b.id, entity_type="decision", title="owner b tries to supersede owner a's entity",
+            authority="founder", basis="manual", entity_idempotency_key="xowner-super-entity-b",
+            supersedes_entity_id=entity_a.id,
+        )
+
+
+def test_recording_a_relationship_to_another_owners_entity_fails_closed(superuser_db):
+    owner_a, claim_a = _owner_with_claim(superuser_db)
+    owner_b, claim_b = _owner_with_claim(superuser_db)
+    superuser_db.commit()
+
+    proposal_a = record_interpretation_proposal(superuser_db, owner_id=owner_a.id, source_claim_id=claim_a.id, proposed_entity_type="idea", idempotency_key="xowner-rel-a")
+    superuser_db.commit()
+    _, entity_a = promote_interpretation_proposal(superuser_db, owner_id=owner_a.id, proposal_id=proposal_a.id, entity_type="idea", title="a", authority="founder", basis="manual", entity_idempotency_key="xowner-rel-entity-a")
+    superuser_db.commit()
+
+    proposal_b = record_interpretation_proposal(superuser_db, owner_id=owner_b.id, source_claim_id=claim_b.id, proposed_entity_type="idea", idempotency_key="xowner-rel-b")
+    superuser_db.commit()
+    _, entity_b = promote_interpretation_proposal(superuser_db, owner_id=owner_b.id, proposal_id=proposal_b.id, entity_type="idea", title="b", authority="founder", basis="manual", entity_idempotency_key="xowner-rel-entity-b")
+    superuser_db.commit()
+
+    # owner_b tries to link THEIR OWN entity to owner_a's entity
+    with pytest.raises(ProjectEntityError):
+        record_entity_relationship(superuser_db, owner_id=owner_b.id, from_entity_id=entity_b.id, to_entity_id=entity_a.id, relationship_type="relates_to")

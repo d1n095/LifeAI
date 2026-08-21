@@ -127,3 +127,78 @@ def test_cannot_write_a_project_entity_for_another_user(db_session, make_verifie
         assert False, "insert should have been rejected by project_entities_isolation's WITH CHECK"
     except Exception:
         db_session.rollback()
+
+
+# --- adversarial: owner-anchored reference integrity (migration 0056) ----------------------
+#
+# Distinct from the cross-owner ROW tests above (which prove RLS rejects owner_id=B), these
+# prove the database itself rejects owner_id=A rows that REFERENCE another owner's object by
+# UUID -- a bare FK only proves the referenced row exists, RLS's WITH CHECK only validates the
+# child row's own owner_id, neither alone proves the referenced UUID belongs to the SAME
+# owner. Constructed directly against the restricted role, bypassing the service layer's own
+# fail-closed checks, to prove the database is the real backstop.
+
+
+def test_cannot_reference_another_owners_claim_from_an_interpretation_proposal(db_session, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, user_b.id)
+    claim_b = _claim_for(db_session, user_b.id)
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(InterpretationProposal(owner_id=user_a.id, source_claim_id=claim_b.id, proposed_entity_type="decision", idempotency_key="rls-xref-ip"))
+    try:
+        db_session.commit()
+        assert False, "insert should have been rejected by the composite owner-anchored FK (migration 0056)"
+    except Exception:
+        db_session.rollback()
+
+
+def test_cannot_reference_another_owners_claim_from_a_project_entity(db_session, make_verified_user):
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, user_b.id)
+    claim_b = _claim_for(db_session, user_b.id)
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(ProjectEntity(owner_id=user_a.id, entity_type="decision", title="x", derived_from_claim_id=claim_b.id, idempotency_key="rls-xref-pe"))
+    try:
+        db_session.commit()
+        assert False, "insert should have been rejected by the composite owner-anchored FK (migration 0056)"
+    except Exception:
+        db_session.rollback()
+
+
+def test_cannot_reference_another_owners_entity_from_a_relationship(db_session, make_verified_user):
+    from app.models.project_entities import ProjectEntityRelationship
+
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, user_a.id)
+    claim_a = _claim_for(db_session, user_a.id)
+    db_session.commit()
+    _set_rls_user(db_session, user_a.id)
+    proposal_a = record_interpretation_proposal(db_session, owner_id=user_a.id, source_claim_id=claim_a.id, proposed_entity_type="idea", idempotency_key="rls-xref-rel-a")
+    _, entity_a = promote_interpretation_proposal(db_session, owner_id=user_a.id, proposal_id=proposal_a.id, entity_type="idea", title="a", authority="founder", basis="manual", entity_idempotency_key="rls-xref-rel-entity-a")
+    db_session.commit()
+
+    _set_rls_user(db_session, user_b.id)
+    claim_b = _claim_for(db_session, user_b.id)
+    db_session.commit()
+    _set_rls_user(db_session, user_b.id)
+    proposal_b = record_interpretation_proposal(db_session, owner_id=user_b.id, source_claim_id=claim_b.id, proposed_entity_type="idea", idempotency_key="rls-xref-rel-b")
+    _, entity_b = promote_interpretation_proposal(db_session, owner_id=user_b.id, proposal_id=proposal_b.id, entity_type="idea", title="b", authority="founder", basis="manual", entity_idempotency_key="rls-xref-rel-entity-b")
+    db_session.commit()
+
+    _set_rls_user(db_session, user_b.id)
+    db_session.add(ProjectEntityRelationship(owner_id=user_b.id, from_entity_id=entity_b.id, to_entity_id=entity_a.id, relationship_type="relates_to"))
+    try:
+        db_session.commit()
+        assert False, "insert should have been rejected by the composite owner-anchored FK (migration 0056)"
+    except Exception:
+        db_session.rollback()

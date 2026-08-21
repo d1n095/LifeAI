@@ -84,6 +84,40 @@ session, real cross-owner insert/read attempts), matching the standing disciplin
 `list_current_diagnoses()`/`list_current_founder_memory()` already play for their sibling
 foundations: excludes `historical`/`superseded`/`disputed`.
 
+## Post-merge hardening (migration 0056)
+
+A founder adversarial review of the already-merged migration 0054 found two real defects,
+fixed by migration 0056 and the accompanying service-layer changes:
+
+1. **Owner-anchored reference integrity.** `interpretation_proposals.source_claim_id`,
+   `project_entities.derived_from_claim_id`, and `project_entity_relationships.from_entity_id`/
+   `to_entity_id` used bare (non-composite) foreign keys -- the exact defect class
+   `app/models/knowledge_claim.py`'s own module docstring already documents and fixes for
+   `memory_source_id`: a bare FK proves the referenced row exists, not that it belongs to the
+   same owner. `project_entity_relationships` had copied `claim_relationships` (migration 0007,
+   which predates this mission's own owner-anchoring discipline)'s older, looser precedent --
+   "existing precedent" is not automatically "correct precedent." Fixed with composite FKs
+   throughout (`knowledge_claims` gained a `UNIQUE(id, owner_id)` constraint to anchor
+   against), plus service-level fail-closed validation in `record_interpretation_proposal()`/
+   `record_entity_relationship()`/`promote_interpretation_proposal()`'s new
+   `supersedes_entity_id` path. Proven by dedicated adversarial tests attempting exactly this
+   attack, both at the service layer and directly against the restricted database role.
+
+2. **Supersession contract was inconsistent.** `mark_project_entity_superseded()` accepted a
+   `superseded_by_entity_id` parameter its own docstring claimed set the durable historical
+   edge, but the parameter was never used -- the function only flipped the old row's status.
+   `promote_interpretation_proposal()` had no `supersedes_entity_id` parameter to pass through
+   at all, despite the `ProjectEntity` model having the column. This meant the original
+   regression test could pass while proving only `old.status == "superseded"`, never the
+   actual `new.supersedes_entity_id == old.id` edge -- a `TEST PASSES != SEMANTIC CONTRACT
+   WORKS` bug. Fixed: `promote_interpretation_proposal()` now accepts `supersedes_entity_id`
+   (validated same-owner, fail-closed); `mark_project_entity_superseded()` now VERIFIES the
+   new entity's `supersedes_entity_id` genuinely points back at the old row before flipping
+   its status, rather than trusting the caller's bookkeeping. A regression test proves both
+   the correct link (`test_mark_project_entity_superseded_never_deletes_or_mutates_content`)
+   and the fail-closed rejection when the link was never actually set
+   (`test_mark_project_entity_superseded_fails_closed_when_the_link_was_never_actually_set`).
+
 ## Explicitly deferred (not built in this migration)
 
 Not built now -- current LIMITATIONS, not permanent architectural prohibitions. Each has a
