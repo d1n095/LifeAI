@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.mainai_execution.planner import create_goal
 from app.models.mainai_execution import MainAIGoalRiskLevel
+from app.models.project_entities import ProjectEntity
 from app.models.work_candidate import WorkCandidate
 
 
@@ -56,7 +57,15 @@ def record_work_candidate(
     that a signal producer noticed a piece of structured project understanding that might be
     actionable. Never raises for "the candidate turned out to be noise" -- that judgment
     happens later, explicitly, via `dismiss_work_candidate()`/`authorize_work_candidate()`,
-    never here."""
+    never here.
+
+    Fails closed BEFORE any write if `source_entity_id` does not structurally belong to
+    `owner_id` -- a clear, typed error here, with the database's own composite FK (migration
+    0056) as the final backstop."""
+
+    entity = db.execute(select(ProjectEntity).where(ProjectEntity.id == source_entity_id, ProjectEntity.owner_id == owner_id)).scalar_one_or_none()
+    if entity is None:
+        raise WorkCandidateError(f"source_entity_id={source_entity_id} does not belong to owner_id={owner_id}")
 
     values: dict[str, Any] = dict(
         source_entity_id=source_entity_id, title=title, rationale=rationale, dependencies=dependencies or [],
