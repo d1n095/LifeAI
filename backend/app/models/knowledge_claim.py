@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, ForeignKeyConstraint, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, ForeignKeyConstraint, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -97,6 +97,12 @@ class KnowledgeClaim(Base):
             ondelete="RESTRICT",
             name="fk_knowledge_claims_memory_source_owner",
         ),
+        # (id, owner_id) unique -- added by migration 0056 so OTHER tables (interpretation_
+        # proposals.source_claim_id, project_entities.derived_from_claim_id) can anchor a
+        # composite FK against a knowledge_claims row the same way this table already anchors
+        # against memory_source_units above. Purely additive: id alone is already globally
+        # unique via the primary key, so (id, owner_id) is trivially unique too.
+        UniqueConstraint("id", "owner_id", name="uq_knowledge_claims_id_owner"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

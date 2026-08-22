@@ -184,6 +184,35 @@ below), and ties return `NEEDS_SELECTION` rather than guessing a winner. Provide
 "trusted-sounding" agent name grants nothing here either, the same invariant
 `test_provider_identity_cannot_grant_authority` already proves at the assignment layer.
 
+**`app.agent_coordination.routing.next_feasible_assignment_for_agent`** answers the INVERSE
+question — "given a known agent (typically one that just went idle), which of its OWN
+already-assigned `ready` work should it pick up next" — the complementary direction to
+`eligible_agents_for()`'s "given work, which agent." Strict FIFO by `created_at`; no priority
+or capability-fit scoring (that would be exactly the "ranking engine built on insufficient
+evidence" this module already refuses to build). Scans in order and returns the first
+assignment `evaluate_assignment_readiness()` calls `ASSIGNABLE` **or** `LEASE_REQUIRED` —
+`LEASE_REQUIRED` is deliberately treated as "found," not "skip," since a fresh `read_write`
+`ready` assignment always reports it until a lease is acquired; that is simply naming the
+caller's own very next step, not a real blocker. A genuinely stuck assignment ahead in the
+queue (stale base, a surfaced duplicate, agent unavailability) never disqualifies a feasible
+one behind it — every skip is recorded with its real `CoordinatorDecision.outcome`, never
+silently dropped. This is what lets "one blocked assignment must not freeze unrelated work"
+hold from an individual AGENT's own point of view, not just the coordinator's. Never mutates
+anything — selecting a next assignment and actually starting it (`acquire_lease()` +
+`transition_status()`) remain separate, deliberate caller actions.
+
+**`app.agent_coordination.routing.idle_agents_with_next_assignment`** is the single-call
+composition of the two directions above with `runtime_view`'s own snapshot — "who is free
+right now, and what should each of them do next," exactly what a founder (or a future
+orchestration loop under founder-set policy) needs to actually put an idle agent back to work
+without querying the registry and then the selector separately for every agent by hand. Only
+truly `RuntimeStatus.IDLE` agents are included — `RUNNING`/`REVIEWING`/`BLOCKED`/`OFFLINE`/etc.
+are busy or unavailable, not "idle with nothing to do," and are correctly omitted rather than
+included with a hollow decision. An idle agent CAN still appear with
+`NO_FEASIBLE_ASSIGNMENT` — that is itself meaningful (genuinely free, genuinely nothing to
+give it), distinct from not appearing at all. A pure composition, never a new data source or
+decision rule of its own.
+
 **`app.agent_coordination.service.build_agent_outcome_payload`** is a canonical, documented
 field vocabulary (tests/duration/cost/CI outcome/review defects/severity/rework/scope
 violations/merge result/failure reason/verified quality — every field optional, omitted
@@ -204,21 +233,291 @@ into `REVIEWING`, a Claude assignment gated on Cursor's completion correctly rep
 `WAITING_DEPENDENCY` while Cursor's own work continues unaffected, and routing still resolving
 normally for other feasible work despite that one blocked assignment.
 
-## FUTURE AGENT RUNTIME INTEGRATION (explicitly deferred)
+## BOUNDED DISPATCH FOUNDATION
+
+Turns a routing decision ("agent X should do assignment Y next") into a real, auditable
+dispatch, without granting any authority the coordination layer did not already, explicitly
+grant. Three pieces, all pure reuse — no new tables, no new registry, no new task/job/approval
+system.
+
+**`app.agent_coordination.bootstrap.bootstrap_known_agents`** idempotently registers Life's
+actual, currently-used worker identities (Claude Code, Cursor Agent, Codex) via
+`register_agent()`'s own upsert-by-`agent_key` — never a new registry. Represents
+identity/capability/config only; never a credential, secret, or machine-specific token (nothing
+here reads an environment variable or a secrets store). Capabilities are the conservative,
+currently-known-true shape of each agent's role — interactive CLI-driven repo editing,
+read-only review, running tests — never an invented performance ranking. Deliberately NOT
+wired into automatic app boot: seeding actual founder-facing data about which real agents
+exist is a decision, not mechanical infrastructure, and stays an explicit, callable action.
+
+**`app.agent_coordination.dispatch.DISPATCH_LIFECYCLE`** maps the founder's own requested
+naming (PROPOSED/READY/DISPATCHING/RUNNING/COMPLETED/FAILED/CANCELLED/BLOCKED) onto the
+ALREADY EXISTING `WorkAssignmentStatus` — `DISPATCHING` reuses `waiting_agent` (ready,
+allocated, not yet confirmed started — exactly what that status has always meant), never a
+new column. "AUTHORIZED" has no status of its own: it is exactly "ready AND passes
+`evaluate_dispatch_readiness()`'s approval check," computed at read time, never stored — the
+same "derived, never stored" doctrine `runtime_view`'s own block-reason handling already
+establishes.
+
+**`evaluate_dispatch_readiness()`** is the fail-closed gate immediately before any real
+invocation. Layers strictly on top of `evaluate_assignment_readiness()` (which alone must
+report `ASSIGNABLE`, not merely `LEASE_REQUIRED` — a dispatch is about to actually invoke a
+real agent and must already hold its write lease, unlike `next_feasible_assignment_for_agent`'s
+own selection-time tolerance for that outcome), then adds: capability match, an explicit
+branch+worktree for any `read_write` dispatch, and founder approval — delegated entirely to
+`app.mainai_execution.approval.require_task_approval()`, the real gate, never reimplemented.
+When an assignment has no linked `task_id` but `approval_required` is set, there is no real
+gate to check against yet — fails closed rather than treating "nothing to check" as "approved."
+
+**`dispatch_assignment(db, assignment=, agent=, adapter=, authority_envelope=)`** is the
+`dispatch(agent_id, assignment_id, authority_envelope)` control-plane entry point. Always
+re-runs `evaluate_dispatch_readiness()` immediately before touching the adapter — on failure,
+the adapter is never called and nothing is mutated. `authority_envelope`, if supplied, is
+validated to be a subset of the assignment's own already-narrowed `allowed_paths` — an adapter
+implementation is never trusted to self-limit; this function enforces the boundary itself.
+Transitions `ready -> waiting_agent` (DISPATCHING) before calling the adapter, and only to
+`running` after `adapter.start_assignment()` returns without raising. On
+`ProviderNotConfiguredError`, transitions to `blocked` with a structured
+`REAL_PROVIDER_NOT_CONFIGURED` reason — never silently reports success, never leaves an
+assignment looking like it is running when nothing real happened.
+
+**`app.agent_coordination.adapters.NotConfiguredAdapter`** is the REAL default `AgentAdapter`
+for every provider until a genuine, separately-reviewed Agent Runtime exists — it implements
+the full Protocol shape but every method that would touch an external agent raises
+`ProviderNotConfiguredError`. It opens no subprocess, makes no network call, and reads no
+credential, by construction.
+
+**`DispatchResult`/`apply_dispatch_result()`** is the structured result handoff — base/head
+sha, branch, worktree, changed paths, tests, CI refs, PR ref, duration/cost, all optional and
+recorded verbatim, never interpreted into a fabricated quality score. Recorded through the
+EXISTING `record_assignment_execution()`/`record_assignment_outcome()`/
+`build_agent_outcome_payload()` primitives PR #83 already built, and transitioned through the
+EXISTING state machine (`transition_status()`) — never a raw status write, never a second
+evidence store.
+
+`tests/backend/mainai/test_agent_dispatch_foundation.py`'s
+`test_current_real_world_dispatch_scenario_end_to_end` proves the whole chain against the
+concrete situation this foundation exists to represent: Cursor busy on PR #79/#80's exact
+paths, Claude free after PR #84, Codex idle — Life sees the overlap refused, selects Claude for
+a genuinely unrelated task, creates the dispatch (a real `AgentWorkAssignment`, never a second
+representation), refuses a colliding dispatch attempt again at the gate (defense in depth, not
+just at routing time), dispatches the non-overlapping one through a fake adapter (no real
+provider configured yet), and records its result — all without the assignment's own
+`allowed_paths` ever changing from what was granted at creation.
+
+## REAL AGENT EXECUTION BRIDGE
+
+Moves dispatch from "create a bounded dispatch record" to "actually invoke a real configured
+local CLI agent" — without inventing a credential, without silently widening authority, and
+without ever faking a successful external run. Two pieces, both additive to the dispatch
+foundation above — no new tables, no second adapter registry.
+
+**`app.agent_coordination.adapter_config`** is the founder-controlled enablement boundary,
+five DISTINCT facts about a provider, never conflated: `supported` (this codebase has a real
+adapter registered for the key — a code-level fact, true regardless of the local machine),
+`executable_found` (`shutil.which()` found a binary on THIS machine's PATH — detection only,
+never itself an authorization to invoke it), `credentials_state` (always `"unknown"` unless the
+founder explicitly asserts `"configured"` via
+`LIFE_AGENT_ADAPTER_CREDENTIALS_CONFIRMED__<KEY>` — this module never inspects auth files,
+never runs a status subcommand, never guesses), `enabled` (the founder's own explicit opt-in,
+`LIFE_AGENT_ADAPTER_ENABLED__<KEY>=true`, defaulting to `False` — the ONLY thing that turns
+"code exists" into "code may run"), and `dispatch_authorized` (computed separately, per
+assignment, by `evaluate_dispatch_readiness()` below — out of this module's scope entirely).
+`real_adapter_config()` returns a real `(executable, args_template, timeout_seconds)` tuple
+ONLY when `enabled=True` AND the executable is genuinely found AND the founder has supplied an
+explicit `LIFE_AGENT_ADAPTER_ARGS__<KEY>` invocation template — this module never invents CLI
+flags for Claude Code/Cursor Agent/Codex. No environment variable this module reads is ever a
+credential, secret, or session token — only plain boolean/string configuration flags.
+
+**`app.agent_coordination.adapters.LocalCLIAdapter`** is the ONE bounded, provider-neutral real
+`AgentAdapter` implementation — the SAME subprocess mechanism serves Claude Code, Cursor Agent,
+or Codex, parametrized entirely by `adapter_config`'s own output, never a per-provider
+duplicated implementation. Every invocation is bounded by construction: the assignment's own
+`worktree_path` as an exact `cwd` (never inferred, never this process's own cwd); a real,
+always-present `timeout_seconds` enforced by `asyncio.wait_for()`, with the process killed on
+expiry; list-form `argv` via `asyncio.create_subprocess_exec()` — never `shell=True`, no code
+path capable of unrestricted shell passthrough; a minimized, caller-supplied `env`, never a
+blind inheritance of this process's own full environment. `send_instruction()`/`resume()` are
+deliberately `NotImplementedError` — this is a bounded, single-shot, non-interactive invocation
+(start, wait up to the bound, capture the result), not an interactive session this coordination
+layer would have to trust mid-flight. `get_real_adapter(provider_key, cwd=, env=)` is the
+founder-controlled factory: returns a real `LocalCLIAdapter` only when `real_adapter_config()`
+confirms every precondition, `NotConfiguredAdapter` — the same honest, fail-closed default — in
+every other case; never silently substitutes a fake/mock adapter.
+
+Two new, honest failure signals, distinct from an ordinary non-zero exit (`AgentResult
+.succeeded=False`) and distinct from `ProviderNotConfiguredError` ("never even tried"):
+`AdapterProcessLostError` (the subprocess could not be started, or was being tracked and is no
+longer traceable) and `AdapterTimeoutError` (the subprocess exceeded its configured bound and
+was killed before this is raised). Life must never read either of these as "completed."
+
+**`evaluate_dispatch_readiness(..., require_adapter_enabled=True)`** is an opt-in extra gate
+check (default `False`) — a caller intending to dispatch through a REAL adapter passes `True`
+to also fail closed on `adapter_availability()` for this exact agent: `ADAPTER_DISABLED` when
+the founder has not explicitly enabled it, `ADAPTER_UNAVAILABLE` when enabled but the
+executable was not found. Default `False` deliberately does NOT check this — a caller
+intentionally dispatching through a test-only fake adapter is never forced to also satisfy
+real-adapter configuration that has nothing to do with what it is actually about to call.
+`dispatch_assignment()` distinguishes, never conflates, every crash mode on the START side —
+`ProviderNotConfiguredError`/`AdapterProcessLostError`/`AdapterTimeoutError`/any other
+unanticipated exception — each transitions the assignment to `blocked` with its own specific
+structured reason (never left stuck in `waiting_agent`, which would silently read as "idle" in
+`runtime_view`) before propagating. A fresh `attempt_id` is generated for every genuine
+invocation attempt and returned on the `DispatchDecision`, so a caller can correlate a specific
+attempt with its eventual result even if the same assignment is retried after a failure.
+
+**`collect_dispatch_result()`** is the companion on the COLLECTION side — calls
+`adapter.collect_result()`, distinguishes the same `AdapterProcessLostError`/
+`AdapterTimeoutError` (a process that disappeared or ran over its bound AFTER having started is
+exactly as real a failure as one that never started), and otherwise applies the observed
+`AgentResult` through the EXISTING `apply_dispatch_result()`. `DispatchResult` gained
+`adapter_key`/`dispatch_attempt_id` — which real provider (or `"fake"`/`"not_configured"`)
+actually produced a given result, and which specific attempt it correlates with — merged into
+the existing evidence payload, never a second evidence store.
+
+`tests/backend/mainai/test_agent_real_execution_bridge.py` proves the subprocess MECHANISM
+against harmless, already-installed system binaries (`/bin/echo`, a nonexistent path, a
+deliberately-short-timeout `sleep`) — never against a real coding agent CLI; every real-agent
+adapter stays disabled by default, verified directly against the actual local machine
+(`test_no_real_provider_is_enabled_by_default`). Its own
+`test_current_real_world_dispatch_scenario_with_full_gate_coverage` extends the same concrete
+Cursor-busy/Claude-free/Codex-idle scenario `test_agent_dispatch_foundation.py` already proves,
+additionally exercising every individual gate rejection (path conflict, wrong worktree, missing
+approval, disabled adapter, unavailable adapter, stale base) against real coordination state,
+with the actual dispatch progression still going through the deterministic fake adapter
+(explicitly sanctioned for automated tests) — no real Claude Code/Cursor Agent/Codex invocation
+happens anywhere in this branch's own code paths or tests.
+
+## INTERACTIVE AGENT EXECUTION CONTROL
+
+Extends the start-then-collect dispatch foundation above into a provider-neutral model that
+can track a REAL, long-running agent process/session: output arriving over time, heartbeats,
+an interactive control contract (instruction/status/cancel/resume), and honest
+reconnect/recovery semantics — without inventing a second supervisor and without ever
+fabricating a `completed` status. One new table (migration 0047,
+`agent_dispatch_executions`) plus one new event-type value on the EXISTING
+`agent_work_assignment_events` table (`execution_observed`, a plain CHECK-constraint addition
+— not a native Postgres enum, so no `ALTER TYPE` was needed); no second evidence store, no
+second dispatch gate.
+
+**`app.agent_coordination.execution_control`** is a layer ABOVE `dispatch.py`, never a
+replacement: every function either calls `dispatch.py`'s own already-reviewed functions
+(`dispatch_assignment`, `collect_dispatch_result`) or reads/writes the new
+`AgentDispatchExecution` tracking row that `dispatch.py` itself never touches.
+`WorkAssignmentStatus` (the canonical, coarser state machine `transition_status()` enforces)
+remains the single source of truth for an assignment's own lifecycle; `ExecutionAdapterState`
+(`starting`/`running`/`exited`/`lost`/`timeout`/`cancelled`) tracks the finer-grained,
+per-ATTEMPT process/session state underneath it — the two are kept in sync by this module's
+own functions, never left to drift independently.
+
+**Output streaming** (`ExecutionEvent`/`record_execution_event()`): structured event kinds
+(`status`/`progress`/`tool_action`/`heartbeat`/`partial_result`/`final_result`) are ALWAYS
+persisted as a durable `execution_observed` `AgentWorkAssignmentEvent` — the same
+append-only, RLS-protected, trigger-enforced history every other assignment event already
+goes through. Raw `stdout`/`stderr` is, by default, NOT persisted this way — only its ARRIVAL
+TIME updates `AgentDispatchExecution.last_output_at` — because a real CLI agent's raw output
+can be arbitrarily large and high-frequency; a caller may pass `persist=True` explicitly for
+a specific chunk it wants durable, an opt-in exception, never the default. Does not pretend
+every provider exposes the same fidelity — an event `kind` this module does not recognize is
+still accepted, just treated as ephemeral unless the caller forces it durable.
+
+**Interactive control contract** (`AdapterCapabilities`, `send_execution_instruction()`/
+`request_execution_status()`/`cancel_execution()`/`resume_execution()`): every adapter
+declares its own truthful `control_capabilities()` — `supports_streaming`/
+`supports_instruction`/`supports_resume`/`supports_cancel`/`supports_structured_events`.
+`send_execution_instruction()`/`cancel_execution()`/`resume_execution()` check the relevant
+flag BEFORE ever calling the adapter's own method — an unsupported operation returns a
+structured `ControlOutcome(OUTCOME_UNSUPPORTED_CAPABILITY, ...)`, never a raised
+`NotImplementedError` a caller has to specifically catch, and never a silent no-op.
+`request_execution_status()` is the one exception — `observe()` is part of the BASE
+`AgentAdapter` Protocol, not capability-gated (there is no `supports_status` flag by design);
+its own honest refusal (e.g. `ProviderNotConfiguredError`) still propagates straight through.
+`LocalCLIAdapter` truthfully declares only `supports_cancel=True` (a real `SIGTERM` against
+its own tracked, still-running process) — single-shot/non-interactive by construction, exactly
+as its own docstring already said; `NotConfiguredAdapter` declares every flag `False`.
+
+**Long-running process tracking** (`AgentDispatchExecution`, migration 0047): one live,
+mutable row per dispatch ATTEMPT — distinct from `AgentWorkAssignmentEvent` (append-only
+history) the same way `AgentScopeLease` is distinct from `AgentWorkAssignment`. Correlates
+with `dispatch.DispatchDecision.attempt_id`; `start_execution_tracking()` is called only after
+`dispatch_assignment()` returns its actual `OUTCOME_ASSIGNABLE` success outcome — `attempt_id`
+itself is generated BEFORE `adapter.start_assignment()` is even attempted (so a crashed start
+still correlates its own `blocked` transition with a specific attempt id), but nothing gets a
+tracking row unless something genuinely started running. `process_ref` is an opaque,
+adapter-supplied identifier (a PID, a session token STRING) — informational/correlation only,
+never a credential, exactly like `CoordinationAgent.model_hint`.
+
+**Reconnect / recovery** (`reconcile_execution_state()`): observes and classifies only —
+process still alive / exited-but-not-yet-ingested / exited-and-already-ingested / adapter
+disconnected (never configured) / session lost (a tracked process no longer traceable, e.g.
+after a backend restart) / result unavailable (never actually started). NEVER changes
+`AgentWorkAssignment.status` itself — only `collect_dispatch_result()` (via
+`apply_dispatch_result()`) is ever allowed to advance an assignment to `completed`, exactly
+like `evaluate_dispatch_readiness()` never dispatches anything itself. No false COMPLETE is
+possible through this function by construction.
+
+**Collection-side wrapper** (`collect_and_ingest_execution_result()`): calls
+`dispatch.collect_dispatch_result()` (never reimplements its own crash handling) and mirrors
+the outcome onto the tracking row — `adapter_state`/`result_ingestion_status` set to
+`lost`/`timeout`/`failed` on a crash, `exited`/`ingested` on success. If
+`collect_dispatch_result()` itself raises (a genuine "agent completed but result ingestion
+failed" case), marks `result_ingestion_status=failed` and re-raises — the caller's own
+transaction boundary still decides what happens next.
+
+**Founder-controlled credential/config interface** (`adapter_config.credential_reference()`/
+`resolve_adapter_env()`): `credential_reference(provider_key)` returns an opaque, founder-
+supplied LABEL (e.g. `"vault:codex-oauth"`) via `LIFE_AGENT_ADAPTER_CREDENTIAL_REF__<KEY>` —
+never a secret; `None` means "unresolved / config-required," since this codebase has no
+secret-storage backend of any kind. `resolve_adapter_env(provider_key)` selectively forwards
+ONLY the ambient environment variable NAMES the founder explicitly allowlists via
+`LIFE_AGENT_ADAPTER_ENV_ALLOWLIST__<KEY>` (comma-separated names, never values) — never a
+blind inheritance of the whole process environment; `get_real_adapter()` now defaults to this
+allowlist whenever a caller omits `env` explicitly (passing `env={}` still means "nothing at
+all," unchanged from before).
+
+`tests/backend/mainai/test_agent_execution_control.py` proves the full control loop using a
+deterministic, fully-capable fake adapter (`_FakeStreamingAgentAdapter`, clearly labelled,
+never in production code) for the streaming/instruction/cancel/resume path, and
+`LocalCLIAdapter` against harmless, already-installed system binaries (`/usr/bin/true`,
+`/bin/sleep`, a nonexistent path) for the lost-process and timeout paths — a genuinely real
+subprocess mechanism, never a real coding-agent CLI. No real Claude Code/Cursor Agent/Codex
+invocation happens anywhere in this file.
+
+## FUTURE AGENT RUNTIME INTEGRATION (still explicitly deferred)
 
 `app.agent_coordination.adapters.AgentAdapter` is a `typing.Protocol` (not a base class
 instances are required to inherit from), the same pattern
 `app.provider_planning.service.PlanningAdapter` already establishes for provider-assisted
-planning. A concrete implementation — actually driving Claude Code/Cursor Agent/Codex CLIs or
-APIs against an assignment — is deliberately out of scope for this foundation PR. It would need
-its own, separately reviewed PR to add: process/session management, credential handling
-(outside this codebase entirely), output streaming, and cancellation semantics. None of that
-belongs in a coordination-layer foundation whose entire job is bookkeeping and conflict
-prevention, not execution.
+planning. `LocalCLIAdapter` above is the one bounded, provider-neutral REAL mechanism this
+codebase implements — but it remains fully inert for every real provider until the founder
+explicitly supplies `LIFE_AGENT_ADAPTER_ENABLED__<KEY>=true` AND a real
+`LIFE_AGENT_ADAPTER_ARGS__<KEY>` invocation template; `NotConfiguredAdapter` stays the honest,
+fail-closed default until then. The provider-neutral output-streaming/interactive-control/
+reconnect MECHANISM now exists (see "Interactive Agent Execution Control" above) and
+`LocalCLIAdapter` truthfully participates in it (declaring only `supports_cancel=True`) — but
+no REAL provider today declares `supports_streaming`/`supports_instruction`/`supports_resume`;
+that would require either a genuinely interactive real adapter implementation (a future,
+separately-reviewed PR) or a provider CLI that itself exposes a resumable session this
+codebase could drive. Credential handling remains entirely outside this codebase — this
+module never reads, stores, or references a secret, only an opaque reference LABEL (see
+`credential_reference()` above). None of that belongs in a coordination-layer foundation whose
+entire job is bookkeeping, conflict prevention, and bounded dispatch orchestration — never
+unbounded or unattended execution.
 
 ## EXPLICITLY DEFERRED
 
-- Actually invoking a real external agent (see "Future Agent Runtime integration").
+- Actually enabling a real external agent for genuine use (mechanism exists via
+  `LocalCLIAdapter`; see "Real Agent Execution Bridge" — every provider stays disabled until the
+  founder explicitly configures it).
+- A REAL provider adapter that declares `supports_streaming`/`supports_instruction`/
+  `supports_resume=True` — the provider-neutral mechanism exists (see "Interactive Agent
+  Execution Control"), but no current adapter implementation is genuinely interactive;
+  `LocalCLIAdapter` stays single-shot/non-interactive by construction.
+- Actual secret storage/resolution for `credential_reference()`'s own opaque labels — this
+  module represents the reference boundary only; resolving a label into a usable credential is
+  a distinct, not-yet-built subsystem this module deliberately does not reach into.
+- Output streaming, interactive mid-run instructions, and provider-specific invocation shapes
+  beyond a founder-supplied `args_template` (see "Future Agent Runtime integration").
 - Automatic synthesis/selection of a winner across a parallel-exploration group — resolution is
   always a later, explicit action.
 - Automatic merge, deploy, or push of any kind.
@@ -239,3 +538,5 @@ prevention, not execution.
   most recent `last_heartbeat_at` across an agent's own active leases (per-lease heartbeats
   already exist); a dedicated agent-level column would be a second source of truth for
   information the lease table already carries.
+- Wiring `bootstrap_known_agents()` into automatic application boot — remains an explicit,
+  founder-invoked action; see that function's own module docstring for why.
