@@ -73,6 +73,25 @@ erasure call has, even though `source_entity_id`'s own `ON DELETE CASCADE` from
 `project_entities` would also remove these rows once that foundation's own erasure runs.
 Behavioral RLS proven in `tests/security/test_rls_isolation_work_candidates.py`.
 
+## Post-merge hardening (migration 0056)
+
+A founder adversarial review of migration 0054 found an owner-anchoring defect (see
+`docs/LIFE_PROJECT_ENTITIES_INTERPRETATION.md`'s own "Post-merge hardening" section for the
+full writeup). Applying the SAME check to this foundation's own `source_entity_id` -- a
+caller-supplied parameter to `record_work_candidate()`, structurally identical to the ones
+already fixed -- found it had the same bare-FK gap. Fixed in the same migration 0056:
+`source_entity_id` is now owner-anchored via a composite FK to `project_entities(id,
+owner_id)`, plus fail-closed validation in `record_work_candidate()` itself.
+
+`authorized_goal_id` was deliberately left as a bare FK, not an oversight: unlike
+`source_entity_id`, this column is never caller-supplied -- `authorize_work_candidate()` sets
+it only from a `MainAIGoal` row that SAME function call just created via `create_goal(db,
+owner_id=owner_id, ...)`, with the identical `owner_id` already in scope, so it cannot
+structurally diverge from the work candidate's own owner. `mainai_goals` also has no
+`UNIQUE(id, owner_id)` constraint to anchor against, and adding one would touch a much older,
+more central, more actively-used table for a reference that carries no actual cross-owner
+risk.
+
 ## Explicitly deferred (not built in this migration)
 
 - **No automatic authorization** -- `authorize_work_candidate()` always requires an explicit,

@@ -161,3 +161,16 @@ def test_authorizing_or_dismissing_a_candidate_belonging_to_another_owner_fails_
         dismiss_work_candidate(superuser_db, owner_id=owner_b.id, candidate_id=candidate.id, reason="not mine")
     with pytest.raises(WorkCandidateError):
         authorize_work_candidate(superuser_db, owner_id=owner_b.id, candidate_id=candidate.id, authorized_by="founder")
+
+
+def test_recording_a_work_candidate_for_another_owners_entity_fails_closed(superuser_db):
+    """Same defect class as project_entities/interpretation_proposals (migration 0056):
+    source_entity_id is caller-supplied, so it must be owner-anchored -- a bare FK only
+    proves the referenced entity exists, not that it belongs to the same owner."""
+
+    owner_a, entity_a = _owner_with_entity(superuser_db)
+    owner_b, _ = _owner_with_entity(superuser_db)
+    superuser_db.commit()
+
+    with pytest.raises(WorkCandidateError):
+        record_work_candidate(superuser_db, owner_id=owner_b.id, source_entity_id=entity_a.id, title="stolen", idempotency_key="xowner-wc-1")

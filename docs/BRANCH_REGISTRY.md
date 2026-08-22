@@ -6,6 +6,61 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 74 (2026-08-21): `claude/project-entities-integrity-hardening` — Owner-Anchored Reference Integrity + Supersession Contract Fix (migration 0056), grenad direkt från integrationsgrenen @ `01a2563` (PR #139 mergad), adversarial fix-forward på redan mergade PR #138/#139
+
+**Bakgrund:** grundaren granskade PR #138 direkt i GitHub (inte bara min terminaltext) och
+hittade två konkreta fel — men PR #138 OCH #139 hade redan hunnit mergas innan granskningen
+kom fram. Detta är alltså en fix-forward, inte ett stopp-innan-merge.
+
+**Fynd 1 — cross-owner-referenser var inte strukturellt låsta:**
+`interpretation_proposals.source_claim_id`, `project_entities.derived_from_claim_id`, och
+`project_entity_relationships.from_entity_id`/`to_entity_id` använde bara (icke-composite)
+FK:er — exakt den felklass `app/models/knowledge_claim.py`s egen moduldocstring redan
+dokumenterar och åtgärdar för `memory_source_id`: en bar FK bevisar att den refererade raden
+finns, INTE att den tillhör samma ägare. `project_entity_relationships` hade kopierat
+`claim_relationships` (migration 0007, som föregår detta uppdrags egen ägar-förankrings-
+disciplin)s äldre, lösare mönster. **"Existing precedent" är inte automatiskt "correct
+precedent."** De befintliga RLS-testerna bevisade INTE detta — de testar att en användare
+inte kan skriva en rad med en annan ägares `owner_id`, inte att raden inte kan referera en
+annan ägares objekt via UUID; en annan attack.
+
+**Fixat:** migration 0056 lägger till `UNIQUE(id, owner_id)` på `knowledge_claims` och byter
+alla fyra referenser till composite ägar-förankrade FK:er. Service-lager fick också explicit
+fail-closed-validering (tydligare fel, DB-constraint förblir sista spärren). 6 nya
+adversariella tester — 3 på service-nivå, 3 direkt mot den begränsade DB-rollen — bevisar att
+attacken nu blockeras på båda nivåerna.
+
+**Fynd 2 — supersession-kontraktet sa en sak, gjorde en annan:**
+`mark_project_entity_superseded(..., superseded_by_entity_id=...)` accepterade parametern men
+använde den ALDRIG i funktionskroppen. `promote_interpretation_proposal()` saknade helt en
+`supersedes_entity_id`-parameter att skicka igenom, trots att docstringen uttryckligen sa att
+den skulle användas så. Resultat: det ursprungliga testet kunde bli grönt samtidigt som den
+faktiska historikkanten (`new.supersedes_entity_id == old.id`) aldrig skapades — ett
+`TEST PASSES != SEMANTIC CONTRACT WORKS`-fel.
+
+**Fixat:** `promote_interpretation_proposal()` tar nu emot `supersedes_entity_id` (validerad
+mot samma ägare, fail-closed). `mark_project_entity_superseded()` VERIFIERAR nu att den nya
+entitetens `supersedes_entity_id` faktiskt pekar tillbaka på den gamla raden innan status
+flippas — litar inte längre på anroparens egen bokföring. De två ursprungliga testerna
+uppdaterade för att faktiskt skicka länken; ett nytt regressionstest bevisar fail-closed-
+beteendet när länken aldrig sattes.
+
+**Verifiering:** `ruff check app/` identisk med baseline (0 nya fel), `alembic heads` enda
+huvud `0056` (downgrade/upgrade round-trip testad), `git diff --check` ren, 42 tester gröna
+i de direkt berörda testfilerna (inklusive de 9 nya/fixade), full
+`tests/backend/mainai/` + `tests/security/` + `tests/backend/rag/`-regression körd.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Noll filöverlapp med Cursors fyra öppna PR:er (#132/#133/#134/#136).
+
+**Beroenden:** Grenad direkt från integrationsgrenen `claude/det-kommer-mer-879lcm` @
+`01a2563` (efter att PR #139 faktiskt mergats).
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/project-entities-integrity-hardening` | (öppnas) | Lokalt verifierad, redo att pushas | Owner-anchored composite FKs (migration 0056) för `interpretation_proposals`/`project_entities`/`project_entity_relationships` + fixat supersession-kontrakt + 9 nya/fixade tester | `claude/det-kommer-mer-879lcm` @ 01a2563 |
+
 ## Pass 73 (2026-08-21): `claude/work-candidates-goal-bridge` — Work Candidates / Knowledge→Goal Bridge (migration 0055), grenad direkt från integrationsgrenen @ `71c39a8` (PR #138 mergad), andra steget i "COMPOSED SYSTEM CLOSING PHASE"
 
 **Bakgrund:** PR #138 (Pass 72, Project Entities/Interpretation Queue) mergad @ `71c39a8`.

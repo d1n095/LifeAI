@@ -83,3 +83,25 @@ def test_cannot_write_a_work_candidate_for_another_user(db_session, make_verifie
         assert False, "insert should have been rejected by work_candidates_isolation's WITH CHECK"
     except Exception:
         db_session.rollback()
+
+
+def test_cannot_reference_another_owners_entity_from_a_work_candidate(db_session, make_verified_user):
+    """Distinct from the cross-owner ROW test above: this constructs owner_id=A (matching the
+    RLS session, passes WITH CHECK) but source_entity_id pointing at owner B's entity --
+    proves the composite owner-anchored FK (migration 0056) is the real backstop, not just
+    RLS on the child row's own owner_id."""
+
+    user_a, _ = make_verified_user()
+    user_b, _ = make_verified_user()
+
+    _set_rls_user(db_session, user_b.id)
+    entity_b = _entity_for(db_session, user_b.id)
+    db_session.commit()
+
+    _set_rls_user(db_session, user_a.id)
+    db_session.add(WorkCandidate(owner_id=user_a.id, source_entity_id=entity_b.id, title="x", idempotency_key="rls-xref-wc"))
+    try:
+        db_session.commit()
+        assert False, "insert should have been rejected by the composite owner-anchored FK (migration 0056)"
+    except Exception:
+        db_session.rollback()

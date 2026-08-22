@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.knowledge_claim import KnowledgeClaim
 from app.models.project_entities import InterpretationProposal, ProjectEntity, ProjectEntityRelationship
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,15 @@ def record_interpretation_proposal(
     `app/rag/claims.py`'s own `extract_claims_for_document()` integration): this function
     never raises for "the proposal turned out to be noise" -- that judgment happens later,
     explicitly, via `dismiss_interpretation_proposal()`/`promote_interpretation_proposal()`,
-    never here."""
+    never here.
+
+    Fails closed BEFORE any write if `source_claim_id` does not structurally belong to
+    `owner_id` -- a clear, typed error here, with the database's own composite FK (migration
+    0056) as the final backstop regardless of what this check does or doesn't catch."""
+
+    claim = db.execute(select(KnowledgeClaim).where(KnowledgeClaim.id == source_claim_id, KnowledgeClaim.owner_id == owner_id)).scalar_one_or_none()
+    if claim is None:
+        raise ProjectEntityError(f"source_claim_id={source_claim_id} does not belong to owner_id={owner_id}")
 
     values: dict[str, Any] = dict(
         source_claim_id=source_claim_id, proposed_entity_type=proposed_entity_type,
@@ -151,6 +160,7 @@ def promote_interpretation_proposal(
     confidence: float | None = None,
     decided_by: str | None = None,
     decided_at: datetime | None = None,
+    supersedes_entity_id: uuid.UUID | None = None,
 ) -> tuple[InterpretationProposal, ProjectEntity]:
     """The ONLY path from an interpretation proposal to real project understanding -- SIGNAL
     PRODUCER != TRUTH WRITER enforced here, not just in the schema's own CHECK constraint.
@@ -161,7 +171,14 @@ def promote_interpretation_proposal(
     same way `app.founder_memory_signals.promote_candidate_signal()` already requires. `title`/
     `summary` are likewise always caller-supplied, never auto-derived from the claim's raw
     text -- a reviewer may summarize, quote verbatim, or add context; either way it is a
-    deliberate, reviewed act of writing, not a copy."""
+    deliberate, reviewed act of writing, not a copy.
+
+    `supersedes_entity_id`, when given, must reference an EXISTING entity belonging to the
+    SAME owner (fails closed otherwise, before any write) -- this is how the new entity's own
+    `supersedes_entity_id` column actually gets set. Pass the same id to
+    `mark_project_entity_superseded()` afterward to flip the OLD entity's status; that function
+    now verifies the new entity's `supersedes_entity_id` genuinely points back at it before
+    doing so, rather than trusting the caller's own bookkeeping."""
 
     row = db.execute(
         select(InterpretationProposal).where(InterpretationProposal.id == proposal_id, InterpretationProposal.owner_id == owner_id).with_for_update()
@@ -171,11 +188,18 @@ def promote_interpretation_proposal(
     if row.status != "unreviewed":
         raise ProjectEntityError(f"interpretation proposal is already {row.status}, not unreviewed")
 
+    if supersedes_entity_id is not None:
+        superseded_entity = db.execute(
+            select(ProjectEntity).where(ProjectEntity.id == supersedes_entity_id, ProjectEntity.owner_id == owner_id)
+        ).scalar_one_or_none()
+        if superseded_entity is None:
+            raise ProjectEntityError(f"supersedes_entity_id={supersedes_entity_id} does not belong to owner_id={owner_id}")
+
     entity = ProjectEntity(
         owner_id=owner_id, entity_type=entity_type, title=title, summary=summary,
         derived_from_claim_id=row.source_claim_id, idempotency_key=entity_idempotency_key,
         authority=authority, basis=basis, confidence=confidence,
-        decided_by=decided_by, decided_at=decided_at,
+        decided_by=decided_by, decided_at=decided_at, supersedes_entity_id=supersedes_entity_id,
         provenance={"promoted_from_interpretation_proposal_id": str(row.id)},
     )
     db.add(entity)
@@ -223,17 +247,33 @@ def list_current_project_entities(db: Session, *, owner_id: uuid.UUID, entity_ty
 
 def mark_project_entity_superseded(db: Session, *, owner_id: uuid.UUID, entity_id: uuid.UUID, superseded_by_entity_id: uuid.UUID) -> ProjectEntity:
     """Marks an entity as `superseded` -- never deletes or mutates its own content, matching
-    every other "derived knowledge" foundation's supersession discipline. The NEW entity is
-    expected to already exist and set its own `supersedes_entity_id` to this row's id; this
-    function only flips the OLD row's status, it does not create the new row itself (that is
-    an ordinary `record_interpretation_proposal()` -> `promote_interpretation_proposal()` pass
-    with `supersedes_entity_id` passed through)."""
+    every other "derived knowledge" foundation's supersession discipline. The NEW entity must
+    ALREADY exist, belong to the same owner, and have its own `supersedes_entity_id` already
+    set to this row's id (pass `supersedes_entity_id=entity_id` to
+    `promote_interpretation_proposal()` when creating it) -- this function VERIFIES that
+    durable new->old link actually exists before flipping the old row's status, it does not
+    set the link itself and does not trust the caller's own bookkeeping. Previously this
+    parameter was accepted but silently ignored, letting a test (or a real caller) believe the
+    historical edge existed when it never did -- fixed to fail closed instead."""
 
     row = db.execute(
         select(ProjectEntity).where(ProjectEntity.id == entity_id, ProjectEntity.owner_id == owner_id).with_for_update()
     ).scalar_one_or_none()
     if row is None:
         raise ProjectEntityError("project entity is missing or belongs to another owner")
+
+    superseding_entity = db.execute(
+        select(ProjectEntity).where(ProjectEntity.id == superseded_by_entity_id, ProjectEntity.owner_id == owner_id)
+    ).scalar_one_or_none()
+    if superseding_entity is None:
+        raise ProjectEntityError(f"superseded_by_entity_id={superseded_by_entity_id} does not belong to owner_id={owner_id}")
+    if superseding_entity.supersedes_entity_id != row.id:
+        raise ProjectEntityError(
+            f"entity {superseded_by_entity_id} does not declare supersedes_entity_id={row.id} "
+            f"(got {superseding_entity.supersedes_entity_id}) -- pass supersedes_entity_id={row.id} "
+            f"to promote_interpretation_proposal() when creating the superseding entity"
+        )
+
     row.status = "superseded"
     row.updated_at = datetime.utcnow()
     db.flush()
@@ -243,8 +283,15 @@ def mark_project_entity_superseded(db: Session, *, owner_id: uuid.UUID, entity_i
 def record_entity_relationship(
     db: Session, *, owner_id: uuid.UUID, from_entity_id: uuid.UUID, to_entity_id: uuid.UUID, relationship_type: str, note: str | None = None,
 ) -> ProjectEntityRelationship:
+    """Fails closed BEFORE any write if either endpoint does not structurally belong to
+    `owner_id` -- a clear, typed error here, with the database's own composite FK (migration
+    0056) as the final backstop."""
+
     if from_entity_id == to_entity_id:
         raise ProjectEntityError("a project entity cannot have a relationship to itself")
+    for label, entity_id in (("from_entity_id", from_entity_id), ("to_entity_id", to_entity_id)):
+        if db.execute(select(ProjectEntity.id).where(ProjectEntity.id == entity_id, ProjectEntity.owner_id == owner_id)).scalar_one_or_none() is None:
+            raise ProjectEntityError(f"{label}={entity_id} does not belong to owner_id={owner_id}")
     row = ProjectEntityRelationship(
         owner_id=owner_id, from_entity_id=from_entity_id, to_entity_id=to_entity_id,
         relationship_type=relationship_type, note=note,
