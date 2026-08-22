@@ -487,9 +487,56 @@ _MAINAI_EXECUTION_TABLES = (
     "agent_work_assignment_dependencies",
     "agent_scope_leases",
     "agent_work_assignment_events",
+    # Migration 0047 (Interactive Agent Execution Control): agent_dispatch_executions is an
+    # ordinary mutable table (same baseline-CRUD, ownership-only treatment as
+    # agent_scope_leases above) -- it is NOT append-only, so it needs no privilege-narrowing
+    # entry in the loop below.
+    "agent_dispatch_executions",
+    # Migration 0048 (Life Capability Reality / Self-Model): capability_records is an ordinary
+    # mutable table (same baseline-CRUD, ownership-only treatment as agent_dispatch_executions
+    # above); capability_observation_events is append-only and privilege-narrowed below exactly
+    # like agent_work_assignment_events, wired in the same migration that creates it.
+    "capability_records",
+    "capability_observation_events",
+    # Migration 0049 (Life Founder/User Memory): founder_memory_notes plays the SAME structural
+    # role life_problem_decisions already plays -- privilege-narrowed the same way (DELETE
+    # revoked, UPDATE kept for status transitions) since both are history-preserving fact
+    # records where deletion must go exclusively through the SECURITY DEFINER erasure path.
+    "founder_memory_notes",
+    # Migration 0050 (Life Causal Diagnosis Interface): diagnosis_records plays the SAME
+    # structural role founder_memory_notes/life_problem_decisions already play -- same
+    # privilege narrowing (DELETE revoked, UPDATE kept for epistemic_stage transitions).
+    "diagnosis_records",
+    # Migration 0052 (Life Corpus Trial Run History): corpus_trial_runs is append-only, same
+    # structural role capability_observation_events/agent_work_assignment_events already play
+    # -- privilege-narrowed below exactly like them (DB trigger enforces append-only, not just
+    # GRANT/REVOKE), wired in the same migration that creates it.
+    "corpus_trial_runs",
+    # Migration 0053 (Life Candidate Learning Signals): candidate_learning_signals plays the
+    # SAME structural role founder_memory_notes/diagnosis_records already play -- a mutable row
+    # whose status transitions in place (unreviewed -> promoted/dismissed), never rewritten
+    # content, deletion only through the SECURITY DEFINER erasure path.
+    "candidate_learning_signals",
+    # Migration 0054 (Life Project Entities / Interpretation Queue): project_entities and
+    # interpretation_proposals play the SAME structural role founder_memory_notes/
+    # candidate_learning_signals already play -- mutable rows whose status transitions in
+    # place, deletion only through the SECURITY DEFINER erasure path.
+    # project_entity_relationships is append-only (an edge either exists or it doesn't, same
+    # treatment as capability_observation_events/agent_work_assignment_events), cleaned up
+    # only via ON DELETE CASCADE from project_entities' own erasure.
+    "project_entities",
+    "interpretation_proposals",
+    "project_entity_relationships",
+    # Migration 0055 (Life Work Candidates): work_candidates plays the SAME structural role
+    # founder_memory_notes/project_entities already play -- a mutable row whose status
+    # transitions in place (unreviewed -> authorized/dismissed/superseded), never rewritten
+    # content, deletion only through the SECURITY DEFINER erasure path.
+    "work_candidates",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
+_CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
+_CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
@@ -562,6 +609,19 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "name": "agent_work_assignment_events_deny_mutation", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
+    {"name": "erase_own_capability_reality_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "capability_observation_events_deny_mutation", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {"name": "erase_own_founder_memory_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_diagnosis_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_corpus_trial_run_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "corpus_trial_runs_deny_mutation", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {"name": "erase_own_candidate_learning_signal_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -846,6 +906,22 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON agent_work_assignment_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_agent_coordination_children() TO mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON capability_observation_events FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_capability_reality_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_memory_notes FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_founder_memory_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON diagnosis_records FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_diagnosis_children() TO mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON corpus_trial_runs FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_corpus_trial_run_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON candidate_learning_signals FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_candidate_learning_signal_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entities FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON interpretation_proposals FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entity_relationships FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_project_entities_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_candidates FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_work_candidates_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -898,6 +974,15 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 "strategy_synthesis_inputs", "strategy_synthesis_materializations",
                 "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")),
             ("agent_work_assignment_events", _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES),
+            ("capability_observation_events", _CAPABILITY_OBSERVATION_EVENTS_ALLOWED_PRIVILEGES),
+            ("founder_memory_notes", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("diagnosis_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("corpus_trial_runs", _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES),
+            ("candidate_learning_signals", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("project_entities", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("interpretation_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),
+            ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

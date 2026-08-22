@@ -24,12 +24,41 @@ from app.models.active_context import (
     ContextMemberState,
 )
 from app.models.audit import AuditLog
+from app.models.capability_reality import (
+    CAPABILITY_AUTHORITIES,
+    CAPABILITY_OBSERVATION_EVENT_TYPES,
+    CAPABILITY_STATUSES,
+    CapabilityObservationEvent,
+    CapabilityRecord,
+)
+from app.models.candidate_learning_signal import (
+    CANDIDATE_SIGNAL_CONFIDENCES,
+    CANDIDATE_SIGNAL_KINDS,
+    CANDIDATE_SIGNAL_SOURCE_TYPES,
+    CANDIDATE_SIGNAL_STATUSES,
+    CandidateLearningSignal,
+)
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
+from app.models.corpus_trial_run import CorpusTrialRun
+from app.models.diagnosis import (
+    DIAGNOSIS_AUTHORITIES,
+    DIAGNOSIS_BASES,
+    DIAGNOSIS_CATEGORIES,
+    DIAGNOSIS_EPISTEMIC_STAGES,
+    DiagnosisRecord,
+)
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
+from app.models.founder_memory import (
+    FOUNDER_MEMORY_AUTHORITIES,
+    FOUNDER_MEMORY_BASES,
+    FOUNDER_MEMORY_NOTE_STATUSES,
+    FOUNDER_MEMORY_NOTE_TYPES,
+    FounderMemoryNote,
+)
 from app.models.import_job import ImportJob
 from app.models.intelligence_governance import (
     ClassificationBasis,
@@ -118,6 +147,7 @@ from app.models.memory_thread import (
 )
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
+from app.models.project_entities import InterpretationProposal, ProjectEntity, ProjectEntityRelationship
 from app.models.project_memory import ProjectBranchPRStatus, ProjectCheckpoint, ProjectCheckpointNote, ProjectNote, ProjectSource
 from app.models.problem_learning import (
     LifeApproachOutcome, LifeComponentEvaluation, LifeProblem, LifeProblemApproach,
@@ -151,6 +181,7 @@ from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
 from app.models.user import User
+from app.models.work_candidate import WorkCandidate
 from app.models.work_intelligence import (
     WorkEfficiencyObservation, WorkSpecialistContribution, WorkStoppingDecision,
     WorkStrategy, WorkStrategyExecution, WorkStrategyFinding, WorkStrategyLessonLink,
@@ -184,13 +215,34 @@ __all__ = [
     "ContextBasis",
     "ContextMemberState",
     "AuditLog",
+    "CAPABILITY_AUTHORITIES",
+    "CAPABILITY_OBSERVATION_EVENT_TYPES",
+    "CAPABILITY_STATUSES",
+    "CapabilityObservationEvent",
+    "CapabilityRecord",
+    "CANDIDATE_SIGNAL_CONFIDENCES",
+    "CANDIDATE_SIGNAL_KINDS",
+    "CANDIDATE_SIGNAL_SOURCE_TYPES",
+    "CANDIDATE_SIGNAL_STATUSES",
+    "CandidateLearningSignal",
     "ClaimRelationship",
     "CompanyInfo",
     "Conversation",
     "Message",
+    "CorpusTrialRun",
+    "DIAGNOSIS_AUTHORITIES",
+    "DIAGNOSIS_BASES",
+    "DIAGNOSIS_CATEGORIES",
+    "DIAGNOSIS_EPISTEMIC_STAGES",
+    "DiagnosisRecord",
     "Document",
     "DocumentChunk",
     "EmailVerificationToken",
+    "FOUNDER_MEMORY_AUTHORITIES",
+    "FOUNDER_MEMORY_BASES",
+    "FOUNDER_MEMORY_NOTE_STATUSES",
+    "FOUNDER_MEMORY_NOTE_TYPES",
+    "FounderMemoryNote",
     "ImportJob",
     "ClassificationBasis",
     "ExecutionRole",
@@ -276,6 +328,10 @@ __all__ = [
     "PasswordResetToken",
     "Project",
     "Task",
+    "ProjectEntity",
+    "WorkCandidate",
+    "ProjectEntityRelationship",
+    "InterpretationProposal",
     "ProjectBranchPRStatus",
     "ProjectCheckpoint",
     "ProjectCheckpointNote",
