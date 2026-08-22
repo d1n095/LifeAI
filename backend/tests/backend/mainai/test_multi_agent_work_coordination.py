@@ -528,7 +528,15 @@ def test_no_automatic_merge_or_deploy_capability():
     method_names = {name for name in dir(adapters_module.AgentAdapter) if not name.startswith("_")}
     forbidden = {"merge", "deploy", "push", "force_push", "delete_branch"}
     assert method_names.isdisjoint(forbidden)
-    assert method_names == {"health", "capabilities", "start_assignment", "send_instruction", "observe", "cancel", "resume", "collect_result"}
+    # Migration 0047 (Interactive Agent Execution Control) added exactly ONE new, deliberately
+    # reviewed method -- control_capabilities() (a declarative capability query, never itself
+    # an authority to act) -- see app.agent_coordination.adapters.AdapterCapabilities and
+    # docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md's own "Interactive Agent Execution Control"
+    # section. This exact-set assertion exists precisely so a FUTURE addition still requires
+    # this same deliberate acknowledgment, not a silent expansion.
+    assert method_names == {
+        "health", "capabilities", "control_capabilities", "start_assignment", "send_instruction", "observe", "cancel", "resume", "collect_result",
+    }
 
 
 # ============================================================================ 25: evidence

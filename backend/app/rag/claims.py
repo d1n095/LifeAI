@@ -9,6 +9,7 @@ tests/backend/rag/test_claims.py's deterministic fake chat provider).
 """
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -21,9 +22,39 @@ from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.memory_source_unit import SnapshotStatus
+from app.project_entities import record_interpretation_proposal
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
+
+logger = logging.getLogger(__name__)
+
+# The subset of ClaimType this codebase's own plan (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md
+# §4.1's own claim_type docstring cross-reference) says P4's interpretation queue should route
+# into project_entities -- vision/technical/historical/uncategorized stay plain facts, never
+# proposed as project entities.
+_INTERPRETATION_WORTHY_CLAIM_TYPES = {ClaimType.idea, ClaimType.decision, ClaimType.task_reference}
+
+
+def _record_interpretation_proposal_if_worth_noticing(db: Session, *, owner_id: uuid.UUID, claim: KnowledgeClaim) -> None:
+    """Purely observational, same doctrine as app/routers/chat.py's own candidate-signal
+    integration: never changes claim extraction's own result, never raises into the caller.
+    Writes ONLY to interpretation_proposals -- a staging table nothing treats as project truth
+    -- never to project_entities. See docs/LIFE_PROJECT_ENTITIES_INTERPRETATION.md's
+    architecture section: SIGNAL PRODUCER != TRUTH WRITER."""
+
+    if claim.claim_type not in _INTERPRETATION_WORTHY_CLAIM_TYPES:
+        return
+    try:
+        record_interpretation_proposal(
+            db, owner_id=owner_id, source_claim_id=claim.id, proposed_entity_type=claim.claim_type.value,
+            classifier_strategy="claim_type_extraction_v1", classifier_confidence=claim.confidence.value,
+            idempotency_key=f"claim-extraction:{claim.id}",
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("failed to record interpretation proposal for claim %s (non-fatal)", claim.id, exc_info=True)
 
 
 class ClaimExtractionIntegrityError(RuntimeError):
@@ -259,6 +290,8 @@ async def extract_claims_for_document(
 
     if created:
         db.commit()
+        for claim in created:
+            _record_interpretation_proposal_if_worth_noticing(db, owner_id=owner_id, claim=claim)
     return created
 
 
