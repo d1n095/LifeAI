@@ -262,13 +262,28 @@ def generate_goal_report(db: Session, *, goal_id: uuid.UUID) -> dict:
     }
 
 
+_WAITING_TASK_STATUSES = frozenset({MainAITaskStatus.waiting_ci, MainAITaskStatus.waiting_external})
+
+
 def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
     """Computes the report and, ONLY if every task has reached a genuinely terminal status
     (completed/failed/cancelled -- retryable_failed is deliberately excluded: it is still
     actionable via retry_task(), so a goal with one is not yet "finished", one way or the
     other), stores it as goal.final_outcome and closes out the goal's own status/completed_at.
     A goal with any task still pending/ready/running/blocked/retryable_failed is left exactly
-    as it was -- this function never forces a goal closed early."""
+    as it was -- this function never forces a goal closed early.
+
+    Also rolls up `goal.status` between `running` and `waiting`: `MainAIGoalStatus.waiting`
+    (see that enum's own docstring: "a goal is waiting if ANY of its in-flight tasks is")
+    existed as a schema value with no writer anywhere -- a goal with a task genuinely stuck in
+    `waiting_ci`/`waiting_external` still read `running`, an honesty gap the founder's own
+    review of Cursor's handoff flagged (`docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md` §H.3:
+    "Goal status lie"). Reuses `task_statuses`, already computed above for the terminal check,
+    rather than a second query -- this IS the one place that already asks "what do this goal's
+    tasks currently look like", not a parallel scan. Only ever flips `running` <-> `waiting`;
+    never touches `pending`/`planning`/`blocked`/a terminal status, so it can never race or
+    conflict with the terminal-close branch below or with `create_plan()`'s own
+    `pending -> running` transition."""
     report = generate_goal_report(db, goal_id=goal.id)
 
     from app.models.mainai_execution import TERMINAL_MAINAI_TASK_STATUSES
@@ -281,5 +296,13 @@ def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
         goal.completed_at = datetime.utcnow()
         goal.status = MainAIGoalStatus.completed if all(s == MainAITaskStatus.completed for s in task_statuses) else MainAIGoalStatus.failed
         db.flush()
+    else:
+        any_waiting = any(s in _WAITING_TASK_STATUSES for s in task_statuses)
+        if any_waiting and goal.status == MainAIGoalStatus.running:
+            goal.status = MainAIGoalStatus.waiting
+            db.flush()
+        elif not any_waiting and goal.status == MainAIGoalStatus.waiting:
+            goal.status = MainAIGoalStatus.running
+            db.flush()
 
     return report

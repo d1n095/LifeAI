@@ -27,6 +27,7 @@ from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import (
     EngineeringLessonSeverity,
     MainAIGoal,
+    MainAIGoalStatus,
     MainAITask,
     MainAITaskEvent,
     MainAITaskEventType,
@@ -173,3 +174,99 @@ def test_goal_summary_rollups(db_session, owner_id):
     assert report["summary"]["tasks_awaiting_auto_retry"] == 1
     assert report["summary"]["tasks_with_wait_history"] == 0
     assert report["summary"]["tasks_with_disputed_lesson_evidence"] == 0
+
+
+# --- goal.status waiting rollup ---------------------------------------------------------
+#
+# MainAIGoalStatus.waiting existed as a schema value with no writer anywhere -- a goal with a
+# task genuinely stuck in waiting_ci still read `running`, an honesty gap the founder's own
+# review of Cursor's handoff flagged. record_final_report() now rolls this up using the same
+# task_statuses it already computes for the terminal-close check.
+
+
+def test_goal_rolls_up_to_waiting_when_its_task_enters_waiting_ci(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(db_session, goal=goal, rationale="r", tasks=[PlannedTaskSpec(description="open a pr", task_type="open_pr")], created_by="test")
+    db_session.commit()
+    assert goal.status == MainAIGoalStatus.running
+
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+
+    assert goal.status == MainAIGoalStatus.waiting
+
+
+def test_goal_rolls_back_to_running_once_the_waiting_task_resumes(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(db_session, goal=goal, rationale="r", tasks=[PlannedTaskSpec(description="open a pr", task_type="open_pr")], created_by="test")
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+    assert goal.status == MainAIGoalStatus.waiting
+
+    # the task resumes to a non-waiting status (matching what resume_waiting_ci_task's own
+    # real transitions do -- back to running/ready/a terminal status depending on outcome)
+    task.status = MainAITaskStatus.running
+    db_session.commit()
+
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+
+    assert goal.status == MainAIGoalStatus.running
+
+
+def test_goal_with_one_waiting_task_among_others_stays_waiting(db_session, owner_id):
+    """Matches MainAIGoalStatus.waiting's own docstring: a goal is waiting if ANY of its
+    in-flight tasks is -- not only when every task is."""
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session, goal=goal, rationale="r",
+        tasks=[PlannedTaskSpec(description="a", task_type="open_pr"), PlannedTaskSpec(description="b", task_type="read_only_audit")],
+        created_by="test",
+    )
+    db_session.commit()
+    tasks = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+    waiting_task, other_task = tasks[0], tasks[1]
+
+    job = executor.dispatch_ready_task(db_session, task=waiting_task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    other_task.status = MainAITaskStatus.running
+    db_session.commit()
+
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+
+    assert goal.status == MainAIGoalStatus.waiting
+
+
+def test_record_final_report_never_marks_a_blocked_goal_as_waiting(db_session, owner_id):
+    """The rollup only ever flips running <-> waiting -- it must never override a goal a
+    planner/founder decision already put into blocked (or any other non-running status)."""
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(db_session, goal=goal, rationale="r", tasks=[PlannedTaskSpec(description="open a pr", task_type="open_pr")], created_by="test")
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    goal.status = MainAIGoalStatus.blocked
+    db_session.commit()
+
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+
+    assert goal.status == MainAIGoalStatus.blocked
