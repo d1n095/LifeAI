@@ -26,6 +26,7 @@ from app.routers import (
     mainai_execution,
     mainai_jobs,
     memory,
+    project_entities,
     projects,
     workbench,
 )
@@ -73,6 +74,7 @@ app.include_router(memory.router)
 app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
 app.include_router(mainai_execution.router)
+app.include_router(project_entities.router)
 
 
 @app.on_event("startup")
