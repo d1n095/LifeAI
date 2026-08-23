@@ -6,6 +6,61 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 75 (2026-08-22): `claude/project-entities-founder-api` — Founder API för project-entities/work-candidates-kedjan (ingen ny migration), grenad direkt från integrationsgrenen @ `2fed6a2` (PR #140 mergad)
+
+**Bakgrund:** grundaren skärpte terminologin — #139:s "composed chain"-test bevisade endast
+SERVICE COMPOSITION (direkt anrop av `promote_interpretation_proposal()`/
+`authorize_work_candidate()` med `superuser_db` och `authorized_by="founder"` satt av testet
+självt), INTE PRODUCTION E2E. De två styrda kanterna
+(`interpretation_proposal → ProjectEntity`, `WorkCandidate → MainAIGoal`) hade fortfarande
+ingen verklig produktionsanropare — bara testkod kunde nå dit.
+
+**Byggt:** `backend/app/routers/project_entities.py`, grundar-endast
+(`Depends(require_founder)` på routernivå, samma mönster som
+`app/routers/mainai_execution.py`). Täcker BÅDA styrda kanterna, inte bara
+`WorkCandidate → MainAIGoal`: lista/läs interpretation-proposals, promota, avvisa; lista/läs
+entities; lista/läs work-candidates, auktorisera, avvisa. Ingen "skapa proposal/candidate"-
+route — de skapas fortfarande bara automatiskt (claims.py resp. promotion-side-effekten),
+matchar verklig produktion.
+
+**Säkerhet:** `owner_id`/`authority`/`basis`/`authorized_by` accepteras ALDRIG från request-
+body — alltid härledda från `user.id` (den verifierade grundaren) och hårdkodade
+`authority="founder"`, `basis="manual"`, `authorized_by="founder"` server-side. Bevisat med
+dedikerade spoofing-tester (klient skickar `authority="ai_interpretation"`/godtycklig
+`owner_id`/`authorized_by` — ignoreras helt).
+
+**16 nya API-nivå-tester** (`tests/backend/test_project_entities_api.py`, riktig FastAPI
+TestClient, riktig lokal Postgres+RLS): autentisering (alla endpoints kräver den, vanlig
+medlem nekas, `role=founder` men fel `FOUNDER_USER_ID` nekas, riktig grundare släpps in),
+spoofing-skydd, fail-closed på obefintliga objekt, "exakt en route kan skapa X"-bevis, samt
+`test_real_source_claim_to_real_authorized_goal_through_the_founder_api_end_to_end` — det
+FAKTISKA PRODUCTION E2E-beviset: riktig claim → riktig proposal (skapad som produktionen
+faktiskt gör det) → HELA resten via riktiga HTTP-anrop med riktig grundarautentisering.
+
+**Verifiering:** `ruff check app/` identisk med baseline, `alembic heads` `0056` (ingen ny
+migration i denna PR), `git diff --check` ren, full
+`tests/backend/mainai/` + `tests/security/` + `tests/backend/rag/` + de nya API-testerna +
+`test_mainai_execution_api.py` (regressionskontroll på det redan etablerade routermönstret)
+körd — endast de två redan kända, orelaterade felen.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd. Noll filöverlapp med Cursors fyra öppna PR:er (#132/#133/#134/#136,
+uppdaterade men samma scope som tidigare).
+
+**Beroenden:** Grenad direkt från integrationsgrenen `claude/det-kommer-mer-879lcm` @
+`2fed6a2` (efter att PR #140 faktiskt mergats).
+
+**Nästa steg (kräver omvalidering mot aktuell kod innan implementation):**
+`eligible authorized MainAI work → produktions-runtime-trigger → Supervisor → Safe Planner →
+execution` — trolig nästa stora kant, men `app/development_supervisor/**` ligger innanför
+uppdragets hårda gräns; kräver antingen Cursor-ägande eller ett uttryckligt
+gränsbeslut av grundaren innan implementation.
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/project-entities-founder-api` | (öppnas) | Lokalt verifierad, redo att pushas | Founder-only API (`app/routers/project_entities.py`) för hela project-entities/work-candidates-kedjan, ingen ny migration, 16 nya API-nivå-tester inklusive riktigt production E2E | `claude/det-kommer-mer-879lcm` @ 2fed6a2 |
+
 ## Pass 74 (2026-08-21): `claude/project-entities-integrity-hardening` — Owner-Anchored Reference Integrity + Supersession Contract Fix (migration 0056), grenad direkt från integrationsgrenen @ `01a2563` (PR #139 mergad), adversarial fix-forward på redan mergade PR #138/#139
 
 **Bakgrund:** grundaren granskade PR #138 direkt i GitHub (inte bara min terminaltext) och
