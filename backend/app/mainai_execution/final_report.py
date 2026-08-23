@@ -262,13 +262,43 @@ def generate_goal_report(db: Session, *, goal_id: uuid.UUID) -> dict:
     }
 
 
+_WAITING_TASK_STATUSES = frozenset({MainAITaskStatus.waiting_ci, MainAITaskStatus.waiting_external})
+# A task in either of these statuses means the GOAL still has forward motion available right
+# now -- something is either actively executing or could be dispatched this very tick.
+# retryable_failed/blocked are deliberately EXCLUDED from this set: neither represents
+# immediately actionable work (one is on its own backoff clock, the other needs founder
+# input), but neither is what MainAIGoalStatus.waiting means either (that is specifically
+# "blocked on an EXTERNAL dependency", not "blocked on time" or "blocked on a decision") -- so
+# a goal containing only those, with no running/ready/waiting_ci/waiting_external task, simply
+# keeps whatever status it already had, exactly as before this rollup existed.
+_IMMEDIATELY_ACTIONABLE_TASK_STATUSES = frozenset({MainAITaskStatus.running, MainAITaskStatus.ready})
+
+
 def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
     """Computes the report and, ONLY if every task has reached a genuinely terminal status
     (completed/failed/cancelled -- retryable_failed is deliberately excluded: it is still
     actionable via retry_task(), so a goal with one is not yet "finished", one way or the
     other), stores it as goal.final_outcome and closes out the goal's own status/completed_at.
     A goal with any task still pending/ready/running/blocked/retryable_failed is left exactly
-    as it was -- this function never forces a goal closed early."""
+    as it was -- this function never forces a goal closed early.
+
+    Also rolls up `goal.status` between `running` and `waiting`: `MainAIGoalStatus.waiting`
+    existed as a schema value with no writer anywhere -- an honesty gap the founder's own
+    review of Cursor's handoff flagged (`docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md` §H.3:
+    "Goal status lie"). The rollup is NOT "any task waiting" -- an earlier version of this
+    docstring (and the enum's own, now corrected) claimed that, but a goal with one task stuck
+    in `waiting_ci` and ANOTHER task still `running`/`ready` is still making progress; calling
+    the whole goal `waiting` in that case would itself be a lie, just a different one. The
+    actual invariant: `waiting` means no part of the goal can currently advance --
+
+        has_waiting = at least one task is genuinely waiting_ci/waiting_external
+        has_actionable = at least one task is running or ready (could be dispatched this tick)
+        goal is `waiting` IFF has_waiting AND NOT has_actionable
+
+    Reuses `task_statuses`, already computed above for the terminal check, rather than a
+    second query. Only ever flips `running` <-> `waiting`; never touches
+    `pending`/`planning`/`blocked`/a terminal status, so it can never race or conflict with the
+    terminal-close branch below or with `create_plan()`'s own `pending -> running` transition."""
     report = generate_goal_report(db, goal_id=goal.id)
 
     from app.models.mainai_execution import TERMINAL_MAINAI_TASK_STATUSES
@@ -281,5 +311,15 @@ def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
         goal.completed_at = datetime.utcnow()
         goal.status = MainAIGoalStatus.completed if all(s == MainAITaskStatus.completed for s in task_statuses) else MainAIGoalStatus.failed
         db.flush()
+    else:
+        has_waiting = any(s in _WAITING_TASK_STATUSES for s in task_statuses)
+        has_actionable = any(s in _IMMEDIATELY_ACTIONABLE_TASK_STATUSES for s in task_statuses)
+        goal_should_be_waiting = has_waiting and not has_actionable
+        if goal_should_be_waiting and goal.status == MainAIGoalStatus.running:
+            goal.status = MainAIGoalStatus.waiting
+            db.flush()
+        elif not goal_should_be_waiting and goal.status == MainAIGoalStatus.waiting:
+            goal.status = MainAIGoalStatus.running
+            db.flush()
 
     return report
