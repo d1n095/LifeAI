@@ -226,9 +226,12 @@ def test_goal_rolls_back_to_running_once_the_waiting_task_resumes(db_session, ow
     assert goal.status == MainAIGoalStatus.running
 
 
-def test_goal_with_one_waiting_task_among_others_stays_waiting(db_session, owner_id):
-    """Matches MainAIGoalStatus.waiting's own docstring: a goal is waiting if ANY of its
-    in-flight tasks is -- not only when every task is."""
+def test_a_waiting_task_alongside_a_running_task_leaves_the_goal_running(db_session, owner_id):
+    """Corrected semantics: `waiting` means NO part of the goal can currently advance, not
+    "any task happens to be waiting". A goal with one task in `waiting_ci` and another still
+    `running` is still making progress -- marking the whole goal `waiting` here would itself be
+    a lie, the same class of dishonesty this rollup exists to fix (see MainAIGoalStatus's own,
+    now-corrected docstring and record_final_report()'s)."""
 
     goal = _goal(db_session, owner_id)
     planner.create_plan(
@@ -249,6 +252,87 @@ def test_goal_with_one_waiting_task_among_others_stays_waiting(db_session, owner
     final_report.record_final_report(db_session, goal=goal)
     db_session.commit()
 
+    assert goal.status == MainAIGoalStatus.running
+
+
+def test_a_waiting_task_alongside_a_ready_task_leaves_the_goal_running(db_session, owner_id):
+    """Same principle as above, for `ready` instead of `running`: a task that could be
+    dispatched THIS tick means the goal is not actually stalled."""
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session, goal=goal, rationale="r",
+        tasks=[PlannedTaskSpec(description="a", task_type="open_pr"), PlannedTaskSpec(description="b", task_type="read_only_audit")],
+        created_by="test",
+    )
+    db_session.commit()
+    tasks = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+    waiting_task, ready_task = tasks[0], tasks[1]
+    assert ready_task.status == MainAITaskStatus.ready  # planner's own default for a dependency-free task
+
+    job = executor.dispatch_ready_task(db_session, task=waiting_task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    db_session.commit()
+
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+
+    assert goal.status == MainAIGoalStatus.running
+
+
+def test_multiple_waiting_tasks_with_no_actionable_work_marks_the_goal_waiting(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session, goal=goal, rationale="r",
+        tasks=[PlannedTaskSpec(description="a", task_type="open_pr"), PlannedTaskSpec(description="b", task_type="open_pr")],
+        created_by="test",
+    )
+    db_session.commit()
+    tasks = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+
+    for i, task in enumerate(tasks):
+        job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+        db_session.commit()
+        start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha=f"sha{i}")
+    db_session.commit()
+
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+
+    assert goal.status == MainAIGoalStatus.waiting
+
+
+def test_a_waiting_task_alongside_only_a_retryable_failed_task_still_marks_the_goal_waiting(db_session, owner_id):
+    """retryable_failed is neither "waiting on an external dependency" (it has its own
+    internal backoff clock, no external signal needed) nor "immediately actionable" (it isn't
+    ready until next_retry_at elapses) -- it does not count toward has_actionable, so it never
+    prevents a genuinely stalled goal from correctly rolling up to `waiting`."""
+
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session, goal=goal, rationale="r",
+        tasks=[PlannedTaskSpec(description="a", task_type="open_pr"), PlannedTaskSpec(description="b", task_type="read_only_audit", max_attempts=3)],
+        created_by="test",
+    )
+    db_session.commit()
+    tasks = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+    waiting_task, retry_task = tasks[0], tasks[1]
+
+    job = executor.dispatch_ready_task(db_session, task=waiting_task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    retry_task.status = MainAITaskStatus.retryable_failed
+    retry_task.attempts = 1
+    retry_task.next_retry_at = datetime.utcnow()
+    db_session.commit()
+
+    final_report.record_final_report(db_session, goal=goal)
+    db_session.commit()
+
+    # has_waiting=True, has_actionable=False (retryable_failed doesn't count as actionable) ->
+    # the goal DOES roll up to waiting here, same as the waiting-only case -- retryable_failed
+    # genuinely isn't runnable work this tick, so it correctly does not prevent `waiting`.
     assert goal.status == MainAIGoalStatus.waiting
 
 
