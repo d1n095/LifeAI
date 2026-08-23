@@ -1049,3 +1049,86 @@ class EngineeringLessonOut(BaseModel):
     created_by: str
     created_at: datetime
     superseded_by: uuid.UUID | None = None
+
+
+# --- Project Entities / Interpretation Queue / Work Candidates (migration 0054/0055/0056) --
+#
+# Founder-only API surface making the two governed manual edges
+# (interpretation_proposal -> ProjectEntity, WorkCandidate -> MainAIGoal) production
+# reachable. See app/routers/project_entities.py's own module docstring: owner_id/authority/
+# authorized_by are ALWAYS server-derived from the authenticated founder (Depends(require_
+# founder)), never accepted from the request body -- a client cannot spoof identity/authority
+# through these schemas even if it tried.
+
+
+class InterpretationProposalOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    source_claim_id: uuid.UUID
+    proposed_entity_type: str
+    classifier_strategy: str
+    classifier_confidence: str
+    classifier_reasoning: str | None = None
+    status: str
+    promoted_to_entity_id: uuid.UUID | None = None
+    dismissed_reason: str | None = None
+    observed_at: datetime
+    created_at: datetime
+
+
+class PromoteInterpretationProposalIn(BaseModel):
+    entity_type: str
+    title: str
+    summary: str | None = None
+    confidence: float | None = None
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    supersedes_entity_id: uuid.UUID | None = None
+
+
+class DismissInterpretationProposalIn(BaseModel):
+    reason: str
+
+
+class ProjectEntityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    entity_type: str
+    title: str
+    summary: str | None = None
+    status: str
+    derived_from_claim_id: uuid.UUID
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    supersedes_entity_id: uuid.UUID | None = None
+    authority: str
+    basis: str
+    confidence: float | None = None
+    last_reviewed_at: datetime | None = None
+    created_at: datetime
+
+
+class WorkCandidateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    source_entity_id: uuid.UUID
+    title: str
+    rationale: str | None = None
+    dependencies: list
+    priority: str
+    status: str
+    authorized_goal_id: uuid.UUID | None = None
+    dismissed_reason: str | None = None
+    classifier_confidence: float | None = None
+    observed_at: datetime
+    created_at: datetime
+
+
+class AuthorizeWorkCandidateIn(BaseModel):
+    title: str | None = None
+    risk_level: str = "low"
+    approval_policy: str = "standard_repo_work"
+
+
+class DismissWorkCandidateIn(BaseModel):
+    reason: str
