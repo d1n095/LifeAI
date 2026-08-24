@@ -655,6 +655,12 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # also remove these rows once erase_own_project_entities_children() runs above.
         db.execute(sa_text("SELECT erase_own_work_candidates_children()"))
 
+        # --- Life Execution Authorization Envelope (migration 0057, see
+        # docs/LIFE_EXECUTION_AUTHORIZATION_ENVELOPE.md): execution_scope_proposals/
+        # execution_authorization_envelopes have DELETE revoked from mainai_app the same way,
+        # deletion only through this one narrow SECURITY DEFINER function.
+        db.execute(sa_text("SELECT erase_own_execution_authorization_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.

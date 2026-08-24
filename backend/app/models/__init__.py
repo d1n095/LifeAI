@@ -52,6 +52,7 @@ from app.models.diagnosis import (
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
+from app.models.execution_envelope import ExecutionAuthorizationEnvelope, ExecutionScopeProposal
 from app.models.founder_memory import (
     FOUNDER_MEMORY_AUTHORITIES,
     FOUNDER_MEMORY_BASES,
@@ -238,6 +239,8 @@ __all__ = [
     "Document",
     "DocumentChunk",
     "EmailVerificationToken",
+    "ExecutionScopeProposal",
+    "ExecutionAuthorizationEnvelope",
     "FOUNDER_MEMORY_AUTHORITIES",
     "FOUNDER_MEMORY_BASES",
     "FOUNDER_MEMORY_NOTE_STATUSES",

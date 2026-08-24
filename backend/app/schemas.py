@@ -1132,3 +1132,54 @@ class AuthorizeWorkCandidateIn(BaseModel):
 
 class DismissWorkCandidateIn(BaseModel):
     reason: str
+
+
+# --- Execution Authorization Envelope (migration 0057) --------------------------------------
+#
+# Founder-only API surface making the proposed-scope -> authorized-envelope edge production
+# reachable. owner_id/authorized_by are ALWAYS server-derived from the authenticated founder
+# (Depends(require_founder)), never accepted from the request body -- same discipline
+# app/routers/project_entities.py's own schemas already establish.
+
+
+class ExecutionScopeProposalOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    goal_id: uuid.UUID
+    repository_identity: str | None = None
+    proposed_paths: list
+    proposed_capabilities: list
+    proposed_risk: str
+    proposal_reasoning: str | None = None
+    proposal_strategy: str
+    status: str
+    authorized_envelope_id: uuid.UUID | None = None
+    rejected_reason: str | None = None
+    observed_at: datetime
+    created_at: datetime
+
+
+class AuthorizeExecutionScopeIn(BaseModel):
+    authorized_paths: list[str]
+    authorized_capabilities: list[str]
+    authorized_risk: str
+
+
+class RejectExecutionScopeIn(BaseModel):
+    reason: str
+
+
+class ExecutionAuthorizationEnvelopeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    goal_id: uuid.UUID
+    source_proposal_id: uuid.UUID | None = None
+    repository_identity: str | None = None
+    authorized_paths: list
+    authorized_capabilities: list
+    authorized_risk: str
+    authorized_by: str
+    authorized_at: datetime
+    status: str
+    supersedes_envelope_id: uuid.UUID | None = None
+    created_at: datetime
