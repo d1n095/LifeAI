@@ -17,8 +17,15 @@ from app.db import Base
 class MainAIGoalStatus(str, enum.Enum):
     """Richer than MainAIJobStatus (app/models/mainai_job.py) because a goal's lifecycle spans
     planning AND execution, not just one queued unit of work. `waiting` covers both
-    waiting_external and waiting_ci at the goal level (a goal is "waiting" if ANY of its
-    in-flight tasks is); `blocked` means the planner cannot proceed without founder input."""
+    waiting_external and waiting_ci at the goal level -- CORRECTED semantics (an earlier
+    version of this docstring said "ANY of its in-flight tasks is", which a founder review
+    caught as itself misleading: a goal with one task in `waiting_ci` and another still
+    `running`/`ready` is still making progress, so calling the whole goal `waiting` would be a
+    different lie than the one this status exists to fix): a goal is `waiting` only when it has
+    at least one genuinely waiting task AND no task that is currently running or ready to
+    dispatch -- see `app/mainai_execution/final_report.py`'s `record_final_report()`, the one
+    place that actually computes and writes this transition. `blocked` means the planner
+    cannot proceed without founder input."""
 
     pending = "pending"
     planning = "planning"

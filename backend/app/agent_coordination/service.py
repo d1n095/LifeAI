@@ -510,15 +510,22 @@ class CoordinatorDecision:
 
 
 def _active_leases_for_repo(db: Session, *, owner_id: uuid.UUID, repository_identity: str) -> list[AgentScopeLease]:
-    return list(
-        db.execute(
+    """Live write authority only: TTL-expired rows stay `status=active` until
+    `expire_stale_active_leases()` (or an explicit release/takeover) clears them, but they
+    must not block conflict scans — `STATE EXISTS != DRIVER EXISTS` otherwise permanently
+    PATH_CONFLICTs new work against a dead holder."""
+    now = datetime.utcnow()
+    return [
+        lease
+        for lease in db.execute(
             select(AgentScopeLease).where(
                 AgentScopeLease.owner_id == owner_id,
                 AgentScopeLease.repository_identity == repository_identity,
                 AgentScopeLease.status == AgentScopeLeaseStatus.active,
             )
         ).scalars()
-    )
+        if not is_lease_stale(lease, now=now)
+    ]
 
 
 def _shares_parallel_exploration_group(db: Session, *, group_id: uuid.UUID | None, other_assignment_id: uuid.UUID) -> bool:
@@ -667,23 +674,38 @@ def acquire_lease(
     "a worker may never silently expand its own path scope.\""""
 
     mode = WorkAssignmentReadWriteMode(mode)
+    now = datetime.utcnow()
     existing = db.execute(
         select(AgentScopeLease)
         .where(AgentScopeLease.assignment_id == assignment.id, AgentScopeLease.status == AgentScopeLeaseStatus.active)
         .with_for_update()
     ).scalar_one_or_none()
     if existing is not None:
-        if not set(allowed_paths) <= set(existing.allowed_paths):
-            raise ScopeExpansionError(
-                f"assignment {assignment.id} already holds lease {existing.id} scoped to {existing.allowed_paths}; "
-                f"{list(allowed_paths)} is not a subset -- scope expansion is never granted implicitly"
+        if is_lease_stale(existing, now=now):
+            # Same assignment's TTL died; clear the row so a fresh acquire can proceed
+            # (take_over_lease remains available until this release commits).
+            existing.status = AgentScopeLeaseStatus.released
+            existing.released_at = now
+            db.flush()
+            _record_event(
+                db,
+                assignment,
+                event_type=AgentWorkAssignmentEventType.lease_released,
+                detail={"lease_id": str(existing.id), "reason": "ttl_expired_on_reacquire"},
             )
-        return LeaseAcquisitionResult("ACQUIRED", existing, "idempotent replay of an already-active lease")
+            existing = None
+        else:
+            if not set(allowed_paths) <= set(existing.allowed_paths):
+                raise ScopeExpansionError(
+                    f"assignment {assignment.id} already holds lease {existing.id} scoped to {existing.allowed_paths}; "
+                    f"{list(allowed_paths)} is not a subset -- scope expansion is never granted implicitly"
+                )
+            return LeaseAcquisitionResult("ACQUIRED", existing, "idempotent replay of an already-active lease")
 
-    now = datetime.utcnow()
     if mode != WorkAssignmentReadWriteMode.read_only:
-        locked_others = list(
-            db.execute(
+        locked_others = [
+            lease
+            for lease in db.execute(
                 select(AgentScopeLease)
                 .where(
                     AgentScopeLease.owner_id == assignment.owner_id,
@@ -693,7 +715,8 @@ def acquire_lease(
                 .order_by(AgentScopeLease.id)
                 .with_for_update()
             ).scalars()
-        )
+            if not is_lease_stale(lease, now=now)
+        ]
         for lease in locked_others:
             if lease.branch == branch or lease.worktree_path == worktree_path:
                 return LeaseAcquisitionResult("WORKTREE_CONFLICT", None, f"lease {lease.id} already holds branch/worktree")
@@ -764,6 +787,44 @@ def renew_lease(
 def is_lease_stale(lease: AgentScopeLease, *, now: datetime | None = None) -> bool:
     now = now or datetime.utcnow()
     return lease.status == AgentScopeLeaseStatus.active and lease.expires_at is not None and lease.expires_at < now
+
+
+def expire_stale_active_leases(db: Session, *, now: datetime | None = None, limit: int = 100) -> int:
+    """Production clock: mark TTL-expired `active` AgentScopeLeases as `released`.
+
+    Fencing already treats expiry as loss of write authority (`is_lease_stale` /
+    `renew_lease`), and acquire/conflict scans skip stale rows — but without this sweep,
+    inventory and any caller that only filters `status=active` still see a permanent live
+    lease. Bounded + SKIP LOCKED so the worker tick cannot pile up behind contested rows.
+    Uses `lease_released` with `reason=ttl_expired` (no new enum / migration)."""
+    now = now or datetime.utcnow()
+    leases = list(
+        db.execute(
+            select(AgentScopeLease)
+            .where(
+                AgentScopeLease.status == AgentScopeLeaseStatus.active,
+                AgentScopeLease.expires_at.is_not(None),
+                AgentScopeLease.expires_at < now,
+            )
+            .order_by(AgentScopeLease.expires_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).scalars()
+    )
+    for lease in leases:
+        lease.status = AgentScopeLeaseStatus.released
+        lease.released_at = now
+        assignment = db.get(AgentWorkAssignment, lease.assignment_id)
+        if assignment is not None:
+            _record_event(
+                db,
+                assignment,
+                event_type=AgentWorkAssignmentEventType.lease_released,
+                detail={"lease_id": str(lease.id), "reason": "ttl_expired", "expired_at": lease.expires_at.isoformat()},
+            )
+    if leases:
+        db.flush()
+    return len(leases)
 
 
 def take_over_lease(
