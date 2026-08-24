@@ -275,27 +275,22 @@ class DeleteIfUnreferencedOutcome(str, enum.Enum):
 
 
 def retain_pending_rejected_upload_cleanup_tasks(storage_key: str) -> int:
-    """Pass 33: supersede stale `rejected_upload_cleanup` tasks when a persistent writer
-    reclaims a content-addressed key under `acquire_storage_key_lock()`.
+    """Pass 33 + runtime clock sweep: supersede stale `rejected_upload_cleanup` tasks AFTER a
+    durable DB reference to `storage_key` is committed.
 
     Those tasks are enqueued when a blob correctly appeared unreferenced (e.g. an empty upload
     rejected before any Document/ImportJob row existed). A concurrent writer can legitimately
-    need the SAME key again moments later via `store_content_with_reference_lock()` or
-    `_store_bytes_with_reference_lock()` -- the advisory lock closes the physical delete TOCTOU
-    until the writer's transaction commits, but `attempt_storage_deletion_task()` used to
-    still observe the stale `pending` row once it acquired the lock AFTER that commit if the
-    caller had not yet persisted a DB reference (or, in the worst case, if the writer's
-    reference row and the cleanup task raced on two connections).
+    need the SAME key again via `store_content_with_reference_lock()` /
+    `_store_bytes_with_reference_lock()`. The advisory lock held during write→reference commit
+    closes the physical-delete TOCTOU until that commit; `storage_key_still_referenced()` then
+    protects the blob. Calling retain *before* the reference exists (the old shape) marked
+    cleanup tasks `retained_shared` even if the writer crashed mid-transaction — leaving an
+    unreferenced blob that cleanup would never delete.
 
-    Marking outstanding cleanup tasks `retained_shared` here -- while the CALLER's session
-    STILL holds `acquire_storage_key_lock()` for this exact key -- gives the outbox worker a
-    durable, terminal-success signal that the blob must survive, without weakening the global
-    reference check or adding sleeps/retries.
-
-    Runs on `_MaintenanceSession` (mainai_app has zero direct privileges on
-    `storage_deletion_tasks`). Does NOT take `acquire_storage_key_lock()` itself -- the caller
-    must already hold it so a concurrent `attempt_storage_deletion_task()` remains blocked at
-    its own lock acquisition until this function returns and the caller commits or rolls back."""
+    Call AFTER the writer's Document / ProjectSource / ProjectCheckpoint / ImportJob reference
+    row is committed. Safe if cleanup already ran: reference check wins; retain is a no-op for
+    terminal rows. Runs on `_MaintenanceSession` (mainai_app has zero direct privileges on
+    `storage_deletion_tasks`)."""
     db = _MaintenanceSession()
     try:
         result = db.execute(
@@ -561,7 +556,6 @@ def store_content_with_reference_lock(
 
     acquire_storage_key_lock(db, blob.storage_key)
     if storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
-        retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
         return blob
 
     # Lost the race, or the blob at this key is corrupt: either something else's reference
@@ -579,7 +573,6 @@ def store_content_with_reference_lock(
             f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
             f"fortfarande inte den förväntade sha256:n efter återpublicering."
         )
-    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     return blob
 
 

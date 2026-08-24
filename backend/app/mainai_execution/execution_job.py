@@ -746,7 +746,13 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
 
     # Crash-matrix finding (P1) -- see the identical fix and full explanation in the except
     # block above; same reordering, same reasoning, applied to the success path.
-    _finalize_task_outcome(db, task, passed=verification.passed, evidence={**verification.evidence(), "work_result": work_result})
+    _finalize_task_outcome(
+        db,
+        task,
+        passed=verification.passed,
+        evidence={**verification.evidence(), "work_result": work_result},
+        job_id=job_id,
+    )
     try:
         mark_completed(db, job, worker_id=worker_id, lease_generation=lease_generation, public_message="Task attempt completed; see task status for the verified outcome.")
     except JobLeaseLostError:
@@ -755,7 +761,9 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         return
 
 
-def _finalize_task_outcome(db: Session, task: MainAITask, *, passed: bool, evidence: dict) -> None:
+def _finalize_task_outcome(
+    db: Session, task: MainAITask, *, passed: bool, evidence: dict, job_id: uuid.UUID | None = None
+) -> None:
     """THE completion gate — a task becomes `completed` if and only if verification passed
     (or genuinely had nothing to verify). A failed verification never produces `completed`: it
     produces `retryable_failed` (if attempts remain) or `failed` (attempts exhausted), and
@@ -789,6 +797,11 @@ def _finalize_task_outcome(db: Session, task: MainAITask, *, passed: bool, evide
             task.status = MainAITaskStatus.failed
             task.completed_at = datetime.utcnow()
             task.next_retry_at = None
+            # Closed-loop learning: only exhausted + structured verification evidence may
+            # become an EngineeringLesson (never exception str / provider prose).
+            from app.mainai_execution.lesson_from_verification import maybe_record_lesson_from_exhausted_verification
+
+            maybe_record_lesson_from_exhausted_verification(db, task=task, evidence=evidence, job_id=job_id)
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.failed, detail=evidence))
 
     db.flush()

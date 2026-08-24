@@ -190,7 +190,6 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
 
     acquire_storage_key_lock(db, blob.storage_key)
     if storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
-        retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
         return blob
 
     # Lost the race, or the blob at this key is corrupt: a concurrent purge/erasure's
@@ -207,7 +206,6 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
             f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
             f"fortfarande inte den förväntade sha256:n efter återpublicering."
         )
-    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     return blob
 
 
@@ -570,6 +568,10 @@ async def _import_one_file(
     document.status = IndexStatus.original_stored
     db.add(document)
     db.commit()
+    # After durable Document.storage_key exists — not while still under the write lock —
+    # supersede any stale rejected_upload_cleanup rows for this key (crash-before-reference
+    # must leave the blob reclaimable by cleanup, not retained_shared forever).
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
 
     if _job_is_cancelled(db, job_id):
         document.status = IndexStatus.cancelled
