@@ -20,6 +20,7 @@ from app.routers import (
     chat,
     conversations,
     documents,
+    execution_envelopes,
     health,
     knowledge,
     library,
@@ -75,6 +76,7 @@ app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
 app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
+app.include_router(execution_envelopes.router)
 
 
 @app.on_event("startup")
