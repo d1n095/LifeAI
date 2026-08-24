@@ -164,6 +164,16 @@ KNOWN_STORAGE_WRITE_PATHS: tuple[tuple[str, str, str], ...] = (
         "specifically, via delete_if_unreferenced() below.",
     ),
     (
+        "routers/documents.py",
+        "upload_document",
+        "Legacy /api/documents/upload thin adapter onto the Library durable path: "
+        "acquire_owner_erasure_lock() before write_stream(); after the blob returns, "
+        "acquire_storage_key_lock() then commit ImportJob(pending) + Document "
+        "(storage_key/checksum/import_job_id) in the same request; retain_pending_* after "
+        "those durable references exist while the storage-key lock is still held. No "
+        "BackgroundTasks. Verified by tests/backend/test_documents_upload_durable_delivery.py.",
+    ),
+    (
         "storage/references.py",
         "store_content_with_reference_lock",
         "acquire_storage_key_lock() taken AFTER write_stream() returns (structurally cannot "

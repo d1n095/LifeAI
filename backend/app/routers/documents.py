@@ -1,18 +1,26 @@
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile
-from sqlalchemy import text
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit
 from app.db import get_db
 from app.deps import require_founder
-from app.models.document import Document, DocumentSource
+from app.models.document import Document, DocumentSource, IndexStatus
+from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.user import User
-from app.rag.extract import extract_text
-from app.rag.ingest import index_document
 from app.schemas import DocumentOut
+from app.storage import get_storage
+from app.storage.base import StorageError, StorageSizeLimitExceeded
 from app.storage.purge import SourcePurgeNotFoundError, purge_source
+from app.storage.references import (
+    acquire_owner_erasure_lock,
+    acquire_storage_key_lock,
+    delete_if_unreferenced,
+    retain_pending_rejected_upload_cleanup_tasks,
+)
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
 
@@ -31,60 +39,137 @@ def list_documents(db: Session = Depends(get_db)):
 
 @router.post("/upload", response_model=DocumentOut)
 async def upload_document(
-    background_tasks: BackgroundTasks,
     request: Request,
     file: UploadFile,
     category: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ):
-    raw = await file.read()
-    if len(raw) > MAX_UPLOAD_BYTES:
+    """Legacy `/api/documents/upload` durability fix (runtime clock sweep).
+
+    PREVIOUSLY: HTTP success committed a Document row then handed extracted text to FastAPI
+    `BackgroundTasks`. Process death after the response left a permanent metadata tombstone
+    with no blob, no ImportJob, and no worker clock able to resume indexing
+    (`#126 FIXED OWNER CONTEXT != DURABLE DELIVERY`).
+
+    NOW: thin adapter onto the Library durable path — stream bytes to `app/storage/`, commit
+    `ImportJob(status=pending)` + a linked Document with `storage_key`/`checksum`/
+    `import_job_id`, then return `DocumentOut`. `app/worker.py`'s existing claim loop does
+    indexing. No second queue. No in-process BackgroundTasks.
+    """
+    # Same owner-erasure lock ordering as /api/library/import — must precede any durable
+    # write so account erasure cannot inventory past a not-yet-referenced blob.
+    acquire_owner_erasure_lock(db, user.id)
+    if db.query(User).filter_by(id=user.id).first() is None:
+        raise HTTPException(status_code=401, detail="Kontot finns inte längre.")
+
+    storage = get_storage()
+
+    # Fail closed on empty before any durable write — avoids content-addressed empty-blob
+    # collisions and the delete_if_unreferenced path for a never-needed key.
+    peek = file.file.read(1)
+    if not peek:
+        raise HTTPException(status_code=400, detail="Filen är tom.")
+    try:
+        file.file.seek(0)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Kunde inte läsa filen: {exc}") from exc
+
+    def _read_chunk() -> bytes:
+        return file.file.read(1 << 20)
+
+    try:
+        blob = await run_in_threadpool(storage.write_stream, _read_chunk, max_bytes=MAX_UPLOAD_BYTES)
+    except StorageSizeLimitExceeded:
         raise HTTPException(status_code=413, detail="Filen är för stor (max 25 MB).")
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}")
 
-    text_content = extract_text(file.filename, raw)
+    if blob.size_bytes == 0:
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Filen är tom.")
 
+    checksum = blob.sha256
+
+    # Whole-upload idempotency (same contract as library import): byte-identical completed
+    # upload with a still-live Document returns that Document instead of a new job.
+    existing_job = (
+        db.query(ImportJob)
+        .filter_by(owner_id=user.id, source_checksum=checksum, status=ImportJobStatus.completed)
+        .order_by(ImportJob.completed_at.desc())
+        .first()
+    )
+    if existing_job is not None:
+        existing_doc = (
+            db.query(Document)
+            .filter(
+                Document.import_job_id == existing_job.id,
+                Document.deleted_at.is_(None),
+                Document.uploaded_by == user.id,
+            )
+            .order_by(Document.created_at.desc())
+            .first()
+        )
+        if existing_doc is not None:
+            return existing_doc
+
+    acquire_storage_key_lock(db, blob.storage_key)
+    if not storage.exists(blob.storage_key):
+        raise HTTPException(
+            status_code=409,
+            detail="Uppladdningen kolliderade med en samtidig radering av en identisk fil. Försök igen.",
+        )
+
+    job = ImportJob(
+        owner_id=user.id,
+        status=ImportJobStatus.pending,
+        source_filename=file.filename,
+        source_checksum=checksum,
+        source_storage_key=blob.storage_key,
+        source_size_bytes=blob.size_bytes,
+        source_media_type=file.content_type,
+    )
+    db.add(job)
+    db.flush()
+
+    # Pre-create the Document so DocumentOut stays stable and the worker's checksum
+    # resume path (_resume_incomplete_document) reuses THIS row instead of inventing a
+    # second one. Status is resumable (`original_stored`) so a crash before the worker
+    # claim still has a durable wake via ImportJob.pending + reconcile/resume.
     document = Document(
-        title=file.filename,
+        title=file.filename or "upload",
         source=DocumentSource.upload,
         category=category,
         uploaded_by=user.id,
+        original_filename=file.filename,
+        checksum=checksum,
+        media_type=file.content_type,
+        storage_key=blob.storage_key,
+        size_bytes=blob.size_bytes,
+        import_job_id=job.id,
+        status=IndexStatus.original_stored,
+        stored_at=datetime.utcnow(),
     )
     db.add(document)
+    db.flush()
+
+    # Retain AFTER durable ImportJob + Document references exist in this transaction, while
+    # the storage-key lock is still held (Pass 33 / #133 ordering).
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
+
     db.commit()
     db.refresh(document)
 
-    record_audit(db, user_id=user.id, action="document_upload", entity_type="document", entity_id=str(document.id), request=request)
-
-    background_tasks.add_task(_index_in_background, document.id, text_content, user.id)
+    record_audit(
+        db,
+        user_id=user.id,
+        action="document_upload",
+        entity_type="document",
+        entity_id=str(document.id),
+        request=request,
+    )
     return document
-
-
-def _index_in_background(document_id: uuid.UUID, text_content: str, owner_id: uuid.UUID) -> None:
-    import asyncio
-
-    from app.db import SessionLocal
-    from app.request_context import current_user_id as current_user_id_var
-
-    async def run():
-        db = SessionLocal()
-        try:
-            # Bind RLS BEFORE the document SELECT — under documents_isolation a fresh
-            # SessionLocal with NULL current_user_id cannot see the row at all, so the old
-            # "load then SET LOCAL" order silently no-op'd. owner_id comes from the request
-            # that enqueued this task (same pattern as library_import's known job owner).
-            current_user_id_var.set(str(owner_id))
-            db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
-            document = db.get(Document, document_id)
-            if document is None or document.uploaded_by is None:
-                return
-            if document.uploaded_by != owner_id:
-                return
-            await index_document(db, document, text_content)
-        finally:
-            db.close()
-
-    asyncio.run(run())
 
 
 @router.delete("/{document_id}")
