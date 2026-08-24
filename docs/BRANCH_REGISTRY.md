@@ -1094,7 +1094,8 @@ bygger vidare på `routing.py`s redan befintliga funktioner. Helt oberoende av C
 
 **Full freeze:** `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md`
 
-**Lane:** `CURSOR ADVERSARIAL LANE COMPLETE` ≠ Life controlled autonomy complete.
+**Lane:** `ADVERSARIAL INVESTIGATION COMPLETE` + `HANDOFF COMPLETE` (#135). #131–#134 not merge-complete until landed. ≠ Life controlled autonomy complete.
+**Severity note:** missing Supervisor production entry is **P1** autonomy-chain blocker, not P0.
 
 **Tip at handoff write:** refresh `claude/det-kommer-mer-879lcm` (was `8641ea8` / #130). Alembic **0046**.
 
