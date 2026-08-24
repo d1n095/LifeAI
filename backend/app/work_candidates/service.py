@@ -15,6 +15,7 @@ elsewhere in the system. This module only decides WHETHER to call it and WITH WH
 never WHETHER THE CALLER IS ALLOWED TO -- that remains entirely the caller's own
 responsibility, exactly like `create_goal()` itself already documents."""
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Any
@@ -27,9 +28,59 @@ from app.models.mainai_execution import MainAIGoalRiskLevel
 from app.models.project_entities import ProjectEntity
 from app.models.work_candidate import WorkCandidate
 
+logger = logging.getLogger(__name__)
+
+# task_type may SUGGEST a proposed scope, it may never AUTHORIZE one (see migration 0057's
+# own module docstring) -- entity_type is this module's own closest analogue to a task_type
+# signal, so it is what the auto-proposal heuristic below uses to suggest capabilities. Paths
+# are deliberately NEVER suggested here (see app.execution_envelopes.service.
+# propose_execution_scope()'s own docstring on why an empty, honest proposal beats a guess).
+_PROPOSED_CAPABILITIES_BY_ENTITY_TYPE = {
+    "task_reference": ("repo_read", "repo_edit", "run_tests"),
+    "decision": ("repo_read", "repo_edit", "run_tests"),
+    "idea": ("repo_read",),
+}
+
 
 class WorkCandidateError(ValueError):
     pass
+
+
+def _propose_execution_scope_if_actionable(db: Session, *, owner_id: uuid.UUID, candidate: WorkCandidate, goal: Any, entity: ProjectEntity) -> None:
+    """Purely observational, same doctrine as app/project_entities/service.py's own
+    work-candidate wiring one level up the chain: never changes authorize_work_candidate()'s
+    own result, never raises into the caller. Writes ONLY to execution_scope_proposals -- a
+    staging table nothing treats as execution authority -- never creates an
+    ExecutionAuthorizationEnvelope. See migration 0057's own module docstring:
+    PROPOSED_SCOPE != AUTHORIZED_SCOPE.
+
+    Uses a SAVEPOINT (db.begin_nested()), not a top-level commit/rollback, for the exact same
+    reason app/project_entities/service.py's own analogous helper does: authorize_work_
+    candidate() itself never commits (leaves that to its own caller), so a plain commit/
+    rollback here would either surprise-commit the caller's still-open transaction or, on
+    failure, roll back the goal authorization this is supposed to be a side effect OF."""
+
+    proposed_capabilities = _PROPOSED_CAPABILITIES_BY_ENTITY_TYPE.get(entity.entity_type)
+    if proposed_capabilities is None:
+        return
+    try:
+        from app.execution_envelopes import propose_execution_scope
+
+        savepoint = db.begin_nested()
+        try:
+            propose_execution_scope(
+                db, owner_id=owner_id, goal_id=goal.id, idempotency_key=f"work-candidate-authorization:{candidate.id}",
+                proposed_capabilities=list(proposed_capabilities), proposed_risk=goal.risk_level.value,
+                proposal_reasoning=f"Derived from WorkCandidate {candidate.id} (ProjectEntity {entity.id}, entity_type={entity.entity_type}).",
+                proposal_strategy="work_candidate_authorization_v1",
+                provenance={"work_candidate_id": str(candidate.id), "project_entity_id": str(entity.id), "entity_type": entity.entity_type},
+            )
+            savepoint.commit()
+        except Exception:
+            savepoint.rollback()
+            raise
+    except Exception:
+        logger.warning("failed to propose execution scope for goal %s (non-fatal)", goal.id, exc_info=True)
 
 
 def _same(row: WorkCandidate, values: dict[str, Any]) -> WorkCandidate:
@@ -139,6 +190,11 @@ def authorize_work_candidate(
     row.authorized_goal_id = goal.id
     row.updated_at = datetime.utcnow()
     db.flush()
+
+    entity = db.execute(select(ProjectEntity).where(ProjectEntity.id == row.source_entity_id, ProjectEntity.owner_id == owner_id)).scalar_one_or_none()
+    if entity is not None:
+        _propose_execution_scope_if_actionable(db, owner_id=owner_id, candidate=row, goal=goal, entity=entity)
+
     return row, goal
 
 
