@@ -10,6 +10,7 @@ Proves `#126 FIXED OWNER CONTEXT != DURABLE DELIVERY`:
 from __future__ import annotations
 
 import io
+import uuid
 
 import pytest
 from fastapi import UploadFile
@@ -88,9 +89,22 @@ async def test_documents_upload_commits_durable_import_job_before_indexing(
 
 @pytest.mark.asyncio
 async def test_documents_upload_survives_process_death_then_worker_indexes(
-    db_session, make_verified_user
+    db_session, superuser_db, make_verified_user
 ):
-    """Crash boundary A → worker claim: durable job is enough for later indexing."""
+    """Crash boundary A → PRODUCTION claim clock → indexing.
+
+    Deliberately does NOT call run_import_job() directly: that would only prove the job row is
+    processable if something hands it to the indexer, which is exactly the assumption
+    `#126 FIXED OWNER CONTEXT != DURABLE DELIVERY` was about. The upload must be visible to
+    app/worker.py's real, owner-blind claim clock (`claim_next_job` on the superuser claim
+    session, since knowledge_import_jobs has FORCE RLS) and be driven by the same
+    `process_claimed_job` wrapper the worker loop uses — with no API-process state surviving."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import SessionLocal, migration_engine
+    from app.jobs.lease import claim_next_job
+    from app.worker import process_claimed_job
+
     user, _ = make_verified_user()
     current_user_id_var.set(str(user.id))
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
@@ -107,21 +121,39 @@ async def test_documents_upload_survives_process_death_then_worker_indexes(
     doc_id = doc.id
     assert job_id is not None
 
-    # Simulate API process death: drop request-scoped owner, do NOT call any background indexer.
+    # API process death: request session gone, request-scoped owner context gone, no
+    # BackgroundTasks and no in-process reference to the job.
+    db_session.close()
     current_user_id_var.set(None)
 
-    current_user_id_var.set(str(user.id))
-    db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
-    await run_import_job(db_session, job_id, user.id)
+    claim_db = sessionmaker(bind=migration_engine)()
+    try:
+        claimed = claim_next_job(claim_db, "worker-under-test", 120)
+    finally:
+        claim_db.close()
+    # The claim clock found the upload on its own, with no owner context supplied to it.
+    assert claimed == (job_id, user.id)
 
-    db_session.expire_all()
-    job = db_session.get(ImportJob, job_id)
-    doc = db_session.get(Document, doc_id)
+    superuser_db.expire_all()
+    claimed_job = superuser_db.get(ImportJob, job_id)
+    assert claimed_job.status == ImportJobStatus.running
+    assert claimed_job.locked_by == "worker-under-test"
+    assert claimed_job.lease_expires_at is not None
+
+    worker_db = SessionLocal()
+    try:
+        await process_claimed_job(worker_db, job_id, user.id)
+    finally:
+        worker_db.close()
+
+    superuser_db.expire_all()
+    job = superuser_db.get(ImportJob, job_id)
+    indexed = superuser_db.get(Document, doc_id)
     assert job is not None and job.status == ImportJobStatus.completed
-    assert doc is not None and doc.status == IndexStatus.indexed
-    assert db_session.query(DocumentChunk).filter_by(document_id=doc_id).count() >= 1
+    assert indexed is not None and indexed.status == IndexStatus.indexed
+    assert superuser_db.query(DocumentChunk).filter_by(document_id=doc_id).count() >= 1
     # Same Document row resumed — no duplicate.
-    assert db_session.query(Document).filter(
+    assert superuser_db.query(Document).filter(
         Document.uploaded_by == user.id, Document.deleted_at.is_(None)
     ).count() == 1
 
@@ -162,6 +194,125 @@ async def test_documents_upload_identical_bytes_returns_completed_document(
         .count()
         == 1
     )
+
+
+def _admin_session():
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+
+    return sessionmaker(bind=migration_engine)()
+
+
+def _blob_with_pending_cleanup_task(raw: bytes) -> tuple[str, uuid.UUID]:
+    """Reproduce the real precondition: this exact content-addressed key already has an
+    outstanding `rejected_upload_cleanup` task (e.g. an earlier empty/rejected upload of the
+    same bytes), so retain ordering is observable."""
+    from app.storage.references import enqueue_rejected_upload_cleanup_task
+
+    storage_key = get_storage().write_stream(iter([raw, b""]).__next__, max_bytes=len(raw)).storage_key
+    return storage_key, enqueue_rejected_upload_cleanup_task(storage_key)
+
+
+@pytest.mark.asyncio
+async def test_documents_upload_crash_before_commit_leaves_blob_purgeable(
+    db_session, make_verified_user, monkeypatch
+):
+    """#143 fix-forward regression: blob written → cleanup task pending → the ImportJob/
+    Document transaction dies before commit → no durable reference exists → cleanup must
+    STILL be able to purge the blob.
+
+    retain_pending_rejected_upload_cleanup_tasks() commits on its own maintenance connection,
+    so a pre-commit retain outlives this rollback and would strand the blob in the terminal
+    `retained_shared` state forever."""
+    from app.account.erasure import attempt_storage_deletion_task
+    from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
+
+    user, _ = make_verified_user()
+    current_user_id_var.set(str(user.id))
+    db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+
+    raw = f"documents upload crash before durable commit {uuid.uuid4().hex}".encode()
+    storage_key, operation_id = _blob_with_pending_cleanup_task(raw)
+
+    def _process_death(*_args, **_kwargs):
+        raise RuntimeError("process death before durable commit")
+
+    monkeypatch.setattr(db_session, "commit", _process_death)
+    with pytest.raises(RuntimeError):
+        await upload_document(
+            request=None,  # type: ignore[arg-type]
+            file=_upload_file("crash.txt", raw),
+            category=None,
+            db=db_session,
+            user=user,
+        )
+    monkeypatch.undo()
+    db_session.rollback()
+
+    admin = _admin_session()
+    try:
+        # Checked RLS-free: "no reference exists" must not be ambiguous with "RLS hides it".
+        assert (
+            admin.execute(
+                sa_text("SELECT count(*) FROM knowledge_import_jobs WHERE source_storage_key = :k"),
+                {"k": storage_key},
+            ).scalar()
+            == 0
+        )
+        assert (
+            admin.execute(
+                sa_text("SELECT count(*) FROM documents WHERE storage_key = :k"), {"k": storage_key}
+            ).scalar()
+            == 0
+        )
+
+        task = admin.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).one()
+        assert task.status == StorageDeletionStatus.pending
+        attempt_storage_deletion_task(admin, task)
+        admin.refresh(task)
+        assert task.status == StorageDeletionStatus.purged
+        assert get_storage().exists(storage_key) is False
+    finally:
+        admin.close()
+
+
+@pytest.mark.asyncio
+async def test_documents_upload_committed_reference_retains_blob_against_cleanup(
+    db_session, make_verified_user
+):
+    """Success complement of the crash test above: once the ImportJob/Document reference
+    commits, retain supersedes the outstanding cleanup task and the outbox worker can no
+    longer delete the blob the pending import job still needs to read."""
+    from app.account.erasure import attempt_storage_deletion_task
+    from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
+
+    user, _ = make_verified_user()
+    current_user_id_var.set(str(user.id))
+    db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+
+    raw = f"documents upload committed reference retains blob {uuid.uuid4().hex}".encode()
+    storage_key, operation_id = _blob_with_pending_cleanup_task(raw)
+
+    doc = await upload_document(
+        request=None,  # type: ignore[arg-type]
+        file=_upload_file("retained.txt", raw),
+        category=None,
+        db=db_session,
+        user=user,
+    )
+    assert doc.storage_key == storage_key
+
+    admin = _admin_session()
+    try:
+        task = admin.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).one()
+        assert task.status == StorageDeletionStatus.retained_shared
+        attempt_storage_deletion_task(admin, task)
+        admin.refresh(task)
+        assert task.status == StorageDeletionStatus.retained_shared
+        assert get_storage().exists(storage_key) is True
+    finally:
+        admin.close()
 
 
 @pytest.mark.asyncio
