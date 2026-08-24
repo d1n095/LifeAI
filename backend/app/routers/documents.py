@@ -152,13 +152,17 @@ async def upload_document(
         stored_at=datetime.utcnow(),
     )
     db.add(document)
-    db.flush()
-
-    # Retain AFTER durable ImportJob + Document references exist in this transaction, while
-    # the storage-key lock is still held (Pass 33 / #133 ordering).
-    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
-
     db.commit()
+    # Retain only AFTER the ImportJob/Document reference is durably COMMITTED — never while
+    # it is merely flushed inside the still-open transaction. retain_pending_* runs on its own
+    # `_MaintenanceSession` and commits independently, so a retain issued pre-commit survives a
+    # rollback/process death that the reference row does not: the cleanup task would sit in the
+    # terminal `retained_shared` state guarding a blob nothing references, and nothing in the
+    # system would ever purge it again. Same ordering as _import_one_file()'s durable path and
+    # what retain_pending_rejected_upload_cleanup_tasks()'s own docstring requires (#133).
+    # Dropping the storage-key lock at commit is safe: from that instant the reference check
+    # in storage_key_still_referenced_global() sees the committed rows and protects the blob.
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
     db.refresh(document)
 
     record_audit(

@@ -169,9 +169,11 @@ KNOWN_STORAGE_WRITE_PATHS: tuple[tuple[str, str, str], ...] = (
         "Legacy /api/documents/upload thin adapter onto the Library durable path: "
         "acquire_owner_erasure_lock() before write_stream(); after the blob returns, "
         "acquire_storage_key_lock() then commit ImportJob(pending) + Document "
-        "(storage_key/checksum/import_job_id) in the same request; retain_pending_* after "
-        "those durable references exist while the storage-key lock is still held. No "
-        "BackgroundTasks. Verified by tests/backend/test_documents_upload_durable_delivery.py.",
+        "(storage_key/checksum/import_job_id) in the same request; retain_pending_* is called "
+        "AFTER that commit -- never pre-commit, since retain commits on its own maintenance "
+        "connection and would outlive a rolled-back reference (see retain_pending_rejected_"
+        "upload_cleanup_tasks()'s own docstring). No BackgroundTasks. Verified by "
+        "tests/backend/test_documents_upload_durable_delivery.py.",
     ),
     (
         "storage/references.py",
