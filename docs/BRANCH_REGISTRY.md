@@ -6,6 +6,55 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 76 (2026-08-23): `claude/goal-waiting-rollup` — MainAIGoalStatus.waiting rollup (ingen ny migration), grenad direkt från integrationsgrenen @ `32c7c72` (PR #141 mergad)
+
+**Bakgrund:** Cursors egen `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md` §H.3 flaggade
+"Goal status lie": `MainAIGoalStatus.waiting` fanns som schemavärde (och `models/mainai_
+execution.py`s egen docstring beskrev exakt semantiken: "a goal is waiting if ANY of its
+in-flight tasks is") men hade INGEN skrivare någonstans — en goal med en uppgift genuint
+fast i `waiting_ci` visade fortfarande `running`. Bekräftat via direkt kodsökning innan
+implementation: `grep -rn "MainAIGoalStatus.waiting"` gav noll skrivningar, bara en
+mängd-definition.
+
+**Byggt:** `app/mainai_execution/final_report.py`s `record_final_report()` — redan anropad
+varje worker-tick via `_finalize_mainai_execution_goals()` för varje aktiv goal — utökad att
+även rulla upp `running ↔ waiting` baserat på samma `task_statuses`-lista funktionen redan
+beräknar för sin egen terminal-close-kontroll. Ingen ny scan, ingen ny tick, ingen parallell
+statemachine — samma "en plats som redan frågar vad uppgifterna ser ut just nu"-princip.
+Rör ALDRIG `pending`/`planning`/`blocked`/en terminal status, bara `running ↔ waiting`.
+
+**4 nya tester** (`tests/backend/test_mainai_execution_final_report_v0_3.py`): goal rullar
+upp till `waiting` när en uppgift går in i `waiting_ci`; rullar tillbaka till `running` när
+uppgiften återupptas; en goal med EN väntande uppgift bland flera stannar `waiting` (matchar
+enum-docstringens "ANY", inte "ALL"); en `blocked`-goal förblir orörd (bevisar rollupen bara
+växlar running↔waiting, aldrig överskriver ett grundar-/planerarbeslut).
+
+**`waiting_external` medvetet INTE producerad här:** `executor.py`s egen kommentar säger
+redan "RESERVED scaffold status (V0.3): there is still no production [producer]" —
+rollup-logiken hanterar den generiskt (samma mängdkontroll som `waiting_ci`) så den fungerar
+korrekt DEN DAG en producent finns, men denna PR bygger ingen sådan producent — matchar
+"bygg inte i förväg"-disciplinen.
+
+**Verifiering:** `ruff check app/` identisk med baseline, `alembic heads` `0056` (ingen ny
+migration), `git diff --check` ren, de 2 nya/befintliga testfelen i
+`test_mainai_execution_auto_recovery.py` bekräftade FÖREFINNS IDENTISKT på den rena
+integrationsgrenen UTAN denna ändring (samma lokala Postgres-tidszonsartefakt som
+dokumenterats upprepade gånger tidigare denna session) — inte en regression. Full
+`tests/backend/mainai/` + `tests/security/` körd, bara det redan kända flaket.
+
+**Hård gräns respekterad:** ingen fil under `backend/app/autonomous_gap/**`,
+`development_supervisor/**`, `development_driver/**`, `development_operator/**` eller
+`safe_planner/**` rörd — trots att `development_supervisor/service.py` SJÄLV skriver
+`goal.status` på två ställen, rördes den filen inte; den koden är för närvarande obekräftat
+produktionsanropad (`run_supervisor()` har fortfarande noll anropare, omverifierat).
+
+**Beroenden:** Grenad direkt från integrationsgrenen `claude/det-kommer-mer-879lcm` @
+`32c7c72` (efter att PR #141 faktiskt mergats).
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `claude/goal-waiting-rollup` | (öppnas) | Lokalt verifierad, redo att pushas | `MainAIGoalStatus.waiting`-rollup i `record_final_report()`, ingen ny migration, 4 nya tester | `claude/det-kommer-mer-879lcm` @ 32c7c72 |
+
 ## Pass 75 (2026-08-22): `claude/project-entities-founder-api` — Founder API för project-entities/work-candidates-kedjan (ingen ny migration), grenad direkt från integrationsgrenen @ `2fed6a2` (PR #140 mergad)
 
 **Bakgrund:** grundaren skärpte terminologin — #139:s "composed chain"-test bevisade endast
