@@ -931,36 +931,26 @@ async def test_run_import_job_leaves_no_storage_key_when_the_blob_cannot_be_reco
     assert doc.storage_key is None
 
 
-def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_never_race_unsafely():
-    """Test D (founder's lettering): races the worker's write against the SAME physical-delete
-    path account-erasure's own durable outbox worker uses (attempt_storage_deletion_task()),
-    not just delete_if_unreferenced() directly -- proving both routes into a physical delete
-    respect the identical storage-key lock, run several times so a real Postgres advisory lock
-    (not manual signaling) decides who actually goes first each time.
-
-    Investigated 2026-08-19 as a recurring CI flake (always reported on "attempt 0" of the
-    four-iteration loop, never 1-3): manually traced both possible advisory-lock orderings
-    against the actual production code (writer-wins-first, already covered by Pass 33's own
-    deterministic test below; worker-wins-first, NOT previously covered) -- both conclude
-    correctly. Added `test_store_bytes_with_reference_lock_outbox_worker_wins_lock_first_
-    writer_must_republish` as a fully deterministic (no threading.Barrier, no timing
-    dependency) regression for the previously-uncovered ordering; it passes reliably. This
-    test itself also passed 10/10 in a tight local loop against a fast, low-latency local
-    Postgres. Both results point away from a correctness bug in the reviewed locking protocol
-    (migrations 0020/0021, Pass 26/27/28/31/32/33) and toward a CI-environment-specific
-    test-harness timing artifact (most plausibly thread/connection-pool cold-start skewing
-    which side of the barrier-released race actually runs first, specifically on this test's
-    FIRST iteration) -- not something a change to the account-erasure/storage locking code
-    itself would fix. Left as-is rather than randomly tuning barrier/join timeouts with no way
-    to verify locally whether a change actually helps."""
+def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_never_race_unsafely(
+    make_verified_user,
+):
+    """Test D: race write-under-lock against outbox cleanup. After retain-after-reference,
+    the durable claim is Document.storage_key in the writer's same transaction — not
+    retain-before-commit. Without that reference, writer-wins + empty commit correctly lets
+    cleanup purge (crash-before-reference must stay reclaimable)."""
+    import hashlib
+    from sqlalchemy import text as sa_text
     from sqlalchemy.orm import sessionmaker
 
     from app.db import migration_engine
+    from app.models.document import DocumentSource
     from app.models.storage_deletion_task import StorageDeletionTask
     from app.account.erasure import attempt_storage_deletion_task
-    from app.storage.references import enqueue_rejected_upload_cleanup_task
+    from app.request_context import current_user_id as current_user_id_var
+    from app.storage.references import enqueue_rejected_upload_cleanup_task, retain_pending_rejected_upload_cleanup_tasks
 
     _AdminSession = sessionmaker(bind=migration_engine)
+    user, _ = make_verified_user()
 
     for attempt in range(4):
         content = f"pass 32 test D attempt {attempt} {uuid.uuid4().hex}".encode()
@@ -985,8 +975,23 @@ def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_n
             db = SessionLocal()
             try:
                 barrier.wait(timeout=5)
-                _store_bytes_with_reference_lock(db, get_storage(), content, max_bytes=len(content) + 10)
+                current_user_id_var.set(str(user.id))
+                db.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+                blob = _store_bytes_with_reference_lock(db, get_storage(), content, max_bytes=len(content) + 10)
+                db.add(
+                    Document(
+                        title=f"race-d-{attempt}.txt",
+                        source=DocumentSource.upload,
+                        uploaded_by=user.id,
+                        checksum=hashlib.sha256(content).hexdigest(),
+                        original_filename=f"race-d-{attempt}.txt",
+                        status=IndexStatus.original_stored,
+                        storage_key=blob.storage_key,
+                        size_bytes=blob.size_bytes,
+                    )
+                )
                 db.commit()
+                retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
             finally:
@@ -1002,25 +1007,31 @@ def test_store_bytes_with_reference_lock_and_the_account_erasure_outbox_worker_n
         assert not t1.is_alive() and not t2.is_alive(), f"attempt {attempt}: a race participant never finished -- possible deadlock"
         assert errors == [], f"attempt {attempt}: unexpected exception(s): {errors}"
         assert get_storage().exists(storage_key) is True, (
-            f"attempt {attempt}: the writer's own later claim (the key is needed again) must "
-            f"win in the end -- the blob must exist on disk regardless of which side ran first"
+            f"attempt {attempt}: writer with durable Document.storage_key must leave the blob on disk"
         )
 
 
-def test_store_bytes_with_reference_lock_writer_wins_lock_first_outbox_worker_must_not_delete():
-    """Pass 33 deterministic regression for Test D's writer-wins-first failure mode: the writer
-    holds the advisory lock through verify BEFORE the outbox worker can delete, then commits
-    without ever setting Document.storage_key (the narrow helper-only window). Without
-    superseding stale rejected_upload_cleanup tasks, the worker would correctly observe no DB
-    reference after the writer's commit and delete a blob the writer just reclaimed."""
+def test_store_bytes_with_reference_lock_writer_wins_lock_first_outbox_worker_must_not_delete(
+    make_verified_user,
+):
+    """Runtime clock sweep / Pass 33 rewrite: the durable claim is Document.storage_key (or
+    equivalent), not retain-before-reference. Writer holds the advisory lock through verify,
+    commits a real DB reference in the same transaction, then retain supersedes stale cleanup.
+    Retaining under lock *before* any reference (the old shape) left unreferenced blobs as
+    retained_shared forever if the writer crashed mid-transaction."""
+    import hashlib
+    from sqlalchemy import text as sa_text
     from sqlalchemy.orm import sessionmaker
 
     from app.db import migration_engine
+    from app.models.document import DocumentSource
     from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
     from app.account.erasure import attempt_storage_deletion_task
-    from app.storage.references import enqueue_rejected_upload_cleanup_task
+    from app.request_context import current_user_id as current_user_id_var
+    from app.storage.references import enqueue_rejected_upload_cleanup_task, retain_pending_rejected_upload_cleanup_tasks
 
     _AdminSession = sessionmaker(bind=migration_engine)
+    user, _ = make_verified_user()
 
     content = f"pass 33 test D-prime writer wins first {uuid.uuid4().hex}".encode()
     storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
@@ -1029,14 +1040,33 @@ def test_store_bytes_with_reference_lock_writer_wins_lock_first_outbox_worker_mu
     writer_verified = threading.Event()
     writer_may_commit = threading.Event()
     worker_outcome: dict[str, StorageDeletionStatus] = {}
+    writer_errors: list[BaseException] = []
 
     def _writer():
         db = SessionLocal()
         try:
-            _store_bytes_with_reference_lock(db, get_storage(), content, max_bytes=len(content) + 10)
+            current_user_id_var.set(str(user.id))
+            db.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+            blob = _store_bytes_with_reference_lock(db, get_storage(), content, max_bytes=len(content) + 10)
+            db.add(
+                Document(
+                    title="retain-after-ref.txt",
+                    source=DocumentSource.upload,
+                    uploaded_by=user.id,
+                    checksum=hashlib.sha256(content).hexdigest(),
+                    original_filename="retain-after-ref.txt",
+                    status=IndexStatus.original_stored,
+                    storage_key=blob.storage_key,
+                    size_bytes=blob.size_bytes,
+                )
+            )
             writer_verified.set()
             writer_may_commit.wait(timeout=5)
             db.commit()
+            retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
+        except BaseException as exc:  # noqa: BLE001
+            writer_errors.append(exc)
+            db.rollback()
         finally:
             db.close()
 
@@ -1060,9 +1090,44 @@ def test_store_bytes_with_reference_lock_writer_wins_lock_first_outbox_worker_mu
     t_writer.join(timeout=10)
     t_worker.join(timeout=10)
 
+    assert writer_errors == [], writer_errors
     assert not t_writer.is_alive() and not t_worker.is_alive()
     assert get_storage().exists(storage_key) is True
     assert worker_outcome["status"] == StorageDeletionStatus.retained_shared
+
+
+def test_store_bytes_with_reference_lock_rollback_without_reference_allows_cleanup():
+    """Crash/rollback after store-under-lock but before Document.storage_key must leave the
+    blob reclaimable — retain must NOT have marked cleanup retained_shared already."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+    from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
+    from app.account.erasure import attempt_storage_deletion_task
+    from app.storage.references import enqueue_rejected_upload_cleanup_task
+
+    _AdminSession = sessionmaker(bind=migration_engine)
+    content = f"retain-after-ref rollback orphan check {uuid.uuid4().hex}".encode()
+    storage_key = get_storage().write_stream(iter([content, b""]).__next__, max_bytes=len(content)).storage_key
+    operation_id = enqueue_rejected_upload_cleanup_task(storage_key)
+
+    db = SessionLocal()
+    try:
+        _store_bytes_with_reference_lock(db, get_storage(), content, max_bytes=len(content) + 10)
+        db.rollback()
+    finally:
+        db.close()
+
+    admin = _AdminSession()
+    try:
+        task = admin.query(StorageDeletionTask).filter_by(operation_id=operation_id, storage_key=storage_key).one()
+        assert task.status == StorageDeletionStatus.pending
+        attempt_storage_deletion_task(admin, task)
+        admin.refresh(task)
+        assert task.status == StorageDeletionStatus.purged
+        assert get_storage().exists(storage_key) is False
+    finally:
+        admin.close()
 
 
 def test_store_bytes_with_reference_lock_outbox_worker_wins_lock_first_writer_must_republish():
