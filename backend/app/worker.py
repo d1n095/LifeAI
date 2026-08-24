@@ -34,6 +34,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
+from app.agent_coordination.service import expire_stale_active_leases
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.jobs.handlers.corpus_review import run_corpus_review_job
@@ -681,6 +682,21 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed to resolve engineering lesson conflicts.", self.worker_id)
 
+    def _expire_stale_agent_scope_leases(self, db: Session) -> None:
+        """Runtime clock for AgentScopeLease TTL: status=active + expires_at < now must not
+        permanently block PATH_CONFLICT / inventory forever. Bounded release via
+        expire_stale_active_leases(); acquire/conflict scans already skip stale rows."""
+        try:
+            n = expire_stale_active_leases(db, limit=50)
+            if n:
+                db.commit()
+                logger.info("Worker %s: expired %d stale agent scope lease(s).", self.worker_id, n)
+            else:
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: failed to expire stale agent scope leases.", self.worker_id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -702,6 +718,7 @@ class Worker:
             await self._advance_mainai_execution_replan(claim_db)
             self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
+            self._expire_stale_agent_scope_leases(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
