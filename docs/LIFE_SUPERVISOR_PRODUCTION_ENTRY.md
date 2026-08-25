@@ -18,7 +18,7 @@ active ExecutionAuthorizationEnvelope
   -> durable worker trigger                        (app/worker.py's _advance_authorized_supervisor_goals tick)
   -> fenced supervisor_goal_leases claim            (app.development_supervisor.lease, migration 0059)
   -> SupervisorScope reconstructed ONLY from the envelope
-  -> narrower per-task WorkBindings
+  -> per-task WorkBindings, bounded by the envelope's own ceiling (see precision note below)
   -> run_supervisor()
   -> Safe Planner / bounded local execution
 ```
@@ -56,6 +56,30 @@ and `test_an_envelope_superseded_mid_run_stops_the_next_task_dispatch`.
 cross-tick half: a founder narrowing an already-active envelope between two SEPARATE ticks is
 honored on the next one, because `eligible_authorized_goals()` is re-read fresh every time —
 never cached, never a stale reference carried across ticks.
+
+### Precision correction: "narrower per-task WorkBindings" was overstated
+
+This document and `production_entry.py`'s own module docstring originally described the chain
+as producing "narrower per-task `WorkBinding`s." That is not literally accurate, and was
+corrected after adversarial review: `build_production_work_binding`-equivalent construction
+inside `run_authorized_goal_supervisor_tick()` sets BOTH `WorkBinding.allowed_paths` and
+`OperatorContext.allowed_paths` to the FULL `scope.allowed_paths` — the entire goal-level
+ceiling — for every task, not something individually narrower per task.
+
+This is still safe in the sense that matters most: no task can ever exceed the
+founder-authorized envelope (`bind_execution_context()`'s own intersection logic in
+`app/development_supervisor/service.py` still enforces that as the hard backstop regardless).
+It is simply not YET true task-level delegation. The honest reason is a data-model gap, not an
+oversight being hidden: `MainAITask` (`app/models/mainai_execution.py`) has no
+`allowed_paths`/`allowed_capabilities` field at all today, so there is no real per-task signal
+to narrow FROM. Deriving one by parsing `task.description` or branching on `task_type` would
+directly violate two rules this whole mission has held to throughout — the founder decision's
+own "task_type may suggest, never authorize" (section 7) and this module's own "never derive
+authority from goal prose" — so inventing a heuristic here would have been a worse choice than
+being honest that every task currently receives the full goal ceiling. True task-level
+narrowing needs a real, explicit, founder-traceable per-task scope signal that does not exist
+yet (most likely a future Safe-Planner-derived scope, computed from an actual accepted plan,
+never from task metadata alone) — building that is future work, not something to fake here.
 
 ## `supervisor_goal_leases` — the crash/retry/concurrency primitive
 

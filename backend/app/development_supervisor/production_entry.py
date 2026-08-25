@@ -5,9 +5,24 @@ chain (see docs/LIFE_EXECUTION_AUTHORIZATION_ENVELOPE.md and this module's own t
     -> eligible MainAIGoal
     -> durable worker trigger (app/worker.py's `_advance_authorized_supervisor_goals`)
     -> reconstructed SupervisorScope   (copied ONLY from the envelope, never invented)
-    -> narrower per-task WorkBindings  (never wider than the envelope's own ceiling)
+    -> per-task WorkBindings           (bounded by the envelope's own ceiling -- see note below)
     -> run_supervisor()
     -> Safe Planner / bounded local execution
+
+PRECISION NOTE (found by adversarial review after this module first merged): every
+`WorkBinding.allowed_paths` / `OperatorContext.allowed_paths` built here is set to the FULL
+`scope.allowed_paths` -- i.e. the entire goal-level ceiling -- for every task, not something
+individually narrower per task. This is NEVER wider than the founder-authorized envelope (the
+actual authority invariant this whole foundation exists to enforce), but it is not yet true
+task-level delegation either, and earlier wording in this docstring and in
+docs/LIFE_SUPERVISOR_PRODUCTION_ENTRY.md overstated it as "narrower." The honest reason:
+`MainAITask` (app/models/mainai_execution.py) has no `allowed_paths`/`allowed_capabilities`
+field at all today -- there is no real per-task signal to narrow FROM. Inventing one by
+parsing `task.description`/`task_type` would violate the founder decision's own "task_type may
+suggest, never authorize" principle and this module's own "never derive authority from goal
+prose" rule -- so until a real, explicit, founder-traceable per-task scope signal exists
+(likely a future Safe-Planner-derived or explicitly-authorized field), giving every task the
+full goal ceiling is the correct, honest, fail-closed choice, not a shortcut being hidden.
 
 AUTHORITY RECONSTRUCTION: every `SupervisorScope` field below comes directly from the
 CURRENTLY ACTIVE `ExecutionAuthorizationEnvelope` row for this goal -- never from goal prose,
