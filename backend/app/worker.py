@@ -406,29 +406,43 @@ class Worker:
         logged, and never stops the rest of this batch or this poll cycle, exactly like
         _retry_storage_deletion_tasks' own per-task isolation above.
 
-        EXCLUDES any task whose goal currently has an active ExecutionAuthorizationEnvelope
-        (migration 0057/0058) -- a goal in that state is meant to be governed EXCLUSIVELY by
+        EXCLUDES any task whose goal has EVER had an ExecutionAuthorizationEnvelope row
+        (migration 0057/0058/0059) -- ANY status, not only `active`. Once a goal enters
+        execution-envelope governance it must never implicitly fall back to this blanket,
+        envelope-blind approval-policy-only dispatch just because its current envelope is
+        absent/superseded/revoked -- authority must never increase as a side effect of
+        revocation, failure, or retry, and a founder revoking autonomous authority getting the
+        OLDER, less-scoped V0.1 path reopened instead would be exactly that. Since
+        `execution_authorization_envelopes` rows are NEVER deleted (only superseded -- see
+        migration 0057's own "never mutate, always supersede" discipline), the mere EXISTENCE
+        of any row for a goal_id, regardless of status, is itself the durable "this goal has
+        been envelope-governed" fact -- no separate governance-state column needed. A goal
+        that currently has an active envelope remains excluded exactly as before (governed by
         `app.development_supervisor.production_entry`'s bounded, envelope-scoped
-        `run_supervisor()` path (see `_advance_authorized_supervisor_goals` below), not also by
-        this blanket, envelope-blind approval-policy-only dispatch. Without this exclusion the
-        whole authorization envelope would be decorative: this tick would keep auto-dispatching
-        every `standard_repo_work`-policy repo_edit/run_tests/open_pr task regardless of the
-        envelope's own allowed_paths/allowed_capabilities/maximum_risk the moment it becomes
-        `ready`, often winning the race against the Supervisor tick simply by running first in
-        this same poll cycle. Goals with no envelope are completely unaffected -- this tick's
-        existing behavior for them is unchanged."""
-        envelope_governed_goal_ids = db.query(ExecutionAuthorizationEnvelope.goal_id).filter(
-            ExecutionAuthorizationEnvelope.status == "active"
-        )
+        `run_supervisor()` path instead -- see `_advance_authorized_supervisor_goals` below); a
+        goal whose envelope was superseded/revoked with no replacement is now ALSO excluded --
+        fail closed (no autonomous dispatch at all), never a silent reopening of the wider,
+        envelope-blind path. Found and pinned as a latent gap by Cursor's own adversarial
+        attack (PR #152) immediately after PR #148 merged; goals that have NEVER had any
+        envelope row are completely unaffected -- this tick's existing behavior for genuinely
+        ordinary, non-autonomous goals is unchanged.
+
+        Re-verified per task, immediately before dispatch (not only once in the batch query
+        above), closing the narrow TOCTOU window between this tick's own SELECT and the actual
+        `dispatch_ready_task()` call: a revoke landing in that gap must still prevent dispatch,
+        not just the next tick's."""
+        ever_envelope_governed_goal_ids = db.query(ExecutionAuthorizationEnvelope.goal_id)
         ready_tasks = (
             db.query(MainAITask)
-            .filter(MainAITask.status == MainAITaskStatus.ready, MainAITask.goal_id.notin_(envelope_governed_goal_ids))
+            .filter(MainAITask.status == MainAITaskStatus.ready, MainAITask.goal_id.notin_(ever_envelope_governed_goal_ids))
             .all()
         )
         for task in ready_tasks:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
                 continue
+            if db.query(ExecutionAuthorizationEnvelope.id).filter(ExecutionAuthorizationEnvelope.goal_id == goal.id).first() is not None:
+                continue  # became envelope-governed in the gap between the batch query and here
             try:
                 dispatch_ready_task(db, task=task, goal=goal, dispatched_by="mainai_worker_auto_advance")
                 db.commit()

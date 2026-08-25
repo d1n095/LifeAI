@@ -133,16 +133,34 @@ the default policy, and what `WorkCandidate` authorization sets — does for `re
 `run_tests`, `open_pr`, and `read_only_audit`), with **zero envelope awareness at all**. This
 predates the whole envelope/Supervisor foundation and was never part of it.
 
-Two consequences, both handled here:
+Three consequences, all handled here:
 
-1. **`_advance_mainai_execution_tasks()` now EXCLUDES any task whose goal has an active
-   `ExecutionAuthorizationEnvelope`** (`app/worker.py`). Without this, the entire envelope
-   system would be decorative: V0.1's blind tick would keep auto-dispatching
-   envelope-governed tasks regardless of `allowed_paths`/`allowed_capabilities`/
-   `maximum_risk`, usually winning the race simply by running earlier in the same poll cycle
-   (see `run_once()`'s own tick ordering). Goals with no envelope are completely unaffected —
-   see `tests/backend/test_advance_tasks_excludes_envelope_governed_goals.py`.
-2. **`prepare_context()`'s own `mainai_jobs` lease claim** (a SEPARATE lease from
+1. **`_advance_mainai_execution_tasks()` now EXCLUDES any task whose goal has EVER had an
+   `ExecutionAuthorizationEnvelope` row — any status, not only `active`** (`app/worker.py`).
+   Without this, the entire envelope system would be decorative: V0.1's blind tick would keep
+   auto-dispatching envelope-governed tasks regardless of `allowed_paths`/
+   `allowed_capabilities`/`maximum_risk`, usually winning the race simply by running earlier
+   in the same poll cycle (see `run_once()`'s own tick ordering). Goals with no envelope are
+   completely unaffected — see
+   `tests/backend/test_advance_tasks_excludes_envelope_governed_goals.py`.
+2. **`REVOCATION != FALLBACK TO OLDER AUTHORITY`** (fixed after Cursor's own adversarial PR
+   #152 pinned this as a latent gap immediately after this PR first merged): the exclusion in
+   (1) originally checked `status == 'active'` only, meaning superseding a goal's only
+   envelope with no replacement made it look identical to a goal that had never been
+   authorized at all — V0.1's wider, envelope-blind path would silently reopen. Since
+   `execution_authorization_envelopes` rows are NEVER deleted (only superseded — the same
+   "never mutate, always supersede" discipline this whole foundation already uses), the mere
+   EXISTENCE of any row for a `goal_id`, regardless of status, is itself the durable "this
+   goal has been envelope-governed" fact — no new column or governance-state table needed.
+   `_advance_mainai_execution_tasks()`'s exclusion now checks existence, not status: a goal
+   that was ever envelope-governed and currently has no active envelope becomes
+   **undispatchable by either path** (fail closed), never a silent reopening of the older,
+   less-scoped one. Re-authorizing afterward returns it to Supervisor-only governance, never
+   V0.1. Also re-verified per task immediately before dispatch (not only once in the tick's
+   own batch query), closing the narrow TOCTOU window where a goal becomes governed between
+   that batch SELECT and a specific task's own turn in the same tick — see
+   `test_a_goal_authorized_mid_batch_still_blocks_its_own_later_task_in_the_same_tick`.
+3. **`prepare_context()`'s own `mainai_jobs` lease claim** (a SEPARATE lease from
    `supervisor_goal_leases`, one per dispatched task/job, reusing
    `app/jobs/mainai_job_lease.py`'s existing fencing primitive via a new
    `claim_specific_mainai_job()`) closes the remaining race: even with exclusion #1 in place,
@@ -261,9 +279,13 @@ capability strings that would apply if authorized.
   the goal-lease-TTL-vs-single-action-duration fix (the margin invariant, and the lease
   actually being renewed at the per-task dispatch boundary), and the clean no-op case (no
   bindable task).
-- `tests/backend/test_advance_tasks_excludes_envelope_governed_goals.py` (2): V0.1's own
+- `tests/backend/test_advance_tasks_excludes_envelope_governed_goals.py` (6): V0.1's own
   blanket auto-dispatch tick correctly excludes envelope-governed goals' tasks while leaving
-  ordinary (non-autonomous) goals completely unaffected.
+  never-governed, ordinary (non-autonomous) goals completely unaffected; superseding a goal's
+  only envelope with no replacement fails closed (never reopens V0.1) rather than silently
+  falling back to it; re-authorizing afterward returns the goal to Supervisor-only governance,
+  never V0.1; and the per-task TOCTOU re-check catches a goal becoming governed mid-tick, not
+  only what the batch query saw at the start.
 
 ## Explicitly deferred
 
