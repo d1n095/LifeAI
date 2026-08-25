@@ -77,3 +77,48 @@ async def test_a_ready_task_under_an_unauthorized_goal_is_still_auto_dispatched_
     ).scalar_one()
     assert task.status == MainAITaskStatus.running
     assert task.mainai_job_id is not None
+
+
+@pytest.mark.asyncio
+async def test_superseding_an_envelope_without_replacement_currently_reopens_v01_auto_dispatch(
+    superuser_db, make_verified_user,
+):
+    """LATENT Class-B characterization, not a pass/fail of desired product behavior.
+
+    `_advance_mainai_execution_tasks` excludes goals with an *active* envelope only. There is
+    today no founder API that supersedes an envelope WITHOUT authorizing a replacement
+    (`authorize_execution_scope` always leaves a new active row), so this state is not on a
+    production path yet. If/when a revoke-without-replacement surface is added, this test
+    pins the CURRENT composition: Supervisor becomes ineligible (correct) AND V0.1's
+    envelope-blind auto-dispatch resumes (possibly NOT what a founder who just revoked
+    autonomous authority intended).
+
+    `AUTHORITY REVOKED != ALL AUTONOMOUS DISPATCH STOPPED` until that decision is made
+    explicitly. Do not "fix" this by widening the exclusion without a founder call -- the
+    safe default for a future revoke API is more likely "stay off V0.1 too", which would
+    deliberately flip this assertion."""
+    from app.models.execution_envelope import ExecutionAuthorizationEnvelope
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    _authorize(superuser_db, owner.id, goal.id)
+    superuser_db.commit()
+
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.ready
+
+    # Simulate a future revoke-without-replacement (no production API today).
+    superuser_db.query(ExecutionAuthorizationEnvelope).filter(
+        ExecutionAuthorizationEnvelope.goal_id == goal.id
+    ).update({"status": "superseded"})
+    superuser_db.commit()
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.running, (
+        "CURRENT behavior: superseding the only envelope without a replacement re-opens V0.1 "
+        "auto-dispatch. If a revoke API is added, decide whether this is still desired."
+    )
+    assert task.mainai_job_id is not None
