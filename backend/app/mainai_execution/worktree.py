@@ -132,14 +132,21 @@ def _require_ownership(worktree: MainAITaskWorktree) -> None:
         )
 
 
-async def create_task_worktree(
-    db: Session, *, task: MainAITask, job: MainAIJob, lease_generation: int, executor_id: str
+def create_task_worktree_sync(
+    db: Session, *, task: MainAITask, job: MainAIJob, lease_generation: int, executor_id: str, base_sha: str
 ) -> MainAITaskWorktree:
-    """Creates (or, if this exact job already has a worktree row, idempotently returns) an
-    isolated local checkout for one task execution attempt. Fails closed if GitHub write is
-    not configured/enabled -- there is no local-only fallback that would make the resulting
-    worktree's branch meaningful, and creating one anyway would just be a second, silently
-    diverging thing to reconcile later."""
+    """The synchronous core of `create_task_worktree()` below, split out so a caller that
+    already has a verified `base_sha` in hand (fetched once, upfront, via its own `await
+    GitHubClient().get_ref(BASE_BRANCH)`) can create a worktree from a plain, non-async
+    context. This is exactly the situation `app/development_supervisor/production_entry.py`'s
+    real `prepare_context` closure is in: `WorkBinding.prepare_context` is a plain
+    `Callable[[MainAITask, MainAIJob], object]`, called synchronously (never awaited) from
+    inside `run_supervisor()` — so the one network call this whole function needs must happen
+    OUTSIDE it, once per Supervisor tick, not once per task.
+
+    Still fails closed exactly like the async wrapper: GitHub write must be configured/
+    enabled, and the branch name is re-verified never protected/mainline before any
+    filesystem side effect."""
     existing = db.query(MainAITaskWorktree).filter(MainAITaskWorktree.job_id == job.id).one_or_none()
     if existing is not None:
         return existing
@@ -158,8 +165,6 @@ async def create_task_worktree(
         # explicitly anyway -- the DB CHECK constraint is the real backstop, this is defense
         # in depth before any filesystem or network side effect happens at all.
         raise WorktreeError(f"Refusing to use protected/mainline branch '{branch}' as a task worktree's working branch.")
-
-    base_sha = await client.get_ref(BASE_BRANCH)
 
     path = WORKTREE_ROOT / str(job.id)
     if path.exists():
@@ -210,6 +215,26 @@ async def create_task_worktree(
     db.add(worktree)
     db.flush()
     return worktree
+
+
+async def create_task_worktree(
+    db: Session, *, task: MainAITask, job: MainAIJob, lease_generation: int, executor_id: str
+) -> MainAITaskWorktree:
+    """Thin async wrapper: resolves `base_sha` via the one real network call
+    (`GitHubClient.get_ref()`), then delegates everything else to the synchronous
+    `create_task_worktree_sync()` above. Behavior is unchanged from before the sync/async
+    split — existing callers (app/mainai_execution/execution_job.py) are unaffected."""
+    settings = get_settings()
+    client = GitHubClient()
+    if not settings.github_write_enabled or not client.is_configured():
+        raise WorktreeError(
+            "GITHUB_WRITE_ENABLED är av eller GITHUB_TOKEN/GITHUB_REPO saknas — kan inte skapa en verklig, "
+            "push-bar worktree. MainAI stannar i förslagsläge (se app/mainai_execution/execution_job.py)."
+        )
+    base_sha = await client.get_ref(BASE_BRANCH)
+    return create_task_worktree_sync(
+        db, task=task, job=job, lease_generation=lease_generation, executor_id=executor_id, base_sha=base_sha
+    )
 
 
 def worktree_git_status(worktree: MainAITaskWorktree) -> dict:

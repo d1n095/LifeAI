@@ -543,6 +543,10 @@ _MAINAI_EXECUTION_TABLES = (
     # updated in place; cleaned up only via ON DELETE CASCADE from mainai_tasks/mainai_goals,
     # which erase_own_mainai_execution_children() already deletes for the calling owner.
     "engineering_lesson_guard_observations",
+    # Migration 0059 (Supervisor Goal Lease): same structural role -- a mutable row whose
+    # status transitions in place (active -> released) and whose lease_generation is bumped in
+    # place on takeover, deletion only through the SECURITY DEFINER erasure path.
+    "supervisor_goal_leases",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -937,6 +941,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_authorization_envelopes FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_execution_authorization_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_guard_observations FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON supervisor_goal_leases FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_supervisor_goal_leases() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1001,6 +1007,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("engineering_lesson_guard_observations", frozenset({"SELECT", "INSERT"})),
+            ("supervisor_goal_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

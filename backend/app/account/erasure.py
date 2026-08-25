@@ -675,6 +675,14 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # fall through the users ON DELETE CASCADE once the gated children are gone.
         db.execute(sa_text("SELECT erase_own_mainai_execution_children()"))
 
+        # --- Supervisor Goal Lease (migration 0059): same DELETE-revoked-from-mainai_app
+        # discipline, deletion only through this one narrow SECURITY DEFINER function. Must run
+        # before erase_own_mainai_execution_children()'s own goal/plan/task cleanup only in the
+        # sense that both are independent, owner-scoped deletes -- supervisor_goal_leases.
+        # goal_id already cascades from mainai_goals' own ON DELETE CASCADE, so this call is
+        # about the DELETE-revoked/SECURITY DEFINER discipline, not an ordering requirement.
+        db.execute(sa_text("SELECT erase_own_supervisor_goal_leases()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.
