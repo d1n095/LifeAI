@@ -330,6 +330,73 @@ def test_erase_account_data_succeeds_for_an_owner_who_has_run_a_mainai_goal():
         session.close()
 
 
+def test_erase_account_data_succeeds_with_an_active_supervisor_goal_lease():
+    """Post-#148 composition attack: #149 wired erase_own_mainai_execution_children; #148
+    wired erase_own_supervisor_goal_leases. Both must be present on the production erasure
+    path together -- a RESTRICT-shaped or DELETE-revoked supervisor_goal_leases row that
+    erasure never clears would make account deletion fail for any owner who had ever held a
+    Supervisor lease, the exact same Class-A shape #149 closed for mainai_task_events.
+
+    Drives the real erase_account_data() entry with a real envelope + claimed lease, not a
+    forged cascade."""
+    import uuid
+
+    from app.development_supervisor.lease import claim_supervisor_goal_lease
+    from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
+    from app.mainai_execution.planner import PlannedTaskSpec, create_goal, create_plan
+    from app.models.supervisor_lease import SupervisorGoalLease
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        goal = create_goal(
+            session, owner_id=owner.id, title="supervisor erasure probe", original_instruction="i", created_by="test"
+        )
+        create_plan(
+            session,
+            goal=goal,
+            rationale="r",
+            tasks=[PlannedTaskSpec(description="run tests", task_type="run_tests")],
+            created_by="test",
+        )
+        session.flush()
+        proposal = propose_execution_scope(
+            session, owner_id=owner.id, goal_id=goal.id, idempotency_key=f"erase-sup-prop-{uuid.uuid4()}"
+        )
+        _, envelope = authorize_execution_scope(
+            session,
+            owner_id=owner.id,
+            proposal_id=proposal.id,
+            authorized_by="founder",
+            authorized_paths=["README.md"],
+            authorized_capabilities=["read_file"],
+            authorized_risk="low",
+            envelope_idempotency_key=f"erase-sup-env-{uuid.uuid4()}",
+        )
+        claim = claim_supervisor_goal_lease(
+            session,
+            owner_id=owner.id,
+            goal_id=goal.id,
+            envelope_id=envelope.id,
+            worker_id="worker-erasure-probe",
+            lease_seconds=300,
+        )
+        session.commit()
+        assert claim is not None
+        owner_id = owner.id
+        assert session.query(SupervisorGoalLease).filter_by(owner_id=owner_id).count() == 1
+
+        _set_rls_user(session, owner.id)
+        erase_account_data(session, owner)
+
+        assert session.get(User, owner_id) is None
+        assert session.query(SupervisorGoalLease).filter_by(owner_id=owner_id).count() == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_erase_account_data_rolls_back_everything_on_a_failure_after_erase_owner_memory(monkeypatch):
     """A failure AFTER erase_owner_memory() has already run (but before the final commit) must
     roll back the S1A erasure too — not just the later Python deletes."""
