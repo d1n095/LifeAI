@@ -210,7 +210,19 @@ async def test_a_goal_whose_lease_is_already_held_returns_none_without_touching_
 
 
 @pytest.mark.asyncio
-async def test_two_workers_racing_the_same_goal_only_one_actually_runs_supervisor(superuser_db, make_verified_user, source_repo):
+async def test_a_second_worker_cannot_adopt_a_still_running_job_left_by_the_first_after_the_goal_lease_is_released(
+    superuser_db, make_verified_user, source_repo
+):
+    """The goal-level supervisor_goal_leases lease is released at the END of every tick
+    (see run_authorized_goal_supervisor_tick's own finally block) -- it does NOT protect a
+    task's own mainai_jobs claim across that gap. If tick 1 (worker-a) dispatches the goal's
+    only task and defers it (no candidate/provider spend authorized), the job stays `running`
+    under worker-a's OWN mainai_jobs lease for up to its full TTL, independent of the goal
+    lease. A DIFFERENT worker (worker-b) claiming the now-free goal lease on the very next
+    tick must NOT be able to silently adopt that still-running job by copying its
+    lease_generation -- it must fail closed, exactly like it would if worker-a were still
+    genuinely alive and mid-execution, because from worker-b's point of view it cannot tell
+    the difference."""
     owner, _ = make_verified_user()
     goal = _goal_with_ready_task(superuser_db, owner.id)
     envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
@@ -218,14 +230,41 @@ async def test_two_workers_racing_the_same_goal_only_one_actually_runs_superviso
 
     result_a = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
     superuser_db.commit()
-    # worker-a already released its lease by the time it returns (finally-block release), so
-    # worker-b CAN claim afterwards -- this proves sequential ticks never deadlock each other,
-    # the real "still held" case is covered by the test above via an unreleased foreign claim.
-    result_b = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-b")
+    assert result_a is not None
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.running  # dispatched, deferred, never resolved
+
+    from app.development_supervisor.service import SupervisorError
+
+    with pytest.raises(SupervisorError):
+        await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-b")
+    superuser_db.commit()  # the tick's own finally-block release, not a DB-level error -- safe to persist
+
+    from app.models.supervisor_lease import SupervisorGoalLease
+    lease = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).order_by(SupervisorGoalLease.acquired_at.desc()).first()
+    assert lease.worker_id == "worker-b"
+    assert lease.status == "released"  # worker-b's own goal lease is still cleanly released despite the failure
+
+
+@pytest.mark.asyncio
+async def test_the_same_worker_can_resume_its_own_still_valid_job_claim_across_two_ticks(superuser_db, make_verified_user, source_repo):
+    """The legitimate case the fix above must not break: the SAME worker_id, resuming its own
+    still-unexpired mainai_jobs claim on a later tick (e.g. after a transient error unwound
+    its own in-process call stack without ever finishing the job) -- this must keep working
+    without needing to re-claim, exactly like run_supervisor()'s own two-call resume design
+    already assumes."""
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
     superuser_db.commit()
 
-    assert result_a is not None
-    assert result_b is not None  # goal still has the same task; both attempts are legitimate
+    result_1 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    superuser_db.commit()
+    assert result_1 is not None
+
+    result_2 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    superuser_db.commit()
+    assert result_2 is not None  # same worker, same still-valid claim -- a legitimate resume
 
 
 @pytest.mark.asyncio

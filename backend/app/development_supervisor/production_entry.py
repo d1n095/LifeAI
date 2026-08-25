@@ -37,6 +37,7 @@ superseded, the very next tick sees that immediately, never a cached or assumed-
 scope."""
 
 import logging
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -174,23 +175,41 @@ async def run_authorized_goal_supervisor_tick(
             very same freshly `queued` job this Supervisor call just created via
             `dispatch_ready_task()` and double-executing it through `run_task_execution_job()`.
 
-            A job already `running` (never `queued`) is a RESUME, not a fresh dispatch --
-            `run_supervisor()`'s own two-call resume design (see
+            A job already `running` (never `queued`) is a RESUME candidate, not necessarily a
+            fresh dispatch -- `run_supervisor()`'s own two-call resume design (see
             test_two_job_chain_and_interruption_resume_are_canonical) calls `prepare_context`
-            again for a task it selected but did not finish in an earlier call. This is safe to
-            treat as "still ours" WITHOUT re-claiming: `supervisor_goal_leases` already
-            guarantees at most one worker runs `run_supervisor()` for this goal at a time, and
-            V0.1's own blind dispatch tick is excluded from every envelope-governed goal (see
-            app/worker.py's `_advance_mainai_execution_tasks`) -- so a `running` job under this
-            goal's own task can only ever be this same logical Supervisor session's own earlier
-            claim, never a genuinely competing one. Anything else (still `queued` after a
-            failed claim -- a real race; or any other status) is a genuine anomaly and stays a
-            hard failure, never silently assumed safe."""
+            again for a task it selected but did not finish in an earlier call. `
+            supervisor_goal_leases` guarantees at most one worker runs `run_supervisor()` for
+            this goal AT ANY GIVEN MOMENT, but NOT across the gap BETWEEN ticks -- the goal
+            lease is released in this function's own `finally` block at the end of EVERY tick,
+            so a task deferred (not completed) in tick N leaves its `mainai_jobs` row `running`
+            under tick N's worker for up to the FULL `mainai_jobs` lease TTL, independent of the
+            goal lease. A later tick (this same worker resuming its own recent claim, OR a
+            genuinely different worker, e.g. after a process restart) can therefore legitimately
+            observe a `running` job it did not itself just claim.
+
+            The ONLY safe resume is the SAME worker_id, within its OWN still-valid lease window
+            -- verified here explicitly (locked_by AND lease_expires_at), never assumed from
+            goal-lease possession or job.status alone. A different worker_id, or an expired
+            lease, is treated as a hard failure: the established `task_execution`
+            stale-lease/takeover pipeline (app/mainai_execution/recovery_takeover.py) is the
+            ONLY path allowed to transfer ownership of an expired task_execution job -- this
+            function must never invent a second, silent reclaim path by copying whatever
+            lease_generation happens to be on the row."""
             claimed_generation = claim_specific_mainai_job(db, job_id=job.id, worker_id=worker_id, lease_seconds=lease_seconds)
             if claimed_generation is None:
                 db.refresh(job)
-                if job.status != MainAIJobStatus.running:
-                    raise SupervisorError(f"could not claim mainai_jobs lease for job {job.id}: already claimed elsewhere")
+                still_valid = (
+                    job.status == MainAIJobStatus.running
+                    and job.locked_by == worker_id
+                    and job.lease_expires_at is not None
+                    and job.lease_expires_at > datetime.utcnow()
+                )
+                if not still_valid:
+                    raise SupervisorError(
+                        f"could not claim mainai_jobs lease for job {job.id}: not queued, and not a "
+                        "still-valid resume of this same worker's own earlier claim"
+                    )
                 claimed_generation = job.lease_generation
             execution = record_execution(
                 db,

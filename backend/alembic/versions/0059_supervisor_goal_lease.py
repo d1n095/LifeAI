@@ -53,8 +53,13 @@ def upgrade() -> None:
             CONSTRAINT uq_supervisor_goal_leases_id_owner UNIQUE (id, owner_id),
             CONSTRAINT fk_supervisor_goal_leases_goal_owner FOREIGN KEY (goal_id, owner_id)
                 REFERENCES mainai_goals (id, owner_id) ON DELETE CASCADE,
+            -- Column-specific SET NULL (PG15+; local/CI/prod all run pg16+): a bare composite
+            -- ON DELETE SET NULL nulls EVERY referencing column by default, including
+            -- owner_id -- which is NOT NULL, so the envelope's DELETE would itself raise a
+            -- constraint violation instead of cleanly detaching the lease. Only envelope_id
+            -- may ever be nulled; owner_id must survive an envelope's deletion untouched.
             CONSTRAINT fk_supervisor_goal_leases_envelope_owner FOREIGN KEY (envelope_id, owner_id)
-                REFERENCES execution_authorization_envelopes (id, owner_id) ON DELETE SET NULL,
+                REFERENCES execution_authorization_envelopes (id, owner_id) ON DELETE SET NULL (envelope_id),
             CONSTRAINT ck_supervisor_goal_leases_status CHECK (status IN ('active', 'released')),
             CONSTRAINT ck_supervisor_goal_leases_generation CHECK (lease_generation >= 1)
         );

@@ -134,3 +134,44 @@ def test_two_workers_racing_the_same_goal_only_one_wins(superuser_db, make_verif
     claim_b = claim_supervisor_goal_lease(superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id, worker_id="worker-b", lease_seconds=300)
 
     assert (claim_a is None) != (claim_b is None)  # exactly one wins
+
+
+def test_deleting_the_referenced_envelope_detaches_the_lease_without_touching_owner_id(superuser_db, make_verified_user):
+    """A bare composite `ON DELETE SET NULL` (no column list) nulls EVERY referencing column
+    by default in PostgreSQL -- including owner_id, which is NOT NULL, so the envelope's own
+    DELETE would raise a constraint violation instead of cleanly detaching the lease. Migration
+    0058 uses the column-specific `ON DELETE SET NULL (envelope_id)` form specifically to avoid
+    this -- this test proves the real DB behavior, not just the migration's own intent.
+
+    Builds the envelope directly via the ORM (never through propose_execution_scope()/
+    authorize_execution_scope()) so no execution_scope_proposals row references it: migration
+    0057's OWN authorized_envelope_id composite FK has the SAME bare-SET-NULL defect (found
+    while writing this very test -- deleting an envelope with an authorized proposal
+    currently raises NotNullViolation on execution_scope_proposals.owner_id), which is a
+    separate, already-merged bug this test deliberately does not exercise -- it is reserved
+    for its own fix-forward PR, matching this project's own "don't blend unrelated fixes"
+    discipline. See docs/LIFE_SUPERVISOR_PRODUCTION_ENTRY.md's own note on this."""
+    from app.models.execution_envelope import ExecutionAuthorizationEnvelope
+    from app.models.supervisor_lease import SupervisorGoalLease
+
+    owner, _ = make_verified_user()
+    goal = create_goal(superuser_db, owner_id=owner.id, title="fk test goal", original_instruction="do work", created_by="test")
+    superuser_db.flush()
+    envelope = ExecutionAuthorizationEnvelope(
+        owner_id=owner.id, goal_id=goal.id, authorized_risk="low", authorized_by="founder", idempotency_key=f"fk-test-env-{uuid.uuid4()}",
+    )
+    superuser_db.add(envelope)
+    superuser_db.flush()
+
+    lease_id, _ = claim_supervisor_goal_lease(
+        superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id, worker_id="worker-a", lease_seconds=300
+    )
+    superuser_db.commit()
+
+    superuser_db.query(ExecutionAuthorizationEnvelope).filter(ExecutionAuthorizationEnvelope.id == envelope.id).delete()
+    superuser_db.commit()  # must not raise
+
+    row = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.id == lease_id).one()
+    assert row.owner_id == owner.id  # untouched
+    assert row.envelope_id is None  # detached, as intended
+    assert row.goal_id == goal.id  # untouched -- a completely separate FK
