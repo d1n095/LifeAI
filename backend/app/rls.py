@@ -537,6 +537,12 @@ _MAINAI_EXECUTION_TABLES = (
     # status transitions in place, deletion only through the SECURITY DEFINER erasure path.
     "execution_scope_proposals",
     "execution_authorization_envelopes",
+    # Migration 0058 (EngineeringLesson effectiveness back-edge): append-only, the same
+    # structural role capability_observation_events/agent_work_assignment_events already play
+    # -- an effectiveness OBSERVATION records what one finalize actually saw and is never
+    # updated in place; cleaned up only via ON DELETE CASCADE from mainai_tasks/mainai_goals,
+    # which erase_own_mainai_execution_children() already deletes for the calling owner.
+    "engineering_lesson_guard_observations",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -930,6 +936,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_scope_proposals FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_authorization_envelopes FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_execution_authorization_children() TO mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_guard_observations FROM mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -993,6 +1000,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("engineering_lesson_guard_observations", frozenset({"SELECT", "INSERT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

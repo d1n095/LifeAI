@@ -76,6 +76,11 @@ from app.models.intelligence_governance import (
 )
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.lesson_guard_observations import (
+    EngineeringLessonGuardObservation,
+    LessonGuardEvidenceStrength,
+    LessonGuardOutcome,
+)
 from app.models.life_intent import LifeIntent, LifeIntentBlocker, LifeIntentDependency, LifeIntentEvent
 from app.models.mainai_execution import (
     ACTIVE_MAINAI_GOAL_STATUSES,
@@ -270,6 +275,9 @@ __all__ = [
     "TERMINAL_MAINAI_GOAL_STATUSES",
     "TERMINAL_MAINAI_TASK_STATUSES",
     "EngineeringLesson",
+    "EngineeringLessonGuardObservation",
+    "LessonGuardEvidenceStrength",
+    "LessonGuardOutcome",
     "EngineeringLessonConfidence",
     "EngineeringLessonSeverity",
     "EngineeringLessonStatus",
