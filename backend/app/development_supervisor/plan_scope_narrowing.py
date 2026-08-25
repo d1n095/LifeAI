@@ -2,23 +2,34 @@
 
 WHY (Autonomy Activation B4 / FIRST_AUTONOMOUS_TASK_BLOCKER_MAP):
 
-`production_entry` currently copies the full execution-envelope path/capability ceiling onto
-every `WorkBinding`. That is correct as a hard upper bound, but it is not the *minimal*
-surface for a concrete accepted plan. After Safe Planner accepts a `PlanCandidate`, the
-operator should only be able to touch paths and capabilities the plan actually cited —
-still never more than the founder envelope.
+After Safe Planner ACCEPTS a provider-assisted `PlanCandidate`, execution should run under
+the *minimal* surface cited by that exact accepted plan — still never more than the founder
+envelope. This is NOT wired when `production_entry` builds initial WorkBindings: at that
+point no provider plan exists yet.
+
+Correct runtime ordering:
+
+    provider planning
+    → Safe Planner ACCEPTED
+    → derive cited paths/capabilities from the exact accepted candidate
+    → fail closed on escape / empty write scope
+    → intersect with founder envelope
+    → narrow effective OperatorContext / execution boundary
+    → Driver executes that exact accepted plan
 
 Hard rules:
   - PLANNER OUTPUT != FOUNDER AUTHORITY. This module never invents new paths or capabilities
     that the envelope did not already authorize.
   - Result is always `intersection(envelope_ceiling, plan_citations)`.
-  - If the plan cites a path/capability outside the envelope, that is a Safe Planner bug /
-    bypass attempt — we raise (fail closed), we do not silently drop and proceed with a
-    widened-looking "empty" or envelope-full binding.
-  - Missing citations (plan has no path-bearing steps) → empty path set (fail closed for
-    write work), not "fall back to full envelope".
+  - If the plan cites a path/capability outside the envelope, fail closed.
+  - Missing path citations → empty path set (fail closed for write work), never "fall back
+    to full envelope".
 
-Final wire into `production_entry` is deferred (Claude owns adjacent authority surfaces).
+Final wire belongs immediately after Safe Planner ACCEPTED (inside Supervisor /
+plan_with_provider → Driver handoff), not in production_entry WorkBinding construction.
+If OperatorContext currently carries paths but not capabilities, the capability half of
+narrowing needs a real enforcement boundary at that handoff — do not document a capability
+restriction that is not enforced.
 """
 
 from __future__ import annotations
@@ -50,8 +61,6 @@ def _paths_from_arguments(arguments: dict) -> list[str]:
                 if isinstance(item, str) and item.strip():
                     found.append(item.strip())
         elif key == "arguments" and isinstance(value, list):
-            # run_focused_test style: arguments=["test_foo.py"] — treat bare relative
-            # path-looking strings as path citations.
             for item in value:
                 if isinstance(item, str) and item.strip() and ("/" in item or item.endswith(".py")):
                     found.append(item.strip())
@@ -65,7 +74,6 @@ def extract_plan_citations(candidate: PlanCandidate) -> tuple[tuple[str, ...], t
         if step.capability:
             capabilities.append(step.capability)
         paths.extend(_paths_from_arguments(dict(step.arguments or {})))
-    # Preserve first-seen order, drop duplicates.
     return (
         tuple(dict.fromkeys(paths)),
         tuple(dict.fromkeys(capabilities)),
@@ -80,7 +88,8 @@ def narrow_task_scope_from_accepted_plan(
 ) -> NarrowedTaskScope:
     """Intersect founder envelope ceiling with citations from an already-validated plan.
 
-    Call only AFTER Safe Planner ACCEPTED the candidate. Does not re-validate plan safety.
+    Call only AFTER Safe Planner ACCEPTED the candidate — never while constructing the
+    initial production_entry WorkBinding (no provider plan exists there yet).
     """
     envelope_path_set = {p for p in envelope_paths if p}
     envelope_cap_set = {c for c in envelope_capabilities if c}
