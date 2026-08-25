@@ -661,6 +661,20 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # deletion only through this one narrow SECURITY DEFINER function.
         db.execute(sa_text("SELECT erase_own_execution_authorization_children()"))
 
+        # --- MainAI Execution Loop (migrations 0032/0033): mainai_task_events /
+        # mainai_checkpoints / mainai_recovery_* / mainai_task_worktrees are append-only at the
+        # DB level -- DELETE is rejected unless `app.mainai_execution_erasure_in_progress` is
+        # set, and that GUC is only ever set by this SECURITY DEFINER function. Without this
+        # call, `db.delete(locked_user)` below cascades into those tables via owner_id and the
+        # trigger raises, so DELETE /api/account FAILS OUTRIGHT for any owner who has ever run
+        # a MainAI goal. Found by attacking the account-erasure path while adding an unrelated
+        # owner-scoped observation table -- the control case (no MainAI execution rows) passed,
+        # the case with one goal+plan+task failed on the append-only trigger. Same shape as
+        # erase_own_mainai_job_children() above: no owner argument, derives identity from this
+        # session's app.current_user_id. Goals/plans/tasks themselves are not append-only and
+        # fall through the users ON DELETE CASCADE once the gated children are gone.
+        db.execute(sa_text("SELECT erase_own_mainai_execution_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.
