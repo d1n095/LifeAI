@@ -281,6 +281,55 @@ def test_erase_account_data_works_for_a_legacy_account_with_no_memory_source_uni
         session.close()
 
 
+def test_erase_account_data_succeeds_for_an_owner_who_has_run_a_mainai_goal():
+    """Class-A regression: DELETE /api/account used to fail outright for any owner who had
+    ever run a MainAI goal. mainai_task_events (and the other 0032/0033 append-only children)
+    reject DELETE unless `app.mainai_execution_erasure_in_progress` is set, and that GUC is
+    only ever set by erase_own_mainai_execution_children(). erase_account_data() never called
+    it, so `db.delete(locked_user)` cascaded into the trigger and raised.
+
+    Found by attacking the erasure path while wiring an unrelated owner-scoped observation
+    table: the control case (no MainAI execution rows) passed, the case with one real
+    goal+plan+task failed on the append-only trigger. The function already existed and
+    already set the GUC -- it was simply never on the production erasure path. This test is
+    the missing production-entry proof for that function, the same defect class as
+    STATE EXISTS != DRIVER EXISTS applied to account erasure itself."""
+    from app.mainai_execution.planner import PlannedTaskSpec, create_goal, create_plan
+    from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskEvent
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        goal = create_goal(
+            session, owner_id=owner.id, title="erasure probe", original_instruction="i", created_by="test"
+        )
+        create_plan(
+            session,
+            goal=goal,
+            rationale="r",
+            tasks=[PlannedTaskSpec(description="run tests", task_type="run_tests")],
+            created_by="test",
+        )
+        session.commit()
+
+        owner_id = owner.id
+        assert session.query(MainAIGoal).filter_by(owner_id=owner_id).count() == 1
+        assert session.query(MainAITask).filter_by(owner_id=owner_id).count() == 1
+        assert session.query(MainAITaskEvent).filter_by(owner_id=owner_id).count() >= 1
+
+        _set_rls_user(session, owner.id)
+        erase_account_data(session, owner)
+
+        assert session.get(User, owner_id) is None
+        assert session.query(MainAIGoal).filter_by(owner_id=owner_id).count() == 0
+        assert session.query(MainAITask).filter_by(owner_id=owner_id).count() == 0
+        assert session.query(MainAITaskEvent).filter_by(owner_id=owner_id).count() == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_erase_account_data_rolls_back_everything_on_a_failure_after_erase_owner_memory(monkeypatch):
     """A failure AFTER erase_owner_memory() has already run (but before the final commit) must
     roll back the S1A erasure too — not just the later Python deletes."""
