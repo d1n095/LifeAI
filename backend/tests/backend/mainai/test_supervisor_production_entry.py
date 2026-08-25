@@ -347,3 +347,121 @@ async def test_a_goal_with_no_ready_or_running_task_is_a_clean_no_op(superuser_d
     from app.models.supervisor_lease import SupervisorGoalLease
     lease = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).one()
     assert lease.status == "released"  # lease released even on a no-op, never left dangling
+
+
+# ---------------------------------------------------------------- envelope TOCTOU
+
+
+@pytest.mark.asyncio
+async def test_an_envelope_superseded_between_eligibility_read_and_execution_performs_zero_execution(
+    superuser_db, make_verified_user, source_repo
+):
+    """The real gap: eligible_authorized_goals() hands the caller an envelope object, some
+    time passes (goal-lease claim, worktree setup), and ONLY THEN does execution actually
+    happen. If the founder narrows/revokes/supersedes the envelope in that window, the tick
+    must not build a SupervisorScope from the now-stale object it was originally given -- it
+    must re-verify against the CURRENT DB state and refuse to execute at all."""
+    from app.development_supervisor.service import SupervisorError
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
+    superuser_db.commit()
+
+    eligible = eligible_authorized_goals(superuser_db, limit=50)
+    assert len(eligible) == 1
+    stale_goal, stale_envelope = eligible[0]
+    assert stale_envelope.id == envelope.id
+
+    # Founder supersedes the envelope AFTER eligibility was read but BEFORE this tick executes
+    # -- exactly the race window run_authorized_goal_supervisor_tick() must close.
+    superuser_db.query(ExecutionAuthorizationEnvelope).filter(ExecutionAuthorizationEnvelope.id == envelope.id).update({"status": "superseded"})
+    superuser_db.commit()
+
+    with pytest.raises(SupervisorError):
+        await run_authorized_goal_supervisor_tick(superuser_db, goal=stale_goal, envelope=stale_envelope, worker_id="test-worker")
+    superuser_db.commit()
+
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.ready  # zero execution occurred
+    assert task.mainai_job_id is None
+
+    from app.models.supervisor_lease import SupervisorGoalLease
+    lease = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).one()
+    assert lease.status == "released"  # still cleanly released despite the failure
+
+
+@pytest.mark.asyncio
+async def test_an_envelope_superseded_mid_run_stops_the_next_task_dispatch(superuser_db, make_verified_user, source_repo, monkeypatch):
+    """The narrower, "preferably" case: authority changing DURING a multi-task run (not just
+    before it starts) must also be caught -- covered here by revoking the envelope on the
+    SECOND re-verification call (entry vs. the first task's own dispatch boundary), proving
+    app.development_supervisor.production_entry re-verifies on every task dispatch, not only
+    once at tick entry."""
+    import app.development_supervisor.production_entry as entry_module
+    from app.development_supervisor.service import SupervisorError
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
+    superuser_db.commit()
+
+    original_reverify_module_fn = entry_module.get_current_execution_envelope
+    call_count = {"n": 0}
+
+    def _revoke_on_second_call(db, *, owner_id, goal_id):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            superuser_db.query(ExecutionAuthorizationEnvelope).filter(ExecutionAuthorizationEnvelope.id == envelope.id).update({"status": "superseded"})
+        return original_reverify_module_fn(db, owner_id=owner_id, goal_id=goal_id)
+
+    monkeypatch.setattr(entry_module, "get_current_execution_envelope", _revoke_on_second_call)
+
+    with pytest.raises(SupervisorError):
+        await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="test-worker")
+    superuser_db.commit()
+
+    assert call_count["n"] >= 2  # re-verified more than once: entry AND the task-dispatch boundary
+
+
+# ---------------------------------------------------------------- goal-lease TTL vs. single-action duration
+
+
+def test_default_lease_seconds_has_real_margin_over_the_longest_single_operator_action():
+    """A basic, always-meaningful invariant: DEFAULT_SUPERVISOR_LEASE_SECONDS must never merely
+    equal (or fall below) the longest single operator action's own timeout -- that was the
+    actual bug (both were 1800s). Derived from COMMAND_PROFILES itself so this stays true even
+    if a future profile's timeout grows."""
+    from app.development_supervisor import production_entry as entry_module
+
+    assert entry_module.DEFAULT_SUPERVISOR_LEASE_SECONDS >= entry_module._MAX_SINGLE_OPERATOR_ACTION_SECONDS * 2
+
+
+@pytest.mark.asyncio
+async def test_the_goal_lease_is_renewed_at_the_per_task_dispatch_boundary(superuser_db, make_verified_user, source_repo, monkeypatch):
+    """Proves the actual fix for "a single long-running operator action could outlive the goal
+    lease": the lease is renewed (not merely checked) every time prepare_context is about to
+    hand a task to the Operator, giving that action a FULL fresh lease window regardless of how
+    much time the tick had already spent on setup or earlier tasks."""
+    import app.development_supervisor.production_entry as entry_module
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
+    superuser_db.commit()
+
+    calls = []
+    original_renew = entry_module.renew_supervisor_goal_lease
+
+    def _spy_renew(db, **kwargs):
+        calls.append(kwargs)
+        return original_renew(db, **kwargs)
+
+    monkeypatch.setattr(entry_module, "renew_supervisor_goal_lease", _spy_renew)
+
+    result = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="test-worker")
+    superuser_db.commit()
+
+    assert result is not None
+    assert len(calls) >= 1  # renewed at the real task-dispatch boundary, not left to the initial claim alone
+    assert calls[0]["worker_id"] == "test-worker"

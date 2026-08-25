@@ -42,8 +42,12 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.development_operator.service import OperatorContext
-from app.development_supervisor.lease import claim_supervisor_goal_lease, release_supervisor_goal_lease
+from app.development_operator.service import COMMAND_PROFILES, OperatorContext
+from app.development_supervisor.lease import (
+    claim_supervisor_goal_lease,
+    release_supervisor_goal_lease,
+    renew_supervisor_goal_lease,
+)
 from app.development_supervisor.production_worktree import ensure_goal_worktree_sync, worker_source_repo_root
 from app.development_supervisor.service import (
     SupervisorBounds,
@@ -54,6 +58,7 @@ from app.development_supervisor.service import (
     instruction_sha256,
     run_supervisor,
 )
+from app.execution_envelopes import get_current_execution_envelope
 from app.intelligence_governance import record_execution
 from app.jobs.mainai_job_lease import claim_specific_mainai_job
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
@@ -69,10 +74,18 @@ logger = logging.getLogger("mainai.development_supervisor.production_entry")
 # non-actionable ("execution binding is unavailable") without needing one.
 _BINDABLE_TASK_STATUSES = (MainAITaskStatus.ready, MainAITaskStatus.running)
 
-# Deliberately generous relative to SupervisorBounds.max_elapsed_seconds's own default (900s):
-# the lease must outlive one full bounded run_supervisor() call with margin, or a merely-slow
-# (not dead) worker would have its own lease reclaimed out from under it mid-run.
-DEFAULT_SUPERVISOR_LEASE_SECONDS = 1800
+# SupervisorBounds.max_elapsed_seconds (default 900s) only bounds the OUTER while loop between
+# task attempts -- it is not a watchdog that can interrupt a SINGLE already-running operator
+# action. The real ceiling on how long the goal lease must survive is the longest single
+# action any capability could actually take: app.development_operator.service.COMMAND_PROFILES'
+# own timeout_seconds (full_backend_pytest is currently 1800s -- previously EQUAL to this
+# constant, a real bug found by adversarial review: a worst-case single action could run right
+# up to, or past, the lease's own expiry, letting a second worker reclaim the goal while the
+# first was still legitimately executing). Derived from COMMAND_PROFILES itself (never a
+# hand-typed guess) so a future longer profile automatically widens this margin too, and
+# doubled for real headroom beyond the theoretical worst case.
+_MAX_SINGLE_OPERATOR_ACTION_SECONDS = max(profile.timeout_seconds for profile in COMMAND_PROFILES.values())
+DEFAULT_SUPERVISOR_LEASE_SECONDS = _MAX_SINGLE_OPERATOR_ACTION_SECONDS * 2
 
 
 def eligible_authorized_goals(db: Session, *, limit: int = 20) -> list[tuple[MainAIGoal, ExecutionAuthorizationEnvelope]]:
@@ -113,11 +126,14 @@ async def run_authorized_goal_supervisor_tick(
     even attempted -- these are not errors, they are legitimate "nothing to do right now"
     outcomes a caller must not retry-with-force.
 
-    `envelope` MUST be the caller's own freshly-read CURRENT envelope (see
-    `eligible_authorized_goals()`) -- this function trusts it as-is and does not re-fetch,
-    exactly so a caller re-running eligibility on every tick (rather than caching it) is what
-    keeps a narrowed/superseded/revoked authorization honored immediately, never one tick
-    stale."""
+    `envelope` is the caller's own recently-read envelope from `eligible_authorized_goals()`
+    -- but this function does NOT simply trust it: a real gap exists between that read and the
+    goal lease actually being claimed (a founder could narrow/revoke/supersede the envelope in
+    that window), so it is RE-VERIFIED against the current DB state immediately after the goal
+    lease is claimed, and again at every task-dispatch boundary inside `prepare_context` (a
+    revocation mid-run, across several dispatched tasks, is caught just as fast as one caught
+    before the run even starts). Only the re-verified envelope is ever used to build
+    `SupervisorScope` -- never the caller-supplied object directly."""
     claim = claim_supervisor_goal_lease(
         db, owner_id=goal.owner_id, goal_id=goal.id, envelope_id=envelope.id, worker_id=worker_id, lease_seconds=lease_seconds
     )
@@ -125,7 +141,24 @@ async def run_authorized_goal_supervisor_tick(
         return None
     lease_id, lease_generation = claim
 
+    def _reverify_authority() -> ExecutionAuthorizationEnvelope:
+        """The TOCTOU close: re-reads the goal's CURRENT active envelope fresh and requires it
+        to be the EXACT SAME row `eligible_authorized_goals()` handed the caller. Raises
+        (never silently substitutes a different envelope, and never continues under the
+        stale one) if the founder narrowed, revoked, or superseded authorization since --
+        whether that happened before this tick even started or between two of its own
+        dispatched tasks makes no difference, both are the same failure."""
+        current = get_current_execution_envelope(db, owner_id=goal.owner_id, goal_id=goal.id)
+        if current is None or current.id != envelope.id:
+            raise SupervisorError(
+                f"execution authorization for goal {goal.id} changed since eligibility was read "
+                f"(expected active envelope {envelope.id}); refusing to execute under stale authority"
+            )
+        return current
+
     try:
+        current_envelope = _reverify_authority()
+
         tasks = (
             db.execute(
                 select(MainAITask)
@@ -150,12 +183,12 @@ async def run_authorized_goal_supervisor_tick(
             owner_id=goal.owner_id,
             goal_id=goal.id,
             authority_kind="authorized_goal",
-            authority_ref=str(envelope.id),
+            authority_ref=str(current_envelope.id),
             authorized_instruction_sha256=instruction_sha256(goal.original_instruction),
             repository_identity=str(repo_root.resolve()),
-            allowed_paths=tuple(envelope.authorized_paths or ()),
-            allowed_capabilities=tuple(envelope.authorized_capabilities or ()),
-            maximum_risk=envelope.authorized_risk,
+            allowed_paths=tuple(current_envelope.authorized_paths or ()),
+            allowed_capabilities=tuple(current_envelope.authorized_capabilities or ()),
+            maximum_risk=current_envelope.authorized_risk,
             provider_spend_authorized=False,
         )
 
@@ -169,8 +202,29 @@ async def run_authorized_goal_supervisor_tick(
         )
 
         def prepare_context(task: MainAITask, job) -> OperatorContext:
-            """The real, non-test `WorkBinding.prepare_context` -- claims the job's own
-            `mainai_jobs` lease FIRST (before anything else), fencing it against the unrelated
+            """The real, non-test `WorkBinding.prepare_context`.
+
+            Two things happen here BEFORE anything else, on every single task attempt within
+            this bounded run_supervisor() call, not just once at entry:
+
+            1. Re-verify authority (`_reverify_authority()`) -- a founder narrowing/revoking
+               the envelope midway through a multi-task run must stop the NEXT dispatch just as
+               fast as it would stop a run that had not started yet. `scope` itself was already
+               built from whatever the FIRST call returned; a real (not yet built) narrower
+               scope would require aborting and letting the next tick pick it up fresh anyway,
+               so this only needs to detect "authority changed", not reconstruct a new scope
+               mid-run.
+            2. Renew the goal lease (`renew_supervisor_goal_lease`) -- SupervisorBounds.
+               max_elapsed_seconds only bounds the OUTER while loop BETWEEN task attempts, it
+               cannot interrupt a single already-running operator action (some of which, e.g.
+               `full_backend_pytest`, can legitimately take up to
+               COMMAND_PROFILES['full_backend_pytest'].timeout_seconds). Renewing right before
+               each task's own action begins resets the lease's clock to a full fresh window
+               for THAT action specifically, so DEFAULT_SUPERVISOR_LEASE_SECONDS's own margin
+               (see that constant's docstring) only ever has to cover one action's worst case,
+               never the accumulated time of a whole multi-task run.
+
+            THEN claims the job's own `mainai_jobs` lease, fencing it against the unrelated
             V0.1 `_advance_mainai_execution_tasks`/`claim_next_mainai_job` poll picking up the
             very same freshly `queued` job this Supervisor call just created via
             `dispatch_ready_task()` and double-executing it through `run_task_execution_job()`.
@@ -196,6 +250,8 @@ async def run_authorized_goal_supervisor_tick(
             ONLY path allowed to transfer ownership of an expired task_execution job -- this
             function must never invent a second, silent reclaim path by copying whatever
             lease_generation happens to be on the row."""
+            _reverify_authority()
+            renew_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
             claimed_generation = claim_specific_mainai_job(db, job_id=job.id, worker_id=worker_id, lease_seconds=lease_seconds)
             if claimed_generation is None:
                 db.refresh(job)

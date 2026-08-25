@@ -35,11 +35,27 @@ response. `eligible_authorized_goals()` is the ONE place that decides eligibilit
 envelope that was never re-authorized simply never appears there, by construction, not by an
 extra check a future caller could forget to add.
 
+**Closing the TOCTOU between eligibility and execution.** `eligible_authorized_goals()` hands
+the caller an envelope object at one moment; real work (claiming the goal lease, setting up
+the worktree) happens moments later, and a multi-task run can keep dispatching further tasks
+minutes after that. A founder narrowing, revoking, or superseding the envelope in either
+window must never be missed. `run_authorized_goal_supervisor_tick()` therefore does NOT simply
+trust the `envelope` argument it was given: `_reverify_authority()` re-reads the goal's current
+active envelope via `get_current_execution_envelope()` and requires it to be the EXACT SAME
+row, both once right after the goal lease is claimed (before `SupervisorScope` is even built —
+using the re-verified row, not the caller-supplied one) AND again inside `prepare_context()`,
+on every single task dispatch within the run — so a revocation between two tasks of the same
+multi-task run is caught exactly as fast as one that happened before the run even started. Any
+mismatch raises immediately; the tick never falls back to the stale object, and never
+silently swaps in a different (even if valid) envelope mid-run. See
+`test_an_envelope_superseded_between_eligibility_read_and_execution_performs_zero_execution`
+and `test_an_envelope_superseded_mid_run_stops_the_next_task_dispatch`.
+
 `test_retrying_after_the_envelope_was_narrowed_between_ticks_honors_the_new_narrower_scope`
-(`tests/backend/mainai/test_supervisor_production_entry.py`) proves the live half of this: a
-founder narrowing an already-active envelope mid-flight is honored on the VERY NEXT tick,
-because `eligible_authorized_goals()` is re-read fresh every time — never cached, never a
-stale reference carried across ticks.
+(`tests/backend/mainai/test_supervisor_production_entry.py`) proves the complementary,
+cross-tick half: a founder narrowing an already-active envelope between two SEPARATE ticks is
+honored on the next one, because `eligible_authorized_goals()` is re-read fresh every time —
+never cached, never a stale reference carried across ticks.
 
 ## `supervisor_goal_leases` — the crash/retry/concurrency primitive
 
@@ -60,6 +76,28 @@ crashed worker's lease blocking recovery only until it genuinely expires (never 
 by force), release making a goal immediately reclaimable rather than waiting out the full TTL,
 and a worker resuming its OWN prior `mainai_jobs` claim across two separate ticks for the same
 goal (see "job-lease resume" below) without ever needing to re-claim it.
+
+**The TTL must actually dominate the longest single effect, not just the outer loop bound.**
+`SupervisorBounds.max_elapsed_seconds` (default 900s) only bounds `run_supervisor()`'s own
+OUTER while loop, checked BETWEEN task attempts — it cannot interrupt a single
+already-running operator action. `DEFAULT_SUPERVISOR_LEASE_SECONDS` was originally a bare
+`1800`, which is exactly EQUAL to `COMMAND_PROFILES['full_backend_pytest'].timeout_seconds`
+(the longest single action any capability can currently take) — meaning a worst-case single
+action could legitimately run right up to, or past, the goal lease's own expiry, letting a
+second worker reclaim the SAME goal while the first was still genuinely executing (found via
+adversarial review, fixed before this PR merged). Two changes close this:
+
+1. `DEFAULT_SUPERVISOR_LEASE_SECONDS` is now derived from `COMMAND_PROFILES` itself
+   (`_MAX_SINGLE_OPERATOR_ACTION_SECONDS * 2`) rather than a hand-typed guess — a future
+   profile with a longer timeout automatically widens this margin too, and the invariant
+   `DEFAULT_SUPERVISOR_LEASE_SECONDS >= _MAX_SINGLE_OPERATOR_ACTION_SECONDS * 2` is itself a
+   regression test.
+2. `prepare_context()` calls `renew_supervisor_goal_lease()` right before every task dispatch
+   (the same boundary the authority re-verification above uses) — giving each task's own
+   upcoming action a FULL fresh lease window measured from when IT starts, not from whenever
+   the whole tick (or an earlier task in the same tick) began. The margin from (1) then only
+   ever has to cover one action's own worst case, never a whole multi-task run's accumulated
+   time. See `test_the_goal_lease_is_renewed_at_the_per_task_dispatch_boundary`.
 
 ## The other lease: fencing against V0.1's own separate execution path
 
@@ -180,20 +218,26 @@ PR per this project's own "don't blend unrelated fixes into an unrelated branch"
 
 ## Test coverage
 
-- `tests/backend/mainai/test_supervisor_goal_lease.py` (7): claim/renew/release/takeover
-  fencing for `supervisor_goal_leases`, including the two-workers-race and
-  crash-then-genuine-expiry-reclaim scenarios.
+- `tests/backend/mainai/test_supervisor_goal_lease.py` (8): claim/renew/release/takeover
+  fencing for `supervisor_goal_leases`, the two-workers-race and
+  crash-then-genuine-expiry-reclaim scenarios, and a real-DB proof that deleting a referenced
+  envelope detaches the lease (`envelope_id -> NULL`) without touching `owner_id`.
 - `tests/backend/test_supervisor_production_worktree.py` (3): a real local `git worktree add`,
   idempotent goal-scoped reuse (reporting the CURRENT head after intervening local commits),
   and independent isolation between two different goals' worktrees.
-- `tests/backend/mainai/test_supervisor_production_entry.py` (12): eligibility (active
+- `tests/backend/mainai/test_supervisor_production_entry.py` (17): eligibility (active
   envelope + running goal required, superseded envelope revokes eligibility, blocked/waiting
   goals excluded even with an active envelope), authority reconstruction (scope copied only
-  from the envelope, a task exceeding the authorized risk ceiling never dispatched), the full
-  concurrency/crash attack list from the founder decision's own section 10 (lease already
-  held, two workers racing, a crashed worker's lease reclaimed only after genuine expiry,
-  re-authorization narrowing honored immediately on the next tick), and the clean no-op case
-  (no bindable task).
+  from the envelope, a task exceeding the authorized risk ceiling never dispatched), the
+  envelope TOCTOU close (zero execution under a stale pre-run envelope, a mid-run revocation
+  stops the next task dispatch), the full concurrency/crash attack list from the founder
+  decision's own section 10 (lease already held, two workers racing, a crashed worker's lease
+  reclaimed only after genuine expiry, re-authorization narrowing honored immediately on the
+  next tick, a second worker unable to adopt a still-running job the first worker's own lease
+  still legitimately covers, the SAME worker legitimately resuming its own still-valid claim),
+  the goal-lease-TTL-vs-single-action-duration fix (the margin invariant, and the lease
+  actually being renewed at the per-task dispatch boundary), and the clean no-op case (no
+  bindable task).
 - `tests/backend/test_advance_tasks_excludes_envelope_governed_goals.py` (2): V0.1's own
   blanket auto-dispatch tick correctly excludes envelope-governed goals' tasks while leaving
   ordinary (non-autonomous) goals completely unaffected.
