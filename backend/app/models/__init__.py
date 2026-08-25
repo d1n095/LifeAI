@@ -185,6 +185,7 @@ from app.models.strategy_synthesis import (
 )
 from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
+from app.models.supervisor_lease import SupervisorGoalLease
 from app.models.usage import UsageLog
 from app.models.user import User
 from app.models.work_candidate import WorkCandidate
@@ -370,6 +371,7 @@ __all__ = [
     "StorageDeletionReason",
     "StorageDeletionStatus",
     "StorageDeletionTask",
+    "SupervisorGoalLease",
     "UsageLog",
     "User",
     "WorkEfficiencyObservation",

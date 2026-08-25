@@ -102,13 +102,14 @@ real `MainAIGoal`, whose authorization side-effect auto-proposes an execution sc
 founder authentication.
 
 **Explicitly NOT built by this foundation** (the separate, larger piece the founder decision's
-point 9-11 describes, to be built next): there is still no durable worker trigger that
-reconstructs a `SupervisorScope` from an authorized envelope, derives bounded `WorkBinding`s,
-and calls `run_supervisor()`. An authorized envelope existing does not yet cause any autonomous
-execution to happen — it only makes such execution possible to build safely on top of. Until
-that trigger exists, this foundation is **RUNTIME REACHABLE for the authorization edge**, not
-**PRODUCTION E2E PROVEN for autonomous execution** — those are different claims and must not be
-conflated.
+point 9-11 describes): at the time this document was first written, there was no durable
+worker trigger that reconstructs a `SupervisorScope` from an authorized envelope, derives
+bounded `WorkBinding`s, and calls `run_supervisor()`. **That piece is now built** — see
+`docs/LIFE_SUPERVISOR_PRODUCTION_ENTRY.md` (migration 0059) for the full worker-trigger/lease/
+worktree architecture. An authorized envelope existing still does not, by itself, cause
+autonomous repo-writing execution — see that document's own "Proof level" section for exactly
+why (provider spend and remote write remain separate, not-yet-authorized gates) — but the
+trigger itself is genuinely reachable now, not merely possible to build on top of.
 
 ## Goal-level ceiling, task-level narrowing (for the next piece to honor)
 
@@ -174,9 +175,5 @@ side effect.
 ## Explicitly deferred
 
 - No frontend UI — API/service layer only, matching every other foundation in this mission.
-- No Supervisor production entry trigger yet — see "What is authorized here" above. That is
-  the next piece, to be built directly on top of this foundation without a further founder
-  design-approval pause, per the founder decision's own instruction: *"Build the smallest
-  coherent implementation, test it, then continue into the real Supervisor production entry."*
 - No pagination beyond `status_filter`/`goal_id` query params, matching the same "smallest
   surface that makes the chain reachable" judgment already applied to the sibling founder API.

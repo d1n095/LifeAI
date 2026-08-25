@@ -108,6 +108,48 @@ def claim_next_mainai_job(db: Session, worker_id: str, lease_seconds: int) -> tu
     return uuid.UUID(str(row[0])), uuid.UUID(str(row[1])), int(row[2])
 
 
+_CLAIM_SPECIFIC_SQL = text("""
+    UPDATE mainai_jobs
+    SET status = 'running',
+        locked_by = :worker_id,
+        lease_generation = lease_generation + 1,
+        lease_expires_at = now() + make_interval(secs => :lease_seconds),
+        last_heartbeat_at = now(),
+        started_at = COALESCE(started_at, now())
+    WHERE id = :job_id AND status = ANY(:claimable_statuses)
+    RETURNING lease_generation
+""")
+
+
+def claim_specific_mainai_job(db: Session, *, job_id: uuid.UUID, worker_id: str, lease_seconds: int) -> int | None:
+    """Same atomic claim as `claim_next_mainai_job()`, but for a specific, already-known job
+    row rather than "whichever is oldest" — the caller (app/development_supervisor/
+    production_entry.py's real `prepare_context`) already knows exactly which job
+    `dispatch_ready_task()` just created for the task it is about to execute inline, and must
+    claim ITS lease before touching anything, or a concurrent `claim_next_mainai_job()` poll
+    (e.g. this same worker's own `run_once()`, a few lines after the tick that calls this) could
+    claim the very same freshly `queued` job and hand it to the unrelated V0.1
+    `run_task_execution_job()` path — a real double-execution hazard, not a theoretical one.
+
+    Only claims from `queued` (never reclaims an expired `running` lease here — a stale
+    Supervisor-dispatched job is recovered through the same `task_execution` takeover path
+    every other stuck job already uses, not through a second reclaim rule). Returns the new
+    `lease_generation`, or `None` if the job was not in a claimable state (already claimed by
+    someone else, or terminal) — the caller must treat `None` as "stop, do not proceed"."""
+    row = db.execute(
+        _CLAIM_SPECIFIC_SQL,
+        {
+            "job_id": str(job_id),
+            "worker_id": worker_id,
+            "lease_seconds": lease_seconds,
+            "claimable_statuses": [s.value for s in CLAIMABLE_MAINAI_JOB_STATUSES],
+        },
+    ).first()
+    if row is None:
+        return None
+    return int(row[0])
+
+
 def renew_mainai_job_lease(db: Session, job_id: uuid.UUID, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
     """Heartbeat: extends the lease and records last_heartbeat_at — called periodically by
     the job's own processing loop (app/jobs/handlers/corpus_review.py) between batches, exactly like

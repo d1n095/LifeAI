@@ -37,6 +37,7 @@ from app.account.erasure import attempt_storage_deletion_task, claim_storage_del
 from app.agent_coordination.service import expire_stale_active_leases
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
+from app.development_supervisor.production_entry import eligible_authorized_goals, run_authorized_goal_supervisor_tick
 from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
@@ -57,6 +58,7 @@ from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeov
 from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
+from app.models.execution_envelope import ExecutionAuthorizationEnvelope
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
 from app.models.mainai_execution import (
     ACTIVE_MAINAI_GOAL_STATUSES,
@@ -402,8 +404,27 @@ class Worker:
         an unattended tick can never silently satisfy an approval gate, it only advances what
         is already actually clear to run. Every other exception attempting ONE task is caught,
         logged, and never stops the rest of this batch or this poll cycle, exactly like
-        _retry_storage_deletion_tasks' own per-task isolation above."""
-        ready_tasks = db.query(MainAITask).filter(MainAITask.status == MainAITaskStatus.ready).all()
+        _retry_storage_deletion_tasks' own per-task isolation above.
+
+        EXCLUDES any task whose goal currently has an active ExecutionAuthorizationEnvelope
+        (migration 0057/0058) -- a goal in that state is meant to be governed EXCLUSIVELY by
+        `app.development_supervisor.production_entry`'s bounded, envelope-scoped
+        `run_supervisor()` path (see `_advance_authorized_supervisor_goals` below), not also by
+        this blanket, envelope-blind approval-policy-only dispatch. Without this exclusion the
+        whole authorization envelope would be decorative: this tick would keep auto-dispatching
+        every `standard_repo_work`-policy repo_edit/run_tests/open_pr task regardless of the
+        envelope's own allowed_paths/allowed_capabilities/maximum_risk the moment it becomes
+        `ready`, often winning the race against the Supervisor tick simply by running first in
+        this same poll cycle. Goals with no envelope are completely unaffected -- this tick's
+        existing behavior for them is unchanged."""
+        envelope_governed_goal_ids = db.query(ExecutionAuthorizationEnvelope.goal_id).filter(
+            ExecutionAuthorizationEnvelope.status == "active"
+        )
+        ready_tasks = (
+            db.query(MainAITask)
+            .filter(MainAITask.status == MainAITaskStatus.ready, MainAITask.goal_id.notin_(envelope_governed_goal_ids))
+            .all()
+        )
         for task in ready_tasks:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
@@ -697,6 +718,37 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed to expire stale agent scope leases.", self.worker_id)
 
+    # Bounded per-tick fan-out: how many eligible authorized goals this worker attempts a
+    # Supervisor call for per poll cycle -- matches the same small, deliberately conservative
+    # batch-size precedent as _MAX_CI_WAITS_PER_TICK above, not an unbounded scan.
+    _MAX_AUTHORIZED_SUPERVISOR_GOALS_PER_TICK = 5
+
+    async def _advance_authorized_supervisor_goals(self, db: Session) -> None:
+        """The durable production trigger for the founder-decided execution authority chain
+        (docs/LIFE_EXECUTION_AUTHORIZATION_ENVELOPE.md): for every currently-eligible
+        authorized goal (a real, active ExecutionAuthorizationEnvelope + goal.status ==
+        running -- see app.development_supervisor.production_entry.eligible_authorized_goals,
+        the ONE place that decides eligibility), attempts one bounded, lease-fenced
+        run_supervisor() call via run_authorized_goal_supervisor_tick(). A goal whose lease is
+        already held by another worker, or that currently has no ready/running task to bind,
+        is a legitimate no-op for this tick, not a failure. Same per-item isolation as every
+        other tick in this method group: one goal's failure is logged and never blocks the
+        rest of this batch or this poll cycle."""
+        for goal, envelope in eligible_authorized_goals(db, limit=self._MAX_AUTHORIZED_SUPERVISOR_GOALS_PER_TICK):
+            try:
+                result = await run_authorized_goal_supervisor_tick(
+                    db, goal=goal, envelope=envelope, worker_id=self.worker_id,
+                )
+                db.commit()
+                if result is not None:
+                    logger.info(
+                        "Worker %s: Supervisor tick for goal %s -> %s.",
+                        self.worker_id, goal.id, result.classification,
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed to advance authorized Supervisor goal %s.", self.worker_id, goal.id)
+
     async def run_once(self) -> bool:
         """Returns True if a job was claimed and processed, False if there was nothing to do
         (caller should sleep before polling again). Claiming and processing deliberately use
@@ -719,6 +771,7 @@ class Worker:
             self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._expire_stale_agent_scope_leases(claim_db)
+            await self._advance_authorized_supervisor_goals(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
