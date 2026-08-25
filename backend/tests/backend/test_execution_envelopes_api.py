@@ -269,18 +269,26 @@ def test_real_claim_to_authorized_execution_envelope_through_both_founder_apis_e
     scope_proposals = scope_proposals_res.json()
     assert len(scope_proposals) == 1
     scope_proposal = scope_proposals[0]
-    assert scope_proposal["proposed_capabilities"] == ["repo_read", "repo_edit", "run_tests"]
+    # Every proposed capability must be a real app.development_operator.service.
+    # DEVELOPMENT_CAPABILITIES key -- the vocabulary run_supervisor()'s own validate_scope()
+    # actually checks scope.allowed_capabilities against -- and never push_branch (REMOTE_WRITE).
+    from app.development_operator.service import DEVELOPMENT_CAPABILITIES
+
+    assert scope_proposal["proposed_capabilities"]
+    for capability in scope_proposal["proposed_capabilities"]:
+        assert capability in DEVELOPMENT_CAPABILITIES
+    assert "push_branch" not in scope_proposal["proposed_capabilities"]
 
     authorize_envelope_res = client.post(
         f"/api/execution-envelopes/proposals/{scope_proposal['id']}/authorize",
-        json={"authorized_paths": ["backend/app/db.py"], "authorized_capabilities": ["repo_read", "repo_edit"], "authorized_risk": "low"},
+        json={"authorized_paths": ["backend/app/db.py"], "authorized_capabilities": ["read_file", "patch_file"], "authorized_risk": "low"},
         headers={"X-CSRF-Token": csrf},
     )
     assert authorize_envelope_res.status_code == 201, authorize_envelope_res.text
     envelope = authorize_envelope_res.json()
     assert envelope["status"] == "active"
     assert envelope["authorized_by"] == "founder"
-    assert envelope["authorized_capabilities"] == ["repo_read", "repo_edit"]  # narrowed from the 3-capability proposal
+    assert envelope["authorized_capabilities"] == ["read_file", "patch_file"]  # narrowed from the full proposed set
 
     current_res = client.get(f"/api/execution-envelopes/current?goal_id={goal_id}", headers={"X-CSRF-Token": csrf})
     assert current_res.json()["id"] == envelope["id"]
