@@ -81,6 +81,11 @@ from app.models.lesson_guard_observations import (
     LessonGuardEvidenceStrength,
     LessonGuardOutcome,
 )
+from app.models.provider_spend import (
+    ProviderSpendAuthorization,
+    ProviderSpendAuthorizationStatus,
+    ProviderSpendUsageEvent,
+)
 from app.models.life_intent import LifeIntent, LifeIntentBlocker, LifeIntentDependency, LifeIntentEvent
 from app.models.mainai_execution import (
     ACTIVE_MAINAI_GOAL_STATUSES,
@@ -279,6 +284,9 @@ __all__ = [
     "EngineeringLessonGuardObservation",
     "LessonGuardEvidenceStrength",
     "LessonGuardOutcome",
+    "ProviderSpendAuthorization",
+    "ProviderSpendAuthorizationStatus",
+    "ProviderSpendUsageEvent",
     "EngineeringLessonConfidence",
     "EngineeringLessonSeverity",
     "EngineeringLessonStatus",
