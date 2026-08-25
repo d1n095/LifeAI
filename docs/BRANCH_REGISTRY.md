@@ -6,6 +6,37 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 79 (2026-08-25): Cursor Omega landade #149 → #150 → #146 @ `60b88eb`; #148 HOLD på ny remote-head
+
+**Integrationsgrenen NU:** `60b88eb`
+
+| PR | Resultat | SHA |
+|---|---|---|
+| [#149](https://github.com/d1n095/LifeAI/pull/149) | MERGAD | `0f4ce31` — `erase_own_mainai_execution_children()` på produktions-erasure-vägen |
+| [#150](https://github.com/d1n095/LifeAI/pull/150) | MERGAD | `d9f9d09` — `write_stream`-kontrakt (ingen post-return existence; ingen corruption/deadlock/temp-leak) |
+| [#146](https://github.com/d1n095/LifeAI/pull/146) | MERGAD | `60b88eb` — `engineering_lesson_guard_observations` (migration **0058**), guard-evidence semantik, column-specific job FK |
+| [#147](https://github.com/d1n095/LifeAI/pull/147) | denna PR | registry efter landning |
+
+**Post-integration-revalidation (faktisk tip-kod, inte PR-text):**
+- `erasure.py` anropar `erase_own_mainai_execution_children()` ✓
+- migration 0058 är `0058_engineering_lesson_guard_observations` med `ON DELETE SET NULL (job_id)` ✓
+- ingen `engineering_lesson_effectiveness` / `attribution_confidence` kvar i app/alembic ✓
+- storage-testerna assertar det korrigerade kontraktet ✓
+
+### Claude #148 — HOLD, men remote rörde sig
+
+Remote head **`02e6531` → `18ba6fc`** (två commits). Pushade review-fixar:
+1. Column-specific `ON DELETE SET NULL (envelope_id)` på supervisor lease ↔ envelope FK ✓
+2. `prepare_context` resume kräver `job.locked_by == worker_id` (+ lease-fönster), inte bara `status==running` ✓
+
+**Kvarvarande merge-gates för #148 (Cursor skriver INTE här):**
+1. **Alembic 0058-kollision:** tip äger redan 0058 (guard observations). #148 måste rebasas på `60b88eb` och omnumreras till **0059**.
+2. **Erasure:** tip har #149:s `erase_own_mainai_execution_children`; #148 lägger `erase_own_supervisor_goal_leases`. Efter rebase måste **båda** finnas före `db.delete(user)`.
+3. **Lease TTL mid-effect:** `renew_supervisor_goal_lease` anropas fortfarande inte under `run_supervisor()`; konstruktionen förlitar sig på bounds 900s < lease 1800s. Bevisa hård wall-clock även över blockerande op, eller heartbeat/fence — `BOUND DECLARED != LEASE CANNOT EXPIRE MID-EFFECT`.
+4. Cursor attackerar den sammansatta kedjan **först efter** #148 faktiskt mergats på tip.
+
+**Cursor nästa skriv-scope:** inget i `development_supervisor/**` / #148-ytan. Efter #148-merge: attacklista i Pass 78. Övrigt: fortsatt Omega på icke-överlappande Class-A.
+
 ## Pass 78 (2026-08-25): Cursor Omega-läge — #145 landad, #146 guard-omdöpt, Class-A erasure (#149), storage-kontrakt (#150), Claude #148 Supervisor-entry CI-grön
 
 **Läget som registret måste visa (NU, inte Pass 77:s snapshot):** integrationsgrenen står
