@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.development_operator.service import DEVELOPMENT_CAPABILITIES, LOCAL_EXECUTION, LOCAL_WRITE, READ_ONLY
 from app.mainai_execution.planner import create_goal
 from app.models.mainai_execution import MainAIGoalRiskLevel
 from app.models.project_entities import ProjectEntity
@@ -35,10 +36,33 @@ logger = logging.getLogger(__name__)
 # signal, so it is what the auto-proposal heuristic below uses to suggest capabilities. Paths
 # are deliberately NEVER suggested here (see app.execution_envelopes.service.
 # propose_execution_scope()'s own docstring on why an empty, honest proposal beats a guess).
+#
+# CAPABILITY VOCABULARY: these MUST be real app.development_operator.service.
+# DEVELOPMENT_CAPABILITIES keys -- the exact vocabulary run_supervisor()'s own validate_scope()
+# checks scope.allowed_capabilities against (app/development_supervisor/service.py). An
+# earlier version of this dict used a coarser, made-up vocabulary ("repo_read"/"repo_edit"/
+# "run_tests") that did not correspond to anything DEVELOPMENT_CAPABILITIES actually
+# recognizes -- a founder authorizing that proposal exactly as suggested would have produced
+# an envelope validate_scope() rejects outright. Found by adversarial review of PR #148
+# (app/development_supervisor/production_entry.py, the first real consumer of these
+# proposals), fixed here rather than by inventing a silent proposal -> capability translation
+# layer at authorization time: proposal vocabulary must stay non-authoritative and the founder
+# must be able to see, in the proposal itself, the EXACT capability strings that would apply
+# if authorized -- not a coarse label a second, hidden mapping later expands.
+#
+# Derived from DEVELOPMENT_CAPABILITIES' own tier labels (never hand-typed) so a future
+# capability added to READ_ONLY/LOCAL_WRITE/LOCAL_EXECUTION is automatically covered, and
+# REMOTE_WRITE ("push_branch") can never end up here by construction -- real remote pushes
+# remain a separate, not-yet-authorized capability throughout this whole mission.
+_READ_ONLY_CAPABILITIES = tuple(sorted(name for name, tier in DEVELOPMENT_CAPABILITIES.items() if tier == READ_ONLY))
+_READ_AND_LOCAL_WORK_CAPABILITIES = _READ_ONLY_CAPABILITIES + tuple(
+    sorted(name for name, tier in DEVELOPMENT_CAPABILITIES.items() if tier in (LOCAL_WRITE, LOCAL_EXECUTION))
+)
+
 _PROPOSED_CAPABILITIES_BY_ENTITY_TYPE = {
-    "task_reference": ("repo_read", "repo_edit", "run_tests"),
-    "decision": ("repo_read", "repo_edit", "run_tests"),
-    "idea": ("repo_read",),
+    "task_reference": _READ_AND_LOCAL_WORK_CAPABILITIES,
+    "decision": _READ_AND_LOCAL_WORK_CAPABILITIES,
+    "idea": _READ_ONLY_CAPABILITIES,
 }
 
 
