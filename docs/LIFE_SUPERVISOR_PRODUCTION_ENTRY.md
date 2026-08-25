@@ -137,6 +137,31 @@ design this whole mission has held to throughout.
 
 ## Known follow-up (not fixed here, out of this PR's scope)
 
+**A pre-existing composite-FK defect in already-merged migration 0057.** While writing this
+PR's own regression test for `supervisor_goal_leases.envelope_id`'s `ON DELETE SET NULL`
+(see "Local-only worktree" section above for the analogous fix this PR makes to its OWN new
+table), the SAME defect was found in migration 0057's `execution_scope_proposals.
+authorized_envelope_id` composite FK: a bare `ON DELETE SET NULL` (no column list) tells
+PostgreSQL to null EVERY referencing column on delete, including `owner_id` — which is
+`NOT NULL` — so deleting a referenced envelope while a proposal still points at it via
+`authorized_envelope_id` raises a constraint violation instead of cleanly detaching.
+
+**Confirmed NOT currently reachable through real account erasure**, however:
+`erase_own_execution_authorization_children()` (migration 0057's own function) deletes
+`execution_scope_proposals` in a separate, EARLIER statement than `execution_authorization_
+envelopes` — by the time envelopes are deleted, no proposal row references them anymore, so
+the defect never actually fires in that flow (verified directly against Postgres with the
+exact two-statement ordering the function uses). The self-referential `supersedes_envelope_id`
+FK has the same bare-SET-NULL shape but is also unreachable in practice: erasure deletes an
+owner's superseded-and-superseding envelope rows in ONE batch `DELETE`, and Postgres's FK
+trigger has nothing left to null by the time it would fire. This is a latent DDL defect (bad
+practice, a landmine for any FUTURE code path that deletes an envelope without first clearing
+every referencing row) — not an active production bug today. Still worth fixing properly (the
+column-specific `ON DELETE SET NULL (authorized_envelope_id)` / `(supersedes_envelope_id)`
+form this PR's own migration 0058 already uses) in its own small, separate fix-forward PR,
+matching this project's own "don't blend unrelated fixes into an unrelated branch" discipline
+— reserved as a near-term priority, not fixed here.
+
 `app/work_candidates/service.py`'s `_propose_execution_scope_if_actionable()` (PR #144)
 proposes capability names from a coarse, WorkCandidate-level vocabulary
 (`"repo_read"`/`"repo_edit"`/`"run_tests"`), while `run_supervisor()`'s own `validate_scope()`
