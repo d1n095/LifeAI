@@ -85,6 +85,7 @@ from app.models.provider_spend import (
     ProviderSpendAuthorization,
     ProviderSpendAuthorizationStatus,
     ProviderSpendUsageEvent,
+    ProviderSpendUsageStatus,
 )
 from app.models.life_intent import LifeIntent, LifeIntentBlocker, LifeIntentDependency, LifeIntentEvent
 from app.models.mainai_execution import (
@@ -287,6 +288,7 @@ __all__ = [
     "ProviderSpendAuthorization",
     "ProviderSpendAuthorizationStatus",
     "ProviderSpendUsageEvent",
+    "ProviderSpendUsageStatus",
     "EngineeringLessonConfidence",
     "EngineeringLessonSeverity",
     "EngineeringLessonStatus",

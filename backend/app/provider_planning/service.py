@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass, field, replace
+from decimal import Decimal
 from typing import Protocol
 
 from sqlalchemy import select
@@ -588,6 +589,77 @@ async def plan_with_provider(
     selected_adapter = adapter or RegistryPlanningAdapter(
         db, provider_name=provider_name, model=model
     )
+    planned_provider = (
+        provider_name
+        or getattr(selected_adapter, "provider_name", None)
+        or getattr(selected_adapter, "default_provider", None)
+    )
+    planned_model = (
+        model
+        or getattr(selected_adapter, "model", None)
+        or getattr(selected_adapter, "default_model", None)
+    )
+    # Spend gate: a live boolean alone must never open a billed call. Reserve first.
+    # Explicit provider+model required so ceilings can be bound before money is spent.
+    from app.provider_spend import (
+        ProviderSpendError,
+        release_provider_spend_call,
+        reserve_provider_spend_call,
+        settle_provider_spend_call,
+    )
+
+    spend_source_ref = (
+        f"provider-planning:{request.owner_id}:{request.task_id}:{request.job_id}:{request_hash}"
+    )
+    spend_reserved = False
+    if not planned_provider or not planned_model:
+        detail = {
+            "request_hash": request_hash,
+            "reason": (
+                "provider-assisted planning requires an explicit provider and model before "
+                "invocation so spend can be reserved against founder ceilings"
+            ),
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "PROVIDER_SPEND_NOT_AUTHORIZED", detail)
+        return PlanningResult(
+            "PROVIDER_SPEND_NOT_AUTHORIZED",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        )
+    try:
+        reserve_provider_spend_call(
+            db,
+            owner_id=request.owner_id,
+            goal_id=request.goal_id,
+            source_ref=spend_source_ref,
+            provider=planned_provider,
+            model=planned_model,
+            task_id=request.task_id,
+            job_id=request.job_id,
+            evidence={"request_hash": request_hash, "phase": "pre_call"},
+        )
+        spend_reserved = True
+    except ProviderSpendError as exc:
+        detail = {
+            "request_hash": request_hash,
+            "reason": str(exc),
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "PROVIDER_SPEND_NOT_AUTHORIZED", detail)
+        return PlanningResult(
+            "PROVIDER_SPEND_NOT_AUTHORIZED",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        )
     started = time.monotonic()
     try:
         response = await asyncio.wait_for(
@@ -599,6 +671,13 @@ async def plan_with_provider(
             timeout=limits.timeout_seconds + 1,
         )
     except Exception as exc:  # noqa: BLE001 - provider boundary must checkpoint every failure
+        if spend_reserved:
+            release_provider_spend_call(
+                db,
+                owner_id=request.owner_id,
+                source_ref=spend_source_ref,
+                evidence={"request_hash": request_hash, "phase": "provider_failure"},
+            )
         safe = classify_provider_exception(exc)
         detail = {
             "request_hash": request_hash,
@@ -617,6 +696,28 @@ async def plan_with_provider(
             checkpoint_id=cp.id,
             context_set_id=context_set.id,
         )
+    usage = response.raw_usage or {}
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    settled_cost = estimate_cost(
+        response.provider, response.model, prompt_tokens, completion_tokens
+    )
+    if settled_cost is None:
+        settled_cost = Decimal("0")
+    settle_provider_spend_call(
+        db,
+        owner_id=request.owner_id,
+        source_ref=spend_source_ref,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=settled_cost,
+        evidence={
+            "request_hash": request_hash,
+            "phase": "settled",
+            "provider": response.provider,
+            "model": response.model,
+        },
+    )
     latency_ms = int((time.monotonic() - started) * 1000)
     try:
         envelope = parse_provider_envelope(

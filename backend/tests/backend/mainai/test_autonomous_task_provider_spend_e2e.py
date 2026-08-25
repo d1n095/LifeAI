@@ -123,6 +123,7 @@ async def test_live_spend_grant_opens_provider_planning_through_real_supervisor_
         authorized_by="founder",
         max_cost_usd=Decimal("1.00"),
         max_requests=5,
+        max_cost_per_request_usd=Decimal("0.50"),
         idempotency_key=f"auto-spend-{uuid.uuid4()}",
         allowed_providers=["fake-local"],
         allowed_models=["planner-v2"],
@@ -188,3 +189,25 @@ async def test_live_spend_grant_opens_provider_planning_through_real_supervisor_
         ).scalars()
     ]
     assert "PROVIDER_SPEND_NOT_AUTHORIZED" not in phases
+
+    # Hard ceilings must govern the actual call — not just gate entry.
+    from app.models.provider_spend import ProviderSpendAuthorization, ProviderSpendUsageEvent
+
+    usage = (
+        superuser_db.execute(
+            select(ProviderSpendUsageEvent).where(ProviderSpendUsageEvent.owner_id == owner.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert len(usage) == 1
+    assert usage[0].status == "settled"
+    assert usage[0].prompt_tokens == 50
+    auth = superuser_db.execute(
+        select(ProviderSpendAuthorization).where(
+            ProviderSpendAuthorization.owner_id == owner.id,
+            ProviderSpendAuthorization.status == "active",
+        )
+    ).scalar_one()
+    assert auth.spent_requests == 1
+    assert auth.reserved_requests == 0

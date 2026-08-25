@@ -376,6 +376,7 @@ def test_erase_account_data_succeeds_with_provider_spend_authorization_rows():
             authorized_by="founder",
             max_cost_usd=Decimal("1.00"),
             max_requests=5,
+            max_cost_per_request_usd=Decimal("0.25"),
             idempotency_key=f"erase-spend-{uuid.uuid4()}",
             allowed_providers=["fake"],
             allowed_models=["fake-plan-v1"],

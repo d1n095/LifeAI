@@ -43,6 +43,9 @@ class FakePlanningAdapter:
         self.response = response
         self.error = error
         self.calls = []
+        # Declared before invoke so plan_with_provider can reserve spend against ceilings.
+        self.provider_name = response.provider if response is not None else "fake-local"
+        self.model = response.model if response is not None else "planner-v2"
 
     async def propose(self, request_payload, *, timeout_seconds, max_output_bytes):
         self.calls.append((request_payload, timeout_seconds, max_output_bytes))
@@ -52,6 +55,11 @@ class FakePlanningAdapter:
 
 
 def _provider_scope(db, tmp_path, instruction=COMPLEX_REQUEST):
+    from decimal import Decimal
+
+    from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
+    from app.provider_spend import authorize_provider_spend
+
     owner, goal, task, job, worktree, context, request = _scope(
         db, tmp_path, instruction
     )
@@ -65,6 +73,39 @@ def _provider_scope(db, tmp_path, instruction=COMPLEX_REQUEST):
     task.verification_plan = [
         {"kind": "targeted_tests", "target": "test_calculator.py"}
     ]
+    # Real provider calls must reserve against a founder spend grant — not a boolean alone.
+    proposal = propose_execution_scope(
+        db, owner_id=owner.id, goal_id=goal.id, idempotency_key=f"provider-prop-{goal.id}"
+    )
+    _, envelope = authorize_execution_scope(
+        db,
+        owner_id=owner.id,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=["calculator.py", "test_calculator.py"],
+        authorized_capabilities=[
+            "read_file",
+            "patch_file",
+            "create_file",
+            "run_focused_test",
+            "verification_evaluate",
+        ],
+        authorized_risk="low",
+        envelope_idempotency_key=f"provider-env-{goal.id}",
+    )
+    authorize_provider_spend(
+        db,
+        owner_id=owner.id,
+        goal_id=goal.id,
+        execution_envelope_id=envelope.id,
+        authorized_by="founder",
+        max_cost_usd=Decimal("5.00"),
+        max_requests=20,
+        max_cost_per_request_usd=Decimal("1.00"),
+        idempotency_key=f"provider-spend-{goal.id}",
+        allowed_providers=["fake-local"],
+        allowed_models=["planner-v2"],
+    )
     db.flush()
     return owner, goal, task, job, worktree, context, request, calculator
 
@@ -341,7 +382,7 @@ async def test_malformed_output_and_secret_scope_fail_closed(superuser_db, tmp_p
         request=request,
         operator_context=context,
         adapter=FakePlanningAdapter(
-            ProviderResponse("not-json", "fake-local", "bad-model")
+            ProviderResponse("not-json", "fake-local", "planner-v2")
         ),
     )
     assert malformed.classification == "PROVIDER_FAILED"

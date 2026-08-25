@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,11 +22,14 @@ class ProviderSpendAuthorizationStatus(str, enum.Enum):
     revoked = "revoked"
 
 
-class ProviderSpendAuthorization(Base):
-    """One founder-granted, ceiling-bounded provider-planning budget for one (goal, envelope).
+class ProviderSpendUsageStatus(str, enum.Enum):
+    reserved = "reserved"
+    settled = "settled"
+    released = "released"
 
-    Never grants repo paths, capabilities, remote_write, or push — only billed planning spend.
-    """
+
+class ProviderSpendAuthorization(Base):
+    """One founder-granted, ceiling-bounded provider-planning budget for one (goal, envelope)."""
 
     __tablename__ = "provider_spend_authorizations"
     __table_args__ = (
@@ -44,7 +47,6 @@ class ProviderSpendAuthorization(Base):
             name="fk_provider_spend_authorizations_envelope_owner",
             ondelete="CASCADE",
         ),
-        # Column list authored in migration 0060 — SQLAlchemy cannot express it; keep in sync.
         ForeignKeyConstraint(
             ["supersedes_authorization_id", "owner_id"],
             ["provider_spend_authorizations.id", "provider_spend_authorizations.owner_id"],
@@ -64,6 +66,7 @@ class ProviderSpendAuthorization(Base):
     max_requests: Mapped[int] = mapped_column(Integer)
     max_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_cost_per_request_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
     allowed_providers: Mapped[list] = mapped_column(JSONB, default=list)
     allowed_models: Mapped[list] = mapped_column(JSONB, default=list)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -71,6 +74,10 @@ class ProviderSpendAuthorization(Base):
     spent_requests: Mapped[int] = mapped_column(Integer, default=0)
     spent_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     spent_completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
+    reserved_requests: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     supersedes_authorization_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     provenance: Mapped[dict] = mapped_column(JSONB, default=dict)
     idempotency_key: Mapped[str] = mapped_column(String(128))
@@ -78,11 +85,11 @@ class ProviderSpendAuthorization(Base):
 
 
 class ProviderSpendUsageEvent(Base):
-    """Append-only spend observation. Idempotent on source_ref so retries cannot inflate spend."""
+    """Call-boundary spend observation: reserved before invoke, settled/released after."""
 
     __tablename__ = "provider_spend_usage_events"
     __table_args__ = (
-        UniqueConstraint("source_ref", name="uq_provider_spend_usage_events_source_ref"),
+        UniqueConstraint("owner_id", "source_ref", name="uq_provider_spend_usage_events_owner_source_ref"),
         ForeignKeyConstraint(
             ["authorization_id", "owner_id"],
             ["provider_spend_authorizations.id", "provider_spend_authorizations.owner_id"],
@@ -108,6 +115,10 @@ class ProviderSpendUsageEvent(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
+    reserved_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_cost_usd: Mapped[Decimal] = mapped_column(Numeric(14, 6), default=Decimal("0"))
+    status: Mapped[str] = mapped_column(String(16), default=ProviderSpendUsageStatus.settled.value)
     evidence: Mapped[dict] = mapped_column(JSONB, default=dict)
     source_ref: Mapped[str] = mapped_column(String(320))
     observed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

@@ -15,21 +15,14 @@ can grant a bounded, revocable, accountably spent provider-planning budget for a
 deliberately deferred (Claude currently owns adjacent Supervisor/worker authority surfaces).
 
 Hard rules, structural:
-  - REPO-WRITE AUTHORITY != PROVIDER-SPEND AUTHORITY. This table never grants paths,
-    capabilities, remote_write, or push. It only answers: may this goal spend up to these
-    ceilings calling an allowlisted provider for planning?
-  - Grant cites the exact `execution_authorization_envelopes` row it was issued under
-    (composite owner-anchored FK). If that envelope is no longer the goal's current active
-    envelope, `get_current_provider_spend_authorization()` returns None -- fail closed, never
-    silently inherit spend under a different authority.
-  - Retry never invents budget: usage events are append-only and idempotent on `source_ref`.
-  - Concurrent workers cannot double-spend: reservation takes `FOR UPDATE` on the
-    authorization row and checks remaining ceilings before recording usage.
-  - Exhausted / expired / revoked / superseded => unavailable. No wake-up that reopens spend
-    without a new founder grant.
-
-Column-specific `ON DELETE SET NULL (supersedes_authorization_id)` -- same lesson as
-migration 0058/0059: a plain composite SET NULL would also null NOT NULL `owner_id`.
+  - REPO-WRITE AUTHORITY != PROVIDER-SPEND AUTHORITY.
+  - At most ONE active spend grant per (owner_id, goal_id) -- partial unique index.
+  - Usage idempotency is owner-scoped: UNIQUE (owner_id, source_ref).
+  - Real calls use reserve → invoke → settle/release. reserved_* counts against ceilings
+    before the provider is contacted; settle adjusts to actuals; release frees the hold.
+  - Settle/release UPDATEs go only through SECURITY DEFINER functions (UPDATE revoked from
+    mainai_app; append-only trigger opens only under settle GUC set inside those functions).
+  - Column-specific ON DELETE SET NULL (supersedes_authorization_id).
 """
 
 from alembic import op
@@ -54,6 +47,7 @@ def upgrade() -> None:
             max_requests integer NOT NULL,
             max_prompt_tokens integer,
             max_completion_tokens integer,
+            max_cost_per_request_usd numeric(14, 6),
             allowed_providers jsonb NOT NULL DEFAULT '[]'::jsonb,
             allowed_models jsonb NOT NULL DEFAULT '[]'::jsonb,
             expires_at timestamp,
@@ -61,6 +55,10 @@ def upgrade() -> None:
             spent_requests integer NOT NULL DEFAULT 0,
             spent_prompt_tokens integer NOT NULL DEFAULT 0,
             spent_completion_tokens integer NOT NULL DEFAULT 0,
+            reserved_cost_usd numeric(14, 6) NOT NULL DEFAULT 0,
+            reserved_requests integer NOT NULL DEFAULT 0,
+            reserved_prompt_tokens integer NOT NULL DEFAULT 0,
+            reserved_completion_tokens integer NOT NULL DEFAULT 0,
             supersedes_authorization_id uuid,
             provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
             idempotency_key varchar(128) NOT NULL,
@@ -81,8 +79,11 @@ def upgrade() -> None:
                 max_cost_usd >= 0 AND max_requests >= 0
                 AND spent_cost_usd >= 0 AND spent_requests >= 0
                 AND spent_prompt_tokens >= 0 AND spent_completion_tokens >= 0
+                AND reserved_cost_usd >= 0 AND reserved_requests >= 0
+                AND reserved_prompt_tokens >= 0 AND reserved_completion_tokens >= 0
                 AND (max_prompt_tokens IS NULL OR max_prompt_tokens >= 0)
                 AND (max_completion_tokens IS NULL OR max_completion_tokens >= 0)
+                AND (max_cost_per_request_usd IS NULL OR max_cost_per_request_usd >= 0)
             ),
             CONSTRAINT ck_provider_spend_authorizations_providers CHECK (jsonb_typeof(allowed_providers) = 'array'),
             CONSTRAINT ck_provider_spend_authorizations_models CHECK (jsonb_typeof(allowed_models) = 'array'),
@@ -95,6 +96,8 @@ def upgrade() -> None:
             ON provider_spend_authorizations(owner_id, goal_id, status);
         CREATE INDEX ix_provider_spend_authorizations_envelope
             ON provider_spend_authorizations(execution_envelope_id);
+        CREATE UNIQUE INDEX uq_provider_spend_one_active_per_owner_goal
+            ON provider_spend_authorizations(owner_id, goal_id) WHERE status = 'active';
 
         ALTER TABLE provider_spend_authorizations ENABLE ROW LEVEL SECURITY;
         ALTER TABLE provider_spend_authorizations FORCE ROW LEVEL SECURITY;
@@ -114,18 +117,27 @@ def upgrade() -> None:
             prompt_tokens integer NOT NULL DEFAULT 0,
             completion_tokens integer NOT NULL DEFAULT 0,
             cost_usd numeric(14, 6) NOT NULL DEFAULT 0,
+            reserved_prompt_tokens integer NOT NULL DEFAULT 0,
+            reserved_completion_tokens integer NOT NULL DEFAULT 0,
+            reserved_cost_usd numeric(14, 6) NOT NULL DEFAULT 0,
+            status varchar(16) NOT NULL DEFAULT 'settled',
             evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
             source_ref varchar(320) NOT NULL,
             observed_at timestamp NOT NULL DEFAULT now(),
             created_at timestamp NOT NULL DEFAULT now(),
-            CONSTRAINT uq_provider_spend_usage_events_source_ref UNIQUE (source_ref),
+            CONSTRAINT uq_provider_spend_usage_events_owner_source_ref UNIQUE (owner_id, source_ref),
             CONSTRAINT fk_provider_spend_usage_events_auth_owner FOREIGN KEY (authorization_id, owner_id)
                 REFERENCES provider_spend_authorizations (id, owner_id) ON DELETE CASCADE,
             CONSTRAINT fk_provider_spend_usage_events_goal_owner FOREIGN KEY (goal_id, owner_id)
                 REFERENCES mainai_goals (id, owner_id) ON DELETE CASCADE,
             CONSTRAINT ck_provider_spend_usage_events_nonneg CHECK (
                 prompt_tokens >= 0 AND completion_tokens >= 0 AND cost_usd >= 0
+                AND reserved_prompt_tokens >= 0 AND reserved_completion_tokens >= 0
+                AND reserved_cost_usd >= 0
             ),
+            CONSTRAINT ck_provider_spend_usage_events_status CHECK (status IN (
+                'reserved', 'settled', 'released'
+            )),
             CONSTRAINT ck_provider_spend_usage_events_evidence CHECK (jsonb_typeof(evidence) = 'object')
         );
         CREATE INDEX ix_provider_spend_usage_events_auth
@@ -137,7 +149,6 @@ def upgrade() -> None:
             USING (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
             WITH CHECK (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
 
-        -- Append-only usage: UPDATE denied; DELETE only via authorized erasure GUC.
         CREATE FUNCTION provider_spend_usage_events_deny_mutation() RETURNS trigger
         LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
         BEGIN
@@ -147,7 +158,10 @@ def upgrade() -> None:
                 END IF;
                 RAISE EXCEPTION 'provider_spend_usage_events is append-only: DELETE is only permitted through an authorized owner erasure.';
             END IF;
-            RAISE EXCEPTION 'provider_spend_usage_events is append-only: UPDATE is never permitted.';
+            IF current_setting('app.provider_spend_settle_in_progress', true) = 'on' THEN
+                RETURN NEW;
+            END IF;
+            RAISE EXCEPTION 'provider_spend_usage_events is append-only: UPDATE is only permitted through settle/release SECURITY DEFINER paths.';
         END;
         $$;
         CREATE TRIGGER provider_spend_usage_events_deny_mutation
@@ -170,13 +184,116 @@ def upgrade() -> None:
         END;
         $$;
         REVOKE ALL ON FUNCTION erase_own_provider_spend_children() FROM PUBLIC;
+
+        CREATE FUNCTION settle_provider_spend_usage(
+            p_owner_id uuid,
+            p_source_ref varchar,
+            p_prompt_tokens integer,
+            p_completion_tokens integer,
+            p_cost_usd numeric,
+            p_evidence jsonb DEFAULT '{}'::jsonb
+        ) RETURNS uuid
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        DECLARE
+            v_event public.provider_spend_usage_events%ROWTYPE;
+            v_auth public.provider_spend_authorizations%ROWTYPE;
+        BEGIN
+            IF p_prompt_tokens < 0 OR p_completion_tokens < 0 OR p_cost_usd < 0 THEN
+                RAISE EXCEPTION 'settle amounts must be non-negative';
+            END IF;
+            SELECT * INTO v_event FROM public.provider_spend_usage_events
+                WHERE owner_id = p_owner_id AND source_ref = p_source_ref FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'provider spend usage event missing for settle';
+            END IF;
+            IF v_event.status = 'settled' THEN
+                RETURN v_event.id;
+            END IF;
+            IF v_event.status <> 'reserved' THEN
+                RAISE EXCEPTION 'provider spend usage event is %, cannot settle', v_event.status;
+            END IF;
+            SELECT * INTO v_auth FROM public.provider_spend_authorizations
+                WHERE id = v_event.authorization_id AND owner_id = p_owner_id FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'provider spend authorization missing for settle';
+            END IF;
+            IF p_prompt_tokens > v_event.reserved_prompt_tokens
+               OR p_completion_tokens > v_event.reserved_completion_tokens
+               OR p_cost_usd > v_event.reserved_cost_usd THEN
+                RAISE EXCEPTION 'settle actuals exceed reservation hold';
+            END IF;
+            PERFORM set_config('app.provider_spend_settle_in_progress', 'on', true);
+            UPDATE public.provider_spend_usage_events SET
+                status = 'settled',
+                prompt_tokens = p_prompt_tokens,
+                completion_tokens = p_completion_tokens,
+                cost_usd = p_cost_usd,
+                evidence = COALESCE(p_evidence, '{}'::jsonb),
+                observed_at = now()
+            WHERE id = v_event.id;
+            UPDATE public.provider_spend_authorizations SET
+                reserved_requests = reserved_requests - 1,
+                reserved_prompt_tokens = reserved_prompt_tokens - v_event.reserved_prompt_tokens,
+                reserved_completion_tokens = reserved_completion_tokens - v_event.reserved_completion_tokens,
+                reserved_cost_usd = reserved_cost_usd - v_event.reserved_cost_usd,
+                spent_requests = spent_requests + 1,
+                spent_prompt_tokens = spent_prompt_tokens + p_prompt_tokens,
+                spent_completion_tokens = spent_completion_tokens + p_completion_tokens,
+                spent_cost_usd = spent_cost_usd + p_cost_usd
+            WHERE id = v_auth.id;
+            RETURN v_event.id;
+        END;
+        $$;
+        REVOKE ALL ON FUNCTION settle_provider_spend_usage(uuid, varchar, integer, integer, numeric, jsonb) FROM PUBLIC;
+
+        CREATE FUNCTION release_provider_spend_usage(
+            p_owner_id uuid,
+            p_source_ref varchar,
+            p_evidence jsonb DEFAULT '{}'::jsonb
+        ) RETURNS uuid
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        DECLARE
+            v_event public.provider_spend_usage_events%ROWTYPE;
+        BEGIN
+            SELECT * INTO v_event FROM public.provider_spend_usage_events
+                WHERE owner_id = p_owner_id AND source_ref = p_source_ref FOR UPDATE;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'provider spend usage event missing for release';
+            END IF;
+            IF v_event.status = 'released' THEN
+                RETURN v_event.id;
+            END IF;
+            IF v_event.status = 'settled' THEN
+                RAISE EXCEPTION 'cannot release an already-settled provider spend usage event';
+            END IF;
+            IF v_event.status <> 'reserved' THEN
+                RAISE EXCEPTION 'provider spend usage event is %, cannot release', v_event.status;
+            END IF;
+            PERFORM set_config('app.provider_spend_settle_in_progress', 'on', true);
+            UPDATE public.provider_spend_usage_events SET
+                status = 'released',
+                evidence = COALESCE(p_evidence, '{}'::jsonb),
+                observed_at = now()
+            WHERE id = v_event.id;
+            UPDATE public.provider_spend_authorizations SET
+                reserved_requests = reserved_requests - 1,
+                reserved_prompt_tokens = reserved_prompt_tokens - v_event.reserved_prompt_tokens,
+                reserved_completion_tokens = reserved_completion_tokens - v_event.reserved_completion_tokens,
+                reserved_cost_usd = reserved_cost_usd - v_event.reserved_cost_usd
+            WHERE id = v_event.authorization_id AND owner_id = p_owner_id;
+            RETURN v_event.id;
+        END;
+        $$;
+        REVOKE ALL ON FUNCTION release_provider_spend_usage(uuid, varchar, jsonb) FROM PUBLIC;
     """)
 
 
 def downgrade() -> None:
     op.execute("""
+        DROP TABLE IF EXISTS provider_spend_usage_events CASCADE;
+        DROP TABLE IF EXISTS provider_spend_authorizations CASCADE;
+        DROP FUNCTION IF EXISTS release_provider_spend_usage(uuid, varchar, jsonb);
+        DROP FUNCTION IF EXISTS settle_provider_spend_usage(uuid, varchar, integer, integer, numeric, jsonb);
         DROP FUNCTION IF EXISTS erase_own_provider_spend_children();
         DROP FUNCTION IF EXISTS provider_spend_usage_events_deny_mutation();
-        DROP TABLE IF EXISTS provider_spend_usage_events;
-        DROP TABLE IF EXISTS provider_spend_authorizations;
     """)

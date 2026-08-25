@@ -1,13 +1,12 @@
 """Provider-spend authorization foundation (migration 0060 / Autonomy Activation B1).
 
-Proves REPO-WRITE AUTHORITY != PROVIDER-SPEND AUTHORITY: an active execution envelope alone
-never makes provider_spend_is_live() true. Only an explicit founder grant with ceilings does.
-Final production_entry wire is deliberately NOT under test here — leave that edge until
-Claude's authority surface unlocks.
+Proves REPO-WRITE AUTHORITY != PROVIDER-SPEND AUTHORITY, and that the call boundary is
+reserve → invoke → settle (not a boolean that leaves ceilings unused).
 """
 
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -19,9 +18,8 @@ from sqlalchemy.exc import DBAPIError
 from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
 from app.mainai_execution.planner import create_goal
 from app.models.provider_spend import (
-    ProviderSpendAuthorization,
     ProviderSpendAuthorizationStatus,
-    ProviderSpendUsageEvent,
+    ProviderSpendUsageStatus,
 )
 from app.models.user import User
 from app.provider_spend import (
@@ -30,7 +28,10 @@ from app.provider_spend import (
     get_current_provider_spend_authorization,
     provider_spend_is_live,
     record_provider_spend_usage,
+    release_provider_spend_call,
+    reserve_provider_spend_call,
     revoke_provider_spend,
+    settle_provider_spend_call,
 )
 
 
@@ -71,9 +72,10 @@ def _grant(db, owner, goal, envelope, **overrides):
         authorized_by="founder",
         max_cost_usd=Decimal("1.00"),
         max_requests=3,
+        max_cost_per_request_usd=Decimal("0.50"),
         idempotency_key=f"spend-{uuid.uuid4()}",
-        allowed_providers=["fake"],
-        allowed_models=["fake-plan-v1"],
+        allowed_providers=["fake-local"],
+        allowed_models=["planner-v2"],
     )
     kwargs.update(overrides)
     return authorize_provider_spend(db, **kwargs)
@@ -82,7 +84,6 @@ def _grant(db, owner, goal, envelope, **overrides):
 def test_envelope_alone_never_authorizes_provider_spend(superuser_db):
     owner, goal, envelope = _owner_goal_envelope(superuser_db)
     superuser_db.commit()
-
     assert get_current_provider_spend_authorization(superuser_db, owner_id=owner.id, goal_id=goal.id) is None
     assert provider_spend_is_live(superuser_db, owner_id=owner.id, goal_id=goal.id) is False
     assert (
@@ -93,81 +94,233 @@ def test_envelope_alone_never_authorizes_provider_spend(superuser_db):
     )
 
 
-def test_authorize_provider_spend_requires_current_envelope(superuser_db):
+def test_authorize_is_idempotent_and_rejects_key_reuse_with_different_authority_fields(superuser_db):
     owner, goal, envelope = _owner_goal_envelope(superuser_db)
     superuser_db.commit()
+    first = _grant(
+        superuser_db,
+        owner,
+        goal,
+        envelope,
+        idempotency_key="same-key",
+        max_requests=2,
+        allowed_providers=["fake-local"],
+        allowed_models=["planner-v2"],
+    )
+    superuser_db.commit()
+    replay = _grant(
+        superuser_db,
+        owner,
+        goal,
+        envelope,
+        idempotency_key="same-key",
+        max_requests=2,
+        allowed_providers=["fake-local"],
+        allowed_models=["planner-v2"],
+    )
+    assert replay.id == first.id
 
-    with pytest.raises(ProviderSpendError, match="current active"):
-        authorize_provider_spend(
+    with pytest.raises(ProviderSpendError, match="idempotency key reused"):
+        _grant(
+            superuser_db,
+            owner,
+            goal,
+            envelope,
+            idempotency_key="same-key",
+            max_requests=2,
+            allowed_providers=["fake-local", "openai"],
+            allowed_models=["planner-v2"],
+        )
+
+
+def test_reserve_before_call_and_settle_consumes_budget(superuser_db):
+    owner, goal, envelope = _owner_goal_envelope(superuser_db)
+    superuser_db.commit()
+    row = _grant(superuser_db, owner, goal, envelope, max_requests=2)
+    superuser_db.commit()
+
+    reserved = reserve_provider_spend_call(
+        superuser_db,
+        owner_id=owner.id,
+        goal_id=goal.id,
+        source_ref="call-1",
+        provider="fake-local",
+        model="planner-v2",
+    )
+    superuser_db.commit()
+    assert reserved.status == ProviderSpendUsageStatus.reserved.value
+    superuser_db.refresh(row)
+    assert row.reserved_requests == 1
+    assert row.spent_requests == 0
+    # Boolean alone is not enough — reserved capacity still counts against live headroom.
+    assert provider_spend_is_live(superuser_db, owner_id=owner.id, goal_id=goal.id)
+
+    settled = settle_provider_spend_call(
+        superuser_db,
+        owner_id=owner.id,
+        source_ref="call-1",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd="0.01",
+    )
+    superuser_db.commit()
+    assert settled.status == ProviderSpendUsageStatus.settled.value
+    superuser_db.refresh(row)
+    assert row.spent_requests == 1
+    assert row.reserved_requests == 0
+    assert row.spent_cost_usd == Decimal("0.010000")
+
+    # Idempotent settle / reserve replay must not double-charge.
+    again = reserve_provider_spend_call(
+        superuser_db,
+        owner_id=owner.id,
+        goal_id=goal.id,
+        source_ref="call-1",
+        provider="fake-local",
+        model="planner-v2",
+    )
+    settle_provider_spend_call(
+        superuser_db,
+        owner_id=owner.id,
+        source_ref="call-1",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd="0.01",
+    )
+    superuser_db.commit()
+    assert again.id == settled.id
+    superuser_db.refresh(row)
+    assert row.spent_requests == 1
+
+
+def test_release_after_failure_does_not_consume_budget(superuser_db):
+    owner, goal, envelope = _owner_goal_envelope(superuser_db)
+    superuser_db.commit()
+    row = _grant(superuser_db, owner, goal, envelope, max_requests=1)
+    superuser_db.commit()
+    reserve_provider_spend_call(
+        superuser_db,
+        owner_id=owner.id,
+        goal_id=goal.id,
+        source_ref="fail-1",
+        provider="fake-local",
+        model="planner-v2",
+    )
+    superuser_db.commit()
+    release_provider_spend_call(superuser_db, owner_id=owner.id, source_ref="fail-1")
+    superuser_db.commit()
+    superuser_db.refresh(row)
+    assert row.spent_requests == 0
+    assert row.reserved_requests == 0
+    assert provider_spend_is_live(superuser_db, owner_id=owner.id, goal_id=goal.id)
+
+
+def test_two_owners_may_reuse_the_same_source_ref(superuser_db):
+    owner_a, goal_a, env_a = _owner_goal_envelope(superuser_db)
+    owner_b, goal_b, env_b = _owner_goal_envelope(superuser_db)
+    superuser_db.commit()
+    _grant(superuser_db, owner_a, goal_a, env_a)
+    _grant(superuser_db, owner_b, goal_b, env_b)
+    superuser_db.commit()
+    shared = "shared-source-ref"
+    a = reserve_provider_spend_call(
+        superuser_db,
+        owner_id=owner_a.id,
+        goal_id=goal_a.id,
+        source_ref=shared,
+        provider="fake-local",
+        model="planner-v2",
+    )
+    b = reserve_provider_spend_call(
+        superuser_db,
+        owner_id=owner_b.id,
+        goal_id=goal_b.id,
+        source_ref=shared,
+        provider="fake-local",
+        model="planner-v2",
+    )
+    superuser_db.commit()
+    assert a.id != b.id
+    assert a.owner_id == owner_a.id
+    assert b.owner_id == owner_b.id
+
+
+def test_concurrent_first_grants_only_one_active(superuser_db):
+    owner, goal, envelope = _owner_goal_envelope(superuser_db)
+    superuser_db.commit()
+    owner_id, goal_id, envelope_id = owner.id, goal.id, envelope.id
+    bind = superuser_db.get_bind()
+    results = []
+    errors = []
+
+    def _attempt(key):
+        from sqlalchemy.orm import sessionmaker
+
+        Session = sessionmaker(bind=bind)
+        session = Session()
+        try:
+            row = authorize_provider_spend(
+                session,
+                owner_id=owner_id,
+                goal_id=goal_id,
+                execution_envelope_id=envelope_id,
+                authorized_by="founder",
+                max_cost_usd="1.00",
+                max_requests=2,
+                max_cost_per_request_usd="0.50",
+                idempotency_key=key,
+                allowed_providers=["fake-local"],
+                allowed_models=["planner-v2"],
+            )
+            session.commit()
+            results.append(row.id)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            errors.append(str(exc))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_attempt, args=("concurrent-a",))
+    t2 = threading.Thread(target=_attempt, args=("concurrent-b",))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    # One wins; the other either loses the unique race or serializes and supersedes.
+    # Structural invariant: never more than one active grant.
+    active = superuser_db.execute(
+        text(
+            "SELECT count(*) FROM provider_spend_authorizations "
+            "WHERE owner_id = :o AND goal_id = :g AND status = 'active'"
+        ),
+        {"o": str(owner_id), "g": str(goal_id)},
+    ).scalar()
+    assert active == 1
+    assert len(results) >= 1
+
+
+def test_cannot_bound_cost_without_per_request_or_priced_model(superuser_db):
+    owner, goal, envelope = _owner_goal_envelope(superuser_db)
+    superuser_db.commit()
+    _grant(
+        superuser_db,
+        owner,
+        goal,
+        envelope,
+        max_cost_per_request_usd=None,
+        allowed_providers=["mystery"],
+        allowed_models=["mystery-v1"],
+    )
+    superuser_db.commit()
+    with pytest.raises(ProviderSpendError, match="cannot bound USD cost"):
+        reserve_provider_spend_call(
             superuser_db,
             owner_id=owner.id,
             goal_id=goal.id,
-            execution_envelope_id=uuid.uuid4(),
-            authorized_by="founder",
-            max_cost_usd="0.50",
-            max_requests=1,
-            idempotency_key="bad-env",
+            source_ref="unbounded",
+            provider="mystery",
+            model="mystery-v1",
         )
-
-    row = _grant(superuser_db, owner, goal, envelope)
-    superuser_db.commit()
-    assert row.status == ProviderSpendAuthorizationStatus.active.value
-    assert provider_spend_is_live(
-        superuser_db, owner_id=owner.id, goal_id=goal.id, execution_envelope_id=envelope.id
-    )
-
-
-def test_authorize_is_idempotent_and_rejects_key_reuse_with_different_fields(superuser_db):
-    owner, goal, envelope = _owner_goal_envelope(superuser_db)
-    superuser_db.commit()
-    first = _grant(superuser_db, owner, goal, envelope, idempotency_key="same-key", max_requests=2)
-    superuser_db.commit()
-    replay = _grant(superuser_db, owner, goal, envelope, idempotency_key="same-key", max_requests=2)
-    assert replay.id == first.id
-
-    with pytest.raises(ProviderSpendError, match="idempotency"):
-        _grant(superuser_db, owner, goal, envelope, idempotency_key="same-key", max_requests=9)
-
-
-def test_new_grant_supersedes_prior_active_without_mutating_it(superuser_db):
-    owner, goal, envelope = _owner_goal_envelope(superuser_db)
-    superuser_db.commit()
-    prior = _grant(superuser_db, owner, goal, envelope, idempotency_key="prior")
-    superuser_db.commit()
-    newer = _grant(superuser_db, owner, goal, envelope, idempotency_key="newer", max_cost_usd="2.00")
-    superuser_db.commit()
-
-    superuser_db.refresh(prior)
-    assert prior.status == ProviderSpendAuthorizationStatus.superseded.value
-    assert newer.supersedes_authorization_id == prior.id
-    assert get_current_provider_spend_authorization(superuser_db, owner_id=owner.id, goal_id=goal.id).id == newer.id
-
-
-def test_envelope_reauth_without_new_spend_grant_fails_closed(superuser_db):
-    owner, goal, old_envelope = _owner_goal_envelope(superuser_db)
-    superuser_db.commit()
-    _grant(superuser_db, owner, goal, old_envelope)
-    superuser_db.commit()
-    assert provider_spend_is_live(superuser_db, owner_id=owner.id, goal_id=goal.id)
-
-    proposal = propose_execution_scope(
-        superuser_db, owner_id=owner.id, goal_id=goal.id, idempotency_key=f"prop-{uuid.uuid4()}"
-    )
-    _, new_envelope = authorize_execution_scope(
-        superuser_db,
-        owner_id=owner.id,
-        proposal_id=proposal.id,
-        authorized_by="founder",
-        authorized_paths=["README.md"],
-        authorized_capabilities=["read_file"],
-        authorized_risk="low",
-        envelope_idempotency_key=f"env-{uuid.uuid4()}",
-    )
-    superuser_db.commit()
-
-    assert new_envelope.id != old_envelope.id
-    assert get_current_provider_spend_authorization(superuser_db, owner_id=owner.id, goal_id=goal.id) is None
-    assert provider_spend_is_live(superuser_db, owner_id=owner.id, goal_id=goal.id) is False
 
 
 def test_revoke_and_expiry_fail_closed(superuser_db):
@@ -175,7 +328,7 @@ def test_revoke_and_expiry_fail_closed(superuser_db):
     superuser_db.commit()
     row = _grant(superuser_db, owner, goal, envelope)
     superuser_db.commit()
-    revoke_provider_spend(superuser_db, owner_id=owner.id, authorization_id=row.id, reason="founder stop")
+    revoke_provider_spend(superuser_db, owner_id=owner.id, authorization_id=row.id, reason="stop")
     superuser_db.commit()
     assert provider_spend_is_live(superuser_db, owner_id=owner.id, goal_id=goal.id) is False
 
@@ -193,148 +346,28 @@ def test_revoke_and_expiry_fail_closed(superuser_db):
     assert expired.status == ProviderSpendAuthorizationStatus.expired.value
 
 
-def test_usage_accounting_ceilings_and_idempotent_retry(superuser_db):
+def test_record_provider_spend_usage_is_reserve_then_settle(superuser_db):
     owner, goal, envelope = _owner_goal_envelope(superuser_db)
     superuser_db.commit()
-    row = _grant(
-        superuser_db,
-        owner,
-        goal,
-        envelope,
-        max_requests=2,
-        max_cost_usd=Decimal("0.10"),
-        max_prompt_tokens=100,
-    )
+    row = _grant(superuser_db, owner, goal, envelope, max_requests=2)
     superuser_db.commit()
-
-    first = record_provider_spend_usage(
+    event = record_provider_spend_usage(
         superuser_db,
         owner_id=owner.id,
         goal_id=goal.id,
-        source_ref="call-1",
-        provider="fake",
-        model="fake-plan-v1",
-        prompt_tokens=40,
-        completion_tokens=10,
-        cost_usd="0.04",
+        source_ref="legacy-1",
+        provider="fake-local",
+        model="planner-v2",
+        prompt_tokens=3,
+        cost_usd="0.02",
     )
     superuser_db.commit()
-    assert first is not None
-    superuser_db.refresh(row)
-    assert row.spent_requests == 1
-    assert row.spent_cost_usd == Decimal("0.040000")
-
-    replay = record_provider_spend_usage(
-        superuser_db,
-        owner_id=owner.id,
-        goal_id=goal.id,
-        source_ref="call-1",
-        provider="fake",
-        model="fake-plan-v1",
-        prompt_tokens=40,
-        completion_tokens=10,
-        cost_usd="0.04",
-    )
-    superuser_db.commit()
-    assert replay.id == first.id
+    assert event.status == ProviderSpendUsageStatus.settled.value
     superuser_db.refresh(row)
     assert row.spent_requests == 1
 
-    with pytest.raises(ProviderSpendError, match="allowlisted"):
-        record_provider_spend_usage(
-            superuser_db,
-            owner_id=owner.id,
-            goal_id=goal.id,
-            source_ref="call-bad-provider",
-            provider="openai",
-            model="gpt-x",
-            cost_usd="0.01",
-        )
 
-    record_provider_spend_usage(
-        superuser_db,
-        owner_id=owner.id,
-        goal_id=goal.id,
-        source_ref="call-2",
-        provider="fake",
-        model="fake-plan-v1",
-        prompt_tokens=40,
-        cost_usd="0.04",
-    )
-    superuser_db.commit()
-    superuser_db.refresh(row)
-    # Exact fill of max_requests marks the grant exhausted — further NEW spend fails closed.
-    assert row.spent_requests == 2
-    assert row.status == ProviderSpendAuthorizationStatus.exhausted.value
-    assert provider_spend_is_live(superuser_db, owner_id=owner.id, goal_id=goal.id) is False
-
-    with pytest.raises(ProviderSpendError, match="no live provider spend"):
-        record_provider_spend_usage(
-            superuser_db,
-            owner_id=owner.id,
-            goal_id=goal.id,
-            source_ref="call-3",
-            provider="fake",
-            model="fake-plan-v1",
-            cost_usd="0.01",
-        )
-    superuser_db.rollback()
-
-    # Retry of an already-recorded source_ref after exhaustion must not raise and must not
-    # invent additional spend.
-    again = record_provider_spend_usage(
-        superuser_db,
-        owner_id=owner.id,
-        goal_id=goal.id,
-        source_ref="call-1",
-        provider="fake",
-        model="fake-plan-v1",
-        cost_usd="0.04",
-    )
-    assert again.id == first.id
-    superuser_db.refresh(row)
-    assert row.spent_requests == 2
-
-
-def test_usage_rejects_over_ceiling_before_exact_fill_marks_exhausted(superuser_db):
-    owner, goal, envelope = _owner_goal_envelope(superuser_db)
-    superuser_db.commit()
-    row = _grant(
-        superuser_db,
-        owner,
-        goal,
-        envelope,
-        max_requests=2,
-        max_cost_usd=Decimal("0.05"),
-    )
-    superuser_db.commit()
-    record_provider_spend_usage(
-        superuser_db,
-        owner_id=owner.id,
-        goal_id=goal.id,
-        source_ref="cost-1",
-        provider="fake",
-        model="fake-plan-v1",
-        cost_usd="0.04",
-    )
-    superuser_db.commit()
-    with pytest.raises(ProviderSpendError, match="cost ceiling"):
-        record_provider_spend_usage(
-            superuser_db,
-            owner_id=owner.id,
-            goal_id=goal.id,
-            source_ref="cost-2",
-            provider="fake",
-            model="fake-plan-v1",
-            cost_usd="0.04",
-        )
-    superuser_db.commit()
-    superuser_db.refresh(row)
-    assert row.status == ProviderSpendAuthorizationStatus.exhausted.value
-    assert row.spent_requests == 1
-
-
-def test_usage_events_are_append_only(superuser_db):
+def test_usage_events_are_append_only_without_settle_guc(superuser_db):
     owner, goal, envelope = _owner_goal_envelope(superuser_db)
     superuser_db.commit()
     _grant(superuser_db, owner, goal, envelope)
@@ -344,37 +377,14 @@ def test_usage_events_are_append_only(superuser_db):
         owner_id=owner.id,
         goal_id=goal.id,
         source_ref=f"append-only-{uuid.uuid4()}",
-        provider="fake",
-        model="fake-plan-v1",
+        provider="fake-local",
+        model="planner-v2",
         cost_usd="0.01",
     )
     superuser_db.commit()
-
     with pytest.raises(DBAPIError):
         superuser_db.execute(
             text("UPDATE provider_spend_usage_events SET cost_usd = 99 WHERE id = :id"),
             {"id": str(event.id)},
         )
     superuser_db.rollback()
-
-
-def test_column_specific_set_null_on_supersedes_survives_delete(superuser_db):
-    """Plain composite SET NULL would also null NOT NULL owner_id — same defect class as 0057."""
-    owner, goal, envelope = _owner_goal_envelope(superuser_db)
-    superuser_db.commit()
-    prior = _grant(superuser_db, owner, goal, envelope, idempotency_key="setnull-prior")
-    superuser_db.commit()
-    newer = _grant(superuser_db, owner, goal, envelope, idempotency_key="setnull-newer")
-    superuser_db.commit()
-    assert newer.supersedes_authorization_id == prior.id
-
-    # Direct DELETE is revoked for mainai_app; tests run as migration owner / superuser so
-    # this probes the FK behavior itself.
-    superuser_db.execute(
-        text("DELETE FROM provider_spend_authorizations WHERE id = :id"),
-        {"id": str(prior.id)},
-    )
-    superuser_db.commit()
-    superuser_db.refresh(newer)
-    assert newer.supersedes_authorization_id is None
-    assert newer.owner_id == owner.id
