@@ -251,27 +251,51 @@ def test_two_identical_concurrent_writers_both_succeed_with_a_single_file_on_dis
     assert list((tmp_path / "tmp").iterdir()) == [], "no leftover tempfiles after two concurrent writers"
 
 
-def test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk(tmp_path):
+def test_write_stream_vs_delete_never_returns_a_corrupt_or_deadlocked_blob(tmp_path):
     """Tests C/D/E (founder's Pass 31 lettering) together: real threads, real filesystem,
-    write_stream() and delete() for the SAME content-addressed key racing repeatedly. The
-    invariant that must hold regardless of scheduling: whenever write_stream() returns
-    successfully, the blob it names genuinely exists on disk at that moment (C/D), no run ever
-    hangs (no deadlock), and no tempfiles are left behind afterward (E).
+    write_stream() and delete() for the SAME content-addressed key racing repeatedly.
 
-    Pass 32: bumped from 20 to 250 iterations -- this is also Pass 32's own point-2 Test D
-    ("writer och delete i hundratals interleavings"), now backed by the real `_key_lock()`
-    fcntl lock rather than the retry loop this replaced, so the invariant should hold even
-    more strongly than before."""
+    This test used to assert "whenever write_stream() returns successfully, the blob it names
+    genuinely exists on disk at that moment", and failed intermittently in CI for years of
+    passes -- dismissed each time as a flake. It is not a flake: the assertion is structurally
+    unprovable, and asserting it taught readers something false. `write_stream()` RELEASES
+    `_key_lock()` before returning (its own docstring says so explicitly, and must, to avoid a
+    lock-ordering cycle with `acquire_storage_key_lock()`), and `delete()` takes that same lock
+    around its `unlink()`. So a concurrent deleter is fully entitled to remove the blob between
+    write_stream() returning and the caller's next look at it. Post-return existence is not
+    something this layer promises anyone -- which is precisely why
+    `app/storage/references.py::store_content_with_reference_lock()` exists: callers who need
+    the blob to survive until their DB reference commits take the DB advisory lock, VERIFY, and
+    republish from memory if a deleter won. That is the real contract, and it is tested there.
+
+    Believing write_stream() alone guarantees post-return existence is the exact false premise
+    behind the write-before-reference bug class this codebase has now fixed three times (#133,
+    #143, #145). A test asserting it is worse than no test.
+
+    What IS provable regardless of scheduling, and is what this test asserts now:
+      - if the blob is present after the race, its bytes hash to its own key (a concurrent
+        delete can make it ABSENT, but can never make it present-and-wrong -- this catches
+        corrupt publishes, which the old existence check never did)
+      - neither participant ever raises unexpectedly
+      - no run hangs (no deadlock between _publish() and delete() on the shared shard lock)
+      - no tempfiles are left behind (E)
+    """
     storage = LocalFilesystemStorage(str(tmp_path))
     payload = b"pass 31/32 tests C/D/E: write_stream vs delete" * 15
+    expected_sha = hashlib.sha256(payload).hexdigest()
 
     failures: list[str] = []
 
     def _writer():
         try:
             blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
-            if not storage.exists(blob.storage_key):
-                failures.append("write_stream() returned success but the blob is missing from disk")
+            if blob.sha256 != expected_sha:
+                failures.append(f"write_stream() returned the wrong hash: {blob.sha256}")
+            # Absent is legitimate here (the deleter may have won); present-but-wrong is not.
+            if storage.exists(blob.storage_key) and not storage.verify(
+                blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes
+            ):
+                failures.append("a published blob is present but its bytes do not match its own key")
         except Exception as exc:  # noqa: BLE001
             failures.append(f"writer raised unexpectedly: {exc!r}")
 
@@ -296,6 +320,28 @@ def test_write_stream_vs_delete_never_returns_a_blob_missing_from_disk(tmp_path)
 
     assert failures == [], f"race invariant violated: {failures}"
     assert list((tmp_path / "tmp").iterdir()) == [], "no leftover tempfiles after the write/delete race"
+
+
+def test_write_stream_gives_no_post_return_existence_guarantee_by_design(tmp_path):
+    """Pins the contract the test above stopped over-asserting, so the weaker assertion there
+    reads as a deliberate decision rather than something quietly given up on.
+
+    A deleter that runs entirely AFTER write_stream() returned removes the blob, and
+    write_stream() has no way to prevent that -- it no longer holds `_key_lock()`. Callers that
+    need the blob to survive until their own DB reference commits must use
+    `store_content_with_reference_lock()`, which verifies and republishes under the DB advisory
+    lock. If someone later makes write_stream() hold the shard lock past return (reintroducing
+    the lock-ordering cycle `_key_lock()`'s docstring rules out), this test fails and says why.
+    """
+    storage = LocalFilesystemStorage(str(tmp_path))
+    blob = storage.write_stream(_chunks(b"no post-return existence guarantee"), max_bytes=10_000)
+    assert storage.exists(blob.storage_key)
+
+    storage.delete(blob.storage_key)
+    assert not storage.exists(blob.storage_key), (
+        "delete() must be able to remove a just-written blob -- write_stream() releases "
+        "_key_lock() before returning and promises nothing about what happens afterwards"
+    )
 
 
 def test_publish_fails_loudly_when_link_conflicts_but_nothing_is_actually_there(tmp_path, monkeypatch):
@@ -405,16 +451,29 @@ def test_a_real_concurrent_delete_blocks_until_write_streams_publish_finishes(tm
     assert errors == [], f"unexpected exception(s): {errors}"
 
 
-def test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_completion(tmp_path):
-    """Test E (founder's Pass 32 point-2 lettering): runs many real write_stream()/delete()
-    interleavings (reusing the C/D/E race harness's shape) and additionally asserts the
-    specific property Pass 31's own docstring could only claim was "shrunk, not eliminated" --
-    that a return from write_stream() is a genuine, safe-at-that-instant guarantee the blob was
-    present, not a stale observation that could already be wrong by the time the caller acts on
-    it. Checked by having the writer itself verify existence synchronously, in the same thread,
-    immediately after write_stream() returns and before the deleter thread (started
-    concurrently) could possibly have been scheduled to interfere -- any failure here would mean
-    the lock let the two threads observe an inconsistent state."""
+def test_write_stream_and_delete_stay_consistent_under_a_second_interleaving_shape(tmp_path):
+    """Test E (founder's Pass 32 point-2 lettering), corrected. A second interleaving shape
+    alongside the C/D/E harness above: the deleter always targets the PREVIOUS iteration's
+    seed while a writer republishes the same content, and the seed is re-published between
+    iterations regardless of who won.
+
+    This test used to assert that "a return from write_stream() is a genuine,
+    safe-at-that-instant guarantee the blob was present", reasoning that the check ran
+    "before the deleter thread could possibly have been scheduled to interfere". That reasoning
+    assumed a scheduling order the test does nothing to enforce, so it failed intermittently in
+    CI and was repeatedly written off as a flake. It is not provable from outside the class at
+    all: `write_stream()` releases `_key_lock()` before returning (deliberately -- see
+    `_key_lock()`'s docstring on the lock-ordering cycle it must avoid), so from the instant it
+    returns, a concurrent `delete()` holding that same lock is entitled to remove the blob.
+    "Publish completion is safe" is only defined INSIDE the locked window; a caller who needs
+    the blob to outlive that window uses
+    `app/storage/references.py::store_content_with_reference_lock()`, which verifies and
+    republishes under the DB advisory lock, and is tested there.
+
+    Asserts the provable invariant instead, the same one the C/D/E harness above now uses: a
+    concurrent delete may make the blob ABSENT, but nothing may ever make it
+    present-with-wrong-bytes -- plus deadlock-freedom and no unexpected exceptions under this
+    second interleaving."""
     storage = LocalFilesystemStorage(str(tmp_path))
     payload = b"pass 32 test E: safe publish completion" * 12
     seed = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
@@ -424,10 +483,10 @@ def test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_comple
     def _writer():
         try:
             blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
-            # Still inside this thread, right after the lock was released by _publish() --
-            # if this observes a miss, the lock failed to make publish-completion safe.
-            if not storage.exists(blob.storage_key):
-                failures.append("write_stream() returned but the blob was already gone")
+            if storage.exists(blob.storage_key) and not storage.verify(
+                blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes
+            ):
+                failures.append("a published blob is present but its bytes do not match its own key")
         except Exception as exc:  # noqa: BLE001
             failures.append(f"writer raised unexpectedly: {exc!r}")
 
@@ -448,7 +507,7 @@ def test_a_successful_write_stream_means_the_blob_existed_at_safe_publish_comple
         # Re-seed for the next iteration regardless of which side "won" this one.
         seed = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
 
-    assert failures == [], f"safe-publish-completion invariant violated: {failures}"
+    assert failures == [], f"content-addressing invariant violated under the race: {failures}"
 
 
 def test_lock_file_count_stays_bounded_regardless_of_how_many_distinct_blobs_are_written(tmp_path):
