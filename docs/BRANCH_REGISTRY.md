@@ -6,6 +6,13 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 80b (2026-08-25): Autonomy Activation B4 — plan-derived scope narrowing (Cursor)
+
+**Branch:** `cursor/plan-derived-scope-narrowing` — pure helper + tests. Does **not** wire
+`production_entry` (Claude #154 owns adjacent authority; spend #155 owns production_entry
+boolean edge). After both land: intersect envelope ceiling with Safe-Planner-validated plan
+citations when building WorkBindings.
+
 ## Pass 79 (2026-08-25): Cursor Omega landade #149 → #150 → #146 @ `60b88eb`; #148 HOLD på ny remote-head
 
 **Integrationsgrenen NU:** `60b88eb`
