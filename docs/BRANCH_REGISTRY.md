@@ -6,6 +6,220 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass 79 (2026-08-25): Cursor Omega landade #149 → #150 → #146 @ `60b88eb`; #148 HOLD på ny remote-head
+
+**Integrationsgrenen NU:** `60b88eb`
+
+| PR | Resultat | SHA |
+|---|---|---|
+| [#149](https://github.com/d1n095/LifeAI/pull/149) | MERGAD | `0f4ce31` — `erase_own_mainai_execution_children()` på produktions-erasure-vägen |
+| [#150](https://github.com/d1n095/LifeAI/pull/150) | MERGAD | `d9f9d09` — `write_stream`-kontrakt (ingen post-return existence; ingen corruption/deadlock/temp-leak) |
+| [#146](https://github.com/d1n095/LifeAI/pull/146) | MERGAD | `60b88eb` — `engineering_lesson_guard_observations` (migration **0058**), guard-evidence semantik, column-specific job FK |
+| [#147](https://github.com/d1n095/LifeAI/pull/147) | denna PR | registry efter landning |
+
+**Post-integration-revalidation (faktisk tip-kod, inte PR-text):**
+- `erasure.py` anropar `erase_own_mainai_execution_children()` ✓
+- migration 0058 är `0058_engineering_lesson_guard_observations` med `ON DELETE SET NULL (job_id)` ✓
+- ingen `engineering_lesson_effectiveness` / `attribution_confidence` kvar i app/alembic ✓
+- storage-testerna assertar det korrigerade kontraktet ✓
+
+### Claude #148 — HOLD, men remote rörde sig
+
+Remote head **`02e6531` → `18ba6fc`** (två commits). Pushade review-fixar:
+1. Column-specific `ON DELETE SET NULL (envelope_id)` på supervisor lease ↔ envelope FK ✓
+2. `prepare_context` resume kräver `job.locked_by == worker_id` (+ lease-fönster), inte bara `status==running` ✓
+
+**Kvarvarande merge-gates för #148 (Cursor skriver INTE här):**
+1. **Alembic 0058-kollision:** tip äger redan 0058 (guard observations). #148 måste rebasas på `60b88eb` och omnumreras till **0059**.
+2. **Erasure:** tip har #149:s `erase_own_mainai_execution_children`; #148 lägger `erase_own_supervisor_goal_leases`. Efter rebase måste **båda** finnas före `db.delete(user)`.
+3. **Lease TTL mid-effect:** `renew_supervisor_goal_lease` anropas fortfarande inte under `run_supervisor()`; konstruktionen förlitar sig på bounds 900s < lease 1800s. Bevisa hård wall-clock även över blockerande op, eller heartbeat/fence — `BOUND DECLARED != LEASE CANNOT EXPIRE MID-EFFECT`.
+4. Cursor attackerar den sammansatta kedjan **först efter** #148 faktiskt mergats på tip.
+
+**Cursor nästa skriv-scope:** inget i `development_supervisor/**` / #148-ytan. Efter #148-merge: attacklista i Pass 78. Övrigt: fortsatt Omega på icke-överlappande Class-A.
+
+## Pass 78 (2026-08-25): Cursor Omega-läge — #145 landad, #146 guard-omdöpt, Class-A erasure (#149), storage-kontrakt (#150), Claude #148 Supervisor-entry CI-grön
+
+**Läget som registret måste visa (NU, inte Pass 77:s snapshot):** integrationsgrenen står
+på `63fb1a8` (#145 mergad). Cursor kör aktiv Omega-runtime-lane parallellt med Claudes
+Supervisor-entry. Pass 77:s snapshot (där #145 fortfarande var öppen och #146 kallade
+observationerna "effectiveness") är medvetet föråldrad och ersatt här.
+
+### Landat sedan Pass 77
+
+| PR | SHA | Vad |
+|---|---|---|
+| [#145](https://github.com/d1n095/LifeAI/pull/145) | `63fb1a8` | Fix-forward #143: retain endast efter commit; produktionsklock-bevis via `claim_next_job` + `process_claimed_job`. Post-integration-revalidation av faktisk kod bekräftade invarianten. |
+
+Permanent regel från #145: `PR MERGED != INVARIANT CONFIRMED IN INTEGRATION`.
+
+### Öppna Cursor-PR:er
+
+| Branch | PR | Status | Scope | Bas | Alembic |
+|---|---|---|---|---|---|
+| `cursor/lesson-effectiveness-feedback` | [#146](https://github.com/d1n095/LifeAI/pull/146) | Öppen, CI körs | Learning-loopens bakåtkant som **guard-observationer**, inte kausal effectiveness. Tabell `engineering_lesson_guard_observations`; outcomes om guarden (`guard_held`/`guard_failed`/…); `evidence_strength` ersätter attribution_confidence; column-specific `ON DELETE SET NULL (job_id)` | `63fb1a8` | **0058** |
+| `cursor/account-erasure-mainai-execution` | [#149](https://github.com/d1n095/LifeAI/pull/149) | Öppen, CI körs | Class-A: `erase_account_data()` anropade aldrig `erase_own_mainai_execution_children()`, så `DELETE /api/account` failar för ägare som kört MainAI-mål. Hittad under #146:s FK-erasure-attack | `63fb1a8` | ingen |
+| `cursor/storage-race-test-asserts-real-invariant` | [#150](https://github.com/d1n095/LifeAI/pull/150) | Öppen, CI körs | CI-"flaken" på `write_stream` vs `delete` var ett falskt invariant-påstående (post-return existence). Tester assertar nu verkligt kontrakt; `store_content_with_reference_lock`-regressioner orörda | `63fb1a8` | ingen |
+| `cursor/branch-registry-cursor-lane-145-146` | [#147](https://github.com/d1n095/LifeAI/pull/147) | Öppen (denna PR) | Registry — måste beskriva NU | `63fb1a8` | ingen |
+
+### #146 semantik (korrigerad före merge)
+
+`apply_lessons_to_verification_plan()` injicerar bara lessonens `regression_test` i
+verification-planen och registrerar `lessons_applied`. Ett passerande mål bevisar:
+
+```text
+denna lessons namngivna guard kördes och höll i denna execution context
+```
+
+inte:
+
+```text
+lessonen ändrade hur arbetet utfördes, eller orsakade att tasken lyckades
+```
+
+Därför heter tabellen/modellen/skrivaren `*_guard_observations`, inte effectiveness.
+`guard_held` + `evidence_strength=direct` är **inte** HIGH causal attribution. Äkta
+"hjälpte lessonen?" kräver provenance-edge som ännu inte finns (lesson → ändrat
+planeringsbeslut → execution → jämförbart utfall).
+
+### Class-A hittad under #146:s attack — #149
+
+Attacken "observation exists → MainAIJob deleted → owner_id måste överleva" ledde till
+erasure-prober. Kontroll (inga MainAI-rader) passerade; fall med riktig goal+plan+task
+dog på `mainai_task_events`-append-only-triggern. Funktionen
+`erase_own_mainai_execution_children()` fanns och satte redan GUC:en — den var bara aldrig
+på produktionsvägen. Samma `STATE EXISTS != DRIVER EXISTS`, applicerad på kontoradering.
+
+### Claude — aktiv ägare
+
+| Branch | PR | Status | Scope | Alembic |
+|---|---|---|---|---|
+| `claude/supervisor-envelope-wiring` | [#148](https://github.com/d1n095/LifeAI/pull/148) | Öppen, CI grön; Claude har lokala ocommittade ändringar | Produktions-Supervisor-entry: worker-tick → `eligible_authorized_goals` → lease-fenced `run_supervisor()` under aktiv `ExecutionAuthorizationEnvelope`. `provider_spend_authorized=False`, `remote_write_authorized=False` medvetet | **0058** (kolliderar med #146) |
+
+**Cursor skriver INTE i Claudes yta** (`development_supervisor/**`, `erasure.py` utöver #149:s
+enda anrop, migration 0058_supervisor_*). När #148 mergats: attackera den sammansatta
+kedjan omedelbart (se attacklista nedan).
+
+### Alembic-kollision 0058
+
+Både #146 (`0058_engineering_lesson_guard_observations`) och #148
+(`0058_supervisor_goal_lease`) tar revision `0058` / `down_revision=0057`. Den som
+mergas först vinner; den andra måste omnumreras till 0059. #149/#150 tar ingen revision.
+
+### Rekommenderad merge-ordning (när respektive CI är grön)
+
+1. **#149** — Class-A erasure, ingen migration, oberoende. (#148 rör också `erasure.py` med
+   en rad för supervisor-leases — den som landar sist gör trivial rebase så BÅDA anropen finns.)
+2. **#150** — test-only, oberoende.
+3. **#146** eller **#148** — Alembic 0058-vinnare; den andra → 0059. Cursor äger inte #148:s
+   merge.
+4. **#147** (denna) — sist, så registret beskriver det landade läget.
+
+### Attacklista efter #148-merge (Cursor, read→attack, ingen skrivning före merge)
+
+- Lease: reclaim endast efter genuin expiry; generation-bump; concurrent twin workers.
+- Authority never increases on retry: tick måste se ny/smalare/superseded envelope, aldrig
+  cachad scope.
+- `eligible_authorized_goals`: goal utan aktiv envelope / icke-`running` får aldrig tickas.
+- Hard gates: provider spend + remote write förblir false utan separat founder-akt.
+- Worker-ordning: Supervisor-tick vs `_advance_mainai_execution_tasks` — ingen dubbeldispatch.
+- Erasure: efter #148+#149 måste både `erase_own_mainai_execution_children` och
+  `erase_own_supervisor_goal_leases` köras före `db.delete(user)`.
+- AgentWorkAssignment / `reconcile_execution_state`: fortfarande utan produktionsentry — INTE
+  samma yta som #148; bygg inte en drivare för states produktion inte kan skapa.
+
+### Medvetet UTANFÖR Cursor nu
+
+- Merga Claudes #148 (Claude/grundare).
+- Aggregering av guard-observationer → lesson-confidence.
+- AgentTask ↔ MainAI Task-bridge.
+- Deploy / irreversibel produktionsmutation.
+
+**Städning som återstår:** rotworktreet `/Users/dennistorildson/Documents/LifeAI` står kvar på
+den inaktuella branchen `cursor/pr79-live-loop-hardening` med övergivna lokala docs-kopior —
+rörs inte av denna PR.
+
+## Pass 77 (2026-08-24): Cursors aktiva runtime-lane återupptagen — HISTORISK SNAPSHOT (ersatt av Pass 78)
+
+> **Föråldrad.** Pass 77 skrevs medan #145 fortfarande var öppen och #146 fortfarande
+> kallade observationerna "effectiveness". Behålls som historik; Pass 78 är aktuellt läge.
+> Originaltexten följer oförändrad nedan för spårbarhet.
+
+## Pass 77 (original): `cursor/documents-upload-retain-after-commit` (PR #145) och `cursor/lesson-effectiveness-feedback` (PR #146), båda grenade direkt från integrationsgrenen @ `be4fb59` (PR #143 mergad)
+
+**Läget som registret måste visa:** Cursors tidigare lane är helt landad — #132, #133, #134
+och #136 är mergade, liksom #142/#143 och Claudes #144. Cursor står alltså INTE i handoff-
+läge längre; han kör en aktiv byggbana (runtime durability, recovery, learning-loop,
+crash/concurrency) parallellt med Claudes cognition/Supervisor-arbete.
+
+**PR #145 — fix-forward på redan mergade #143.** Grundaren granskade #143 efter merge och
+hittade att den durabla `/api/documents/upload`-vägen innehöll exakt den felklass #133 skrevs
+för att ta bort — och citerade #133 i kommentaren som motiverade den:
+`retain_pending_rejected_upload_cleanup_tasks()` anropades efter `db.flush()` men FÖRE
+`db.commit()`. Funktionen commitar på sin egen `_MaintenanceSession`, så en krasch eller
+rollback mellan de två punkterna lämnar cleanup-tasken terminalt `retained_shared` för en blob
+vars `ImportJob`/`Document`-referens aldrig blev till — en permanent, osynlig orphan som inget
+i systemet någonsin försöker radera igen. Anropet flyttat efter commit. Två regressioner som
+efterfrågades till #143 men aldrig lades till (krasch före commit → bloben går fortfarande att
+purga; committad referens → outbox-workern kan inte radera den). Registerposten i
+`KNOWN_STORAGE_WRITE_PATHS` rättad — den dokumenterade FEL ordning som om den vore invarianten,
+vilket är hur defekten passerade granskning två gånger. Dessutom skärptes worker-beviset: det
+anropade `run_import_job()` direkt, vilket förutsätter att något lämnar jobbet till indexeraren
+— just det antagandet `#126 FIXED OWNER CONTEXT != DURABLE DELIVERY` handlar om. Det kör nu
+produktionsklockan: `claim_next_job()` på den ägar-blinda superuser-claim-sessionen, därefter
+`app/worker.py`s `process_claimed_job()`.
+
+**Generalisering gjord i samma svep (inga fler träffar):** varje anropsställe för
+`retain_pending_rejected_upload_cleanup_tasks()` genomsökt — `project_memory.py` (tre),
+`rag/library_import.py` (ett) och nu `routers/documents.py` commitar alla före retain.
+Felklassen är stängd. `_MaintenanceSession`-hjälparna som avsiktligt commitar före anroparen
+(`enqueue_rejected_upload_cleanup_task`, `_record_storage_orphan_risk_audit`,
+`attempt_pending_storage_deletions_for_operation`) kontrollerade och korrekta.
+
+**PR #146 — learning-loopens saknade bakåtkant.** Lärdomar kunde skrivas (#134) och tillämpas
+(regressionsmål vid planering), men ingenting tittade någonsin tillbaka på om det var värt
+något: en lärdoms `confidence` kunde bara vara vad dess skrivare påstod vid födseln. Samma
+`STATE EXISTS != DRIVER EXISTS`-form som resten av denna lane, applicerad på lärandet självt.
+Ny tabell `engineering_lesson_effectiveness` (migration 0058) plus skrivaren som fylls från
+`_finalize_task_outcome` — vid både pass och fail, eftersom enbart misslyckanden skulle vinkla
+varje lärdoms bevisning negativt. Kausalitetsdisciplinen är fail-closed: bevis tillskrivs bara
+lärdomar som uppgiftens plan durabelt registrerade som tillämpade (`lessons_applied`), utfallet
+härleds enbart ur lärdomens EGET regressionsmål i den strukturerade verifieringsbevisningen,
+och saknas målet blir utfallet `insufficient_evidence` — aldrig `reinforced`. Ett orelaterat
+senare lyckat utfall är aldrig bevis för att en lärdom fungerade. Varje enum-värde har en
+verklig producent (`contradicted` är reserverat för pytest exit 4/5, dvs. lärdomen namnger ett
+mål som inte är en körbar garde alls) — inga värden definierade "för fullständighetens skull",
+vilket är just den defektklass denna lane hittar om och om igen. Ägarskopad RLS med
+composite owner-anchored FK:er trots att `EngineeringLesson` själv är grundar-bred: raden bär
+ägarskopade fakta, så den ärver sin BEVISNINGS känslighet, inte sitt subjekts.
+
+**Medvetet UTANFÖR #146:** aggregering av observationer till en grundargranskningsbar
+confidence-signal, och all automatisk påverkan på `EngineeringLesson.confidence`. Båda kräver
+ett grundarbeslut om hur mycket auktoritet ackumulerad bevisning ska ha.
+
+**Överlappsrisk mot Claude:** ingen. Claude äger `execution-authorization-envelope` /
+Supervisor-entry / Safe Planner. #145 rör `routers/documents.py` + `storage/references.py`;
+#146 rör `mainai_execution/lesson_effectiveness.py` (ny), `execution_job.py`s finalize-gate,
+`models/`, `rls.py`s privilegiepolicy och migration 0058. Ingen fil under
+`autonomous_gap/**`, `development_supervisor/**`, `development_driver/**`,
+`development_operator/**` eller `safe_planner/**` rörd.
+
+**Beroenden:** båda grenade direkt från `claude/det-kommer-mer-879lcm` @ `be4fb59` (efter att
+#143 faktiskt mergats). Oberoende av varandra — kan mergas i valfri ordning. #146 tar
+Alembic-huvudet 0057 → 0058, så en samtidig Claude-migration måste rebasas efter #146, inte
+före (se merge-regeln i `CLAUDE.md`).
+
+| Branch | PR | Status | Scope | Bas |
+|---|---|---|---|---|
+| `cursor/documents-upload-retain-after-commit` | [#145](https://github.com/d1n095/LifeAI/pull/145) | Öppen, CI körs | Fix-forward av #143:s retain-före-commit; 2 nya regressioner; produktionsklock-bevis via `claim_next_job` + `process_claimed_job`; registerformulering rättad | `claude/det-kommer-mer-879lcm` @ be4fb59 |
+| `cursor/lesson-effectiveness-feedback` | [#146](https://github.com/d1n095/LifeAI/pull/146) | Öppen, CI körs | `engineering_lesson_effectiveness` (migration 0058) + attribution från `_finalize_task_outcome`; 16 nya tester inkl. cross-owner-RLS och composite-FK-förfalskning | `claude/det-kommer-mer-879lcm` @ be4fb59 |
+
+**Städning som återstår:** rotworktreet `/Users/dennistorildson/Documents/LifeAI` står kvar på
+den inaktuella branchen `cursor/pr79-live-loop-hardening` med en ocommittad äldre version av
+`docs/BRANCH_REGISTRY.md` och en ospårad kopia av
+`docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md`. Båda är numera landade via #136 och
+kopiorna är alltså övergivna — rörs inte av denna PR, men bör städas av grundaren så att
+rotworktreet inte fortsätter se ut som pågående arbete.
+
 ## Pass 76 (2026-08-23): `claude/goal-waiting-rollup` — MainAIGoalStatus.waiting rollup (ingen ny migration), grenad direkt från integrationsgrenen @ `32c7c72` (PR #141 mergad)
 
 **Bakgrund:** Cursors egen `docs/CURSOR_ADVERSARIAL_RUNTIME_LANE_HANDOFF.md` §H.3 flaggade
