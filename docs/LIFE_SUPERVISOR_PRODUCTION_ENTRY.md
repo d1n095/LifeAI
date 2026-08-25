@@ -224,21 +224,20 @@ form this PR's own migration 0058 already uses) in its own small, separate fix-f
 matching this project's own "don't blend unrelated fixes into an unrelated branch" discipline
 — reserved as a near-term priority, not fixed here.
 
-`app/work_candidates/service.py`'s `_propose_execution_scope_if_actionable()` (PR #144)
-proposes capability names from a coarse, WorkCandidate-level vocabulary
-(`"repo_read"`/`"repo_edit"`/`"run_tests"`), while `run_supervisor()`'s own `validate_scope()`
-checks `scope.allowed_capabilities` against `app.development_operator.service.
-DEVELOPMENT_CAPABILITIES`'s granular operator-level vocabulary (`"read_file"`,
-`"patch_file"`, `"run_focused_test"`, `"stage_scoped_changes"`, ...) — the two vocabularies do
-not overlap at all today. A founder authorizing a WorkCandidate-derived proposal exactly as
-proposed would therefore produce an envelope `run_supervisor()`'s own `validate_scope()`
-rejects outright (`"capability envelope contains missing or unsafe capability"`). This is a
-real, separate gap (a vocabulary/translation layer is missing, likely in
-`authorize_execution_scope()` or in the proposal step itself) — reserved for its own follow-up
-PR per this project's own "don't blend unrelated fixes into an unrelated branch" discipline
-(`CLAUDE.md`), not fixed here. This PR's own tests construct envelopes with
-`DEVELOPMENT_CAPABILITIES`-vocabulary strings directly to stay honest about what
-`run_supervisor()` itself actually requires.
+**FIXED** (was documented here as a known follow-up; closed in its own PR immediately after
+this one merged — see `app/work_candidates/service.py`'s own module-level comment above
+`_PROPOSED_CAPABILITIES_BY_ENTITY_TYPE`). `_propose_execution_scope_if_actionable()` (PR #144)
+originally proposed capability names from a coarse, made-up vocabulary
+(`"repo_read"`/`"repo_edit"`/`"run_tests"`) that did not correspond to anything
+`run_supervisor()`'s own `validate_scope()` actually recognizes — a founder authorizing a
+WorkCandidate-derived proposal exactly as proposed would have produced an envelope
+`validate_scope()` rejects outright. Fixed by making proposals express real
+`app.development_operator.service.DEVELOPMENT_CAPABILITIES` suggestions directly (derived from
+that registry's own `READ_ONLY`/`LOCAL_WRITE`/`LOCAL_EXECUTION` tier labels, never
+hand-typed) — deliberately NOT a silent proposal → capability translation layer applied at
+authorization time, per the founder's own explicit instruction: proposal vocabulary must stay
+non-authoritative, and the founder must be able to see, in the proposal itself, the exact
+capability strings that would apply if authorized.
 
 ## Test coverage
 
@@ -270,8 +269,6 @@ PR per this project's own "don't blend unrelated fixes into an unrelated branch"
 
 - No provider-spend or remote-write authorization path — see "Proof level" above; a separate,
   later founder act, not invented here.
-- No capability-vocabulary translation between `WorkCandidate` proposals and
-  `DEVELOPMENT_CAPABILITIES` — see "Known follow-up" above.
 - No frontend UI — matching every other foundation in this mission.
 - No `docs/BRANCH_REGISTRY.md` update in this PR — a Cursor PR was actively editing that exact
   file when this branch was pushed; the registry entry follows in a small, separate PR once
