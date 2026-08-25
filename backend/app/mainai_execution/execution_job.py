@@ -807,11 +807,14 @@ def _finalize_task_outcome(
     # Closed-loop learning, the back-edge: every lesson this task's plan actually applied gets
     # ONE append-only observation of what happened to its own regression target here -- on
     # success as well as failure, since only recording failures would bias every lesson's
-    # evidence negative. Never mutates the lesson itself; no-op unless the evidence carries
-    # structured verification steps. See lesson_effectiveness.py's module docstring.
-    from app.mainai_execution.lesson_effectiveness import record_lesson_effectiveness_from_finalize
+    # evidence negative. This is GUARD evidence, not lesson effectiveness: applying a lesson
+    # only injects its regression_test into the verification plan, so a passing target shows
+    # the guard held here, not that the lesson caused the outcome. Never mutates the lesson
+    # itself; no-op unless the evidence carries structured verification steps. See
+    # lesson_guard_observations.py's module docstring.
+    from app.mainai_execution.lesson_guard_observations import record_lesson_guard_observations_from_finalize
 
-    record_lesson_effectiveness_from_finalize(db, task=task, evidence=evidence, passed=passed, job_id=job_id)
+    record_lesson_guard_observations_from_finalize(db, task=task, evidence=evidence, passed=passed, job_id=job_id)
 
     db.flush()
     recompute_task_readiness(db, goal_id=task.goal_id)
