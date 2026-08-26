@@ -1,7 +1,7 @@
 # HANDOFF — Composed autonomy runtime probe (Cursor)
 
 **SHA:** `ec1bdd03e841`
-**PR:** (pending open)
+**PR:** https://github.com/d1n095/LifeAI/pull/163
 **Base tip:** `27f8562`
 
 ## Done
