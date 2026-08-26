@@ -547,6 +547,11 @@ _MAINAI_EXECUTION_TABLES = (
     # status transitions in place (active -> released) and whose lease_generation is bumped in
     # place on takeover, deletion only through the SECURITY DEFINER erasure path.
     "supervisor_goal_leases",
+    # Migration 0060 (Provider Spend Authorization): authorizations are mutable (status
+    # transitions + spent counters under row lock); usage events are append-only. Deletion
+    # only through erase_own_provider_spend_children().
+    "provider_spend_authorizations",
+    "provider_spend_usage_events",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -555,6 +560,20 @@ _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_provider_spend_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "settle_provider_spend_usage",
+        "identity_args": "p_owner_id uuid, p_source_ref character varying, p_prompt_tokens integer, p_completion_tokens integer, p_cost_usd numeric, p_evidence jsonb",
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
+    {
+        "name": "release_provider_spend_usage",
+        "identity_args": "p_owner_id uuid, p_source_ref character varying, p_evidence jsonb",
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
+    {"name": "provider_spend_usage_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_task_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_checkpoints_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_recovery_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
@@ -943,6 +962,17 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_guard_observations FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON supervisor_goal_leases FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_supervisor_goal_leases() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_spend_authorizations FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_spend_usage_events FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_spend_children() TO mainai_app"))
+        conn.execute(
+            text(
+                "GRANT EXECUTE ON FUNCTION settle_provider_spend_usage(uuid, varchar, integer, integer, numeric, jsonb) TO mainai_app"
+            )
+        )
+        conn.execute(
+            text("GRANT EXECUTE ON FUNCTION release_provider_spend_usage(uuid, varchar, jsonb) TO mainai_app")
+        )
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1008,6 +1038,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("engineering_lesson_guard_observations", frozenset({"SELECT", "INSERT"})),
             ("supervisor_goal_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

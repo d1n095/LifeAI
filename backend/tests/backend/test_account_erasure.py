@@ -330,6 +330,82 @@ def test_erase_account_data_succeeds_for_an_owner_who_has_run_a_mainai_goal():
         session.close()
 
 
+def test_erase_account_data_succeeds_with_provider_spend_authorization_rows():
+    """Migration 0060: usage events are append-only and authorizations have DELETE revoked
+    from mainai_app. Account erasure must clear both via erase_own_provider_spend_children
+    (wired from erase_account_data) or DELETE /api/account fails for any founder who ever
+    granted provider spend — same Class-A shape as supervisor leases / mainai_task_events."""
+    import uuid
+    from decimal import Decimal
+
+    from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
+    from app.mainai_execution.planner import create_goal
+    from app.models.provider_spend import ProviderSpendAuthorization, ProviderSpendUsageEvent
+    from app.provider_spend import authorize_provider_spend, record_provider_spend_usage
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        goal = create_goal(
+            session,
+            owner_id=owner.id,
+            title="provider spend erasure probe",
+            original_instruction="i",
+            created_by="test",
+        )
+        session.flush()
+        proposal = propose_execution_scope(
+            session, owner_id=owner.id, goal_id=goal.id, idempotency_key=f"erase-spend-prop-{uuid.uuid4()}"
+        )
+        _, envelope = authorize_execution_scope(
+            session,
+            owner_id=owner.id,
+            proposal_id=proposal.id,
+            authorized_by="founder",
+            authorized_paths=["README.md"],
+            authorized_capabilities=["read_file"],
+            authorized_risk="low",
+            envelope_idempotency_key=f"erase-spend-env-{uuid.uuid4()}",
+        )
+        authorize_provider_spend(
+            session,
+            owner_id=owner.id,
+            goal_id=goal.id,
+            execution_envelope_id=envelope.id,
+            authorized_by="founder",
+            max_cost_usd=Decimal("1.00"),
+            max_requests=5,
+            max_cost_per_request_usd=Decimal("0.25"),
+            idempotency_key=f"erase-spend-{uuid.uuid4()}",
+            allowed_providers=["fake"],
+            allowed_models=["fake-plan-v1"],
+        )
+        record_provider_spend_usage(
+            session,
+            owner_id=owner.id,
+            goal_id=goal.id,
+            source_ref=f"erase-spend-usage-{uuid.uuid4()}",
+            provider="fake",
+            model="fake-plan-v1",
+            cost_usd="0.01",
+        )
+        session.commit()
+        owner_id = owner.id
+        assert session.query(ProviderSpendAuthorization).filter_by(owner_id=owner_id).count() == 1
+        assert session.query(ProviderSpendUsageEvent).filter_by(owner_id=owner_id).count() == 1
+
+        _set_rls_user(session, owner.id)
+        erase_account_data(session, owner)
+
+        assert session.get(User, owner_id) is None
+        assert session.query(ProviderSpendAuthorization).filter_by(owner_id=owner_id).count() == 0
+        assert session.query(ProviderSpendUsageEvent).filter_by(owner_id=owner_id).count() == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_erase_account_data_succeeds_with_an_active_supervisor_goal_lease():
     """Post-#148 composition attack: #149 wired erase_own_mainai_execution_children; #148
     wired erase_own_supervisor_goal_leases. Both must be present on the production erasure

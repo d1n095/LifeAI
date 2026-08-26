@@ -52,6 +52,9 @@ def _git(root, *args):
 
 
 class FailingProvider:
+    provider_name = "fake-local"
+    model = "planner-v2"
+
     async def propose(self, *_args, **_kwargs):
         raise ProviderError("quota exhausted", category="rate_limited")
 
@@ -560,8 +563,39 @@ async def test_tie_bounds_cross_owner_and_self_work_have_no_bypass(
 async def test_blocked_capability_gap_and_provider_outage_do_not_freeze_independent_work(
     superuser_db, tmp_path
 ):
-    _, _, first, second, _, original, prepare, scope = _foundation(
+    from decimal import Decimal
+
+    from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
+    from app.provider_spend import authorize_provider_spend
+
+    owner, goal, first, second, _, original, prepare, scope = _foundation(
         superuser_db, tmp_path, tied=True
+    )
+    proposal = propose_execution_scope(
+        superuser_db, owner_id=owner.id, goal_id=goal.id, idempotency_key=f"outage-prop-{goal.id}"
+    )
+    _, envelope = authorize_execution_scope(
+        superuser_db,
+        owner_id=owner.id,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=list(scope.allowed_paths),
+        authorized_capabilities=list(scope.allowed_capabilities),
+        authorized_risk="low",
+        envelope_idempotency_key=f"outage-env-{goal.id}",
+    )
+    authorize_provider_spend(
+        superuser_db,
+        owner_id=owner.id,
+        goal_id=goal.id,
+        execution_envelope_id=envelope.id,
+        authorized_by="founder",
+        max_cost_usd=Decimal("2.00"),
+        max_requests=5,
+        max_cost_per_request_usd=Decimal("0.50"),
+        idempotency_key=f"outage-spend-{goal.id}",
+        allowed_providers=["fake-local"],
+        allowed_models=["planner-v2"],
     )
     scope = replace(scope, provider_spend_authorized=True)
     first.priority = 20
