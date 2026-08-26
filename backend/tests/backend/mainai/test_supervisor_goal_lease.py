@@ -84,11 +84,34 @@ def test_release_makes_the_goal_immediately_reclaimable(superuser_db, make_verif
     lease_id, generation = claim_supervisor_goal_lease(
         superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id, worker_id="worker-a", lease_seconds=300
     )
-    release_supervisor_goal_lease(superuser_db, lease_id=lease_id, worker_id="worker-a", lease_generation=generation)
+    released = release_supervisor_goal_lease(superuser_db, lease_id=lease_id, worker_id="worker-a", lease_generation=generation)
     superuser_db.commit()
+    assert released is True  # observable: this call really did hold and release the lease
 
     second = claim_supervisor_goal_lease(superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id, worker_id="worker-b", lease_seconds=300)
     assert second is not None  # no need to wait out the TTL
+
+
+def test_release_reports_false_when_the_lease_was_already_reclaimed_by_someone_else(superuser_db, make_verified_user):
+    """The observability this fix closes: a release call that no-ops against the fenced WHERE
+    clause (because a DIFFERENT worker already reclaimed the lease, e.g. after this worker's
+    own TTL genuinely expired mid-run) must report that back, not silently succeed."""
+    owner, _ = make_verified_user()
+    goal, envelope = _goal_and_envelope(superuser_db, owner.id)
+
+    lease_id, generation = claim_supervisor_goal_lease(
+        superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id, worker_id="worker-a", lease_seconds=300
+    )
+    from sqlalchemy import text
+
+    superuser_db.execute(text("UPDATE supervisor_goal_leases SET expires_at = now() - interval '1 second' WHERE id = :id"), {"id": str(lease_id)})
+    superuser_db.commit()
+    claim_supervisor_goal_lease(superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id, worker_id="worker-b", lease_seconds=300)
+    superuser_db.commit()
+
+    # worker-a, unaware its lease was already reclaimed, still tries to release "its own" lease.
+    released = release_supervisor_goal_lease(superuser_db, lease_id=lease_id, worker_id="worker-a", lease_generation=generation)
+    assert released is False  # correctly reports the no-op -- never claims success
 
 
 def test_renew_extends_the_lease_and_requires_the_exact_current_generation(superuser_db, make_verified_user):

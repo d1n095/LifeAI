@@ -123,6 +123,18 @@ adversarial review, fixed before this PR merged). Two changes close this:
    ever has to cover one action's own worst case, never a whole multi-task run's accumulated
    time. See `test_the_goal_lease_is_renewed_at_the_per_task_dispatch_boundary`.
 
+**Release observability (found by adversarial self-review after this foundation first
+merged).** `release_supervisor_goal_lease()`'s own fenced `UPDATE` was originally called and
+its result silently discarded in `run_authorized_goal_supervisor_tick()`'s `finally:` block —
+correct (never releases a different worker's now-current claim) but with zero observable
+signal if a worker's OWN lease was already reclaimed by someone else before it got to release
+it (e.g. an operator action that legitimately outlived the TTL despite the per-task renewal
+above, or a genuine bug). The function now returns whether it actually released a row it
+held, and the `finally:` block logs a warning when it did not — never changes behavior, only
+closes a blind spot at exactly the "detect lost ownership at a consequential boundary" every
+other lease-fenced write in this codebase already provides. See
+`test_release_reports_false_when_the_lease_was_already_reclaimed_by_someone_else`.
+
 ## The other lease: fencing against V0.1's own separate execution path
 
 `app/mainai_execution/execution_job.py`'s `run_task_execution_job()` (MainAI Execution Loop
@@ -277,10 +289,12 @@ capability strings that would apply if authorized.
 
 ## Test coverage
 
-- `tests/backend/mainai/test_supervisor_goal_lease.py` (8): claim/renew/release/takeover
+- `tests/backend/mainai/test_supervisor_goal_lease.py` (9): claim/renew/release/takeover
   fencing for `supervisor_goal_leases`, the two-workers-race and
-  crash-then-genuine-expiry-reclaim scenarios, and a real-DB proof that deleting a referenced
-  envelope detaches the lease (`envelope_id -> NULL`) without touching `owner_id`.
+  crash-then-genuine-expiry-reclaim scenarios, a real-DB proof that deleting a referenced
+  envelope detaches the lease (`envelope_id -> NULL`) without touching `owner_id`, and
+  `release_supervisor_goal_lease()` reporting `False` (never a silent success) when its own
+  lease was already reclaimed by someone else before it got to release it.
 - `tests/backend/test_supervisor_production_worktree.py` (6): a real local `git worktree add`,
   idempotent goal-scoped reuse (reporting the CURRENT head after intervening local commits),
   independent isolation between two different goals' worktrees, and
