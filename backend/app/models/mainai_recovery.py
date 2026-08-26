@@ -100,6 +100,7 @@ class MainAIRecoveryEventType(str, enum.Enum):
     recovery_blocked = "recovery_blocked"
     manual_review_required = "manual_review_required"
     approval_granted = "approval_granted"
+    takeover_declined_governed = "takeover_declined_governed"
 
 
 class MainAITaskWorktree(Base):

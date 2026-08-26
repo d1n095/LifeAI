@@ -206,6 +206,32 @@ def get_current_execution_envelope(db: Session, *, owner_id: uuid.UUID, goal_id:
     ).scalar_one_or_none()
 
 
+def goal_has_ever_been_envelope_governed(db: Session, *, owner_id: uuid.UUID, goal_id: uuid.UUID) -> bool:
+    """The durable EVER_GOVERNED fact: whether ANY `ExecutionAuthorizationEnvelope` row has
+    ever existed for this goal, regardless of its current status (active/superseded/revoked).
+    `execution_authorization_envelopes` rows are never deleted, only superseded (see this
+    module's own module docstring / migration 0057), so mere row existence is itself the
+    proof -- no separate governance-state column needed.
+
+    Once true for a goal, it is true forever: authority must never fall back to an
+    envelope-blind execution path just because the CURRENT envelope is absent, superseded, or
+    revoked (see `get_current_execution_envelope()`'s own docstring for the companion "no
+    current envelope = not eligible" half of this invariant). `app.worker.py`'s
+    `_advance_mainai_execution_tasks()` established this exact predicate first (PR #154,
+    found by Cursor's #152); `app.mainai_execution.recovery_takeover.execute_takeover()` is
+    the second independent caller -- see that module for why the dead-job-takeover path needs
+    the identical check."""
+    return (
+        db.execute(
+            select(ExecutionAuthorizationEnvelope.id).where(
+                ExecutionAuthorizationEnvelope.owner_id == owner_id,
+                ExecutionAuthorizationEnvelope.goal_id == goal_id,
+            )
+        ).first()
+        is not None
+    )
+
+
 def list_execution_authorization_envelopes(db: Session, *, owner_id: uuid.UUID, goal_id: uuid.UUID) -> list[ExecutionAuthorizationEnvelope]:
     """Full history for a goal, oldest first -- including superseded envelopes, for audit."""
 
