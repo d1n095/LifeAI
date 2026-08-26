@@ -26,17 +26,21 @@ from app.development_driver.service import run_driver
 from app.development_operator.service import DEVELOPMENT_CAPABILITIES, OperatorContext
 from app.intelligence_governance import record_evidence
 from app.life_intents.service import IntentError, evaluate_feasibility
+from app.jobs.mainai_job_lease import JobLeaseLostError
+from app.jobs.service import mark_failed_flush
 from app.mainai_execution.approval import ApprovalRequiredError
-from app.mainai_execution.executor import dispatch_ready_task
+from app.mainai_execution.executor import _lock_task, dispatch_ready_task
 from app.models.mainai_execution import (
     MainAICheckpoint,
     MainAIGoal,
     MainAIGoalStatus,
     MainAIPlan,
     MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
     MainAITaskStatus,
 )
-from app.models.mainai_job import MainAIJob
+from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
 from app.models.work_intelligence import WorkStrategyExecution
 from app.provider_planning.service import PlanningAdapter, plan_with_provider
 from app.safe_planner.service import (
@@ -490,6 +494,54 @@ def _augment_bindings_with_gap_children(db, *, scope, bindings: tuple[WorkBindin
     if not derived:
         return bindings
     return bindings + tuple(derived)
+
+
+def _release_provider_wait_midflight(
+    db, *, task: MainAITask, job: MainAIJob, context: OperatorContext, phase: str
+) -> None:
+    """B7: fence-release a supervisor-dispatched job that deferred on WAITING_PROVIDER.
+
+    Without this, the task/job pair stays `running` under the deferring worker's lease. Process
+    death then routes through expired-lease auto-recovery → ordinary `task_execution` claim —
+    not supervisor `plan_with_provider` retry. Durable checkpoint already records the wait;
+    this only returns the task to `ready` and terminals the mid-flight job so the next
+    supervisor tick (wake) can re-dispatch honestly. Does not invent spend authority, does not
+    fabricate verification failure, flush-only.
+    """
+    try:
+        mark_failed_flush(
+            db,
+            job,
+            worker_id=context.worker_id,
+            lease_generation=context.lease_generation,
+            error_category=MainAIJobErrorCategory.capability_unavailable,
+        )
+    except JobLeaseLostError:
+        logger.warning(
+            "provider-wait release lost job lease for task %s job %s; leaving task state alone",
+            task.id,
+            job.id,
+        )
+        return
+    locked = _lock_task(db, task.id)
+    if locked.status != MainAITaskStatus.running:
+        return
+    locked.status = MainAITaskStatus.ready
+    locked.next_retry_at = None
+    db.add(
+        MainAITaskEvent(
+            task_id=locked.id,
+            owner_id=locked.owner_id,
+            event_type=MainAITaskEventType.retry_scheduled,
+            detail={
+                "reason": "waiting_provider_defer_release",
+                "phase": phase,
+                "released_job_id": str(job.id),
+                "attempts": locked.attempts,
+            },
+        )
+    )
+    db.flush()
 
 
 def _apply_deferred(assessments, deferred: dict[uuid.UUID, str]):
@@ -986,6 +1038,9 @@ async def run_supervisor(
                 deferred[task.id] = DEFERRED_GAP_GENERATION_ERROR
                 continue
             if planning.classification == "WAITING_PROVIDER" and binding.independent:
+                _release_provider_wait_midflight(
+                    db, task=task, job=job, context=context, phase="WAITING_PROVIDER"
+                )
                 deferred[task.id] = DEFERRED_WAITING_PROVIDER
                 continue
             if planning.classification == "CAPABILITY_MISSING" and binding.independent:
@@ -994,6 +1049,10 @@ async def run_supervisor(
             if gap_error == DEFERRED_GAP_GENERATION_ERROR and binding.independent:
                 deferred[task.id] = DEFERRED_GAP_GENERATION_ERROR
                 continue
+            if planning.classification == "WAITING_PROVIDER":
+                _release_provider_wait_midflight(
+                    db, task=task, job=job, context=context, phase="WAITING_PROVIDER"
+                )
             return _result(
                 planning.classification,
                 goal,
