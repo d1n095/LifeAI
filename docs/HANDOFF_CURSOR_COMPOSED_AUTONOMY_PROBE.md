@@ -1,7 +1,7 @@
 # HANDOFF — Composed autonomy runtime probe (Cursor)
 
-**SHA:** (pending)  
-**PR:** (pending)  
+**SHA:** `ec1bdd03e841`
+**PR:** (pending open)
 **Base tip:** `27f8562`
 
 ## Done
