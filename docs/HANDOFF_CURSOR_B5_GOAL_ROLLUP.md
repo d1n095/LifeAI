@@ -1,7 +1,7 @@
 # HANDOFF — B5 goal rollup / next-task (Cursor)
 
 **SHA:** 223fd9031a7844ba69ce9f55d542bbb7f0001f9e  
-**PR:** (set after open)  
+**PR:** https://github.com/d1n095/LifeAI/pull/158  
 **Base tip:** `4c86e58` (#154 EVER_GOVERNED)
 
 ## Done
