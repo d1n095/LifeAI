@@ -90,14 +90,22 @@ def renew_supervisor_goal_lease(db: Session, *, lease_id: uuid.UUID, worker_id: 
         raise SupervisorLeaseLostError(lease_id)
 
 
-def release_supervisor_goal_lease(db: Session, *, lease_id: uuid.UUID, worker_id: str, lease_generation: int) -> None:
+def release_supervisor_goal_lease(db: Session, *, lease_id: uuid.UUID, worker_id: str, lease_generation: int) -> bool:
     """Ends this worker's hold on the lease at the end of a tick (success OR failure) so the
     next eligible tick -- this worker or another -- can claim it immediately rather than
     waiting out the full TTL. A caller whose lease was already lost (SupervisorLeaseLostError
     already raised by a prior renew) must NOT call this -- there is nothing of theirs left to
     release, and doing so would silently no-op against the fenced WHERE clause anyway, never
-    against a different worker's now-current claim."""
-    db.execute(
+    against a different worker's now-current claim.
+
+    Returns True if this call actually released a row it held, False if the fenced WHERE
+    clause matched nothing (already released, or -- the case worth a caller actually
+    noticing -- this worker's own lease was reclaimed by someone else before this tick even
+    got to release it, e.g. an unexpectedly slow operation outliving the TTL despite the
+    per-task renewal in `prepare_context()`). The caller decides what a False means at its own
+    boundary; this function only reports it, matching every other fenced UPDATE...RETURNING-
+    shaped write in this codebase (never a silent, unobservable no-op)."""
+    result = db.execute(
         text("""
             UPDATE supervisor_goal_leases
             SET status = 'released', released_at = now()
@@ -105,3 +113,4 @@ def release_supervisor_goal_lease(db: Session, *, lease_id: uuid.UUID, worker_id
         """),
         {"lease_id": str(lease_id), "worker_id": worker_id, "lease_generation": lease_generation},
     )
+    return result.rowcount > 0

@@ -342,4 +342,18 @@ async def run_authorized_goal_supervisor_tick(
 
         return await run_supervisor(db, scope=scope, bindings=bindings, worker_id=worker_id, bounds=bounds or SupervisorBounds())
     finally:
-        release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation)
+        # A False return here means this worker's OWN lease was no longer the active one by
+        # the time this tick tried to release it -- e.g. an operator action that legitimately
+        # ran long enough to outlive the TTL despite the per-task renewal in prepare_context(),
+        # or a genuine bug. Never a correctness problem (the fenced UPDATE already guarantees
+        # this call can never release a DIFFERENT worker's now-current claim) -- but silently
+        # swallowing it would erase the one signal available to notice a worker's lease was
+        # lost mid-run, which is exactly the "detect lost ownership at a consequential
+        # boundary" this codebase already expects at every other lease-fenced write.
+        if not release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation):
+            logger.warning(
+                "Worker %s: supervisor_goal_lease %s (goal %s) was no longer this worker's own active "
+                "lease by the time this tick tried to release it -- likely reclaimed after an unexpectedly "
+                "long-running operator action outlived the TTL.",
+                worker_id, lease_id, goal.id,
+            )
