@@ -175,6 +175,15 @@ def authorize_provider_spend(
     if existing is not None:
         if _row_authority_fingerprint(existing) != requested:
             raise ProviderSpendError("idempotency key reused with different authority fields")
+        # Idempotent replay / crash recovery: re-run wake against any still-parked matching tasks.
+        from app.mainai_execution.provider_wait_wake import wake_tasks_blocked_for_provider_spend
+
+        wake_tasks_blocked_for_provider_spend(
+            db,
+            owner_id=owner_id,
+            goal_id=goal_id,
+            execution_envelope_id=execution_envelope_id,
+        )
         return existing
 
     prior = db.execute(
@@ -218,6 +227,17 @@ def authorize_provider_spend(
         raise ProviderSpendError(
             "concurrent active provider spend grant already exists for this owner+goal"
         ) from exc
+
+    # Durable wake: matching PROVIDER_SPEND_NOT_AUTHORIZED parks become ready under this grant.
+    # Idempotent authorize replay and worker reconcile use the same helper (crash recovery).
+    from app.mainai_execution.provider_wait_wake import wake_tasks_blocked_for_provider_spend
+
+    wake_tasks_blocked_for_provider_spend(
+        db,
+        owner_id=owner_id,
+        goal_id=goal_id,
+        execution_envelope_id=execution_envelope_id,
+    )
     return row
 
 

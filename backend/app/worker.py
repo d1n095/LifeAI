@@ -523,6 +523,20 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed waiting-provider backoff wake.", self.worker_id)
 
+    def _reconcile_provider_spend_parks(self, db: Session) -> None:
+        """Crash recovery: active founder spend grants wake matching PROVIDER_SPEND parks."""
+        from app.mainai_execution.provider_wait_wake import (
+            reconcile_provider_spend_parks_for_active_grants,
+        )
+
+        try:
+            woken = reconcile_provider_spend_parks_for_active_grants(db, limit=50)
+            if woken:
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: failed provider-spend park reconcile.", self.worker_id)
+
     # V0.3: how many candidate dead task_execution jobs this worker inspects per poll cycle --
     # a real, bounded scan, same reasoning as _MAX_CI_WAITS_PER_TICK above.
     _MAX_AUTO_RECOVERY_SCANS_PER_TICK = 10
@@ -795,6 +809,7 @@ class Worker:
             await self._poll_mainai_task_waits(claim_db)
             self._advance_mainai_execution_retries(claim_db)
             self._advance_waiting_provider_backoff(claim_db)
+            self._reconcile_provider_spend_parks(claim_db)
             await self._advance_mainai_execution_auto_recovery(claim_db)
             await self._advance_mainai_execution_replan(claim_db)
             self._finalize_mainai_execution_goals(claim_db)
