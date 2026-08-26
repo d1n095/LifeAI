@@ -527,11 +527,18 @@ def mark_completed(db: Session, job: MainAIJob, *, worker_id: str, lease_generat
     db.commit()
 
 
-def mark_failed(db: Session, job: MainAIJob, *, worker_id: str, lease_generation: int, error_category: MainAIJobErrorCategory) -> None:
-    """`error_category` is the ONLY thing derived from the real failure — public_message
-    always comes from the fixed _PUBLIC_ERROR_MESSAGES table above, never from the exception
-    itself. Callers are expected to log the real exception separately (see
-    app/jobs/handlers/corpus_review.py) — this function only ever persists the safe category."""
+def mark_failed_flush(
+    db: Session,
+    job: MainAIJob,
+    *,
+    worker_id: str,
+    lease_generation: int,
+    error_category: MainAIJobErrorCategory,
+) -> None:
+    """Fence-fail a running job without committing — for callers that own the transaction
+    boundary (Supervisor deferring a mid-tick provider wait). Same lease fence and public
+    error vocabulary as `mark_failed()`; the caller's commit makes the terminal state durable
+    together with any sibling task/checkpoint writes."""
     _guarded_job_write(
         db,
         job.id,
@@ -546,7 +553,29 @@ def mark_failed(db: Session, job: MainAIJob, *, worker_id: str, lease_generation
     )
     db.refresh(job)
     _record_event(db, job, MainAIJobEventType.failed, {"error_category": error_category.value})
-    record_audit(db, user_id=job.owner_id, action="mainai_job_failed", entity_type="mainai_job", entity_id=str(job.id), detail=error_category.value)
+    record_audit(
+        db,
+        user_id=job.owner_id,
+        action="mainai_job_failed",
+        entity_type="mainai_job",
+        entity_id=str(job.id),
+        detail=error_category.value,
+        commit=False,
+    )
+
+
+def mark_failed(db: Session, job: MainAIJob, *, worker_id: str, lease_generation: int, error_category: MainAIJobErrorCategory) -> None:
+    """`error_category` is the ONLY thing derived from the real failure — public_message
+    always comes from the fixed _PUBLIC_ERROR_MESSAGES table above, never from the exception
+    itself. Callers are expected to log the real exception separately (see
+    app/jobs/handlers/corpus_review.py) — this function only ever persists the safe category."""
+    mark_failed_flush(
+        db,
+        job,
+        worker_id=worker_id,
+        lease_generation=lease_generation,
+        error_category=error_category,
+    )
     db.commit()
 
 
@@ -703,6 +732,7 @@ __all__ = [
     "mark_cancelled",
     "mark_completed",
     "mark_failed",
+    "mark_failed_flush",
     "record_claimed",
     "record_document_reviewed",
     "record_document_skipped",
