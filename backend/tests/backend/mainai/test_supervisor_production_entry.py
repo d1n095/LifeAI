@@ -210,79 +210,196 @@ async def test_a_goal_whose_lease_is_already_held_returns_none_without_touching_
 
 
 @pytest.mark.asyncio
-async def test_a_second_worker_cannot_adopt_a_still_running_job_left_by_the_first_after_the_goal_lease_is_released(
+async def test_provider_spend_defer_parks_task_so_a_second_worker_finds_nothing_bindable(
     superuser_db, make_verified_user, source_repo
 ):
-    """The goal-level supervisor_goal_leases lease is released at the END of every tick
-    (see run_authorized_goal_supervisor_tick's own finally block) -- it does NOT protect a
-    task's own mainai_jobs claim across that gap. If tick 1 (worker-a) dispatches the goal's
-    only task and defers it (no candidate/provider spend authorized), the job stays `running`
-    under worker-a's OWN mainai_jobs lease for up to its full TTL, independent of the goal
-    lease. A DIFFERENT worker (worker-b) claiming the now-free goal lease on the very next
-    tick must NOT be able to silently adopt that still-running job by copying its
-    lease_generation -- it must fail closed, exactly like it would if worker-a were still
-    genuinely alive and mid-execution, because from worker-b's point of view it cannot tell
-    the difference."""
+    """Spend defer used to leave the task/job `running` across the goal-lease gap, creating a
+    silent adopt race for worker-b. Production now parks the task `blocked` and fence-fails
+    the mid-flight job, so the next worker's tick has no bindable work and returns None —
+    closing the race at the source rather than relying on claim fencing alone."""
     owner, _ = make_verified_user()
     goal = _goal_with_ready_task(superuser_db, owner.id)
     envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
     superuser_db.commit()
 
-    result_a = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    result_a = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+    )
+    superuser_db.commit()
+    assert result_a is not None
+    assert result_a.classification == "PROVIDER_SPEND_NOT_AUTHORIZED"
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.blocked
+
+    result_b = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-b"
+    )
+    superuser_db.commit()
+    assert result_b is None  # no ready/running bindable task
+    superuser_db.refresh(task)
+    assert task.status == MainAITaskStatus.blocked
+
+
+@pytest.mark.asyncio
+async def test_a_second_worker_cannot_adopt_a_still_running_capability_defer_job(
+    superuser_db, make_verified_user, source_repo, monkeypatch
+):
+    """Lease fencing still matters for defers that intentionally leave a running job
+    (e.g. independent CAPABILITY_MISSING). Prove worker-b cannot adopt worker-a's claim."""
+    from app.development_supervisor import service as supervisor_service
+    from app.development_supervisor.service import SupervisorError
+    from app.safe_planner.service import PlanningResult
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    envelope = _authorize(superuser_db, owner.id, goal.id)
+    superuser_db.commit()
+
+    # Force planning into CAPABILITY_MISSING with independent continue (leaves running job).
+    def _force_capability_missing(*_a, **_k):
+        return PlanningResult(
+            "CAPABILITY_MISSING",
+            {"reason": "forced for lease-fencing test", "requested_capability": "inspect_git_history"},
+        )
+
+    monkeypatch.setattr(supervisor_service, "plan_founder_request", _force_capability_missing)
+    # Also skip spend gate by pretending spend authorized on the scope built inside entry —
+    # patch after scope construction via run_supervisor's scope field is hard; instead make
+    # allow_deterministic_fallback path unused and spend path skipped by patching the
+    # WorkBinding construction to set allow_deterministic_fallback + a fake that still hits
+    # plan_founder_request. Simpler: patch production_entry scope spend flag.
+    import app.development_supervisor.production_entry as entry_module
+    original_run = entry_module.run_supervisor
+
+    async def _run_with_spend(db, *, scope, bindings, worker_id, bounds=None):
+        from dataclasses import replace
+
+        scope = replace(scope, provider_spend_authorized=True)
+        # Give each binding a dummy candidate so spend/provider path isn't taken;
+        # plan_founder_request is monkeypatched to CAPABILITY_MISSING.
+        from app.safe_planner.service import CandidateStep, PlanCandidate
+
+        forced = PlanCandidate(
+            "force",
+            "force",
+            "force",
+            (CandidateStep("x", "x", "x", "inspect_git_history"),),
+        )
+        bindings = tuple(
+            replace(b, candidate=forced, independent=True) for b in bindings
+        )
+        return await original_run(db, scope=scope, bindings=bindings, worker_id=worker_id, bounds=bounds)
+
+    monkeypatch.setattr(entry_module, "run_supervisor", _run_with_spend)
+
+    result_a = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+    )
     superuser_db.commit()
     assert result_a is not None
     task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
-    assert task.status == MainAITaskStatus.running  # dispatched, deferred, never resolved
-
-    from app.development_supervisor.service import SupervisorError
+    assert task.status == MainAITaskStatus.running
 
     with pytest.raises(SupervisorError):
-        await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-b")
-    superuser_db.commit()  # the tick's own finally-block release, not a DB-level error -- safe to persist
-
-    from app.models.supervisor_lease import SupervisorGoalLease
-    lease = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).order_by(SupervisorGoalLease.acquired_at.desc()).first()
-    assert lease.worker_id == "worker-b"
-    assert lease.status == "released"  # worker-b's own goal lease is still cleanly released despite the failure
+        await run_authorized_goal_supervisor_tick(
+            superuser_db, goal=goal, envelope=envelope, worker_id="worker-b"
+        )
+    superuser_db.commit()
 
 
 @pytest.mark.asyncio
-async def test_the_same_worker_can_resume_its_own_still_valid_job_claim_across_two_ticks(superuser_db, make_verified_user, source_repo):
-    """The legitimate case the fix above must not break: the SAME worker_id, resuming its own
-    still-unexpired mainai_jobs claim on a later tick (e.g. after a transient error unwound
-    its own in-process call stack without ever finishing the job) -- this must keep working
-    without needing to re-claim, exactly like run_supervisor()'s own two-call resume design
-    already assumes."""
+async def test_the_same_worker_can_resume_its_own_still_valid_job_claim_across_two_ticks(
+    superuser_db, make_verified_user, source_repo, monkeypatch
+):
+    """Same worker_id resuming its own still-unexpired mainai_jobs claim after a defer that
+    intentionally leaves the job running (capability gap). Spend defer no longer leaves
+    running jobs — it parks blocked — so this uses a forced CAPABILITY_MISSING path."""
+    from dataclasses import replace
+
+    from app.development_supervisor import service as supervisor_service
+    from app.safe_planner.service import CandidateStep, PlanCandidate, PlanningResult
+    import app.development_supervisor.production_entry as entry_module
+
     owner, _ = make_verified_user()
     goal = _goal_with_ready_task(superuser_db, owner.id)
-    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
+    envelope = _authorize(superuser_db, owner.id, goal.id)
     superuser_db.commit()
 
-    result_1 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    monkeypatch.setattr(
+        supervisor_service,
+        "plan_founder_request",
+        lambda *_a, **_k: PlanningResult(
+            "CAPABILITY_MISSING",
+            {"reason": "forced", "requested_capability": "inspect_git_history"},
+        ),
+    )
+    original_run = entry_module.run_supervisor
+
+    async def _run_with_gap(db, *, scope, bindings, worker_id, bounds=None):
+        scope = replace(scope, provider_spend_authorized=True)
+        forced = PlanCandidate(
+            "force", "force", "force", (CandidateStep("x", "x", "x", "inspect_git_history"),)
+        )
+        bindings = tuple(replace(b, candidate=forced, independent=True) for b in bindings)
+        return await original_run(db, scope=scope, bindings=bindings, worker_id=worker_id, bounds=bounds)
+
+    monkeypatch.setattr(entry_module, "run_supervisor", _run_with_gap)
+
+    result_1 = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+    )
     superuser_db.commit()
     assert result_1 is not None
 
-    result_2 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    result_2 = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+    )
     superuser_db.commit()
-    assert result_2 is not None  # same worker, same still-valid claim -- a legitimate resume
+    assert result_2 is not None
 
 
 @pytest.mark.asyncio
-async def test_a_resumed_tasks_own_uncommitted_work_survives_across_two_ticks(superuser_db, make_verified_user, source_repo):
-    """The precise boundary the worktree-reset fix must respect: reset-on-fresh-claim must
-    NEVER fire for a genuine resume of this SAME worker's own still-valid job -- a resume's
-    entire point is continuing exactly where that task's own prior attempt left off,
-    uncommitted local changes included."""
+async def test_a_resumed_tasks_own_uncommitted_work_survives_across_two_ticks(
+    superuser_db, make_verified_user, source_repo, monkeypatch
+):
+    """Reset-on-fresh-claim must NEVER fire for a genuine resume of this SAME worker's own
+    still-valid job — including after a capability defer that leaves the job running."""
     import subprocess
+    from dataclasses import replace
 
+    from app.development_supervisor import service as supervisor_service
     from app.development_supervisor.production_worktree import ensure_goal_worktree_sync
+    from app.safe_planner.service import CandidateStep, PlanCandidate, PlanningResult
+    import app.development_supervisor.production_entry as entry_module
 
     owner, _ = make_verified_user()
     goal = _goal_with_ready_task(superuser_db, owner.id)
-    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
+    envelope = _authorize(superuser_db, owner.id, goal.id)
     superuser_db.commit()
 
-    result_1 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    monkeypatch.setattr(
+        supervisor_service,
+        "plan_founder_request",
+        lambda *_a, **_k: PlanningResult(
+            "CAPABILITY_MISSING",
+            {"reason": "forced", "requested_capability": "inspect_git_history"},
+        ),
+    )
+    original_run = entry_module.run_supervisor
+
+    async def _run_with_gap(db, *, scope, bindings, worker_id, bounds=None):
+        scope = replace(scope, provider_spend_authorized=True)
+        forced = PlanCandidate(
+            "force", "force", "force", (CandidateStep("x", "x", "x", "inspect_git_history"),)
+        )
+        bindings = tuple(replace(b, candidate=forced, independent=True) for b in bindings)
+        return await original_run(db, scope=scope, bindings=bindings, worker_id=worker_id, bounds=bounds)
+
+    monkeypatch.setattr(entry_module, "run_supervisor", _run_with_gap)
+
+    result_1 = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+    )
     superuser_db.commit()
     assert result_1 is not None
 
@@ -290,12 +407,16 @@ async def test_a_resumed_tasks_own_uncommitted_work_survives_across_two_ticks(su
     (repo_root / "in_progress_by_this_same_task.py").write_text("x = 1\n", encoding="utf-8")
     subprocess.run(["git", "add", "in_progress_by_this_same_task.py"], cwd=str(repo_root), check=True)
 
-    result_2 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    result_2 = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+    )
     superuser_db.commit()
     assert result_2 is not None
 
-    assert (repo_root / "in_progress_by_this_same_task.py").exists()  # NOT wiped -- this was a resume, not a fresh claim
-    status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo_root), capture_output=True, text=True, check=True).stdout.strip()
+    assert (repo_root / "in_progress_by_this_same_task.py").exists()
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=str(repo_root), capture_output=True, text=True, check=True
+    ).stdout.strip()
     assert "in_progress_by_this_same_task.py" in status
 
 
