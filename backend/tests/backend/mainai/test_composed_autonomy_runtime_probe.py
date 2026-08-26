@@ -206,8 +206,11 @@ async def test_composed_claim_to_supervisor_tick_stops_honestly_without_spend(
     task = superuser_db.execute(
         select(MainAITask).where(MainAITask.goal_id == goal.id)
     ).scalar_one()
-    # Production plain bindings dispatch then defer — no Safe Planner ACCEPT, no write.
-    assert task.status in {MainAITaskStatus.ready, MainAITaskStatus.running}
+    # Spend denial parks durable blocked (wakeable after founder grant) — not dead-running.
+    assert task.status == MainAITaskStatus.blocked
+    assert task.blocker_reason == (
+        "provider-assisted planning is not authorized for this scope"
+    )
     assert goal.final_outcome is None
 
     # Boundaries: no invented spend, no remote write side effects on the seed repo.
