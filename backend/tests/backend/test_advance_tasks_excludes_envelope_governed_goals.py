@@ -210,3 +210,136 @@ async def test_a_goal_authorized_mid_batch_still_blocks_its_own_later_task_in_th
     blocked_task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == blocked_goal_id)).scalar_one()
     assert blocked_task.status == MainAITaskStatus.ready  # the per-task re-check caught the mid-tick change
     assert blocked_task.mainai_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_scope_proposal_without_authorization_is_still_never_governed_and_v01_dispatches(
+    superuser_db, make_verified_user,
+):
+    """Adversarial boundary (post-#154): PROPOSED_SCOPE != AUTHORIZED_SCOPE. An unreviewed
+    execution_scope_proposals row alone must NOT trip the ever-governed exclusion -- only an
+    execution_authorization_envelopes row does. Otherwise ordinary founder goals that merely
+    had a scope *suggested* would silently stop advancing under V0.1."""
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    propose_execution_scope(superuser_db, owner_id=owner.id, goal_id=goal.id, idempotency_key="excl-prop-only")
+    superuser_db.commit()
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.running
+    assert task.mainai_job_id is not None
+
+
+@pytest.mark.asyncio
+async def test_ever_governed_active_is_supervisor_eligible_and_v01_blocked_composed(
+    superuser_db, make_verified_user,
+):
+    """Composed three-way invariant (active branch): EVER GOVERNED + ACTIVE ENVELOPE must be
+    offered to Supervisor AND simultaneously excluded from V0.1 auto-advance. Split coverage
+    across production_entry + this file previously existed; this pins both halves on the same
+    goal in one assertion so a future drift that 'fixes' one path while breaking the other
+    cannot hide."""
+    from app.development_supervisor.production_entry import eligible_authorized_goals
+    from app.models.mainai_execution import MainAIGoalStatus
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    _authorize(superuser_db, owner.id, goal.id)
+    goal.status = MainAIGoalStatus.running
+    superuser_db.commit()
+
+    eligible_ids = {g.id for g, _env in eligible_authorized_goals(superuser_db, limit=50)}
+    assert goal.id in eligible_ids
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.ready
+    assert task.mainai_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_ever_governed_no_active_envelope_is_neither_supervisor_nor_v01(
+    superuser_db, make_verified_user,
+):
+    """Composed three-way invariant (revocation branch): EVER GOVERNED + NO ACTIVE ENVELOPE
+    must be STOP for BOTH autonomous paths -- not merely excluded from V0.1 while still
+    appearing in eligible_authorized_goals (or the reverse)."""
+    from app.development_supervisor.production_entry import eligible_authorized_goals
+    from app.models.execution_envelope import ExecutionAuthorizationEnvelope
+    from app.models.mainai_execution import MainAIGoalStatus
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    _authorize(superuser_db, owner.id, goal.id)
+    goal.status = MainAIGoalStatus.running
+    superuser_db.commit()
+
+    superuser_db.query(ExecutionAuthorizationEnvelope).filter(
+        ExecutionAuthorizationEnvelope.goal_id == goal.id
+    ).update({"status": "superseded"})
+    superuser_db.commit()
+
+    eligible_ids = {g.id for g, _env in eligible_authorized_goals(superuser_db, limit=50)}
+    assert goal.id not in eligible_ids
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.ready, "must fail closed on V0.1 -- never reopen after revoke"
+    assert task.mainai_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_dependent_ready_after_revoke_still_never_reopens_v01(superuser_db, make_verified_user):
+    """Adversarial graph case: a goal was envelope-governed; its first task completed (or is
+    forced completed) while the envelope is then superseded with no replacement; a dependent
+    becomes `ready` via recompute_task_readiness. The newly-ready dependent must STILL be
+    excluded from V0.1 -- 'ever governed' is a goal fact, not a per-task or 'was ready at
+    revoke time' fact."""
+    from app.mainai_execution.graph import recompute_task_readiness
+    from app.models.execution_envelope import ExecutionAuthorizationEnvelope
+
+    owner, _ = make_verified_user()
+    goal = planner.create_goal(
+        superuser_db, owner_id=owner.id, title="dep exclusion", original_instruction="edit then test", created_by="test",
+    )
+    planner.create_plan(
+        superuser_db, goal=goal, rationale="two-step",
+        tasks=[
+            PlannedTaskSpec(description="edit a file", task_type="repo_edit"),
+            PlannedTaskSpec(description="run tests", task_type="run_tests", depends_on=[0]),
+        ],
+        created_by="test",
+    )
+    _authorize(superuser_db, owner.id, goal.id)
+    superuser_db.commit()
+
+    tasks = list(superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at)).scalars())
+    first, dependent = tasks[0], tasks[1]
+    assert first.status == MainAITaskStatus.ready
+    assert dependent.status == MainAITaskStatus.pending
+
+    from datetime import datetime
+
+    first.status = MainAITaskStatus.completed
+    first.completed_at = datetime.utcnow()
+    superuser_db.flush()
+    newly_ready = recompute_task_readiness(superuser_db, goal_id=goal.id)
+    assert dependent.id in {t.id for t in newly_ready}
+    superuser_db.query(ExecutionAuthorizationEnvelope).filter(
+        ExecutionAuthorizationEnvelope.goal_id == goal.id
+    ).update({"status": "superseded"})
+    superuser_db.commit()
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+
+    dependent = superuser_db.get(MainAITask, dependent.id)
+    assert dependent.status == MainAITaskStatus.ready
+    assert dependent.mainai_job_id is None
