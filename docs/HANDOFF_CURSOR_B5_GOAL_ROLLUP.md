@@ -1,6 +1,6 @@
 # HANDOFF — B5 goal rollup / next-task (Cursor)
 
-**SHA:** (set after commit)  
+**SHA:** 223fd9031a7844ba69ce9f55d542bbb7f0001f9e  
 **PR:** (set after open)  
 **Base tip:** `4c86e58` (#154 EVER_GOVERNED)
 
