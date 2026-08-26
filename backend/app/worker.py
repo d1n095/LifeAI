@@ -509,6 +509,20 @@ class Worker:
                 db.rollback()
                 logger.exception("Worker %s: failed to auto-retry MainAITask %s.", self.worker_id, task.id)
 
+    def _advance_waiting_provider_backoff(self, db: Session) -> None:
+        """Wake WAITING_PROVIDER parks whose durable next_retry_at has elapsed — not a tight loop."""
+        from app.mainai_execution.provider_wait_wake import wake_due_waiting_provider_backoff_tasks
+
+        try:
+            woken = wake_due_waiting_provider_backoff_tasks(
+                db, limit=self._MAX_RETRY_SCANS_PER_TICK
+            )
+            if woken:
+                db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: failed waiting-provider backoff wake.", self.worker_id)
+
     # V0.3: how many candidate dead task_execution jobs this worker inspects per poll cycle --
     # a real, bounded scan, same reasoning as _MAX_CI_WAITS_PER_TICK above.
     _MAX_AUTO_RECOVERY_SCANS_PER_TICK = 10
@@ -780,6 +794,7 @@ class Worker:
             self._retry_storage_deletion_tasks(claim_db)
             await self._poll_mainai_task_waits(claim_db)
             self._advance_mainai_execution_retries(claim_db)
+            self._advance_waiting_provider_backoff(claim_db)
             await self._advance_mainai_execution_auto_recovery(claim_db)
             await self._advance_mainai_execution_replan(claim_db)
             self._finalize_mainai_execution_goals(claim_db)

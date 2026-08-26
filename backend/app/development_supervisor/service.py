@@ -595,17 +595,23 @@ def _augment_bindings_with_gap_children(db, *, scope, bindings: tuple[WorkBindin
     return rebuilt + tuple(additions)
 
 
-def _release_provider_wait_midflight(
-    db, *, task: MainAITask, job: MainAIJob, context: OperatorContext, phase: str
+def _release_midflight_job_and_set_task_status(
+    db,
+    *,
+    task: MainAITask,
+    job: MainAIJob,
+    context: OperatorContext,
+    phase: str,
+    task_status: MainAITaskStatus,
+    event_reason: str,
+    blocker_reason: str | None = None,
 ) -> None:
-    """B7: fence-release a supervisor-dispatched job that deferred on WAITING_PROVIDER.
+    """Fence-fail a supervisor mid-flight job and move the task off `running`.
 
-    Without this, the task/job pair stays `running` under the deferring worker's lease. Process
-    death then routes through expired-lease auto-recovery → ordinary `task_execution` claim —
-    not supervisor `plan_with_provider` retry. Durable checkpoint already records the wait;
-    this only returns the task to `ready` and terminals the mid-flight job so the next
-    supervisor tick (wake) can re-dispatch honestly. Does not invent spend authority, does not
-    fabricate verification failure, flush-only.
+    Used for durable provider waits so process death cannot route through ordinary
+    `task_execution` recovery. `WAITING_PROVIDER` returns the task to `ready` (next tick
+    wakes). `PROVIDER_SPEND_NOT_AUTHORIZED` parks as `blocked` (no redispatch spam until
+    spend is founder-authorized / task is explicitly unblocked). Flush-only.
     """
     try:
         mark_failed_flush(
@@ -617,23 +623,30 @@ def _release_provider_wait_midflight(
         )
     except JobLeaseLostError:
         logger.warning(
-            "provider-wait release lost job lease for task %s job %s; leaving task state alone",
+            "midflight release lost job lease for task %s job %s phase=%s; leaving task state alone",
             task.id,
             job.id,
+            phase,
         )
         return
     locked = _lock_task(db, task.id)
     if locked.status != MainAITaskStatus.running:
         return
-    locked.status = MainAITaskStatus.ready
+    locked.status = task_status
     locked.next_retry_at = None
+    locked.blocker_reason = blocker_reason
+    event_type = (
+        MainAITaskEventType.blocked
+        if task_status == MainAITaskStatus.blocked
+        else MainAITaskEventType.retry_scheduled
+    )
     db.add(
         MainAITaskEvent(
             task_id=locked.id,
             owner_id=locked.owner_id,
-            event_type=MainAITaskEventType.retry_scheduled,
+            event_type=event_type,
             detail={
-                "reason": "waiting_provider_defer_release",
+                "reason": event_reason,
                 "phase": phase,
                 "released_job_id": str(job.id),
                 "attempts": locked.attempts,
@@ -641,6 +654,63 @@ def _release_provider_wait_midflight(
         )
     )
     db.flush()
+
+
+def _release_provider_wait_midflight(
+    db, *, task: MainAITask, job: MainAIJob, context: OperatorContext, phase: str
+) -> None:
+    """B7: WAITING_PROVIDER → fence-fail job + durable backoff park (not immediate ready).
+
+    Immediate ready caused a hot loop while the provider stayed down. Park as `blocked` with
+    `next_retry_at` so the worker clock wakes the task later; exhausted after
+    WAITING_PROVIDER_MAX_BACKOFFS with no clock (not fabricated permanent incapability).
+    """
+    from app.mainai_execution.provider_wait_wake import (
+        WAITING_PROVIDER_BACKOFF_REASON,
+        WAITING_PROVIDER_BLOCKER,
+        WAITING_PROVIDER_EXHAUSTED_REASON,
+        compute_waiting_provider_retry_at,
+        count_waiting_provider_backoffs,
+    )
+
+    prior = count_waiting_provider_backoffs(db, task=task)
+    retry_at = compute_waiting_provider_retry_at(prior_backoffs=prior)
+    exhausted = retry_at is None
+    _release_midflight_job_and_set_task_status(
+        db,
+        task=task,
+        job=job,
+        context=context,
+        phase=phase,
+        task_status=MainAITaskStatus.blocked,
+        event_reason=WAITING_PROVIDER_EXHAUSTED_REASON if exhausted else WAITING_PROVIDER_BACKOFF_REASON,
+        blocker_reason=WAITING_PROVIDER_BLOCKER,
+    )
+    locked = _lock_task(db, task.id)
+    if locked.status == MainAITaskStatus.blocked:
+        locked.next_retry_at = retry_at
+        db.flush()
+
+
+def _park_provider_spend_defer_midflight(
+    db, *, task: MainAITask, job: MainAIJob, context: OperatorContext
+) -> None:
+    """Spend denial → fence-fail job + park task blocked (no ready-loop spam)."""
+    from app.mainai_execution.provider_wait_wake import (
+        PROVIDER_SPEND_PARK_BLOCKER,
+        PROVIDER_SPEND_PARK_REASON,
+    )
+
+    _release_midflight_job_and_set_task_status(
+        db,
+        task=task,
+        job=job,
+        context=context,
+        phase="PROVIDER_SPEND_NOT_AUTHORIZED",
+        task_status=MainAITaskStatus.blocked,
+        event_reason=PROVIDER_SPEND_PARK_REASON,
+        blocker_reason=PROVIDER_SPEND_PARK_BLOCKER,
+    )
 
 
 def _apply_deferred(assessments, deferred: dict[uuid.UUID, str]):
@@ -1056,8 +1126,14 @@ async def run_supervisor(
                         },
                     )
                     if binding.independent:
+                        _park_provider_spend_defer_midflight(
+                            db, task=task, job=job, context=context
+                        )
                         deferred[task.id] = DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED
                         continue
+                    _park_provider_spend_defer_midflight(
+                        db, task=task, job=job, context=context
+                    )
                     return _result(
                         "PROVIDER_SPEND_NOT_AUTHORIZED",
                         goal,
@@ -1086,8 +1162,14 @@ async def run_supervisor(
                 },
             )
             if binding.independent:
+                _park_provider_spend_defer_midflight(
+                    db, task=task, job=job, context=context
+                )
                 deferred[task.id] = DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED
                 continue
+            _park_provider_spend_defer_midflight(
+                db, task=task, job=job, context=context
+            )
             return _result(
                 "PROVIDER_SPEND_NOT_AUTHORIZED",
                 goal,
