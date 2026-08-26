@@ -659,22 +659,48 @@ def _release_midflight_job_and_set_task_status(
 def _release_provider_wait_midflight(
     db, *, task: MainAITask, job: MainAIJob, context: OperatorContext, phase: str
 ) -> None:
-    """B7: WAITING_PROVIDER → fence-fail job + return task to ready for next-tick wake."""
+    """B7: WAITING_PROVIDER → fence-fail job + durable backoff park (not immediate ready).
+
+    Immediate ready caused a hot loop while the provider stayed down. Park as `blocked` with
+    `next_retry_at` so the worker clock wakes the task later; exhausted after
+    WAITING_PROVIDER_MAX_BACKOFFS with no clock (not fabricated permanent incapability).
+    """
+    from app.mainai_execution.provider_wait_wake import (
+        WAITING_PROVIDER_BACKOFF_REASON,
+        WAITING_PROVIDER_BLOCKER,
+        WAITING_PROVIDER_EXHAUSTED_REASON,
+        compute_waiting_provider_retry_at,
+        count_waiting_provider_backoffs,
+    )
+
+    prior = count_waiting_provider_backoffs(db, task=task)
+    retry_at = compute_waiting_provider_retry_at(prior_backoffs=prior)
+    exhausted = retry_at is None
     _release_midflight_job_and_set_task_status(
         db,
         task=task,
         job=job,
         context=context,
         phase=phase,
-        task_status=MainAITaskStatus.ready,
-        event_reason="waiting_provider_defer_release",
+        task_status=MainAITaskStatus.blocked,
+        event_reason=WAITING_PROVIDER_EXHAUSTED_REASON if exhausted else WAITING_PROVIDER_BACKOFF_REASON,
+        blocker_reason=WAITING_PROVIDER_BLOCKER,
     )
+    locked = _lock_task(db, task.id)
+    if locked.status == MainAITaskStatus.blocked:
+        locked.next_retry_at = retry_at
+        db.flush()
 
 
 def _park_provider_spend_defer_midflight(
     db, *, task: MainAITask, job: MainAIJob, context: OperatorContext
 ) -> None:
     """Spend denial → fence-fail job + park task blocked (no ready-loop spam)."""
+    from app.mainai_execution.provider_wait_wake import (
+        PROVIDER_SPEND_PARK_BLOCKER,
+        PROVIDER_SPEND_PARK_REASON,
+    )
+
     _release_midflight_job_and_set_task_status(
         db,
         task=task,
@@ -682,8 +708,8 @@ def _park_provider_spend_defer_midflight(
         context=context,
         phase="PROVIDER_SPEND_NOT_AUTHORIZED",
         task_status=MainAITaskStatus.blocked,
-        event_reason="provider_spend_not_authorized_park",
-        blocker_reason=DEFERRED_REASON_MESSAGES[DEFERRED_PROVIDER_SPEND_NOT_AUTHORIZED],
+        event_reason=PROVIDER_SPEND_PARK_REASON,
+        blocker_reason=PROVIDER_SPEND_PARK_BLOCKER,
     )
 
 
