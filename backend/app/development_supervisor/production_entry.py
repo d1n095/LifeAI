@@ -63,7 +63,11 @@ from app.development_supervisor.lease import (
     release_supervisor_goal_lease,
     renew_supervisor_goal_lease,
 )
-from app.development_supervisor.production_worktree import ensure_goal_worktree_sync, worker_source_repo_root
+from app.development_supervisor.production_worktree import (
+    ensure_goal_worktree_sync,
+    reset_goal_worktree_to_clean_head,
+    worker_source_repo_root,
+)
 from app.development_supervisor.service import (
     SupervisorBounds,
     SupervisorError,
@@ -264,10 +268,26 @@ async def run_authorized_goal_supervisor_tick(
             stale-lease/takeover pipeline (app/mainai_execution/recovery_takeover.py) is the
             ONLY path allowed to transfer ownership of an expired task_execution job -- this
             function must never invent a second, silent reclaim path by copying whatever
-            lease_generation happens to be on the row."""
+            lease_generation happens to be on the row.
+
+            A FRESH claim (not a resume) additionally resets the shared goal worktree to its
+            last clean commit (`reset_goal_worktree_to_clean_head`) before this brand-new task
+            touches anything -- an EARLIER, DIFFERENT task under this same goal may have left
+            uncommitted changes behind (a `patch_file`/`create_file` step that succeeded but
+            whose plan never reached its own `commit_scoped_changes` step, e.g. because
+            verification failed or the tick itself raised). Every real write already fails
+            closed on an unexpected `before_sha256` (app.development_operator.service.
+            write_file()), so that leftover mess could never silently corrupt a later task's
+            own write -- but without this reset it WOULD incorrectly block/fail every later
+            task under the goal indefinitely, since nothing else ever cleans this shared
+            directory between distinct attempts. Deliberately NOT done on resume: a resume's
+            entire point is continuing exactly where THIS SAME task's own prior attempt left
+            off, uncommitted changes included."""
             _reverify_authority()
             renew_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
             claimed_generation = claim_specific_mainai_job(db, job_id=job.id, worker_id=worker_id, lease_seconds=lease_seconds)
+            if claimed_generation is not None:
+                reset_goal_worktree_to_clean_head(repo_root)
             if claimed_generation is None:
                 db.refresh(job)
                 still_valid = (

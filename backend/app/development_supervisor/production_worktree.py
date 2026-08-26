@@ -91,3 +91,38 @@ def ensure_goal_worktree_sync(*, goal_id, source_repo_root: Path) -> tuple[Path,
     else:
         _run_git(["worktree", "add", "-b", branch, str(path), base_sha], cwd=source_repo_root)
     return path, base_sha, branch
+
+
+def reset_goal_worktree_to_clean_head(repository_root: Path) -> None:
+    """Discards any uncommitted changes (staged, unstaged, and untracked) in a goal's shared
+    worktree, restoring it to exactly its last real commit.
+
+    WHY THIS EXISTS: this worktree is deliberately reused across every task attempted under
+    one authorized goal, potentially across many separate worker ticks (see this module's own
+    docstring on why it is keyed by goal_id, not job_id) -- but a task that only got partway
+    through its own plan before deferring, failing, or the whole tick raising (e.g. a
+    `patch_file`/`create_file` step succeeded but the plan's own later `commit_scoped_changes`
+    step never ran) leaves those changes sitting UNCOMMITTED in this SHARED directory. Every
+    `app.development_operator.service.write_file()` call already fails closed on an unexpected
+    `before_sha256` mismatch, so a later, unrelated task can never have its own write silently
+    corrupted by that leftover mess -- but without this function, it WOULD be incorrectly
+    blocked/failed by it indefinitely, since nothing else ever cleans the shared worktree
+    between distinct task attempts. That is an availability defect (one task's partial failure
+    permanently wedges every later task under the same goal), not a security one, but a real
+    one: found via targeted adversarial self-review of PR #148's own new worktree-reuse design
+    after it merged.
+
+    CALLER CONTRACT -- this MUST be called only when a genuinely NEW task attempt is
+    beginning (a job just freshly claimed from `queued`), NEVER when the SAME task's own
+    still-valid claim is being resumed across two ticks: a resume's entire point is to
+    continue exactly where that task's own prior attempt left off, uncommitted changes
+    included. See `app/development_supervisor/production_entry.py`'s own `prepare_context()`
+    -- it calls this only in the fresh-claim branch, never the resume branch.
+
+    Never touches COMMITTED history: `git reset --hard HEAD` moves the working tree and index
+    back to the current branch tip only (never rewrites `HEAD` itself), so every earlier
+    task's own SUCCESSFULLY COMMITTED work remains exactly as committed. `git clean -fd`
+    additionally removes untracked files/directories a `create_file` step may have left behind
+    without ever being staged -- never touches `.git/` itself."""
+    _run_git(["reset", "--hard", "HEAD"], cwd=repository_root)
+    _run_git(["clean", "-fd"], cwd=repository_root)

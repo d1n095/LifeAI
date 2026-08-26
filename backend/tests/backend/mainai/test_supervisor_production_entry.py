@@ -268,6 +268,38 @@ async def test_the_same_worker_can_resume_its_own_still_valid_job_claim_across_t
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_tasks_own_uncommitted_work_survives_across_two_ticks(superuser_db, make_verified_user, source_repo):
+    """The precise boundary the worktree-reset fix must respect: reset-on-fresh-claim must
+    NEVER fire for a genuine resume of this SAME worker's own still-valid job -- a resume's
+    entire point is continuing exactly where that task's own prior attempt left off,
+    uncommitted local changes included."""
+    import subprocess
+
+    from app.development_supervisor.production_worktree import ensure_goal_worktree_sync
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
+    superuser_db.commit()
+
+    result_1 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    superuser_db.commit()
+    assert result_1 is not None
+
+    repo_root, _, _ = ensure_goal_worktree_sync(goal_id=goal.id, source_repo_root=source_repo)
+    (repo_root / "in_progress_by_this_same_task.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "in_progress_by_this_same_task.py"], cwd=str(repo_root), check=True)
+
+    result_2 = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="worker-a")
+    superuser_db.commit()
+    assert result_2 is not None
+
+    assert (repo_root / "in_progress_by_this_same_task.py").exists()  # NOT wiped -- this was a resume, not a fresh claim
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo_root), capture_output=True, text=True, check=True).stdout.strip()
+    assert "in_progress_by_this_same_task.py" in status
+
+
+@pytest.mark.asyncio
 async def test_a_worker_that_crashes_before_releasing_blocks_others_only_until_the_lease_expires(superuser_db, make_verified_user, source_repo):
     from sqlalchemy import text
 
@@ -465,3 +497,43 @@ async def test_the_goal_lease_is_renewed_at_the_per_task_dispatch_boundary(super
     assert result is not None
     assert len(calls) >= 1  # renewed at the real task-dispatch boundary, not left to the initial claim alone
     assert calls[0]["worker_id"] == "test-worker"
+
+
+# ---------------------------------------------------------------- worktree contamination
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_task_claim_always_gets_a_clean_worktree_regardless_of_prior_mess(
+    superuser_db, make_verified_user, source_repo
+):
+    """A goal's shared worktree can carry uncommitted leftovers from an EARLIER, unrelated
+    tick's task that patched a file but never reached its own commit_scoped_changes step
+    (deferred, failed, or the tick itself raised). Every real write already fails closed on
+    an unexpected before_sha256 (app.development_operator.service.write_file()), so that mess
+    could never silently corrupt a later task's own write -- but without prepare_context's own
+    reset-on-fresh-claim, it WOULD incorrectly block every later task indefinitely, since
+    nothing else ever cleans this shared directory between distinct attempts."""
+    import subprocess
+
+    from app.development_supervisor.production_worktree import ensure_goal_worktree_sync
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
+    superuser_db.commit()
+
+    # Simulate an earlier tick's task leaving real uncommitted mess in the shared worktree.
+    repo_root, base_sha, _ = ensure_goal_worktree_sync(goal_id=goal.id, source_repo_root=source_repo)
+    (repo_root / "README.md").write_text("an earlier task's own uncommitted, never-committed edit\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo_root), check=True)
+    (repo_root / "never_staged_by_that_task.py").write_text("x = 1\n", encoding="utf-8")
+    assert subprocess.run(["git", "status", "--porcelain"], cwd=str(repo_root), capture_output=True, text=True, check=True).stdout.strip()
+
+    result = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="test-worker")
+    superuser_db.commit()
+
+    assert result is not None
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo_root), capture_output=True, text=True, check=True).stdout.strip()
+    assert status == ""  # the fresh claim for this tick's own task reset it clean
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_root), capture_output=True, text=True, check=True).stdout.strip()
+    assert head == base_sha

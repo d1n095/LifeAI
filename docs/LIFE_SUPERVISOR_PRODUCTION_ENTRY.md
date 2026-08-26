@@ -200,6 +200,24 @@ internal refactor: `create_task_worktree()` was split into a synchronous core
 context (`WorkBinding.prepare_context` is a plain, never-awaited callable) can still use it —
 existing callers and behavior are unchanged.
 
+**Cross-task contamination fix (found by adversarial self-review after this foundation first
+merged).** Reusing ONE worktree across many DIFFERENT tasks over time means a task that only
+got partway through its own plan — a `patch_file`/`create_file` step succeeded but the plan's
+own later `commit_scoped_changes` step never ran, because verification failed, the task was
+deferred, or the whole tick raised — leaves those changes sitting UNCOMMITTED in the SHARED
+directory. Every real write already fails closed on an unexpected `before_sha256`
+(`app.development_operator.service.write_file()`), so that leftover mess could never silently
+corrupt a LATER task's own write — but nothing was cleaning it up either, so it WOULD
+incorrectly block/fail every later task under the same goal indefinitely (an availability
+defect, not a security one, but a real one). `prepare_context()` now resets the worktree to
+its last clean commit (`reset_goal_worktree_to_clean_head()` — `git reset --hard HEAD` +
+`git clean -fd`, never touches committed history) whenever it claims a genuinely FRESH job
+(never on a RESUME of this same worker's own still-valid claim — a resume's entire point is
+continuing exactly where that task's own prior attempt left off, uncommitted changes
+included). See
+`test_a_fresh_task_claim_always_gets_a_clean_worktree_regardless_of_prior_mess` and
+`test_a_resumed_tasks_own_uncommitted_work_survives_across_two_ticks`.
+
 ## Proof level: RUNTIME REACHABLE, still not autonomous repo-writing
 
 Every real task this wiring reaches, without a hand-built `PlanCandidate` or a gap-derived
@@ -263,10 +281,12 @@ capability strings that would apply if authorized.
   fencing for `supervisor_goal_leases`, the two-workers-race and
   crash-then-genuine-expiry-reclaim scenarios, and a real-DB proof that deleting a referenced
   envelope detaches the lease (`envelope_id -> NULL`) without touching `owner_id`.
-- `tests/backend/test_supervisor_production_worktree.py` (3): a real local `git worktree add`,
+- `tests/backend/test_supervisor_production_worktree.py` (6): a real local `git worktree add`,
   idempotent goal-scoped reuse (reporting the CURRENT head after intervening local commits),
-  and independent isolation between two different goals' worktrees.
-- `tests/backend/mainai/test_supervisor_production_entry.py` (17): eligibility (active
+  independent isolation between two different goals' worktrees, and
+  `reset_goal_worktree_to_clean_head()` discarding staged/unstaged/untracked changes while
+  never touching a prior task's own real commit.
+- `tests/backend/mainai/test_supervisor_production_entry.py` (19): eligibility (active
   envelope + running goal required, superseded envelope revokes eligibility, blocked/waiting
   goals excluded even with an active envelope), authority reconstruction (scope copied only
   from the envelope, a task exceeding the authorized risk ceiling never dispatched), the
@@ -277,8 +297,10 @@ capability strings that would apply if authorized.
   next tick, a second worker unable to adopt a still-running job the first worker's own lease
   still legitimately covers, the SAME worker legitimately resuming its own still-valid claim),
   the goal-lease-TTL-vs-single-action-duration fix (the margin invariant, and the lease
-  actually being renewed at the per-task dispatch boundary), and the clean no-op case (no
-  bindable task).
+  actually being renewed at the per-task dispatch boundary), the clean no-op case (no
+  bindable task), and the cross-task worktree contamination fix (a fresh task claim always
+  gets a clean worktree regardless of what an earlier, unrelated attempt left behind; a
+  genuine resume never has its own in-progress uncommitted work wiped).
 - `tests/backend/test_advance_tasks_excludes_envelope_governed_goals.py` (6): V0.1's own
   blanket auto-dispatch tick correctly excludes envelope-governed goals' tasks while leaving
   never-governed, ordinary (non-autonomous) goals completely unaffected; superseding a goal's
