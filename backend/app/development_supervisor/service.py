@@ -450,9 +450,85 @@ def select_candidate(assessments):
     return tied[0], "SELECTED", "highest-priority actionable canonical task"
 
 
+def _completed_repair_child_for_source(
+    db, *, owner_id: uuid.UUID, source: MainAITask
+) -> tuple[object, MainAITask] | None:
+    """Find a completed gap repair child whose LifeProblem points at `source`.
+
+    Used to rebuild a durable re-verify PlanCandidate on a later tick after process death —
+    the same-run path already mutates in-memory bindings, but production_entry rebuilds
+    plain bindings every tick and would otherwise lose the reverify contract."""
+    siblings = (
+        db.execute(
+            select(MainAITask).where(
+                MainAITask.owner_id == owner_id,
+                MainAITask.goal_id == source.goal_id,
+                MainAITask.id != source.id,
+                MainAITask.status == MainAITaskStatus.completed,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for child in siblings:
+        problem = gap_problem_for_child_task(db, owner_id=owner_id, task=child)
+        if problem is None or problem.mainai_task_id != source.id:
+            continue
+        envelope = ((problem.provenance or {}).get("execution_envelope") or {})
+        if isinstance(envelope.get("reverify"), dict):
+            return problem, child
+    return None
+
+
+def _derive_reverify_binding_for_repaired_source(
+    db, *, scope, task: MainAITask, prepare_context, existing: WorkBinding
+) -> WorkBinding | None:
+    """Rebuild re-verify material from durable gap envelope when production rebuilt a plain binding."""
+    if existing.candidate is not None or existing.allow_deterministic_fallback:
+        return None
+    if is_gap_generated_child(db, owner_id=scope.owner_id, task=task):
+        return None
+    if task.status not in {MainAITaskStatus.ready, MainAITaskStatus.running}:
+        return None
+    found = _completed_repair_child_for_source(db, owner_id=scope.owner_id, source=task)
+    if found is None:
+        return None
+    problem, _child = found
+    try:
+        candidate = _reverify_candidate_for_source(source=task, problem=problem)
+    except SupervisorError:
+        return None
+    envelope = dict(((problem.provenance or {}).get("execution_envelope") or {}))
+    allowed_paths = tuple(envelope.get("allowed_paths") or existing.allowed_paths or scope.allowed_paths)
+    allowed_paths = tuple(p for p in allowed_paths if p in set(scope.allowed_paths))
+    if not allowed_paths:
+        return None
+    required_capabilities = tuple(
+        envelope.get("required_capabilities")
+        or ("run_focused_test", "run_static_check")
+    )
+    return WorkBinding(
+        task_id=task.id,
+        prepare_context=prepare_context,
+        candidate=candidate,
+        required_capabilities=required_capabilities,
+        expected_contribution="re-verify original work after repair",
+        independent=True,
+        repository_identity=scope.repository_identity,
+        allowed_paths=allowed_paths,
+        allow_deterministic_fallback=False,
+    )
+
+
 def _augment_bindings_with_gap_children(db, *, scope, bindings: tuple[WorkBinding, ...]) -> tuple[WorkBinding, ...]:
     """Close the live handoff: discover gap-generated children and derive WorkBindings from
-    structured gap evidence. Does not invent PlanCandidates or auto-approve."""
+    structured gap evidence. Does not invent PlanCandidates or auto-approve.
+
+    Production ticks (`production_entry`) rebuild plain WorkBindings for every ready/running
+    task each invocation. Those plains MUST NOT permanently shadow a durable gap child or a
+    post-repair re-verify source: replace (do not skip) known bindings when durable gap
+    evidence supplies a narrower, recipe-capable binding. Explicit caller candidates are kept.
+    """
     if not bindings:
         return bindings
     prepare = bindings[0].prepare_context
@@ -475,21 +551,44 @@ def _augment_bindings_with_gap_children(db, *, scope, bindings: tuple[WorkBindin
         .scalars()
         .all()
     )
-    derived: list[WorkBinding] = []
+    replacements: dict[uuid.UUID, WorkBinding] = {}
+    additions: list[WorkBinding] = []
     for task in tasks:
-        if task.id in known:
+        existing = known.get(task.id)
+        if is_gap_generated_child(db, owner_id=scope.owner_id, task=task):
+            # Never let a production-plain pre-bind (candidate=None, no fallback) hide the
+            # durable gap recipe/path envelope across ticks.
+            if existing is not None and (
+                existing.candidate is not None or existing.allow_deterministic_fallback
+            ):
+                continue
+            derived = derive_work_binding_for_gap_child(
+                db, scope=scope, task=task, prepare_context=prepare
+            )
+            if derived is None:
+                continue
+            if existing is None:
+                additions.append(derived)
+                known[task.id] = derived
+            else:
+                replacements[task.id] = derived
+                known[task.id] = derived
             continue
-        if not is_gap_generated_child(db, owner_id=scope.owner_id, task=task):
-            continue
-        binding = derive_work_binding_for_gap_child(
-            db, scope=scope, task=task, prepare_context=prepare
-        )
-        if binding is not None:
-            derived.append(binding)
-            known[task.id] = binding
-    if not derived:
+        if existing is not None:
+            reverify = _derive_reverify_binding_for_repaired_source(
+                db,
+                scope=scope,
+                task=task,
+                prepare_context=prepare,
+                existing=existing,
+            )
+            if reverify is not None:
+                replacements[task.id] = reverify
+                known[task.id] = reverify
+    if not replacements and not additions:
         return bindings
-    return bindings + tuple(derived)
+    rebuilt = tuple(replacements.get(binding.task_id, binding) for binding in bindings)
+    return rebuilt + tuple(additions)
 
 
 def _apply_deferred(assessments, deferred: dict[uuid.UUID, str]):
