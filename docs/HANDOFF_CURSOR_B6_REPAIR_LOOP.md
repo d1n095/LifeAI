@@ -1,6 +1,6 @@
 # HANDOFF — B6 repair loop across ticks (Cursor)
 
-**SHA:** (pending commit)  
+**SHA:** c8c9f93e9bd88f539f3c93593dab29f5ccf9cdd5  
 **PR:** (pending)  
 **Base tip:** `4c86e58`
 
