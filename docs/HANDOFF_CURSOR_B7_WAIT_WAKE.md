@@ -1,7 +1,7 @@
 # HANDOFF — B7 WAITING_PROVIDER wake release (Cursor)
 
-**SHA:** a6cc93328888ce6294978b161fc06551a8d13ba1  
-**PR:** a6cc93328888ce6294978b161fc06551a8d13ba1  
+**SHA:** `95e4b61e`  
+**PR:** https://github.com/d1n095/LifeAI/pull/162  
 **Base tip:** `27f8562`
 
 ## Done
