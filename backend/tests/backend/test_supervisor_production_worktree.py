@@ -14,6 +14,7 @@ from app.development_supervisor.production_worktree import (
     ensure_goal_worktree_sync,
     goal_branch_name,
     goal_worktree_path,
+    reset_goal_worktree_to_clean_head,
 )
 
 
@@ -98,3 +99,61 @@ def test_two_different_goals_get_two_independent_worktrees(source_repo):
     _git(root_a, "commit", "-q", "-m", "goal a work")
 
     assert not (root_b / "a_only.py").exists()  # goal b's checkout is untouched
+
+
+# ---------------------------------------------------------------- reset_goal_worktree_to_clean_head
+
+
+def test_reset_discards_uncommitted_staged_and_unstaged_changes(source_repo):
+    import uuid
+
+    root, base_sha, _ = ensure_goal_worktree_sync(goal_id=uuid.uuid4(), source_repo_root=source_repo)
+
+    (root / "README.md").write_text("a failed task's own uncommitted edit\n", encoding="utf-8")
+    _git(root, "add", "README.md")  # staged, never committed -- exactly the "patch succeeded,
+    # commit_scoped_changes never ran" shape a real deferred/failed task leaves behind
+
+    reset_goal_worktree_to_clean_head(root)
+
+    assert _git(root, "status", "--porcelain") == ""
+    assert _git(root, "rev-parse", "HEAD") == base_sha
+    assert (root / "README.md").read_text(encoding="utf-8") == "seed\n"
+
+
+def test_reset_removes_untracked_files_a_create_file_step_left_behind(source_repo):
+    import uuid
+
+    root, _, _ = ensure_goal_worktree_sync(goal_id=uuid.uuid4(), source_repo_root=source_repo)
+
+    (root / "never_staged.py").write_text("x = 1\n", encoding="utf-8")  # create_file wrote it,
+    # but the plan never reached its own stage/commit step
+
+    reset_goal_worktree_to_clean_head(root)
+
+    assert not (root / "never_staged.py").exists()
+    assert _git(root, "status", "--porcelain") == ""
+
+
+def test_reset_never_touches_a_prior_tasks_own_real_commit(source_repo):
+    """The invariant that actually matters: reset restores the working tree to the CURRENT
+    branch tip, it never rewrites history -- an EARLIER task's own successfully committed work
+    under this same goal must survive exactly as committed."""
+    import uuid
+
+    root, base_sha, _ = ensure_goal_worktree_sync(goal_id=uuid.uuid4(), source_repo_root=source_repo)
+
+    (root / "committed_by_task_a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(root, "add", "committed_by_task_a.py")
+    _git(root, "commit", "-q", "-m", "task a's own real, verified, committed work")
+    committed_head = _git(root, "rev-parse", "HEAD")
+    assert committed_head != base_sha
+
+    # Simulate task b leaving its OWN uncommitted mess on top.
+    (root / "committed_by_task_a.py").write_text("x = 2  # task b's stray, never-committed edit\n", encoding="utf-8")
+    (root / "task_b_stray.py").write_text("y = 1\n", encoding="utf-8")
+
+    reset_goal_worktree_to_clean_head(root)
+
+    assert _git(root, "rev-parse", "HEAD") == committed_head  # task a's commit is untouched
+    assert (root / "committed_by_task_a.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert not (root / "task_b_stray.py").exists()
