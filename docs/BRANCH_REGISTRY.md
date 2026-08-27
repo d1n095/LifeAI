@@ -30,24 +30,40 @@ schemat för varje senare test i samma pytest-session så fort en migration läg
 CI-fel efter första pushen (DSN-konstruktionen tappade lösenordskomponenten, fungerade lokalt
 under trust-auth men inte i CI:s lösenords-auth-container) fixades i samma PR innan merge.
 
-**#170** (`claude/life-vault-egress-control`, Claude) — **OPEN**, väntar på CI. Life Vault /
+**#170** (`claude/life-vault-egress-control`, Claude) — **MERGED** @ `5a80310`. Life Vault /
 External-AI Egress Control-grunden: `provider_disclosure_events`-ledger (migration 0062,
 append-only/RLS, samma mönster som `provider_spend_usage_events`), `app/egress_policy/service.py`
 (`enforce_egress_policy()` — default-deny-grind, hård-deny på NEVER_EGRESS-markerat innehåll,
 redigering via befintlig `_redact_value()`), inkopplad i `provider_planning.plan_with_provider()`
-omedelbart före den riktiga `.propose()`-anropet. Se `docs/LIFE_VAULT_EGRESS_CONTROL.md` för
-hela hotmodellen/arkitekturkartan. Rebased ovanpå #169:s merge (`d0c5fee`) eftersom #170 lägger
-till migration 0062 ovanpå 0061 — utan #169:s fix hade #170:s egen CI drabbats av exakt samma
-databaskorruptionskedja. Uttryckligen UTANFÖR scope för denna PR: `app/routers/chat.py`,
-RAG/embedding-anropsställen, fullständigt klassificeringsschema (dokumenterat som V1/V2/V4/V5/V7
-i hotmodellen, nästa steg efter merge).
+(V3) omedelbart före den riktiga `.propose()`-anropet. Se `docs/LIFE_VAULT_EGRESS_CONTROL.md` för
+hela hotmodellen/arkitekturkartan/rankad blockerlista (V1-V7).
 
-**Claude-äger, inte Cursor:** Life Vault / external-AI-egress-linjen (#170 och framåt) — se
-`docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Rör inte #167/#168:s filer
+**#171** (`claude/life-vault-egress-v1-chat-wiring`, Claude) — **OPEN**, väntar på CI. Sluter V1:
+`app/providers/registry.chat_with_fallback()` får valfria `owner_id`/`purpose`/`requested_by`/
+`task_id`/`goal_id`/`job_id` (default `None`, inkrementell adoption — övriga anropare opåverkade).
+`app/routers/chat.py` skickar nu `owner_id=user.id` — grundarens egen chatt, den största
+befintliga exponeringen av rått dokumentinnehåll, är nu grindad. Basgren:
+`origin/claude/det-kommer-mer-879lcm` @ `5a80310` (#170 mergad).
+
+**#172** (`claude/life-vault-egress-v2-embedding`, Claude) — **OPEN**, väntar på CI. Sluter
+HALVA V2 (dokument-/media-embedding, `rag/ingest.py` + `rag/media_import.py` via ny
+`embed_with_policy()`) — INTE query-embedding-halvan (`rag/retrieve.py`/`routers/library.py`,
+kvarstår öppen, annan felhanteringsform). **STACKAD på #171** (basgren
+`claude/life-vault-egress-v1-chat-wiring`, INTE integrationsgrenen) — `registry.py` innehåller
+redan #171:s ändringar, `embed_with_policy()` läggs till bredvid dem i samma fil. Måste mergas
+EFTER #171. Hittade under regressionskörning: `test_section3_account_erasure_hard_deletes_
+documents_entirely` (permission denied för `erase_own_agent_coordination_children`) — bekräftat
+orelaterat/redan existerande (reproducerat på ren `5a80310`-checkout utan denna lanes ändringar),
+dokumenterat men INTE fixat här, flaggat för egen separat fix (migration 0046/0047:s
+privilegier).
+
+**Claude-äger, inte Cursor:** Life Vault / external-AI-egress-linjen (#170→#171→#172 och
+framåt) — se `docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Rör inte #167/#168:s filer
 (`development_operator/service.py`, `production_entry.py`, `production_worktree.py`,
 `worker.py`).
 
-**Integrationsgren-tip (origin/claude/det-kommer-mer-879lcm):** `d0c5fee` (#169 mergad).
+**Integrationsgren-tip (origin/claude/det-kommer-mer-879lcm):** `5a80310` (#170 mergad).
+**Merge-ordning:** #171 → #172 (stackad) → integrationsgrenen.
 
 ## Pass 80b (2026-08-25): Autonomy Activation B4 — plan-derived scope narrowing (Cursor)
 

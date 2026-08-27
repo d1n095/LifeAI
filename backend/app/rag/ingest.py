@@ -3,9 +3,10 @@ import uuid
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.egress_policy import EgressDeniedError
 from app.models.document import Document, IndexStatus
 from app.models.provider_verification import VerificationResult
-from app.providers.registry import resolve_active
+from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception, ensure_verified
 from app.rag.chunking import chunk_text
 from app.rag.vector_store import upsert_chunks
@@ -94,7 +95,25 @@ async def index_document(db: Session, document: Document, text_content: str) -> 
             return
 
         try:
-            vectors = await provider.embed(chunks, model=model)
+            vectors = await embed_with_policy(
+                db,
+                provider,
+                chunks,
+                model=model,
+                owner_id=document.uploaded_by,
+                purpose="rag_ingest",
+                requested_by="rag.ingest.index_document",
+            )
+        except EgressDeniedError as exc:
+            # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2):
+            # a policy refusal, not a provider outage -- str(exc) is safe here (its message is
+            # a fixed, static description, never raw document content; see EgressDeniedError's
+            # own docstring), unlike a raw provider exception.
+            document.status = IndexStatus.indexing_failed
+            document.error_message = str(exc)
+            db.add(document)
+            db.commit()
+            return
         except Exception as exc:  # noqa: BLE001 - a genuinely new failure AFTER a passed pre-flight check
             # P1: pre-flight passed but the real call still failed — a distinct, presumably
             # rarer case from a paused awaiting_provider/blocked_provider document, so it is

@@ -69,6 +69,53 @@ def resolve_active(db: Session, role: str) -> tuple[LLMProvider, str]:
     return get_provider(settings.default_llm_provider), settings.default_llm_model
 
 
+async def embed_with_policy(
+    db: Session,
+    provider: LLMProvider,
+    texts: list[str],
+    *,
+    model: str,
+    owner_id: uuid.UUID | None = None,
+    purpose: str | None = None,
+    requested_by: str | None = None,
+    task_id: uuid.UUID | None = None,
+    goal_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
+) -> list[list[float]]:
+    """`provider.embed(texts, model=model)`, gated the same way `chat_with_fallback()` gates
+    `.chat()` (Life Vault / External-AI Egress Control, V2 — see
+    docs/LIFE_VAULT_EGRESS_CONTROL.md): when `owner_id` is passed, `texts` is routed through
+    `enforce_egress_policy()` first -- default-deny, hard-deny on NEVER_EGRESS-marked content
+    (the whole batch, never a partial embed with the poisoned chunk silently dropped), one
+    disclosure-ledger row per call. `owner_id` defaults to None (gate skipped, unchanged
+    legacy behavior) for the same incremental-adoption reason as `chat_with_fallback()`.
+
+    Takes an already-resolved `provider`/`model` rather than resolving them itself: every
+    existing call site already calls `resolve_active(db, role="embedding")` earlier in its own
+    flow (for provider verification / pre-flight checks that must happen before this), and
+    resolving a second time here would be redundant, not just extra work -- a provider config
+    change landing between the two resolutions could then embed with a provider different from
+    the one that was actually verified.
+    """
+    outbound_texts = texts
+    if owner_id is not None:
+        from app.egress_policy import enforce_egress_policy
+
+        outbound_texts = enforce_egress_policy(
+            db,
+            owner_id=owner_id,
+            provider=provider.name,
+            model=model,
+            purpose=purpose or "embedding",
+            requested_by=requested_by or "providers.registry.embed_with_policy",
+            payload=texts,
+            task_id=task_id,
+            goal_id=goal_id,
+            job_id=job_id,
+        )
+    return await provider.embed(outbound_texts, model=model)
+
+
 def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
     """Primary chat provider first (DB config / settings default, as usual), then the
     remaining providers in CHAT_FALLBACK_ORDER that are actually configured (have an API

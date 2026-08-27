@@ -21,10 +21,11 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from app.egress_policy import EgressDeniedError
 from app.models.document import Document, IndexStatus
 from app.models.document_chunk import DocumentChunk
 from app.models.provider_verification import VerificationResult
-from app.providers.registry import resolve_active
+from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.transcription import TranscriptSegment, resolve_transcription_provider
 from app.providers.verification import classify_provider_exception, ensure_verified
 
@@ -202,7 +203,24 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
             return
 
         try:
-            vectors = await embed_provider.embed([c.text for c in timed_chunks], model=model)
+            vectors = await embed_with_policy(
+                db,
+                embed_provider,
+                [c.text for c in timed_chunks],
+                model=model,
+                owner_id=document.uploaded_by,
+                purpose="rag_ingest",
+                requested_by="rag.media_import.index_media_document",
+            )
+        except EgressDeniedError as exc:
+            # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2):
+            # a policy refusal, not a provider outage -- str(exc) is safe (fixed, static
+            # description, never raw transcript content).
+            document.status = IndexStatus.indexing_failed
+            document.error_message = str(exc)
+            db.add(document)
+            db.commit()
+            return
         except Exception as exc:  # noqa: BLE001 - post-preflight embed failure
             document.status = IndexStatus.indexing_failed
             document.error_message = classify_provider_exception(exc).message

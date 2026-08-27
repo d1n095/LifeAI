@@ -81,7 +81,7 @@ auto-downgrade it.
 | ID | Blocks a real Vault guarantee? | Status | Scope |
 |---|---|---|---|
 | **V1** | **YES — highest exposure, now gated** | **CLOSED** (`chat_with_fallback(owner_id=...)`, PR "Wire the Life Vault egress gate into chat_with_fallback() (V1)") | Chat endpoint (row 1) now passes `owner_id`/`purpose="chat"` into `chat_with_fallback()` — every attempt is routed through `enforce_egress_policy()` before any provider is called; NEVER_EGRESS-shaped retrieved content is denied outright (never partial-sent, never treated as a per-provider failure to fall back from); real disclosure-ledger entry per attempt. Still no semantic classification (V5) or history-replay handling (V7) — see those rows. |
-| **V2** | YES | OPEN, not started | RAG/embedding pipeline (rows 2-5) embeds raw document/query text with zero classification gate. |
+| **V2** | YES — partially closed | **PARTIAL** (`embed_with_policy()` wired into rows 2+4, PR "Wire the Life Vault egress gate into document/media embedding (closes V2 document-ingestion half)") | Document-chunk embedding (`rag/ingest.py`) and transcript-chunk embedding (`rag/media_import.py`) — the highest-volume raw-content paths (whole documents, not short queries) — are gated via a new `app/providers/registry.embed_with_policy()`. Query embedding (`rag/retrieve.py`, `routers/library.py` — rows 3+5) remains OPEN: those call sites have different exception-handling shapes (graceful degrade-to-text-search on any failure) that need their own careful pass, not a rushed bolt-on. |
 | **V3** | YES — mitigated | **CLOSED** (PR #170) | `provider_planning`/Safe Planner boundary (row 6) — the autonomous path from #166/#167. Gated via the same `enforce_egress_policy()`. Still no semantic classification (V5). |
 | **V4** | YES | OPEN, not started | 6 remaining `chat_with_fallback()` callers (rows 7-13 minus row 1, now closed) — zero redaction found in any of them. The `owner_id` kwarg exists on `chat_with_fallback()` now; wiring the remaining callers is mechanical, not a redesign. |
 | **V5** | Foundational, blocks everything else | OPEN, not started | No sensitivity/egress classification field exists anywhere in the schema. |
@@ -114,11 +114,24 @@ mechanism first, not the full taxonomy), V7 (history-replay). These remained rea
 tracked gaps at PR #1 time.
 
 **Status update:** V1 closed in a follow-up PR ("Wire the Life Vault egress gate into
-chat_with_fallback() (V1)") — see the ranked-blockers table above. Remaining open, named gaps:
-V2 (RAG/embedding — highest-value next lane now, since it's the only remaining ungated path
-that runs on every single document import, not just chat/planning turns), V4 (6 remaining
+chat_with_fallback() (V1)"). V2 partially closed in a further follow-up ("Wire the Life Vault
+egress gate into document/media embedding") — document-chunk and transcript-chunk embedding
+(the whole-document raw-content paths) are gated via `embed_with_policy()`; query embedding
+(short user-typed search/retrieval queries) is intentionally deferred, see V2's own row above.
+See the ranked-blockers table above for current status. Remaining open, named gaps: the query-
+embedding half of V2 (`rag/retrieve.py`, `routers/library.py`), V4 (6 remaining
 `chat_with_fallback()` callers — mechanical now that the `owner_id` kwarg exists), V5 (full
 classification schema), V7 (history-replay design).
+
+**Unrelated finding surfaced during V2's regression run (2026-08-27):**
+`tests/backend/rag/test_bootstrap_hardening.py::test_section3_account_erasure_hard_deletes_documents_entirely`
+fails with `psycopg2.errors.InsufficientPrivilege: permission denied for function
+erase_own_agent_coordination_children` — reproduced on a completely fresh database, on the
+clean merged tip (`5a80310`) with none of this lane's changes present, so it predates and is
+unrelated to any Life Vault work. Not fixed here per this repo's own "don't blend unrelated
+fixes into the current branch" discipline (`CLAUDE.md`) — flagged for a separate, dedicated fix
+(likely a privilege-grant gap in `app/rls.py` for `erase_own_agent_coordination_children`,
+migrations 0046/0047).
 
 ## Attack list coverage plan (from the founder's brief; PR #1 realistic subset)
 
