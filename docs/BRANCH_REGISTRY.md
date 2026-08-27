@@ -14,7 +14,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 |---|---|---|
 | [#168](https://github.com/d1n095/LifeAI/pull/168) | **MERGED** @ `6a3572e` | Canonical goal finalize |
 | [#177](https://github.com/d1n095/LifeAI/pull/177) | **MERGED** @ `77d3f1e` | Effect-time envelope authority + governed empty-capability fail-closed |
-| `cursor/toctou-spend-revoke-before-reserve` | **ACTIVE (Cursor)** | Live spend recheck before `plan_with_provider`; revoke after eligibility → zero invoke |
+| [#181](https://github.com/d1n095/LifeAI/pull/181) `cursor/toctou-spend-revoke-before-reserve` | **OPEN (Cursor)** @ `3be536b` | Live spend recheck before `plan_with_provider`; revoke after eligibility → zero invoke |
 
 **Remaining Cursor TOCTOU (after this):** concurrent budget exhaustion; path/cap outside envelope (narrowing already covers plan-time); two-worker race; crash after invoke before settle; crash after write before verify; completed-goal later tick.
 

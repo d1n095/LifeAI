@@ -232,12 +232,17 @@ class SupervisorScope:
 
 
 def _live_provider_spend_authorized(db, scope: SupervisorScope) -> bool:
-    """Effect-time spend gate: tick-start boolean is not enough.
+    """Supervisor fail-fast / defense-in-depth: re-read live spend before planning.
 
-    `scope.provider_spend_authorized` is reconstructed at Supervisor tick start from a live
-    grant read. A founder revoke/exhaust between that read and `plan_with_provider` must still
-    fail closed here — reserve inside planning is the final fence; this re-read closes the
-    Supervisor dispatch window the same way envelope reverify closes authority TOCTOU.
+    `scope.provider_spend_authorized` is reconstructed at Supervisor tick start. A founder
+    revoke/exhaust between that read and `plan_with_provider` should fail closed HERE so we
+    do not enter provider planning under a stale True.
+
+    This does NOT replace the authoritative final security fence inside
+    `plan_with_provider` → `reserve_provider_spend_call` (locked live authorization check
+    immediately before `adapter.propose`). The inner reservation remains the boundary that
+    prevents unauthorized provider EFFECT. This outer check is earlier current-state
+    revalidation: fail-fast classification, less wasted planning work, defense-in-depth.
     """
     if not scope.provider_spend_authorized:
         return False
