@@ -280,6 +280,7 @@ def _checkpoint(db, context, task, goal, *, phase, classification, state):
 def _invoke_operator(db, context, step, idempotency_key):
     args = dict(step.arguments)
     capability = step.capability
+    operator._require_capability(context, capability)
     if capability.startswith("repo_"):
         return operator.inspect_repository(
             db, context, capability, idempotency_key=idempotency_key, **args

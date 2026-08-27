@@ -31,16 +31,19 @@ goal with no current active envelope is not eligible, full stop (`eligible_autho
 below is the one place that decides eligibility, and it is a plain read of `status = 'active'`
 -- nothing here ever synthesizes a missing authorization).
 
-STILL NOT AUTONOMOUS REPO-WRITING, on purpose, in this "smallest coherent implementation":
-`scope.provider_spend_authorized` is hardcoded `False` (a bare authorized envelope never
-implies provider spend -- see `SupervisorScope`'s own docstring, a founder P1 review finding
-from before this module existed) and every `OperatorContext` this module builds leaves
-`remote_write_authorized` at its default `False` (real GitHub pushes remain a separate,
-NOT-YET-authorized capability -- see `app/development_supervisor/production_worktree.py`'s own
-docstring). Without a hand-built `PlanCandidate` or a gap-derived deterministic repair recipe,
-every real task this wiring reaches will legitimately defer as `PROVIDER_SPEND_NOT_AUTHORIZED`
--- an honest, safe, fully testable RUNTIME REACHABLE outcome, not a bug. Expanding either gate
-is a separate, later founder act, exactly like the founder decision's own staging describes.
+STILL NOT AUTONOMOUS REMOTE WRITE, on purpose:
+every `OperatorContext` this module builds leaves `remote_write_authorized` at its default
+`False` (real GitHub pushes remain a separate, NOT-YET-authorized capability -- see
+`app/development_supervisor/production_worktree.py`'s own docstring).
+
+PROVIDER SPEND is no longer a hardcoded False: `scope.provider_spend_authorized` is derived
+ONLY from a matching live founder-granted provider-spend authorization for this owner + goal
++ current envelope (`provider_spend_is_live`). No grant / revoked / expired / exhausted /
+wrong-envelope → False (fail closed). A bare authorized envelope never implies spend.
+
+Without a live spend grant (and without a hand-built `PlanCandidate` or gap-derived
+deterministic repair), provider-assisted planning still parks as
+`PROVIDER_SPEND_NOT_AUTHORIZED` — honest and wakeable after founder authorize.
 
 CRASH/RETRY/CONCURRENCY: `app/development_supervisor/lease.py`'s `supervisor_goal_leases`
 (migration 0059) is the sole mutual-exclusion primitive -- at most one worker may run
@@ -83,6 +86,7 @@ from app.jobs.mainai_job_lease import claim_specific_mainai_job
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
 from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus, MainAITask, MainAITaskStatus
 from app.models.mainai_job import MainAIJobStatus
+from app.provider_spend import provider_spend_is_live
 from app.work_intelligence import bind_strategy_execution, create_strategy
 
 logger = logging.getLogger("mainai.development_supervisor.production_entry")
@@ -208,7 +212,12 @@ async def run_authorized_goal_supervisor_tick(
             allowed_paths=tuple(current_envelope.authorized_paths or ()),
             allowed_capabilities=tuple(current_envelope.authorized_capabilities or ()),
             maximum_risk=current_envelope.authorized_risk,
-            provider_spend_authorized=False,
+            provider_spend_authorized=provider_spend_is_live(
+                db,
+                owner_id=goal.owner_id,
+                goal_id=goal.id,
+                execution_envelope_id=current_envelope.id,
+            ),
         )
 
         strategy = create_strategy(
@@ -328,6 +337,7 @@ async def run_authorized_goal_supervisor_tick(
                 strategy_execution_id=binding_row.id,
                 worktree_id=None,
                 allowed_paths=scope.allowed_paths,
+                allowed_capabilities=scope.allowed_capabilities,
             )
 
         bindings = tuple(
