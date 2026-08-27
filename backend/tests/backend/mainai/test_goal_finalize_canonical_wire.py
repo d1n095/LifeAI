@@ -137,9 +137,14 @@ def test_cancelled_goal_not_overridden_by_late_task_finalize(
     assert goal.final_outcome is None
 
 
-def test_failed_last_task_marks_goal_failed_not_completed(
+def test_failed_last_task_stays_replan_eligible_until_worker_finalize(
     superuser_db, make_verified_user
 ):
+    """Permanent failure must NOT close the goal inside the completion gate — auto-replan
+    only scans ACTIVE goals. Worker finalize (after replan in run_once) is the reconciler."""
+    from app.mainai_execution.replan import find_replan_trigger
+    from app.worker import Worker
+
     owner, _ = make_verified_user()
     goal, first, second = _two_task_goal(superuser_db, owner.id)
     _finalize_task_outcome(superuser_db, first, passed=True, evidence={"wire": "a"})
@@ -152,6 +157,14 @@ def test_failed_last_task_marks_goal_failed_not_completed(
     )
     superuser_db.commit()
     superuser_db.refresh(goal)
+    superuser_db.refresh(second)
     assert second.status == MainAITaskStatus.failed
+    assert goal.status == MainAIGoalStatus.running
+    assert goal.final_outcome is None
+    assert find_replan_trigger(superuser_db, goal=goal) == second
+
+    Worker()._finalize_mainai_execution_goals(superuser_db)
+    superuser_db.commit()
+    superuser_db.refresh(goal)
     assert goal.status == MainAIGoalStatus.failed
     assert goal.final_outcome is not None

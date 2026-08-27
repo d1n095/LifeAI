@@ -765,14 +765,25 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
 def _rollup_goal_after_task_boundary(db: Session, *, task: MainAITask) -> None:
     """Canonical B5 chain after a task reaches a durable terminal/retry boundary:
 
-        recompute_task_readiness → record_final_report
+        recompute_task_readiness → (conditionally) record_final_report
 
     `record_final_report` itself decides whether the goal stays `running`/`waiting` or
-    closes — callers must never set `goal.status` directly. Worker
-    `_finalize_mainai_execution_goals` remains the crash/retry reconciler for graphs that
-    became terminal without passing through this gate.
+    closes — callers must never set `goal.status` directly.
+
+    IMPORTANT — auto-replan window: a permanently `failed` task is the trigger for
+    `app/mainai_execution/replan.py` / worker `_advance_mainai_execution_replan`, which only
+    scans ACTIVE goals. Closing the goal as `failed` inside this gate would race ahead of
+    that tick and permanently suppress replan (CI: test_demo_auto_replan_triggers_after_a_
+    task_permanently_exhausts_retries). So permanent-failure / retryable-failure outcomes
+    recompute readiness only; the worker finalize tick (ordered AFTER replan in `run_once`)
+    remains the reconciler that closes failed graphs via the same canonical report.
+
+    Successful `completed` (and cooperative `cancelled`) still invoke `record_final_report`
+    here so a fully successful task graph closes without waiting for another poll.
     """
     recompute_task_readiness(db, goal_id=task.goal_id)
+    if task.status in (MainAITaskStatus.failed, MainAITaskStatus.retryable_failed):
+        return
     goal = db.execute(
         select(MainAIGoal).where(
             MainAIGoal.id == task.goal_id, MainAIGoal.owner_id == task.owner_id
@@ -791,9 +802,10 @@ def _finalize_task_outcome(
     downstream tasks are re-evaluated via recompute_task_readiness() so a task depending on
     this one is correctly moved to `blocked`, never left silently `pending`.
 
-    After readiness recompute, the canonical `record_final_report` path runs so a fully
-    terminal task graph closes the MainAIGoal (and a partial graph keeps it `running` /
-    `waiting`) without a separate manual/report-only bridge."""
+    After a successful `completed` (or cooperative cancel), the canonical `record_final_report`
+    path runs so a fully successful terminal graph closes the MainAIGoal. Permanent `failed`
+    outcomes defer goal close to the worker finalize tick so auto-replan can still claim an
+    ACTIVE goal — see `_rollup_goal_after_task_boundary`."""
     db.add(
         MainAITaskEvent(
             task_id=task.id,
