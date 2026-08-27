@@ -38,31 +38,38 @@ redigering via befintlig `_redact_value()`), inkopplad i `provider_planning.plan
 (V3) omedelbart före den riktiga `.propose()`-anropet. Se `docs/LIFE_VAULT_EGRESS_CONTROL.md` för
 hela hotmodellen/arkitekturkartan/rankad blockerlista (V1-V7).
 
-**#171** (`claude/life-vault-egress-v1-chat-wiring`, Claude) — **OPEN**, väntar på CI. Sluter V1:
+**#171** (`claude/life-vault-egress-v1-chat-wiring`, Claude) — **MERGED** @ `e5498d7`. Sluter V1:
 `app/providers/registry.chat_with_fallback()` får valfria `owner_id`/`purpose`/`requested_by`/
 `task_id`/`goal_id`/`job_id` (default `None`, inkrementell adoption — övriga anropare opåverkade).
 `app/routers/chat.py` skickar nu `owner_id=user.id` — grundarens egen chatt, den största
-befintliga exponeringen av rått dokumentinnehåll, är nu grindad. Basgren:
-`origin/claude/det-kommer-mer-879lcm` @ `5a80310` (#170 mergad).
+befintliga exponeringen av rått dokumentinnehåll, är nu grindad.
 
-**#172** (`claude/life-vault-egress-v2-embedding`, Claude) — **OPEN**, väntar på CI. Sluter
-HALVA V2 (dokument-/media-embedding, `rag/ingest.py` + `rag/media_import.py` via ny
+**#172** (`claude/life-vault-egress-v2-embedding`, Claude) — **MERGED** @ `ece6a97` (var stackad
+på #171, ombasad till integrationsgrenen efter #171:s merge, ren diff bekräftad efter ombasning).
+Sluter HALVA V2 (dokument-/media-embedding, `rag/ingest.py` + `rag/media_import.py` via ny
 `embed_with_policy()`) — INTE query-embedding-halvan (`rag/retrieve.py`/`routers/library.py`,
-kvarstår öppen, annan felhanteringsform). **STACKAD på #171** (basgren
-`claude/life-vault-egress-v1-chat-wiring`, INTE integrationsgrenen) — `registry.py` innehåller
-redan #171:s ändringar, `embed_with_policy()` läggs till bredvid dem i samma fil. Måste mergas
-EFTER #171. Hittade under regressionskörning: `test_section3_account_erasure_hard_deletes_
-documents_entirely` (permission denied för `erase_own_agent_coordination_children`) — bekräftat
-orelaterat/redan existerande (reproducerat på ren `5a80310`-checkout utan denna lanes ändringar),
-dokumenterat men INTE fixat här, flaggat för egen separat fix (migration 0046/0047:s
-privilegier).
+kvarstår öppen, annan felhanteringsform).
 
-**Claude-äger, inte Cursor:** Life Vault / external-AI-egress-linjen (#170→#171→#172 och
-framåt) — se `docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Rör inte #167/#168:s filer
-(`development_operator/service.py`, `production_entry.py`, `production_worktree.py`,
-`worker.py`).
+**#173** (`claude/pytest-boot-privilege-parity`, Claude) — **OPEN**, väntar på CI. Fristående fix,
+INTE del av Life Vault-linjen — grenad direkt från integrationsgrenen, inte stackad. Roten till
+#172:s hittade `erase_own_agent_coordination_children`-fynd: `tests/conftest.py`s sessions-
+fixture körde aldrig `apply_rls()`/`apply_mainai_job_runtime_privileges()`/
+`apply_mainai_execution_privileges()` (samma tre funktioner `app/main.py`s riktiga startup-event
+kör, i samma ordning) — dessa privilegier applicerades bara som en BIEFFEKT av att någon annan
+test i samma session råkade instansiera `client`-fixturen först. En test som kör `SessionLocal()`
+direkt och körs tidigt nog i en session/delmängd (t.ex. `test_bootstrap_hardening.py` ensamt)
+fick då en falsk "permission denied". Fix: kör alla tre funktionerna direkt efter migrering,
+samma ordning som produktionens riktiga boot-sekvens. Verifierat: full svit 2179 passed / 11
+failed (samtliga tidigare dokumenterade TZ-artefakter) / 1 skipped — inga nya fel, och det
+ursprungligen felande testet passerar nu.
 
-**Integrationsgren-tip (origin/claude/det-kommer-mer-879lcm):** `5a80310` (#170 mergad).
+**Claude-äger, inte Cursor:** Life Vault / external-AI-egress-linjen (#170→#171→#172, nästa steg
+V2:s query-embedding-halva eller V4) — se `docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Rör inte
+#167/#168:s filer (`development_operator/service.py`, `production_entry.py`,
+`production_worktree.py`, `worker.py`).
+
+**Integrationsgren-tip (origin/claude/det-kommer-mer-879lcm):** `ece6a97` (#170→#171→#172 mergade).
+#173 väntar på egen CI innan merge.
 **Merge-ordning:** #171 → #172 (stackad) → integrationsgrenen.
 
 ## Pass 80b (2026-08-25): Autonomy Activation B4 — plan-derived scope narrowing (Cursor)
