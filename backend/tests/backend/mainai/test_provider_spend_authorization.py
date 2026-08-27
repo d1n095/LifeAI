@@ -367,6 +367,76 @@ def test_record_provider_spend_usage_is_reserve_then_settle(superuser_db):
     assert row.spent_requests == 1
 
 
+def test_two_workers_racing_the_last_unit_of_budget_never_both_reserve(superuser_db):
+    """Adversarial review, 2026-08-27 (Attack 3): reserve_provider_spend_call() locks the
+    authorization row via get_current_provider_spend_authorization()'s SELECT ... FOR UPDATE,
+    so a second concurrent reservation should see the first's committed totals and correctly
+    exhaust -- proven here by code inspection, but this was the one attack in that review with
+    ZERO real concurrency test coverage (test_concurrent_first_grants_only_one_active above
+    covers concurrent GRANT creation, not concurrent RESERVATION against an already-live,
+    near-exhausted grant). Two real threads, two real DB connections, racing for the single
+    remaining request slot (max_requests=1) with DIFFERENT source_ref values each (so this
+    exercises the budget race itself, not reserve_provider_spend_call()'s own separate
+    same-source_ref idempotency short-circuit)."""
+    owner, goal, envelope = _owner_goal_envelope(superuser_db)
+    superuser_db.commit()
+    _grant(superuser_db, owner, goal, envelope, max_requests=1, max_cost_usd=Decimal("10.00"))
+    superuser_db.commit()
+    owner_id, goal_id = owner.id, goal.id
+    bind = superuser_db.get_bind()
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def _attempt(source_ref):
+        from sqlalchemy.orm import sessionmaker
+
+        Session = sessionmaker(bind=bind)
+        session = Session()
+        try:
+            barrier.wait(timeout=5)  # maximize the chance both threads race the same lock
+            event = reserve_provider_spend_call(
+                session,
+                owner_id=owner_id,
+                goal_id=goal_id,
+                source_ref=source_ref,
+                provider="fake-local",
+                model="planner-v2",
+            )
+            session.commit()
+            results.append(event.id)
+        except ProviderSpendError as exc:
+            session.rollback()
+            errors.append(str(exc))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_attempt, args=(f"race-a-{uuid.uuid4()}",))
+    t2 = threading.Thread(target=_attempt, args=(f"race-b-{uuid.uuid4()}",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    # Exactly one of the two genuinely distinct reservation attempts succeeds -- never both
+    # (overspend), never neither (the lock must not deadlock/starve both callers).
+    assert len(results) == 1, f"expected exactly one winner, got {len(results)} (errors: {errors})"
+    assert len(errors) == 1
+    assert "ceiling exhausted" in errors[0]
+
+    reserved = superuser_db.execute(
+        text("SELECT reserved_requests FROM provider_spend_authorizations WHERE owner_id = :o AND goal_id = :g"),
+        {"o": str(owner_id), "g": str(goal_id)},
+    ).scalar()
+    assert reserved == 1  # never double-reserved past the ceiling
+
+    usage_count = superuser_db.execute(
+        text("SELECT count(*) FROM provider_spend_usage_events WHERE owner_id = :o AND goal_id = :g AND status = 'reserved'"),
+        {"o": str(owner_id), "g": str(goal_id)},
+    ).scalar()
+    assert usage_count == 1  # exactly one real reservation row, not zero or two
+
+
 def test_usage_events_are_append_only_without_settle_guc(superuser_db):
     owner, goal, envelope = _owner_goal_envelope(superuser_db)
     superuser_db.commit()
