@@ -16,7 +16,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 | [#168](https://github.com/d1n095/LifeAI/pull/168) | **MERGED** @ `6a3572e` | Canonical goal finalize / auto-replan-safe failed path |
 | [#170](https://github.com/d1n095/LifeAI/pull/170)–[#176](https://github.com/d1n095/LifeAI/pull/176) | MERGED | Life Vault egress foundation through transcription/verification sweep |
 | [#173](https://github.com/d1n095/LifeAI/pull/173) | MERGED | Pytest boot / RLS privilege parity with production |
-| `cursor/stale-authority-effect-time` | **ACTIVE (Cursor)** | Effect-time envelope revalidation + governed empty-capability fail-closed |
+| [#177](https://github.com/d1n095/LifeAI/pull/177) `cursor/stale-authority-effect-time` | **OPEN (Cursor)** @ `d920dea` | Effect-time envelope revalidation + governed empty-capability fail-closed |
 
 **Next Cursor primary:** stale authority between plan and effect (envelope A accepted → revoke/supersede before Operator write → ZERO filesystem effect). Empty governed capability ceiling must FAIL CLOSED (never legacy unrestricted).
 
