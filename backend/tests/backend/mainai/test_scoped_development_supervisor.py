@@ -209,6 +209,7 @@ def _foundation(db, tmp_path, *, tied=False, approved=True):
         repository_identity=str(repo.resolve()),
         allowed_paths=("calculator.py", "test_calculator.py"),
         allowed_capabilities=(
+            "read_file",
             "patch_file",
             "create_file",
             "run_static_check",
