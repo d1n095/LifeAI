@@ -345,6 +345,10 @@ async def run_authorized_goal_supervisor_tick(
                 text=True,
                 check=True,
             ).stdout.strip()
+            # Bind the exact envelope row this context was authorized under. Operator
+            # re-reads CURRENT active envelope at every effect and refuses if the row
+            # changed (founder revoke/supersede after plan ACCEPT / before write).
+            live_envelope = _reverify_authority()
             return OperatorContext(
                 owner_id=goal.owner_id,
                 task_id=task.id,
@@ -358,6 +362,7 @@ async def run_authorized_goal_supervisor_tick(
                 supervisor_goal_id=goal.id,
                 supervisor_lease_id=lease_id,
                 supervisor_lease_generation=lease_generation,
+                execution_envelope_id=live_envelope.id,
                 allowed_paths=scope.allowed_paths,
                 allowed_capabilities=scope.allowed_capabilities,
             )

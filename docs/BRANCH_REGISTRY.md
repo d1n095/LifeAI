@@ -6,6 +6,27 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass (2026-08-27): tip `6a3572e` — #168 MERGED; Cursor starts stale-authority TOCTOU
+
+**Integrations tip:** `6a3572e` (Merge #168). Alembic head unchanged by this lane.
+
+| PR / Branch | Status | Notes |
+|---|---|---|
+| [#167](https://github.com/d1n095/LifeAI/pull/167) | MERGED | Composed autonomy + PER-GOAL Supervisor worktree lease auth |
+| [#168](https://github.com/d1n095/LifeAI/pull/168) | **MERGED** @ `6a3572e` | Canonical goal finalize / auto-replan-safe failed path |
+| [#170](https://github.com/d1n095/LifeAI/pull/170)–[#176](https://github.com/d1n095/LifeAI/pull/176) | MERGED | Life Vault egress foundation through transcription/verification sweep |
+| [#173](https://github.com/d1n095/LifeAI/pull/173) | MERGED | Pytest boot / RLS privilege parity with production |
+| [#177](https://github.com/d1n095/LifeAI/pull/177) `cursor/stale-authority-effect-time` | **OPEN (Cursor)** @ `d920dea` | Effect-time envelope revalidation + governed empty-capability fail-closed |
+
+**Next Cursor primary:** stale authority between plan and effect (envelope A accepted → revoke/supersede before Operator write → ZERO filesystem effect). Empty governed capability ceiling must FAIL CLOSED (never legacy unrestricted).
+
+**Claude (parallel, do not collide):** remaining Vault callers / logs-leakage / disclosure ledger — not Cursor's lane.
+
+**#168 semantics (landed; do not redesign):**
+- successful completed task graph → immediate canonical `record_final_report`
+- failed / retryable_failed → keep ACTIVE for auto-replan; worker post-replan finalize closes
+- founder-cancel / already-terminal → late finalize cannot overwrite
+
 ## Pass (2026-08-27): tip `505c696` — Vault through #176; #168 final rebase
 
 **Integrations tip:** `505c696` (#176 merged).

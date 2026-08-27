@@ -46,7 +46,7 @@ def test_operator_rejects_capability_outside_context_ceiling(tmp_path):
     _require_capability(ctx, "read_file")
     with pytest.raises(OperatorCapabilityMissing):
         _require_capability(ctx, "patch_file")
-    # Empty ceiling remains permissive for legacy callers.
+    # Empty ceiling remains permissive for never-governed legacy callers.
     legacy = OperatorContext(
         owner_id=ctx.owner_id,
         task_id=ctx.task_id,

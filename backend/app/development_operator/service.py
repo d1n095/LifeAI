@@ -166,9 +166,14 @@ class OperatorContext:
     supervisor_goal_id: uuid.UUID | None = None
     supervisor_lease_id: uuid.UUID | None = None
     supervisor_lease_generation: int | None = None
+    # Exact ExecutionAuthorizationEnvelope row this context was bound under. When set, every
+    # Operator effect re-reads the CURRENT active envelope and refuses if it is absent or a
+    # different row (founder revoke/supersede after planning / before effect).
+    execution_envelope_id: uuid.UUID | None = None
     allowed_paths: tuple[str, ...] = ()
-    # Empty = legacy unrestricted (path-only era). Non-empty = fail-closed capability ceiling
-    # (envelope and/or plan-derived narrowing). Never invent capabilities outside this set.
+    # Empty = legacy unrestricted ONLY when this context is not envelope-governed.
+    # Governed contexts (execution_envelope_id set and/or Supervisor goal binding) MUST carry
+    # a non-empty capability ceiling — empty never falls back to legacy unrestricted.
     allowed_capabilities: tuple[str, ...] = ()
     remote_write_authorized: bool = False
     expected_remote_sha: str | None = None
@@ -183,8 +188,65 @@ def _supervisor_goal_binding_claimed(context: OperatorContext) -> bool:
     )
 
 
+def _is_governed_operator_context(context: OperatorContext) -> bool:
+    """Production Supervisor / envelope-bound execution — never inherits legacy empty ceiling."""
+    return (
+        context.execution_envelope_id is not None
+        or _supervisor_goal_binding_claimed(context)
+    )
+
+
 def _write_identity_present(context: OperatorContext) -> bool:
     return context.worktree_id is not None or _supervisor_goal_binding_claimed(context)
+
+
+def _path_within_authorized(path: str, authorized_paths: tuple[str, ...] | list[str]) -> bool:
+    pure = PurePosixPath(path)
+    return any(
+        pure == PurePosixPath(scope) or PurePosixPath(scope) in pure.parents
+        for scope in authorized_paths
+    )
+
+
+def _require_live_execution_authority(db, context: OperatorContext, *, task: MainAITask) -> None:
+    """Effect-time authority: planning-time authorization is not sufficient.
+
+    If this context was bound to a specific envelope row, the CURRENT active envelope for the
+    task's goal must still be that exact row. A founder revoke/supersede between Safe Planner
+    ACCEPT and Operator filesystem effect must produce ZERO effect.
+    """
+    if context.execution_envelope_id is None:
+        return
+    from app.execution_envelopes import get_current_execution_envelope
+
+    current = get_current_execution_envelope(
+        db, owner_id=context.owner_id, goal_id=task.goal_id
+    )
+    if current is None or current.id != context.execution_envelope_id:
+        raise OperatorAuthorizationError(
+            "execution authorization changed since OperatorContext was bound; "
+            "refusing to execute under stale authority"
+        )
+    authorized_paths = tuple(current.authorized_paths or ())
+    if not authorized_paths:
+        raise OperatorAuthorizationError(
+            "current execution envelope has no authorized paths; refusing effect"
+        )
+    for path in context.allowed_paths:
+        if not _path_within_authorized(path, authorized_paths):
+            raise OperatorAuthorizationError(
+                "OperatorContext path ceiling is outside the CURRENT execution envelope"
+            )
+    authorized_caps = tuple(current.authorized_capabilities or ())
+    if not authorized_caps:
+        raise OperatorAuthorizationError(
+            "current execution envelope has no authorized capabilities; refusing effect"
+        )
+    for capability in context.allowed_capabilities:
+        if capability not in authorized_caps:
+            raise OperatorAuthorizationError(
+                "OperatorContext capability ceiling is outside the CURRENT execution envelope"
+            )
 
 
 def _verify_supervisor_goal_worktree(db, context: OperatorContext, *, task: MainAITask) -> None:
@@ -295,7 +357,19 @@ def _git(
     return result
 
 
+def _require_governed_capability_ceiling(context: OperatorContext) -> None:
+    """EVER_GOVERNED / envelope-bound contexts never inherit legacy empty=unrestricted."""
+    if _is_governed_operator_context(context) and not tuple(
+        context.allowed_capabilities or ()
+    ):
+        raise OperatorAuthorizationError(
+            "governed OperatorContext cannot inherit legacy unrestricted empty "
+            "capability ceiling; refusing effect"
+        )
+
+
 def _require_context(db, context: OperatorContext, *, write: bool = False):
+    _require_governed_capability_ceiling(context)
     task = db.execute(
         select(MainAITask).where(
             MainAITask.id == context.task_id, MainAITask.owner_id == context.owner_id
@@ -316,6 +390,8 @@ def _require_context(db, context: OperatorContext, *, write: bool = False):
         raise OperatorAuthorizationError(
             "task, job, or strategy execution is missing or cross-owner"
         )
+    # Effect-time authority: planning-time envelope binding is not enough.
+    _require_live_execution_authority(db, context, task=task)
     execution = None
     if binding and binding.execution_id:
         execution = db.execute(
@@ -405,12 +481,14 @@ def _require_context(db, context: OperatorContext, *, write: bool = False):
 
 
 def _require_capability(context: OperatorContext, capability: str) -> None:
-    """Enforce OperatorContext.allowed_capabilities when a real ceiling is present.
+    """Enforce OperatorContext.allowed_capabilities.
 
-    Empty tuple preserves legacy callers that only set path scopes. Once production_entry /
-    post-ACCEPT narrowing sets a non-empty ceiling, any capability outside it fails closed
-    here — not after a write already happened.
+    Empty tuple preserves legacy unrestricted behavior ONLY for never-governed contexts
+    (no execution_envelope_id, no Supervisor goal binding). Governed contexts with an empty
+    ceiling fail closed — never fall back to unrestricted. Once a non-empty ceiling is set,
+    any capability outside it fails closed here — not after a write already happened.
     """
+    _require_governed_capability_ceiling(context)
     ceiling = tuple(context.allowed_capabilities or ())
     if not ceiling:
         return
