@@ -8,11 +8,17 @@ formally switches over. Orchestrates, in this exact order:
      looking at it first". Only PUSHED_NO_PR/PR_EXISTS require it by default (the dead
      attempt's code is already visible on GitHub) — see that module's own docstring.
   0.5. RECOVERY MUST NEVER INCREASE OR BYPASS AUTHORITY (governance gate, this module):
-     `goal_has_ever_been_envelope_governed()` — if the owning goal has EVER had an
-     `execution_authorization_envelopes` row, this function refuses to hand the dead job to
-     V0.1's `dispatch_ready_task()` at all and takes the `_decline_takeover_for_governed_goal`
-     branch below instead. See that function's own docstring for the full reasoning and the
-     module docstring addendum further down.
+     locks the goal row (`SELECT ... FOR UPDATE`) FIRST -- the same row
+     `app.execution_envelopes.service.authorize_execution_scope()` now also locks before
+     creating/superseding an envelope -- then `goal_has_ever_been_envelope_governed()`. If the
+     owning goal has EVER had an `execution_authorization_envelopes` row, this function
+     refuses to hand the dead job to V0.1's `dispatch_ready_task()` at all and takes the
+     `_decline_takeover_for_governed_goal` branch below instead. The lock (not a bare re-SELECT
+     immediately before dispatch, which still leaves a window) is what makes this decision
+     race-free against a founder authorizing a goal's FIRST-EVER envelope concurrently -- see
+     the lock's own inline comment and `authorize_execution_scope()`'s matching docstring for
+     the full reasoning, and `_decline_takeover_for_governed_goal`'s own docstring further
+     down for the decline branch itself.
   1. reset_task_for_takeover() (executor.py) — the dead job's task, still stuck at `running`,
      moves back to `ready` WITHOUT fabricating a pass/fail verdict (a dead job proves nothing
      about whether the work would have succeeded).
@@ -60,6 +66,7 @@ NO_ACTIVE => STOP invariant PR #154 already established for ordinary V0.1 auto-d
 
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.execution_envelopes.service import goal_has_ever_been_envelope_governed
@@ -106,6 +113,18 @@ async def execute_takeover(
     dead_job_id = record.job_id
 
     record_recovery_event(db, record=record, event_type=MainAIRecoveryEventType.takeover_started, detail={"dispatched_by": dispatched_by})
+
+    # FIRST-GOVERNANCE TOCTOU FENCE: lock the goal row BEFORE the EVER_GOVERNED decision and
+    # hold it through whichever branch below actually runs (V0.1 dispatch or governed
+    # decline) -- see app.execution_envelopes.service.authorize_execution_scope()'s matching
+    # lock and docstring for the exact race this closes. A bare re-SELECT immediately before
+    # dispatch does NOT close this window (the gap between that SELECT and the dispatch write
+    # is itself still racy); only a lock held by BOTH sides across their own consequential
+    # transition serializes the two orderings so "governance becomes effective mid-flight of
+    # an already-decided legacy dispatch" is structurally impossible.
+    db.execute(
+        select(MainAIGoal).where(MainAIGoal.id == goal.id, MainAIGoal.owner_id == goal.owner_id).with_for_update()
+    ).scalar_one()
 
     if goal_has_ever_been_envelope_governed(db, owner_id=goal.owner_id, goal_id=goal.id):
         return await _decline_takeover_for_governed_goal(db, task=task, record=record, dead_job_id=dead_job_id)

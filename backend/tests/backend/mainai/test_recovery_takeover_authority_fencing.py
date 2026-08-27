@@ -28,8 +28,15 @@ This file proves:
   - The REAL production path composes correctly end to end: a governed task's job crashes,
     the automatic recovery tick declines to V0.1-resume it, and the goal's OWN next Supervisor
     tick rediscovers and re-governs it -- never a second, independent authority
-    reconstruction invented in the recovery pipeline itself."""
+    reconstruction invented in the recovery pipeline itself.
+  - FIRST-GOVERNANCE TOCTOU: a founder authorizing a goal's FIRST-EVER envelope and a
+    concurrent dead-job recovery pass for that SAME goal are genuinely serialized by a shared
+    goal-row lock (`SELECT ... FOR UPDATE` in both `execute_takeover()` and
+    `authorize_execution_scope()`), not just re-checked with another ordinary SELECT. Both
+    real threads, both real DB connections, real blocking proven with a timeout -- not a
+    single-threaded simulation."""
 
+import os
 import uuid
 from datetime import datetime
 
@@ -609,3 +616,237 @@ async def test_a_crashed_governed_task_is_declined_by_recovery_then_re_governed_
     assert task.mainai_job_id != first_job_id  # a genuinely new job, minted by Supervisor itself
     new_job = superuser_db.get(MainAIJob, task.mainai_job_id)
     assert new_job.locked_by == "worker-b"  # governed dispatch self-claims, unlike V0.1's queued-for-anyone job
+
+
+# ---------------------------------------------------------------- migration downgrade, with real data
+
+
+@pytest.mark.asyncio
+async def test_downgrading_past_this_migration_fails_loudly_once_a_real_row_exists_not_silently(
+    db_session, superuser_db, owner_id
+):
+    """`alembic downgrade -1` re-adds the narrower CHECK constraint that predates
+    'takeover_declined_governed'. A no-data round-trip proves nothing about whether that is
+    actually safe once real recovery history exists -- this test inserts a GENUINE row via
+    the real execute_takeover() code path (not a hand-crafted INSERT) against THIS test's own
+    live database, then actually runs `alembic downgrade -1` as a real subprocess against it.
+
+    Must fail loudly (IntegrityError/CheckViolation), never silently succeed or silently drop/
+    rewrite the row -- mainai_recovery_events is append-only at the database level (migration
+    0033's trg_mainai_recovery_events_deny_mutation denies UPDATE unconditionally, for every
+    role, with no GUC escape hatch), so there is no safe way for a downgrade to make room for
+    the narrower constraint other than refusing. Alembic runs each migration inside a
+    transaction (transactional DDL), so a failed downgrade must leave the schema completely
+    unchanged -- verified here by checking `alembic current` is still 0061 afterward, so this
+    test cannot corrupt state for whatever runs after it in the same session."""
+    import subprocess
+    from pathlib import Path
+
+    goal = _goal(db_session, owner_id)
+    _authorize(db_session, owner_id, goal.id)
+    db_session.commit()
+
+    task, dead_job = _task_and_dead_job(db_session, superuser_db, owner_id, goal)
+    record = await _through_classification(db_session, task, dead_job)
+    assert record.classification == RecoveryClassification.nothing_done
+
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="downgrade-proof")
+    db_session.commit()
+    assert new_job is None
+
+    row = db_session.execute(
+        sa_text("SELECT event_type FROM mainai_recovery_events WHERE recovery_record_id = :id AND event_type = 'takeover_declined_governed'"),
+        {"id": str(record.id)},
+    ).one()
+    assert row[0] == "takeover_declined_governed"  # the genuine row this downgrade must refuse to orphan
+    # Close out this session's own transaction (even a read-only SELECT holds an
+    # AccessShareLock until commit/rollback) -- otherwise it deadlocks against the subprocess
+    # below's own `ALTER TABLE ... DROP CONSTRAINT`, which needs ACCESS EXCLUSIVE.
+    db_session.commit()
+
+    backend_root = Path(__file__).resolve().parents[3]
+    env = dict(os.environ)
+    result = subprocess.run(
+        ["alembic", "downgrade", "-1"], cwd=str(backend_root), env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, f"downgrade unexpectedly succeeded with real data present:\n{result.stdout}\n{result.stderr}"
+    assert "CheckViolation" in result.stderr or "IntegrityError" in result.stderr or "violates check constraint" in result.stderr
+
+    current = subprocess.run(["alembic", "current"], cwd=str(backend_root), env=env, capture_output=True, text=True)
+    assert "0061" in current.stdout  # transactional DDL rollback -- schema genuinely unchanged
+
+
+# ---------------------------------------------------------------- first-governance TOCTOU race
+
+
+def _make_session():
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+
+    return sessionmaker(bind=migration_engine)()
+
+
+def test_first_governance_toctou_race_governance_committed_while_recovery_waits_is_observed(
+    db_session, superuser_db, owner_id
+):
+    """Ordering B (acceptable): first governance wins -> recovery observes EVER_GOVERNED ->
+    V0.1 takeover is declined. Two REAL threads, two REAL DB connections. Thread A takes the
+    goal-row lock directly (simulating "some transaction is mid-flight, about to authorize
+    the first envelope") and holds it past a controlled checkpoint; thread B runs the REAL
+    `execute_takeover()` and must genuinely block on that same lock (proven by a join timeout,
+    not assumed). Only once thread A actually creates and commits the envelope -- still
+    holding the SAME already-acquired lock, so this is exactly authorize_execution_scope()'s
+    own code path re-entering a lock its own transaction already holds, never a second lock --
+    does thread B's execute_takeover() unblock. FORBIDDEN outcome this proves does NOT happen:
+    thread B minting a new V0.1 job after thread A's envelope is already committed."""
+    import asyncio
+    import threading
+
+    from app.models.mainai_execution import MainAIGoal
+
+    goal = _goal(db_session, owner_id)
+    db_session.commit()
+    assert not goal_has_ever_been_envelope_governed(db_session, owner_id=owner_id, goal_id=goal.id)
+
+    task, dead_job = _task_and_dead_job(db_session, superuser_db, owner_id, goal)
+    record = asyncio.run(_through_classification(db_session, task, dead_job))
+    assert record.classification == RecoveryClassification.nothing_done
+    record_id, task_id, goal_id, dead_job_id = record.id, task.id, goal.id, dead_job.id
+    db_session.commit()
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    results: dict = {}
+
+    def _thread_a_hold_then_authorize():
+        session = _make_session()
+        try:
+            session.execute(sa_text("SELECT id FROM mainai_goals WHERE id = :id FOR UPDATE"), {"id": str(goal_id)})
+            lock_held.set()
+            release_lock.wait(timeout=10)
+            proposal = propose_execution_scope(session, owner_id=owner_id, goal_id=goal_id, idempotency_key=f"toctou-b-prop-{uuid.uuid4()}")
+            _, envelope = authorize_execution_scope(
+                session, owner_id=owner_id, proposal_id=proposal.id, authorized_by="founder",
+                authorized_paths=["README.md"], authorized_capabilities=["read_file"], authorized_risk="low",
+                envelope_idempotency_key=f"toctou-b-env-{uuid.uuid4()}",
+            )
+            session.commit()
+            results["envelope_id"] = envelope.id
+        finally:
+            session.close()
+
+    def _thread_b_takeover():
+        session = _make_session()
+        try:
+            goal_row = session.get(MainAIGoal, goal_id)
+            task_row = session.get(MainAITask, task_id)
+            record_row = session.get(MainAIRecoveryRecord, record_id)
+
+            async def _run():
+                return await execute_takeover(session, task=task_row, goal=goal_row, record=record_row, dispatched_by="toctou-recovery")
+
+            record_out, new_job = asyncio.run(_run())
+            session.commit()
+            results["new_job_id"] = new_job.id if new_job is not None else None
+        finally:
+            session.close()
+
+    thread_a = threading.Thread(target=_thread_a_hold_then_authorize)
+    thread_a.start()
+    assert lock_held.wait(timeout=10), "thread A never acquired the goal-row lock"
+
+    thread_b = threading.Thread(target=_thread_b_takeover)
+    thread_b.start()
+    thread_b.join(timeout=2)
+    assert thread_b.is_alive(), "execute_takeover() did NOT block on the goal-row lock thread A holds -- the fence is not real"
+
+    release_lock.set()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+
+    assert results.get("envelope_id") is not None  # thread A's first envelope committed
+    assert results.get("new_job_id") is None  # thread B correctly observed EVER_GOVERNED and declined -- never minted a V0.1 job
+
+    dead_row = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :id"), {"id": str(dead_job_id)}).one()
+    assert dead_row[0] == "failed"
+
+
+def test_first_governance_toctou_race_recovery_committed_first_then_governance_follows(
+    db_session, superuser_db, owner_id
+):
+    """Ordering A (acceptable): legacy recovery obtains the serialization boundary first ->
+    completes its legacy transition -> only then can first governance become effective. Thread
+    A holds the goal-row lock and, while still holding it, runs the REAL `execute_takeover()`
+    for this never-governed goal (a genuine V0.1 dispatch). Thread B's real
+    `authorize_execution_scope()` call must block until thread A commits. FORBIDDEN outcome
+    this proves does NOT happen: the envelope becoming active WHILE thread A's decision was
+    still in flight (it cannot, since thread B cannot even start writing until thread A's
+    entire transaction -- decision AND action -- is durably committed)."""
+    import asyncio
+    import threading
+
+    from app.models.mainai_execution import MainAIGoal
+
+    goal = _goal(db_session, owner_id)
+    db_session.commit()
+
+    task, dead_job = _task_and_dead_job(db_session, superuser_db, owner_id, goal)
+    record = asyncio.run(_through_classification(db_session, task, dead_job))
+    record_id, task_id, goal_id = record.id, task.id, goal.id
+    db_session.commit()
+
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    results: dict = {}
+
+    def _thread_a_hold_then_takeover():
+        session = _make_session()
+        try:
+            session.execute(sa_text("SELECT id FROM mainai_goals WHERE id = :id FOR UPDATE"), {"id": str(goal_id)})
+            lock_held.set()
+            release_lock.wait(timeout=10)
+            goal_row = session.get(MainAIGoal, goal_id)
+            task_row = session.get(MainAITask, task_id)
+            record_row = session.get(MainAIRecoveryRecord, record_id)
+
+            async def _run():
+                return await execute_takeover(session, task=task_row, goal=goal_row, record=record_row, dispatched_by="toctou-recovery")
+
+            _record_out, new_job = asyncio.run(_run())
+            session.commit()
+            results["new_job_id"] = new_job.id if new_job is not None else None
+        finally:
+            session.close()
+
+    def _thread_b_authorize():
+        session = _make_session()
+        try:
+            proposal = propose_execution_scope(session, owner_id=owner_id, goal_id=goal_id, idempotency_key=f"toctou-a-prop-{uuid.uuid4()}")
+            _, envelope = authorize_execution_scope(
+                session, owner_id=owner_id, proposal_id=proposal.id, authorized_by="founder",
+                authorized_paths=["README.md"], authorized_capabilities=["read_file"], authorized_risk="low",
+                envelope_idempotency_key=f"toctou-a-env-{uuid.uuid4()}",
+            )
+            session.commit()
+            results["envelope_id"] = envelope.id
+        finally:
+            session.close()
+
+    thread_a = threading.Thread(target=_thread_a_hold_then_takeover)
+    thread_a.start()
+    assert lock_held.wait(timeout=10), "thread A never acquired the goal-row lock"
+
+    thread_b = threading.Thread(target=_thread_b_authorize)
+    thread_b.start()
+    thread_b.join(timeout=2)
+    assert thread_b.is_alive(), "authorize_execution_scope() did NOT block on the goal-row lock thread A holds -- the fence is not real"
+
+    release_lock.set()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+
+    assert results.get("new_job_id") is not None  # legacy takeover dispatched -- goal was never governed at decision time
+    assert results.get("envelope_id") is not None  # founder's authorization only completes AFTER, never concurrently

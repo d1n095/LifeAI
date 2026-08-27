@@ -25,15 +25,32 @@ authorizes at that later moment.
 Adds exactly one new allowed `mainai_recovery_events.event_type` value -- no new table, no new
 column, mirrors migration 0035's exact ALTER CONSTRAINT shape.
 
-Revision ID: 0060
-Revises: 0059
+DOWNGRADE IS ONLY SAFE WHILE NO ROW HAS EVER RECORDED `takeover_declined_governed` -- proven,
+not assumed (see `test_downgrading_past_this_migration_fails_loudly_once_a_real_row_exists_
+not_silently` in test_recovery_takeover_authority_fencing.py, which inserts a genuine row via
+the real `execute_takeover()` code path against a persistent DB, then attempts this exact
+downgrade and asserts it raises `IntegrityError`). `mainai_recovery_events` is append-only at
+the DATABASE level (migration 0033's `trg_mainai_recovery_events_deny_mutation` -- UPDATE is
+unconditionally denied for every role, no GUC escape hatch the way `provider_spend_usage_events`
+has for its own settle path; DELETE only through an authorized owner erasure). There is
+therefore no way for this downgrade to rewrite or remove an existing `takeover_declined_governed`
+row to make the narrower CHECK constraint pass again -- and it must never try to, since
+silently bypassing that append-only guarantee just to make a downgrade succeed would be worse
+than the downgrade failing loudly. `re-add the narrower CHECK constraint` failing with a real
+`CheckViolation` in that situation is CORRECT, deliberate behavior, not a bug: it means real
+governed-recovery history exists and this migration cannot be safely undone, exactly like
+(undocumented until now) migration 0035's own `approval_granted` downgrade has always
+implicitly depended on no `approval_granted` event ever having been recorded.
+
+Revision ID: 0061
+Revises: 0060
 Create Date: 2026-08-26
 """
 
 from alembic import op
 
-revision = "0060"
-down_revision = "0059"
+revision = "0061"
+down_revision = "0060"
 branch_labels = None
 depends_on = None
 
@@ -56,6 +73,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Deliberately raises IntegrityError (CheckViolation) if any row already recorded
+    # 'takeover_declined_governed' -- see this migration's own module docstring. Never add a
+    # data-mutating workaround here; mainai_recovery_events' append-only guarantee (migration
+    # 0033) must not be bypassed just to make a downgrade succeed.
     op.execute(f"""
         ALTER TABLE mainai_recovery_events DROP CONSTRAINT ck_mainai_recovery_events_event_type;
         ALTER TABLE mainai_recovery_events ADD CONSTRAINT ck_mainai_recovery_events_event_type CHECK (
