@@ -651,7 +651,7 @@ async def test_downgrading_past_this_migration_fails_loudly_once_a_real_row_exis
     import subprocess
     import uuid as uuid_module
     from pathlib import Path
-    from urllib.parse import urlparse
+    from urllib.parse import urlparse, urlunparse
 
     import psycopg2
     from sqlalchemy import create_engine
@@ -660,10 +660,14 @@ async def test_downgrading_past_this_migration_fails_loudly_once_a_real_row_exis
     backend_root = Path(__file__).resolve().parents[3]
     base_dsn = os.environ["DATABASE_URL"]
     parsed = urlparse(base_dsn)
-    host, port, admin_user = parsed.hostname, parsed.port or 5432, parsed.username
     temp_db_name = f"lifeos_downgrade_probe_{uuid_module.uuid4().hex[:16]}"
-    admin_dsn = f"postgresql://{admin_user}@{host}:{port}/postgres"
-    temp_dsn = f"postgresql://{admin_user}@{host}:{port}/{temp_db_name}"
+    # Replace only the path (database name) and keep scheme/userinfo/host/port/query
+    # byte-for-byte from the real DATABASE_URL -- rebuilding the DSN by hand from
+    # hostname/port/username alone (as an earlier version of this test did) silently
+    # drops any password, which passes locally under trust-auth Postgres but fails in
+    # CI's password-auth container with "fe_sendauth: no password supplied".
+    admin_dsn = urlunparse(parsed._replace(path="/postgres"))
+    temp_dsn = urlunparse(parsed._replace(path=f"/{temp_db_name}"))
 
     admin_conn = psycopg2.connect(admin_dsn)
     admin_conn.autocommit = True
