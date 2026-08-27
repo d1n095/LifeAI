@@ -54,8 +54,12 @@ founder narrows, supersedes, or has not (yet) re-authorized after a prior envelo
 superseded, the very next tick sees that immediately, never a cached or assumed-still-valid
 scope."""
 
+import hashlib
+import json
 import logging
+import subprocess
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -86,6 +90,7 @@ from app.jobs.mainai_job_lease import claim_specific_mainai_job
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
 from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus, MainAITask, MainAITaskStatus
 from app.models.mainai_job import MainAIJobStatus
+from app.models.mainai_recovery import MainAITaskWorktree, MainAITaskWorktreeStatus
 from app.provider_spend import provider_spend_is_live
 from app.work_intelligence import bind_strategy_execution, create_strategy
 
@@ -296,6 +301,9 @@ async def run_authorized_goal_supervisor_tick(
             renew_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
             claimed_generation = claim_specific_mainai_job(db, job_id=job.id, worker_id=worker_id, lease_seconds=lease_seconds)
             if claimed_generation is not None:
+                # claim_specific updates via raw SQL — expire the ORM identity so later
+                # Operator/_require_context reads see running+locked_by, not a stale queued row.
+                db.refresh(job)
                 reset_goal_worktree_to_clean_head(repo_root)
             if claimed_generation is None:
                 db.refresh(job)
@@ -325,6 +333,77 @@ async def run_authorized_goal_supervisor_tick(
                 execution_id=execution.id,
                 idempotency_key=f"authorized-supervisor-binding:{task.id}:{job.id}",
             )
+            # Goal worktree is shared on disk (production_worktree); Operator still requires a
+            # durable MainAITaskWorktree ownership row + marker for any write capability.
+            current_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            existing_worktree = db.execute(
+                select(MainAITaskWorktree).where(MainAITaskWorktree.job_id == job.id)
+            ).scalar_one_or_none()
+            if existing_worktree is not None:
+                worktree = existing_worktree
+                worktree.lease_generation = claimed_generation
+                worktree.base_sha = current_head
+                worktree.branch = branch
+                worktree.path = str(repo_root.resolve())
+                worktree.status = MainAITaskWorktreeStatus.active
+                marker_token = worktree.marker_token
+            else:
+                marker_token = hashlib.sha256(
+                    f"{task.id}:{job.id}:{claimed_generation}".encode()
+                ).hexdigest()[:32]
+                worktree = MainAITaskWorktree(
+                    task_id=task.id,
+                    owner_id=goal.owner_id,
+                    job_id=job.id,
+                    lease_generation=claimed_generation,
+                    executor_id=worker_id,
+                    repo="local/supervisor-goal",
+                    base_sha=current_head,
+                    branch=branch,
+                    path=str(repo_root.resolve()),
+                    marker_token=marker_token,
+                    status=MainAITaskWorktreeStatus.active,
+                )
+                db.add(worktree)
+            marker = {
+                "task_id": str(task.id),
+                "job_id": str(job.id),
+                "marker_token": marker_token,
+                "lease_generation": claimed_generation,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            (repo_root / ".mainai_worktree_owner.json").write_text(
+                json.dumps(marker), encoding="utf-8"
+            )
+            exclude_path = Path(
+                subprocess.run(
+                    ["git", "rev-parse", "--git-path", "info/exclude"],
+                    cwd=str(repo_root),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout.strip()
+            )
+            if not exclude_path.is_absolute():
+                exclude_path = repo_root / exclude_path
+            exclude_path.parent.mkdir(parents=True, exist_ok=True)
+            existing_excludes = (
+                exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+            )
+            if ".mainai_worktree_owner.json" not in existing_excludes:
+                exclude_path.write_text(
+                    existing_excludes
+                    + ("" if existing_excludes.endswith("\n") or not existing_excludes else "\n")
+                    + ".mainai_worktree_owner.json\n",
+                    encoding="utf-8",
+                )
+            db.flush()
             return OperatorContext(
                 owner_id=goal.owner_id,
                 task_id=task.id,
@@ -332,10 +411,10 @@ async def run_authorized_goal_supervisor_tick(
                 worker_id=worker_id,
                 lease_generation=claimed_generation,
                 repository_root=repo_root,
-                expected_base_sha=base_sha,
+                expected_base_sha=current_head,
                 expected_branch=branch,
                 strategy_execution_id=binding_row.id,
-                worktree_id=None,
+                worktree_id=worktree.id,
                 allowed_paths=scope.allowed_paths,
                 allowed_capabilities=scope.allowed_capabilities,
             )
