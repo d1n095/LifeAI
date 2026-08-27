@@ -402,7 +402,8 @@ def reserve_provider_spend_call(
     """Atomically hold request/token/cost budget BEFORE any provider invocation.
 
     Idempotent on (owner_id, source_ref): a reserved or settled prior event is returned
-    without increasing holds. A released prior event is treated as a new call (new reserve).
+    without increasing holds. A released prior event FAILS CLOSED — append-only usage
+    rows cannot be resurrected under the same key (callers must allocate a new source_ref).
     """
     # Do NOT FOR UPDATE the usage row here — mainai_app has UPDATE revoked on append-only
     # usage events (Postgres FOR UPDATE requires UPDATE privilege). Serialize via the
@@ -413,7 +414,14 @@ def reserve_provider_spend_call(
             ProviderSpendUsageEvent.source_ref == source_ref,
         )
     ).scalar_one_or_none()
-    if prior is not None and prior.status != ProviderSpendUsageStatus.released.value:
+    if prior is not None:
+        if prior.status == ProviderSpendUsageStatus.released.value:
+            # Append-only usage rows cannot be resurrected under the same source_ref.
+            # Returning a released row as if it were a live hold would open a free invoke.
+            raise ProviderSpendError(
+                "provider spend source_ref was already released; a new source_ref is required"
+            )
+        # reserved or settled: idempotent return without increasing holds.
         return prior
 
     row = get_current_provider_spend_authorization(db, owner_id=owner_id, goal_id=goal_id)

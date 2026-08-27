@@ -529,6 +529,41 @@ def _candidate_payload(candidate):
     return asdict(candidate) if candidate else None
 
 
+def _allocate_provider_spend_source_ref(db, *, owner_id, base_ref: str) -> str:
+    """Pick a spend source_ref that is safe to reserve under append-only usage rows.
+
+    - No prior / reserved / settled → reuse base_ref (idempotent resume / crash reconcile).
+    - Released → allocate base_ref:aN for a fresh hold (never resurrect a released key).
+    """
+    from app.models.provider_spend import (
+        ProviderSpendUsageEvent,
+        ProviderSpendUsageStatus,
+    )
+    from app.provider_spend import ProviderSpendError
+
+    prior = db.execute(
+        select(ProviderSpendUsageEvent).where(
+            ProviderSpendUsageEvent.owner_id == owner_id,
+            ProviderSpendUsageEvent.source_ref == base_ref,
+        )
+    ).scalar_one_or_none()
+    if prior is None or prior.status != ProviderSpendUsageStatus.released.value:
+        return base_ref
+    for n in range(1, 1000):
+        cand = f"{base_ref}:a{n}"
+        row = db.execute(
+            select(ProviderSpendUsageEvent).where(
+                ProviderSpendUsageEvent.owner_id == owner_id,
+                ProviderSpendUsageEvent.source_ref == cand,
+            )
+        ).scalar_one_or_none()
+        if row is None or row.status != ProviderSpendUsageStatus.released.value:
+            return cand
+    raise ProviderSpendError(
+        "exhausted provider spend source_ref attempt space for this request"
+    )
+
+
 async def plan_with_provider(
     db,
     *,
@@ -607,9 +642,16 @@ async def plan_with_provider(
         reserve_provider_spend_call,
         settle_provider_spend_call,
     )
+    from app.models.provider_spend import (
+        ProviderSpendUsageEvent,
+        ProviderSpendUsageStatus,
+    )
 
-    spend_source_ref = (
+    spend_base_ref = (
         f"provider-planning:{request.owner_id}:{request.task_id}:{request.job_id}:{request_hash}"
+    )
+    spend_source_ref = _allocate_provider_spend_source_ref(
+        db, owner_id=request.owner_id, base_ref=spend_base_ref
     )
     spend_reserved = False
     if not planned_provider or not planned_model:
@@ -631,8 +673,15 @@ async def plan_with_provider(
             checkpoint_id=cp.id,
             context_set_id=context_set.id,
         )
+
+    preexisting = db.execute(
+        select(ProviderSpendUsageEvent).where(
+            ProviderSpendUsageEvent.owner_id == request.owner_id,
+            ProviderSpendUsageEvent.source_ref == spend_source_ref,
+        )
+    ).scalar_one_or_none()
     try:
-        reserve_provider_spend_call(
+        reserved_event = reserve_provider_spend_call(
             db,
             owner_id=request.owner_id,
             goal_id=request.goal_id,
@@ -656,6 +705,48 @@ async def plan_with_provider(
         cp = _checkpoint(db, request, "PROVIDER_SPEND_NOT_AUTHORIZED", detail)
         return PlanningResult(
             "PROVIDER_SPEND_NOT_AUTHORIZED",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        )
+
+    # Crash window A: a prior ticket left this source_ref reserved (invoke may have
+    # completed before settle). Never re-invoke. Consume reserved holds as conservative
+    # actuals so the ambiguous call is not labelled unspent, then wait honestly.
+    if (
+        preexisting is not None
+        and preexisting.status == ProviderSpendUsageStatus.reserved.value
+        and reserved_event.status == ProviderSpendUsageStatus.reserved.value
+    ):
+        settle_provider_spend_call(
+            db,
+            owner_id=request.owner_id,
+            source_ref=spend_source_ref,
+            prompt_tokens=int(reserved_event.reserved_prompt_tokens or 0),
+            completion_tokens=int(reserved_event.reserved_completion_tokens or 0),
+            cost_usd=reserved_event.reserved_cost_usd or Decimal("0"),
+            evidence={
+                "request_hash": request_hash,
+                "phase": "crash_before_settle_reconcile",
+                "reason": "unresolved reservation; refusing re-invoke",
+            },
+        )
+        detail = {
+            "request_hash": request_hash,
+            "reason": (
+                "prior provider spend reservation was still reserved after a crash window; "
+                "refusing to re-invoke the provider for the same source_ref"
+            ),
+            "failure_category": "unresolved_reservation",
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "spend_source_ref": spend_source_ref,
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
+        return PlanningResult(
+            "WAITING_PROVIDER",
             detail,
             checkpoint_id=cp.id,
             context_set_id=context_set.id,
