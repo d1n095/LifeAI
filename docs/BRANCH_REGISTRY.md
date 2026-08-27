@@ -6,32 +6,18 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Pass (2026-08-27 night): tip `8b2057d` — Claude concurrent spend/lease; #181 rebased
+## Pass (2026-08-27 night): tip `e10ae97` — #181 MERGED; #182 crash-before-settle
 
-**Integrations tip:** `8b2057d` (Merge #180). Claude landed real two-thread tests:
-- [#178](https://github.com/d1n095/LifeAI/pull/178) last-unit budget race (exactly one reservation)
-- [#179](https://github.com/d1n095/LifeAI/pull/179) supervisor-goal-lease claim race
-- [#180](https://github.com/d1n095/LifeAI/pull/180) revoke racing reserve
+**Integrations tip:** `e10ae97` (Merge #181).
 
 | PR | Status | Notes |
 |---|---|---|
-| [#181](https://github.com/d1n095/LifeAI/pull/181) | OPEN (Cursor) — rebased on tip | Supervisor spend fail-fast / defense-in-depth (Outcome B); mutation test proves delta |
+| [#178](https://github.com/d1n095/LifeAI/pull/178)–[#180](https://github.com/d1n095/LifeAI/pull/180) | MERGED | Concurrent last-unit budget / lease / revoke-vs-reserve races (Claude) |
+| [#181](https://github.com/d1n095/LifeAI/pull/181) | **MERGED** @ `e10ae97` | Supervisor spend fail-fast / defense-in-depth (Outcome B; mutation-proven) |
+| [#182](https://github.com/d1n095/LifeAI/pull/182) | OPEN (Cursor) | Crash before settle → refuse re-invoke; released source_ref fail-closed |
 
-**Phase 2 concurrent near-exhausted budget:** already proven by #178 — do not redesign; Cursor night run moves to Phase 3 after #181 merges.
+**Next:** Phase 4 local write crash before verify.
 
-## Pass (2026-08-27): tip `77d3f1e` — #177 MERGED; spend revoke-before-reserve TOCTOU
-
-**Integrations tip:** `77d3f1e` (Merge #177).
-
-| PR / Branch | Status | Notes |
-|---|---|---|
-| [#168](https://github.com/d1n095/LifeAI/pull/168) | **MERGED** @ `6a3572e` | Canonical goal finalize |
-| [#177](https://github.com/d1n095/LifeAI/pull/177) | **MERGED** @ `77d3f1e` | Effect-time envelope authority + governed empty-capability fail-closed |
-| [#181](https://github.com/d1n095/LifeAI/pull/181) `cursor/toctou-spend-revoke-before-reserve` | **OPEN (Cursor)** @ `3be536b` | Live spend recheck before `plan_with_provider`; revoke after eligibility → zero invoke |
-
-**Remaining Cursor TOCTOU (after this):** concurrent budget exhaustion; path/cap outside envelope (narrowing already covers plan-time); two-worker race; crash after invoke before settle; crash after write before verify; completed-goal later tick.
-
-**Claude (parallel):** remaining Vault callers / logs-leakage / disclosure — do not collide.
 
 ## Pass (2026-08-27): tip `6a3572e` — #168 MERGED; Cursor starts stale-authority TOCTOU
 
