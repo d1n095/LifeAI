@@ -622,58 +622,119 @@ async def test_a_crashed_governed_task_is_declined_by_recovery_then_re_governed_
 
 
 @pytest.mark.asyncio
-async def test_downgrading_past_this_migration_fails_loudly_once_a_real_row_exists_not_silently(
-    db_session, superuser_db, owner_id
-):
-    """`alembic downgrade -1` re-adds the narrower CHECK constraint that predates
-    'takeover_declined_governed'. A no-data round-trip proves nothing about whether that is
-    actually safe once real recovery history exists -- this test inserts a GENUINE row via
-    the real execute_takeover() code path (not a hand-crafted INSERT) against THIS test's own
-    live database, then actually runs `alembic downgrade -1` as a real subprocess against it.
+async def test_downgrading_past_this_migration_fails_loudly_once_a_real_row_exists_not_silently():
+    """`alembic downgrade -1` (from migration 0061's own head at the time this test was
+    written) re-adds the narrower CHECK constraint that predates 'takeover_declined_governed'.
+    A no-data round-trip proves nothing about whether that is actually safe once real recovery
+    history exists -- this test inserts a GENUINE row via the real execute_takeover() code
+    path (not a hand-crafted INSERT), then actually runs `alembic downgrade -1` as a real
+    subprocess.
 
     Must fail loudly (IntegrityError/CheckViolation), never silently succeed or silently drop/
     rewrite the row -- mainai_recovery_events is append-only at the database level (migration
     0033's trg_mainai_recovery_events_deny_mutation denies UPDATE unconditionally, for every
     role, with no GUC escape hatch), so there is no safe way for a downgrade to make room for
-    the narrower constraint other than refusing. Alembic runs each migration inside a
-    transaction (transactional DDL), so a failed downgrade must leave the schema completely
-    unchanged -- verified here by checking `alembic current` is still 0061 afterward, so this
-    test cannot corrupt state for whatever runs after it in the same session."""
+    the narrower constraint other than refusing.
+
+    Runs against a genuinely ISOLATED, throwaway database -- never the shared session-scoped
+    `db_session`/`superuser_db` database every other test in this pytest run also depends on.
+    `alembic downgrade -1` is inherently a RELATIVE target: it always downgrades whatever the
+    CURRENT actual head is, not necessarily migration 0061 specifically. Any later migration
+    added on top of 0061 in the future (there already is one -- 0062) would make a bare
+    `downgrade -1` against the shared database downgrade THAT migration instead, potentially
+    dropping a table/tearing down state a later migration's own downgrade() is not designed to
+    survive being called on real data, and -- worse -- silently corrupting schema state for
+    every OTHER test that runs afterward in the same pytest session, since nothing else in the
+    suite re-migrates the shared database mid-session. A dedicated, disposable database
+    created/torn down entirely within this one test closes that class of bug structurally,
+    regardless of how many further migrations get layered on top later."""
     import subprocess
+    import uuid as uuid_module
     from pathlib import Path
+    from urllib.parse import urlparse
 
-    goal = _goal(db_session, owner_id)
-    _authorize(db_session, owner_id, goal.id)
-    db_session.commit()
-
-    task, dead_job = _task_and_dead_job(db_session, superuser_db, owner_id, goal)
-    record = await _through_classification(db_session, task, dead_job)
-    assert record.classification == RecoveryClassification.nothing_done
-
-    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="downgrade-proof")
-    db_session.commit()
-    assert new_job is None
-
-    row = db_session.execute(
-        sa_text("SELECT event_type FROM mainai_recovery_events WHERE recovery_record_id = :id AND event_type = 'takeover_declined_governed'"),
-        {"id": str(record.id)},
-    ).one()
-    assert row[0] == "takeover_declined_governed"  # the genuine row this downgrade must refuse to orphan
-    # Close out this session's own transaction (even a read-only SELECT holds an
-    # AccessShareLock until commit/rollback) -- otherwise it deadlocks against the subprocess
-    # below's own `ALTER TABLE ... DROP CONSTRAINT`, which needs ACCESS EXCLUSIVE.
-    db_session.commit()
+    import psycopg2
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
 
     backend_root = Path(__file__).resolve().parents[3]
-    env = dict(os.environ)
-    result = subprocess.run(
-        ["alembic", "downgrade", "-1"], cwd=str(backend_root), env=env, capture_output=True, text=True,
-    )
-    assert result.returncode != 0, f"downgrade unexpectedly succeeded with real data present:\n{result.stdout}\n{result.stderr}"
-    assert "CheckViolation" in result.stderr or "IntegrityError" in result.stderr or "violates check constraint" in result.stderr
+    base_dsn = os.environ["DATABASE_URL"]
+    parsed = urlparse(base_dsn)
+    host, port, admin_user = parsed.hostname, parsed.port or 5432, parsed.username
+    temp_db_name = f"lifeos_downgrade_probe_{uuid_module.uuid4().hex[:16]}"
+    admin_dsn = f"postgresql://{admin_user}@{host}:{port}/postgres"
+    temp_dsn = f"postgresql://{admin_user}@{host}:{port}/{temp_db_name}"
 
-    current = subprocess.run(["alembic", "current"], cwd=str(backend_root), env=env, capture_output=True, text=True)
-    assert "0061" in current.stdout  # transactional DDL rollback -- schema genuinely unchanged
+    admin_conn = psycopg2.connect(admin_dsn)
+    admin_conn.autocommit = True
+    try:
+        with admin_conn.cursor() as cur:
+            cur.execute(f'CREATE DATABASE "{temp_db_name}"')
+
+        env = dict(os.environ)
+        env["DATABASE_URL"] = temp_dsn
+        upgraded = subprocess.run(
+            ["alembic", "upgrade", "head"], cwd=str(backend_root), env=env, capture_output=True, text=True,
+        )
+        assert upgraded.returncode == 0, f"isolated probe DB failed to migrate to head:\n{upgraded.stdout}\n{upgraded.stderr}"
+        current_before = subprocess.run(["alembic", "current"], cwd=str(backend_root), env=env, capture_output=True, text=True)
+        assert "0061" in current_before.stdout  # this test only means anything against exactly 0061's own downgrade
+
+        temp_engine = create_engine(temp_dsn)
+        temp_session = sessionmaker(bind=temp_engine)()
+        try:
+            owner_id = uuid_module.uuid4()
+            temp_session.execute(
+                sa_text(
+                    "INSERT INTO users (id, email, password_hash, role, is_active, created_at, email_verified, sessions_valid_after) "
+                    "VALUES (:id, :email, 'x', 'founder', true, now(), true, now())"
+                ),
+                {"id": str(owner_id), "email": f"downgrade-probe-{owner_id}@test.local"},
+            )
+            temp_session.commit()
+
+            goal = _goal(temp_session, owner_id)
+            _authorize(temp_session, owner_id, goal.id)
+            temp_session.commit()
+
+            task, dead_job = _task_and_dead_job(temp_session, temp_session, owner_id, goal)
+            record = await _through_classification(temp_session, task, dead_job)
+            assert record.classification == RecoveryClassification.nothing_done
+
+            record, new_job = await execute_takeover(temp_session, task=task, goal=goal, record=record, dispatched_by="downgrade-proof")
+            temp_session.commit()
+            assert new_job is None
+
+            row = temp_session.execute(
+                sa_text("SELECT event_type FROM mainai_recovery_events WHERE recovery_record_id = :id AND event_type = 'takeover_declined_governed'"),
+                {"id": str(record.id)},
+            ).one()
+            assert row[0] == "takeover_declined_governed"  # the genuine row this downgrade must refuse to orphan
+            # Close out this session's own transaction (even a read-only SELECT holds an
+            # AccessShareLock until commit/rollback) -- otherwise it deadlocks against the
+            # subprocess below's own `ALTER TABLE ... DROP CONSTRAINT`, which needs ACCESS
+            # EXCLUSIVE.
+            temp_session.commit()
+        finally:
+            temp_session.close()
+            temp_engine.dispose()
+
+        result = subprocess.run(
+            ["alembic", "downgrade", "-1"], cwd=str(backend_root), env=env, capture_output=True, text=True,
+        )
+        assert result.returncode != 0, f"downgrade unexpectedly succeeded with real data present:\n{result.stdout}\n{result.stderr}"
+        assert "CheckViolation" in result.stderr or "IntegrityError" in result.stderr or "violates check constraint" in result.stderr
+
+        current_after = subprocess.run(["alembic", "current"], cwd=str(backend_root), env=env, capture_output=True, text=True)
+        assert "0061" in current_after.stdout  # transactional DDL rollback -- schema genuinely unchanged
+    finally:
+        with admin_conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()",
+                (temp_db_name,),
+            )
+            cur.execute(f'DROP DATABASE IF EXISTS "{temp_db_name}"')
+        admin_conn.close()
 
 
 # ---------------------------------------------------------------- first-governance TOCTOU race
