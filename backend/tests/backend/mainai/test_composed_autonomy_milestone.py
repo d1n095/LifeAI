@@ -722,6 +722,10 @@ async def test_composed_two_task_same_goal_worktree_continuation(
     assert task_a.status == MainAITaskStatus.completed
     assert task_b.status == MainAITaskStatus.ready
     assert len(adapter.calls) == 1
+    # Invariant A: first task complete while dependent remains ready → goal stays running.
+    superuser_db.refresh(goal)
+    assert goal.status == MainAIGoalStatus.running
+    assert goal.final_outcome is None
 
     import app.development_supervisor.production_worktree as wt_module
 
@@ -743,10 +747,11 @@ async def test_composed_two_task_same_goal_worktree_continuation(
         ).scalars()
     ]
     assert len(adapter.calls) == 2
-    # Driver/_finalize_task_outcome recomputes readiness but does NOT call
-    # record_final_report — so a fully completed task graph can leave the goal
-    # `running`. That is the next real autonomy edge after ownership is fixed.
-    assert goal.status == MainAIGoalStatus.running
+    # Canonical B5 rollup: Driver completion gate → recompute → record_final_report.
+    # No manual goal mutation / no test-side record_final_report bridge.
+    assert goal.status == MainAIGoalStatus.completed
+    assert goal.final_outcome is not None
+    assert goal.completed_at is not None
 
     final = goal_files[0].read_text(encoding="utf-8")
     assert "multiply" in final and "divide" in final
@@ -760,13 +765,36 @@ async def test_composed_two_task_same_goal_worktree_continuation(
         == []
     )
 
-    # Later tick: neither completed task re-executes; no more provider calls.
-    # Goal may still be eligible while status remains running with no bindable tasks.
+    # Later Worker tick: zero provider calls, no re-execution, goal stays completed.
+    from app.development_supervisor.production_entry import eligible_authorized_goals
+    from app.models.mainai_job import MainAIJob
+
+    jobs_before = (
+        superuser_db.execute(
+            select(MainAIJob).where(MainAIJob.owner_id == user.id)
+        )
+        .scalars()
+        .all()
+    )
     calls_before = len(adapter.calls)
     await worker._advance_authorized_supervisor_goals(superuser_db)
+    worker._finalize_mainai_execution_goals(superuser_db)
     superuser_db.commit()
     assert len(adapter.calls) == calls_before
     superuser_db.refresh(task_a)
     superuser_db.refresh(task_b)
+    superuser_db.refresh(goal)
     assert task_a.status == MainAITaskStatus.completed
     assert task_b.status == MainAITaskStatus.completed
+    assert goal.status == MainAIGoalStatus.completed
+    assert [
+        g.id for g, _ in eligible_authorized_goals(superuser_db, limit=50) if g.owner_id == user.id
+    ] == []
+    jobs_after = (
+        superuser_db.execute(
+            select(MainAIJob).where(MainAIJob.owner_id == user.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert len(jobs_after) == len(jobs_before)

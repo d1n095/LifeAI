@@ -6,95 +6,25 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Pass (2026-08-27, senaste): #173 MERGAD (fristående), #174/#175 OPEN (stackade V2/V4)
+## Pass (2026-08-27): tip `505c696` — Vault through #176; #168 final rebase
 
-**#173** (`claude/pytest-boot-privilege-parity`, Claude) — **MERGED** @ `93bed6a`. Fristående,
-INTE Vault-linjen. `tests/conftest.py`s sessionsfixtur kör nu samma RLS/privilegie-boot-sekvens
-(`apply_rls`/`apply_mainai_job_runtime_privileges`/`apply_mainai_execution_privileges`) som
-produktionens riktiga startup-event — hittad via #172:s regressionskörning, se Pass nedan.
+**Integrations tip:** `505c696` (#176 merged).
 
-**#174** (`claude/life-vault-egress-v2-query-embedding`, Claude) — **OPEN**, väntar på CI.
-Sluter V2 HELT: query-embedding (`rag/retrieve.py`, `routers/library.py`) gated via
-`embed_with_policy()`. Även: log/leakage-audit (inget läckage hittat) + ny dokumenterad lucka
-**V8** (disclosure-ledgern saknar document/project/conversation-länkning — kan bara svara "fick
-provider X något alls" inte "vad fick provider X om projekt Y"). Basgren: integrationsgrenen
-@ `93bed6a`.
+| PR | Status | Notes |
+|---|---|---|
+| [#167](https://github.com/d1n095/LifeAI/pull/167) | MERGED | Composed autonomy + PER-GOAL Supervisor worktree lease auth |
+| [#168](https://github.com/d1n095/LifeAI/pull/168) | OPEN (Cursor) | Canonical goal finalize; final rebase onto current tip |
+| [#169](https://github.com/d1n095/LifeAI/pull/169) | MERGED | Isolate migration-0061 downgrade probe DB |
+| [#170](https://github.com/d1n095/LifeAI/pull/170)–[#172](https://github.com/d1n095/LifeAI/pull/172) | MERGED | Life Vault foundation + chat/RAG + document/media embedding egress |
+| [#173](https://github.com/d1n095/LifeAI/pull/173) | MERGED | Pytest boot / RLS privilege parity with production |
+| [#174](https://github.com/d1n095/LifeAI/pull/174)–[#176](https://github.com/d1n095/LifeAI/pull/176) | MERGED | Query embedding + more chat callers + transcription/verification sweep |
 
-**#175** (`claude/life-vault-egress-v4-mechanical-callers`, Claude) — **OPEN**, väntar på CI.
-**STACKAD på #174** (måste mergas efter). Sluter DELVIS V4: `workbench.py`/`planner.py`/
-`corpus_review.py` gated (owner_id strukturellt tillgängligt). `lesson_conflicts.py`/
-`agent_orchestration.py` INTE gated — `EngineeringLesson`/`AgentTask` saknar owner_id helt
-(dokumenterat "founder-wide, not per-owner" i modellernas egna docstrings) — grundarbeslut
-krävs, ingen påhittad identitet. `execution_job.py` INTE rört (Cursor-ägt, #168 öppet).
+**#168 semantics (do not redesign):**
+- successful completed task graph → immediate canonical `record_final_report`
+- failed / retryable_failed → keep ACTIVE for auto-replan; worker post-replan finalize closes
+- founder-cancel / already-terminal → late finalize cannot overwrite
 
-**Integrationsgren-tip:** `93bed6a` (#170→#171→#172→#173 mergade). Merge-ordning: #174 → #175
-(stackad) → integrationsgrenen.
-
-## Pass (2026-08-27, uppdaterad): #167 MERGAD, #169 MERGAD, #170 OPEN — Life Vault-grunden
-
-**#167** (`cursor/composed-autonomy-milestone`) — **MERGED** @ `4261787`, med `bf843cb` som
-det slutgiltiga fixande committet. Den slutgiltiga arkitekturen ersatte det ursprungliga
-per-job-marker-återanvändningsförslaget (avvisat, kolliderade med delad PER-GOAL-worktree)
-med Supervisor-goal-lease-strukturverifiering: nya `OperatorContext`-fält
-`supervisor_goal_id`/`supervisor_lease_id`/`supervisor_lease_generation`, ömsesidigt
-uteslutande mot `worktree_id`, verifierade mot en aktiv `supervisor_goal_leases`-rad +
-kanonisk `goal_worktree_path`/`goal_branch_name`. Ingen `MainAITaskWorktree`-markörfil för
-det per-goal-fallet.
-
-**#168** (`cursor/goal-finalize-canonical-wire`, Cursor) — OPEN, granskad av Claude, inga
-blockerande fynd. Cursor äger denna gren.
-
-**#169** (`claude/isolate-downgrade-probe-db`, Claude) — **MERGED** @ `d0c5fee`. Fixade en
-verklig regression i redan mergad kod: `test_downgrading_past_this_migration_fails_loudly_...`
-körde `alembic downgrade -1` (ett RELATIVT mål) mot den DELADE test-databasen, vilket tyst
-nedgraderar VILKEN migration som än råkar vara head — inte nödvändigtvis 0061 — och korrumperar
-schemat för varje senare test i samma pytest-session så fort en migration läggs ovanpå 0061
-(vilket #170 nedan gör). Fix: testet bygger nu sin egen disponibla databas
-(create → migrera → bygg riktig data → kör den riktiga downgrade-proben → drop). Ett andra
-CI-fel efter första pushen (DSN-konstruktionen tappade lösenordskomponenten, fungerade lokalt
-under trust-auth men inte i CI:s lösenords-auth-container) fixades i samma PR innan merge.
-
-**#170** (`claude/life-vault-egress-control`, Claude) — **MERGED** @ `5a80310`. Life Vault /
-External-AI Egress Control-grunden: `provider_disclosure_events`-ledger (migration 0062,
-append-only/RLS, samma mönster som `provider_spend_usage_events`), `app/egress_policy/service.py`
-(`enforce_egress_policy()` — default-deny-grind, hård-deny på NEVER_EGRESS-markerat innehåll,
-redigering via befintlig `_redact_value()`), inkopplad i `provider_planning.plan_with_provider()`
-(V3) omedelbart före den riktiga `.propose()`-anropet. Se `docs/LIFE_VAULT_EGRESS_CONTROL.md` för
-hela hotmodellen/arkitekturkartan/rankad blockerlista (V1-V7).
-
-**#171** (`claude/life-vault-egress-v1-chat-wiring`, Claude) — **MERGED** @ `e5498d7`. Sluter V1:
-`app/providers/registry.chat_with_fallback()` får valfria `owner_id`/`purpose`/`requested_by`/
-`task_id`/`goal_id`/`job_id` (default `None`, inkrementell adoption — övriga anropare opåverkade).
-`app/routers/chat.py` skickar nu `owner_id=user.id` — grundarens egen chatt, den största
-befintliga exponeringen av rått dokumentinnehåll, är nu grindad.
-
-**#172** (`claude/life-vault-egress-v2-embedding`, Claude) — **MERGED** @ `ece6a97` (var stackad
-på #171, ombasad till integrationsgrenen efter #171:s merge, ren diff bekräftad efter ombasning).
-Sluter HALVA V2 (dokument-/media-embedding, `rag/ingest.py` + `rag/media_import.py` via ny
-`embed_with_policy()`) — INTE query-embedding-halvan (`rag/retrieve.py`/`routers/library.py`,
-kvarstår öppen, annan felhanteringsform).
-
-**#173** (`claude/pytest-boot-privilege-parity`, Claude) — **OPEN**, väntar på CI. Fristående fix,
-INTE del av Life Vault-linjen — grenad direkt från integrationsgrenen, inte stackad. Roten till
-#172:s hittade `erase_own_agent_coordination_children`-fynd: `tests/conftest.py`s sessions-
-fixture körde aldrig `apply_rls()`/`apply_mainai_job_runtime_privileges()`/
-`apply_mainai_execution_privileges()` (samma tre funktioner `app/main.py`s riktiga startup-event
-kör, i samma ordning) — dessa privilegier applicerades bara som en BIEFFEKT av att någon annan
-test i samma session råkade instansiera `client`-fixturen först. En test som kör `SessionLocal()`
-direkt och körs tidigt nog i en session/delmängd (t.ex. `test_bootstrap_hardening.py` ensamt)
-fick då en falsk "permission denied". Fix: kör alla tre funktionerna direkt efter migrering,
-samma ordning som produktionens riktiga boot-sekvens. Verifierat: full svit 2179 passed / 11
-failed (samtliga tidigare dokumenterade TZ-artefakter) / 1 skipped — inga nya fel, och det
-ursprungligen felande testet passerar nu.
-
-**Claude-äger, inte Cursor:** Life Vault / external-AI-egress-linjen (#170→#171→#172, nästa steg
-V2:s query-embedding-halva eller V4) — se `docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Rör inte
-#167/#168:s filer (`development_operator/service.py`, `production_entry.py`,
-`production_worktree.py`, `worker.py`).
-
-**Integrationsgren-tip (origin/claude/det-kommer-mer-879lcm):** `ece6a97` (#170→#171→#172 mergade).
-#173 väntar på egen CI innan merge.
-**Merge-ordning:** #171 → #172 (stackad) → integrationsgrenen.
+**Ownership:** Cursor owns #168 + composed TOCTOU. Claude owns remaining Vault/egress.
 
 ## Pass 80b (2026-08-25): Autonomy Activation B4 — plan-derived scope narrowing (Cursor)
 

@@ -298,10 +298,19 @@ def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
     Reuses `task_statuses`, already computed above for the terminal check, rather than a
     second query. Only ever flips `running` <-> `waiting`; never touches
     `pending`/`planning`/`blocked`/a terminal status, so it can never race or conflict with the
-    terminal-close branch below or with `create_plan()`'s own `pending -> running` transition."""
+    terminal-close branch below or with `create_plan()`'s own `pending -> running` transition.
+
+    IDEMPOTENCY / FOUNDER AUTHORITY: if the goal is already in a terminal status
+    (`completed`/`failed`/`cancelled`), this function returns the report without mutating
+    status, `final_outcome`, or `completed_at`. A second finalize after Driver completion is
+    therefore stable, and a founder cancel/supersede cannot be overwritten by a late task
+    completion race."""
     report = generate_goal_report(db, goal_id=goal.id)
 
-    from app.models.mainai_execution import TERMINAL_MAINAI_TASK_STATUSES
+    from app.models.mainai_execution import TERMINAL_MAINAI_GOAL_STATUSES, TERMINAL_MAINAI_TASK_STATUSES
+
+    if goal.status in TERMINAL_MAINAI_GOAL_STATUSES:
+        return report
 
     task_statuses = [MainAITaskStatus(t["task_outcome"]) for t in report["tasks"]]
     all_terminal = bool(task_statuses) and all(s in TERMINAL_MAINAI_TASK_STATUSES for s in task_statuses)

@@ -816,6 +816,10 @@ class Worker:
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._expire_stale_agent_scope_leases(claim_db)
             await self._advance_authorized_supervisor_goals(claim_db)
+            # Reconcile again after Supervisor/Driver may have completed the last task in
+            # this same tick. Primary rollup is now inside `_finalize_task_outcome`; this
+            # second scan covers crash/retry graphs that became terminal without that gate.
+            self._finalize_mainai_execution_goals(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
             claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
