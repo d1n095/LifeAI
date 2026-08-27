@@ -1245,7 +1245,71 @@ async def run_supervisor(
                 ),
                 cp,
             )
-        driver = run_driver(db, context=context, plan=planning.plan)
+        # ACCEPTED → derive plan-cited paths/capabilities, intersect envelope, enforce at Driver.
+        from app.development_driver.service import DRIVER_DIRECTIVES
+        from app.development_supervisor.plan_scope_narrowing import (
+            PlanScopeNarrowingError,
+            narrow_task_scope_from_accepted_development_plan,
+        )
+
+        try:
+            narrowed = narrow_task_scope_from_accepted_development_plan(
+                envelope_paths=tuple(scope.allowed_paths),
+                envelope_capabilities=tuple(scope.allowed_capabilities),
+                plan=planning.plan,
+            )
+            operator_steps = [
+                step
+                for step in planning.plan.steps
+                if getattr(step, "capability", None) not in DRIVER_DIRECTIVES
+            ]
+            if operator_steps:
+                if not narrowed.allowed_paths:
+                    raise PlanScopeNarrowingError(
+                        "accepted plan cites no paths; refusing to fall back to full envelope"
+                    )
+                if not narrowed.allowed_capabilities:
+                    raise PlanScopeNarrowingError(
+                        "accepted plan cites no capabilities; refusing to fall back to full envelope"
+                    )
+                exec_context = replace(
+                    context,
+                    allowed_paths=narrowed.allowed_paths,
+                    allowed_capabilities=narrowed.allowed_capabilities,
+                )
+                exec_context = bind_execution_context(
+                    scope=scope, binding=binding, context=exec_context
+                )
+            else:
+                # Directive-only plans (e.g. verification_evaluate) — Driver owns them; do not
+                # invent path/capability ceilings from an empty citation set.
+                exec_context = context
+        except PlanScopeNarrowingError as exc:
+            cp = _checkpoint(
+                db,
+                goal=goal,
+                task=task,
+                job_id=job.id,
+                phase="OUT_OF_SCOPE",
+                state={
+                    "completed_task_ids": [str(value) for value in selected],
+                    "selected_task_id": str(task.id),
+                    "planning_checkpoint_id": str(planning.checkpoint_id)
+                    if planning.checkpoint_id
+                    else None,
+                    "narrowing_error": str(exc),
+                },
+            )
+            return _result(
+                "OUT_OF_SCOPE",
+                goal,
+                completed_jobs,
+                selected,
+                assessments,
+                str(exc),
+                cp,
+            )
+        driver = run_driver(db, context=exec_context, plan=planning.plan)
         if driver.classification != "COMPLETE":
             if driver.classification in {
                 "VERIFICATION_REQUIRED",

@@ -89,6 +89,8 @@ def test_plan_capability_outside_envelope_fails_closed():
 
 
 def test_empty_citations_do_not_fall_back_to_full_envelope():
+    # Driver directives alone are not operator/envelope capabilities — citations stay empty
+    # and must not expand to the full envelope ceiling.
     candidate = _candidate(
         CandidateStep("gate", "evaluate", "ok", "verification_evaluate", {}),
     )
@@ -98,4 +100,10 @@ def test_empty_citations_do_not_fall_back_to_full_envelope():
         candidate=candidate,
     )
     assert narrowed.allowed_paths == ()
-    assert narrowed.allowed_capabilities == ("verification_evaluate",)
+    assert narrowed.allowed_capabilities == ()
+    assert narrowed.allowed_paths != ("a.py", "b.py")
+    assert set(narrowed.allowed_capabilities) != {
+        "read_file",
+        "patch_file",
+        "verification_evaluate",
+    }

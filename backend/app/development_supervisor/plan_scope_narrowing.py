@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.development_driver.service import DRIVER_DIRECTIVES
 from app.safe_planner.service import PATH_KEYS, PlanCandidate
 
 
@@ -71,7 +72,7 @@ def extract_plan_citations(candidate: PlanCandidate) -> tuple[tuple[str, ...], t
     paths: list[str] = []
     capabilities: list[str] = []
     for step in candidate.steps:
-        if step.capability:
+        if step.capability and step.capability not in DRIVER_DIRECTIVES:
             capabilities.append(step.capability)
         paths.extend(_paths_from_arguments(dict(step.arguments or {})))
     return (
@@ -80,20 +81,15 @@ def extract_plan_citations(candidate: PlanCandidate) -> tuple[tuple[str, ...], t
     )
 
 
-def narrow_task_scope_from_accepted_plan(
+def _narrow_from_citations(
     *,
     envelope_paths: tuple[str, ...] | list[str],
     envelope_capabilities: tuple[str, ...] | list[str],
-    candidate: PlanCandidate,
+    cited_paths: tuple[str, ...],
+    cited_caps: tuple[str, ...],
 ) -> NarrowedTaskScope:
-    """Intersect founder envelope ceiling with citations from an already-validated plan.
-
-    Call only AFTER Safe Planner ACCEPTED the candidate — never while constructing the
-    initial production_entry WorkBinding (no provider plan exists there yet).
-    """
     envelope_path_set = {p for p in envelope_paths if p}
     envelope_cap_set = {c for c in envelope_capabilities if c}
-    cited_paths, cited_caps = extract_plan_citations(candidate)
 
     escaped_paths = [p for p in cited_paths if p not in envelope_path_set]
     if escaped_paths:
@@ -111,4 +107,46 @@ def narrow_task_scope_from_accepted_plan(
         allowed_capabilities=cited_caps,
         cited_paths=cited_paths,
         cited_capabilities=cited_caps,
+    )
+
+
+def narrow_task_scope_from_accepted_plan(
+    *,
+    envelope_paths: tuple[str, ...] | list[str],
+    envelope_capabilities: tuple[str, ...] | list[str],
+    candidate: PlanCandidate,
+) -> NarrowedTaskScope:
+    """Intersect founder envelope ceiling with citations from an already-validated plan.
+
+    Call only AFTER Safe Planner ACCEPTED the candidate — never while constructing the
+    initial production_entry WorkBinding (no provider plan exists there yet).
+    """
+    cited_paths, cited_caps = extract_plan_citations(candidate)
+    return _narrow_from_citations(
+        envelope_paths=envelope_paths,
+        envelope_capabilities=envelope_capabilities,
+        cited_paths=cited_paths,
+        cited_caps=cited_caps,
+    )
+
+
+def narrow_task_scope_from_accepted_development_plan(
+    *,
+    envelope_paths: tuple[str, ...] | list[str],
+    envelope_capabilities: tuple[str, ...] | list[str],
+    plan,
+) -> NarrowedTaskScope:
+    """Same narrowing against the exact ACCEPTED DevelopmentPlan Driver will execute."""
+    paths: list[str] = []
+    capabilities: list[str] = []
+    for step in plan.steps:
+        capability = getattr(step, "capability", None)
+        if capability and capability not in DRIVER_DIRECTIVES:
+            capabilities.append(capability)
+        paths.extend(_paths_from_arguments(dict(getattr(step, "arguments", None) or {})))
+    return _narrow_from_citations(
+        envelope_paths=envelope_paths,
+        envelope_capabilities=envelope_capabilities,
+        cited_paths=tuple(dict.fromkeys(paths)),
+        cited_caps=tuple(dict.fromkeys(capabilities)),
     )

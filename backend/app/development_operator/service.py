@@ -150,6 +150,9 @@ class OperatorContext:
     strategy_execution_id: uuid.UUID
     worktree_id: uuid.UUID | None = None
     allowed_paths: tuple[str, ...] = ()
+    # Empty = legacy unrestricted (path-only era). Non-empty = fail-closed capability ceiling
+    # (envelope and/or plan-derived narrowing). Never invent capabilities outside this set.
+    allowed_capabilities: tuple[str, ...] = ()
     remote_write_authorized: bool = False
     expected_remote_sha: str | None = None
     disposable_database_authorized: bool = False
@@ -291,6 +294,24 @@ def _require_context(db, context: OperatorContext, *, write: bool = False):
             "repository HEAD does not match expected base SHA"
         )
     return task, job, binding, None
+
+
+def _require_capability(context: OperatorContext, capability: str) -> None:
+    """Enforce OperatorContext.allowed_capabilities when a real ceiling is present.
+
+    Empty tuple preserves legacy callers that only set path scopes. Once production_entry /
+    post-ACCEPT narrowing sets a non-empty ceiling, any capability outside it fails closed
+    here — not after a write already happened.
+    """
+    ceiling = tuple(context.allowed_capabilities or ())
+    if not ceiling:
+        return
+    if capability not in ceiling:
+        raise OperatorCapabilityMissing(
+            capability,
+            why_needed="capability is outside the authorized OperatorContext ceiling",
+            unrelated_work_can_continue=True,
+        )
 
 
 def _path(context: OperatorContext, value: str, *, write: bool = False) -> Path:
