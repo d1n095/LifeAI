@@ -119,9 +119,20 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # an unhandled exception. classify_provider_exception() turns either into a safe, sanitized
     # message (never a raw URL/key — see that function's own guarantee), fed into
     # build_context_status() below instead of collapsing straight to a fixed string.
+    # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
+    # embedding half): retrieve_context() now also gates the query text itself through
+    # enforce_egress_policy() before it reaches the embedding provider. A NEVER_EGRESS-marked
+    # query is refused BEFORE any provider call -- never treated as a provider outage, never
+    # silently retried against a different provider (embedding has no fallback chain in
+    # MainAI 0.1 in the first place, see resolve_active()'s own docstring), and it degrades
+    # exactly the same way a provider failure already does here: zero grounding, an accurate
+    # degraded reason, the chat turn still completes ungrounded rather than crashing.
     retrieval_degraded_reason: str | None = None
     try:
         hits = await retrieve_context(db, user.id, user_message.content, top_k=5)
+    except EgressDeniedError as exc:
+        hits = []
+        retrieval_degraded_reason = str(exc)
     except (ProviderError, httpx.HTTPError) as exc:
         hits = []
         retrieval_degraded_reason = classify_provider_exception(exc).message

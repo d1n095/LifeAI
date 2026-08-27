@@ -238,6 +238,39 @@ def test_embedding_failure_degrades_to_ungrounded_reply_when_chat_still_works(cl
     assert body["sources"] == []
 
 
+def test_never_egress_marked_message_is_denied_at_retrieval_without_crashing_then_denied_again_at_chat(client, monkeypatch):
+    """Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
+    embedding half): retrieve_context() now gates the query text (the user's own message)
+    itself, independently of chat_with_fallback()'s own gate (V1) on the same message once it
+    becomes part of the conversation content. Defense in depth, not redundancy: this proves
+    retrieval's EgressDeniedError is caught internally (never an unhandled 500 -- the request
+    still gets a clean 200 with a failed contract, exactly like any other retrieval failure
+    mode in this file) AND that neither the embedding provider nor the chat provider is ever
+    actually invoked with the marked content, at either gate."""
+    embed_calls: list[str] = []
+    chat_calls: list[str] = []
+
+    async def _tracking_embed(self, texts, model, **kwargs):
+        embed_calls.append(self.name)
+        return [[0.1] * DIM for _ in texts]
+
+    async def _tracking_chat(self, messages, model, **kwargs):
+        chat_calls.append(self.name)
+        return ChatResult(content="should never be reached", provider=self.name, model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _tracking_embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "NEVER_EGRESS: hemlig fraga"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text  # never an unhandled 500 -- caught at both gates
+    body = res.json()
+    assert body["assistant_status"] == "failed"
+    assert body["error_category"] == "egress_denied"
+    assert body["retryable"] is False
+    assert embed_calls == []  # the marked query never reached the embedding provider
+    assert chat_calls == []  # the marked message never reached the chat provider either
+
+
 def test_embedding_failure_with_no_provider_at_all_returns_clean_failed_contract(client, superuser_db, monkeypatch):
     # The exact incident: no provider configured (or none reachable) for EITHER role. Before
     # the fix, retrieve_context()'s ProviderError propagated out of _attempt_assistant_reply()

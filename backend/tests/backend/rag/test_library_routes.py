@@ -426,6 +426,47 @@ def test_hybrid_search_finds_exact_text_match(client):
     assert hits[0]["text_match"] is True
 
 
+def test_never_egress_marked_search_query_denies_semantic_search_but_keeps_text_match(client, monkeypatch):
+    """Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
+    embedding half): a NEVER_EGRESS-marked search query must never reach the embedding
+    provider, and must degrade exactly like any other embedding failure -- vector stays None,
+    the independent ILIKE text-match channel still finds real matches, never a 500."""
+    from app.providers.openai_provider import OpenAIProvider
+
+    embedded_texts: list[str] = []
+
+    real_embed = OpenAIProvider.embed
+
+    async def _tracking_embed(self, texts, model, **kwargs):
+        # Tracks the document import's own legitimate chunk-embedding call and the
+        # verification pre-flight's fixed probe string too, same as
+        # test_rag_ingest_egress.py -- what must never happen is the marked QUERY text itself
+        # reaching a real embedding call.
+        embedded_texts.extend(texts)
+        return await real_embed(self, texts, model, **kwargs)
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _tracking_embed)
+
+    csrf = _login(client)
+    _import_and_wait(client, csrf, "marker-searchable.txt", b"NEVER_EGRESS-sokord finns bara har.")
+
+    marker_query = "NEVER_EGRESS: sokord"
+    res = client.get("/api/library/search/hybrid", params={"q": marker_query})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["semantic_search_available"] is False
+    assert body["degraded_reason"] is not None
+    assert "egress denied" in body["degraded_reason"].lower()
+    assert marker_query not in embedded_texts  # never reached a real embedding call
+
+    # A separate, ordinary query still works normally -- the denial is per-request, not a
+    # provider-wide lockout.
+    res2 = client.get("/api/library/search/hybrid", params={"q": "sokord"})
+    body2 = res2.json()
+    assert body2["semantic_search_available"] is True
+    assert body2["degraded_reason"] is None
+
+
 def test_create_and_read_source_relationship(client):
     csrf = _login(client)
     job_a = _import_and_wait(client, csrf, "old.txt", b"gammalt beslut")

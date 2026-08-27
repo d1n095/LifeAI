@@ -22,7 +22,8 @@ from app.models.knowledge_version import KnowledgeVersion
 from app.models.media_url_import import MediaUrlImport
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
-from app.providers.registry import resolve_active
+from app.egress_policy import EgressDeniedError
+from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.library_import import maybe_purge_blob
 from app.rag.trust import assess_claim_confidence
@@ -612,8 +613,23 @@ async def search_library(
     degraded_reason: str | None = None
     try:
         provider, model = resolve_active(db, role="embedding")
-        vectors = await provider.embed([query.query], model=model)
+        vectors = await embed_with_policy(
+            db,
+            provider,
+            [query.query],
+            model=model,
+            owner_id=user.id,
+            purpose="rag_query",
+            requested_by="routers.library.search_library",
+        )
         vector = vectors[0]
+    except EgressDeniedError as exc:
+        # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
+        # embedding half): a policy refusal, not a provider outage -- str(exc) is safe to show
+        # (fixed, static description, never raw query content). Same graceful degrade as any
+        # other failure mode here: vector stays None, the independent ILIKE text-match channel
+        # still runs, never a silent retry against a different provider.
+        degraded_reason = str(exc)
     except Exception as exc:  # noqa: BLE001 - every failure mode must degrade, never 500
         degraded_reason = classify_provider_exception(exc).message
 
