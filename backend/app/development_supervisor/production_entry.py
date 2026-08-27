@@ -36,6 +36,12 @@ every `OperatorContext` this module builds leaves `remote_write_authorized` at i
 `False` (real GitHub pushes remain a separate, NOT-YET-authorized capability -- see
 `app/development_supervisor/production_worktree.py`'s own docstring).
 
+WRITE IDENTITY for the shared PER-GOAL production worktree is NOT `MainAITaskWorktree`.
+That model is PER-JOB recovery (marker_token / `.mainai_worktree_owner.json`). Reusing it
+for a goal-shared directory overwrites historical ownership truth across tasks. Instead
+`prepare_context()` binds `supervisor_goal_id` + the active `supervisor_goal_leases`
+claim; Operator verifies lease + canonical goal path/branch structurally.
+
 PROVIDER SPEND is no longer a hardcoded False: `scope.provider_spend_authorized` is derived
 ONLY from a matching live founder-granted provider-spend authorization for this owner + goal
 + current envelope (`provider_spend_is_live`). No grant / revoked / expired / exhausted /
@@ -55,6 +61,7 @@ superseded, the very next tick sees that immediately, never a cached or assumed-
 scope."""
 
 import logging
+import subprocess
 from datetime import datetime
 
 from sqlalchemy import select
@@ -296,6 +303,9 @@ async def run_authorized_goal_supervisor_tick(
             renew_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation, lease_seconds=lease_seconds)
             claimed_generation = claim_specific_mainai_job(db, job_id=job.id, worker_id=worker_id, lease_seconds=lease_seconds)
             if claimed_generation is not None:
+                # claim_specific updates via raw SQL — expire the ORM identity so later
+                # Operator/_require_context reads see running+locked_by, not a stale queued row.
+                db.refresh(job)
                 reset_goal_worktree_to_clean_head(repo_root)
             if claimed_generation is None:
                 db.refresh(job)
@@ -325,6 +335,16 @@ async def run_authorized_goal_supervisor_tick(
                 execution_id=execution.id,
                 idempotency_key=f"authorized-supervisor-binding:{task.id}:{job.id}",
             )
+            # Shared PER-GOAL worktree: Operator verifies via active supervisor lease +
+            # canonical path/branch. Do NOT create MainAITaskWorktree / ownership markers
+            # here — that model is PER-JOB recovery and would overwrite sibling-task truth.
+            current_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
             return OperatorContext(
                 owner_id=goal.owner_id,
                 task_id=task.id,
@@ -332,10 +352,12 @@ async def run_authorized_goal_supervisor_tick(
                 worker_id=worker_id,
                 lease_generation=claimed_generation,
                 repository_root=repo_root,
-                expected_base_sha=base_sha,
+                expected_base_sha=current_head,
                 expected_branch=branch,
                 strategy_execution_id=binding_row.id,
-                worktree_id=None,
+                supervisor_goal_id=goal.id,
+                supervisor_lease_id=lease_id,
+                supervisor_lease_generation=lease_generation,
                 allowed_paths=scope.allowed_paths,
                 allowed_capabilities=scope.allowed_capabilities,
             )

@@ -25,8 +25,15 @@ implementation" grants itself.
 
 No DB row, no ownership marker, no persistent-volume durability story: unlike the job-scoped
 model, a lost local checkout here is always cleanly re-creatable (nothing in it is durable
-truth -- durable truth is `mainai_checkpoints`/task status, entirely unchanged), so there is
-nothing to verify ownership of and nothing recovery needs to inspect after a crash."""
+truth -- durable truth is `mainai_checkpoints`/task status, entirely unchanged).
+
+WRITE AUTHORIZATION for this shared directory is still real, but it is NOT
+`MainAITaskWorktree` / `.mainai_worktree_owner.json`. Those are PER-JOB recovery identities;
+stamping them onto a PER-GOAL path creates an invalid lifecycle when task B overwrites task
+A's marker. Operator instead verifies the active `supervisor_goal_leases` claim plus this
+module's canonical `goal_worktree_path` / `goal_branch_name` formulas (see
+`OperatorContext.supervisor_goal_id` / lease fields). Recovery inspectors continue to ignore
+this directory class unless a genuine per-job recovery worktree exists elsewhere."""
 
 import subprocess
 from pathlib import Path
