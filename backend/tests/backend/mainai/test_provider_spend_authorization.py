@@ -437,6 +437,110 @@ def test_two_workers_racing_the_last_unit_of_budget_never_both_reserve(superuser
     assert usage_count == 1  # exactly one real reservation row, not zero or two
 
 
+def test_revoke_racing_reserve_never_produces_a_reservation_after_revocation_completed(superuser_db):
+    """Adversarial review, 2026-08-27 (Attack 2): revoke_provider_spend() and
+    reserve_provider_spend_call() (via get_current_provider_spend_authorization()) both lock
+    the SAME authorization row via SELECT ... FOR UPDATE, so the two operations can never
+    interleave -- whichever transaction's lock-acquiring SELECT runs first fully commits
+    before the other's SELECT returns. Verified correct by code inspection during the review,
+    but had zero real-concurrency test coverage (unlike the analogous recovery-authority
+    fencing in PR #165, which has real two-thread tests for its own revoke-vs-authorize race).
+
+    Two real threads, two real DB connections: one revokes, the other concurrently attempts a
+    genuinely new reservation (a fresh source_ref, not hitting reserve_provider_spend_call()'s
+    own idempotency short-circuit). A generous budget (max_requests=5) rules out the reserve
+    call itself exhausting the grant -- this test is about revoke-vs-reserve ordering
+    specifically, not budget-exhaustion semantics (see the sibling test above for that).
+
+    Whichever operation wins the lock race is a legitimate business outcome (a reservation
+    already in flight when revoke is requested may reasonably complete, or may reasonably be
+    rejected, depending on exact timing) -- what must NEVER happen is a corrupted state: a
+    reservation recorded as succeeded while contradicting the authorization's own final
+    'revoked' status in a way with no real usage-event row to justify it, or revoke itself
+    failing/losing effect because of the race."""
+    owner, goal, envelope = _owner_goal_envelope(superuser_db)
+    superuser_db.commit()
+    grant = _grant(superuser_db, owner, goal, envelope, max_requests=5, max_cost_usd=Decimal("10.00"))
+    superuser_db.commit()
+    owner_id, goal_id, authorization_id = owner.id, goal.id, grant.id
+    bind = superuser_db.get_bind()
+    outcomes = {}
+    barrier = threading.Barrier(2)
+
+    def _revoke():
+        from sqlalchemy.orm import sessionmaker
+
+        Session = sessionmaker(bind=bind)
+        session = Session()
+        try:
+            barrier.wait(timeout=5)
+            revoke_provider_spend(session, owner_id=owner_id, authorization_id=authorization_id, reason="race test")
+            session.commit()
+            outcomes["revoke"] = "succeeded"
+        except ProviderSpendError as exc:
+            session.rollback()
+            outcomes["revoke"] = str(exc)
+        finally:
+            session.close()
+
+    def _reserve():
+        from sqlalchemy.orm import sessionmaker
+
+        Session = sessionmaker(bind=bind)
+        session = Session()
+        try:
+            barrier.wait(timeout=5)
+            event = reserve_provider_spend_call(
+                session,
+                owner_id=owner_id,
+                goal_id=goal_id,
+                source_ref=f"revoke-race-{uuid.uuid4()}",
+                provider="fake-local",
+                model="planner-v2",
+            )
+            session.commit()
+            outcomes["reserve"] = event.id
+        except ProviderSpendError as exc:
+            session.rollback()
+            outcomes["reserve"] = str(exc)
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_revoke)
+    t2 = threading.Thread(target=_reserve)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert "revoke" in outcomes and "reserve" in outcomes
+
+    # The grant's budget (5) is never exhausted by one reservation, so nothing here competes
+    # with revoke's own precondition (status == active) except the reservation attempt itself
+    # -- revoke must always eventually succeed, regardless of which lock-holder went first.
+    assert outcomes["revoke"] == "succeeded"
+
+    row_status = superuser_db.execute(
+        text("SELECT status FROM provider_spend_authorizations WHERE id = :id"),
+        {"id": str(authorization_id)},
+    ).scalar()
+    assert row_status == "revoked"
+
+    reserved_count = superuser_db.execute(
+        text("SELECT count(*) FROM provider_spend_usage_events WHERE owner_id = :o AND goal_id = :g AND status = 'reserved'"),
+        {"o": str(owner_id), "g": str(goal_id)},
+    ).scalar()
+
+    if isinstance(outcomes["reserve"], uuid.UUID):
+        # Reserve won the lock race: a genuine reservation row must exist to justify it.
+        assert reserved_count == 1
+    else:
+        # Revoke won the lock race: reserve must have been denied for exactly that reason, and
+        # no reservation row exists to contradict the revoked status.
+        assert "no live provider spend authorization" in outcomes["reserve"]
+        assert reserved_count == 0
+
+
 def test_usage_events_are_append_only_without_settle_guc(superuser_db):
     owner, goal, envelope = _owner_goal_envelope(superuser_db)
     superuser_db.commit()
