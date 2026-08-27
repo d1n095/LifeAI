@@ -46,6 +46,7 @@ from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
 from app.mainai_execution.executor import _lock_task, task_for_job
+from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.graph import recompute_task_readiness
 from app.mainai_execution.verify import (
     VerificationResult,
@@ -761,6 +762,37 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         return
 
 
+def _rollup_goal_after_task_boundary(db: Session, *, task: MainAITask) -> None:
+    """Canonical B5 chain after a task reaches a durable terminal/retry boundary:
+
+        recompute_task_readiness → (conditionally) record_final_report
+
+    `record_final_report` itself decides whether the goal stays `running`/`waiting` or
+    closes — callers must never set `goal.status` directly.
+
+    IMPORTANT — auto-replan window: a permanently `failed` task is the trigger for
+    `app/mainai_execution/replan.py` / worker `_advance_mainai_execution_replan`, which only
+    scans ACTIVE goals. Closing the goal as `failed` inside this gate would race ahead of
+    that tick and permanently suppress replan (CI: test_demo_auto_replan_triggers_after_a_
+    task_permanently_exhausts_retries). So permanent-failure / retryable-failure outcomes
+    recompute readiness only; the worker finalize tick (ordered AFTER replan in `run_once`)
+    remains the reconciler that closes failed graphs via the same canonical report.
+
+    Successful `completed` (and cooperative `cancelled`) still invoke `record_final_report`
+    here so a fully successful task graph closes without waiting for another poll.
+    """
+    recompute_task_readiness(db, goal_id=task.goal_id)
+    if task.status in (MainAITaskStatus.failed, MainAITaskStatus.retryable_failed):
+        return
+    goal = db.execute(
+        select(MainAIGoal).where(
+            MainAIGoal.id == task.goal_id, MainAIGoal.owner_id == task.owner_id
+        )
+    ).scalar_one_or_none()
+    if goal is not None:
+        record_final_report(db, goal=goal)
+
+
 def _finalize_task_outcome(
     db: Session, task: MainAITask, *, passed: bool, evidence: dict, job_id: uuid.UUID | None = None
 ) -> None:
@@ -768,7 +800,12 @@ def _finalize_task_outcome(
     (or genuinely had nothing to verify). A failed verification never produces `completed`: it
     produces `retryable_failed` (if attempts remain) or `failed` (attempts exhausted), and
     downstream tasks are re-evaluated via recompute_task_readiness() so a task depending on
-    this one is correctly moved to `blocked`, never left silently `pending`."""
+    this one is correctly moved to `blocked`, never left silently `pending`.
+
+    After a successful `completed` (or cooperative cancel), the canonical `record_final_report`
+    path runs so a fully successful terminal graph closes the MainAIGoal. Permanent `failed`
+    outcomes defer goal close to the worker finalize tick so auto-replan can still claim an
+    ACTIVE goal — see `_rollup_goal_after_task_boundary`."""
     db.add(
         MainAITaskEvent(
             task_id=task.id,
@@ -817,7 +854,7 @@ def _finalize_task_outcome(
     record_lesson_guard_observations_from_finalize(db, task=task, evidence=evidence, passed=passed, job_id=job_id)
 
     db.flush()
-    recompute_task_readiness(db, goal_id=task.goal_id)
+    _rollup_goal_after_task_boundary(db, task=task)
 
 
 def _finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
@@ -833,7 +870,7 @@ def _finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> N
     task.next_retry_at = None
     db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.cancelled, detail={"reason": reason}))
     db.flush()
-    recompute_task_readiness(db, goal_id=task.goal_id)
+    _rollup_goal_after_task_boundary(db, task=task)
 
 
 async def resume_waiting_ci_task(db: Session, wait: MainAITaskWait) -> None:
