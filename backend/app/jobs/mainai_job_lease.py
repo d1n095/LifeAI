@@ -251,3 +251,63 @@ def mark_job_superseded(db: Session, *, job_id: uuid.UUID, superseded_by_job_id:
             f"Job {job_id} is not a dead expired-lease running job, nor an already-terminal "
             f"job whose owning task is still stuck running -- refusing to supersede it."
         )
+
+
+class JobNotDeclinableError(Exception):
+    """Raised by mark_job_failed_after_governed_recovery_decline() when the target job is not
+    actually a dead job eligible for this outcome -- the identical TaskLiveness.dead
+    re-verification mark_job_superseded() performs, for the same reason: recording a terminal
+    outcome for a job that might still be legitimately alive (or already honestly terminal)
+    would race a real worker or silently overwrite a truthful result. See
+    app/mainai_execution/recovery_takeover.py, the only caller."""
+
+
+def mark_job_failed_after_governed_recovery_decline(db: Session, *, job_id: uuid.UUID) -> None:
+    """The honest terminal outcome for a dead `task_execution` job when execute_takeover()
+    declines to hand it to V0.1's dispatch_ready_task() because the owning goal is (or has
+    ever been) execution-envelope-governed -- see recovery_takeover.py's
+    `_decline_takeover_for_governed_goal()`, the only caller.
+
+    Deliberately no `superseded_by_job_id`: this dead job is not being replaced by one
+    specific new job right now the way a real takeover creates one -- the task it belonged to
+    goes back to `ready`, and the goal's OWN Supervisor tick creates whatever new job it
+    needs, on its own schedule, once it rediscovers the task, under its own re-validated
+    authority. There is no 1:1 successor to record, so `status = 'failed'` (not
+    `'superseded'`, which migration 0034's own CHECK ties to a non-null
+    `superseded_by_job_id`) is the correct, honest terminal status here.
+
+    Reuses mark_job_superseded()'s exact TaskLiveness.dead re-verification shape (see that
+    function's own docstring for why each of the two accepted branches is safe) so this
+    outcome can never be written for a job that is not actually dead -- kept as a literal
+    sibling rather than a shared helper because the two functions' UPDATEs touch different
+    columns and diverging them further later must not silently drift the other."""
+    result = db.execute(
+        text("""
+            UPDATE mainai_jobs
+            SET status = 'failed',
+                completed_at = COALESCE(completed_at, now()),
+                error_category = 'permanent'
+            WHERE id = :job_id
+              AND (
+                (
+                  status = 'running'
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at < now()
+                )
+                OR (
+                  status IN ('failed', 'completed', 'cancelled')
+                  AND EXISTS (
+                    SELECT 1 FROM mainai_recovery_records r
+                    WHERE r.job_id = mainai_jobs.id
+                      AND r.status = 'taking_over'
+                  )
+                )
+              )
+        """),
+        {"job_id": str(job_id)},
+    )
+    if result.rowcount == 0:
+        raise JobNotDeclinableError(
+            f"Job {job_id} is not a dead expired-lease running job, nor an already-terminal "
+            f"job whose owning task is still stuck running -- refusing to finalize it."
+        )

@@ -80,6 +80,13 @@ def propose_execution_scope(
     if existing:
         return _same(existing, values)
 
+    # Incidental but real: this INSERT's own composite FK to mainai_goals(id, owner_id) makes
+    # Postgres take an implicit FOR KEY SHARE lock on the goal row, which already contends
+    # with execute_takeover()'s explicit FOR UPDATE lock on that same row (see
+    # authorize_execution_scope()'s own FIRST-GOVERNANCE TOCTOU FENCE docstring below) --
+    # never relied upon AS the fence (a later authorize_execution_scope() call against an
+    # already-existing, already-committed proposal from an earlier transaction gets none of
+    # this insert's protection), but real defense-in-depth worth knowing about, not assuming.
     row = ExecutionScopeProposal(owner_id=owner_id, idempotency_key=idempotency_key, status="unreviewed", **values)
     db.add(row)
     db.flush()
@@ -128,7 +135,22 @@ def authorize_execution_scope(
 
     If this goal already has a current (`status='active'`) envelope, it is superseded (never
     mutated) by the new one -- the founder's original authorization decision remains durably
-    auditable even after a later re-authorization changes it."""
+    auditable even after a later re-authorization changes it.
+
+    FIRST-GOVERNANCE TOCTOU FENCE: locks the goal row (`SELECT ... FOR UPDATE`) BEFORE this
+    transition, for the exact same reason `app.mainai_execution.recovery_takeover.
+    execute_takeover()` locks the identical row before its own `goal_has_ever_been_envelope_
+    governed()` decision -- a founder authorizing a goal's FIRST-EVER envelope and a
+    concurrent dead-job recovery pass for that same goal must be strictly serialized. Without
+    this, `execute_takeover()` could read EVER_GOVERNED=false, this function could commit the
+    first envelope a moment later, and the recovery pass would still dispatch through V0.1's
+    envelope-blind executor -- a real window, not a hypothetical one, since neither side
+    previously took any lock in common. Both orderings are safe (whichever transaction gets
+    here first fully completes before the other proceeds); only "governance becomes effective
+    mid-flight of an already-decided legacy dispatch" is forbidden, and holding this lock
+    across the whole decision closes exactly that window. See recovery_takeover.py's own
+    matching docstring and test_first_governance_toctou_race_is_serialized_not_racy (both
+    orderings) in test_recovery_takeover_authority_fencing.py."""
 
     row = db.execute(
         select(ExecutionScopeProposal).where(ExecutionScopeProposal.id == proposal_id, ExecutionScopeProposal.owner_id == owner_id).with_for_update()
@@ -204,6 +226,32 @@ def get_current_execution_envelope(db: Session, *, owner_id: uuid.UUID, goal_id:
             ExecutionAuthorizationEnvelope.status == "active",
         )
     ).scalar_one_or_none()
+
+
+def goal_has_ever_been_envelope_governed(db: Session, *, owner_id: uuid.UUID, goal_id: uuid.UUID) -> bool:
+    """The durable EVER_GOVERNED fact: whether ANY `ExecutionAuthorizationEnvelope` row has
+    ever existed for this goal, regardless of its current status (active/superseded/revoked).
+    `execution_authorization_envelopes` rows are never deleted, only superseded (see this
+    module's own module docstring / migration 0057), so mere row existence is itself the
+    proof -- no separate governance-state column needed.
+
+    Once true for a goal, it is true forever: authority must never fall back to an
+    envelope-blind execution path just because the CURRENT envelope is absent, superseded, or
+    revoked (see `get_current_execution_envelope()`'s own docstring for the companion "no
+    current envelope = not eligible" half of this invariant). `app.worker.py`'s
+    `_advance_mainai_execution_tasks()` established this exact predicate first (PR #154,
+    found by Cursor's #152); `app.mainai_execution.recovery_takeover.execute_takeover()` is
+    the second independent caller -- see that module for why the dead-job-takeover path needs
+    the identical check."""
+    return (
+        db.execute(
+            select(ExecutionAuthorizationEnvelope.id).where(
+                ExecutionAuthorizationEnvelope.owner_id == owner_id,
+                ExecutionAuthorizationEnvelope.goal_id == goal_id,
+            )
+        ).first()
+        is not None
+    )
 
 
 def list_execution_authorization_envelopes(db: Session, *, owner_id: uuid.UUID, goal_id: uuid.UUID) -> list[ExecutionAuthorizationEnvelope]:
