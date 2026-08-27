@@ -415,6 +415,10 @@ def _require_context(db, context: OperatorContext, *, write: bool = False):
         or job.lease_generation != context.lease_generation
     ):
         raise OperatorAuthorizationError("stale or absent MainAI job lease")
+    # Effect-time expiry: claim-time ownership is not enough if the lease clock elapsed
+    # before takeover rebinds locked_by/generation.
+    if job.lease_expires_at is not None and job.lease_expires_at <= datetime.utcnow():
+        raise OperatorAuthorizationError("stale or absent MainAI job lease")
     root = context.repository_root.resolve()
     if not root.is_dir() or _git(
         root, ["rev-parse", "--show-toplevel"]
