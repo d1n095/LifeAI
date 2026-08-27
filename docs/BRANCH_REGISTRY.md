@@ -6,6 +6,24 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass (2026-08-27): #167 HOLD — Supervisor goal-worktree ownership (Cursor)
+
+**PR:** [#167](https://github.com/d1n095/LifeAI/pull/167) `cursor/composed-autonomy-milestone`  
+**Status:** OPEN — **do not merge** until PER-GOAL vs PER-JOB worktree ownership fix is on head and proven.
+
+Composed milestone chain is real and must be preserved. Blocking defect on prior head
+`2fe87e5`: `production_entry` stamped `MainAITaskWorktree` + `.mainai_worktree_owner.json`
+onto the shared PER-GOAL Supervisor worktree, colliding with per-job recovery semantics.
+
+**Fix direction (in progress on same PR):** Operator verifies Supervisor writes via active
+`supervisor_goal_leases` + canonical `goal_worktree_path`/`goal_branch_name` — not per-job
+markers. Two-task same-goal continuation test required before merge.
+
+**Claude parallel lane:** Life Vault / external-AI egress — see
+`docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Do not collide with #167 files.
+
+**Integrations tip (origin):** `7093480` (#166 + #165 merged).
+
 ## Pass 80b (2026-08-25): Autonomy Activation B4 — plan-derived scope narrowing (Cursor)
 
 **Branch:** `cursor/plan-derived-scope-narrowing` — pure helper + tests. Does **not** wire

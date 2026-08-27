@@ -2,7 +2,16 @@
 
 This module is deliberately not a scheduler and exposes no generic shell primitive. Every
 operation is a structured, bounded capability tied to an existing task/job/lease and, for
-writes, an existing V0.2 worktree ownership record.
+writes, a structurally verified worktree class:
+
+A) PER-JOB recovery worktree — `MainAITaskWorktree` + `.mainai_worktree_owner.json`
+   (`worktree_id` set; see `app/mainai_execution/worktree.py`).
+
+B) PER-GOAL Supervisor production worktree — canonical path/branch from
+   `app/development_supervisor/production_worktree.py`, verified against the *active*
+   `supervisor_goal_leases` claim (`supervisor_goal_id` + lease id/generation). No
+   per-job ownership marker; no `MainAITaskWorktree` row. Callers cannot self-authorize
+   with a boolean flag — Operator re-verifies lease + path + branch + task↔goal link.
 """
 
 from __future__ import annotations
@@ -15,6 +24,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select
@@ -33,6 +43,7 @@ from app.models.intelligence_governance import IntelligenceExecution
 from app.models.mainai_execution import MainAIGoal, MainAITask
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.mainai_recovery import MainAITaskWorktree, MainAITaskWorktreeStatus
+from app.models.supervisor_lease import SupervisorGoalLease
 from app.models.work_intelligence import WorkStrategyExecution, WorkTraceEvent
 from app.work_intelligence import record_trace_event
 
@@ -149,6 +160,12 @@ class OperatorContext:
     expected_branch: str
     strategy_execution_id: uuid.UUID
     worktree_id: uuid.UUID | None = None
+    # Supervisor PER-GOAL worktree binding (mutually exclusive with worktree_id).
+    # All three must be set together; Operator verifies them against supervisor_goal_leases
+    # + canonical goal_worktree_path/branch — never a self-granted boolean.
+    supervisor_goal_id: uuid.UUID | None = None
+    supervisor_lease_id: uuid.UUID | None = None
+    supervisor_lease_generation: int | None = None
     allowed_paths: tuple[str, ...] = ()
     # Empty = legacy unrestricted (path-only era). Non-empty = fail-closed capability ceiling
     # (envelope and/or plan-derived narrowing). Never invent capabilities outside this set.
@@ -156,6 +173,82 @@ class OperatorContext:
     remote_write_authorized: bool = False
     expected_remote_sha: str | None = None
     disposable_database_authorized: bool = False
+
+
+def _supervisor_goal_binding_claimed(context: OperatorContext) -> bool:
+    return (
+        context.supervisor_goal_id is not None
+        or context.supervisor_lease_id is not None
+        or context.supervisor_lease_generation is not None
+    )
+
+
+def _write_identity_present(context: OperatorContext) -> bool:
+    return context.worktree_id is not None or _supervisor_goal_binding_claimed(context)
+
+
+def _verify_supervisor_goal_worktree(db, context: OperatorContext, *, task: MainAITask) -> None:
+    """Structurally verify the PER-GOAL Supervisor production worktree.
+
+    Authority comes only from: active supervisor_goal_leases claim matching this worker +
+    generation, task belonging to that goal, and repository_root/branch matching the
+    canonical production_worktree formulas. No MainAITaskWorktree marker is consulted or
+    required — that model remains PER-JOB recovery only.
+    """
+    from app.development_supervisor.production_worktree import (
+        WORKTREE_ROOT,
+        goal_branch_name,
+        goal_worktree_path,
+    )
+
+    if context.worktree_id is not None:
+        raise OperatorAuthorizationError(
+            "ambiguous worktree class: per-job recovery and supervisor goal both claimed"
+        )
+    if (
+        context.supervisor_goal_id is None
+        or context.supervisor_lease_id is None
+        or context.supervisor_lease_generation is None
+    ):
+        raise OperatorAuthorizationError(
+            "incomplete supervisor goal worktree binding"
+        )
+    if task.goal_id != context.supervisor_goal_id:
+        raise OperatorAuthorizationError(
+            "task is not under the claimed supervisor goal"
+        )
+
+    lease = db.execute(
+        select(SupervisorGoalLease).where(
+            SupervisorGoalLease.id == context.supervisor_lease_id,
+            SupervisorGoalLease.owner_id == context.owner_id,
+            SupervisorGoalLease.goal_id == context.supervisor_goal_id,
+            SupervisorGoalLease.worker_id == context.worker_id,
+            SupervisorGoalLease.lease_generation == context.supervisor_lease_generation,
+            SupervisorGoalLease.status == "active",
+        )
+    ).scalar_one_or_none()
+    if lease is None or lease.expires_at <= datetime.utcnow():
+        raise OperatorAuthorizationError(
+            "supervisor goal lease is absent, stale, or not held by this worker"
+        )
+
+    root = context.repository_root.resolve()
+    expected_path = goal_worktree_path(context.supervisor_goal_id).resolve()
+    if root != expected_path:
+        raise OperatorAuthorizationError(
+            "repository root is not the canonical supervisor goal worktree path"
+        )
+    try:
+        root.relative_to(WORKTREE_ROOT.resolve())
+    except ValueError as exc:
+        raise OperatorAuthorizationError(
+            "repository root is outside the supervisor goal worktree root"
+        ) from exc
+    if context.expected_branch != goal_branch_name(context.supervisor_goal_id):
+        raise OperatorAuthorizationError(
+            "expected branch is not the canonical supervisor goal branch"
+        )
 
 
 @dataclass(frozen=True)
@@ -258,10 +351,18 @@ def _require_context(db, context: OperatorContext, *, write: bool = False):
         raise OperatorAuthorizationError(
             "repository branch does not match operator context"
         )
-    if write and context.worktree_id is None:
+
+    supervisor_claimed = _supervisor_goal_binding_claimed(context)
+    if context.worktree_id is not None and supervisor_claimed:
         raise OperatorAuthorizationError(
-            "write capability requires an isolated worktree"
+            "ambiguous worktree class: per-job recovery and supervisor goal both claimed"
         )
+    if write and context.worktree_id is None and not supervisor_claimed:
+        raise OperatorAuthorizationError(
+            "write capability requires a verified worktree identity "
+            "(per-job recovery worktree or supervisor goal worktree)"
+        )
+
     if context.worktree_id is not None:
         worktree = db.execute(
             select(MainAITaskWorktree).where(
@@ -289,6 +390,13 @@ def _require_context(db, context: OperatorContext, *, write: bool = False):
                 "worktree base or branch identity changed unexpectedly"
             )
         return task, job, binding, worktree
+
+    if supervisor_claimed:
+        _verify_supervisor_goal_worktree(db, context, task=task)
+        # Shared goal worktrees advance HEAD via commit within an attempt; do not require
+        # live HEAD == expected_base_sha the way read-only non-worktree contexts do.
+        return task, job, binding, None
+
     if _git(root, ["rev-parse", "HEAD"]).stdout.strip() != context.expected_base_sha:
         raise OperatorAuthorizationError(
             "repository HEAD does not match expected base SHA"
@@ -763,7 +871,7 @@ def checkpoint_operator_progress(
     unresolved_failures: list[str],
 ):
     task, _, _, worktree = _require_context(
-        db, context, write=context.worktree_id is not None
+        db, context, write=_write_identity_present(context)
     )
     goal = db.execute(
         select(MainAIGoal).where(
@@ -783,6 +891,9 @@ def checkpoint_operator_progress(
             "base_sha": context.expected_base_sha,
             "branch": context.expected_branch,
             "worktree_id": str(worktree.id) if worktree else None,
+            "supervisor_goal_id": (
+                str(context.supervisor_goal_id) if context.supervisor_goal_id else None
+            ),
             "completed_action_ids": [str(value) for value in completed_action_ids],
             "next_phase": next_phase,
             "unresolved_failures": unresolved_failures,
@@ -875,8 +986,9 @@ def commit_changes(db, context: OperatorContext, *, message: str, idempotency_ke
         raise OperatorAuthorizationError("secret-like content detected in diff")
     _git(context.repository_root, ["commit", "-q", "-m", message])
     sha = _git(context.repository_root, ["rev-parse", "HEAD"]).stdout.strip()
-    worktree.current_commit = sha
-    db.flush()
+    if worktree is not None:
+        worktree.current_commit = sha
+        db.flush()
     event = _audit(
         db,
         context,
@@ -894,6 +1006,11 @@ def commit_changes(db, context: OperatorContext, *, message: str, idempotency_ke
 async def push_branch(db, context: OperatorContext, *, idempotency_key: str):
     started = time.monotonic()
     _, _, _, worktree = _require_context(db, context, write=True)
+    if worktree is None:
+        raise OperatorAuthorizationError(
+            "push_branch requires a per-job recovery worktree; "
+            "supervisor goal worktrees are local-only"
+        )
     if not context.remote_write_authorized:
         raise OperatorAuthorizationError("REMOTE_WRITE authorization is required")
     replay = _replay(

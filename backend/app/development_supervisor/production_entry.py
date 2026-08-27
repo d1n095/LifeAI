@@ -36,6 +36,12 @@ every `OperatorContext` this module builds leaves `remote_write_authorized` at i
 `False` (real GitHub pushes remain a separate, NOT-YET-authorized capability -- see
 `app/development_supervisor/production_worktree.py`'s own docstring).
 
+WRITE IDENTITY for the shared PER-GOAL production worktree is NOT `MainAITaskWorktree`.
+That model is PER-JOB recovery (marker_token / `.mainai_worktree_owner.json`). Reusing it
+for a goal-shared directory overwrites historical ownership truth across tasks. Instead
+`prepare_context()` binds `supervisor_goal_id` + the active `supervisor_goal_leases`
+claim; Operator verifies lease + canonical goal path/branch structurally.
+
 PROVIDER SPEND is no longer a hardcoded False: `scope.provider_spend_authorized` is derived
 ONLY from a matching live founder-granted provider-spend authorization for this owner + goal
 + current envelope (`provider_spend_is_live`). No grant / revoked / expired / exhausted /
@@ -54,12 +60,9 @@ founder narrows, supersedes, or has not (yet) re-authorized after a prior envelo
 superseded, the very next tick sees that immediately, never a cached or assumed-still-valid
 scope."""
 
-import hashlib
-import json
 import logging
 import subprocess
 from datetime import datetime
-from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -90,7 +93,6 @@ from app.jobs.mainai_job_lease import claim_specific_mainai_job
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
 from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus, MainAITask, MainAITaskStatus
 from app.models.mainai_job import MainAIJobStatus
-from app.models.mainai_recovery import MainAITaskWorktree, MainAITaskWorktreeStatus
 from app.provider_spend import provider_spend_is_live
 from app.work_intelligence import bind_strategy_execution, create_strategy
 
@@ -333,8 +335,9 @@ async def run_authorized_goal_supervisor_tick(
                 execution_id=execution.id,
                 idempotency_key=f"authorized-supervisor-binding:{task.id}:{job.id}",
             )
-            # Goal worktree is shared on disk (production_worktree); Operator still requires a
-            # durable MainAITaskWorktree ownership row + marker for any write capability.
+            # Shared PER-GOAL worktree: Operator verifies via active supervisor lease +
+            # canonical path/branch. Do NOT create MainAITaskWorktree / ownership markers
+            # here — that model is PER-JOB recovery and would overwrite sibling-task truth.
             current_head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=str(repo_root),
@@ -342,68 +345,6 @@ async def run_authorized_goal_supervisor_tick(
                 text=True,
                 check=True,
             ).stdout.strip()
-            existing_worktree = db.execute(
-                select(MainAITaskWorktree).where(MainAITaskWorktree.job_id == job.id)
-            ).scalar_one_or_none()
-            if existing_worktree is not None:
-                worktree = existing_worktree
-                worktree.lease_generation = claimed_generation
-                worktree.base_sha = current_head
-                worktree.branch = branch
-                worktree.path = str(repo_root.resolve())
-                worktree.status = MainAITaskWorktreeStatus.active
-                marker_token = worktree.marker_token
-            else:
-                marker_token = hashlib.sha256(
-                    f"{task.id}:{job.id}:{claimed_generation}".encode()
-                ).hexdigest()[:32]
-                worktree = MainAITaskWorktree(
-                    task_id=task.id,
-                    owner_id=goal.owner_id,
-                    job_id=job.id,
-                    lease_generation=claimed_generation,
-                    executor_id=worker_id,
-                    repo="local/supervisor-goal",
-                    base_sha=current_head,
-                    branch=branch,
-                    path=str(repo_root.resolve()),
-                    marker_token=marker_token,
-                    status=MainAITaskWorktreeStatus.active,
-                )
-                db.add(worktree)
-            marker = {
-                "task_id": str(task.id),
-                "job_id": str(job.id),
-                "marker_token": marker_token,
-                "lease_generation": claimed_generation,
-                "created_at": datetime.utcnow().isoformat(),
-            }
-            (repo_root / ".mainai_worktree_owner.json").write_text(
-                json.dumps(marker), encoding="utf-8"
-            )
-            exclude_path = Path(
-                subprocess.run(
-                    ["git", "rev-parse", "--git-path", "info/exclude"],
-                    cwd=str(repo_root),
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout.strip()
-            )
-            if not exclude_path.is_absolute():
-                exclude_path = repo_root / exclude_path
-            exclude_path.parent.mkdir(parents=True, exist_ok=True)
-            existing_excludes = (
-                exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
-            )
-            if ".mainai_worktree_owner.json" not in existing_excludes:
-                exclude_path.write_text(
-                    existing_excludes
-                    + ("" if existing_excludes.endswith("\n") or not existing_excludes else "\n")
-                    + ".mainai_worktree_owner.json\n",
-                    encoding="utf-8",
-                )
-            db.flush()
             return OperatorContext(
                 owner_id=goal.owner_id,
                 task_id=task.id,
@@ -414,7 +355,9 @@ async def run_authorized_goal_supervisor_tick(
                 expected_base_sha=current_head,
                 expected_branch=branch,
                 strategy_execution_id=binding_row.id,
-                worktree_id=worktree.id,
+                supervisor_goal_id=goal.id,
+                supervisor_lease_id=lease_id,
+                supervisor_lease_generation=lease_generation,
                 allowed_paths=scope.allowed_paths,
                 allowed_capabilities=scope.allowed_capabilities,
             )
