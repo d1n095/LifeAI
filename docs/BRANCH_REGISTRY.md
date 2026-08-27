@@ -6,7 +6,6 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Pass (2026-08-27 night): tip `e10ae97` — #181 MERGED; #182 crash-before-settle
 
 **Integrations tip:** `e10ae97` (Merge #181).
 
@@ -18,6 +17,17 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 **Next:** Phase 4 local write crash before verify.
 
+
+## Pass (2026-08-27 night): tip `f9cedcc` — #182 MERGED; #184 lease effect rebasing
+
+**Integrations tip:** `f9cedcc` (Merge #182 crash-before-settle).
+
+| PR | Status | Notes |
+|---|---|---|
+| [#181](https://github.com/d1n095/LifeAI/pull/181) | MERGED | Supervisor spend fail-fast |
+| [#182](https://github.com/d1n095/LifeAI/pull/182) | **MERGED** @ `f9cedcc` | Crash before settle → no re-invoke |
+| [#183](https://github.com/d1n095/LifeAI/pull/183) | OPEN | Local write crash heal |
+| [#184](https://github.com/d1n095/LifeAI/pull/184) | OPEN | Job lease expiry at Operator write effect |
 
 ## Pass (2026-08-27): tip `6a3572e` — #168 MERGED; Cursor starts stale-authority TOCTOU
 
