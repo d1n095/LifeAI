@@ -552,6 +552,10 @@ _MAINAI_EXECUTION_TABLES = (
     # only through erase_own_provider_spend_children().
     "provider_spend_authorizations",
     "provider_spend_usage_events",
+    # Migration 0062 (Life Vault / External-AI Egress Control): the disclosure ledger is
+    # append-only, same structural role as provider_spend_usage_events above -- deletion only
+    # through erase_own_provider_disclosure_events().
+    "provider_disclosure_events",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -574,6 +578,8 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "mainai_app_execute": True,
     },
     {"name": "provider_spend_usage_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
+    {"name": "erase_own_provider_disclosure_events", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "provider_disclosure_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_task_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_checkpoints_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_recovery_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
@@ -973,6 +979,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(
             text("GRANT EXECUTE ON FUNCTION release_provider_spend_usage(uuid, varchar, jsonb) TO mainai_app")
         )
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_disclosure_events FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1040,6 +1048,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("supervisor_goal_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
+            ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

@@ -661,6 +661,15 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # provider_spend_* and would hit the append-only trigger without the spend GUC set.
         db.execute(sa_text("SELECT erase_own_provider_spend_children()"))
 
+        # --- Life Vault / External-AI Egress Control (migration 0062, see
+        # docs/LIFE_VAULT_EGRESS_CONTROL.md): the disclosure ledger is append-only, same
+        # structural role as provider_spend_usage_events above. Only owner_id -> users(id)
+        # CASCADEs into it (task_id/goal_id/job_id are plain informational columns, not FKs),
+        # so this has no ordering dependency on the execution-authorization/mainai_execution
+        # cleanup below -- placed here purely for topical proximity to the other spend/security
+        # erasure calls.
+        db.execute(sa_text("SELECT erase_own_provider_disclosure_events()"))
+
         # --- Life Execution Authorization Envelope (migration 0057, see
         # docs/LIFE_EXECUTION_AUTHORIZATION_ENVELOPE.md): execution_scope_proposals/
         # execution_authorization_envelopes have DELETE revoked from mainai_app the same way,

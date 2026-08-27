@@ -660,6 +660,51 @@ async def plan_with_provider(
             checkpoint_id=cp.id,
             context_set_id=context_set.id,
         )
+
+    # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md): spend
+    # authority governs WHETHER a call may happen; this governs WHAT CONTENT that call may
+    # carry -- MODEL_REQUESTED_CONTEXT != AUTHORIZED_EGRESS_CONTEXT is a separate boundary
+    # from PROVIDER_SPEND_NOT_AUTHORIZED, checked here immediately before the payload leaves
+    # the process, never assumed satisfied just because spend was authorized above.
+    from app.egress_policy import EgressDeniedError, enforce_egress_policy
+
+    try:
+        payload = enforce_egress_policy(
+            db,
+            owner_id=request.owner_id,
+            provider=planned_provider,
+            model=planned_model,
+            purpose="development_planning",
+            requested_by="provider_planning.plan_with_provider",
+            payload=payload,
+            task_id=request.task_id,
+            goal_id=request.goal_id,
+            job_id=request.job_id,
+        )
+    except EgressDeniedError as exc:
+        if spend_reserved:
+            release_provider_spend_call(
+                db,
+                owner_id=request.owner_id,
+                source_ref=spend_source_ref,
+                evidence={"request_hash": request_hash, "phase": "egress_denied"},
+            )
+        detail = {
+            "request_hash": request_hash,
+            "reason": exc.reason,
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "EGRESS_DENIED", detail)
+        return PlanningResult(
+            "EGRESS_DENIED",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        )
+
     started = time.monotonic()
     try:
         response = await asyncio.wait_for(
