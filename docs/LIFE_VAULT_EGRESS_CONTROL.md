@@ -43,11 +43,26 @@ use, never look at what's being sent.
 | 6 | `app/safe_planner/service.py:safe_provider_prompt()` (L556) → `app/provider_planning/service.py:RegistryPlanningAdapter.propose()` | Autonomous MainAI development-planning tick (the #166/#167 path) | `instruction = operator.redact(...)` (L558) — **regex-redacted, fail-closed placeholder substitution on detection** (not partial-send); `context_references` = reference **metadata only** (`object_type`/`object_ref`/`basis`/`reason`/`path`, never raw document/claim bodies) from `assemble_planning_context()`, additionally passed through `operator._redact_value()`; fixed capability allowlist (`DEVELOPMENT_CAPABILITIES`) | **Partial, real, but syntactic only.** `redact()` (`app/development_operator/service.py`) is a regex secret-pattern scrubber (`key=value`, `Bearer ...`, standalone secret-shaped tokens) — it has no concept of business sensitivity, VAULT, or IP_PROTECTED. |
 | 7-13 | `chat_with_fallback()` callers: `mainai_execution/execution_job.py` (L147,203,320), `mainai_execution/planner.py:344`, `mainai_execution/lesson_conflicts.py:80`, `rag/claims.py` (L251,404 — raw document text for claim extraction), `agent_orchestration.py` (L189,252), `jobs/handlers/corpus_review.py:203`, `routers/workbench.py:89` | Various autonomous ticks / founder actions | Task/goal descriptions, repo file content, raw document text (claim extraction is a *second*, separate raw-content path beyond the embedding one) | None found in any of these files |
 
-**Not yet swept, flagged for the ledger design specifically:** `app/providers/verification.py`,
-`app/providers/transcription.py`; whether chat history (#1) can compound exposure across turns
-(a past assistant reply that already echoed retrieved content gets replayed verbatim as
-`history` on the *next* turn, so redacting only the current turn's fresh retrieval would not
-un-expose what a prior turn already sent).
+**Swept 2026-08-27 (were flagged as not yet swept):**
+- `app/providers/verification.py` — its `.chat()`/`.embed()` calls (the pre-flight probe
+  `ensure_verified()`/`verify_provider()` use before every real ingest/media call) send only
+  the fixed constant `VERIFICATION_PROBE_TEXT = "ping"`, never real user/document content.
+  Confirmed zero egress relevance — nothing to gate.
+- `app/providers/transcription.py` — `resolve_transcription_provider()` unconditionally
+  returns `MockTranscriptionProvider()`; **no real transcription provider is wired anywhere in
+  this codebase today** (own module docstring: "no API keys, no paid calls — an explicit
+  constraint of this work order"). Confirmed **zero current exposure** — no raw audio/video
+  bytes leave the process via this path today, because there is currently no path that leaves
+  the process at all. This is a forward-looking requirement, not a live gap: the moment a real
+  `TranscriptionProvider` subclass is added (Whisper, Gemini, or anything else),
+  `resolve_transcription_provider()`'s single resolution point is exactly where an
+  `enforce_egress_policy()`-style gate must be inserted before that subclass's `.transcribe()`
+  is ever reachable in production — do not ship a real transcription provider without it.
+
+**Still open:** whether chat history (V1) can compound exposure across turns (a past assistant
+reply that already echoed retrieved content gets replayed verbatim as `history` on the *next*
+turn, so redacting only the current turn's fresh retrieval would not un-expose what a prior
+turn already sent) — see **V7** below.
 
 **Existing patterns worth reusing, not reinventing:**
 - `operator.redact()`/`_redact_value()` — real, working, reusable as *one layer*, not sufficient alone (syntactic, not semantic).
