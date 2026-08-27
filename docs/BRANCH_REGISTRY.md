@@ -6,23 +6,48 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Pass (2026-08-27): #167 HOLD — Supervisor goal-worktree ownership (Cursor)
+## Pass (2026-08-27, uppdaterad): #167 MERGAD, #169 MERGAD, #170 OPEN — Life Vault-grunden
 
-**PR:** [#167](https://github.com/d1n095/LifeAI/pull/167) `cursor/composed-autonomy-milestone`  
-**Status:** OPEN — **do not merge** until PER-GOAL vs PER-JOB worktree ownership fix is on head and proven.
+**#167** (`cursor/composed-autonomy-milestone`) — **MERGED** @ `4261787`, med `bf843cb` som
+det slutgiltiga fixande committet. Den slutgiltiga arkitekturen ersatte det ursprungliga
+per-job-marker-återanvändningsförslaget (avvisat, kolliderade med delad PER-GOAL-worktree)
+med Supervisor-goal-lease-strukturverifiering: nya `OperatorContext`-fält
+`supervisor_goal_id`/`supervisor_lease_id`/`supervisor_lease_generation`, ömsesidigt
+uteslutande mot `worktree_id`, verifierade mot en aktiv `supervisor_goal_leases`-rad +
+kanonisk `goal_worktree_path`/`goal_branch_name`. Ingen `MainAITaskWorktree`-markörfil för
+det per-goal-fallet.
 
-Composed milestone chain is real and must be preserved. Blocking defect on prior head
-`2fe87e5`: `production_entry` stamped `MainAITaskWorktree` + `.mainai_worktree_owner.json`
-onto the shared PER-GOAL Supervisor worktree, colliding with per-job recovery semantics.
+**#168** (`cursor/goal-finalize-canonical-wire`, Cursor) — OPEN, granskad av Claude, inga
+blockerande fynd. Cursor äger denna gren.
 
-**Fix direction (in progress on same PR):** Operator verifies Supervisor writes via active
-`supervisor_goal_leases` + canonical `goal_worktree_path`/`goal_branch_name` — not per-job
-markers. Two-task same-goal continuation test required before merge.
+**#169** (`claude/isolate-downgrade-probe-db`, Claude) — **MERGED** @ `d0c5fee`. Fixade en
+verklig regression i redan mergad kod: `test_downgrading_past_this_migration_fails_loudly_...`
+körde `alembic downgrade -1` (ett RELATIVT mål) mot den DELADE test-databasen, vilket tyst
+nedgraderar VILKEN migration som än råkar vara head — inte nödvändigtvis 0061 — och korrumperar
+schemat för varje senare test i samma pytest-session så fort en migration läggs ovanpå 0061
+(vilket #170 nedan gör). Fix: testet bygger nu sin egen disponibla databas
+(create → migrera → bygg riktig data → kör den riktiga downgrade-proben → drop). Ett andra
+CI-fel efter första pushen (DSN-konstruktionen tappade lösenordskomponenten, fungerade lokalt
+under trust-auth men inte i CI:s lösenords-auth-container) fixades i samma PR innan merge.
 
-**Claude parallel lane:** Life Vault / external-AI egress — see
-`docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Do not collide with #167 files.
+**#170** (`claude/life-vault-egress-control`, Claude) — **OPEN**, väntar på CI. Life Vault /
+External-AI Egress Control-grunden: `provider_disclosure_events`-ledger (migration 0062,
+append-only/RLS, samma mönster som `provider_spend_usage_events`), `app/egress_policy/service.py`
+(`enforce_egress_policy()` — default-deny-grind, hård-deny på NEVER_EGRESS-markerat innehåll,
+redigering via befintlig `_redact_value()`), inkopplad i `provider_planning.plan_with_provider()`
+omedelbart före den riktiga `.propose()`-anropet. Se `docs/LIFE_VAULT_EGRESS_CONTROL.md` för
+hela hotmodellen/arkitekturkartan. Rebased ovanpå #169:s merge (`d0c5fee`) eftersom #170 lägger
+till migration 0062 ovanpå 0061 — utan #169:s fix hade #170:s egen CI drabbats av exakt samma
+databaskorruptionskedja. Uttryckligen UTANFÖR scope för denna PR: `app/routers/chat.py`,
+RAG/embedding-anropsställen, fullständigt klassificeringsschema (dokumenterat som V1/V2/V4/V5/V7
+i hotmodellen, nästa steg efter merge).
 
-**Integrations tip (origin):** `7093480` (#166 + #165 merged).
+**Claude-äger, inte Cursor:** Life Vault / external-AI-egress-linjen (#170 och framåt) — se
+`docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`. Rör inte #167/#168:s filer
+(`development_operator/service.py`, `production_entry.py`, `production_worktree.py`,
+`worker.py`).
+
+**Integrationsgren-tip (origin/claude/det-kommer-mer-879lcm):** `d0c5fee` (#169 mergad).
 
 ## Pass 80b (2026-08-25): Autonomy Activation B4 — plan-derived scope narrowing (Cursor)
 

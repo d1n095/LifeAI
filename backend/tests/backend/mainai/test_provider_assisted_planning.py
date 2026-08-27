@@ -523,3 +523,76 @@ async def test_accepted_provider_candidate_replay_does_not_repeat_call_or_usage(
         )
         == 1
     )
+
+
+# ---------------------------------------------------------------- Life Vault / egress gate wiring
+# (docs/LIFE_VAULT_EGRESS_CONTROL.md) -- proves app.egress_policy.enforce_egress_policy() is a
+# real part of plan_with_provider()'s own call path, not just a standalone unit.
+
+
+@pytest.mark.asyncio
+async def test_real_provider_call_records_an_allowed_disclosure_ledger_entry(
+    superuser_db, tmp_path
+):
+    from app.models.provider_disclosure import ProviderDisclosureEvent
+
+    owner, goal, task, job, _, context, request, calculator = _provider_scope(
+        superuser_db, tmp_path
+    )
+    adapter = FakePlanningAdapter(_response(_candidate_payload(calculator)))
+    result = await plan_with_provider(
+        superuser_db, request=request, operator_context=context, adapter=adapter
+    )
+    assert result.classification == "ACCEPTED"
+
+    event = superuser_db.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.owner_id == owner.id)
+    ).scalar_one()
+    assert event.decision == "allowed"
+    assert event.provider == "fake-local"
+    assert event.model == "planner-v2"
+    assert event.purpose == "development_planning"
+    assert event.task_id == task.id
+    assert event.goal_id == goal.id
+    assert event.job_id == job.id
+    assert event.sent_content_hash is not None
+
+
+@pytest.mark.asyncio
+async def test_never_egress_content_is_denied_before_the_provider_is_ever_called(
+    superuser_db, tmp_path
+):
+    """A NEVER_EGRESS-marked instruction must stop the call before ANY network-shaped
+    adapter.propose() happens (adapter.calls stays empty), release the already-reserved
+    provider spend (never billed for a call that never left the process), and record a
+    denied ledger entry -- proving the egress gate is a real, load-bearing part of this call
+    path, not decorative."""
+    from app.models.provider_disclosure import ProviderDisclosureEvent
+    from app.models.provider_spend import ProviderSpendAuthorization
+
+    owner, goal, task, job, _, context, request, calculator = _provider_scope(
+        superuser_db,
+        tmp_path,
+        instruction="NEVER_EGRESS: the founder's entire private roadmap and financial model",
+    )
+    adapter = FakePlanningAdapter(_response(_candidate_payload(calculator)))
+    result = await plan_with_provider(
+        superuser_db, request=request, operator_context=context, adapter=adapter
+    )
+    assert result.classification == "EGRESS_DENIED"
+    assert len(adapter.calls) == 0  # the provider was never actually invoked
+
+    event = superuser_db.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.owner_id == owner.id)
+    ).scalar_one()
+    assert event.decision == "denied"
+    assert "never_egress_marker" in event.redaction_categories
+
+    auth = superuser_db.execute(
+        select(ProviderSpendAuthorization).where(
+            ProviderSpendAuthorization.owner_id == owner.id,
+            ProviderSpendAuthorization.status == "active",
+        )
+    ).scalar_one()
+    assert auth.reserved_requests == 0  # reservation was released, not left stranded
+    assert auth.spent_requests == 0  # never actually spent -- the call never happened

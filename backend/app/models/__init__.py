@@ -167,6 +167,7 @@ from app.models.problem_learning import (
     LifeSolutionComponent, LifeSolutionComponentLink, LifeSolutionSelection,
 )
 from app.models.provider_config import ProviderConfig
+from app.models.provider_disclosure import ProviderDisclosureDecision, ProviderDisclosureEvent
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
@@ -371,6 +372,8 @@ __all__ = [
     "LifeSolutionComponentLink",
     "LifeSolutionSelection",
     "ProviderConfig",
+    "ProviderDisclosureDecision",
+    "ProviderDisclosureEvent",
     "ProviderVerificationCheck",
     "RefreshToken",
     "RevokedAccessToken",

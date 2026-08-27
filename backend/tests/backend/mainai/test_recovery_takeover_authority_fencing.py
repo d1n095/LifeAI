@@ -677,10 +677,14 @@ async def test_downgrading_past_this_migration_fails_loudly_once_a_real_row_exis
 
         env = dict(os.environ)
         env["DATABASE_URL"] = temp_dsn
+        # Target migration 0061 explicitly, never "head" -- this test only means anything
+        # against exactly 0061's own downgrade (the CHECK constraint it re-adds), and "head"
+        # silently drifts as later migrations land on top (0062 already does). Pinning here
+        # keeps the test correct forever, not just at the moment it was written.
         upgraded = subprocess.run(
-            ["alembic", "upgrade", "head"], cwd=str(backend_root), env=env, capture_output=True, text=True,
+            ["alembic", "upgrade", "0061"], cwd=str(backend_root), env=env, capture_output=True, text=True,
         )
-        assert upgraded.returncode == 0, f"isolated probe DB failed to migrate to head:\n{upgraded.stdout}\n{upgraded.stderr}"
+        assert upgraded.returncode == 0, f"isolated probe DB failed to migrate to 0061:\n{upgraded.stdout}\n{upgraded.stderr}"
         current_before = subprocess.run(["alembic", "current"], cwd=str(backend_root), env=env, capture_output=True, text=True)
         assert "0061" in current_before.stdout  # this test only means anything against exactly 0061's own downgrade
 
