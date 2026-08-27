@@ -1,4 +1,5 @@
 import logging
+import uuid
 
 from sqlalchemy.orm import Session
 
@@ -92,12 +93,32 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
     return chain
 
 
-async def chat_with_fallback(db: Session, messages: list[Message], **kwargs) -> tuple[ChatResult, list[str]]:
+async def chat_with_fallback(
+    db: Session,
+    messages: list[Message],
+    *,
+    owner_id: uuid.UUID | None = None,
+    purpose: str | None = None,
+    requested_by: str | None = None,
+    task_id: uuid.UUID | None = None,
+    goal_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
+    **kwargs,
+) -> tuple[ChatResult, list[str]]:
     """Try the primary chat provider, then fall back through CHAT_FALLBACK_ORDER on failure.
 
     Returns the successful result plus the list of provider names that were attempted
     (including the one that succeeded), so callers can log/audit exactly what happened
     instead of it being invisible.
+
+    Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): when
+    `owner_id` is passed, every attempt is routed through `enforce_egress_policy()` first --
+    default-deny gate, hard-deny on NEVER_EGRESS-marked content (never partial-send, and never
+    treated as "try the next provider" -- the content itself is what's denied, not a specific
+    provider being unreachable), otherwise secret-pattern redacted, with exactly one disclosure-
+    ledger row per real attempt. `owner_id` is optional and defaults to None (gate skipped,
+    unchanged legacy behavior) so existing callers migrate incrementally -- see the threat
+    model's V1/V4 blocker list for which callers still need to pass it.
     """
     # Deferred import: app/providers/verification.py imports resolve_active from this module,
     # so importing it at module load time would be a circular import. classify_provider_exception
@@ -111,6 +132,11 @@ async def chat_with_fallback(db: Session, messages: list[Message], **kwargs) -> 
     # to contain a live Gemini key.
     from app.providers.verification import classify_provider_exception
 
+    # Deferred for the same reason: keep app.egress_policy's own import graph (which reaches
+    # into app.development_operator.service) from ever becoming a load-time dependency of this
+    # already-central module.
+    from app.egress_policy import EgressDeniedError, enforce_egress_policy
+
     chain = resolve_chat_chain(db)
     attempted: list[str] = []
     last_error: Exception | None = None
@@ -118,7 +144,23 @@ async def chat_with_fallback(db: Session, messages: list[Message], **kwargs) -> 
     for provider, model in chain:
         attempted.append(provider.name)
         try:
-            result = await provider.chat(messages, model=model, **kwargs)
+            outbound_messages = messages
+            if owner_id is not None:
+                payload = [{"role": m.role, "content": m.content} for m in messages]
+                redacted = enforce_egress_policy(
+                    db,
+                    owner_id=owner_id,
+                    provider=provider.name,
+                    model=model,
+                    purpose=purpose or "chat",
+                    requested_by=requested_by or "providers.registry.chat_with_fallback",
+                    payload=payload,
+                    task_id=task_id,
+                    goal_id=goal_id,
+                    job_id=job_id,
+                )
+                outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
+            result = await provider.chat(outbound_messages, model=model, **kwargs)
             if len(attempted) > 1:
                 logger.warning(
                     "Chat fallback engaged: %s failed over to %s (attempted: %s)",
@@ -127,6 +169,11 @@ async def chat_with_fallback(db: Session, messages: list[Message], **kwargs) -> 
                     attempted,
                 )
             return result, attempted
+        except EgressDeniedError:
+            # A denial is about the CONTENT, not this specific provider -- every other
+            # provider in the chain would deny identically. Never treated as a per-provider
+            # failure to fall back from; abort the whole call immediately.
+            raise
         except Exception as exc:  # noqa: BLE001 - any provider failure should trigger fallback, not just ProviderError
             safe = classify_provider_exception(exc)
             logger.warning("Chat provider %s failed (%s): %s", provider.name, safe.result.value, safe.message)

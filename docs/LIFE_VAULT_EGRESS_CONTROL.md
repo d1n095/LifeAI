@@ -80,13 +80,13 @@ auto-downgrade it.
 
 | ID | Blocks a real Vault guarantee? | Status | Scope |
 |---|---|---|---|
-| **V1** | **YES — highest exposure today** | OPEN, not started | Chat endpoint (row 1) sends raw RAG chunks + raw history to real configured providers with zero filtering. Pre-existing, unrelated to #167. |
+| **V1** | **YES — highest exposure, now gated** | **CLOSED** (`chat_with_fallback(owner_id=...)`, PR "Wire the Life Vault egress gate into chat_with_fallback() (V1)") | Chat endpoint (row 1) now passes `owner_id`/`purpose="chat"` into `chat_with_fallback()` — every attempt is routed through `enforce_egress_policy()` before any provider is called; NEVER_EGRESS-shaped retrieved content is denied outright (never partial-sent, never treated as a per-provider failure to fall back from); real disclosure-ledger entry per attempt. Still no semantic classification (V5) or history-replay handling (V7) — see those rows. |
 | **V2** | YES | OPEN, not started | RAG/embedding pipeline (rows 2-5) embeds raw document/query text with zero classification gate. |
-| **V3** | YES — but already partially mitigated | PARTIAL (real `redact()`, reference-only context) | `provider_planning`/Safe Planner boundary (row 6) — the newly-live autonomous path from #166/#167. Best-behaved boundary today; still has no semantic classification, no disclosure ledger, no founder-policy-driven allow/deny. |
-| **V4** | YES | OPEN, not started | 7 remaining `chat_with_fallback()` callers (rows 7-13) — zero redaction found in any of them. |
+| **V3** | YES — mitigated | **CLOSED** (PR #170) | `provider_planning`/Safe Planner boundary (row 6) — the autonomous path from #166/#167. Gated via the same `enforce_egress_policy()`. Still no semantic classification (V5). |
+| **V4** | YES | OPEN, not started | 6 remaining `chat_with_fallback()` callers (rows 7-13 minus row 1, now closed) — zero redaction found in any of them. The `owner_id` kwarg exists on `chat_with_fallback()` now; wiring the remaining callers is mechanical, not a redesign. |
 | **V5** | Foundational, blocks everything else | OPEN, not started | No sensitivity/egress classification field exists anywhere in the schema. |
-| **V6** | Foundational, blocks the founder's own audit requirement | OPEN, not started | No disclosure ledger exists — "what has provider X ever received?" is unanswerable today. |
-| **V7** | Compounding risk on V1 | OPEN, not started, needs design | Chat history replay: a past turn's already-sent content re-appears verbatim in every later turn's `history`. |
+| **V6** | Foundational, blocks the founder's own audit requirement | **CLOSED** (migration 0062, PR #170) | `provider_disclosure_events` ledger exists and is written by every gated call site (V1, V3 today). Still doesn't cover V2/V4's ungated sites — "what has provider X ever received" is only a complete answer once those close too. |
+| **V7** | Compounding risk on V1 | OPEN, not started, needs design | Chat history replay: a past turn's already-sent content re-appears verbatim in every later turn's `history`. V1's gate re-evaluates and re-redacts the FULL history (including prior turns) on every single call — structurally stateless, so this is less severe than originally scoped (nothing is exempt from re-inspection), but a prior turn's content that was already ALLOWED once is disclosed again on every subsequent turn; no design exists yet for whether/how that should be suppressed. |
 
 ## First PR scope (smallest unowned foundation, per the founder's own deliverable order)
 
@@ -110,10 +110,15 @@ auto-downgrade it.
 dropped): V1 (chat endpoint), V2 (RAG/embedding), V4 (other `chat_with_fallback` callers), the
 full PUBLIC..NEVER_EGRESS classification schema applied to real `Document`/`KnowledgeClaim`
 rows (V5 — the gate ships with a narrower, structural SECRET-detection + explicit-allow
-mechanism first, not the full taxonomy), V7 (history-replay). These remain real, named,
-tracked gaps — the highest-value next lane is almost certainly V1, given it is the single
-largest, already-live exposure of raw founder document content, but it is intentionally not
-PR #1 per the founder's own "smallest unowned foundation" instruction.
+mechanism first, not the full taxonomy), V7 (history-replay). These remained real, named,
+tracked gaps at PR #1 time.
+
+**Status update:** V1 closed in a follow-up PR ("Wire the Life Vault egress gate into
+chat_with_fallback() (V1)") — see the ranked-blockers table above. Remaining open, named gaps:
+V2 (RAG/embedding — highest-value next lane now, since it's the only remaining ungated path
+that runs on every single document import, not just chat/planning turns), V4 (6 remaining
+`chat_with_fallback()` callers — mechanical now that the `owner_id` kwarg exists), V5 (full
+classification schema), V7 (history-replay design).
 
 ## Attack list coverage plan (from the founder's brief; PR #1 realistic subset)
 
