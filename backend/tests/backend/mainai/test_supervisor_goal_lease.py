@@ -159,6 +159,66 @@ def test_two_workers_racing_the_same_goal_only_one_wins(superuser_db, make_verif
     assert (claim_a is None) != (claim_b is None)  # exactly one wins
 
 
+def test_two_workers_with_real_concurrent_connections_racing_the_same_goal_only_one_wins(
+    superuser_db, make_verified_user
+):
+    """Adversarial review, 2026-08-27 (Attack 7): the sibling test above proves the claim
+    SQL's WHERE logic is correct, but calls both attempts sequentially on the SAME session --
+    it does not empirically prove safety under genuine concurrent database connections the way
+    tests/backend/jobs/test_mainai_jobs.py::test_two_workers_racing_many_jobs_never_claim_the_same_job
+    does for mainai_jobs' own claim path. Two real threads, two real DB connections, racing
+    claim_supervisor_goal_lease() for the same goal at the same instant."""
+    import threading
+
+    owner, _ = make_verified_user()
+    goal, envelope = _goal_and_envelope(superuser_db, owner.id)
+    superuser_db.commit()
+    owner_id, goal_id, envelope_id = owner.id, goal.id, envelope.id
+    bind = superuser_db.get_bind()
+    results = []
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def _attempt(worker_id):
+        from sqlalchemy.orm import sessionmaker
+
+        Session = sessionmaker(bind=bind)
+        session = Session()
+        try:
+            barrier.wait(timeout=5)
+            claim = claim_supervisor_goal_lease(
+                session, owner_id=owner_id, goal_id=goal_id, envelope_id=envelope_id, worker_id=worker_id, lease_seconds=300
+            )
+            session.commit()
+            results.append((worker_id, claim))
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            errors.append(str(exc))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_attempt, args=("real-worker-a",))
+    t2 = threading.Thread(target=_attempt, args=("real-worker-b",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert len(results) == 2, f"both threads must complete without raising (errors: {errors})"
+    winners = [worker_id for worker_id, claim in results if claim is not None]
+    assert len(winners) == 1, f"exactly one real concurrent connection must win the claim, got {winners}"
+
+    from app.models.supervisor_lease import SupervisorGoalLease
+
+    active_leases = (
+        superuser_db.query(SupervisorGoalLease)
+        .filter_by(owner_id=owner_id, goal_id=goal_id, status="active")
+        .all()
+    )
+    assert len(active_leases) == 1
+    assert active_leases[0].worker_id == winners[0]
+
+
 def test_deleting_the_referenced_envelope_detaches_the_lease_without_touching_owner_id(superuser_db, make_verified_user):
     """A bare composite `ON DELETE SET NULL` (no column list) nulls EVERY referencing column
     by default in PostgreSQL -- including owner_id, which is NOT NULL, so the envelope's own
