@@ -2,6 +2,8 @@
 
 **Owner:** Cursor  
 **Branch:** `cursor/stale-authority-effect-time`  
+**PR:** [#177](https://github.com/d1n095/LifeAI/pull/177)  
+**Head:** `bd08505`  
 **Base tip:** `6a3572e` (#168 merged)  
 **Started:** 2026-08-27  
 
