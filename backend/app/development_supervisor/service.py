@@ -231,6 +231,37 @@ class SupervisorScope:
     provider_spend_authorized: bool = False
 
 
+def _live_provider_spend_authorized(db, scope: SupervisorScope) -> bool:
+    """Supervisor fail-fast / defense-in-depth: re-read live spend before planning.
+
+    `scope.provider_spend_authorized` is reconstructed at Supervisor tick start. A founder
+    revoke/exhaust between that read and `plan_with_provider` should fail closed HERE so we
+    do not enter provider planning under a stale True.
+
+    This does NOT replace the authoritative final security fence inside
+    `plan_with_provider` → `reserve_provider_spend_call` (locked live authorization check
+    immediately before `adapter.propose`). The inner reservation remains the boundary that
+    prevents unauthorized provider EFFECT. This outer check is earlier current-state
+    revalidation: fail-fast classification, less wasted planning work, defense-in-depth.
+    """
+    if not scope.provider_spend_authorized:
+        return False
+    from app.provider_spend import provider_spend_is_live
+
+    envelope_id: uuid.UUID | None = None
+    if scope.authority_kind == "authorized_goal":
+        try:
+            envelope_id = uuid.UUID(str(scope.authority_ref))
+        except ValueError:
+            return False
+    return provider_spend_is_live(
+        db,
+        owner_id=scope.owner_id,
+        goal_id=scope.goal_id,
+        execution_envelope_id=envelope_id,
+    )
+
+
 @dataclass(frozen=True)
 class WorkBinding:
     """Execution material for one existing MainAI task, never canonical backlog truth."""
@@ -1113,7 +1144,7 @@ async def run_supervisor(
                     },
                 )
             if planning.classification == "WAITING_PROVIDER":
-                if not scope.provider_spend_authorized:
+                if not _live_provider_spend_authorized(db, scope):
                     cp = _checkpoint(
                         db,
                         goal=goal,
@@ -1140,7 +1171,7 @@ async def run_supervisor(
                         completed_jobs,
                         selected,
                         assessments,
-                        "provider-assisted planning requires scope.provider_spend_authorized=True",
+                        "provider-assisted planning requires a still-live founder spend grant",
                         cp,
                     )
                 planning = await plan_with_provider(
@@ -1149,7 +1180,7 @@ async def run_supervisor(
                     operator_context=context,
                     adapter=binding.provider_adapter,
                 )
-        elif not scope.provider_spend_authorized:
+        elif not _live_provider_spend_authorized(db, scope):
             cp = _checkpoint(
                 db,
                 goal=goal,
@@ -1176,7 +1207,7 @@ async def run_supervisor(
                 completed_jobs,
                 selected,
                 assessments,
-                "provider-assisted planning requires scope.provider_spend_authorized=True",
+                "provider-assisted planning requires a still-live founder spend grant",
                 cp,
             )
         else:
