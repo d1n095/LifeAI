@@ -6,6 +6,19 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass (2026-08-27 night): tip `8b2057d` — Claude concurrent spend/lease; #181 rebased
+
+**Integrations tip:** `8b2057d` (Merge #180). Claude landed real two-thread tests:
+- [#178](https://github.com/d1n095/LifeAI/pull/178) last-unit budget race (exactly one reservation)
+- [#179](https://github.com/d1n095/LifeAI/pull/179) supervisor-goal-lease claim race
+- [#180](https://github.com/d1n095/LifeAI/pull/180) revoke racing reserve
+
+| PR | Status | Notes |
+|---|---|---|
+| [#181](https://github.com/d1n095/LifeAI/pull/181) | OPEN (Cursor) — rebased on tip | Supervisor spend fail-fast / defense-in-depth (Outcome B); mutation test proves delta |
+
+**Phase 2 concurrent near-exhausted budget:** already proven by #178 — do not redesign; Cursor night run moves to Phase 3 after #181 merges.
+
 ## Pass (2026-08-27): tip `77d3f1e` — #177 MERGED; spend revoke-before-reserve TOCTOU
 
 **Integrations tip:** `77d3f1e` (Merge #177).
