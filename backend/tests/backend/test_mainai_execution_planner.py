@@ -528,6 +528,38 @@ async def test_propose_plan_via_ai_parses_a_valid_response_into_planned_task_spe
 
 
 @pytest.mark.asyncio
+async def test_propose_plan_via_ai_never_egress_marked_instruction_is_denied_before_the_provider_is_ever_called(
+    db_session, owner_id, monkeypatch
+):
+    """Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V4):
+    propose_plan_via_ai() now routes through chat_with_fallback(owner_id=goal.owner_id).
+    goal.owner_id was already available in this function's own scope -- no identity-
+    propagation gap here, unlike lesson_conflicts.py/agent_orchestration.py's genuinely
+    ownerless models (see the threat model doc's V4 row)."""
+    from app.egress_policy import EgressDeniedError
+
+    chat_calls: list[str] = []
+
+    async def _tracking_chat(self, messages, model, **kwargs):
+        chat_calls.append(self.name)
+        return ChatResult(content=_VALID_PLAN_JSON, provider=self.name, model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
+    goal = planner.create_goal(
+        db_session,
+        owner_id=owner_id,
+        title="Marked goal",
+        original_instruction="NEVER_EGRESS: hemlig instruktion som aldrig far lamna processen.",
+        created_by="test",
+    )
+
+    with pytest.raises(EgressDeniedError):
+        await planner.propose_plan_via_ai(db_session, goal=goal)
+
+    assert chat_calls == []  # the marked instruction never reached the chat provider
+
+
+@pytest.mark.asyncio
 async def test_propose_plan_via_ai_strips_markdown_code_fences(db_session, owner_id, monkeypatch):
     fenced = "```json\n" + _VALID_PLAN_JSON + "\n```"
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat(fenced))

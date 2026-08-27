@@ -57,6 +57,7 @@ from app.jobs.service import mark_cancelled, mark_completed, mark_failed, record
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobProposal, MainAIJobStatus
+from app.egress_policy import EgressDeniedError
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 
@@ -206,7 +207,39 @@ async def run_corpus_review_job(
                     Message(role="system", content=CORPUS_REVIEW_SYSTEM_PROMPT),
                     Message(role="user", content=f"Document title: {document.title}\n\n{review_text}"),
                 ],
+                owner_id=document.uploaded_by,
+                purpose="corpus_review",
+                requested_by="jobs.handlers.corpus_review",
             )
+        except EgressDeniedError as exc:
+            # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V4):
+            # a policy refusal for THIS ONE document's content -- must not abort the whole
+            # corpus-review job (same per-document-skip principle as the ProviderError branch
+            # right below), and must never be caught by the generic `except Exception` fallback
+            # further down, which treats an unrecognized exception as a WHOLE-JOB failure.
+            # permanent, not transient_io: retrying the exact same denied content changes
+            # nothing.
+            db.rollback()
+            provider_failed_count += 1
+            logger.warning("corpus_review job %s: document %s egress-denied: %s", job_id, document_id, exc)
+            job = _refresh(db, job_id)
+            if job is None:
+                return
+            try:
+                record_document_skipped(
+                    db,
+                    job,
+                    worker_id=worker_id,
+                    lease_generation=lease_generation,
+                    document_id=document_id,
+                    reason="egress_denied",
+                    error_category=MainAIJobErrorCategory.permanent.value,
+                )
+                db.commit()
+            except JobLeaseLostError:
+                _lease_lost("skip:egress_denied")
+                return
+            continue
         except ProviderError as exc:
             # A provider failure for THIS ONE document does not abort the whole job — see
             # module docstring. Recorded as its own skipped outcome (reason `provider_failed`,

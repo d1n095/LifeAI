@@ -900,6 +900,60 @@ async def test_run_corpus_review_job_marks_failed_when_every_document_provider_f
 
 
 @pytest.mark.asyncio
+async def test_run_corpus_review_job_egress_denied_document_is_skipped_not_a_whole_job_failure(
+    db_session, superuser_db, make_verified_user, monkeypatch
+):
+    """Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V4):
+    NEVER_EGRESS-marked chunk content must never reach the chat provider, and -- critically --
+    must be caught by its own dedicated except clause, never fall through to the generic
+    `except Exception` branch that treats an unrecognized exception as a whole-job failure
+    (mark_failed(error_category=unexpected)) instead of a per-document skip. Mirrors
+    test_run_corpus_review_job_marks_failed_when_every_document_provider_fails's shape exactly,
+    substituting a NEVER_EGRESS-marked chunk for a provider failure."""
+    chat_calls: list[str] = []
+
+    async def _tracking_chat(self, messages, model, **kwargs):
+        chat_calls.append(self.name)
+        return ChatResult(content="should never be reached", provider=self.name, model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
+    user, _ = make_verified_user()
+    doc = _make_indexed_document(db_session, user.id)
+    _make_chunk(db_session, user.id, doc.id, text_value="NEVER_EGRESS: hemligt innehall som aldrig far granskas externt.")
+    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, user.id)
+    await run_corpus_review_job(db_session, job.id, user.id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    assert chat_calls == []  # the marked chunk never reached the chat provider
+
+    job = superuser_db.get(MainAIJob, job.id)
+    # A content-policy denial for one document is retryable via the same "all failed" framing
+    # as a provider failure -- never mark_failed(error_category=unexpected), which is what the
+    # generic except-Exception branch further down in corpus_review.py would have produced had
+    # EgressDeniedError not been caught by its own explicit clause first.
+    assert job.status == MainAIJobStatus.failed
+    assert job.error_category != MainAIJobErrorCategory.unexpected
+
+    events = superuser_db.execute(
+        sa_text("SELECT event_type, detail FROM mainai_job_events WHERE job_id = :j AND event_type = 'document_skipped'"), {"j": str(job.id)}
+    ).all()
+    assert len(events) == 1
+    detail = events[0][1]
+    assert detail["reason"] == "egress_denied"
+    assert detail["document_id"] == str(doc.id)
+    assert detail["error_category"] == MainAIJobErrorCategory.permanent.value
+    assert "NEVER_EGRESS" not in json.dumps(detail)  # never leaks the raw denied content
+
+    proposal_count = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_job_proposals WHERE job_id = :j"), {"j": str(job.id)}).scalar()
+    assert proposal_count == 0
+
+    # Founder retry affordance is open again, same as a provider-failed run.
+    retried = service.retry_job(db_session, job.id, requested_by=user.id)
+    assert retried.status == MainAIJobStatus.queued
+
+
+@pytest.mark.asyncio
 async def test_run_corpus_review_job_mixed_outcomes_in_one_run(db_session, superuser_db, make_verified_user, monkeypatch):
     """One run, three documents, three different outcomes: reviewed, deleted mid-run, and a
     provider failure -- exactly the "blandade utfall" scenario the founder's review asked to

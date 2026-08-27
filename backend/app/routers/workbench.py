@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
+from app.egress_policy import EgressDeniedError
 from app.limiter import limiter
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, KnowledgeClassification
 from app.models.source_relationship import RelationshipType, SourceRelationship
@@ -86,8 +87,10 @@ async def analyze(
     messages = [Message(role="system", content=system_content), Message(role="user", content=payload.question)]
 
     try:
-        result, _ = await chat_with_fallback(db, messages)
-    except ProviderError as exc:
+        result, _ = await chat_with_fallback(
+            db, messages, owner_id=user.id, purpose="workbench_analyze", requested_by="routers.workbench.analyze"
+        )
+    except (ProviderError, EgressDeniedError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     conclusion, critique = _split_conclusion(result.content)
