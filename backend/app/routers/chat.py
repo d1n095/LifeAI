@@ -26,6 +26,7 @@ from app.context.resolver import (
 )
 from app.db import get_db
 from app.deps import require_founder
+from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
@@ -206,9 +207,20 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     assistant_row = _get_or_create_reply_slot(db, user_message.id)
 
     try:
-        result, attempted = await chat_with_fallback(db, messages)
-    except ProviderError as exc:
-        category = exc.category or "unreachable"
+        result, attempted = await chat_with_fallback(
+            db,
+            messages,
+            owner_id=user.id,
+            purpose="chat",
+            requested_by="routers.chat._attempt_assistant_reply",
+        )
+    except (ProviderError, EgressDeniedError) as exc:
+        # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
+        # EgressDeniedError means the gate refused the WHOLE call before any provider was ever
+        # reached (never a provider outage) -- always non-retryable, since the content that
+        # triggered the denial (this conversation's own history/retrieval) is unchanged on
+        # retry and would be denied identically again.
+        category = "egress_denied" if isinstance(exc, EgressDeniedError) else (exc.category or "unreachable")
         if assistant_row is None:
             assistant_row = MessageModel(
                 conversation_id=conversation.id,

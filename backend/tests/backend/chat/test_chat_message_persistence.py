@@ -332,3 +332,132 @@ def test_retry_404s_for_unknown_message(client, bad_id, monkeypatch):
     csrf = _login(client)
     res = client.post(f"/api/chat/messages/{bad_id}/retry", headers={"X-CSRF-Token": csrf})
     assert res.status_code == 404
+
+
+# --- Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1) ---------
+# app/routers/chat.py is the highest-exposure call site named in the threat model: raw RAG
+# chunks + raw conversation history, sent to a real configured external provider. These prove
+# the wiring into chat_with_fallback(owner_id=...) actually gates this specific endpoint, not
+# just the already-covered provider_planning boundary (see test_provider_assisted_planning.py).
+
+
+def _founder_id(superuser_db):
+    from app.models.user import User
+
+    return superuser_db.query(User).filter_by(email=FOUNDER_EMAIL).first().id
+
+
+def _latest_disclosure_event(superuser_db):
+    from app.models.provider_disclosure import ProviderDisclosureEvent
+
+    return (
+        superuser_db.query(ProviderDisclosureEvent)
+        .order_by(ProviderDisclosureEvent.created_at.desc(), ProviderDisclosureEvent.id.desc())
+        .first()
+    )
+
+
+def test_a_real_chat_reply_records_an_allowed_disclosure_ledger_entry_for_the_actual_founder(client, superuser_db, monkeypatch):
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Hej!"))
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Vad vet du om projektet?"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    assert res.json()["assistant_status"] == "succeeded"
+
+    event = _latest_disclosure_event(superuser_db)
+    assert event is not None
+    assert event.owner_id == _founder_id(superuser_db)  # never a wrong/default owner
+    assert event.provider == "openai"
+    assert event.purpose == "chat"
+    assert event.requested_by == "routers.chat._attempt_assistant_reply"
+    assert event.decision == "allowed"
+    assert event.sent_content_hash is not None
+
+
+def test_never_egress_marked_retrieved_content_is_denied_before_any_provider_is_ever_called(client, superuser_db, monkeypatch):
+    chat_calls: list[str] = []
+
+    async def _tracking_chat(self, messages, model, **kwargs):
+        chat_calls.append(self.name)
+        return ChatResult(content="should never be reached", provider=self.name, model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
+
+    async def _fake_retrieve_context(db, owner_id, query, top_k=5):
+        return [
+            {
+                "document_id": "00000000-0000-0000-0000-000000000001",
+                "chunk_id": "00000000-0000-0000-0000-000000000002",
+                "title": "Hemligt dokument",
+                "text": "NEVER_EGRESS: detta får aldrig lämna processen.",
+                "score": 0.9,
+                "active_truth_status": "active",
+            }
+        ]
+
+    monkeypatch.setattr("app.routers.chat.retrieve_context", _fake_retrieve_context)
+
+    csrf = _login(client)
+    res = client.post("/api/chat", json={"message": "Berätta om det hemliga dokumentet."}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["assistant_status"] == "failed"
+    assert body["error_category"] == "egress_denied"
+    assert body["retryable"] is False
+    assert body["reply"] is None
+
+    # The whole call was refused before ANY provider was ever actually reached -- not a
+    # provider-specific failure that a fallback should have tried to route around.
+    assert chat_calls == []
+
+    # The user's own message is never lost, matching this file's core persistence invariant --
+    # a policy denial is not exempt from that guarantee just because it's a different kind of
+    # failure than a provider outage.
+    saved = _latest_message(superuser_db, MessageRole.user)
+    assert saved is not None
+    assert saved.content == "Berätta om det hemliga dokumentet."
+    assert saved.status == MessageStatus.succeeded
+
+    event = _latest_disclosure_event(superuser_db)
+    assert event is not None
+    assert event.owner_id == _founder_id(superuser_db)
+    assert event.decision == "denied"
+    assert event.sent_content_hash is None
+    assert "never_egress_marker" in event.redaction_categories
+
+
+def test_retrying_after_an_egress_denial_is_denied_again_not_silently_bypassed(client, superuser_db, monkeypatch):
+    from app.models.provider_disclosure import ProviderDisclosureEvent
+
+    async def _tracking_chat(self, messages, model, **kwargs):
+        raise AssertionError("provider.chat() must never be reached for NEVER_EGRESS content")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
+
+    async def _fake_retrieve_context(db, owner_id, query, top_k=5):
+        return [
+            {
+                "document_id": "00000000-0000-0000-0000-000000000001",
+                "chunk_id": "00000000-0000-0000-0000-000000000002",
+                "title": "Hemligt dokument",
+                "text": "NEVER_EGRESS: detta får aldrig lämna processen.",
+                "score": 0.9,
+                "active_truth_status": "active",
+            }
+        ]
+
+    monkeypatch.setattr("app.routers.chat.retrieve_context", _fake_retrieve_context)
+
+    csrf = _login(client)
+    res1 = client.post("/api/chat", json={"message": "Fråga 1"}, headers={"X-CSRF-Token": csrf})
+    assert res1.json()["error_category"] == "egress_denied"
+    user_message_id = res1.json()["user_message_id"]
+
+    count_after_first = superuser_db.query(ProviderDisclosureEvent).count()
+
+    res2 = client.post(f"/api/chat/messages/{user_message_id}/retry", headers={"X-CSRF-Token": csrf})
+    assert res2.status_code == 200, res2.text
+    assert res2.json()["error_category"] == "egress_denied"  # still denied -- never inherits/skips re-evaluation
+
+    count_after_retry = superuser_db.query(ProviderDisclosureEvent).count()
+    assert count_after_retry == count_after_first + 1  # a genuinely fresh decision was recorded, not a cached one
