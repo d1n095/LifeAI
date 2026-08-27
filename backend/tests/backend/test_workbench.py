@@ -87,6 +87,39 @@ def test_analyze_splits_conclusion_and_critique(client, superuser_db, _fake_prov
     assert body["confidence"] == "high"
 
 
+def test_analyze_never_egress_marked_question_never_reaches_the_chat_provider(client, superuser_db, monkeypatch):
+    """Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V4):
+    analyze() now passes owner_id=user.id into chat_with_fallback(). The question also feeds
+    retrieve_context() (V2), which has no try/except around it in this endpoint at all today
+    (pre-existing, documented in the threat model doc, unchanged by this wiring -- any
+    provider failure already crashed here before egress gating existed) -- so a
+    NEVER_EGRESS-marked question is denied at the retrieval gate first, propagating exactly
+    like any other retrieval failure already would. What matters here, regardless of which
+    gate catches it first: the chat provider is never reached with the marked content."""
+    from app.egress_policy import EgressDeniedError
+    from app.providers.openai_provider import OpenAIProvider
+
+    chat_calls: list[str] = []
+
+    async def _tracking_chat(self, messages, model, **kwargs):
+        chat_calls.append(self.name)
+        raise AssertionError("chat provider must never be reached for NEVER_EGRESS content")
+
+    async def _fake_embed(self, texts, model, **kwargs):
+        return [MATCHING_VECTOR for _ in texts]
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
+    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+
+    founder_id = _founder_id(superuser_db)
+    _make_source(superuser_db, founder_id, "Analyskalla")
+    csrf = _login(client)
+
+    with pytest.raises(EgressDeniedError):
+        client.post("/api/workbench/analyze", json={"question": "NEVER_EGRESS: hemlig fraga"}, headers={"X-CSRF-Token": csrf})
+    assert chat_calls == []
+
+
 def test_analyze_scoped_to_a_single_document_ignores_other_sources(client, superuser_db, _fake_provider):
     founder_id = _founder_id(superuser_db)
     target = _make_source(superuser_db, founder_id, "Rätt källa")

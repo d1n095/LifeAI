@@ -6,6 +6,30 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Pass (2026-08-27, senaste): #173 MERGAD (fristående), #174/#175 OPEN (stackade V2/V4)
+
+**#173** (`claude/pytest-boot-privilege-parity`, Claude) — **MERGED** @ `93bed6a`. Fristående,
+INTE Vault-linjen. `tests/conftest.py`s sessionsfixtur kör nu samma RLS/privilegie-boot-sekvens
+(`apply_rls`/`apply_mainai_job_runtime_privileges`/`apply_mainai_execution_privileges`) som
+produktionens riktiga startup-event — hittad via #172:s regressionskörning, se Pass nedan.
+
+**#174** (`claude/life-vault-egress-v2-query-embedding`, Claude) — **OPEN**, väntar på CI.
+Sluter V2 HELT: query-embedding (`rag/retrieve.py`, `routers/library.py`) gated via
+`embed_with_policy()`. Även: log/leakage-audit (inget läckage hittat) + ny dokumenterad lucka
+**V8** (disclosure-ledgern saknar document/project/conversation-länkning — kan bara svara "fick
+provider X något alls" inte "vad fick provider X om projekt Y"). Basgren: integrationsgrenen
+@ `93bed6a`.
+
+**#175** (`claude/life-vault-egress-v4-mechanical-callers`, Claude) — **OPEN**, väntar på CI.
+**STACKAD på #174** (måste mergas efter). Sluter DELVIS V4: `workbench.py`/`planner.py`/
+`corpus_review.py` gated (owner_id strukturellt tillgängligt). `lesson_conflicts.py`/
+`agent_orchestration.py` INTE gated — `EngineeringLesson`/`AgentTask` saknar owner_id helt
+(dokumenterat "founder-wide, not per-owner" i modellernas egna docstrings) — grundarbeslut
+krävs, ingen påhittad identitet. `execution_job.py` INTE rört (Cursor-ägt, #168 öppet).
+
+**Integrationsgren-tip:** `93bed6a` (#170→#171→#172→#173 mergade). Merge-ordning: #174 → #175
+(stackad) → integrationsgrenen.
+
 ## Pass (2026-08-27, uppdaterad): #167 MERGAD, #169 MERGAD, #170 OPEN — Life Vault-grunden
 
 **#167** (`cursor/composed-autonomy-milestone`) — **MERGED** @ `4261787`, med `bf843cb` som

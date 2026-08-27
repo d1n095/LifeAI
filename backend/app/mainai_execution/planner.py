@@ -341,7 +341,9 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
     the database (see create_plan() for the separate, deterministic persist step this feeds)."""
     user_prompt = f"## Mål\n{goal.title}\n\n## Fullständig instruktion\n{goal.original_instruction}"
     messages = [Message(role="system", content=PLANNER_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=goal.owner_id, purpose="mainai_planning", requested_by="mainai_execution.planner.propose_plan_via_ai", goal_id=goal.id
+    )
 
     raw = result.content.strip()
     if raw.startswith("```"):
