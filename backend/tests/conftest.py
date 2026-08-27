@@ -79,8 +79,26 @@ def _test_database():
     against it (never Base.metadata.create_all — the whole point of this test run is to
     exercise the same migration path production uses), grants the restricted runtime role
     the same privileges backend/db-init/01-app-role.sh gives it in Docker (idempotent — a
-    fresh CI Postgres service container won't have run that script), and drops the database
-    again at the end of the session."""
+    fresh CI Postgres service container won't have run that script), applies the same
+    RLS/privilege-narrowing steps app/main.py's own startup event applies in production, and
+    drops the database again at the end of the session.
+
+    The RLS/privilege step (apply_rls / apply_mainai_job_runtime_privileges /
+    apply_mainai_execution_privileges) used to be missing here entirely — this fixture only
+    ever ran `alembic upgrade head`, and every EXECUTE grant those three functions apply
+    (e.g. erase_own_agent_coordination_children, migration 0046/0047) was left to happen as an
+    ACCIDENTAL side effect of whichever test happened to instantiate the FastAPI `client`
+    fixture first in the session (app/main.py's `@app.on_event("startup")` calls all three).
+    That made any test using a raw SessionLocal() instead of `client` — and running early
+    enough in a session/subset that no `client`-using test had gone first — silently hit
+    `permission denied for function ...` for a privilege that was never actually missing in
+    production, only in this fixture. Real, reproduced case: running
+    `tests/backend/rag/test_bootstrap_hardening.py` (which never uses `client`) standalone, or
+    as the first file in a narrower selection, failed
+    test_section3_account_erasure_hard_deletes_documents_entirely with exactly this error.
+    Applying the same three functions here, in the same order production's boot sequence
+    does, right after migrating and before any test runs, makes every test's starting
+    privilege state identical regardless of what else did or didn't run first."""
     from app.config import get_settings
 
     settings = get_settings()
@@ -131,6 +149,15 @@ def _test_database():
         check=True,
         env={**os.environ},
     )
+
+    # Mirrors app/main.py's on_startup() exactly (same three functions, same order, same
+    # migration_engine) -- see this fixture's own docstring for the bug this closes.
+    from app.db import migration_engine
+    from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges, apply_rls
+
+    apply_rls(migration_engine)
+    apply_mainai_job_runtime_privileges(migration_engine)
+    apply_mainai_execution_privileges(migration_engine)
 
     yield
 
