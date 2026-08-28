@@ -368,7 +368,13 @@ def _require_governed_capability_ceiling(context: OperatorContext) -> None:
         )
 
 
-def _require_context(db, context: OperatorContext, *, write: bool = False):
+def _require_context(
+    db,
+    context: OperatorContext,
+    *,
+    write: bool = False,
+    refuse_if_cancelled: bool = False,
+):
     _require_governed_capability_ceiling(context)
     task = db.execute(
         select(MainAITask).where(
@@ -419,6 +425,12 @@ def _require_context(db, context: OperatorContext, *, write: bool = False):
     # before takeover rebinds locked_by/generation.
     if job.lease_expires_at is not None and job.lease_expires_at <= datetime.utcnow():
         raise OperatorAuthorizationError("stale or absent MainAI job lease")
+    # Founder cancel mid-flight: past effects remain historical; future filesystem /
+    # remote effects must stop. Progress checkpoints of already-done work stay allowed.
+    if refuse_if_cancelled and job.cancel_requested:
+        raise OperatorAuthorizationError(
+            "job cancel requested; refusing further filesystem effect"
+        )
     root = context.repository_root.resolve()
     if not root.is_dir() or _git(
         root, ["rev-parse", "--show-toplevel"]
@@ -800,7 +812,7 @@ def write_file(
     delete: bool = False,
 ):
     started = time.monotonic()
-    _require_context(db, context, write=True)
+    _require_context(db, context, write=True, refuse_if_cancelled=True)
     target = _path(context, path, write=True)
     existing = (
         target.read_bytes()
@@ -905,7 +917,7 @@ def run_profile(
     environment: dict[str, str] | None = None,
 ):
     started = time.monotonic()
-    _require_context(db, context, write=True)
+    _require_context(db, context, write=True, refuse_if_cancelled=True)
     profile = COMMAND_PROFILES.get(profile_name)
     if not profile:
         raise OperatorCommandError("command profile is not allowlisted")
@@ -1027,7 +1039,7 @@ def stage_scoped_changes(
     idempotency_key: str,
 ):
     started = time.monotonic()
-    _require_context(db, context, write=True)
+    _require_context(db, context, write=True, refuse_if_cancelled=True)
     if not paths or len(paths) > 100:
         raise OperatorPathError("one to 100 scoped paths are required")
     normalized = []
@@ -1061,7 +1073,9 @@ def stage_scoped_changes(
 
 def commit_changes(db, context: OperatorContext, *, message: str, idempotency_key: str):
     started = time.monotonic()
-    _, _, _, worktree = _require_context(db, context, write=True)
+    _, _, _, worktree = _require_context(
+        db, context, write=True, refuse_if_cancelled=True
+    )
     message_sha256 = hashlib.sha256(message.encode()).hexdigest()
     replay = _replay(
         db,
@@ -1121,7 +1135,9 @@ def commit_changes(db, context: OperatorContext, *, message: str, idempotency_ke
 
 async def push_branch(db, context: OperatorContext, *, idempotency_key: str):
     started = time.monotonic()
-    _, _, _, worktree = _require_context(db, context, write=True)
+    _, _, _, worktree = _require_context(
+        db, context, write=True, refuse_if_cancelled=True
+    )
     if worktree is None:
         raise OperatorAuthorizationError(
             "push_branch requires a per-job recovery worktree; "
