@@ -1340,6 +1340,34 @@ async def run_supervisor(
                 str(exc),
                 cp,
             )
+        # Founder cancel after ACCEPTED provider/Safe Planner plan / before Driver:
+        # model output is historical DATA, not authority for consequential effects.
+        job = db.get(MainAIJob, job.id, populate_existing=True)
+        if job is not None and job.cancel_requested:
+            cp = _checkpoint(
+                db,
+                goal=goal,
+                task=task,
+                job_id=job.id,
+                phase="CANCELLED",
+                state={
+                    "completed_task_ids": [str(value) for value in selected],
+                    "selected_task_id": str(task.id),
+                    "planning_checkpoint_id": str(planning.checkpoint_id)
+                    if planning.checkpoint_id
+                    else None,
+                    "reason": "job cancel requested after accepted plan before driver",
+                },
+            )
+            return _result(
+                "CANCELLED",
+                goal,
+                completed_jobs,
+                selected,
+                assessments,
+                "job cancel requested after accepted plan; refusing driver effects",
+                cp,
+            )
         driver = run_driver(db, context=exec_context, plan=planning.plan)
         if driver.classification != "COMPLETE":
             if driver.classification in {
