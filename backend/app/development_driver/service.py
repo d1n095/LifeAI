@@ -13,13 +13,16 @@ from sqlalchemy import select
 from app.active_context.service import create_context_set, refresh_context
 from app.development_operator import service as operator
 from app.life_intents.service import evaluate_feasibility
-from app.jobs.service import mark_completed
+from app.jobs.service import mark_cancelled, mark_completed
 from app.mainai_execution.approval import require_task_approval
 from app.mainai_execution.checkpoint import (
     latest_checkpoint_for_step,
     record_checkpoint,
 )
-from app.mainai_execution.execution_job import _finalize_task_outcome
+from app.mainai_execution.execution_job import (
+    _finalize_cancelled_task,
+    _finalize_task_outcome,
+)
 from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
 from app.models.mainai_job import MainAIJob
 from app.models.life_intent import LifeIntent
@@ -671,6 +674,35 @@ def run_driver(
                 "capability": "verification_evaluate",
                 "verification_required": True,
             },
+            cp.id,
+        )
+    # Founder cancel after verify success / before task finalize: past verified FS
+    # effects remain historical; never convert cancel into completed.
+    job = db.get(MainAIJob, context.job_id, populate_existing=True)
+    if job is not None and job.cancel_requested:
+        cp = _checkpoint(
+            db,
+            context,
+            task,
+            goal,
+            phase="CANCELLED",
+            classification="CANCELLED",
+            state=state,
+        )
+        _finalize_cancelled_task(
+            db, task, reason="cooperative_cancel_after_verify_before_finalize"
+        )
+        mark_cancelled(
+            db,
+            job,
+            worker_id=context.worker_id,
+            lease_generation=context.lease_generation,
+        )
+        return DriverResult(
+            "CANCELLED",
+            "CANCELLED",
+            len(state["completed"]),
+            {"reason": "job cancel requested after verify before task finalize"},
             cp.id,
         )
     _finalize_task_outcome(
