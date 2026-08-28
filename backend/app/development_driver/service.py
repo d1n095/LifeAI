@@ -339,11 +339,9 @@ def run_driver(
     task, goal = validate_plan(db, context, plan)
     if max_actions < 1 or max_actions > 50 or max_elapsed_seconds < 1:
         raise DriverPlanError("invocation bounds are invalid")
-    job = db.execute(
-        select(MainAIJob).where(
-            MainAIJob.id == context.job_id, MainAIJob.owner_id == context.owner_id
-        )
-    ).scalar_one()
+    job = db.get(MainAIJob, context.job_id, populate_existing=True)
+    if job is None or job.owner_id != context.owner_id:
+        raise DriverPlanError("job is missing or cross-owner")
     if job.cancel_requested:
         state = {
             "plan_id": plan.plan_id,
