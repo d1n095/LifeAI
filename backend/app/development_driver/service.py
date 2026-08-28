@@ -527,6 +527,26 @@ def run_driver(
         idem = (
             f"driver:{task.id}:{plan.plan_id}:{index}:{attempt}:{plan_hash[:16]}"
         )
+        # Re-read cancel between steps: founder cancel after ACCEPT / before later writes
+        # must stop future effects without erasing already-completed steps.
+        db.refresh(job)
+        if job.cancel_requested:
+            cp = _checkpoint(
+                db,
+                context,
+                task,
+                goal,
+                phase="CANCELLED",
+                classification="CANCELLED",
+                state=state,
+            )
+            return DriverResult(
+                "CANCELLED",
+                "CANCELLED",
+                len(state["completed"]),
+                {"reason": "job cancel requested before further operator effects"},
+                cp.id,
+            )
         try:
             result = _invoke_operator(db, context, step, idem)
         except operator.OperatorCapabilityMissing as exc:
