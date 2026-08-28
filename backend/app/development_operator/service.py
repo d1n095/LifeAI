@@ -828,6 +828,40 @@ def write_file(
     )
     if replay:
         return replay
+    # Crash window: disk write landed, process died before work_trace audit/commit.
+    # If on-disk content already matches the requested after-hash, do NOT require the
+    # pre-write before-hash (it is gone) and do NOT rewrite — record durable audit once.
+    if (
+        not delete
+        and content is not None
+        and existing is not None
+        and hashlib.sha256(existing).hexdigest() == requested_after
+    ):
+        capability = "patch_file" if expected_sha256 is not None else "create_file"
+        event = _audit(
+            db,
+            context,
+            capability,
+            idempotency_key,
+            {
+                "path": path,
+                "before_sha256": expected_sha256,
+                "after_sha256": requested_after,
+                "recovered_after_crash_before_audit": True,
+            },
+            "succeeded",
+            started,
+        )
+        return ActionResult(
+            capability,
+            "succeeded",
+            {
+                "path": path,
+                "before_sha256": expected_sha256,
+                "after_sha256": requested_after,
+            },
+            event.id,
+        )
     before_hash = hashlib.sha256(existing).hexdigest() if existing is not None else None
     if before_hash != expected_sha256:
         raise OperatorAuthorizationError("expected-before hash mismatch")

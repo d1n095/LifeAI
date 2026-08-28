@@ -18,16 +18,17 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 **Next:** Phase 4 local write crash before verify.
 
 
-## Pass (2026-08-27 night): tip `f9cedcc` — #182 MERGED; #184 lease effect rebasing
 
-**Integrations tip:** `f9cedcc` (Merge #182 crash-before-settle).
+## Pass (2026-08-27 night): tip `0d12d54` — #182+#184 MERGED; #183 heal rebasing
+
+**Integrations tip:** `0d12d54` (Merge #184).
 
 | PR | Status | Notes |
 |---|---|---|
 | [#181](https://github.com/d1n095/LifeAI/pull/181) | MERGED | Supervisor spend fail-fast |
-| [#182](https://github.com/d1n095/LifeAI/pull/182) | **MERGED** @ `f9cedcc` | Crash before settle → no re-invoke |
-| [#183](https://github.com/d1n095/LifeAI/pull/183) | OPEN | Local write crash heal |
-| [#184](https://github.com/d1n095/LifeAI/pull/184) | OPEN | Job lease expiry at Operator write effect |
+| [#182](https://github.com/d1n095/LifeAI/pull/182) | MERGED | Crash before settle → no re-invoke |
+| [#184](https://github.com/d1n095/LifeAI/pull/184) | **MERGED** @ `0d12d54` | Job lease expiry at Operator write |
+| [#183](https://github.com/d1n095/LifeAI/pull/183) | OPEN | Local write crash heal (rebase) |
 
 ## Pass (2026-08-27): tip `6a3572e` — #168 MERGED; Cursor starts stale-authority TOCTOU
 
