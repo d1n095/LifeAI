@@ -336,7 +336,11 @@ def _ordered_steps(candidate: PlanCandidate) -> list[CandidateStep]:
 
 
 def _validate_path_value(context: operator.OperatorContext, value: str):
-    operator._path(context, value)
+    try:
+        operator._path(context, value)
+    except operator.OperatorPathError as exc:
+        # Planning must fail closed as CandidateValidationError, not abort the Supervisor tick.
+        raise CandidateValidationError(str(exc)) from exc
 
 
 def _validate_step(context: operator.OperatorContext, step: CandidateStep):

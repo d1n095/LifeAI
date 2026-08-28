@@ -166,11 +166,28 @@ def test_path_shell_approval_and_provider_candidate_cannot_bypass_validation(
             {"path": "../.env"},
         )
     )
-    with pytest.raises(Exception, match="traverse|authorized"):
+    with pytest.raises(CandidateValidationError, match="traverse|authorized|outside"):
         validate_candidate(
             superuser_db,
             request=request,
             candidate=unsafe_path,
+            operator_context=context,
+        )
+    outside = _candidate(
+        CandidateStep(
+            "write",
+            "write outside envelope",
+            "must never land",
+            "create_file",
+            {"path": "outside_envelope.py", "content": "ESCAPE\n", "expected_sha256": None},
+            required_risk=LOCAL_WRITE,
+        )
+    )
+    with pytest.raises(CandidateValidationError, match="outside the authorized path scope"):
+        validate_candidate(
+            superuser_db,
+            request=request,
+            candidate=outside,
             operator_context=context,
         )
     raw = _candidate(
