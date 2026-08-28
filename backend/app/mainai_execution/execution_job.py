@@ -816,6 +816,26 @@ def _finalize_task_outcome(
     )
 
     if passed:
+        # Cancel vs success-finalize race: founder cancel_requested on the live job must not
+        # lose to a concurrent _finalize_task_outcome(passed=True). Already-cancelled tasks
+        # stay cancelled (no completed overwrite).
+        locked = db.execute(
+            select(MainAITask)
+            .where(MainAITask.id == task.id)
+            .with_for_update()
+        ).scalar_one()
+        if locked.status == MainAITaskStatus.cancelled:
+            return
+        if locked.mainai_job_id is not None:
+            job = db.get(MainAIJob, locked.mainai_job_id, populate_existing=True)
+            if job is not None and job.cancel_requested:
+                _finalize_cancelled_task(
+                    db,
+                    locked,
+                    reason="cancel_requested_beats_success_finalize",
+                )
+                return
+        task = locked
         task.status = MainAITaskStatus.completed
         task.completed_at = datetime.utcnow()
         task.next_retry_at = None
