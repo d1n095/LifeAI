@@ -8,35 +8,64 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 ## Aktiva PR:er (2026-08-27/28) — Night run autonomy hardening
 
-Integration tip: `claude/det-kommer-mer-879lcm` @ **`ff07be8`** (#191).
+Integration tip: `claude/det-kommer-mer-879lcm` @ **`a535752`** (#195).
 Night report: `docs/NIGHT_RUN_AUTONOMY_HARDENING_REPORT.md`.
 Claude's independent red-team review + test-quality audit: **KLAR**, se
 `docs/SECURITY_TEST_QUALITY_AUDIT_165_187.md` (#189) och `docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md`
-(#188). Inget test i #165–191 visade sig passera utan sin egen fix.
+(#188). Inget test i #165–195 visade sig passera utan sin egen fix.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/toctou-spend-revoke-before-reserve` | [#181](https://github.com/d1n095/LifeAI/pull/181) | **Mergad** @ `e10ae97` | Supervisor spend fail-fast (Outcome B) |
-| `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke — **1 öppen follow-up, se nedan** |
+| `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke — **Window B (ambiguous invocation) fortfarande öppen, ej påbörjad** |
 | `cursor/operator-lease-effect-time-race` | [#184](https://github.com/d1n095/LifeAI/pull/184) | **Mergad** @ `0d12d54` | Lease expiry at Operator write |
-| `cursor/local-write-crash-before-verify` | [#183](https://github.com/d1n095/LifeAI/pull/183) | **Mergad** @ `bd04934` | Heal write after crash before audit — **1 öppen follow-up, se nedan** |
+| `cursor/local-write-crash-before-verify` | [#183](https://github.com/d1n095/LifeAI/pull/183) | **Mergad** @ `bd04934` | Heal write after crash before audit — **idempotency-identity tightening fortfarande öppen, ej påbörjad** |
 | `cursor/founder-cancel-after-accept-before-write` | [#185](https://github.com/d1n095/LifeAI/pull/185) | **Mergad** @ `4bcc66f` | Cancel after ACCEPT / before write |
 | `cursor/planner-out-of-scope-path-validation` | [#186](https://github.com/d1n095/LifeAI/pull/186) | **Mergad** @ `fd18f4c` | Out-of-scope path → CandidateValidationError |
 | `cursor/composed-autonomy-soak` | [#187](https://github.com/d1n095/LifeAI/pull/187) | **Mergad**, Claude-granskad (rent, inga hidden bridges) | Phase 8 composed Worker soak |
 | Claude review/design lane | [#188](https://github.com/d1n095/LifeAI/pull/188)–[#191](https://github.com/d1n095/LifeAI/pull/191) | **Mergade** | Vault V4/V5/V7/V8 memos, test-quality audit, prompt-injection regression, second-worker-takeover regression |
+| `cursor/cancel-after-accept-before-driver` | [#192](https://github.com/d1n095/LifeAI/pull/192) | **Mergad**, Claude-granskad | Cancel after ACCEPTED / before Driver — kärnan bekräftad verklig (inte vaken), 1 follow-up (se nedan) |
+| `cursor/cancel-after-verify-before-finalize` | [#193](https://github.com/d1n095/LifeAI/pull/193) | **Mergad**, Claude-granskad (ren) | Cancel after verify / before finalize |
+| `cursor/cancel-vs-finalize-race` | [#194](https://github.com/d1n095/LifeAI/pull/194) | **Mergad**, Claude-granskad | Verklig two-thread race-test, 1 precision-notering (se nedan) |
+| `cursor/composed-autonomy-soak-v2` | [#195](https://github.com/d1n095/LifeAI/pull/195) | **Mergad**, Claude-granskad | Fresh-Worker soak — **mergad FÖRE #182/#183, se ordningsavvikelse nedan** |
+
+**Ordningsavvikelse upptäckt (2026-08-28):** grundarens uttryckliga ordning var #182 → #183 →
+cancel-boundaries → restart-soak. Cursor gick istället direkt på cancel-boundaries (#192-194)
+och sedan restart-soak (#195), **utan** att röra #182 Window B eller #183 heal-tightening.
+Flaggat, inte blockerande — men #182/#183 är fortfarande de två återstående, opåbörjade
+punkterna från natt-körningen och bör prioriteras innan autonomin utökas ytterligare.
+
+**Claude's granskningsfynd på #192/#194/#195** (detaljer i respektive PR-kommentar):
+- **#192**: kärnkontrollen bekräftad verklig (inte en vaken/no-op-fix). Men hittade och
+  EMPIRISKT verifierade (två-sessions-prob, inte bara läsning) att `_require_context()`
+  (`app/development_operator/service.py`) fortfarande gör vanliga `select()`-hämtningar utan
+  `populate_existing=True`/`db.refresh()` för job/task — dess korrekthet för
+  `cancel_requested`-färskhet vilar just nu HELT på att alla anropare (verifierat: de gör det
+  idag) redan har uppdaterat objektet. Inget existerande test skulle fånga en framtida
+  regression här, eftersom alla cancel-tester muterar samma sessions redan-identity-mappade
+  objekt. Rekommendation: lägg till `populate_existing=True` i `_require_context()` själv som
+  försvar-i-djup.
+- **#194**: solid design, riktig two-thread/two-session-test, men båda testerna använder
+  `threading.Barrier` för att TVINGA fram en sekventiell total-ordning (inte genuint
+  samtidiga trådar som #178-180). Rätt testform för just detta invariant, men lämnar samma typ
+  av smalt, kvantifierat TOCTOU-fönster som #184/#185 redan har, otestat här.
+- **#195**: `del worker_a; worker_b = Worker()` förstör Worker-instansen men återanvänder
+  SAMMA databas-session — bevisar inte fullt ut "PROCESS MEMORY != AUTHORITY" på
+  sessionsgränsen, bara på Python-objektsgränsen. En starkare version skulle använda en genuint
+  separat session för worker_b-fasen.
 
 **Merge-ordning / nästa prioritet för Cursor** (founder-godkänd ordning, se
 `docs/ACTIVE_WORK_CURSOR_NIGHT_RUN_FOLLOWUPS.md` för fullständiga instruktioner):
 
 ```
-1. #182 Window B (ambiguous provider invocation on crash/exception)
-2. #183 heal/idempotency identity tightening
-3. cancel after provider-plan / before Safe Planner effect
-4. cancel after verify / before finalize
-5. only then: process-restart autonomy soak (PROCESS MEMORY != AUTHORITY)
+1. #182 Window B (ambiguous provider invocation on crash/exception) -- EJ PÅBÖRJAD
+2. #183 heal/idempotency identity tightening -- EJ PÅBÖRJAD
+3. cancel after provider-plan / before Safe Planner effect -- KLAR (#192)
+4. cancel after verify / before finalize -- KLAR (#193, #194)
+5. process-restart autonomy soak -- KLAR (#195), men se scope-notering ovan
 ```
 
-Stäng dessa fyra innan autonomin utökas ytterligare. Claude Vault/egress — leave alone.
+Stäng #182/#183 innan autonomin utökas ytterligare. Claude Vault/egress — leave alone.
 
 ---
 

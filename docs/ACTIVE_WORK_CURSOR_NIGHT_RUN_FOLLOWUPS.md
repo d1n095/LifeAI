@@ -5,6 +5,15 @@
 **Integration tip at handoff:** `claude/det-kommer-mer-879lcm` @ `ff07be8` (#191 merged)
 **Depends:** none of these are blocked on each other except by the stated order below
 
+**STATUS UPDATE (2026-08-28, later same day):** Cursor closed items 3, 4, and (out of order) 5
+— #192 (cancel/Driver), #193+#194 (cancel/finalize + real race test), #195 (restart soak) all
+merged and Claude-reviewed (see PR comments and `docs/BRANCH_REGISTRY.md` for findings — none
+blocking, several precise follow-ups noted). **Items 1 (#182 Window B) and 2 (#183 heal
+tightening) below were skipped and remain fully open** — neither has a PR yet. These are the
+two hardest, most security-relevant items in this queue; please pick them up next rather than
+expanding autonomy scope further. The rest of this document (sections 1 and 2) is unchanged
+and still fully applicable — sections 3-5 are historical/superseded by what's now merged.
+
 ## Why this doc exists
 
 Claude's independent night review (`docs/SECURITY_TEST_QUALITY_AUDIT_165_187.md`) is complete.
