@@ -8,7 +8,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 ## Aktiva PR:er (2026-08-27/28) — Night run autonomy hardening
 
-Integration tip: `claude/det-kommer-mer-879lcm` @ **`bd04934`** (#183; includes #181/#182/#184).
+Integration tip: `claude/det-kommer-mer-879lcm` @ **`fd18f4c`** (#186).
 Night report: `docs/NIGHT_RUN_AUTONOMY_HARDENING_REPORT.md`.
 
 | Branch | PR | Status | Scope |
@@ -17,9 +17,11 @@ Night report: `docs/NIGHT_RUN_AUTONOMY_HARDENING_REPORT.md`.
 | `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke |
 | `cursor/operator-lease-effect-time-race` | [#184](https://github.com/d1n095/LifeAI/pull/184) | **Mergad** @ `0d12d54` | Lease expiry at Operator write |
 | `cursor/local-write-crash-before-verify` | [#183](https://github.com/d1n095/LifeAI/pull/183) | **Mergad** @ `bd04934` | Heal write after crash before audit |
-| `cursor/founder-cancel-after-accept-before-write` | (öppnas) | WIP | Cancel after ACCEPT / before write; past≠erase |
+| `cursor/founder-cancel-after-accept-before-write` | [#185](https://github.com/d1n095/LifeAI/pull/185) | **Mergad** @ `4bcc66f` | Cancel after ACCEPT / before write |
+| `cursor/planner-out-of-scope-path-validation` | [#186](https://github.com/d1n095/LifeAI/pull/186) | **Mergad** @ `fd18f4c` | Out-of-scope path → CandidateValidationError |
+| `cursor/composed-autonomy-soak` | (öppnas) | WIP | Phase 8 composed Worker soak |
 
-**Merge-ordning:** land cancel-before-write next; then Phase 7 recovery empty-cap if still open; then Phase 8 soak. Claude Vault/egress — leave alone.
+**Merge-ordning:** land soak next. Phase 7 already closed on tip. Claude Vault/egress — leave alone.
 
 ---
 
