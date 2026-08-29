@@ -6,6 +6,35 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Claude's non-överlappande lane: MainAI V1 arkitektur/readiness (2026-08-29)
+
+Parallellt med red-team-granskning av Cursors correction-pass-PR:er (#196 osv, nedan) — INTE i
+samma filer, ingen konflikt. Läs-och-dokumentera-jobb, ingen körbar kod ändrad. Fyra dokument:
+
+- `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md` — goal-intake gap-analys + task-decomposition-kontrakt.
+  Huvudfynd: kedjan founder→Worker är väsentligt mer produktions-riktig än väntat — en fullständig
+  founder-facing HTTP-API kopplar redan dokumentinmatning/direkt-goal hela vägen till autonom
+  Worker-pickup, inklusive riktig AI-driven task-decomposition (`propose_plan_via_ai` →
+  `create_plan()`, en riktig route, inte test-only).
+- `docs/MAINAI_V1_READINESS.md` — long-run authenticity-spec (maskinkontrollerbar checklista),
+  gap/repair-produktionsloop-audit (bekräftat produktions-riktig end-to-end;
+  `multiplication_repair` är en enda namngiven recipe, ren kostnadsoptimering, inte en
+  begränsning av den generella mekanismen), och fullständig V1-blockermatris.
+- `docs/MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` — säkerhetskontrakt för MainAI:s första
+  självförbättrings-körning mot sin egen kodbas. `remote_write_authorized=false`, ingen
+  provider-spend, en enda smal path/capability-scope, founder granskar allt innan push.
+- `docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md` — nytt addendum: V4/V5/V8 skarpade till exakta
+  implementations-redo beslut (inte längre bara alternativ), tydligt märkt vad som är "safe
+  default" vs. kräver explicit founder-signoff.
+
+**Enda riktiga V1-blockers, redan i rörelse:** Cursors correction-pass Phase 1-5 (se nedan),
+plus två nya, tidigare oupptäckta uppföljningar: (1) verifiera idempotens/krash-återhämtning
+mitt i `create_plan()`-decomposition (inte kollat denna omgång), (2) samma för
+mid-decomposition-cancellation. Vault V5/V8-schema är EXPLICIT INTE en V1-blocker (egen
+tidslinje, separat initiativ).
+
+---
+
 ## Aktiva PR:er (2026-08-27/28/29) — Night run autonomy hardening
 
 Integration tip: `claude/det-kommer-mer-879lcm` (post-#195, se `docs/ACTIVE_WORK_CURSOR_CORRECTION_PASS_182_183.md`s commit).
