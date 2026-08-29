@@ -121,15 +121,50 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
-## MAINAI V1 COMPLETION RUN — Stages 1–2 (Cursor)
+## MAINAI V1 COMPLETION RUN — Stages 1–2 (Cursor) + Claude's parallel v1-readiness-workstream
 
-Integration tip: post-#202 (`ae1bcdc`). Program:
+Integration tip: post-#204 (`4388657`). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
-| `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Öppen — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
+| `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
+| `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | Long-run 8-12 task soak; independently reviewed by Claude pre-merge |
+
+**Claude's egen, icke-överlappande gren `v1-readiness-workstream` (PR #197, öppen, ej mergad,
+grenad ovanpå #203/#204)** — natt-skift 2026-08-29→30, fyra riktiga, var för sig
+three-check-verifierade fynd (`git stash`-negativkontroll: varje fix' egen test misslyckas
+genuint på pre-fix-kod, passerar post-fix), alla pushade, ingen ännu founder-granskad:
+
+1. **`OperatorAuthorityTransitionError`** (`app/development_operator/service.py`,
+   `app/development_driver/service.py`) — `run_driver()`s per-steg try/except fångade tidigare
+   ENDAST `OperatorCapabilityMissing`; en mitt-i-körning-takeover/lease-expiry/founder-cancel
+   kraschade okontrollerat ut ur `run_driver()` istället för en ren `DriverResult`
+   (`STALE_AUTHORITY`-klassificering + checkpoint). Spårade och klassificerade VARJE
+   `OperatorAuthorizationError`-raise-plats i modulen (förväntad auktoritetsövergång vs.
+   genuin programmeringsdefekt) till en ny, smalare exception-subklass. Två separata
+   Driver-anropsplatser behövde fångas (`_invoke_operator` OCH `checkpoint_operator_progress`,
+   upptäckt empiriskt). Ny test bevisar även att den VINNANDE workerns nästa `run_driver()`-
+   anrop återupptar från exakt rätt checkpoint, noll duplicering.
+2. **Två test-fixtures** (`test_autonomous_gap_child_task.py`, `test_partial_plan_insertion.py`)
+   som `create_plan()`s egen (tidigare i samma gren fixade) `populate_existing=True`
+   goal-row-lock tyst kastade bort — ren testartefakt, ingen produktionsbugg (produktionskod
+   sätter aldrig `goal.approval_policy` efter konstruktion).
+3. **Genuin TOCTOU-race i `authorize_execution_scope()`** (`app/execution_envelopes/
+   service.py`) — dess egen docstring hävdade en `SELECT ... FOR UPDATE` på goal-raden FÖRE
+   envelope-transitionen; koden gjorde det aldrig, bara en sen, oavsiktlig FK-driven lås via
+   `ExecutionAuthorizationEnvelope`s egen insert. Ett riktigt, smalt fönster där
+   `execute_takeover()` kunde hinna dispatcha ett legacy V0.1-jobb precis innan governance
+   blev effektiv. Fixad med en explicit tidig lås; empiriskt bevisad med en test som pausar
+   INUTI funktionen (via `session.add()`-interception) strax före den oavsiktliga FK-låsningen.
+4. **Obegränsad automatisk replan-loop** (`app/mainai_execution/replan.py`) — en genuint
+   olöslig goal skulle replana för evigt, en riktig fakturerad AI-anrop per worker-tick, utan
+   räknare eller founder-eskalering. Fixad med `MAX_AUTO_REPLANS = 3` (matchar
+   `safe_planner.service`s egen precedent); begränsar bara den obevakade tick:en, aldrig
+   founderns egen explicita replan. Ingen ny schema/eskaleringsmekanism behövdes — den
+   redan existerande `_finalize_mainai_execution_goals`-ticken stänger målet till `failed`
+   med en riktig rapport på nästa varv.
 
 ---
 
