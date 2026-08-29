@@ -103,7 +103,7 @@ Integration tip: post-#205 (`d215130`). Program:
 | `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
 | `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
 | `cursor/first-bounded-self-improvement` | [#205](https://github.com/d1n095/LifeAI/pull/205) | **Mergad — Stage 4** | Bounded self-improvement: SSH egress marker test via Worker→Supervisor; disposable mirror; no remote_write |
-| `cursor/goal-intake-path-a-worker` | TBD | **Lokal — Stage 5 IN PROGRESS** | Path A goal intake proof: Document/claim → WorkCandidate → authorize → plan/envelope/spend → Worker to goal complete. Report: `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`. Path B bridge stays Claude #197 — not duplicated |
+| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Öppen — Stage 5** | Path A goal intake → Worker complete; report `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`; Path B stays Claude #197 |
 
 ---
 
