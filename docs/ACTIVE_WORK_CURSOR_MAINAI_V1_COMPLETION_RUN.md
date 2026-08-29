@@ -27,7 +27,7 @@ without a human translating every step.
 | 2 | Lease expiry + takeover continuation | **MERGED** #203 |
 | 3 | Long autonomous soak (8–12 tasks) + report | **MERGED** #204 |
 | 4 | First real bounded self-improvement on LifeAI | **MERGED** #205 |
-| 5 | Goal intake / bootstrap production path | **IN PROGRESS** — `cursor/goal-intake-path-a-worker` |
+| 5 | Goal intake / bootstrap production path | **IN PROGRESS** — [#206](https://github.com/d1n095/LifeAI/pull/206) |
 | 6 | `docs/MAINAI_V1_READINESS.md` audit | waiting |
 
 ## Stage 1–4 (landed)
