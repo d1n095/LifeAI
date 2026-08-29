@@ -172,3 +172,55 @@ self-improvement run is Stage 4, sequenced after Stage 2 (takeover) and Stage 3 
 **do not run it out of that order** without explicit founder direction, even though the
 correction-pass gate itself has lifted; Stage 4's own package stays ready and unchanged in the
 meantime.
+
+## PR #197 self-review finding — real TOCTOU race in `authorize_execution_scope()`, fixed
+
+Adversarial self-review of this PR's own Path B bridge (5 claims: zero-authority-before-
+approval, RLS/ON-CONFLICT safety, `create_plan()` lock deadlock-freedom, concurrent-proposal
+canonicality, no doc overclaim) found 4/5 clean and one real, confirmed gap in a DIFFERENT
+function this PR also touches:
+
+`authorize_execution_scope()`'s own docstring claimed it "locks the goal row (`SELECT ... FOR
+UPDATE`) BEFORE this transition" to serialize against `execute_takeover()`'s matching lock
+(the FIRST-GOVERNANCE TOCTOU fence). The code never actually did that select — the only lock
+the function took early was on the `ExecutionScopeProposal` row, not `MainAIGoal`; the goal row
+was only implicitly, incidentally locked much later, via the `ExecutionAuthorizationEnvelope`
+row's own composite FK to `mainai_goals` firing at `db.flush()`. This left a real, narrow
+window (during the `prior_envelope` lookup and envelope object construction) where
+`execute_takeover()` could acquire the goal lock uncontested, read `EVER_GOVERNED=false`
+correctly-at-the-time, and fully dispatch+commit a legacy V0.1 job — immediately followed by
+`authorize_execution_scope()` committing the goal's first-ever envelope a moment later. Exactly
+the "governance becomes effective mid-flight of an already-decided legacy dispatch" outcome the
+docstring calls structurally impossible.
+
+**Why the existing tests didn't catch it**: both existing TOCTOU tests
+(`test_first_governance_toctou_race_governance_committed_while_recovery_waits_is_observed` /
+`..._recovery_committed_first_then_governance_follows`) manually pre-lock the goal row via raw
+SQL `FOR UPDATE` before calling `propose_execution_scope()`/`authorize_execution_scope()` — a
+caller-side lock the real router path never takes, so both tests exercised a strictly safer,
+fictional code path.
+
+**Fix**: `authorize_execution_scope()` now takes an explicit `SELECT ... FOR UPDATE` on the
+goal row immediately after reading the proposal (using `row.goal_id`, the earliest point that
+ID is known), held through the rest of the function. Verified no new lock-ordering cycle
+(repo-wide grep of every `with_for_update()` call site — `execute_takeover()` is the only other
+caller that ever locks `MainAIGoal`, and it never touches `ExecutionScopeProposal`, so this
+function's proposal-then-goal ordering can't deadlock against it).
+
+**Empirical proof, not just reasoning**: a new test,
+`test_authorize_execution_scope_itself_locks_the_goal_row_no_manual_prelock_needed`, pauses
+execution INSIDE `authorize_execution_scope()` (via a `session.add()` interception) at the
+exact instant BEFORE the envelope is added — strictly before the incidental FK lock could ever
+fire — and attempts a real, concurrent `execute_takeover()` at that precise point. Three-check
+verified: passes post-fix (thread B blocks); genuinely FAILS pre-fix via `git stash` (thread B
+does NOT block, races ahead, and dispatches a legacy job — the exact forbidden outcome),
+confirming this is a real regression guard, not a vacuous assertion. An earlier, simpler
+version of this test (pausing only *after* `authorize_execution_scope()` returned) was found
+and discarded during this same review pass — it passed identically before AND after the fix,
+because the incidental FK lock alone was already sufficient by the time the function returns;
+only pausing *inside* the function, before that incidental lock fires, actually isolates the
+function's own early-lock behavior.
+
+Also fixed in the same pass: a stale test-name reference in `authorize_execution_scope()`'s own
+docstring (cited a test that never existed in the repo, `test_first_governance_toctou_race_
+is_serialized_not_racy` — the two real tests have different, longer names).

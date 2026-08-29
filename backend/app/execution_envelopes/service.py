@@ -179,8 +179,11 @@ def authorize_execution_scope(
     here first fully completes before the other proceeds); only "governance becomes effective
     mid-flight of an already-decided legacy dispatch" is forbidden, and holding this lock
     across the whole decision closes exactly that window. See recovery_takeover.py's own
-    matching docstring and test_first_governance_toctou_race_is_serialized_not_racy (both
-    orderings) in test_recovery_takeover_authority_fencing.py."""
+    matching docstring and, in test_recovery_takeover_authority_fencing.py,
+    test_first_governance_toctou_race_governance_committed_while_recovery_waits_is_observed /
+    test_first_governance_toctou_race_recovery_committed_first_then_governance_follows (both
+    orderings) plus test_authorize_execution_scope_itself_locks_the_goal_row_no_manual_
+    prelock_needed (proves this function's OWN lock, not a caller's, closes the window)."""
 
     row = db.execute(
         select(ExecutionScopeProposal).where(ExecutionScopeProposal.id == proposal_id, ExecutionScopeProposal.owner_id == owner_id).with_for_update()
@@ -189,6 +192,14 @@ def authorize_execution_scope(
         raise ExecutionEnvelopeError("execution scope proposal is missing or belongs to another owner")
     if row.status != "unreviewed":
         raise ExecutionEnvelopeError(f"execution scope proposal is already {row.status}, not unreviewed")
+
+    # The goal-row lock the docstring above promises: taken here (not earlier, since goal_id
+    # is only known once the proposal row above is read) and held through the envelope
+    # creation below. execute_takeover() only ever locks the goal row, never the proposal row,
+    # so this ordering (proposal, then goal) can never form a lock-ordering cycle with it.
+    db.execute(
+        select(MainAIGoal).where(MainAIGoal.id == row.goal_id, MainAIGoal.owner_id == owner_id).with_for_update()
+    ).scalar_one()
 
     prior_envelope = db.execute(
         select(ExecutionAuthorizationEnvelope).where(
