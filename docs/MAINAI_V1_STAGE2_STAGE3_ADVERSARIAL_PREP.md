@@ -224,3 +224,41 @@ function's own early-lock behavior.
 Also fixed in the same pass: a stale test-name reference in `authorize_execution_scope()`'s own
 docstring (cited a test that never existed in the repo, `test_first_governance_toctou_race_
 is_serialized_not_racy` — the two real tests have different, longer names).
+
+## V1 blocker sweep finding #2 — unbounded automatic replan loop, fixed
+
+A parallel blocker-sweep pass over the verification → repair → recovery → finalize → idle
+transitions found a second real, confirmed (via direct code trace) gap:
+`app/mainai_execution/replan.py`'s `find_replan_trigger()` had no bound on how many times a
+goal could be automatically replanned. A genuinely unworkable goal (references a nonexistent
+file, needs a permanently-unavailable capability, or a model that keeps proposing the same
+broken approach) would loop forever — every worker tick, once per tick, each iteration a real,
+billed `propose_plan_via_ai()` call — with no counter anywhere in the path and no founder
+escalation. From outside, an actively-replanning goal and a stuck-in-a-loop goal look
+identical (both stay `running`, plan version keeps incrementing); a founder would only notice
+via rising provider spend or manual plan-history inspection, with no automatic signal.
+
+By contrast, `autonomous_gap.service`'s gap/repair lineage was checked and confirmed already
+properly bounded (`GapGenerationBounds.max_generation_depth`, tracked per-lineage via
+`DiscoveredGap.generation_depth`) — this was specifically a gap in the OTHER automatic-retry
+path (V0.3's plan-level replan tick), not a repeat of an already-fixed class.
+
+**Fix**: a new `MAX_AUTO_REPLANS = 3` constant in `replan.py` (matching `app.safe_planner.
+service`'s own existing `max_replans=3` precedent in a different module), checked against
+`goal.current_plan_version - 1` (the number of automatic replans already performed — version 1
+is the original plan, not itself a replan). Only bounds the UNATTENDED tick:
+`find_replan_trigger()` is the only caller-path this checks; a founder's own explicit replan
+via `propose_and_create_plan_route` calls `create_plan()` directly and is never restricted.
+
+No new schema/escalation mechanism needed: once the bound refuses further replans, the failed
+task simply stays `failed` (a real terminal status) rather than being silently swallowed or
+retried — `record_final_report()` (already existing, unchanged) already treats an all-terminal
+task graph as closeable, so the very next `_finalize_mainai_execution_goals` tick closes the
+goal to `MainAIGoalStatus.failed` with a concrete `final_outcome` report, turning an invisible
+infinite loop into a founder-discoverable outcome for free.
+
+Two new tests in `tests/backend/test_mainai_execution_replan.py`, three-check verified (pass
+post-fix, genuinely fail via `git stash` pre-fix with an `ImportError` on the new constant):
+`test_find_replan_trigger_stops_once_max_auto_replans_reached` (the bound itself) and
+`test_goal_stuck_past_the_replan_bound_finalizes_as_failed_not_silently_stuck` (proves the
+finalize-tick composition actually closes the loop, not just that the trigger stops firing).

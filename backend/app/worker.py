@@ -658,10 +658,13 @@ class Worker:
         replan.py's find_replan_trigger()) and, if so, proposes and persists a fresh plan
         version via the SAME propose_plan_via_ai()/create_plan() V0.1's planner.py already
         implements for a founder-triggered replan -- no second planning mechanism. A goal
-        whose active plan has no failed task is left untouched; a goal that already replanned
-        (its active plan is now the NEW version) naturally stops matching find_replan_trigger()
-        on the next tick, since that function only ever looks at the plan currently `active`.
-        Per-goal isolation, same as every other tick in this method group."""
+        whose active plan has no failed task is left untouched. find_replan_trigger() is
+        itself bounded (MAX_AUTO_REPLANS, that module's own constant): a goal whose every
+        replanned attempt keeps failing the same way stops matching after that many automatic
+        replans rather than looping forever -- the failed task then stays `failed`, and
+        _finalize_mainai_execution_goals's own next pass closes the goal to `failed` with a
+        real report, never silently stuck `running`. Per-goal isolation, same as every other
+        tick in this method group."""
         goals = (
             db.query(MainAIGoal)
             .filter(MainAIGoal.status.in_(ACTIVE_MAINAI_GOAL_STATUSES))
