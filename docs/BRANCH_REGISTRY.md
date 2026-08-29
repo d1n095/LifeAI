@@ -92,7 +92,11 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
+<<<<<<< HEAD
 ## MAINAI V1 COMPLETION RUN — Stages 1–3 (Cursor)
+=======
+## MAINAI V1 COMPLETION RUN — Stages 1–4 (Cursor)
+>>>>>>> 4edb865 (Prove Stage 4 first bounded self-improvement via Worker→Supervisor.)
 
 Integration tip: post-#203 (`86d8f0f`). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
@@ -101,7 +105,14 @@ Integration tip: post-#203 (`86d8f0f`). Program:
 |---|---|---|---|
 | `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
 | `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
+<<<<<<< HEAD
 | `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Öppen — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
+=======
+| `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Öppen — Stage 3** | 8-task long autonomy soak (gap + restart + lease) |
+| `cursor/first-bounded-self-improvement` | TBD | **Lokal — Stage 4 IN PROGRESS** (push efter #204) | First bounded self-improvement: SSH egress marker regression test via Worker→Supervisor; disposable worktree mirror; no remote_write. Report: `docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md` |
+
+**Merge-ordning:** #204 (Stage 3) först → därefter push/PR för Stage 4. Rebasa inte Stage 4 i förväg.
+>>>>>>> 4edb865 (Prove Stage 4 first bounded self-improvement via Worker→Supervisor.)
 
 ---
 
