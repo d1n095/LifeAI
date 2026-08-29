@@ -126,15 +126,96 @@ This is a manual gate, not a policy MainAI itself evaluates — matching this pr
 "FOUNDER AUTHORITY CANNOT BE CREATED FROM MODEL OUTPUT" doctrine applied to the final ship
 decision, not just execution authority.
 
-## Recommended first founder goal
+## Recommended first founder goal — concrete, fully prepared package
 
-**"Add a missing edge-case regression test for a specific, already-identified, narrow gap in
-an already-reviewed function, in one named test file."** Narrow enough that the expected diff
-is a single new test function in a single file; broad enough to genuinely exercise the full
-plan → write → verify → finalize chain (a new test is a `create_file`/`patch_file` +
-`run_focused_test` + `verification_evaluate` sequence, the same shape as every soak test this
-session reviewed); low-risk because a wrong or broken test has zero production blast radius.
+**Do not execute until Phases 1-5 of the correction pass are merged green.** Everything below
+is pre-committed and ready; only the "go" decision remains, per this document's own opening
+gate.
 
-**Explicit non-goals for the first milestone** (defer to later, separately-contracted runs):
-provider-assisted planning, multi-task decomposition, any push/remote effect, any touch to
-authority/Vault code, any capability beyond the narrow list above.
+### The exact goal text
+
+> "The egress policy gate (`app/egress_policy/`) detects two hard-deny content markers:
+> `NEVER_EGRESS:` and an SSH private-key header (`-----BEGIN OPENSSH PRIVATE KEY-----`). The
+> existing test suite (`backend/tests/backend/mainai/test_egress_policy.py`) covers the
+> `NEVER_EGRESS:` marker extensively but has no test for the SSH-key marker at all — confirmed
+> by direct search, zero hits. Add a regression test proving the SSH-key marker is detected and
+> denies the call, matching the existing `NEVER_EGRESS:` tests' style and rigor. Do not modify
+> `app/egress_policy/service.py` itself — the detection logic already exists and works; only
+> the missing test coverage is the gap."
+
+This is deliberately worded to describe the PROBLEM (a coverage gap, verified real) without
+dictating the exact test shape — MainAI must still read the existing file's conventions, find
+the right place to add the test, and write it correctly. Verified this session: the gap is
+real (`grep -rn "OPENSSH\|BEGIN.*PRIVATE" tests/backend/mainai/test_egress_policy.py` → zero
+hits, while `NEVER_EGRESS` appears throughout the same file).
+
+### Exact parameters
+
+- **`authorized_paths`**: `["backend/tests/backend/mainai/test_egress_policy.py"]` — exactly
+  one file, a test file, zero existing callers of anything it might add.
+- **`authorized_capabilities`**: `["read_file", "patch_file", "run_focused_test",
+  "verification_evaluate"]`. No `create_file` (the target file already exists — this is
+  read+patch, not a wholesale new file). No `delete_file`. No `run_full_suite`.
+  No `stage_scoped_changes`/`commit_scoped_changes` for the FIRST attempt (see note below).
+- **`remote_write_authorized`**: `false`.
+- **Provider disclosure**: none — `provider_spend_authorized=false`. This goal has an
+  obvious deterministic path (read the existing file's pattern, write one analogous test); it
+  should not need provider assistance at all. If MainAI's planning genuinely concludes it
+  needs provider assistance for a goal this narrow, treat that itself as a signal to stop and
+  have the founder review before proceeding, not to authorize spend reactively.
+- **Spend ceiling**: N/A (no spend authorized at all, per above).
+- **`authorized_risk`**: `low`.
+- **Task approval**: a single, founder-approved task — no autonomous multi-task
+  decomposition for this first run (per this contract's earlier "can it create new tasks?"
+  answer).
+
+### Success criteria
+
+1. Exactly one new test function added to `test_egress_policy.py` (or the diff is otherwise
+   confined to that one file).
+2. The new test genuinely exercises the SSH-key marker path — asserts a call containing the
+   `-----BEGIN OPENSSH PRIVATE KEY-----` string is denied (matching the existing
+   `NEVER_EGRESS:` tests' assertion style: `decision == "denied"`, `sent_content_hash is
+   None`, no provider ever invoked).
+3. `run_focused_test` on `test_egress_policy.py` passes, including the new test and all
+   existing ones (no regression).
+4. `verification_evaluate` reports the verification plan satisfied.
+5. The task reaches `completed` through the real `_finalize_task_outcome` chain — not a
+   fabricated status.
+
+### Forbidden actions (restating this contract's standing rules for this specific run)
+
+No push, no remote effect (`remote_write_authorized=false` throughout). No modification to
+`app/egress_policy/service.py` or any file outside `authorized_paths`. No provider-assisted
+planning. No additional task creation. No capability beyond the four listed above.
+
+### Independent review checklist (for whoever — founder or a reviewing agent — checks the
+result before deciding whether to keep/discard the branch)
+
+- [ ] Diff touches exactly `test_egress_policy.py`, nothing else.
+- [ ] The new test actually imports/calls the real `enforce_egress_policy()` (or equivalent
+      real entry point) — not a reimplementation or a mock of the detection logic.
+- [ ] The new test's assertions genuinely fail if the SSH-key marker detection were removed
+      (a quick manual check: temporarily comment out the marker in
+      `_NEVER_EGRESS_MARKERS`, confirm the new test fails, restore it — matching this
+      session's own negative-control discipline).
+- [ ] No test-only bypass was used to reach `completed` (check `WorkTraceEvent`/checkpoint
+      trail for a genuine `patch_file` → `run_focused_test` → `verification_evaluate`
+      sequence, not a shortcut).
+- [ ] `git log`/`git diff` on the local worktree branch shows only the expected change —
+      confirm before deciding to push.
+
+### Note on local commits
+
+`stage_scoped_changes`/`commit_scoped_changes` are deliberately excluded from this FIRST
+attempt's capability list (stricter than this contract's general "can it commit locally? yes"
+answer) — for the very first real run specifically, recommend reviewing the raw diff before
+authorizing even a local commit, so the founder's first look at MainAI's own self-improvement
+output is the rawest possible form. Local commit capability can be added for the SECOND
+milestone once the first has been reviewed.
+
+### Explicit non-goals for this milestone
+
+Provider-assisted planning, multi-task decomposition, any push/remote effect, any touch to
+authority/Vault code, any capability beyond the four listed above, local commit (this specific
+run only, per the note above).
