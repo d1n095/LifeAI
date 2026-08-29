@@ -15,7 +15,11 @@ from sqlalchemy.orm import sessionmaker
 
 from app.development_driver import service as driver_svc
 from app.development_driver.service import DriverStep, run_driver
-from app.development_operator.service import LOCAL_WRITE, OperatorAuthorizationError, write_file
+from app.development_operator.service import (
+    LOCAL_WRITE,
+    OperatorAuthorityTransitionError,
+    write_file,
+)
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import MainAITaskWorktree
 from tests.backend.mainai.test_autonomous_development_driver import _driver_foundation, _plan
@@ -31,7 +35,9 @@ def test_expired_job_lease_blocks_write_with_zero_filesystem_effect(superuser_db
     job.lease_expires_at = datetime.utcnow() - timedelta(seconds=1)
     superuser_db.flush()
 
-    with pytest.raises(OperatorAuthorizationError, match="stale or absent"):
+    # Lease expiry is an expected authority transition, not a programming defect --
+    # must raise the narrower OperatorAuthorityTransitionError subclass specifically.
+    with pytest.raises(OperatorAuthorityTransitionError, match="stale or absent"):
         write_file(
             superuser_db,
             context,
@@ -58,7 +64,9 @@ def test_takeover_generation_bump_blocks_stale_worker_write_zero_fs_effect(
     worktree.lease_generation = job.lease_generation
     superuser_db.flush()
 
-    with pytest.raises(OperatorAuthorizationError, match="stale or absent"):
+    # Takeover is an expected authority transition -- must raise the narrower
+    # OperatorAuthorityTransitionError subclass specifically, not just the base class.
+    with pytest.raises(OperatorAuthorityTransitionError, match="stale or absent"):
         write_file(
             superuser_db,
             context,  # still bound to worker-1 / old generation
@@ -111,17 +119,17 @@ def test_genuine_cross_session_takeover_mid_run_blocks_next_step_zero_effect(
     same-session identity-map staleness #199 fixed, it's proof the refresh mechanism also
     correctly observes a truly external commit, not just a same-session mutation.
 
-    FINDING, not a bug, recorded precisely: run_driver()'s own per-step try/except
-    (development_driver/service.py:551-553) only catches OperatorCapabilityMissing
-    gracefully -- OperatorAuthorizationError from a mid-run stale-lease/takeover detection is
-    NOT caught, so it propagates uncaught out of run_driver() instead of becoming a clean
-    DriverResult (e.g. a STALE_AUTHORITY classification with its own checkpoint) the way
-    cancellation (job.cancel_requested check, same loop) and capability-missing both do.
-    Worker's own per-goal try/except (_advance_authorized_supervisor_goals) still catches
-    this at the tick level and rolls back cleanly -- no crash of the wider poll loop -- but
-    the superseded task's OWN audit trail never records a clean "stopped: superseded by
-    takeover" checkpoint the way a cancel does. Observability/audit gap, not an authority
-    gap; worth adding OperatorAuthorizationError to this except clause for parity."""
+    CLOSED (was a real observability gap, now fixed): run_driver()'s per-step try/except
+    now also catches OperatorAuthorityTransitionError -- a narrower OperatorAuthorizationError
+    subclass reserved for expected authority transitions (lease takeover/expiry, founder
+    cancel, envelope revoke, concurrent worktree/branch advance) -- and returns a clean
+    DriverResult with classification="STALE_AUTHORITY" plus its own durable checkpoint,
+    mirroring the existing cancel-path handling in the same loop. A founder reading the audit
+    trail can now tell "superseded by another worker" apart from "founder cancelled". Prior
+    behavior (still asserted by this test's predecessor in git history) was an uncaught
+    exception propagating out of run_driver() -- Worker's own per-goal try/except still
+    caught it at the tick level with no crash of the wider poll loop, but the superseded
+    task's own audit trail never recorded a clean disposition."""
     _, _, task, job, worktree, context = _driver_foundation(superuser_db, tmp_path)
     context = replace(context, allowed_paths=("a.txt", "b.txt"))
     job_id, worktree_id = job.id, worktree.id
@@ -163,13 +171,105 @@ def test_genuine_cross_session_takeover_mid_run_blocks_next_step_zero_effect(
                 {"path": "b.txt", "content": "second\n", "expected_sha256": None}, LOCAL_WRITE,
             ),
         )
-        with pytest.raises(OperatorAuthorizationError, match="stale or absent"):
-            run_driver(superuser_db, context=context, plan=plan, max_actions=10)
+        result = run_driver(superuser_db, context=context, plan=plan, max_actions=10)
     finally:
         driver_svc._invoke_operator = real_invoke
 
+    assert result.phase == "BLOCKED"
+    assert result.classification == "STALE_AUTHORITY"
+    assert result.completed_steps == 1
+    assert "stale or absent" in result.detail["reason"]
     assert (context.repository_root / "a.txt").read_text(encoding="utf-8") == "first\n"
     assert not (context.repository_root / "b.txt").exists(), (
         "second write must NOT land -- the genuinely separate takeover session's commit "
         "must be observed by run_driver()'s own between-steps db.refresh(job)"
     )
+
+    # The checkpoint itself is durable and carries the classification/reason.
+    from app.mainai_execution.checkpoint import latest_checkpoint_for_step
+
+    checkpoint = latest_checkpoint_for_step(
+        superuser_db, task_id=task.id, job_id=job_id, step="development_driver"
+    )
+    assert checkpoint is not None
+    assert checkpoint.executor_state["classification"] == "STALE_AUTHORITY"
+    assert checkpoint.executor_state["phase"] == "BLOCKED"
+
+
+def test_winning_worker_resumes_from_stale_authority_checkpoint_and_completes(
+    superuser_db, tmp_path
+):
+    """V1 Stage 2: closes the 'recovery after takeover' gap this session's own prep doc
+    flagged as untested (docs/MAINAI_V1_STAGE2_STAGE3_ADVERSARIAL_PREP.md: 'does the WINNING
+    worker's own subsequent tick correctly pick up and continue the task -- not yet
+    empirically tested'). Composes the STALE_AUTHORITY fix with run_driver()'s own existing
+    checkpoint-resume design: the LOSING worker's run above must leave state["next_step"]
+    UNADVANCED past the refused step (proven here, not assumed) so the WINNING worker's own
+    later run_driver() call -- same task/job/plan, new worker_id + bumped lease_generation --
+    resumes from that exact step and completes it for real, with zero duplication of the
+    already-completed first step."""
+    _, _, task, job, worktree, context = _driver_foundation(superuser_db, tmp_path)
+    context = replace(context, allowed_paths=("a.txt", "b.txt"))
+    task.verification_plan = []
+    job_id, worktree_id = job.id, worktree.id
+    original_lease_generation = job.lease_generation
+
+    bind = superuser_db.get_bind()
+    Session = sessionmaker(bind=bind)
+    real_invoke = driver_svc._invoke_operator
+
+    def _invoke_then_real_takeover(db, ctx, step, idem):
+        result = real_invoke(db, ctx, step, idem)
+        takeover_session = Session()
+        try:
+            job_row = takeover_session.get(MainAIJob, job_id)
+            wt_row = takeover_session.get(MainAITaskWorktree, worktree_id)
+            job_row.locked_by = "worker-genuine-takeover"
+            job_row.lease_generation = original_lease_generation + 1
+            wt_row.lease_generation = original_lease_generation + 1
+            takeover_session.commit()
+        finally:
+            takeover_session.close()
+        return result
+
+    superuser_db.commit()
+    driver_svc._invoke_operator = _invoke_then_real_takeover
+    plan = _plan(
+        context,
+        "genuine-takeover-then-resume",
+        DriverStep(
+            "create_file", "first authorized write", "a.txt exists",
+            {"path": "a.txt", "content": "first\n", "expected_sha256": None}, LOCAL_WRITE,
+        ),
+        DriverStep(
+            "create_file", "second write, must resume after takeover", "b.txt exists",
+            {"path": "b.txt", "content": "second\n", "expected_sha256": None}, LOCAL_WRITE,
+        ),
+    )
+    try:
+        losing_result = run_driver(superuser_db, context=context, plan=plan, max_actions=10)
+    finally:
+        driver_svc._invoke_operator = real_invoke
+
+    assert losing_result.classification == "STALE_AUTHORITY"
+    assert losing_result.completed_steps == 1
+    assert not (context.repository_root / "b.txt").exists()
+
+    # The WINNING worker: same task/job/plan, its own real worker_id + the generation the
+    # takeover session actually committed -- exactly what a second, genuinely separate
+    # worker process resuming this goal would construct for itself.
+    winner_context = replace(
+        context,
+        worker_id="worker-genuine-takeover",
+        lease_generation=original_lease_generation + 1,
+    )
+    winning_result = run_driver(
+        superuser_db, context=winner_context, plan=plan, max_actions=10
+    )
+
+    assert winning_result.classification == "COMPLETE"
+    # Zero duplication: exactly the 2 real steps, not 3 (no re-run of the already-completed
+    # first step just because a second run_driver() call happened).
+    assert winning_result.completed_steps == 2
+    assert (context.repository_root / "a.txt").read_text(encoding="utf-8") == "first\n"
+    assert (context.repository_root / "b.txt").read_text(encoding="utf-8") == "second\n"

@@ -35,18 +35,41 @@ takeover between steps; worker A's own next step attempt, still using its stale 
 session's commit under READ COMMITTED — not the same-session staleness class #199 fixed, a
 genuinely different and now also-verified mechanism).
 
-**Real finding, not a security gap**: `run_driver()`'s per-step `try/except`
-(`development_driver/service.py:551-553`) only catches `OperatorCapabilityMissing`
-gracefully. `OperatorAuthorizationError` from a mid-run takeover propagates *uncaught* out of
-`run_driver()`, instead of becoming a clean `DriverResult` (e.g. a `STALE_AUTHORITY`
-classification with its own checkpoint) the way cancellation already does in the same loop.
-`Worker`'s own per-goal `try/except` in `_advance_authorized_supervisor_goals()` still catches
-this at the tick level (confirmed: no crash of the wider poll loop) — but the superseded
-task's own audit trail never records a clean "stopped: superseded by takeover" checkpoint the
-way a cancel does. **Recommend for Stage 2**: add `OperatorAuthorizationError` to that except
-clause, producing a `STALE_AUTHORITY`/`SUPERSEDED` classification + checkpoint, for parity with
-the cancel path — small, narrow, non-overlapping with anything Cursor's correction pass
-touched.
+**CLOSED (was a real finding, not a security gap, now fixed on `v1-readiness-workstream`)**:
+`run_driver()`'s per-step `try/except` previously only caught `OperatorCapabilityMissing`
+gracefully; `OperatorAuthorizationError` from a mid-run takeover propagated *uncaught* out of
+`run_driver()` instead of becoming a clean `DriverResult`. Fixed via a new, narrower exception
+subclass and two Driver-level catch sites:
+
+- `app/development_operator/service.py`: added `OperatorAuthorityTransitionError
+  (OperatorAuthorizationError)` — reserved specifically for EXPECTED authority transitions
+  (lease takeover/expiry, founder cancel racing the effect fence, execution-envelope
+  revoke/supersede, supervisor-goal-lease staleness, or another worker concurrently advancing
+  the repository/branch/remote). Genuine invariant violations (ambiguous worktree class,
+  cross-owner task/job, missing write-identity) stay the base `OperatorAuthorizationError` —
+  structural, not just documented, matching this codebase's own doctrine. Every raise site in
+  `_require_context()`, `_require_live_execution_authority()`, `_verify_supervisor_goal_
+  worktree()`, and `push_branch()` was individually traced and classified into one bucket or
+  the other (`WorktreeOwnershipError`, a separate hierarchy, was left untouched — a genuinely
+  different, already-intentional design feeding the existing recovery/takeover pipeline).
+- `app/development_driver/service.py`'s `run_driver()`: TWO call sites needed the new except
+  clause, not one — `_invoke_operator()` (the step's own effect) AND
+  `operator.checkpoint_operator_progress()` (the routine post-effect bookkeeping call
+  immediately after), discovered empirically because the existing genuine two-connection
+  takeover test's mock takes over immediately after step 1's real effect, before the
+  bookkeeping checkpoint call runs — a second real call site that would otherwise still crash
+  uncaught even with the first fixed. Both now return a `DriverResult` with
+  `phase="BLOCKED"`, `classification="STALE_AUTHORITY"`, and a durable checkpoint carrying the
+  original reason string, mirroring the existing cancel-path handling in the same loop.
+  `state["completed"]` (already-done steps) is preserved as historical either way.
+
+Verified via the existing genuine two-connection takeover test
+(`test_operator_lease_effect_time_race.py::test_genuine_cross_session_takeover_mid_run_
+blocks_next_step_zero_effect`, updated to assert the new graceful `DriverResult` +
+checkpoint instead of `pytest.raises`), plus a negative control (`git stash` on the two
+service files: the updated test suite fails to even import on pre-fix code, confirming real
+dependency on the fix — not a vacuous assertion). Full `tests/backend/mainai/ -k "operator or
+driver"` regression: 27/27 passing.
 
 ### Attack criteria for Cursor's own Stage 2 PR, when it appears
 
@@ -63,10 +86,24 @@ touched.
    trail must be able to tell "superseded by another worker" apart from "founder cancelled"),
    and that the checkpoint is written using the CURRENT (post-takeover) authority state, not a
    stale one.
-4. **Recovery after takeover**: does the WINNING worker's own subsequent tick correctly pick
-   up and continue the task (not get stuck because the LOSING worker's abandoned checkpoint
-   confuses readiness/dependency state)? Not yet empirically tested this session — a real gap
-   worth an empirical check once Stage 2 lands.
+4. **Recovery after takeover** — CLOSED, empirically proven this session, not just traced:
+   `test_operator_lease_effect_time_race.py::test_winning_worker_resumes_from_stale_
+   authority_checkpoint_and_completes` runs the LOSING worker to a real `STALE_AUTHORITY`
+   result (proving `state["next_step"]` is left unadvanced past the refused step, not
+   assumed), then calls `run_driver()` a SECOND time with the WINNING worker's own real
+   context (new `worker_id`, the actually-committed bumped `lease_generation`) against the
+   SAME task/job/plan. Confirmed: resumes from the exact refused step via `run_driver()`'s
+   existing checkpoint-resume design (plan-hash match + stored `driver_state`), completes
+   both steps for real, reaches `COMPLETE`, and `completed_steps == 2` (not 3) — zero
+   duplication of the already-completed first step. Also traced the Supervisor/Worker layer
+   above `run_driver()`: `STALE_AUTHORITY` is deliberately absent from `autonomous_gap.
+   service.LIVE_GAP_SIGNAL_CLASSIFICATIONS`, so `development_supervisor/service.py`'s
+   post-driver gap-invocation path returns `None` for it (no spurious repair child gets
+   created just because authority changed), the task's own `status`/`blocker_reason` are
+   left untouched, and `Worker._advance_authorized_supervisor_goals()` only logs the
+   classification — the next tick from whichever worker currently holds the lease simply
+   re-attempts the same still-`running` task and resumes cleanly, no special-casing needed
+   anywhere in that chain.
 
 ## Stage 3 — long autonomous soak (8-12 tasks) + report
 
