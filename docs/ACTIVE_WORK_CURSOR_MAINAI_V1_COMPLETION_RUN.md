@@ -23,14 +23,14 @@ without a human translating every step.
 | 0C | `_require_context` owns freshness | **MERGED** #199 |
 | 0D | Genuine cancel vs finalize race | **MERGED** #200 |
 | 0E | True restart + fresh DB session | **MERGED** #201 |
-| 1 | Autonomous gap/repair live loop | **IN PROGRESS** — `cursor/autonomous-gap-worker-live-loop` |
-| 2 | Lease expiry + takeover continuation | next after Stage 1 merge |
+| 1 | Autonomous gap/repair live loop | **MERGED** #202 |
+| 2 | Lease expiry + takeover continuation | **IN PROGRESS** — [#203](https://github.com/d1n095/LifeAI/pull/203) |
 | 3 | Long autonomous soak (8–12 tasks) + report | waiting |
 | 4 | First real bounded self-improvement on LifeAI | waiting |
 | 5 | Goal intake / bootstrap production path | waiting |
 | 6 | `docs/MAINAI_V1_READINESS.md` audit | waiting |
 
-## Stage 1 proof target
+## Stage 1 proof target (landed in #202)
 
 Worker → Supervisor only (no harness bridges):
 
@@ -42,6 +42,12 @@ Allowed founder edges: envelope/spend authorize; `grant_task_approval` for repai
 
 Forbidden harness: hand repair task / WorkBinding / PlanCandidate / status mutation /
 dependency unlock / final report.
+
+## Stage 2 proof target
+
+Real `supervisor_goal_leases` crash-hold → wall-clock expiry → Worker B reclaim (generation
+bump) → goal continues; old worker ZERO further filesystem effect. Fresh Session B after
+Session A closes (PROCESS MEMORY != AUTHORITY; ORM SESSION MEMORY != AUTHORITY).
 
 ## Operating rules (non-negotiable)
 

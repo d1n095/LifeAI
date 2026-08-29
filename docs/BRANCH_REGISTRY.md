@@ -92,14 +92,15 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
-## MAINAI V1 COMPLETION RUN — Stage 1 (Cursor, efter correction gate)
+## MAINAI V1 COMPLETION RUN — Stages 1–2 (Cursor)
 
-Integration tip: `225657f` (correction Phases 1–5 complete). Program:
+Integration tip: post-#202 (`ae1bcdc`). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/autonomous-gap-worker-live-loop` | (öppnas) | **Öppen — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
+| `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
+| `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Öppen — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
 
 ---
 
