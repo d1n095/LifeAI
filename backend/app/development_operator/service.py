@@ -377,15 +377,21 @@ def _require_context(
     refuse_if_cancelled: bool = False,
 ):
     _require_governed_capability_ceiling(context)
+    # THE LAST FENCE BEFORE EFFECT MUST OWN ITS OWN FRESHNESS.
+    # expire_on_commit=False means a plain select() returns the identity-map instance
+    # without reloading attributes — so a concurrent Session B cancel/lease change would
+    # be invisible unless we force populate_existing here (not rely on caller refresh).
     task = db.execute(
-        select(MainAITask).where(
+        select(MainAITask)
+        .where(
             MainAITask.id == context.task_id, MainAITask.owner_id == context.owner_id
         )
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     job = db.execute(
-        select(MainAIJob).where(
-            MainAIJob.id == context.job_id, MainAIJob.owner_id == context.owner_id
-        )
+        select(MainAIJob)
+        .where(MainAIJob.id == context.job_id, MainAIJob.owner_id == context.owner_id)
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     binding = db.execute(
         select(WorkStrategyExecution).where(
