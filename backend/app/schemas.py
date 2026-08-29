@@ -1169,6 +1169,20 @@ class RejectExecutionScopeIn(BaseModel):
     reason: str
 
 
+class ProposeExecutionScopeIn(BaseModel):
+    """Path B bridge input -- the founder's OWN stated suggestion for a directly-created
+    goal's execution scope. Carries zero authority (see propose_execution_scope()'s own
+    docstring: the proposal is never copied into an envelope automatically); every field here
+    defaults to the same honest-empty/low-risk defaults propose_execution_scope() itself
+    uses, since this route has no more reliable a signal for "what paths does this goal need"
+    than the automatic Path A trigger does."""
+
+    proposed_paths: list[str] = []
+    proposed_capabilities: list[str] = []
+    proposed_risk: str = "low"
+    repository_identity: str | None = None
+
+
 class ExecutionAuthorizationEnvelopeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID

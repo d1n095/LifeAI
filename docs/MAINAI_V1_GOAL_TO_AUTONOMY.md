@@ -13,13 +13,16 @@ much is still manual" suggested. A full, end-to-end founder-facing HTTP API alre
 document ingestion (Path A) all the way through AI-driven task decomposition, execution-
 envelope authorization, task approval, provider-spend authorization, and autonomous Worker
 pickup — with zero test-only construction in the *core* chain. **Update, found on a dedicated
-adversarial re-verification pass**: this full chain is proven complete for Path A goals
-specifically. **Path B (direct founder-typed `POST /api/mainai/goals`) has one real gap**: no
-route exists to create an execution-scope proposal for a directly-created goal, so Path B
-goals can be planned/decomposed but never reach execution authority — see gap #0 below. Also
+adversarial re-verification pass, then closed the same session**: this full chain was proven
+complete for Path A goals from the start; Path B (direct founder-typed
+`POST /api/mainai/execution/goals`) had one real gap — no route existed to create an
+execution-scope proposal for a directly-created goal — **now closed** via a new founder-invoked
+bridge route, see gap #0 below for the full fix and its production-shaped E2E proof. Also
 resolved this session: a real concurrent-decomposition bug (unhandled `IntegrityError` on a
 genuine race, now fixed with a regression test) and full confirmation that decomposition
-crash-recovery is completely safe (single-transaction atomicity — see Deliverable 2).
+crash-recovery is completely safe (single-transaction atomicity — see Deliverable 2). **Both
+founder goal-entry paths now converge on the same canonical FOUNDER INTENT → AUTHORITY
+PROPOSAL → FOUNDER APPROVAL → DURABLE ENVELOPE → WORKER → SAFE AUTONOMOUS EXECUTION chain.**
 
 ## Deliverable 1 — Goal intake gap analysis
 
@@ -93,10 +96,10 @@ Worker.run()'s real `while True` poll loop     app/worker.py:107
 | Task dependencies | **1. Production-derived** | `_detect_cycle()` (`planner.py:134`) is real production cycle-detection wired directly into `create_plan()` — dependency graphs come from the AI's own proposed output, not hand-set only in tests. |
 | `WorkBinding` | **1. Production-derived** | Constructed at `development_supervisor/production_entry.py:371`, `development_supervisor/service.py:545,1468`, **and** `app/autonomous_gap/service.py:863` (the gap/repair path also builds real bindings). |
 | `SupervisorScope` | **1. Production-derived** | Single real construction site, `production_entry.py:212`. |
-| Execution-authorization-envelope | **2. Partially production-derived — real gap found on adversarial re-verification** | Real founder-facing route, `POST /api/execution-envelopes/proposals/{id}/authorize` — but this route only AUTHORIZES an already-existing proposal; it never CREATES one. `propose_execution_scope()` has exactly one production caller anywhere in `app/`: `work_candidates/service.py:95`, reachable only via Path A (`WorkCandidate` → founder authorization). **`app/routers/execution_envelopes.py` has no route to create a proposal for a directly-created (Path B, `POST /api/mainai/goals`) goal.** A Path B goal can get a plan and tasks but can never reach `authorize_execution_scope()` through any real HTTP interaction — only via a raw Python function call a human/test would have to make by hand. Found via a dedicated adversarial re-verification pass specifically hunting for this class of hidden bridge; missed by the original investigation, which checked "does a route exist to authorize" without checking "does a route exist to create what gets authorized." |
+| Execution-authorization-envelope | **1. Production-derived (both paths)** | Real founder-facing route, `POST /api/execution-envelopes/proposals/{id}/authorize`. `propose_execution_scope()` now has TWO production callers: `work_candidates/service.py:95` (Path A, automatic) and the new `POST /api/execution-envelopes/goals/{goal_id}/propose` (Path B, founder-invoked, added this session). Both converge on the same `authorize_execution_scope()` — proven via a real production-shaped E2E test, `backend/tests/backend/test_path_b_execution_scope_bridge.py`. |
 | Task approval records | **1. Production-derived** | Real founder-facing route, `POST /api/mainai/tasks/{id}/approve`. |
 | Provider planning request | **1. Production-derived** | Real chain from `Worker` → `Supervisor` → `_invoke_live_gap()` → `plan_with_provider()`, confirmed reachable via `Worker.run_once()`, not only via direct test calls (this session's #181/#196 reviews independently confirmed this exact call chain). |
-| Provider-spend authorization | **2. Partially production-derived — inherits the envelope gap above** | Real founder-facing route, `POST /api/provider-spend/authorize`, correctly chains from the envelope-authorization response's `id` (verified: the chain genuinely works end-to-end for Path A goals) — but is equally unreachable for Path B goals, for the same reason as the row above, not a separate defect. |
+| Provider-spend authorization | **1. Production-derived (both paths)** | Real founder-facing route, `POST /api/provider-spend/authorize`, chains from the envelope-authorization response's `id` — reachable for both Path A and Path B goals now that the envelope gap above is closed. |
 | Worktree binding | **1. Production-derived** | `goal_worktree_path()`/`ensure_goal_worktree_sync()` (`development_supervisor/production_worktree.py:65,76`) are real production functions. |
 | Task readiness | **1. Production-derived** | `recompute_task_readiness()` has 6 real production callers across `execution_job.py`, `worker.py`, `plan_insertion.py`, `executor.py`, `planner.py`, `graph.py`, `replan.py`. |
 | Final report linkage | **1. Production-derived** | `_finalize_task_outcome()` → `record_final_report()`, confirmed via this session's #168/#193 review — the canonical, not-bypassable completion gate. |
@@ -109,17 +112,40 @@ correct shape, not a gap.
 
 ### The actual remaining gaps (narrower than the original framing assumed)
 
-0. **REAL BLOCKER, found on adversarial re-verification: Path B goals (direct
-   `POST /api/mainai/goals`) have no route to ever get an execution-scope proposal created,
-   so they can never reach execution authority through any real API interaction.** See the
-   execution-authorization-envelope row above. Two options: (a) add a
-   `propose_execution_scope()`-creating route reachable for a directly-created goal (mirroring
-   what Path A gets automatically via `_propose_execution_scope_if_actionable()`), or (b)
-   explicitly document that Path B is not yet a complete autonomy path — founders wanting a
-   fully autonomous goal must go through Path A (document/claim → entity promotion →
-   `WorkCandidate` authorization), not direct goal creation. Recommend (a) for V1 — it's the
-   smaller, more consistent fix, and Path B otherwise dead-ends at "plan created, can never
-   execute."
+0. **CLOSED this session.** Path B goals (direct `POST /api/mainai/execution/goals` — the
+   correct real prefix, `/api/mainai/goals` in earlier drafts of this document was imprecise)
+   previously had no route to ever get an execution-scope proposal created, so they could
+   plan/decompose but never reach execution authority through any real API interaction.
+   **Fixed via a new founder-invoked route**, `POST /api/execution-envelopes/goals/{goal_id}/
+   propose` (`app/routers/execution_envelopes.py`) — Option (a) from the original framing
+   below, kept for the historical record. Calls the same `propose_execution_scope()` Path A's
+   automatic trigger uses; the proposal carries zero authority regardless of content
+   (`authorize_execution_scope()` never copies from it — proven structurally, not just
+   assumed). Idempotency key is a content-hash of `(goal_id, proposed_paths, proposed_
+   capabilities, proposed_risk, repository_identity)` — an accidental retry with identical
+   content is a true no-op; a deliberate new proposal with different content (e.g. after a
+   rejection) is never blocked by history. A second, related bug was found and fixed in the
+   same underlying function: `propose_execution_scope()`'s check-then-insert had no protection
+   against two genuinely concurrent callers sharing an idempotency_key (Path A's automatic
+   trigger racing a Path B founder call, or a client retry) — the loser used to raise an
+   unhandled `IntegrityError` instead of gracefully converging on the winner's row. Fixed with
+   `INSERT ... ON CONFLICT DO NOTHING` (not a `SAVEPOINT`+catch, which was tried first and
+   reverted after it broke RLS test isolation when run alongside other execution-envelope
+   test modules — a real regression, reproduced and root-caused before switching approach).
+   Full production-shaped E2E proof (goal → decomposition → proposal → founder authorization →
+   task approval → `eligible_authorized_goals()` genuinely includes the goal) plus 4 negative
+   tests (no-approval, broader-proposal-never-widens, cancel-before-approval,
+   retry-never-duplicates) in `backend/tests/backend/test_path_b_execution_scope_bridge.py`;
+   the concurrent-proposal race has its own dedicated two-thread regression in
+   `backend/tests/backend/mainai/test_execution_envelopes.py`. No test-side manual
+   `SupervisorScope`/`WorkBinding`/envelope/task-status construction anywhere in the new
+   suite — every transition is a real HTTP call or the same service function its own router
+   calls.
+
+   Original framing, kept for context: two options were considered — (a) add a
+   `propose_execution_scope()`-creating route reachable for a directly-created goal (the one
+   implemented), or (b) explicitly document Path B as execution-incomplete for V1 and require
+   founders to use Path A instead. (a) was chosen as the smaller, more consistent fix.
 1. **No founder-facing route to reject or narrow an AI-proposed plan's task list before
    creation.** `propose_and_create_plan()` commits the AI's full proposed task set
    immediately; the founder's only granular control point is per-task approve/reject

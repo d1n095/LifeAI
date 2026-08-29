@@ -146,10 +146,10 @@ not been empirically checked) / **BLOCKED** (a real, open gap stands in the way)
 |---|---|---|---|---|
 | Goal intake | **PROVEN** | Two real HTTP routes (`POST /api/mainai/goals`, `WorkCandidate` authorization path) → `create_goal()`. See `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md`. | None. | — |
 | Task decomposition | **PROVEN, one bug fixed this session** | `POST /api/mainai/goals/{id}/plan` → `propose_plan_via_ai()` → `create_plan()`, real AI-driven multi-task creation. Fully atomic (single transaction, confirmed by direct trace — no reachable partial-decomposition state). Concurrent-decomposition race (unhandled `IntegrityError` on the loser) found, fixed (goal-row lock + `populate_existing=True`), and regression-tested this session (`test_two_genuinely_concurrent_create_plan_calls_for_the_same_goal_never_raise_unhandled_integrity_error`). | Confirm/add a max-task-count bound (Deliverable 2) — a nice-to-have, not urgent; no cancellation check inside decomposition itself (narrow exposure window, single synchronous request). | IMPORTANT POST-V1 for both remaining items; neither is a blocker. |
-| Authority derivation | **PARTIAL — one real gap found this session** | `authorize_execution_scope()`, `grant_task_approval()`, `authorize_provider_spend()` — all real founder-facing routes; AI can only narrow, never widen (verified via #166's plan-scope-narrowing and #190's prompt-injection regression). **But**: found via a dedicated adversarial re-verification pass — Path B goals (direct `POST /api/mainai/goals`) have no route to create an execution-scope PROPOSAL at all (only Path A, via `WorkCandidate` authorization, gets one automatically). See `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md`'s gap #0. | Add a proposal-creation route reachable for directly-created goals, or explicitly document Path B as execution-incomplete for V1. | BLOCKER — this specifically breaks Path B's ability to ever reach autonomous execution, not a cosmetic gap. |
+| Authority derivation | **PROVEN, one real gap found and closed this session** | `authorize_execution_scope()`, `grant_task_approval()`, `authorize_provider_spend()` — all real founder-facing routes; AI can only narrow, never widen (verified via #166's plan-scope-narrowing and #190's prompt-injection regression). Path B (direct `POST /api/mainai/execution/goals`) previously had no route to create an execution-scope proposal at all (found via adversarial re-verification, `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md`'s gap #0) — **closed this session**: new founder-invoked bridge route (`POST /api/execution-envelopes/goals/{goal_id}/propose`), full production-shaped E2E proof plus 4 negative tests (`test_path_b_execution_scope_bridge.py`), and a related concurrent-proposal-creation race found and fixed in the same underlying function (`propose_execution_scope()`, `INSERT ... ON CONFLICT DO NOTHING`, two-thread regression test). | None. | — |
 | Planning | **PROVEN** | `plan_with_provider()`/`plan_founder_request()`, real, extensively tested this session (#181, #196). | None for V1 scope. | — |
 | Provider use | **PROVEN, with 2 tracked follow-ups** | Reservation/settlement/spend-authorization chain real and tested (#178-181, #196). | #182 Window B core closed (#196, this session); one non-blocking completeness note (`provider_request_may_have_left` never set by real adapters, conservative-safe default). | IMPORTANT POST-V1 (the completeness note); not a blocker. |
-| Execution | **PROVEN** | `run_driver()`/Operator capability chain, extensively tested (#183-186, #191, #192). | Phase 3 (`_require_context()` freshness) still open per the correction-pass queue — see below. | BLOCKER until Phase 3 merges (queued, in progress as of this document). |
+| Execution | **PROVEN** | `run_driver()`/Operator capability chain, extensively tested (#183-186, #191, #192). Phase 3 (`_require_context()` freshness) closed via #199, independently verified this session. | None. | — |
 | Verification | **PROVEN** | `verification_evaluate` step, real `run_focused_test` integration, checkpointed. | None for V1 scope. | — |
 | Repair | **PROVEN** | Full gap→repair→re-verification→unlock chain, see Part B above. | None — the `multiplication_repair` narrowness is a cost optimization, not a correctness gap. | — |
 | Dependency progression | **PROVEN** | `_detect_cycle()`, `recompute_task_readiness()` (6 real callers). | None for V1 scope. | — |
@@ -165,11 +165,13 @@ not been empirically checked) / **BLOCKED** (a real, open gap stands in the way)
 
 ### V1 blocker summary (the short version)
 
-**Real blockers, all already in motion**: Phases 1-5 of the correction pass (#182 Window B —
-core closed via #196, follow-up tracked; #183 heal identity; Phase 3 `_require_context`
-freshness; Phase 4 genuine cancel/finalize concurrency; Phase 5 restart-soak v3), plus the
-task-decomposition idempotency/crash-recovery checks flagged in Deliverable 2, plus actually
-running the first self-improvement milestone once those land.
+**Real blockers, all already in motion**: Phases 4-5 of the correction pass (Phase 4 genuine
+cancel/finalize concurrency; Phase 5 restart-soak v3) — Phases 1-3 (#182 Window B, #183 heal
+identity, Phase 3 `_require_context` freshness) all closed and independently verified this
+session (#196/#198/#199). Task-decomposition idempotency/crash-recovery/Path-B-authority
+questions flagged in Deliverable 2 are all resolved this session too (concurrent-decomposition
+race fixed, atomicity confirmed, Path B bridge built and proven). Remaining real work: Phase
+4-5, then actually running the first self-improvement milestone once those land.
 
 **Not blockers, explicitly scoped out of V1**: Vault V5/V8 schema implementation (separate
 initiative, its own timeline), the `multiplication_repair` recipe's narrowness (cost
