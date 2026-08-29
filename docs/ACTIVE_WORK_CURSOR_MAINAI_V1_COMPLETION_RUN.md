@@ -24,7 +24,7 @@ without a human translating every step.
 | 0D | Genuine cancel vs finalize race | **MERGED** #200 |
 | 0E | True restart + fresh DB session | **MERGED** #201 |
 | 1 | Autonomous gap/repair live loop | **MERGED** #202 |
-| 2 | Lease expiry + takeover continuation | **IN PROGRESS** — `cursor/worker-live-lease-expiry-takeover` |
+| 2 | Lease expiry + takeover continuation | **IN PROGRESS** — [#203](https://github.com/d1n095/LifeAI/pull/203) |
 | 3 | Long autonomous soak (8–12 tasks) + report | waiting |
 | 4 | First real bounded self-improvement on LifeAI | waiting |
 | 5 | Goal intake / bootstrap production path | waiting |
