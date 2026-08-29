@@ -6,13 +6,18 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Aktiva PR:er (2026-08-27/28) — Night run autonomy hardening
+## Aktiva PR:er (2026-08-27/28/29) — Night run autonomy hardening
 
-Integration tip: `claude/det-kommer-mer-879lcm` @ **`a535752`** (#195).
+Integration tip: `claude/det-kommer-mer-879lcm` (post-#195, se `docs/ACTIVE_WORK_CURSOR_CORRECTION_PASS_182_183.md`s commit).
 Night report: `docs/NIGHT_RUN_AUTONOMY_HARDENING_REPORT.md`.
 Claude's independent red-team review + test-quality audit: **KLAR**, se
 `docs/SECURITY_TEST_QUALITY_AUDIT_165_187.md` (#189) och `docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md`
 (#188). Inget test i #165–195 visade sig passera utan sin egen fix.
+
+**🛑 CORRECTION PASS AKTIV (2026-08-29) — se `docs/ACTIVE_WORK_CURSOR_CORRECTION_PASS_182_183.md`
+för fullständiga instruktioner.** Grundaren har uttryckligen pausat den längre 8–12-task
+self-directed autonomy-experimentet tills Phase 1–5 i det dokumentet är mergade gröna. Kör INTE
+det längre experimentet innan dess.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
@@ -54,15 +59,23 @@ punkterna från natt-körningen och bör prioriteras innan autonomin utökas ytt
   sessionsgränsen, bara på Python-objektsgränsen. En starkare version skulle använda en genuint
   separat session för worker_b-fasen.
 
-**Merge-ordning / nästa prioritet för Cursor** (founder-godkänd ordning, se
-`docs/ACTIVE_WORK_CURSOR_NIGHT_RUN_FOLLOWUPS.md` för fullständiga instruktioner):
+**Merge-ordning / nästa prioritet för Cursor — CORRECTION PASS, se
+`docs/ACTIVE_WORK_CURSOR_CORRECTION_PASS_182_183.md` för fullständiga instruktioner (5 faser,
+skarpare krav än den ursprungliga natt-körnings-kön):**
 
 ```
-1. #182 Window B (ambiguous provider invocation on crash/exception) -- EJ PÅBÖRJAD
-2. #183 heal/idempotency identity tightening -- EJ PÅBÖRJAD
-3. cancel after provider-plan / before Safe Planner effect -- KLAR (#192)
-4. cancel after verify / before finalize -- KLAR (#193, #194)
-5. process-restart autonomy soak -- KLAR (#195), men se scope-notering ovan
+1. Phase 1: #182 Window B -- ambiguous-invocation-klassificering (A/B/C), äkta negativ kontroll
+   som exercisar EFTER invocation-gränsen, inte före -- EJ PÅBÖRJAD
+2. Phase 2: #183 heal-identitetsbindning (idempotency_key m.fl., inte bara hash-match) --
+   EJ PÅBÖRJAD
+3. Phase 3: härda _require_context() med egen populate_existing=True/refresh, tvåsessions-
+   regression -- EJ PÅBÖRJAD (ny fas, från #192-granskningen)
+4. Phase 4: genuint samtidig cancel/finalize-race (inte bara sekventiell barriär) -- EJ PÅBÖRJAD
+   (ny fas, från #194-granskningen)
+5. Phase 5: restart-soak v3 med GENUINT separat session för Worker B -- EJ PÅBÖRJAD
+   (ny fas, från #195-granskningen)
+
+Endast EFTER Phase 1-5 mergade gröna: det längre 8-12-task self-directed autonomy-experimentet.
 ```
 
 Stäng #182/#183 innan autonomin utökas ytterligare. Claude Vault/egress — leave alone.
