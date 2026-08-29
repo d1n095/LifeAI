@@ -92,7 +92,21 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
+<<<<<<< HEAD
 ## MAINAI V1 COMPLETION RUN — Stages 1–5 (Cursor)
+=======
+## MAINAI V1 COMPLETION RUN — Stage 6 (Cursor)
+
+Integration tip: post-#205. Program: `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-v1-readiness-audit` | (öppnas) | **Öppen — Stage 6** | Land V1 readiness + companion design docs on tip |
+
+---
+
+## MAINAI V1 COMPLETION RUN — Stages 1–4 (Cursor)
+>>>>>>> 3ff1486 (Land MainAI V1 readiness audit and companion design docs on tip.)
 
 Integration tip: post-#205 (`d215130`). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
