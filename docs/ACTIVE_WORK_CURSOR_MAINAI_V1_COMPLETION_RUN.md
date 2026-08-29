@@ -26,7 +26,7 @@ without a human translating every step.
 | 1 | Autonomous gap/repair live loop | **MERGED** #202 |
 | 2 | Lease expiry + takeover continuation | **MERGED** #203 |
 | 3 | Long autonomous soak (8–12 tasks) + report | **MERGED** #204 |
-| 4 | First real bounded self-improvement on LifeAI | **IN PROGRESS** — `cursor/first-bounded-self-improvement` |
+| 4 | First real bounded self-improvement on LifeAI | **IN PROGRESS** — [#205](https://github.com/d1n095/LifeAI/pull/205) |
 | 5 | Goal intake / bootstrap production path | waiting |
 | 6 | `docs/MAINAI_V1_READINESS.md` audit | waiting |
 
