@@ -18,17 +18,30 @@ without a human translating every step.
 
 | Stage | What | Status |
 |---|---|---|
-| 0A | #182 Window B ambiguous provider invoke | PR #196 open — merge first |
-| 0B | #183 heal operation identity | waiting on 0A |
-| 0C | `_require_context` owns freshness | waiting |
-| 0D | Genuine cancel vs finalize race | waiting |
-| 0E | True restart + fresh DB session | waiting |
-| 1 | Autonomous gap/repair live loop | waiting |
-| 2 | Lease expiry + takeover continuation | waiting |
+| 0A | #182 Window B ambiguous provider invoke | **MERGED** #196 |
+| 0B | #183 heal operation identity | **MERGED** #198 |
+| 0C | `_require_context` owns freshness | **MERGED** #199 |
+| 0D | Genuine cancel vs finalize race | **MERGED** #200 |
+| 0E | True restart + fresh DB session | **MERGED** #201 |
+| 1 | Autonomous gap/repair live loop | **IN PROGRESS** — `cursor/autonomous-gap-worker-live-loop` |
+| 2 | Lease expiry + takeover continuation | next after Stage 1 merge |
 | 3 | Long autonomous soak (8–12 tasks) + report | waiting |
 | 4 | First real bounded self-improvement on LifeAI | waiting |
 | 5 | Goal intake / bootstrap production path | waiting |
 | 6 | `docs/MAINAI_V1_READINESS.md` audit | waiting |
+
+## Stage 1 proof target
+
+Worker → Supervisor only (no harness bridges):
+
+verification failure → structured gap → repair child → narrowed authority → repair executes →
+source re-verifies → downstream dependency unlocks → goal continues.
+
+Allowed founder edges: envelope/spend authorize; `grant_task_approval` for repair
+`repo_edit` under `autonomous_development_work` (listed explicitly).
+
+Forbidden harness: hand repair task / WorkBinding / PlanCandidate / status mutation /
+dependency unlock / final report.
 
 ## Operating rules (non-negotiable)
 
