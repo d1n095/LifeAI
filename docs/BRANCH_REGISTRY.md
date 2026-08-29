@@ -23,7 +23,7 @@ det längre experimentet innan dess.
 |---|---|---|---|
 | `cursor/toctou-spend-revoke-before-reserve` | [#181](https://github.com/d1n095/LifeAI/pull/181) | **Mergad** @ `e10ae97` | Supervisor spend fail-fast (Outcome B) |
 | `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke — Window A/C closed; Window B follow-up: se `cursor/provider-ambiguous-invoke-window-b` |
-| `cursor/provider-ambiguous-invoke-window-b` | (öppen PR) | **Öppen — Correction Phase 1** | #182 Window B: ambiguous post-invoke failure must not release spend; concurrent first-reserve created-flag refuse second invoke |
+| `cursor/provider-ambiguous-invoke-window-b` | [#196](https://github.com/d1n095/LifeAI/pull/196) | **Öppen — Correction Phase 1** | #182 Window B: ambiguous post-invoke failure must not release spend; concurrent first-reserve created-flag refuse second invoke |
 | `cursor/operator-lease-effect-time-race` | [#184](https://github.com/d1n095/LifeAI/pull/184) | **Mergad** @ `0d12d54` | Lease expiry at Operator write |
 | `cursor/local-write-crash-before-verify` | [#183](https://github.com/d1n095/LifeAI/pull/183) | **Mergad** @ `bd04934` | Heal write after crash before audit — **idempotency-identity tightening fortfarande öppen, ej påbörjad** |
 | `cursor/founder-cancel-after-accept-before-write` | [#185](https://github.com/d1n095/LifeAI/pull/185) | **Mergad** @ `4bcc66f` | Cancel after ACCEPT / before write |
