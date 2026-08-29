@@ -101,7 +101,7 @@ Integration tip: post-#203 (`86d8f0f`). Program:
 |---|---|---|---|
 | `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
 | `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
-| `cursor/long-autonomy-soak-v1` | (öppnas) | **Öppen — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
+| `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Öppen — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
 
 ---
 
