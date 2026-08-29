@@ -25,35 +25,23 @@ without a human translating every step.
 | 0E | True restart + fresh DB session | **MERGED** #201 |
 | 1 | Autonomous gap/repair live loop | **MERGED** #202 |
 | 2 | Lease expiry + takeover continuation | **MERGED** #203 |
-| 3 | Long autonomous soak (8–12 tasks) + report | **IN PROGRESS** — [#204](https://github.com/d1n095/LifeAI/pull/204) |
-| 4 | First real bounded self-improvement on LifeAI | waiting |
+| 3 | Long autonomous soak (8–12 tasks) + report | **MERGED** #204 |
+| 4 | First real bounded self-improvement on LifeAI | **IN PROGRESS** — [#205](https://github.com/d1n095/LifeAI/pull/205) |
 | 5 | Goal intake / bootstrap production path | waiting |
 | 6 | `docs/MAINAI_V1_READINESS.md` audit | waiting |
 
-## Stage 1 proof target (landed in #202)
+## Stage 1–3 (landed)
 
-Worker → Supervisor only (no harness bridges):
+- #202 live gap/repair Worker loop
+- #203 lease-expiry takeover + continuation
+- #204 8-task long soak + `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`
 
-verification failure → structured gap → repair child → narrowed authority → repair executes →
-source re-verifies → downstream dependency unlocks → goal continues.
+## Stage 4 proof target
 
-Allowed founder edges: envelope/spend authorize; `grant_task_approval` for repair
-`repo_edit` under `autonomous_development_work` (listed explicitly).
-
-Forbidden harness: hand repair task / WorkBinding / PlanCandidate / status mutation /
-dependency unlock / final report.
-
-## Stage 2 proof target (landed in #203)
-
-Real `supervisor_goal_leases` crash-hold → wall-clock expiry → Worker B reclaim (generation
-bump) → goal continues; old worker ZERO further filesystem effect. Fresh Session B after
-Session A closes (PROCESS MEMORY != AUTHORITY; ORM SESSION MEMORY != AUTHORITY).
-
-## Stage 3 proof target
-
-8-task Worker soak composing transient failure, out-of-scope deny, gap/repair, session
-restart, lease takeover, finalize, and idle ZERO-effect ticks. Report:
-`docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`.
+Bounded self-improvement: add SSH OpenSSH marker regression coverage via Worker→Supervisor
+under a narrow test-file envelope. Report:
+`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`. No remote_write / push / authority-core
+edits.
 
 ## Operating rules (non-negotiable)
 
