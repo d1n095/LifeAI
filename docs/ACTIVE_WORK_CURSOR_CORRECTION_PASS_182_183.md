@@ -19,6 +19,17 @@ more interesting work.
 **Do not start the long 8-12 task self-directed autonomous experiment until Phases 1-5 below
 are merged green.**
 
+## START WORK NOW — DO NOT HOLD (2026-08-29, founder-issued)
+
+Work continuously through all five phases below in strict order. Do not skip ahead. Do not
+mark an item done because an adjacent older PR exists — either prove the exact follow-up is
+already closed (with evidence) or implement/test/merge it. **Do not stop after opening one PR
+and do not switch to monitor-only mode while there is unowned queue work in this document** —
+open the narrow PR for a phase, get exact-head CI green, merge, then immediately move to the
+next phase. Claude is running an active parallel red-team shift against each phase as it lands
+and preparing adversarial test cases ahead of your PRs — this is not a review-then-wait cycle,
+both of you are expected to be continuously active until all five phases are merged.
+
 ---
 
 ## PHASE 1 — Close #182 Window B
@@ -170,6 +181,37 @@ item is judged already closed, document the exact evidence and then move on — 
 reorder. Otherwise land it before advancing.
 
 **Only after Phases 1-5 merge green: proceed to the longer 8-12 task autonomous experiment.**
+
+---
+
+## THE LONG EXPERIMENT — scope, for when Phases 1-5 are actually merged green
+
+8-12 meaningful tasks, driven through the real production Worker/Supervisor path (not a direct
+`run_driver()` call as the main orchestration path). Must genuinely exercise:
+
+- provider planning
+- deterministic/local work
+- task dependencies
+- a provider transient failure
+- an out-of-scope provider plan (must be denied, not silently narrowed by the harness)
+- a verification failure
+- the autonomous repair/gap path, if the existing architecture already supports it
+- a real process/session restart (per Phase 5's upgraded standard)
+- a lease takeover
+- a local crash/recovery
+- retries
+- final goal rollup
+- idle ticks (proving no further effect after completion)
+
+**No human translation after start.** Forbidden once the experiment begins: manually creating a
+`PlanCandidate`, manually editing a status, manually selecting the next task, manually calling
+`final_report`, fake/widened authority, or `run_driver()` as the main orchestration path instead
+of the real Worker/Supervisor entry point. A fake provider adapter is fine — that's the one
+acceptable fake boundary, same as every soak test this cycle.
+
+If a real defect appears during the experiment: root-cause it, write a regression test, apply
+the smallest fix, merge, then resume the experiment rather than restarting it from scratch
+unless the defect specifically requires that.
 
 ## Current status assessment (for reference, not to be silently trusted as still-accurate later)
 
