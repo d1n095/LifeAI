@@ -31,19 +31,32 @@ Covers, in order:
      proves the DB itself refuses to accept a write that breaks it, e.g. from a future bug in
      application code that forgets the convention).
 
+  J. Concurrent decomposition (V1 readiness hardening): two genuinely simultaneous
+     create_plan() calls for the SAME goal, real separate threads/DB sessions/connections
+     (threading.Barrier, matching this project's own established two-thread concurrency
+     pattern -- see test_provider_spend_authorization.py/test_supervisor_goal_lease.py).
+     Before this fix, the loser's INSERT hit uq_mainai_plans_goal_version and raised an
+     unhandled IntegrityError instead of gracefully superseding the winner's just-committed
+     plan (create_plan() now locks the goal row, with populate_existing=True, before reading
+     previous_active/next_version -- see create_plan()'s own updated docstring/comment).
+
 Real local Postgres (RLS included)."""
 
+import threading
 import uuid
 from datetime import datetime
 
 import pytest
 from sqlalchemy import text as sa_text
+from sqlalchemy.orm import sessionmaker
 
 from app.mainai_execution import graph, lessons, planner
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import (
     EngineeringLessonSeverity,
+    MainAIGoal,
     MainAIGoalStatus,
+    MainAIPlan,
     MainAIPlanStatus,
     MainAITask,
     MainAITaskEventType,
@@ -658,3 +671,81 @@ def test_ck_attempts_within_budget_rejects_attempts_exceeding_max_attempts(db_se
     with pytest.raises(IntegrityError):
         db_session.execute(sa_text("UPDATE mainai_tasks SET attempts = max_attempts + 1 WHERE id = :id"), {"id": str(task.id)})
     db_session.rollback()
+
+
+# ---------------------------------------------------------------- J. concurrent decomposition
+
+
+def test_two_genuinely_concurrent_create_plan_calls_for_the_same_goal_never_raise_unhandled_integrity_error(
+    superuser_db,
+):
+    """V1 readiness finding: no lock guarded previous_active/next_version, so two truly
+    simultaneous create_plan() calls (real threads, real separate DB connections -- not the
+    already-covered SEQUENTIAL replan case above in section G) could both compute
+    next_version=1 and race to INSERT MainAIPlan(goal_id, version=1). The unique constraint
+    correctly prevented a duplicate/corrupt row from landing, but the LOSER's db.flush() used
+    to raise an uncaught IntegrityError instead of gracefully superseding the winner's plan.
+
+    Negative control (confirmed manually before this fix): removing create_plan()'s goal-row
+    with_for_update() lock reproduces exactly one 'ok' and one 'error' (IntegrityError /
+    UniqueViolation on uq_mainai_plans_goal_version) in `results` below."""
+    from app.models.user import User
+
+    owner = User(email=f"concurrent-plan-{uuid.uuid4()}@example.com", password_hash="x", email_verified=True)
+    superuser_db.add(owner)
+    superuser_db.commit()
+    owner_id = owner.id
+
+    goal = planner.create_goal(
+        superuser_db, owner_id=owner_id, title="race", original_instruction="do it", created_by="test",
+    )
+    superuser_db.commit()
+    goal_id = goal.id
+
+    bind = superuser_db.get_bind()
+    Session = sessionmaker(bind=bind)
+    barrier = threading.Barrier(2)
+    results: list[tuple] = []
+
+    def _attempt(label: str):
+        session = Session()
+        try:
+            local_goal = session.get(MainAIGoal, goal_id)
+            barrier.wait(timeout=5)
+            plan = planner.create_plan(
+                session,
+                goal=local_goal,
+                rationale=f"attempt-{label}",
+                tasks=[PlannedTaskSpec(description="task", task_type="read_only_audit")],
+                created_by="test",
+            )
+            session.commit()
+            results.append(("ok", label, plan.version))
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(("error", label, repr(exc)))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_attempt, args=("a",))
+    t2 = threading.Thread(target=_attempt, args=("b",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    errors = [r for r in results if r[0] == "error"]
+    assert errors == [], f"expected zero unhandled errors, got: {errors}"
+    assert len(results) == 2
+    versions = sorted(r[2] for r in results)
+    assert versions == [1, 2], "one attempt must win version 1, the other gracefully supersede to version 2"
+
+    superuser_db.expire_all()
+    plans = (
+        superuser_db.query(MainAIPlan)
+        .filter(MainAIPlan.goal_id == goal_id)
+        .order_by(MainAIPlan.version)
+        .all()
+    )
+    assert [p.status for p in plans] == [MainAIPlanStatus.superseded, MainAIPlanStatus.active]
+    assert len(superuser_db.query(MainAITask).filter(MainAITask.goal_id == goal_id).all()) == 2  # never duplicated

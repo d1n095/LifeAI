@@ -10,10 +10,16 @@ self-improvement run's safety contract).
 **Headline finding, corrects the initial framing this document was commissioned under**: the
 founder-to-Worker chain is substantially more production-complete than "some of this is real,
 much is still manual" suggested. A full, end-to-end founder-facing HTTP API already connects
-document ingestion (or direct goal creation) all the way through AI-driven task decomposition,
-execution-envelope authorization, task approval, provider-spend authorization, and autonomous
-Worker pickup — with zero test-only construction in the *core* chain. The real gaps are
-narrower and more specific than "goal intake is unwired" — see the classification below.
+document ingestion (Path A) all the way through AI-driven task decomposition, execution-
+envelope authorization, task approval, provider-spend authorization, and autonomous Worker
+pickup — with zero test-only construction in the *core* chain. **Update, found on a dedicated
+adversarial re-verification pass**: this full chain is proven complete for Path A goals
+specifically. **Path B (direct founder-typed `POST /api/mainai/goals`) has one real gap**: no
+route exists to create an execution-scope proposal for a directly-created goal, so Path B
+goals can be planned/decomposed but never reach execution authority — see gap #0 below. Also
+resolved this session: a real concurrent-decomposition bug (unhandled `IntegrityError` on a
+genuine race, now fixed with a regression test) and full confirmation that decomposition
+crash-recovery is completely safe (single-transaction atomicity — see Deliverable 2).
 
 ## Deliverable 1 — Goal intake gap analysis
 
@@ -87,10 +93,10 @@ Worker.run()'s real `while True` poll loop     app/worker.py:107
 | Task dependencies | **1. Production-derived** | `_detect_cycle()` (`planner.py:134`) is real production cycle-detection wired directly into `create_plan()` — dependency graphs come from the AI's own proposed output, not hand-set only in tests. |
 | `WorkBinding` | **1. Production-derived** | Constructed at `development_supervisor/production_entry.py:371`, `development_supervisor/service.py:545,1468`, **and** `app/autonomous_gap/service.py:863` (the gap/repair path also builds real bindings). |
 | `SupervisorScope` | **1. Production-derived** | Single real construction site, `production_entry.py:212`. |
-| Execution-authorization-envelope | **1. Production-derived** | Real founder-facing route, `POST /api/execution-envelopes/proposals/{id}/authorize`. |
+| Execution-authorization-envelope | **2. Partially production-derived — real gap found on adversarial re-verification** | Real founder-facing route, `POST /api/execution-envelopes/proposals/{id}/authorize` — but this route only AUTHORIZES an already-existing proposal; it never CREATES one. `propose_execution_scope()` has exactly one production caller anywhere in `app/`: `work_candidates/service.py:95`, reachable only via Path A (`WorkCandidate` → founder authorization). **`app/routers/execution_envelopes.py` has no route to create a proposal for a directly-created (Path B, `POST /api/mainai/goals`) goal.** A Path B goal can get a plan and tasks but can never reach `authorize_execution_scope()` through any real HTTP interaction — only via a raw Python function call a human/test would have to make by hand. Found via a dedicated adversarial re-verification pass specifically hunting for this class of hidden bridge; missed by the original investigation, which checked "does a route exist to authorize" without checking "does a route exist to create what gets authorized." |
 | Task approval records | **1. Production-derived** | Real founder-facing route, `POST /api/mainai/tasks/{id}/approve`. |
 | Provider planning request | **1. Production-derived** | Real chain from `Worker` → `Supervisor` → `_invoke_live_gap()` → `plan_with_provider()`, confirmed reachable via `Worker.run_once()`, not only via direct test calls (this session's #181/#196 reviews independently confirmed this exact call chain). |
-| Provider-spend authorization | **1. Production-derived** | Real founder-facing route, `POST /api/provider-spend/authorize`. |
+| Provider-spend authorization | **2. Partially production-derived — inherits the envelope gap above** | Real founder-facing route, `POST /api/provider-spend/authorize`, correctly chains from the envelope-authorization response's `id` (verified: the chain genuinely works end-to-end for Path A goals) — but is equally unreachable for Path B goals, for the same reason as the row above, not a separate defect. |
 | Worktree binding | **1. Production-derived** | `goal_worktree_path()`/`ensure_goal_worktree_sync()` (`development_supervisor/production_worktree.py:65,76`) are real production functions. |
 | Task readiness | **1. Production-derived** | `recompute_task_readiness()` has 6 real production callers across `execution_job.py`, `worker.py`, `plan_insertion.py`, `executor.py`, `planner.py`, `graph.py`, `replan.py`. |
 | Final report linkage | **1. Production-derived** | `_finalize_task_outcome()` → `record_final_report()`, confirmed via this session's #168/#193 review — the canonical, not-bypassable completion gate. |
@@ -103,6 +109,17 @@ correct shape, not a gap.
 
 ### The actual remaining gaps (narrower than the original framing assumed)
 
+0. **REAL BLOCKER, found on adversarial re-verification: Path B goals (direct
+   `POST /api/mainai/goals`) have no route to ever get an execution-scope proposal created,
+   so they can never reach execution authority through any real API interaction.** See the
+   execution-authorization-envelope row above. Two options: (a) add a
+   `propose_execution_scope()`-creating route reachable for a directly-created goal (mirroring
+   what Path A gets automatically via `_propose_execution_scope_if_actionable()`), or (b)
+   explicitly document that Path B is not yet a complete autonomy path — founders wanting a
+   fully autonomous goal must go through Path A (document/claim → entity promotion →
+   `WorkCandidate` authorization), not direct goal creation. Recommend (a) for V1 — it's the
+   smaller, more consistent fix, and Path B otherwise dead-ends at "plan created, can never
+   execute."
 1. **No founder-facing route to reject or narrow an AI-proposed plan's task list before
    creation.** `propose_and_create_plan()` commits the AI's full proposed task set
    immediately; the founder's only granular control point is per-task approve/reject
@@ -183,28 +200,57 @@ skip provider assistance when a known-safe recipe applies.
 `CandidateValidationError`/`NEEDS_AUTHORIZATION`/`NEEDS_CLARIFICATION` — already real, already
 tested extensively this session (#186, #190).
 
-**Cancellation behavior**: mid-decomposition cancellation is not something this session traced
-specifically — **flagged as an open question for `docs/MAINAI_V1_READINESS.md`'s blocker
-matrix**: does a founder cancel landing WHILE `propose_plan_via_ai()`/`create_plan()` is
-in-flight get honored correctly (no tasks created from a cancelled decomposition), or is there
-a window here analogous to the Operator-effect-time races already found and partially closed
-this session (#184/#185/#192/#193)? Recommend Cursor's correction-pass discipline
-(classify the exact window, don't assume zero) be applied to this specific boundary too, once
-Phases 1-5 are closed.
+**Cancellation behavior — traced and resolved.** No cancellation check exists inside
+`create_plan()`/`propose_and_create_plan()` — `MainAIGoal` has no `cancel_requested` field at
+all (that field lives only on `MainAIJob`, a deliberately separate task/job-level concept per
+`app/models/mainai_execution.py:116-118`'s own comment). A founder cancel landing mid-request
+would not be observed by decomposition. **This is a real, minor gap, not a blocker**: the
+entire decomposition (provider call + all DB writes) is a single synchronous HTTP request —
+typically seconds — a categorically narrower exposure window than the Driver's multi-tick
+per-step loop #185/#192/#193 already cover. Recommend as a IMPORTANT-POST-V1 follow-up, not a
+V1 blocker.
 
 **Provenance**: `MainAITask.plan_id` links every task back to the `MainAIPlan` that created it;
 `MainAIPlan` itself is linked to the goal and (implicitly, via the provider-planning
 checkpoint chain) to whatever provider call produced it, if any. Sufficient for V1.
 
-**Idempotency**: `create_plan()`'s real production behavior on this axis was not independently
-re-verified in this pass — **flagged as a specific follow-up question**: does calling
-`POST /api/mainai/goals/{id}/plan` twice for the same goal create duplicate task graphs, or is
-there an idempotency guard? Worth a dedicated empirical check before V1, given how central
-idempotency-key discipline has been to every other part of this system (spend reservation,
-Operator writes).
+**Idempotency / duplication risk — traced and resolved; one real bug found and fixed this
+session.** No idempotency-key mechanism exists for decomposition — but `MainAIPlan`'s own
+`uq_mainai_plans_goal_version` unique constraint (migration 0032) provides real structural
+protection: a sequential re-call correctly supersedes the previous plan (proven by the
+existing `test_create_plan_called_again_supersedes_previous_plan_and_cancels_its_unstarted_
+tasks` test), and no scenario produces duplicate/coexisting task graphs. **The real bug**: two
+genuinely CONCURRENT decomposition calls for the same goal had no lock, so both could compute
+the same `next_version` and race to insert conflicting `MainAIPlan` rows — the unique
+constraint correctly prevented the duplicate row, but the loser's `db.flush()` raised an
+**unhandled `IntegrityError`** (confirmed empirically via a real two-thread/two-connection
+test) instead of gracefully superseding the winner's plan. **Fixed this session**:
+`create_plan()` now locks the goal row (`with_for_update()`, `populate_existing=True` —
+required because this project's `expire_on_commit=False` session config means a plain locked
+SELECT does not by itself refresh an already-identity-mapped `goal` object's attributes)
+before reading `previous_active`/`next_version`, serializing concurrent attempts into the
+same well-defined sequential-supersede behavior. Regression test:
+`test_two_genuinely_concurrent_create_plan_calls_for_the_same_goal_never_raise_unhandled_
+integrity_error` (`tests/backend/test_mainai_execution_planner.py`, section J).
 
-**Recovery after crash midway through decomposition**: not independently verified this pass —
-same recommendation as cancellation above, flagged for `docs/MAINAI_V1_READINESS.md`.
+**Recovery after crash midway through decomposition — traced and resolved, fully safe.**
+`create_plan()` uses only `db.flush()` internally, never `db.commit()` — the single commit
+point is the router (`propose_and_create_plan()`, `mainai_execution.py:138`), *after* both the
+provider call and all of `create_plan()`'s DB writes (plan row, task rows, dependency edges,
+events, goal-status update) complete. **The entire decomposition is one atomic transaction.**
+A crash anywhere before the commit leaves zero durable rows (Postgres rolls back the
+abandoned, uncommitted transaction); a crash after the commit means decomposition fully
+succeeded. There is no reachable intermediate/partial state — confirmed by direct trace, not
+assumed. This also resolves the dependency-edge-consistency concern: since task rows and
+their dependency edges are both created pre-commit in the same transaction (`planner.py:263-
+297`), a task can never durably exist with a missing/inconsistent dependency edge — and
+`recompute_task_readiness()`'s "no dependencies → immediately ready"
+rule (`graph.py:52-56`) is therefore safe, since the only way a task can have zero recorded
+dependencies is if it genuinely has none by design, never as a crash artifact. A crash
+*before* `create_plan()` even starts (i.e. after the provider call returns but before
+`create_plan()` is invoked) wastes the provider call on retry (no `request_hash`/checkpoint-
+replay mechanism exists here, unlike `plan_with_provider()`'s own) but creates zero risk of
+duplicate/inconsistent tasks, since nothing was ever inserted from the lost attempt.
 
 **Scope discipline**: per the founder's own instruction, this is NOT a generic agent framework
 — it documents and lightly tightens the bounds of the mechanism MainAI V1 already has, not a
