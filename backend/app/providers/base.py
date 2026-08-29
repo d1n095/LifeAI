@@ -95,6 +95,15 @@ class ProviderError(RuntimeError):
     embedded in a provider's URL, see that module's docstring). None when the raiser hasn't
     classified the failure — callers must treat that as "unknown", never assume a category."""
 
-    def __init__(self, message: str, *, category: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str | None = None,
+        provider_request_may_have_left: bool | None = None,
+    ):
         super().__init__(message)
         self.category = category
+        # After adapter.propose() is entered: None/True → treat as ambiguous (do not
+        # release spend). False → proven pre-external-effect; release is allowed.
+        self.provider_request_may_have_left = provider_request_may_have_left

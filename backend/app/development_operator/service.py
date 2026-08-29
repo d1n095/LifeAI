@@ -17,6 +17,7 @@ B) PER-GOAL Supervisor production worktree — canonical path/branch from
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -376,15 +377,21 @@ def _require_context(
     refuse_if_cancelled: bool = False,
 ):
     _require_governed_capability_ceiling(context)
+    # THE LAST FENCE BEFORE EFFECT MUST OWN ITS OWN FRESHNESS.
+    # expire_on_commit=False means a plain select() returns the identity-map instance
+    # without reloading attributes — so a concurrent Session B cancel/lease change would
+    # be invisible unless we force populate_existing here (not rely on caller refresh).
     task = db.execute(
-        select(MainAITask).where(
+        select(MainAITask)
+        .where(
             MainAITask.id == context.task_id, MainAITask.owner_id == context.owner_id
         )
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     job = db.execute(
-        select(MainAIJob).where(
-            MainAIJob.id == context.job_id, MainAIJob.owner_id == context.owner_id
-        )
+        select(MainAIJob)
+        .where(MainAIJob.id == context.job_id, MainAIJob.owner_id == context.owner_id)
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     binding = db.execute(
         select(WorkStrategyExecution).where(
@@ -801,6 +808,135 @@ def read_file(
     )
 
 
+def _write_intent_dir(context: OperatorContext) -> Path:
+    """Durable, worktree-local write intents — survive process death with the FS effect.
+
+    DB rows in the same transaction as the audit do not survive a crash-before-commit;
+    the filesystem write does. Intent files bind recovery to the SAME semantic operation.
+    """
+    root = context.repository_root / ".mainai_operator" / "write_intents"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _write_intent_path(context: OperatorContext, *, idempotency_key: str, path: str) -> Path:
+    digest = hashlib.sha256(
+        f"{context.owner_id}:{context.job_id}:{idempotency_key}:{path}".encode()
+    ).hexdigest()
+    return _write_intent_dir(context) / f"{digest}.json"
+
+
+def _write_intent_payload(
+    context: OperatorContext,
+    *,
+    idempotency_key: str,
+    path: str,
+    capability: str,
+    before_sha256: str | None,
+    after_sha256: str | None,
+) -> dict:
+    return {
+        "idempotency_key": idempotency_key,
+        "path": path,
+        "capability": capability,
+        "before_sha256": before_sha256,
+        "after_sha256": after_sha256,
+        "owner_id": str(context.owner_id),
+        "task_id": str(context.task_id),
+        "job_id": str(context.job_id),
+        "worker_id": context.worker_id,
+        "lease_generation": context.lease_generation,
+        "strategy_execution_id": str(context.strategy_execution_id),
+        "worktree_id": str(context.worktree_id) if context.worktree_id else None,
+        "supervisor_goal_id": (
+            str(context.supervisor_goal_id) if context.supervisor_goal_id else None
+        ),
+    }
+
+
+def _record_write_intent(
+    context: OperatorContext,
+    *,
+    idempotency_key: str,
+    path: str,
+    capability: str,
+    before_sha256: str | None,
+    after_sha256: str | None,
+) -> None:
+    intent_path = _write_intent_path(
+        context, idempotency_key=idempotency_key, path=path
+    )
+    payload = _write_intent_payload(
+        context,
+        idempotency_key=idempotency_key,
+        path=path,
+        capability=capability,
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+    )
+    tmp = intent_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, intent_path)
+
+
+def _clear_write_intent(
+    context: OperatorContext, *, idempotency_key: str, path: str
+) -> None:
+    intent_path = _write_intent_path(
+        context, idempotency_key=idempotency_key, path=path
+    )
+    try:
+        intent_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _matching_write_intent(
+    context: OperatorContext,
+    *,
+    idempotency_key: str,
+    path: str,
+    capability: str,
+    before_sha256: str | None,
+    after_sha256: str | None,
+) -> dict | None:
+    """Return durable intent only when it binds THIS semantic operation identity."""
+    intent_path = _write_intent_path(
+        context, idempotency_key=idempotency_key, path=path
+    )
+    if not intent_path.is_file():
+        return None
+    try:
+        payload = json.loads(intent_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    expected = _write_intent_payload(
+        context,
+        idempotency_key=idempotency_key,
+        path=path,
+        capability=capability,
+        before_sha256=before_sha256,
+        after_sha256=after_sha256,
+    )
+    # Identity fields must match exactly — bytes alone are not enough.
+    for key in (
+        "idempotency_key",
+        "path",
+        "capability",
+        "before_sha256",
+        "after_sha256",
+        "owner_id",
+        "task_id",
+        "job_id",
+        "strategy_execution_id",
+        "worktree_id",
+        "supervisor_goal_id",
+    ):
+        if payload.get(key) != expected.get(key):
+            return None
+    return payload
+
+
 def write_file(
     db,
     context: OperatorContext,
@@ -841,13 +977,23 @@ def write_file(
     if replay:
         return replay
     # Crash window: disk write landed, process died before work_trace audit/commit.
-    # If on-disk content already matches the requested after-hash, do NOT require the
-    # pre-write before-hash (it is gone) and do NOT rewrite — record durable audit once.
+    # Heal ONLY when a durable write-intent for THIS idempotency_key / job / task / path
+    # / after_hash is present. Matching bytes alone must not let a different semantic
+    # operation steal the prior write's missing audit (UNKNOWN PRODUCER != THIS OPERATION).
     if (
         not delete
         and content is not None
         and existing is not None
         and hashlib.sha256(existing).hexdigest() == requested_after
+        and _matching_write_intent(
+            context,
+            idempotency_key=idempotency_key,
+            path=path,
+            capability=capability,
+            before_sha256=expected_sha256,
+            after_sha256=requested_after,
+        )
+        is not None
     ):
         capability = "patch_file" if expected_sha256 is not None else "create_file"
         event = _audit(
@@ -864,6 +1010,7 @@ def write_file(
             "succeeded",
             started,
         )
+        _clear_write_intent(context, idempotency_key=idempotency_key, path=path)
         return ActionResult(
             capability,
             "succeeded",
@@ -886,6 +1033,18 @@ def write_file(
     else:
         if content is None or len(content.encode()) > 1_000_000:
             raise OperatorPathError("write content is missing or exceeds bound")
+        # Durable intent BEFORE the filesystem effect so crash-before-audit recovery can
+        # prove THIS operation (not merely matching bytes) produced the on-disk content.
+        _record_write_intent(
+            context,
+            idempotency_key=idempotency_key,
+            path=path,
+            capability=(
+                "patch_file" if existing is not None else "create_file"
+            ),
+            before_sha256=expected_sha256,
+            after_sha256=requested_after,
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         after_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -899,6 +1058,8 @@ def write_file(
         "succeeded",
         started,
     )
+    if not delete:
+        _clear_write_intent(context, idempotency_key=idempotency_key, path=path)
     return ActionResult(
         capability,
         "succeeded",

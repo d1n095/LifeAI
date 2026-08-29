@@ -43,15 +43,22 @@ Claude's independent red-team review + test-quality audit: **KLAR**, se
 `docs/SECURITY_TEST_QUALITY_AUDIT_165_187.md` (#189) och `docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md`
 (#188). Inget test i #165–195 visade sig passera utan sin egen fix.
 
-**🛑 CORRECTION PASS AKTIV (2026-08-29) — se `docs/ACTIVE_WORK_CURSOR_CORRECTION_PASS_182_183.md`
-för fullständiga instruktioner.** Grundaren har uttryckligen pausat den längre 8–12-task
-self-directed autonomy-experimentet tills Phase 1–5 i det dokumentet är mergade gröna. Kör INTE
-det längre experimentet innan dess.
+**✅ CORRECTION PASS KLAR (2026-08-29) — alla 5 faser mergade och Claude-granskade.** Se
+`docs/ACTIVE_WORK_CURSOR_CORRECTION_PASS_182_183.md` för historiken. Phase 1 = [#196](https://github.com/d1n095/LifeAI/pull/196)
+(Window B), Phase 2 = [#198](https://github.com/d1n095/LifeAI/pull/198) (heal-identitet, write-intent-fil),
+Phase 3 = [#199](https://github.com/d1n095/LifeAI/pull/199) (`_require_context` freshness),
+Phase 4 = [#200](https://github.com/d1n095/LifeAI/pull/200) (genuint osynkroniserad cancel/finalize-race, 40 trials),
+Phase 5 = [#201](https://github.com/d1n095/LifeAI/pull/201) (restart-soak v3, genuint NY session + NY Worker).
+Grundarens gate ("kör inte det längre 8–12-task self-directed autonomy-experimentet förrän
+Phase 1–5 mergade gröna") är därmed **uppfylld** — experimentet är inte längre pausat av denna
+regel. Se `docs/MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` för det förberedda första bundna
+self-improvement-körningspaketet, redo att köras.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/toctou-spend-revoke-before-reserve` | [#181](https://github.com/d1n095/LifeAI/pull/181) | **Mergad** @ `e10ae97` | Supervisor spend fail-fast (Outcome B) |
-| `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke — **Window B (ambiguous invocation) fortfarande öppen, ej påbörjad** |
+| `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke — Window A/C closed; Window B follow-up: se `cursor/provider-ambiguous-invoke-window-b` |
+| `cursor/provider-ambiguous-invoke-window-b` | [#196](https://github.com/d1n095/LifeAI/pull/196) | **Öppen — Correction Phase 1** | #182 Window B: ambiguous post-invoke failure must not release spend; concurrent first-reserve created-flag refuse second invoke |
 | `cursor/operator-lease-effect-time-race` | [#184](https://github.com/d1n095/LifeAI/pull/184) | **Mergad** @ `0d12d54` | Lease expiry at Operator write |
 | `cursor/local-write-crash-before-verify` | [#183](https://github.com/d1n095/LifeAI/pull/183) | **Mergad** @ `bd04934` | Heal write after crash before audit — **idempotency-identity tightening fortfarande öppen, ej påbörjad** |
 | `cursor/founder-cancel-after-accept-before-write` | [#185](https://github.com/d1n095/LifeAI/pull/185) | **Mergad** @ `4bcc66f` | Cancel after ACCEPT / before write |
@@ -93,21 +100,36 @@ punkterna från natt-körningen och bör prioriteras innan autonomin utökas ytt
 skarpare krav än den ursprungliga natt-körnings-kön):**
 
 ```
-1. Phase 1: #182 Window B -- ambiguous-invocation-klassificering (A/B/C), äkta negativ kontroll
-   som exercisar EFTER invocation-gränsen, inte före -- EJ PÅBÖRJAD
-2. Phase 2: #183 heal-identitetsbindning (idempotency_key m.fl., inte bara hash-match) --
-   EJ PÅBÖRJAD
-3. Phase 3: härda _require_context() med egen populate_existing=True/refresh, tvåsessions-
-   regression -- EJ PÅBÖRJAD (ny fas, från #192-granskningen)
-4. Phase 4: genuint samtidig cancel/finalize-race (inte bara sekventiell barriär) -- EJ PÅBÖRJAD
-   (ny fas, från #194-granskningen)
-5. Phase 5: restart-soak v3 med GENUINT separat session för Worker B -- EJ PÅBÖRJAD
-   (ny fas, från #195-granskningen)
+1. Phase 1: #182 Window B -- KLAR, #196, Claude-granskad (tre-check-protokoll, ORM-staleness-
+   regression jag flaggade innan PR:n fanns bekräftat stängd)
+2. Phase 2: #183 heal-identitetsbindning -- KLAR, #198, Claude-granskad (write-intent-fil
+   bunden till idempotency_key+job/task/path/hash, exakt min egen förberedda attack stängd)
+3. Phase 3: _require_context() populate_existing=True -- KLAR, #199, Claude-granskad
+   (tvåsessions-regression matchar min förberedda harness nästan exakt)
+4. Phase 4: genuint osynkroniserad cancel/finalize-race -- KLAR, #200, Claude-granskad
+   (start-only barrier, soft jitter, 40 trials, båda utfallen krävda)
+5. Phase 5: restart-soak v3, GENUINT ny session -- KLAR, #201, Claude-granskad (strikt
+   hidden-memory-audit: endast durable UUID:er korsar gränsen, allt annat del:at)
 
-Endast EFTER Phase 1-5 mergade gröna: det längre 8-12-task self-directed autonomy-experimentet.
+ALLA FEM FASER MERGADE OCH GRANSKADE. Det längre 8-12-task self-directed autonomy-
+experimentet är inte längre blockerat av denna gate -- se docs/MAINAI_SELF_IMPROVEMENT_
+ACCEPTANCE.md för det förberedda första (mindre, striktare avgränsade) bundna
+self-improvement-körningspaketet.
 ```
 
-Stäng #182/#183 innan autonomin utökas ytterligare. Claude Vault/egress — leave alone.
+Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (autonomous gap/repair
+live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
+`docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
+
+## MAINAI V1 COMPLETION RUN — Stages 1–2 (Cursor)
+
+Integration tip: post-#202 (`ae1bcdc`). Program:
+`docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
+| `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Öppen — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
 
 ---
 

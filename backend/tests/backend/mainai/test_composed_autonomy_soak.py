@@ -165,7 +165,11 @@ async def test_composed_autonomy_synthetic_soak(
 
     adapter = _SoakPlanningAdapter(
         [
-            ProviderError("transient soak outage", category="rate_limited"),
+            ProviderError(
+                "transient soak outage",
+                category="rate_limited",
+                provider_request_may_have_left=False,
+            ),
             deny_resp,
             multiply_resp,
             _divide_from_worktree,

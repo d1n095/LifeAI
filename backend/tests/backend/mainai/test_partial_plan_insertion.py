@@ -730,7 +730,11 @@ async def test_security_provider_outage_does_not_break_deterministic_insertion(d
     from app.providers.openai_provider import OpenAIProvider
 
     async def _always_fails(self, *args, **kwargs):
-        raise ProviderError("simulated total provider outage", category="rate_limited")
+        raise ProviderError(
+            "simulated total provider outage",
+            category="rate_limited",
+            provider_request_may_have_left=False,
+        )
 
     monkeypatch.setattr(OpenAIProvider, "chat", _always_fails)
 

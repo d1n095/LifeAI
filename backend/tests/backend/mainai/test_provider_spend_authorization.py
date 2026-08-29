@@ -139,7 +139,7 @@ def test_reserve_before_call_and_settle_consumes_budget(superuser_db):
     row = _grant(superuser_db, owner, goal, envelope, max_requests=2)
     superuser_db.commit()
 
-    reserved = reserve_provider_spend_call(
+    reserved, _created = reserve_provider_spend_call(
         superuser_db,
         owner_id=owner.id,
         goal_id=goal.id,
@@ -171,7 +171,7 @@ def test_reserve_before_call_and_settle_consumes_budget(superuser_db):
     assert row.spent_cost_usd == Decimal("0.010000")
 
     # Idempotent settle / reserve replay must not double-charge.
-    again = reserve_provider_spend_call(
+    again, _created = reserve_provider_spend_call(
         superuser_db,
         owner_id=owner.id,
         goal_id=goal.id,
@@ -223,7 +223,7 @@ def test_two_owners_may_reuse_the_same_source_ref(superuser_db):
     _grant(superuser_db, owner_b, goal_b, env_b)
     superuser_db.commit()
     shared = "shared-source-ref"
-    a = reserve_provider_spend_call(
+    a, _created = reserve_provider_spend_call(
         superuser_db,
         owner_id=owner_a.id,
         goal_id=goal_a.id,
@@ -231,7 +231,7 @@ def test_two_owners_may_reuse_the_same_source_ref(superuser_db):
         provider="fake-local",
         model="planner-v2",
     )
-    b = reserve_provider_spend_call(
+    b, _created = reserve_provider_spend_call(
         superuser_db,
         owner_id=owner_b.id,
         goal_id=goal_b.id,
@@ -395,7 +395,7 @@ def test_two_workers_racing_the_last_unit_of_budget_never_both_reserve(superuser
         session = Session()
         try:
             barrier.wait(timeout=5)  # maximize the chance both threads race the same lock
-            event = reserve_provider_spend_call(
+            event, _created = reserve_provider_spend_call(
                 session,
                 owner_id=owner_id,
                 goal_id=goal_id,
@@ -490,7 +490,7 @@ def test_revoke_racing_reserve_never_produces_a_reservation_after_revocation_com
         session = Session()
         try:
             barrier.wait(timeout=5)
-            event = reserve_provider_spend_call(
+            event, _created = reserve_provider_spend_call(
                 session,
                 owner_id=owner_id,
                 goal_id=goal_id,
