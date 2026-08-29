@@ -173,17 +173,14 @@ not been empirically checked) / **BLOCKED** (a real, open gap stands in the way)
 | Finalization | **PROVEN** | Canonical `record_final_report` chain (#168, #193), idempotent, respects prior cancellation. | None. | — |
 | Idle/stopping | **PROVEN** | Confirmed via #187's/#195's "later tick does nothing" checks — genuine re-invocation, not stale-state assertion. | None. | — |
 | Observability/audit | **PROVEN** | Checkpoints, `WorkTraceEvent`, `ProviderSpendUsageEvent`, `mainai_recovery_events`, `provider_disclosure_events` all real and append-only/RLS-protected. | None for V1 scope. | — |
-| Self-improvement safety | **PARTIAL, design complete** | Contract fully specified in `docs/MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` (this workstream). No run has actually been executed yet. | Execute the first bounded run per that contract, once Phases 1-5 close. | BLOCKER — this is the actual gating milestone, not a code gap. |
+| Self-improvement safety | **PROVEN (bounded)** | Contract in `docs/MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md`. First bounded run proven via Worker→Supervisor in #205 (`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`) under a narrow test-file envelope with `remote_write_authorized=False`. | Founder review before any production-checkout apply; Path B code drop remains Claude #197. | IMPORTANT POST-V1 for production-checkout apply / Path B merge. |
 
 ### V1 blocker summary (the short version)
 
-**Real blockers, all already in motion**: Phases 4-5 of the correction pass (Phase 4 genuine
-cancel/finalize concurrency; Phase 5 restart-soak v3) — Phases 1-3 (#182 Window B, #183 heal
-identity, Phase 3 `_require_context` freshness) all closed and independently verified this
-session (#196/#198/#199). Task-decomposition idempotency/crash-recovery/Path-B-authority
-questions flagged in Deliverable 2 are all resolved this session too (concurrent-decomposition
-race fixed, atomicity confirmed, Path B bridge built and proven). Remaining real work: Phase
-4-5, then actually running the first self-improvement milestone once those land.
+**Correction-pass Phases 1–5 and Cursor V1 completion Stages 1–4 are MERGED** on tip
+(#196/#198/#199/#200/#201, #202, #203, #204, #205). Remaining Cursor Stage 5 (Path A intake
+proof) and Stage 6 (this readiness landing) close the completion-run tracker. Path B
+execution-scope bridge implementation remains Claude PR #197.
 
 **Not blockers, explicitly scoped out of V1**: Vault V5/V8 schema implementation (separate
 initiative, its own timeline), the `multiplication_repair` recipe's narrowness (cost
