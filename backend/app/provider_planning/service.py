@@ -529,6 +529,20 @@ def _candidate_payload(candidate):
     return asdict(candidate) if candidate else None
 
 
+def _provider_failure_allows_spend_release(exc: BaseException) -> bool:
+    """After propose() was entered, release only when failure is proven pre-external-effect.
+
+    Invariant: UNKNOWN EXTERNAL EFFECT != NO EXTERNAL EFFECT.
+
+    - Explicit ``provider_request_may_have_left=False`` (e.g. test fakes that fail before
+      any transport) → release allowed.
+    - Default / True / unmarked exceptions (timeouts, transport errors, ambiguous crashes)
+      → do not release; leave the reservation held for Window-A recovery.
+    """
+    flag = getattr(exc, "provider_request_may_have_left", None)
+    return flag is False
+
+
 def _allocate_provider_spend_source_ref(db, *, owner_id, base_ref: str) -> str:
     """Pick a spend source_ref that is safe to reserve under append-only usage rows.
 
@@ -681,7 +695,7 @@ async def plan_with_provider(
         )
     ).scalar_one_or_none()
     try:
-        reserved_event = reserve_provider_spend_call(
+        reserved_event, reservation_created = reserve_provider_spend_call(
             db,
             owner_id=request.owner_id,
             goal_id=request.goal_id,
@@ -752,6 +766,36 @@ async def plan_with_provider(
             context_set_id=context_set.id,
         )
 
+    # Concurrent first-reserve race / non-creator: another caller won the INSERT (or
+    # an idempotent re-entry did not create). Never invoke. If the twin's hold is still
+    # reserved, do not settle it (they may still be inside propose). If already settled,
+    # the peer finished — still do not re-invoke.
+    if not reservation_created:
+        detail = {
+            "request_hash": request_hash,
+            "reason": (
+                "this caller did not create the provider spend reservation for this "
+                "source_ref; refusing a second invoke"
+            ),
+            "failure_category": (
+                "concurrent_reservation"
+                if reserved_event.status == ProviderSpendUsageStatus.reserved.value
+                else "reservation_not_owned"
+            ),
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "spend_source_ref": spend_source_ref,
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
+        return PlanningResult(
+            "WAITING_PROVIDER",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        )
+
     # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md): spend
     # authority governs WHETHER a call may happen; this governs WHAT CONTENT that call may
     # carry -- MODEL_REQUESTED_CONTEXT != AUTHORIZED_EGRESS_CONTEXT is a separate boundary
@@ -807,7 +851,10 @@ async def plan_with_provider(
             timeout=limits.timeout_seconds + 1,
         )
     except Exception as exc:  # noqa: BLE001 - provider boundary must checkpoint every failure
-        if spend_reserved:
+        # Window B: once propose() is entered, release only if failure is proven
+        # pre-external-effect. Ambiguous post-boundary failures leave the reservation
+        # held so retry takes the Window A refuse-re-invoke path.
+        if spend_reserved and _provider_failure_allows_spend_release(exc):
             release_provider_spend_call(
                 db,
                 owner_id=request.owner_id,
@@ -823,6 +870,10 @@ async def plan_with_provider(
             "provider_hint": provider_name,
             "model_hint": model,
             "context_set_id": str(context_set.id),
+            "spend_source_ref": spend_source_ref,
+            "spend_released": bool(
+                spend_reserved and _provider_failure_allows_spend_release(exc)
+            ),
             "unrelated_deterministic_work_preserved": True,
         }
         cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)

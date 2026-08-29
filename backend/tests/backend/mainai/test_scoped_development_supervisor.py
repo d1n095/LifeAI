@@ -56,7 +56,12 @@ class FailingProvider:
     model = "planner-v2"
 
     async def propose(self, *_args, **_kwargs):
-        raise ProviderError("quota exhausted", category="rate_limited")
+        # Proven pre-external-effect fake: fail before any request leaves the process.
+        raise ProviderError(
+            "quota exhausted",
+            category="rate_limited",
+            provider_request_may_have_left=False,
+        )
 
 
 def _foundation(db, tmp_path, *, tied=False, approved=True):
