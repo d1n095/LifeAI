@@ -362,7 +362,11 @@ async def test_provider_outage_checkpoints_without_erasing_deterministic_state(
         request=request,
         operator_context=context,
         adapter=FakePlanningAdapter(
-            error=ProviderError("quota unavailable", category="rate_limited")
+            error=ProviderError(
+                "quota unavailable",
+                category="rate_limited",
+                provider_request_may_have_left=False,
+            )
         ),
     )
     assert result.classification == "WAITING_PROVIDER"

@@ -398,12 +398,16 @@ def reserve_provider_spend_call(
     task_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
     evidence: dict[str, Any] | None = None,
-) -> ProviderSpendUsageEvent:
+) -> tuple[ProviderSpendUsageEvent, bool]:
     """Atomically hold request/token/cost budget BEFORE any provider invocation.
 
     Idempotent on (owner_id, source_ref): a reserved or settled prior event is returned
     without increasing holds. A released prior event FAILS CLOSED — append-only usage
     rows cannot be resurrected under the same key (callers must allocate a new source_ref).
+
+    Returns ``(event, created)``. ``created`` is True only when this call inserted the
+    usage row — concurrent losers and idempotent re-entries get ``created=False`` so
+    callers can refuse a second adapter invoke without settling a live twin's hold.
     """
     # Do NOT FOR UPDATE the usage row here — mainai_app has UPDATE revoked on append-only
     # usage events (Postgres FOR UPDATE requires UPDATE privilege). Serialize via the
@@ -422,7 +426,7 @@ def reserve_provider_spend_call(
                 "provider spend source_ref was already released; a new source_ref is required"
             )
         # reserved or settled: idempotent return without increasing holds.
-        return prior
+        return prior, False
 
     row = get_current_provider_spend_authorization(db, owner_id=owner_id, goal_id=goal_id)
     if row is None:
@@ -481,12 +485,13 @@ def reserve_provider_spend_call(
     inserted_id = result.scalar_one_or_none()
     if inserted_id is None:
         # Concurrent twin reserved the same source_ref — return the winner's row.
-        return db.execute(
+        twin = db.execute(
             select(ProviderSpendUsageEvent).where(
                 ProviderSpendUsageEvent.owner_id == owner_id,
                 ProviderSpendUsageEvent.source_ref == source_ref,
             )
         ).scalar_one()
+        return twin, False
 
     row.reserved_requests += 1
     row.reserved_prompt_tokens += prompt
@@ -494,7 +499,7 @@ def reserve_provider_spend_call(
     row.reserved_cost_usd = _as_decimal(row.reserved_cost_usd) + cost
     _mark_terminal_if_needed(row, now=datetime.utcnow())
     db.flush()
-    return db.get(ProviderSpendUsageEvent, inserted_id)
+    return db.get(ProviderSpendUsageEvent, inserted_id), True
 
 
 def settle_provider_spend_call(
@@ -557,12 +562,15 @@ def release_provider_spend_call(
         },
     )
     db.flush()
-    return db.execute(
+    event = db.execute(
         select(ProviderSpendUsageEvent).where(
             ProviderSpendUsageEvent.owner_id == owner_id,
             ProviderSpendUsageEvent.source_ref == source_ref,
         )
     ).scalar_one()
+    # Raw SQL updated the row; refresh so the identity map does not keep "reserved".
+    db.refresh(event)
+    return event
 
 
 def record_provider_spend_usage(
@@ -594,7 +602,7 @@ def record_provider_spend_usage(
         task_id=task_id,
         job_id=job_id,
         evidence=evidence,
-    )
+    )  # created flag unused: legacy one-shot path
     return settle_provider_spend_call(
         db,
         owner_id=owner_id,

@@ -372,7 +372,11 @@ async def test_composed_autonomy_soak_v2_multi_tick_and_fresh_worker(
 
     adapter = _SoakPlanningAdapter(
         [
-            ProviderError("transient soak-v2 outage", category="rate_limited"),
+            ProviderError(
+                "transient soak-v2 outage",
+                category="rate_limited",
+                provider_request_may_have_left=False,
+            ),
             _provider_response(_out_of_scope_candidate_payload(), "soak-v2-deny"),
             _provider_response(
                 _committed_multiply_candidate_payload(calculator), "soak-v2-a"

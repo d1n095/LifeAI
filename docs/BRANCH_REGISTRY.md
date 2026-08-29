@@ -22,7 +22,8 @@ det längre experimentet innan dess.
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/toctou-spend-revoke-before-reserve` | [#181](https://github.com/d1n095/LifeAI/pull/181) | **Mergad** @ `e10ae97` | Supervisor spend fail-fast (Outcome B) |
-| `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke — **Window B (ambiguous invocation) fortfarande öppen, ej påbörjad** |
+| `cursor/provider-crash-before-settle` | [#182](https://github.com/d1n095/LifeAI/pull/182) | **Mergad** @ `f9cedcc` | Crash-before-settle refuse re-invoke — Window A/C closed; Window B follow-up: se `cursor/provider-ambiguous-invoke-window-b` |
+| `cursor/provider-ambiguous-invoke-window-b` | [#196](https://github.com/d1n095/LifeAI/pull/196) | **Öppen — Correction Phase 1** | #182 Window B: ambiguous post-invoke failure must not release spend; concurrent first-reserve created-flag refuse second invoke |
 | `cursor/operator-lease-effect-time-race` | [#184](https://github.com/d1n095/LifeAI/pull/184) | **Mergad** @ `0d12d54` | Lease expiry at Operator write |
 | `cursor/local-write-crash-before-verify` | [#183](https://github.com/d1n095/LifeAI/pull/183) | **Mergad** @ `bd04934` | Heal write after crash before audit — **idempotency-identity tightening fortfarande öppen, ej påbörjad** |
 | `cursor/founder-cancel-after-accept-before-write` | [#185](https://github.com/d1n095/LifeAI/pull/185) | **Mergad** @ `4bcc66f` | Cancel after ACCEPT / before write |
@@ -65,9 +66,9 @@ skarpare krav än den ursprungliga natt-körnings-kön):**
 
 ```
 1. Phase 1: #182 Window B -- ambiguous-invocation-klassificering (A/B/C), äkta negativ kontroll
-   som exercisar EFTER invocation-gränsen, inte före -- EJ PÅBÖRJAD
+   som exercisar EFTER invocation-gränsen, inte före -- [#196](https://github.com/d1n095/LifeAI/pull/196)
 2. Phase 2: #183 heal-identitetsbindning (idempotency_key m.fl., inte bara hash-match) --
-   EJ PÅBÖRJAD
+   EJ PÅBÖRJAD (väntar på Phase 1 merge)
 3. Phase 3: härda _require_context() med egen populate_existing=True/refresh, tvåsessions-
    regression -- EJ PÅBÖRJAD (ny fas, från #192-granskningen)
 4. Phase 4: genuint samtidig cancel/finalize-race (inte bara sekventiell barriär) -- EJ PÅBÖRJAD
