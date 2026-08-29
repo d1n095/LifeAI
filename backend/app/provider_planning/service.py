@@ -546,8 +546,10 @@ def _provider_failure_allows_spend_release(exc: BaseException) -> bool:
 def _allocate_provider_spend_source_ref(db, *, owner_id, base_ref: str) -> str:
     """Pick a spend source_ref that is safe to reserve under append-only usage rows.
 
-    - No prior / reserved / settled → reuse base_ref (idempotent resume / crash reconcile).
-    - Released → allocate base_ref:aN for a fresh hold (never resurrect a released key).
+    - No prior → reuse base_ref (first attempt).
+    - Reserved → reuse base_ref (Window A crash reconcile; do not mint a free retry key).
+    - Settled or released → allocate base_ref:aN for a fresh hold (never resurrect a
+      released key; never re-invoke under an already-settled key as if it were free).
     """
     from app.models.provider_spend import (
         ProviderSpendUsageEvent,
@@ -561,7 +563,7 @@ def _allocate_provider_spend_source_ref(db, *, owner_id, base_ref: str) -> str:
             ProviderSpendUsageEvent.source_ref == base_ref,
         )
     ).scalar_one_or_none()
-    if prior is None or prior.status != ProviderSpendUsageStatus.released.value:
+    if prior is None or prior.status == ProviderSpendUsageStatus.reserved.value:
         return base_ref
     for n in range(1, 1000):
         cand = f"{base_ref}:a{n}"
@@ -571,7 +573,7 @@ def _allocate_provider_spend_source_ref(db, *, owner_id, base_ref: str) -> str:
                 ProviderSpendUsageEvent.source_ref == cand,
             )
         ).scalar_one_or_none()
-        if row is None or row.status != ProviderSpendUsageStatus.released.value:
+        if row is None or row.status == ProviderSpendUsageStatus.reserved.value:
             return cand
     raise ProviderSpendError(
         "exhausted provider spend source_ref attempt space for this request"
@@ -766,22 +768,21 @@ async def plan_with_provider(
             context_set_id=context_set.id,
         )
 
-    # Concurrent first-reserve race / non-creator: another caller won the INSERT (or
-    # an idempotent re-entry did not create). Never invoke. If the twin's hold is still
-    # reserved, do not settle it (they may still be inside propose). If already settled,
-    # the peer finished — still do not re-invoke.
-    if not reservation_created:
+    # Concurrent first-reserve race: another caller won the INSERT for this source_ref
+    # and the hold is still live. Do not settle their hold (they may still be inside
+    # propose), and do not invoke. Settled non-creators should not reach here — allocate
+    # mints a fresh :aN after settle/release so a new attempt creates its own row.
+    if (
+        not reservation_created
+        and reserved_event.status == ProviderSpendUsageStatus.reserved.value
+    ):
         detail = {
             "request_hash": request_hash,
             "reason": (
-                "this caller did not create the provider spend reservation for this "
-                "source_ref; refusing a second invoke"
+                "another caller already holds the provider spend reservation for this "
+                "source_ref; refusing a concurrent second invoke"
             ),
-            "failure_category": (
-                "concurrent_reservation"
-                if reserved_event.status == ProviderSpendUsageStatus.reserved.value
-                else "reservation_not_owned"
-            ),
+            "failure_category": "concurrent_reservation",
             "provider_hint": planned_provider,
             "model_hint": planned_model,
             "context_set_id": str(context_set.id),
