@@ -92,26 +92,16 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
-<<<<<<< HEAD
-## MAINAI V1 COMPLETION RUN — Stages 1–2 (Cursor)
+## MAINAI V1 COMPLETION RUN — Stages 1–3 (Cursor)
 
-Integration tip: post-#202 (`ae1bcdc`). Program:
-=======
-## MAINAI V1 COMPLETION RUN — Stage 1–3 (Cursor, efter correction gate)
-
-Integration tip: `ae1bcdc` (post-#202). Program:
->>>>>>> 55dc979 (prove 8-task long autonomy soak with gap, restart, and lease takeover.)
+Integration tip: post-#203 (`86d8f0f`). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
-<<<<<<< HEAD
-| `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Öppen — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
-=======
-| `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Öppen — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → goal continues |
-| `cursor/long-autonomy-soak-v1` | (öppnas efter #203) | **Öppen — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
->>>>>>> 55dc979 (prove 8-task long autonomy soak with gap, restart, and lease takeover.)
+| `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
+| `cursor/long-autonomy-soak-v1` | (öppnas) | **Öppen — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
 
 ---
 
