@@ -66,7 +66,7 @@ skarpare krav än den ursprungliga natt-körnings-kön):**
 
 ```
 1. Phase 1: #182 Window B -- ambiguous-invocation-klassificering (A/B/C), äkta negativ kontroll
-   som exercisar EFTER invocation-gränsen, inte före -- ÖPPEN PR `cursor/provider-ambiguous-invoke-window-b`
+   som exercisar EFTER invocation-gränsen, inte före -- [#196](https://github.com/d1n095/LifeAI/pull/196)
 2. Phase 2: #183 heal-identitetsbindning (idempotency_key m.fl., inte bara hash-match) --
    EJ PÅBÖRJAD (väntar på Phase 1 merge)
 3. Phase 3: härda _require_context() med egen populate_existing=True/refresh, tvåsessions-

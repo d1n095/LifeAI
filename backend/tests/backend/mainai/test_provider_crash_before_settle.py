@@ -365,7 +365,4 @@ async def test_non_creator_of_reservation_does_not_invoke_provider(superuser_db,
 
     assert len(adapter.calls) == 0
     assert result.classification == "WAITING_PROVIDER"
-    assert result.explanation.get("failure_category") in {
-        "concurrent_reservation",
-        "reservation_not_owned",
-    }
+    assert result.explanation.get("failure_category") == "concurrent_reservation"
