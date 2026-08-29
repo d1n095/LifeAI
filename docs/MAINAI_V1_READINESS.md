@@ -155,25 +155,95 @@ not been empirically checked) / **BLOCKED** (a real, open gap stands in the way)
 | Dependency progression | **PROVEN** | `_detect_cycle()`, `recompute_task_readiness()` (6 real callers). | None for V1 scope. | — |
 | Provider-spend truth | **PROVEN** | Reservation/settlement/ledger chain, real two-thread concurrency tests (#178, #180, #196). | #182 Window B follow-up (concurrent-first-call edge, already tracked on #196's thread). | IMPORTANT POST-V1. |
 | Egress/Vault | **PARTIAL** | V1-V3 closed (real default-deny gate + ledger), V4 mostly closed. V5 (classification schema), V8 (provenance linkage) have implementation-ready decisions now (`docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md` + its Deliverable-7 addendum) but no schema built yet. | V5/V8 schema implementation — explicitly NOT required for MainAI V1's execution-autonomy scope (Vault classification governs external-provider disclosure of Life Vault content, a mostly-separate concern from the autonomous-development-loop V1 is about) — do not let this block V1 unless the founder wants it bundled. | OPTIONAL for V1 proper; IMPORTANT for the broader Life Vault initiative on its own timeline. |
-| Restart recovery | **PARTIAL** | Recovery-authority chain proven for crash/takeover cases (#165, #177, #183, #191). Full process/session-boundary restart (Phase 5) not yet proven — #195 only proved the Python-object boundary. | Phase 5 (restart-soak v3) — queued, in progress. | BLOCKER until Phase 5 merges. |
-| Lease takeover | **PROVEN** | `claim_supervisor_goal_lease()`, real two-thread concurrency test (#179), second-worker scope-narrowing proven (#191). | None. | — |
-| Cancellation | **PARTIAL** | Cancel-after-ACCEPT, cancel-after-verify, cancel-vs-finalize all proven with real (if #194's sequenced-not-simultaneous caveat noted) tests (#192-194). Mid-decomposition cancellation traced this session: confirmed genuinely absent (`MainAIGoal` has no `cancel_requested` field; `create_plan()` never checks one) — but the exposure window is a single synchronous HTTP request, not a multi-tick loop. | Strengthen #194 to genuine unscheduled concurrency (Phase 4, queued). Mid-decomposition cancellation check is a real gap but narrow-window. | BLOCKER until Phase 4 merges; mid-decomposition cancellation downgraded to IMPORTANT POST-V1 (confirmed real but narrow, not urgent). |
+| Restart recovery | **PROVEN** | Restart-soak v3 (Phase 5) merged and independently verified this session (#201) — genuine NEW session + NEW Worker process boundary, not just the Python-object boundary #195 proved. | None. | — |
+| Lease takeover | **PROVEN, hardened further this session** | `claim_supervisor_goal_lease()`, real two-thread concurrency test (#179), second-worker scope-narrowing proven (#191). Stage 2 (#203, merged) added real `supervisor_goal_leases` expiry → reclaim → zero-FS-effect → goal-continuation proof. This session additionally found and closed a real observability gap: `run_driver()` previously crashed uncaught on a mid-run authority transition instead of a clean `DriverResult` — fixed via `OperatorAuthorityTransitionError` + a `STALE_AUTHORITY` classification, with an empirical proof that the winning worker's next tick resumes cleanly from checkpoint. Also found and closed a genuine first-governance TOCTOU race in `authorize_execution_scope()` (docstring claimed a goal-row lock the code never took) — see the branch registry's own entry on PR #197 for both fixes' full detail. | None outstanding from this pass. | — |
+| Cancellation | **PROVEN** | Cancel-after-ACCEPT, cancel-after-verify, cancel-vs-finalize all proven; Phase 4 (#200, merged) closed the genuine unscheduled-concurrency gap #194 left open (40-trial real-race regression). Mid-decomposition cancellation remains a real but narrow-window gap (single synchronous HTTP request, not a multi-tick loop). | Mid-decomposition cancellation check — still open, still narrow. | IMPORTANT POST-V1 (confirmed real but narrow, not urgent). |
 | Finalization | **PROVEN** | Canonical `record_final_report` chain (#168, #193), idempotent, respects prior cancellation. | None. | — |
 | Idle/stopping | **PROVEN** | Confirmed via #187's/#195's "later tick does nothing" checks — genuine re-invocation, not stale-state assertion. | None. | — |
 | Observability/audit | **PROVEN** | Checkpoints, `WorkTraceEvent`, `ProviderSpendUsageEvent`, `mainai_recovery_events`, `provider_disclosure_events` all real and append-only/RLS-protected. | None for V1 scope. | — |
-| Self-improvement safety | **PARTIAL, design complete** | Contract fully specified in `docs/MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` (this workstream). No run has actually been executed yet. | Execute the first bounded run per that contract, once Phases 1-5 close. | BLOCKER — this is the actual gating milestone, not a code gap. |
+| Self-improvement safety | **PROVEN, mechanism-only — see caveat** | First bounded run executed and merged (#205, "Stage 4"): real Worker→Supervisor spine, narrow envelope (`authorized_paths` = one test file, no `delete_file`/commit/push capabilities), `remote_write_authorized=False` asserted, independently reviewed post-merge (Claude, PR #205 comment). | **Important caveat, not a blocker, but must not be misread**: the run edited a disposable worktree mirror seeded to match production, NOT the real checkout — production `backend/tests/backend/mainai/test_egress_policy.py` is unchanged by this run. This PROVES the mechanism is safe end-to-end; it does NOT mean MainAI's real codebase actually improved yet. Applying the same diff to production remains a separate, still-open action. See `docs/MAINAI_INSPECTABLE_MEMORY_CONTRACT.md` for why this is exactly the SAID-vs-VERIFIED distinction that document exists to make explicit. | — (mechanism proven; whether/when to run milestone 2 against a real checkout is a founder decision, not a V1 gap). |
 
 ### V1 blocker summary (the short version)
 
-**Real blockers, all already in motion**: Phases 4-5 of the correction pass (Phase 4 genuine
-cancel/finalize concurrency; Phase 5 restart-soak v3) — Phases 1-3 (#182 Window B, #183 heal
-identity, Phase 3 `_require_context` freshness) all closed and independently verified this
-session (#196/#198/#199). Task-decomposition idempotency/crash-recovery/Path-B-authority
-questions flagged in Deliverable 2 are all resolved this session too (concurrent-decomposition
-race fixed, atomicity confirmed, Path B bridge built and proven). Remaining real work: Phase
-4-5, then actually running the first self-improvement milestone once those land.
+**Correction-pass Phases 1-5 all closed and independently verified**: #196/#198/#199/#200/#201.
+Stage 1-3 of the MAINAI V1 COMPLETION RUN (Cursor) also merged: #202 (gap/repair live loop),
+#203 (Stage 2 lease-expiry takeover), #204 (Stage 3 long-run soak). Task-decomposition
+idempotency/crash-recovery/Path-B-authority questions flagged in Deliverable 2 are all resolved
+(concurrent-decomposition race fixed, atomicity confirmed, Path B bridge built and proven).
+This session additionally found and closed three further real gaps beyond what any Cursor
+Stage PR covered: the `run_driver()` mid-run-takeover crash (`OperatorAuthorityTransitionError`),
+the `authorize_execution_scope()` first-governance TOCTOU race, and an unbounded automatic
+replan loop (`MAX_AUTO_REPLANS`) — all empirically proven via `git stash` negative controls,
+see PR #197. Stage 4 (#205, first bounded self-improvement) and Stage 5 (#206, Path A goal
+intake) have also since merged and been independently reviewed (Claude, both PR comments) —
+**no open code blockers remain for V1's execution-autonomy scope.** The one item worth a
+founder decision, not a code gap: #205 proved the self-improvement mechanism is safe but did
+not actually change MainAI's real codebase (disposable-mirror caveat, table above) — whether a
+milestone-2 run against the real checkout happens next is a founder call, not something this
+readiness matrix blocks on.
 
 **Not blockers, explicitly scoped out of V1**: Vault V5/V8 schema implementation (separate
 initiative, its own timeline), the `multiplication_repair` recipe's narrowness (cost
 optimization only), the provider-adapter `provider_request_may_have_left` completeness gap
-(conservative-safe already).
+(conservative-safe already), and the entire new Personal Intent & Executive Reasoning /
+Long-Horizon Planning / Memory Truth workstream — see Part D below for why and for the one
+piece of it (memory truth) that IS required now regardless.
+
+---
+
+## Part D — Personal Intent & Executive Reasoning: V1 classification
+
+Founder-defined new capability (2026-08-30), specified in three companion documents:
+`docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md`, `docs/MAINAI_INSPECTABLE_MEMORY_
+CONTRACT.md`, `docs/MAINAI_LONG_HORIZON_PLANNING.md`. Per the founder's own explicit
+instruction, this is **not** automatically a V1 blocker — V1 is about the execution-autonomy
+chain (Parts A-C above) being safe and complete; this workstream is about reducing founder
+instruction-effort over time, a genuinely separate capability axis layered on top of an
+already-safe V1.
+
+**V1 minimum required from this workstream: none.** Every mechanism specified across all three
+documents is additive to the already-shipped goal→plan→execute→verify→finalize chain — none
+of it is required for that chain to be correct or complete.
+
+**Required NOW regardless of V1/V1.1/V2 sequencing** — the founder's own explicit exception:
+the **memory truth invariant** (`docs/MAINAI_INSPECTABLE_MEMORY_CONTRACT.md` §2's
+`MemoryTruthState` vocabulary and §5.1's "build claims from returned rows, never from
+requests" calling convention). Reasoning, restated from that document: every producer this
+workstream will build (resolved references, generated candidates, conversational lessons)
+needs somewhere truthful to land before it's built, or the very first thing built to reduce
+founder effort recreates the exact SAID/STORED confusion the founder is asking to prevent.
+This is cheap to establish now (a vocabulary + a calling convention, not new infrastructure)
+and expensive to retrofit once call sites exist that don't follow it. Tonight's own four real
+bugs (§ the readiness table's "run_driver() mid-run-takeover", "authorize_execution_scope()
+TOCTOU", two test-fixture fixes, and the unbounded-replan loop) are concrete, already-happened
+instances of exactly this failure class, in code that predates this document — not a
+speculative risk.
+
+**V1.1** (see each document's own §8/§7/§6 for full reasoning, summarized here):
+- `ConversationalInterpretationProposal` + resolution flow (personal-intent doc §1) — reuses
+  `project_entities`' proven pattern verbatim, no new authority surface.
+- Conversational lesson recording (personal-intent doc §5) — one new caller into an
+  already-fully-built `EngineeringLesson` system.
+- `WorkCandidate.priority` NOW/NEAR/LATER/OPTIONAL/BLOCKED vocabulary widening (personal-intent
+  doc §2.3 / long-horizon doc §4.1) — a CHECK constraint change, cheap and additive.
+- Additional replan trigger sources beyond task failure (long-horizon doc §3.2) — reuses the
+  existing, tested `trigger_replan()` mechanism unchanged.
+- NEAR-radius executive scan (long-horizon doc §4).
+
+**V2:**
+- Full executive look-around orchestrator (personal-intent doc §2) — real integration work
+  across three subsystems, needs its own bounded-generation tuning before trustworthy at scale.
+- `authority_kind` generalization out of `safe_planner` into a shared classifier (personal-
+  intent doc §3) — a real refactor of a working module, not just a new caller.
+- MID/LONG-radius horizon scanning (long-horizon doc §4) — new multi-hop traversal logic,
+  needs correctness/performance validation before running automatically.
+- Inspectable-memory UI surface and background verification job scheduling (memory-contract
+  doc §6.3/§5.2) — the `MemoryTruthState` vocabulary itself ships now (see above); the UI and
+  automated verification around it are deferrable.
+
+**Standing invariant this workstream must never weaken, at any tier**: LONG-horizon items and
+executive-scan-generated `WorkCandidate` rows carry exactly zero authority — every path from
+this workstream's own output to a real effect still passes through the SAME
+`authorize_execution_scope()`/`grant_task_approval()`/`authorize_work_candidate()` gates Parts
+A-C already prove are real and tested. Nothing in Part D introduces a new way to acquire
+execution authority.
