@@ -178,6 +178,30 @@ def dismiss_work_candidate(db: Session, *, owner_id: uuid.UUID, candidate_id: uu
     return row
 
 
+def supersede_work_candidate(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    reason: str,
+) -> WorkCandidate:
+    """Mark an unreviewed candidate superseded (e.g. a founder correction replaced it).
+    Never deletes; never authorizes. Status CHECK already allows 'superseded' (migration 0055)."""
+
+    row = db.execute(
+        select(WorkCandidate).where(WorkCandidate.id == candidate_id, WorkCandidate.owner_id == owner_id).with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        raise WorkCandidateError("work candidate is missing or belongs to another owner")
+    if row.status != "unreviewed":
+        raise WorkCandidateError(f"work candidate is already {row.status}, not unreviewed")
+    row.status = "superseded"
+    row.dismissed_reason = reason
+    row.updated_at = datetime.utcnow()
+    db.flush()
+    return row
+
+
 def authorize_work_candidate(
     db: Session,
     *,
