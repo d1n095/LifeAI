@@ -250,10 +250,12 @@ def resolve_with_learned_intent(
             db.flush()
 
     ambiguity = classify_ambiguity(raw_expression, residual_intent=intent, confidence=confidence)
-    # If we auto-resolved via learned binding, downgrade LOW_RISK ambiguity.
+    # Learned bindings may auto-resolve LOW_RISK interpretation only.
+    # PAST LANGUAGE MEMORY != CURRENT AUTHORIZATION:
+    # auto_resolved must NEVER suppress consequential confirmation.
     if auto_resolved and ambiguity == AmbiguityClass.LOW_RISK:
         ambiguity = AmbiguityClass.NONE
-    must_surface = ambiguity == AmbiguityClass.CONSEQUENTIAL and not auto_resolved
+    must_surface = ambiguity == AmbiguityClass.CONSEQUENTIAL
 
     if persist and binding_id is None:
         key = idempotency_key or f"intent:{owner_id}:{_phrase_key(raw_expression)}:{uuid.uuid4()}"

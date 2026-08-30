@@ -10,8 +10,14 @@ from sqlalchemy import select, text as sa_text
 from app.models.founder_intent import FounderIntentBinding, FounderIntentCorrection
 from app.models.project_entities import ProjectEntity
 from app.models.user import User
-from app.personal_intent import AmbiguityClass, correct_intent_binding, resolve_with_learned_intent
+from app.personal_intent import (
+    AmbiguityClass,
+    correct_intent_binding,
+    record_intent_binding,
+    resolve_with_learned_intent,
+)
 from app.request_context import current_user_id as current_user_id_var
+from app.db import SessionLocal
 
 
 def _owner(db):
@@ -135,6 +141,94 @@ def test_consequential_ambiguity_must_surface(superuser_db):
     assert res.ambiguity == AmbiguityClass.CONSEQUENTIAL
     assert res.must_surface is True
     assert res.authority_claimed is False
+
+
+def test_consequential_confirmation_never_suppressed_by_learned_phrase(superuser_db):
+    """PAST LANGUAGE MEMORY != CURRENT AUTHORIZATION.
+
+    Occurrence #1…#N of the same/similar consequential phrase must still require
+    confirmation. Learning may set auto_resolved (interpretation reuse) but must
+    never clear must_surface.
+    """
+    owner = _owner(superuser_db)
+    phrase = "deploy till production den grejen"
+    first = resolve_with_learned_intent(
+        superuser_db, owner_id=owner.id, raw_expression=phrase, idempotency_key="j-cons-1", persist=True
+    )
+    superuser_db.commit()
+    assert first.must_surface is True
+    assert first.authority_claimed is False
+    assert first.auto_resolved is False
+
+    for i in range(2, 6):
+        again = resolve_with_learned_intent(
+            superuser_db,
+            owner_id=owner.id,
+            raw_expression=phrase,
+            idempotency_key=f"j-cons-{i}",
+            persist=True,
+        )
+        superuser_db.commit()
+        assert again.auto_resolved is True, f"occurrence #{i} should reuse learned binding"
+        assert again.ambiguity == AmbiguityClass.CONSEQUENTIAL
+        assert again.must_surface is True, f"occurrence #{i} must still require confirmation"
+        assert again.authority_claimed is False
+
+
+def test_consequential_high_confidence_binding_still_surfaces(superuser_db):
+    owner = _owner(superuser_db)
+    record_intent_binding(
+        superuser_db,
+        owner_id=owner.id,
+        raw_expression="approve merge to production",
+        interpreted_intent="approve merge to production",
+        canonical_entity_id=None,
+        confidence=0.99,
+        idempotency_key="j-hi-conf",
+    )
+    superuser_db.commit()
+    res = resolve_with_learned_intent(
+        superuser_db,
+        owner_id=owner.id,
+        raw_expression="approve merge to production",
+        idempotency_key="j-hi-conf-resolve",
+        persist=True,
+    )
+    superuser_db.commit()
+    assert res.auto_resolved is True
+    assert res.confidence >= 0.99
+    assert res.must_surface is True
+    assert res.authority_claimed is False
+
+
+def test_consequential_survives_new_db_session(superuser_db):
+    """Restart / new session: durable binding loads, confirmation still required."""
+    owner = _owner(superuser_db)
+    phrase = "delete production database backup"
+    resolve_with_learned_intent(
+        superuser_db, owner_id=owner.id, raw_expression=phrase, idempotency_key="j-sess-1", persist=True
+    )
+    superuser_db.commit()
+    owner_id = owner.id
+    superuser_db.expire_all()
+
+    fresh = SessionLocal()
+    token = current_user_id_var.set(str(owner_id))
+    try:
+        fresh.execute(
+            sa_text("SELECT set_config('app.current_user_id', :owner, true)"),
+            {"owner": str(owner_id)},
+        )
+        res = resolve_with_learned_intent(
+            fresh, owner_id=owner_id, raw_expression=phrase, idempotency_key="j-sess-2", persist=True
+        )
+        fresh.commit()
+        assert res.auto_resolved is True
+        assert res.must_surface is True
+        assert res.authority_claimed is False
+    finally:
+        current_user_id_var.reset(token)
+        fresh.close()
 
 
 def test_hon_ska_kunna_and_unfinished_reference(superuser_db):
