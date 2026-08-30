@@ -227,7 +227,7 @@ här är röd-team-granskning av Cursors PR:er, inte primärbyggare, tills annat
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/mainai-inspectable-memory-foundation` | [#209](https://github.com/d1n095/LifeAI/pull/209) | **Mergad — Stage A** @ `b73a018` | Canonical inspectable memory (`memory_truth_claims`, verify-against-reality, founder API `/api/founder/memory`). Landed Alembic **0063** on tip BEFORE #197 merged — won the numbering race (see resolution below). Claude red-team review (fork): clean, `verify_truth_claim()` genuinely re-derives truth from the real target row, never trusts caller input. |
-| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Mergad — Stage B** @ `e8c9ca6`, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Landed Alembic **0064** on tip BEFORE #197 merged, colliding with #197's already-renumbered 0064 (see resolution below). Claude red-team review (fork): ONE plausible-not-yet-confirmed TOCTOU race in `promote_interpretation_proposal()`'s SAME-collapse (`find_same_concept()` unlocked SELECT → unlocked insert) — posted to PR, offered to build the two-thread empirical proof; not yet resolved, carried forward. |
+| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Mergad — Stage B** @ `e8c9ca6`, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Landed Alembic **0064** on tip BEFORE #197 merged, colliding with #197's already-renumbered 0064 (see resolution below). **CONFIRMED empiriskt** (uppdaterat, se konsoliderad bugglista nedan): TOCTOU-race i `find_same_concept()` (unlocked SELECT → unlocked insert) ger en riktig, ohanterad `IntegrityError` för förloraren; det unika constraintet självt förhindrar dock alltid faktiska dubbletter. Dessutom: fullskalig soak (1189 events) visar att SAME-collapse i praktiken NÄSTAN ALDRIG triggas för omformulerade dubbletter (20/20 ämnen kolliderade inte) — mycket allvarligare än det ursprungliga race-fyndet. |
 
 **Alembic-revisionskollision — LÖST TVÅ GÅNGER 2026-08-30 (basen fortsatte röra sig under
 #197s öppna fönster):** Första kollisionen: #209 mergade `0063_inspectable_memory_foundation.py`
@@ -245,6 +245,100 @@ löste registerkonflikten ovan): #197s två migrationer omnumrerades EN GÅNG TI
 priority`) → `0066` (#197, `candidate_signal_entity_resolution`)), innehåll i övrigt
 byte-identiskt, `alembic heads` visar exakt EN head efter omnumreringen. Ingen ytterligare
 öppen Cursor-branch känd att kollidera med just nu.
+
+### Stages C–S (17 PRs, #211–#227) — fullständig stack, en enda kväll (2026-08-30)
+
+Cursor öppnade hela resten av Memory Frontier-programmet som EN stackad kedja (#211→#212→…
+→#227, varje PR:s bas är föregående PR:s branch — det betyder att `#227`:s branchtipp redan
+innehåller ALLA 17 stadier kombinerade, utan att vänta på GitHub-mergningar). Långt utöver den
+ursprungliga A–I-planen (9 stadier); den faktiska omfattningen är A–S (19 stadier räknat från
+#209). Claude granskade samtliga 17 med paralleliserade forks (individuell diff-granskning +
+en separat systemisk cross-stage-attack + en riktig long-memory-soak-testkörning), alla
+kommentarer postade direkt på respektive PR.
+
+| PR | Stage | Status (första passet) |
+|---|---|---|
+| [#211](https://github.com/d1n095/LifeAI/pull/211) | C: memory→work linkage | Ren (empiriskt verifierad auktoritetsgräns) |
+| [#212](https://github.com/d1n095/LifeAI/pull/212) | D: temporal recap | Ren (ingen LLM i recap-vägen, allt spårbart till källrad) |
+| [#213](https://github.com/d1n095/LifeAI/pull/213) | E: self-model/capability ledger | **BEKRÄFTAD BUGG** (se lista nedan) |
+| [#214](https://github.com/d1n095/LifeAI/pull/214) | F: continuous simplification | Ren (rent förslags-lager, ingen destruktiv väg än) |
+| [#215](https://github.com/d1n095/LifeAI/pull/215) | G: founder-language slice | **TROLIG BUGG** (statisk, se lista nedan) |
+| [#216](https://github.com/d1n095/LifeAI/pull/216) | H: memory quality/history stress | Ren, men egen "stress"-test har noll concurrency |
+| [#217](https://github.com/d1n095/LifeAI/pull/217) | I: long-horizon planning | Ren (verifierat: ingen väg till verklig exekveringsauktoritet) |
+| [#218](https://github.com/d1n095/LifeAI/pull/218) | J: personal intent learning | **BEKRÄFTAD BUGG, KRITISK** (se lista nedan) |
+| [#219](https://github.com/d1n095/LifeAI/pull/219) | K: contradiction/assumption engine | Ren (ingen auto-vinnare vid motsägelse) |
+| [#220](https://github.com/d1n095/LifeAI/pull/220) | L: prediction vs outcome | **BEKRÄFTAD BUGG** (se lista nedan) |
+| [#221](https://github.com/d1n095/LifeAI/pull/221) | M: attention/priority engine | Ren (ingen dataförlust, men ingen auktoritets-floor) |
+| [#222](https://github.com/d1n095/LifeAI/pull/222) | N: hot/warm/cold memory tiers | Ren (provenance-påstående verifierat sant) |
+| [#223](https://github.com/d1n095/LifeAI/pull/223) | O: memory repack/health | Ren (rent läs-lager, ingen skrivväg) |
+| [#224](https://github.com/d1n095/LifeAI/pull/224) | P: cognitive load reduction | **BEKRÄFTAD BUGG** (se lista nedan) |
+| [#225](https://github.com/d1n095/LifeAI/pull/225) | Q: interruption recovery | Ren |
+| [#226](https://github.com/d1n095/LifeAI/pull/226) | R: self-improvement ROI | Ren (inert, rör inte det verkliga self-improvement-auktoritetsgrindet) |
+| [#227](https://github.com/d1n095/LifeAI/pull/227) | S: 1000-tick soak, stacktipp | **BEKRÄFTAD BUGG** (testtäckningsgap, se lista nedan) |
+
+**Systemisk fynd, viktigast av allt för prioritering:** **hela 17-PR-stacken saknar HELT
+router-/HTTP-koppling** — ingenting är nåbart från en riktig founder-facing yta ännu. Alla
+buggar nedan är just nu latenta, inte live-exploaterbara. Ändrar prioritetsordning, inte
+korrekthetsskuld.
+
+### Konsoliderad, prioritetsordnad bugglista (Claude röd-team, 2026-08-30, kväll)
+
+1. **[#218] KRITISK — säkerhetsregression.** `must_surface = ambiguity == CONSEQUENTIAL and not
+   auto_resolved` slutar tyst kräva founder-bekräftelse för konsekvensfulla ord (deploy/
+   production/merge/delete/approve) redan vid ANDRA förekomsten av en matchande fras, eftersom
+   en tidigare bindning består oavsett ambiguity-klass. Empiriskt bevisad (disponibel worktree,
+   riktig Postgres). Minsta fix: ta bort `and not auto_resolved` — konsekvensrisk handlar om
+   HANDLING, inte tolkningssäkerhet, och får aldrig nedgraderas av en inlärd bindning.
+2. **[#210] SAME-collapse, två separata problem.** (a) Empiriskt bevisad TOCTOU: förloraren i en
+   samtidig SAME-collapse-race kraschar med en ohanterad `IntegrityError` istället för att
+   kollapsa graciöst (unique constraint förhindrar ändå riktiga dubbletter). (b) I fullskalig
+   soak (1189 events, 20 ämnen): SAME-collapse triggas i praktiken NÄSTAN ALDRIG för realistiskt
+   omformulerade dubbletter — `find_same_concept()` konsulterar aldrig sin egen redan beräknade
+   Jaccard-likhet, bara exakt fingerprint-match. (b) är allvarligare än (a) och direkt i linje
+   med founderns egna namngivna "personal language variance"-exempel.
+3. **[#213]/[#220] Self-model "confidence masquerading as evidence".** `build_self_model()`s
+   `proven`/`improved`-klassificering kontrollerar aldrig `last_proof_evidence_id`;
+   `verification_evidence_id` är valfri (default `None`). #220 har SAMMA gap men strukturellt
+   värre — `prediction_records` är inte ens kopplad till `intelligence_evidence`-systemet, så
+   riktig evidens kan inte skickas ens om anroparen ville. Minsta fix: kräv
+   `verification_evidence_id`, lägg till försvar-i-djup-filter.
+4. **[#224] Fel minnessanning vald som aktuell.** `consider_founder_question()` väljer
+   `matches[0]` från en STIGANDE-sorterad (äldst först, ingen `.desc()`) fråga — returnerar tyst
+   den ÄLDSTA matchande anteckningen som sanning och hoppar över att fråga founder. Klassisk
+   "memory claim != actual durable state". Minsta fix: sortera efter senaste, eller falla
+   tillbaka till att fråga när flera träffar finns.
+5. **[#215] Icke-verbatim founder-text.** `founder_memory_notes.content` lagrar MainAI:s
+   normaliserade tolkning, inte founderns ordagranna ord (rå text finns bara i `provenance`);
+   samtidigt sätts `authority="founder", basis="manual"` som om det vore en explicit founder-
+   handling, utan markör som skiljer "founder sa detta" från "MainAI:s regex producerade
+   detta". Bryter mot samma "citera, inte parafrasera"-princip som redan etablerats i
+   `record_lesson_from_founder_correction()` (PR #197).
+6. **[#227] Falsk "1000-tick"-täckningsgap (delvis motbevisad).** Ursprungligt fynd: bara 12
+   ticks var testtäckta, standard-körning är 20. UPPFÖLJNING (skalad soak): Cursors egen
+   `run_bounded_memory_soak()` körs FAKTISKT rent vid riktiga 1000 ticks (2.5s, inga anomalier)
+   när den anropas direkt — det är alltså ett testtäcknings-gap, inte en runtime-bugg. Kvarstår
+   som en riktig brist (koden är overifierad i CI/testsviten vid den faktiska skalan) men mindre
+   allvarligt än ursprungligen trott.
+7. **[#216]/allmänt] Låg allvarlighetsgrad, latenta, inga live-anroparen ännu:** #221:s
+   attention-ranking har ingen auktoritets-/säkerhets-floor (`items[:limit]` kan tyst begrava
+   ett säkerhetsrelevant item); #223:s `changes_canonical_meaning` är alltid `False` (gör
+   `ok_to_repack` vakuöst sant); `list_founder_memory()`s tie-break vid identiska timestamps
+   saknar en avsiktlig sekundär sorteringsnyckel (stabil av en slump, inte design); #222:s
+   `_get_or_create()` har samma olåsta TOCTOU-form som #210 men ingen live-anropare ännu.
+
+**Systemisk cross-stage-attack (12 interaktionskedjor, founderns egen lista) — 9 av 12
+RENSADE** (mest för att inget är live-kopplat ännu), 1 verklig ej-testad lucka funnen
+(session-omstart/rekonstruktion-fidelitet över FLERA omstarter i en väldigt lång historik —
+enstaka omstart verifierad ren, kumulativ drift över många omstarter inte fullt uttömd), 2 ej
+tillämpliga ännu (circular provenance kräver #213:s evidence-FK som inte är hård än; recap→
+canonical redan täckt av #212:s egen granskning).
+
+**Long-memory-soak (Lane C, 1189 syntetiska events, 20 ämnen, flera omstarts-simuleringar):**
+Invariant 1 (rekonstruerbar) PASS · Invariant 2 (historik oförlorad) PASS · Invariant 3 (inga
+dubbletter) **FAIL, allvarligt** (20/20 ämnen kolliderade inte) · Invariant 4 (inga falska
+self-claims) FAIL (förväntat, bekräftar #213 från ny vinkel) · Invariant 5 (ingen
+auktoritetsutvidgning) PASS. Ingen O(n²)-prestandaproblematik vid denna skala (1.57x
+tidsförhållande tidigt→sent över ~1200 events).
 
 ---
 
