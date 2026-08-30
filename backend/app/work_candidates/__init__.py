@@ -11,6 +11,7 @@ from app.work_candidates.service import (
     list_unreviewed_work_candidates,
     list_work_candidates,
     record_work_candidate,
+    supersede_work_candidate,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "list_unreviewed_work_candidates",
     "list_work_candidates",
     "record_work_candidate",
+    "supersede_work_candidate",
 ]
