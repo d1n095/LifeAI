@@ -4,6 +4,7 @@ planned, or unknown. See `service.py`'s own module docstring for the full doctri
 
 from app.capability_reality.agent_bridge import sync_agent_adapter_capability
 from app.capability_reality.service import (
+    CapabilityRealityError,
     get_capability_reality,
     list_capability_gaps,
     list_capability_records,
@@ -12,6 +13,7 @@ from app.capability_reality.service import (
 )
 
 __all__ = [
+    "CapabilityRealityError",
     "get_capability_reality",
     "list_capability_gaps",
     "list_capability_records",
