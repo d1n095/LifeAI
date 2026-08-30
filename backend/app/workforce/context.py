@@ -19,6 +19,17 @@ class ContextPackagingError(Exception):
 
 EXTERNALISH_ZONES = frozenset({"EXTERNAL_PROVIDER", "UNTRUSTED_REMOTE"})
 
+# Credentials / vault material are NEVER packageable — any trust zone.
+ALWAYS_DENIED_KINDS: frozenset[str] = frozenset(
+    {
+        "vault",
+        "secret",
+        "api_key",
+        "provider_credential",
+        "system_secret",
+    }
+)
+
 
 def classify_trust_zone(zone: str) -> str:
     # Extensible: unknown zones are treated as UNTRUSTED_REMOTE for safety.
@@ -36,12 +47,19 @@ def minimize_for_trust_zone(
     trust_zone: str,
     requested_items: list[dict],
 ) -> tuple[list[dict], list[str]]:
-    """Return (accepted_items, denied_kinds). External zones never receive forbidden kinds."""
+    """Return (accepted_items, denied_kinds).
+
+    Credentials/vault are always denied. External zones also deny the broader
+    FORBIDDEN_EXTERNAL_DISCLOSURE_KINDS set (full memory, etc.).
+    """
     zone = classify_trust_zone(trust_zone)
     accepted: list[dict] = []
     denied: list[str] = []
     for item in requested_items:
         kind = _item_kind(item)
+        if kind in ALWAYS_DENIED_KINDS:
+            denied.append(kind)
+            continue
         if zone in EXTERNALISH_ZONES and kind in FORBIDDEN_EXTERNAL_DISCLOSURE_KINDS:
             denied.append(kind)
             continue
