@@ -201,6 +201,14 @@ from app.models.supervisor_lease import SupervisorGoalLease
 from app.models.usage import UsageLog
 from app.models.user import User
 from app.models.work_candidate import WorkCandidate
+from app.models.workforce import (
+    WorkforceAgentProfile,
+    WorkforceAssignment,
+    WorkforceContextPackage,
+    WorkforceDelegationRequest,
+    WorkforcePerformanceRollup,
+    WorkforceTeam,
+)
 from app.models.work_intelligence import (
     WorkEfficiencyObservation, WorkSpecialistContribution, WorkStoppingDecision,
     WorkStrategy, WorkStrategyExecution, WorkStrategyFinding, WorkStrategyLessonLink,
@@ -361,6 +369,12 @@ __all__ = [
     "Task",
     "ProjectEntity",
     "WorkCandidate",
+    "WorkforceAgentProfile",
+    "WorkforceAssignment",
+    "WorkforceContextPackage",
+    "WorkforceDelegationRequest",
+    "WorkforcePerformanceRollup",
+    "WorkforceTeam",
     "ProjectEntityAlias",
     "ProjectEntityRelationship",
     "InterpretationProposal",

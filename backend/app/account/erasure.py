@@ -617,6 +617,25 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # this call too (capability_records.agent_id merely references it, never owns it).
         db.execute(sa_text("SELECT erase_own_capability_reality_children()"))
 
+        # --- MainAI Internal Workforce Foundation (migration 0067): ordinary mutable
+        # owner-scoped tables with baseline CRUD. Explicit delete order respects FKs;
+        # coordination_agents (founder-wide) is untouched.
+        from app.models.workforce import (
+            WorkforceAgentProfile,
+            WorkforceAssignment,
+            WorkforceContextPackage,
+            WorkforceDelegationRequest,
+            WorkforcePerformanceRollup,
+            WorkforceTeam,
+        )
+
+        db.query(WorkforcePerformanceRollup).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceAssignment).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceContextPackage).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceDelegationRequest).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceTeam).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceAgentProfile).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+
         # --- Life Founder/User Memory (migration 0049, see docs/LIFE_FOUNDER_MEMORY.md):
         # founder_memory_notes has DELETE revoked from mainai_app outside this one narrow
         # SECURITY DEFINER function, same "deletion only through the authorized erasure path"

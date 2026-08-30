@@ -562,6 +562,16 @@ _MAINAI_EXECUTION_TABLES = (
     # append-only, same structural role as provider_spend_usage_events above -- deletion only
     # through erase_own_provider_disclosure_events().
     "provider_disclosure_events",
+    # Migration 0067 (MainAI Internal Workforce Foundation): owner-scoped organizational
+    # agent registry, delegation broker receipts, context packages, assignments, performance
+    # rollups. Ordinary mutable tables (baseline CRUD) — sit ABOVE coordination_agents (0046),
+    # never duplicate provider spend / envelopes / intelligence evidence.
+    "workforce_agent_profiles",
+    "workforce_teams",
+    "workforce_delegation_requests",
+    "workforce_context_packages",
+    "workforce_assignments",
+    "workforce_performance_rollups",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
