@@ -1,14 +1,22 @@
 # MainAI V1 Readiness
 
-**Completion-run status (Cursor, 2026-08-29):** Stages 0A–0E and Stages 1–4 are **MERGED**
-on `claude/det-kommer-mer-879lcm` (#196/#198/#199/#200/#201, #202, #203, #204, #205).
+**Completion-run status (2026-08-30):** Stages 0A–0E and Stages 1–5 are **MERGED** on
+`claude/det-kommer-mer-879lcm` (#196/#198/#199/#200/#201, #202, #203, #204, #205, #206).
 Evidence reports: `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`,
-`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`, plus the Stage 1–2 tests named in
-`docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
+`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`, `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`,
+plus the Stage 1–2 tests named in `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`. All
+independently reviewed post-merge (Claude PR comments on #205/#206) — #205's self-improvement
+run has one important caveat worth reading in the table below: it proved the mechanism safe
+end-to-end but ran against a disposable worktree mirror, not the real checkout, so MainAI's
+actual codebase did not change as a result.
 
-The body below is adapted from Claude's design-lane draft (PR #197) so the durable
-readiness matrix lives on tip. Path B execution-scope bridge code remains #197's
-implementation lane — this doc tracks readiness, not that code drop.
+The body below is adapted from Claude's design-lane draft (PR #197), refreshed to its
+2026-08-30 state so this landed copy is not a stale snapshot — includes four real bugs #197
+found and fixed during that same session's V1 blocker sweep (`run_driver()` mid-run-takeover
+crash, an `authorize_execution_scope()` TOCTOU race, an unbounded automatic-replan loop, and a
+real approval-gate bypass via `POST /api/mainai/jobs`), all `git stash`-negative-control
+verified. Path B execution-scope bridge code remains #197's implementation lane — this doc
+tracks readiness, not that code drop.
 
 ---
 
@@ -158,7 +166,7 @@ not been empirically checked) / **BLOCKED** (a real, open gap stands in the way)
 |---|---|---|---|---|
 | Goal intake | **PROVEN** | Two real HTTP routes (`POST /api/mainai/goals`, `WorkCandidate` authorization path) → `create_goal()`. See `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md`. | None. | — |
 | Task decomposition | **PROVEN, one bug fixed this session** | `POST /api/mainai/goals/{id}/plan` → `propose_plan_via_ai()` → `create_plan()`, real AI-driven multi-task creation. Fully atomic (single transaction, confirmed by direct trace — no reachable partial-decomposition state). Concurrent-decomposition race (unhandled `IntegrityError` on the loser) found, fixed (goal-row lock + `populate_existing=True`), and regression-tested this session (`test_two_genuinely_concurrent_create_plan_calls_for_the_same_goal_never_raise_unhandled_integrity_error`). | Confirm/add a max-task-count bound (Deliverable 2) — a nice-to-have, not urgent; no cancellation check inside decomposition itself (narrow exposure window, single synchronous request). | IMPORTANT POST-V1 for both remaining items; neither is a blocker. |
-| Authority derivation | **PROVEN, one real gap found and closed this session** | `authorize_execution_scope()`, `grant_task_approval()`, `authorize_provider_spend()` — all real founder-facing routes; AI can only narrow, never widen (verified via #166's plan-scope-narrowing and #190's prompt-injection regression). Path B (direct `POST /api/mainai/execution/goals`) previously had no route to create an execution-scope proposal at all (found via adversarial re-verification, `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md`'s gap #0) — **closed this session**: new founder-invoked bridge route (`POST /api/execution-envelopes/goals/{goal_id}/propose`), full production-shaped E2E proof plus 4 negative tests (`test_path_b_execution_scope_bridge.py`), and a related concurrent-proposal-creation race found and fixed in the same underlying function (`propose_execution_scope()`, `INSERT ... ON CONFLICT DO NOTHING`, two-thread regression test). | None. | — |
+| Authority derivation | **PROVEN, two real gaps found and closed this session** | `authorize_execution_scope()`, `grant_task_approval()`, `authorize_provider_spend()` — all real founder-facing routes; AI can only narrow, never widen (verified via #166's plan-scope-narrowing and #190's prompt-injection regression). Path B (direct `POST /api/mainai/execution/goals`) previously had no route to create an execution-scope proposal at all (found via adversarial re-verification, `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md`'s gap #0) — **closed this session**: new founder-invoked bridge route (`POST /api/execution-envelopes/goals/{goal_id}/propose`), full production-shaped E2E proof plus 4 negative tests (`test_path_b_execution_scope_bridge.py`), and a related concurrent-proposal-creation race found and fixed in the same underlying function (`propose_execution_scope()`, `INSERT ... ON CONFLICT DO NOTHING`, two-thread regression test). **Second gap, front-half V1 blocker sweep**: `require_task_approval()` was checked ONLY inside `dispatch_ready_task()` — the generic, founder-gated `POST /api/mainai/jobs` route calls `app.jobs.service.create_job()` directly with `job_type="task_execution"`, a real, live, entirely separate door to a durable `mainai_jobs` row that never called `dispatch_ready_task()` and therefore never checked approval at all. Closed: `_validate_task_execution_input_refs()` (the ONE check that door's own call path gets) now also calls `require_task_approval()`, raising `InvalidInputRefsError` if unapproved — three-check verified (`git stash` confirms the pre-fix call succeeds silently with zero approval check; post-fix it's refused). | None. | — |
 | Planning | **PROVEN** | `plan_with_provider()`/`plan_founder_request()`, real, extensively tested this session (#181, #196). | None for V1 scope. | — |
 | Provider use | **PROVEN, with 2 tracked follow-ups** | Reservation/settlement/spend-authorization chain real and tested (#178-181, #196). | #182 Window B core closed (#196, this session); one non-blocking completeness note (`provider_request_may_have_left` never set by real adapters, conservative-safe default). | IMPORTANT POST-V1 (the completeness note); not a blocker. |
 | Execution | **PROVEN** | `run_driver()`/Operator capability chain, extensively tested (#183-186, #191, #192). Phase 3 (`_require_context()` freshness) closed via #199, independently verified this session. | None. | — |
@@ -167,22 +175,42 @@ not been empirically checked) / **BLOCKED** (a real, open gap stands in the way)
 | Dependency progression | **PROVEN** | `_detect_cycle()`, `recompute_task_readiness()` (6 real callers). | None for V1 scope. | — |
 | Provider-spend truth | **PROVEN** | Reservation/settlement/ledger chain, real two-thread concurrency tests (#178, #180, #196). | #182 Window B follow-up (concurrent-first-call edge, already tracked on #196's thread). | IMPORTANT POST-V1. |
 | Egress/Vault | **PARTIAL** | V1-V3 closed (real default-deny gate + ledger), V4 mostly closed. V5 (classification schema), V8 (provenance linkage) have implementation-ready decisions now (`docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md` + its Deliverable-7 addendum) but no schema built yet. | V5/V8 schema implementation — explicitly NOT required for MainAI V1's execution-autonomy scope (Vault classification governs external-provider disclosure of Life Vault content, a mostly-separate concern from the autonomous-development-loop V1 is about) — do not let this block V1 unless the founder wants it bundled. | OPTIONAL for V1 proper; IMPORTANT for the broader Life Vault initiative on its own timeline. |
-| Restart recovery | **PARTIAL** | Recovery-authority chain proven for crash/takeover cases (#165, #177, #183, #191). Full process/session-boundary restart (Phase 5) not yet proven — #195 only proved the Python-object boundary. | Phase 5 (restart-soak v3) — queued, in progress. | BLOCKER until Phase 5 merges. |
-| Lease takeover | **PROVEN** | `claim_supervisor_goal_lease()`, real two-thread concurrency test (#179), second-worker scope-narrowing proven (#191). | None. | — |
-| Cancellation | **PARTIAL** | Cancel-after-ACCEPT, cancel-after-verify, cancel-vs-finalize all proven with real (if #194's sequenced-not-simultaneous caveat noted) tests (#192-194). Mid-decomposition cancellation traced this session: confirmed genuinely absent (`MainAIGoal` has no `cancel_requested` field; `create_plan()` never checks one) — but the exposure window is a single synchronous HTTP request, not a multi-tick loop. | Strengthen #194 to genuine unscheduled concurrency (Phase 4, queued). Mid-decomposition cancellation check is a real gap but narrow-window. | BLOCKER until Phase 4 merges; mid-decomposition cancellation downgraded to IMPORTANT POST-V1 (confirmed real but narrow, not urgent). |
+| Restart recovery | **PROVEN** | Restart-soak v3 (Phase 5) merged and independently verified this session (#201) — genuine NEW session + NEW Worker process boundary, not just the Python-object boundary #195 proved. | None. | — |
+| Lease takeover | **PROVEN, hardened further this session** | `claim_supervisor_goal_lease()`, real two-thread concurrency test (#179), second-worker scope-narrowing proven (#191). Stage 2 (#203, merged) added real `supervisor_goal_leases` expiry → reclaim → zero-FS-effect → goal-continuation proof. This session additionally found and closed a real observability gap: `run_driver()` previously crashed uncaught on a mid-run authority transition instead of a clean `DriverResult` — fixed via `OperatorAuthorityTransitionError` + a `STALE_AUTHORITY` classification, with an empirical proof that the winning worker's next tick resumes cleanly from checkpoint. Also found and closed a genuine first-governance TOCTOU race in `authorize_execution_scope()` (docstring claimed a goal-row lock the code never took) — see the branch registry's own entry on PR #197 for both fixes' full detail. | None outstanding from this pass. | — |
+| Cancellation | **PROVEN** | Cancel-after-ACCEPT, cancel-after-verify, cancel-vs-finalize all proven; Phase 4 (#200, merged) closed the genuine unscheduled-concurrency gap #194 left open (40-trial real-race regression). Mid-decomposition cancellation remains a real but narrow-window gap (single synchronous HTTP request, not a multi-tick loop). | Mid-decomposition cancellation check — still open, still narrow. | IMPORTANT POST-V1 (confirmed real but narrow, not urgent). |
 | Finalization | **PROVEN** | Canonical `record_final_report` chain (#168, #193), idempotent, respects prior cancellation. | None. | — |
 | Idle/stopping | **PROVEN** | Confirmed via #187's/#195's "later tick does nothing" checks — genuine re-invocation, not stale-state assertion. | None. | — |
 | Observability/audit | **PROVEN** | Checkpoints, `WorkTraceEvent`, `ProviderSpendUsageEvent`, `mainai_recovery_events`, `provider_disclosure_events` all real and append-only/RLS-protected. | None for V1 scope. | — |
-| Self-improvement safety | **PROVEN (bounded)** | Contract in `docs/MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md`. First bounded run proven via Worker→Supervisor in #205 (`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`) under a narrow test-file envelope with `remote_write_authorized=False`. | Founder review before any production-checkout apply; Path B code drop remains Claude #197. | IMPORTANT POST-V1 for production-checkout apply / Path B merge. |
+| Self-improvement safety | **PROVEN, mechanism-only — see caveat** | First bounded run executed and merged (#205, "Stage 4"): real Worker→Supervisor spine, narrow envelope (`authorized_paths` = one test file, no `delete_file`/commit/push capabilities), `remote_write_authorized=False` asserted, independently reviewed post-merge (Claude, PR #205 comment). | **Important caveat, not a blocker, but must not be misread**: the run edited a disposable worktree mirror seeded to match production, NOT the real checkout — production `backend/tests/backend/mainai/test_egress_policy.py` is unchanged by this run. This PROVES the mechanism is safe end-to-end; it does NOT mean MainAI's real codebase actually improved yet. Applying the same diff to production remains a separate, still-open action. See `docs/MAINAI_INSPECTABLE_MEMORY_CONTRACT.md` for why this is exactly the SAID-vs-VERIFIED distinction that document exists to make explicit. | — (mechanism proven; whether/when to run milestone 2 against a real checkout is a founder decision, not a V1 gap). |
 
 ### V1 blocker summary (the short version)
 
-**Correction-pass Phases 1–5 and Cursor V1 completion Stages 1–4 are MERGED** on tip
-(#196/#198/#199/#200/#201, #202, #203, #204, #205). Remaining Cursor Stage 5 (Path A intake
-proof) and Stage 6 (this readiness landing) close the completion-run tracker. Path B
-execution-scope bridge implementation remains Claude PR #197.
+**Correction-pass Phases 1-5 all closed and independently verified**: #196/#198/#199/#200/#201.
+Stage 1-3 of the MAINAI V1 COMPLETION RUN (Cursor) also merged: #202 (gap/repair live loop),
+#203 (Stage 2 lease-expiry takeover), #204 (Stage 3 long-run soak). Task-decomposition
+idempotency/crash-recovery/Path-B-authority questions flagged in Deliverable 2 are all resolved
+(concurrent-decomposition race fixed, atomicity confirmed, Path B bridge built and proven).
+This session additionally found and closed four further real gaps beyond what any Cursor
+Stage PR covered: the `run_driver()` mid-run-takeover crash (`OperatorAuthorityTransitionError`),
+the `authorize_execution_scope()` first-governance TOCTOU race, an unbounded automatic
+replan loop (`MAX_AUTO_REPLANS`), and a real approval-gate bypass (`POST /api/mainai/jobs`
+could dispatch an approval-required task with zero approval check, via a second door
+`dispatch_ready_task()`'s own gate never covered) — all empirically proven via `git stash`
+negative controls, see PR #197. Stage 4 (#205, first bounded self-improvement) and Stage 5 (#206, Path A goal
+intake) have also since merged and been independently reviewed (Claude, both PR comments) —
+**no open code blockers remain for V1's execution-autonomy scope.** The one item worth a
+founder decision, not a code gap: #205 proved the self-improvement mechanism is safe but did
+not actually change MainAI's real codebase (disposable-mirror caveat, table above) — whether a
+milestone-2 run against the real checkout happens next is a founder call, not something this
+readiness matrix blocks on.
 
 **Not blockers, explicitly scoped out of V1**: Vault V5/V8 schema implementation (separate
 initiative, its own timeline), the `multiplication_repair` recipe's narrowness (cost
 optimization only), the provider-adapter `provider_request_may_have_left` completeness gap
-(conservative-safe already).
+(conservative-safe already), and a new, founder-defined Personal Intent & Executive Reasoning
+/ Long-Horizon Planning / Memory Truth workstream (three companion architecture docs, not yet
+landed on this tip — see PR #197's own Part D for the full V1/V1.1/V2 classification once
+those docs merge). One piece of it, the memory-truth invariant (SAID != STORED != PLANNED !=
+IMPLEMENTED != VERIFIED), is called out there as required now regardless of V1/V1.1/V2
+sequencing for the rest.
+
