@@ -17,7 +17,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 | `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Mergad** | T8–T20 ops (0068). |
 | `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness, first team, staff loop. |
 | `cursor/workforce-registry-post-232` | [#233](https://github.com/d1n095/LifeAI/pull/233) | **Öppen** (docs) | Registry mark #230–#232 merged. |
-| `cursor/mainai-workforce-activation-prep` | (öppnas) | **Öppen** från tip | ActivationGateSet fail-closed, startup readiness levels, first low-risk delegation scenario, department evidence ledger. **Ingen ny migration.** |
+| `cursor/mainai-workforce-activation-prep` | [#234](https://github.com/d1n095/LifeAI/pull/234) | **Öppen** från tip | ActivationGateSet fail-closed, startup readiness levels, first low-risk delegation scenario, department evidence ledger. **Ingen ny migration.** |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
