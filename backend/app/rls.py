@@ -572,6 +572,11 @@ _MAINAI_EXECUTION_TABLES = (
     "workforce_context_packages",
     "workforce_assignments",
     "workforce_performance_rollups",
+    # Migration 0068 (Workforce ops): checkpoints, lifecycle, cost budgets, verification decisions.
+    "workforce_assignment_checkpoints",
+    "workforce_lifecycle_events",
+    "workforce_cost_budgets",
+    "workforce_verification_decisions",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})

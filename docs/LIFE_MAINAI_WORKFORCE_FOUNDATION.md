@@ -52,14 +52,17 @@ This foundation adds an **owner-scoped organizational layer** above those primit
 | Trust zones | **IMPLEMENTED** (string field + classify) |
 | Performance rollup ledger | **IMPLEMENTED** |
 | Explainable selector | **IMPLEMENTED** (evidence-based scoring) |
-| Team formation (no shared auto-context) | **IMPLEMENTED** (schema + `form_team`) |
+| Team formation (no shared auto-context) | **IMPLEMENTED** (schema + `form_team` / patterns) |
 | Inspectable org snapshot | **IMPLEMENTED** (`organization_snapshot`) |
 | Injection scrubbing of authority keys | **IMPLEMENTED** (structural scrub) |
+| Failure/takeover/checkpoints (T13) | **IMPLEMENTED** (0068 + `workforce.failure`) |
+| Verification policy pipeline (T14) | **IMPLEMENTED** (`workforce.verification`) |
+| Cost budgets org ceilings (T16) | **IMPLEMENTED** (gates; real spend still `provider_spend`) |
+| Hiring/learning lifecycle (T9/T10) | **IMPLEMENTED** (`workforce.lifecycle`; `trained` only for fine_tune) |
+| Low-risk vertical slice dry-run (T19) | **IMPLEMENTED** in-process; **provider activate blocked** |
 | Wire to live provider / CLI adapter execution | **NOT IMPLEMENTED** (waits verified safety gates) |
-| Full hiring lifecycle automation | **SCHEMA/STATUS only** |
-| Agent learning / fine-tune pipeline | **NOT IMPLEMENTED** |
 | Founder UI | **NOT IMPLEMENTED** (backend snapshot only) |
-| Consequential vertical slice with real model call | **NOT YET** — safe in-process slice in tests |
+| Consequential vertical slice with real model call | **NOT YET** — refused until gates verified |
 
 ## FIRST TEAM (logical, not fake runtime)
 
@@ -76,4 +79,6 @@ and merged.
 
 ## MIGRATION
 
-`0067_workforce_foundation.py` — six owner-scoped RLS tables.
+`0067_workforce_foundation.py` — six owner-scoped RLS tables (registry/broker/context/…).
+`0068_workforce_ops.py` — checkpoints, lifecycle events, cost budgets, verification decisions +
+assignment failure/takeover columns.
