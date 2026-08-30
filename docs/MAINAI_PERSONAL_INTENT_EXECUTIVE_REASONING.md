@@ -59,40 +59,56 @@ or "the other auth thing", nothing today resolves WHICH entity "there"/"the othe
 refers to. That's a reference-resolution problem, not an intent-classification problem — a
 genuinely new capability.
 
-### 1.2 New durable record: `ConversationalInterpretationProposal`
+### 1.2 IMPLEMENTED (2026-08-30): extends `CandidateLearningSignal`, not a new table
 
-Same shape as `app.project_entities.InterpretationProposal` (do not invent a new pattern —
-literally reuse the model, add one nullable source column):
+**Design correction, recorded here so this document stays accurate** (see
+`docs/MAINAI_INSPECTABLE_MEMORY_CONTRACT.md`'s own memory-truth invariant — a doc describing a
+design that was superseded during implementation is exactly the kind of SAID-vs-IMPLEMENTED
+drift that invariant exists to prevent): the original sketch below proposed a new
+`conversational_interpretation_proposals` table mirroring `app.project_entities.
+InterpretationProposal`. Re-reading the actual schema before building anything showed
+`app.founder_memory_signals.CandidateLearningSignal` (migration 0053) already carries nearly
+every column that sketch needed — `source_message_id` (already a bare FK to `messages.id`,
+already live-wired into `app/routers/chat.py`), `classifier_strategy`/`classifier_confidence`/
+`classifier_reasoning`, `status`, `provenance`, the whole `record_candidate_signal()` →
+`promote_candidate_signal()` staging discipline. A parallel table would have duplicated all of
+that for no real benefit. **Implemented instead**: migration 0064 adds three nullable columns
+to the existing table —
 
 ```python
-class ConversationalInterpretationProposal(Base):
-    __tablename__ = "conversational_interpretation_proposals"
-    id: UUID
-    owner_id: UUID
-    source_message_id: UUID | None      # FK -> messages.id, when resolvable to one turn
-    source_signal_id: UUID | None       # FK -> candidate_learning_signals.id, when this
-                                         # proposal is itself downstream of a staged signal
-    raw_expression: Text                 # verbatim substring/turn -- never paraphrased
-    resolved_entity_type: str            # closed vocabulary: project_entity | mainai_goal |
-                                          # mainai_task | founder_memory_note | unknown
-    resolved_entity_id: UUID | None      # null while unresolved / NEEDS_CLARIFICATION
-    classifier_strategy: str
-    classifier_confidence: str           # matches project_entities' vocabulary exactly
-    classifier_reasoning: Text
-    status: str                          # unreviewed | promoted | dismissed | superseded
-    dismissed_reason: Text | None
-    promoted_at: datetime | None
-    corrects_proposal_id: UUID | None    # self-FK: THIS resolution corrects an earlier wrong
-                                          # one -- the correction is a NEW row, the old row's
-                                          # own content is never rewritten (same doctrine as
-                                          # founder_memory_notes.supersedes_note_id)
-    provenance: JSONB
-    created_at: datetime
+resolved_entity_type: str | None      # loose string for now, not yet validated against
+                                       # app.active_context.service.SUPPORTED_TYPES' closed
+                                       # registry (a reasonable follow-up once real resolver
+                                       # usage exists to validate against)
+resolved_entity_id: uuid.UUID | None
+resolution_reasoning: str | None
 ```
 
-`raw_expression` vs `resolved_entity_id` is the concrete instantiation of the founder's own
+plus one new service function, `app.founder_memory_signals.resolve_candidate_signal_entity()`
+— same precondition as `dismiss_candidate_signal()`/`promote_candidate_signal()` (signal must
+still be `unreviewed`), same epistemic status as `classifier_confidence` (a resolver's own
+guess, never a truth claim on its own — `promote_candidate_signal()`, unchanged, remains the
+only path to real founder knowledge). Tests: `tests/backend/mainai/
+test_candidate_learning_signals.py`. No `corrects_proposal_id`/self-correction-chain field was
+added (a genuine scope cut, not an oversight) — a wrong resolution is corrected today via
+`dismiss_candidate_signal()` on the wrong signal plus a fresh one, matching how this table
+already handles every other "this was wrong" case; a dedicated correction chain can be added
+later if that proves insufficient in practice.
+
+`raw_expression` (already `CandidateLearningSignal`'s own message-derived content, via
+`source_message_id`) vs `resolved_entity_id` is the concrete instantiation of the founder's own
 "RAW EXPRESSION → INTERPRETED INTENT → REFERENCED ENTITY" split — never collapsed into one
 field, exactly matching `founder_memory_notes.content` (immutable) vs the entity it's ABOUT.
+
+**Original sketch, superseded, kept only for the reasoning trail below (§1.3's resolution flow
+still applies, just producing `resolve_candidate_signal_entity()` calls instead of a new
+table's rows):**
+
+```python
+class ConversationalInterpretationProposal(Base):  # NOT BUILT -- see above
+    __tablename__ = "conversational_interpretation_proposals"
+    ...  # superseded by CandidateLearningSignal + migration 0064, see above
+```
 
 ### 1.3 Resolution flow
 
@@ -124,28 +140,27 @@ chat turn arrives
 
 ### 1.4 Promotion — the ONLY path to acting on a resolved reference
 
-```python
-def promote_conversational_interpretation(
-    db, *, owner_id, proposal_id, confirmed_by, confirmed_entity_id=None,
-) -> ConversationalInterpretationProposal:
-    """Mirrors project_entities.promote_interpretation_proposal() exactly. confirmed_by is
-    ALWAYS the caller's own explicit assertion -- never the classifier's own confidence,
-    same invariant founder_memory_signals already proves in
-    test_promoting_a_signal_requires_the_callers_own_explicit_authority_never_the_classifiers_
-    confidence. confirmed_entity_id, if supplied, OVERRIDES resolved_entity_id -- this is how
-    a founder correction ("no, I meant the OTHER auth thing") gets recorded: not by mutating
-    the wrong proposal's own resolved_entity_id in place, but by promoting with a different
-    id and letting the wrong proposal's status become superseded via corrects_proposal_id
-    on the new row."""
-```
+**IMPLEMENTED (2026-08-30), unchanged from what already existed**: `resolve_candidate_signal_
+entity()` (§1.2) only records the resolver's own guess — it never itself acts on it.
+`app.founder_memory_signals.promote_candidate_signal()` (already built, migration 0053, no
+change needed for this) remains the ONLY path to real founder knowledge, and already requires
+the caller's own explicit `authority`/`basis` — never the signal's own `classifier_confidence`
+copied in, proven by the existing `test_promoting_a_signal_requires_the_callers_own_explicit_
+authority_never_the_classifiers_confidence`. A caller that wants to act on a RESOLVED entity
+simply reads `signal.resolved_entity_id` as context when constructing the `content` it passes
+to `promote_candidate_signal()` — no separate promotion function was needed. A wrong
+resolution is corrected via `dismiss_candidate_signal()` on the mis-resolved signal plus a
+fresh `record_candidate_signal()` + `resolve_candidate_signal_entity()` pair, not a mutation in
+place — matching every other "this was wrong" case this table already handles.
 
-`confirmed_by` in practice is one of: a founder's explicit chat reply ("yes, that one"), OR
-(for low-ambiguity, reversible, PLANNING-only actions — never a consequential effect) MainAI's
-own executive-reasoning layer proceeding on its best resolution while flagging it, per §4
-(Self-Correction) below. The distinction is drawn exactly where `execution_envelopes` draws it
-elsewhere in this codebase: resolving a reference to inform PLANNING costs nothing to get
-wrong and can proceed on inference; resolving a reference that gates a CONSEQUENTIAL EFFECT
-(which file to edit, which task to authorize) must be confirmed before that effect, per §6.
+`confirmed_by` (i.e. the caller of `promote_candidate_signal()`) in practice is one of: a
+founder's explicit chat reply ("yes, that one"), OR (for low-ambiguity, reversible,
+PLANNING-only actions — never a consequential effect) MainAI's own executive-reasoning layer
+proceeding on its best resolution while flagging it, per §4 (Self-Correction) below. The
+distinction is drawn exactly where `execution_envelopes` draws it elsewhere in this codebase:
+resolving a reference to inform PLANNING costs nothing to get wrong and can proceed on
+inference; resolving a reference that gates a CONSEQUENTIAL EFFECT (which file to edit, which
+task to authorize) must be confirmed before that effect, per §6.
 
 ### 1.5 What this section explicitly does NOT do
 
@@ -427,11 +442,16 @@ tracks — these are read-only compositions of already-shipped, already-tested p
   genuinely separate capability axis.
 
 **V1.1 — important, high-value, low-risk, ship soon after V1:**
-- §1 (`ConversationalInterpretationProposal` + resolution flow) — directly reduces founder
-  friction, reuses `project_entities`' proven pattern verbatim, no new authority surface.
+- **DONE (2026-08-30)** — §1 entity-resolution capability: migration 0064 + `resolve_
+  candidate_signal_entity()`, extending `CandidateLearningSignal` rather than the
+  `ConversationalInterpretationProposal` table originally sketched here (§1.2 records the
+  design correction). No live wiring into `app/routers/chat.py` yet — data + service layer
+  only, matching this codebase's own established "foundation first" pattern (same shape as
+  `founder_memory_signals` itself when it first shipped).
 - §5 (conversational lesson recording) — one new caller into an already-fully-built system.
-- §2.3's `WorkCandidate.priority` vocabulary widening (a CHECK constraint change) — cheap,
-  additive, unblocks §2's orchestration without requiring §2's full scan logic yet.
+  Not yet started.
+- **DONE (2026-08-30)** — §2.3's `WorkCandidate.priority` vocabulary widening: migration 0063,
+  additive CHECK-constraint change.
 
 **V2 — advanced, higher build cost, sequence after V1.1 lands and is used for a while:**
 - §2's full executive look-around orchestrator (real integration work across three

@@ -18,6 +18,7 @@ from app.founder_memory_signals import (
     list_unreviewed_candidate_signals,
     promote_candidate_signal,
     record_candidate_signal,
+    resolve_candidate_signal_entity,
 )
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.user import User
@@ -116,6 +117,93 @@ def test_a_low_confidence_signal_can_still_be_promoted_with_high_authority_and_v
     )
     superuser_db.commit()
     assert note.authority == "founder"
+
+
+# ---------------------------------------------------------------- entity resolution (migration 0064)
+
+
+def test_resolve_candidate_signal_entity_sets_the_resolution_fields(superuser_db):
+    """docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md §1.3: a resolver's own guess about
+    which existing entity an indirect reference ("that", "the other thing") points at -- never
+    a truth claim, same epistemic status as classifier_confidence."""
+    owner, message = _owner_with_message(superuser_db, content="gör samma på den andra grejen")
+    superuser_db.commit()
+    signal = record_candidate_signal(
+        superuser_db, owner_id=owner.id, signal_kind="idea_candidate", idempotency_key="resolve-1",
+        source_message_id=message.id, classifier_confidence="medium",
+    )
+    superuser_db.commit()
+
+    entity_id = uuid.uuid4()
+    resolved = resolve_candidate_signal_entity(
+        superuser_db, owner_id=owner.id, signal_id=signal.id, resolved_entity_type="mainai_task",
+        resolved_entity_id=entity_id, resolution_reasoning="Most recently discussed task in this thread.",
+    )
+    superuser_db.commit()
+
+    assert resolved.resolved_entity_type == "mainai_task"
+    assert resolved.resolved_entity_id == entity_id
+    assert resolved.resolution_reasoning == "Most recently discussed task in this thread."
+    # Resolution alone is not a truth claim -- the signal stays unreviewed until a real
+    # promote/dismiss decision, exactly like an unresolved signal would.
+    assert resolved.status == "unreviewed"
+
+
+def test_resolve_candidate_signal_entity_rejects_an_already_reviewed_signal(superuser_db):
+    owner, message = _owner_with_message(superuser_db)
+    superuser_db.commit()
+    signal = record_candidate_signal(
+        superuser_db, owner_id=owner.id, signal_kind="idea_candidate", idempotency_key="resolve-reviewed",
+        source_message_id=message.id,
+    )
+    superuser_db.commit()
+    dismiss_candidate_signal(superuser_db, owner_id=owner.id, signal_id=signal.id, reason="noise")
+    superuser_db.commit()
+
+    with pytest.raises(CandidateLearningSignalError):
+        resolve_candidate_signal_entity(
+            superuser_db, owner_id=owner.id, signal_id=signal.id, resolved_entity_type="mainai_task",
+            resolved_entity_id=uuid.uuid4(),
+        )
+
+
+def test_resolve_candidate_signal_entity_rejects_a_signal_belonging_to_another_owner(superuser_db):
+    owner, message = _owner_with_message(superuser_db)
+    other_owner, _other_message = _owner_with_message(superuser_db)
+    superuser_db.commit()
+    signal = record_candidate_signal(
+        superuser_db, owner_id=owner.id, signal_kind="idea_candidate", idempotency_key="resolve-cross-owner",
+        source_message_id=message.id,
+    )
+    superuser_db.commit()
+
+    with pytest.raises(CandidateLearningSignalError):
+        resolve_candidate_signal_entity(
+            superuser_db, owner_id=other_owner.id, signal_id=signal.id, resolved_entity_type="mainai_task",
+            resolved_entity_id=uuid.uuid4(),
+        )
+
+
+def test_resolving_an_entity_never_promotes_the_signal_or_touches_founder_memory(superuser_db):
+    """Resolution is metadata a later, deliberate promote_candidate_signal() call may use as
+    context -- it must never itself create a FounderMemoryNote or flip status to promoted."""
+    owner, message = _owner_with_message(superuser_db)
+    superuser_db.commit()
+    signal = record_candidate_signal(
+        superuser_db, owner_id=owner.id, signal_kind="idea_candidate", idempotency_key="resolve-no-promote",
+        source_message_id=message.id,
+    )
+    superuser_db.commit()
+
+    resolve_candidate_signal_entity(
+        superuser_db, owner_id=owner.id, signal_id=signal.id, resolved_entity_type="mainai_task",
+        resolved_entity_id=uuid.uuid4(),
+    )
+    superuser_db.commit()
+
+    fetched = get_candidate_signal(superuser_db, owner_id=owner.id, signal_id=signal.id)
+    assert fetched.status == "unreviewed"
+    assert fetched.promoted_to_note_id is None
 
 
 def test_cannot_promote_an_already_reviewed_signal_twice(superuser_db):
