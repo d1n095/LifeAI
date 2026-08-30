@@ -370,25 +370,32 @@ FUTURE_PLAN_CHECK loop is, per §0, already fully built for verification-failure
 The only real gap: `lessons.py`'s `record_lesson()` currently has no conversational entry
 point — "we forgot X" / "why didn't you think of Y" said in chat never reaches it today.
 
-**Fix: a new, narrow caller, not a new table.** A confirmed founder correction (§3.3) whose
-content matches a "missed thing" shape (a `FounderMemoryNote` with `note_type="correction"`
-where the correction identifies an omission, not a factual error) becomes a `record_lesson()`
-call with:
-- `problem` = the raw miss, verbatim
-- `root_cause` = MainAI's own analysis (never auto-generalized without this field — matches
-  `EngineeringLesson`'s existing required-column shape)
-- `applies_to` = tags derived from §2's own relevance-scan machinery (the SAME
-  active_context/entity-type tagging §2.2 step 1 already computes) — this is what prevents
-  overgeneralizing a one-off: `applies_to` stays as narrow as the actual affected-component
-  set the scan found, never widened to "everything" by default
-- `source_type`/`source_ref` = the `FounderMemoryNote`'s own id — full provenance chain
+**IMPLEMENTED (2026-08-30): a new, narrow caller, not a new table.**
+`app.mainai_execution.lessons.record_lesson_from_founder_correction()` takes an already-
+confirmed `FounderMemoryNote` (`note_type="correction"`, caller-supplied — this function never
+classifies or re-derives that) and calls `record_lesson()` (existing, unchanged) with:
+- `problem` = `note.content`, quoted verbatim, never paraphrased (matches
+  `founder_memory_notes.content`'s own immutability)
+- `root_cause`/`fix`/`general_rule`/`applies_to`/`affected_component` = the caller's own
+  required, explicit judgment — never auto-generalized from the raw correction text (this is
+  what prevents overgeneralizing a one-off, matching `record_lesson()`'s own existing
+  required-column shape verbatim; §2's future executive scan is the intended eventual source
+  of `applies_to` tags, not built yet — the caller supplies them directly today)
+- `source_type="founder_correction"`, `source_ref=str(note.id)`, `evidence="founder_memory_
+  notes:{note.id}"` — full provenance chain back to the exact note
+- `first_seen_at=note.observed_at` — taken from the note, not re-timestamped
+
+Rejects (`ValueError`) if the supplied note's own `note_type` isn't `"correction"` — fails
+closed rather than silently accepting a preference/goal/observation note as if it were a miss.
+Tests: `tests/backend/test_mainai_lesson_from_founder_correction.py`.
 
 `lookup_lessons()`/`apply_lessons_to_verification_plan()` (existing, unchanged) then retrieve
-this exactly as they would any other lesson — §2's own history scan (step 2) already calls
-`lookup_lessons()`, so a conversationally-sourced lesson is automatically included in future
-executive scans with zero additional retrieval code. `lesson_conflicts.py`'s existing
-contradiction detection applies unchanged, closing the founder's own "avoid overgeneralizing"
-requirement for free.
+this exactly as they would any other lesson — proven directly (`lookup_lessons(applies_to_any=
+[...])` finds the new lesson in the same test). §2's own future history scan (step 2) already
+calls `lookup_lessons()`, so a conversationally-sourced lesson will be automatically included
+in future executive scans with zero additional retrieval code once §2 itself is built.
+`lesson_conflicts.py`'s existing contradiction detection applies unchanged, closing the
+founder's own "avoid overgeneralizing" requirement for free.
 
 ---
 
@@ -448,8 +455,9 @@ tracks — these are read-only compositions of already-shipped, already-tested p
   design correction). No live wiring into `app/routers/chat.py` yet — data + service layer
   only, matching this codebase's own established "foundation first" pattern (same shape as
   `founder_memory_signals` itself when it first shipped).
-- §5 (conversational lesson recording) — one new caller into an already-fully-built system.
-  Not yet started.
+- **DONE (2026-08-30)** — §5 conversational lesson recording:
+  `record_lesson_from_founder_correction()`, one new caller into the already-fully-built
+  `EngineeringLesson` system, no schema change.
 - **DONE (2026-08-30)** — §2.3's `WorkCandidate.priority` vocabulary widening: migration 0063,
   additive CHECK-constraint change.
 

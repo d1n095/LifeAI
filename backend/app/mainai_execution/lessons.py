@@ -64,6 +64,69 @@ def record_lesson(
     return lesson
 
 
+def record_lesson_from_founder_correction(
+    db: Session,
+    *,
+    note,
+    root_cause: str,
+    affected_component: str,
+    general_rule: str,
+    applies_to: list[str],
+    created_by: str,
+    fix: str,
+    severity=None,
+    regression_test: str | None = None,
+    confidence: EngineeringLessonConfidence = EngineeringLessonConfidence.likely,
+) -> EngineeringLesson:
+    """docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md §5 (missed-thing learning): "we forgot
+    X" / "why didn't you think of Y" is a real, structured lesson source, not just a
+    conversational remark to log and discard. Turns a confirmed `FounderMemoryNote`
+    (`note_type="correction"`) into a real `EngineeringLesson`, reusing `record_lesson()`
+    completely unchanged -- no new table, no schema change. `note` is a real, already-durable
+    `app.founder_memory.FounderMemoryNote` row (owner-scoped) the CALLER already fetched and
+    confirmed is a correction; this function never re-derives or re-classifies it, and never
+    reads founder_memory_notes itself (kept as a plain, untyped parameter specifically to avoid
+    a module-level app.mainai_execution -> app.founder_memory import, matching this codebase's
+    established "local import, no hard cross-module dependency" convention elsewhere).
+
+    `EngineeringLesson` is deliberately founder-wide, not owner-scoped (see this module's own
+    docstring) -- a reasoning lesson generalizes the same way a code lesson already does; this
+    crosses the RLS boundary the same, already-established way `record_lesson()` always has for
+    every other caller, not a new exception carved out for this one.
+
+    `problem`/`evidence`/`first_seen_at` are taken FROM the note (never re-typed by the caller,
+    matching `founder_memory_notes.content`'s own immutability -- the lesson's own `problem`
+    field is a durable quote of what the founder actually said, not a paraphrase). `root_cause`/
+    `fix`/`general_rule`/`applies_to`/`affected_component` remain the caller's own required,
+    explicit judgment -- reusing record_lesson()'s own "never auto-generalized" discipline
+    verbatim; a MISS becomes a LESSON only via a deliberate act that names what actually went
+    wrong and how narrowly it applies, never automatically from the raw correction text alone
+    (this is what keeps `applies_to` narrow enough to avoid overgeneralizing a one-off, exactly
+    as the founder's own spec requires)."""
+    if getattr(note, "note_type", None) != "correction":
+        raise ValueError(f"record_lesson_from_founder_correction requires a note_type='correction' note, got {getattr(note, 'note_type', None)!r}")
+
+    from app.models.mainai_execution import EngineeringLessonSeverity
+
+    return record_lesson(
+        db,
+        problem=note.content,
+        root_cause=root_cause,
+        affected_component=affected_component,
+        severity=severity or EngineeringLessonSeverity.medium,
+        evidence=f"founder_memory_notes:{note.id}",
+        fix=fix,
+        general_rule=general_rule,
+        applies_to=applies_to,
+        source_type="founder_correction",
+        source_ref=str(note.id),
+        created_by=created_by,
+        first_seen_at=note.observed_at,
+        regression_test=regression_test,
+        confidence=confidence,
+    )
+
+
 def lookup_lessons(db: Session, *, applies_to_any: list[str]) -> list[EngineeringLesson]:
     """Active lessons tagged with ANY of `applies_to_any` — uses the GIN-indexed jsonb `?|`
     "any array element matches" operator (migration 0032's own ix_engineering_lessons_applies_to
