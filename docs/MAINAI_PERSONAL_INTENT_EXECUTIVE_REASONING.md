@@ -72,9 +72,9 @@ every column that sketch needed — `source_message_id` (already a bare FK to `m
 already live-wired into `app/routers/chat.py`), `classifier_strategy`/`classifier_confidence`/
 `classifier_reasoning`, `status`, `provenance`, the whole `record_candidate_signal()` →
 `promote_candidate_signal()` staging discipline. A parallel table would have duplicated all of
-that for no real benefit. **Implemented instead**: migration 0065 (renumbered from 0064 after
-PR #209 landed Alembic revision 0063 on the integration tip first — see
-docs/BRANCH_REGISTRY.md) adds three nullable columns
+that for no real benefit. **Implemented instead**: migration 0066 (renumbered twice — first
+0063→0064, then 0064→0065→0066 after #209 and #210 both landed Alembic revisions ahead of
+this branch on the integration tip — see docs/BRANCH_REGISTRY.md) adds three nullable columns
 to the existing table —
 
 ```python
@@ -109,7 +109,7 @@ table's rows):**
 ```python
 class ConversationalInterpretationProposal(Base):  # NOT BUILT -- see above
     __tablename__ = "conversational_interpretation_proposals"
-    ...  # superseded by CandidateLearningSignal + migration 0065, see above
+    ...  # superseded by CandidateLearningSignal + migration 0066, see above
 ```
 
 ### 1.3 Resolution flow
@@ -451,9 +451,9 @@ tracks — these are read-only compositions of already-shipped, already-tested p
   genuinely separate capability axis.
 
 **V1.1 — important, high-value, low-risk, ship soon after V1:**
-- **DONE (2026-08-30)** — §1 entity-resolution capability: migration 0065 (renumbered from
-  0064 — PR #209 landed its own Alembic 0063 on tip first) + `resolve_
-  candidate_signal_entity()`, extending `CandidateLearningSignal` rather than the
+- **DONE (2026-08-30)** — §1 entity-resolution capability: migration 0066 (renumbered twice,
+  0064→0065→0066 — #209 and #210 both landed their own Alembic revisions on tip first) +
+  `resolve_candidate_signal_entity()`, extending `CandidateLearningSignal` rather than the
   `ConversationalInterpretationProposal` table originally sketched here (§1.2 records the
   design correction). No live wiring into `app/routers/chat.py` yet — data + service layer
   only, matching this codebase's own established "foundation first" pattern (same shape as
@@ -461,8 +461,8 @@ tracks — these are read-only compositions of already-shipped, already-tested p
 - **DONE (2026-08-30)** — §5 conversational lesson recording:
   `record_lesson_from_founder_correction()`, one new caller into the already-fully-built
   `EngineeringLesson` system, no schema change.
-- **DONE (2026-08-30)** — §2.3's `WorkCandidate.priority` vocabulary widening: migration 0064
-  (renumbered from 0063), additive CHECK-constraint change.
+- **DONE (2026-08-30)** — §2.3's `WorkCandidate.priority` vocabulary widening: migration 0065
+  (renumbered twice, 0063→0064→0065), additive CHECK-constraint change.
 
 **V2 — advanced, higher build cost, sequence after V1.1 lands and is used for a while:**
 - §2's full executive look-around orchestrator (real integration work across three
