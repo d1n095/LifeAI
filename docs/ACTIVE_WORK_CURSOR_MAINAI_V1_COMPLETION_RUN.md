@@ -28,7 +28,7 @@ without a human translating every step.
 | 3 | Long autonomous soak (8–12 tasks) + report | **MERGED** #204 |
 | 4 | First real bounded self-improvement on LifeAI | **MERGED** #205 |
 | 5 | Goal intake / bootstrap production path | **MERGED** #206 |
-| 6 | `docs/MAINAI_V1_READINESS.md` audit | **IN PROGRESS** — `cursor/mainai-v1-readiness-audit` |
+| 6 | `docs/MAINAI_V1_READINESS.md` audit | **IN PROGRESS** — [#207](https://github.com/d1n095/LifeAI/pull/207) |
 
 ## Landed evidence
 
