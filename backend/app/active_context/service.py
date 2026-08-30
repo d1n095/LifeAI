@@ -17,6 +17,7 @@ from app.models.capability_reality import CapabilityRecord
 from app.models.conversation import Conversation, Message
 from app.models.diagnosis import DiagnosisRecord
 from app.models.document import Document
+from app.models.candidate_learning_signal import CandidateLearningSignal
 from app.models.founder_memory import FounderMemoryNote
 from app.models.intelligence_governance import (
     IntelligenceEvidence,
@@ -28,6 +29,8 @@ from app.models.intelligence_governance import (
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.life_intent import LifeIntent, LifeIntentBlocker
+from app.models.project_entities import ProjectEntity
+from app.models.work_candidate import WorkCandidate
 from app.models.mainai_execution import EngineeringLesson, MainAICheckpoint, MainAIGoal, MainAIPlan, MainAITask
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import MainAIRecoveryRecord
@@ -50,6 +53,7 @@ SUPPORTED_TYPES = frozenset({
     "life_intent", "life_intent_blocker", "life_problem", "life_problem_approach",
     "life_solution_component", "life_problem_assumption", "life_problem_decision",
     "life_approach_outcome", "founder_memory_note", "diagnosis_record", "capability_record",
+    "candidate_learning_signal", "work_candidate", "project_entity",
 })
 ANCHOR_TYPES = SUPPORTED_TYPES | {"explicit_topic"}
 
@@ -110,6 +114,9 @@ def _owned_row(db: Session, owner_id: uuid.UUID, ref: _Ref):
         "founder_memory_note": (FounderMemoryNote, FounderMemoryNote.owner_id),
         "diagnosis_record": (DiagnosisRecord, DiagnosisRecord.owner_id),
         "capability_record": (CapabilityRecord, CapabilityRecord.owner_id),
+        "candidate_learning_signal": (CandidateLearningSignal, CandidateLearningSignal.owner_id),
+        "work_candidate": (WorkCandidate, WorkCandidate.owner_id),
+        "project_entity": (ProjectEntity, ProjectEntity.owner_id),
     }
     if ref.object_type in mappings:
         model, owner_column = mappings[ref.object_type]

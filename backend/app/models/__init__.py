@@ -38,6 +38,11 @@ from app.models.candidate_learning_signal import (
     CANDIDATE_SIGNAL_STATUSES,
     CandidateLearningSignal,
 )
+from app.models.memory_truth_claim import (
+    MEMORY_TRUTH_STATES,
+    MEMORY_TRUTH_TARGET_KINDS,
+    MemoryTruthClaim,
+)
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
@@ -239,6 +244,9 @@ __all__ = [
     "CANDIDATE_SIGNAL_SOURCE_TYPES",
     "CANDIDATE_SIGNAL_STATUSES",
     "CandidateLearningSignal",
+    "MEMORY_TRUTH_STATES",
+    "MEMORY_TRUTH_TARGET_KINDS",
+    "MemoryTruthClaim",
     "ClaimRelationship",
     "CompanyInfo",
     "Conversation",
