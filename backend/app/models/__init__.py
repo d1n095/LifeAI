@@ -164,7 +164,7 @@ from app.models.memory_thread import (
 )
 from app.models.password_reset_token import PasswordResetToken
 from app.models.project import Project, Task
-from app.models.project_entities import InterpretationProposal, ProjectEntity, ProjectEntityRelationship
+from app.models.project_entities import InterpretationProposal, ProjectEntity, ProjectEntityAlias, ProjectEntityRelationship
 from app.models.project_memory import ProjectBranchPRStatus, ProjectCheckpoint, ProjectCheckpointNote, ProjectNote, ProjectSource
 from app.models.problem_learning import (
     LifeApproachOutcome, LifeComponentEvaluation, LifeProblem, LifeProblemApproach,
@@ -361,6 +361,7 @@ __all__ = [
     "Task",
     "ProjectEntity",
     "WorkCandidate",
+    "ProjectEntityAlias",
     "ProjectEntityRelationship",
     "InterpretationProposal",
     "ProjectBranchPRStatus",

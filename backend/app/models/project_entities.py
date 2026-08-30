@@ -35,6 +35,7 @@ class ProjectEntity(Base):
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     entity_type: Mapped[str] = mapped_column(String(32))
     title: Mapped[str] = mapped_column(Text)
+    title_normalized: Mapped[str] = mapped_column(String(512), default="")
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="proposed")
     derived_from_claim_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
@@ -77,6 +78,31 @@ class ProjectEntityRelationship(Base):
     to_entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     relationship_type: Mapped[str] = mapped_column(String(32))
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ProjectEntityAlias(Base):
+    """Alternate founder wording bound to one canonical ProjectEntity (SAME collapse)."""
+
+    __tablename__ = "project_entity_aliases"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["entity_id", "owner_id"],
+            ["project_entities.id", "project_entities.owner_id"],
+            ondelete="CASCADE",
+            name="fk_project_entity_aliases_entity_owner",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    raw_text: Mapped[str] = mapped_column(Text)
+    text_normalized: Mapped[str] = mapped_column(String(512))
+    source_claim_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_claims.id", ondelete="SET NULL"), nullable=True
+    )
+    provenance: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

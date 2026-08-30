@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 _ACTIONABLE_ENTITY_TYPES = {"idea", "decision", "task_reference"}
 
 
+def _normalize_title(title: str) -> str:
+    from app.concept_reconciliation.normalize import normalize_concept_text
+
+    return normalize_concept_text(title)
+
 def _record_work_candidate_if_actionable(db: Session, *, owner_id: uuid.UUID, entity: ProjectEntity) -> None:
     """Purely observational, same doctrine as app/rag/claims.py's own interpretation-proposal
     integration one level up: never changes promote_interpretation_proposal()'s own result,
@@ -195,8 +200,31 @@ def promote_interpretation_proposal(
         if superseded_entity is None:
             raise ProjectEntityError(f"supersedes_entity_id={supersedes_entity_id} does not belong to owner_id={owner_id}")
 
+    # Stage B: SAME collapse — differently-worded duplicates reuse the canonical entity.
+    title_normalized = _normalize_title(title)
+    if not title_normalized:
+        raise ProjectEntityError("title normalizes to empty")
+    from app.concept_reconciliation.service import attach_alias, find_same_concept
+
+    existing = find_same_concept(db, owner_id=owner_id, entity_type=entity_type, title=title)
+    if existing is not None and supersedes_entity_id is None:
+        row.status = "promoted"
+        row.promoted_to_entity_id = existing.id
+        row.updated_at = datetime.utcnow()
+        db.flush()
+        attach_alias(
+            db,
+            owner_id=owner_id,
+            entity_id=existing.id,
+            raw_text=title,
+            source_claim_id=row.source_claim_id,
+            provenance={"via": "promote_interpretation_proposal_same_collapse", "proposal_id": str(row.id)},
+        )
+        # Do NOT create a second work_candidate for the same canonical entity.
+        return row, existing
+
     entity = ProjectEntity(
-        owner_id=owner_id, entity_type=entity_type, title=title, summary=summary,
+        owner_id=owner_id, entity_type=entity_type, title=title, title_normalized=title_normalized, summary=summary,
         derived_from_claim_id=row.source_claim_id, idempotency_key=entity_idempotency_key,
         authority=authority, basis=basis, confidence=confidence,
         decided_by=decided_by, decided_at=decided_at, supersedes_entity_id=supersedes_entity_id,
