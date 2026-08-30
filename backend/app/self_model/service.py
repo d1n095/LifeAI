@@ -140,7 +140,7 @@ def build_self_model(db: Session, *, owner_id: uuid.UUID, domain: str | None = N
     """
     records = list_capability_records(db, owner_id=owner_id, domain=domain)
     entries = [build_ledger_entry(db, owner_id=owner_id, record=r) for r in records]
-    proven = [e.capability_key for e in entries if e.status == "verified_available" and e.last_proof_at is not None]
+    proven = [e.capability_key for e in entries if e.status == "verified_available" and e.last_proof_evidence_id is not None]
     failed = [e.capability_key for e in entries if e.failure_count > 0]
     repeatedly_failing = [e.capability_key for e in entries if e.failure_count >= 2]
     weak = [e.capability_key for e in entries if e.weak]
@@ -169,11 +169,14 @@ def record_proven_capability(
     owner_id: uuid.UUID,
     capability_key: str,
     domain: str,
-    verification_evidence_id: uuid.UUID | None = None,
+    verification_evidence_id: uuid.UUID,
     authority: str = "deterministic_source",
     status_reason: str | None = None,
 ) -> CapabilityRecord:
-    """Caller observed a REAL success — still must pass status explicitly via observation API."""
+    """Caller observed a REAL success backed by durable same-owner evidence.
+
+    PROVEN requires a valid intelligence_evidence FK — never confidence or free text alone.
+    """
     return record_capability_observation(
         db,
         owner_id=owner_id,
