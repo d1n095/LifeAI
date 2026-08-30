@@ -6,6 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
+
+**Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
+konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-workforce-foundation-t1-t2` | [#230](https://github.com/d1n095/LifeAI/pull/230) | **Öppen** från tip `1aa0ab7` | T1–T7+T8/T15/T17/T19 schema+kontrakt: registry, broker, authority, context packaging, trust zones, performance ledger, selector, team formation, injection scrub, org snapshot, safe in-process vertical slice. Migration **0067**. Doc: `docs/LIFE_MAINAI_WORKFORCE_FOUNDATION.md`. **Ingen** live provider-dispatch (väntar Claude-verifierade safety gates t.ex. #218). |
+
+**Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
+
+**Lane A (fortsätter separat):** fix-PR:er #218/#229/#213/#215/#220/#224 — CI kan vara grön; **Claude-verifiering saknas fortfarande** → merge hålls.
+
+---
+
 ## Claude's non-överlappande lane: MainAI V1 arkitektur/readiness (2026-08-29)
 
 Parallellt med red-team-granskning av Cursors correction-pass-PR:er (#196 osv, nedan) — INTE i
