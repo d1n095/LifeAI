@@ -628,7 +628,17 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             WorkforcePerformanceRollup,
             WorkforceTeam,
         )
+        from app.models.workforce_ops import (
+            WorkforceAssignmentCheckpoint,
+            WorkforceCostBudget,
+            WorkforceLifecycleEvent,
+            WorkforceVerificationDecision,
+        )
 
+        db.query(WorkforceVerificationDecision).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceAssignmentCheckpoint).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceLifecycleEvent).filter_by(owner_id=owner_id).delete(synchronize_session=False)
+        db.query(WorkforceCostBudget).filter_by(owner_id=owner_id).delete(synchronize_session=False)
         db.query(WorkforcePerformanceRollup).filter_by(owner_id=owner_id).delete(synchronize_session=False)
         db.query(WorkforceAssignment).filter_by(owner_id=owner_id).delete(synchronize_session=False)
         db.query(WorkforceContextPackage).filter_by(owner_id=owner_id).delete(synchronize_session=False)

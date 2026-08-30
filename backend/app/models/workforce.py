@@ -161,6 +161,12 @@ class WorkforceAssignment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # T13 failure/takeover bookkeeping (migration 0068) — never widens authority.
+    supersedes_assignment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    takeover_of_assignment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    failure_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    external_effect_state: Mapped[str] = mapped_column(String(32), default="none_known")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
 
     __table_args__ = (
         ForeignKeyConstraint(

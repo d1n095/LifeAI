@@ -209,6 +209,12 @@ from app.models.workforce import (
     WorkforcePerformanceRollup,
     WorkforceTeam,
 )
+from app.models.workforce_ops import (
+    WorkforceAssignmentCheckpoint,
+    WorkforceCostBudget,
+    WorkforceLifecycleEvent,
+    WorkforceVerificationDecision,
+)
 from app.models.work_intelligence import (
     WorkEfficiencyObservation, WorkSpecialistContribution, WorkStoppingDecision,
     WorkStrategy, WorkStrategyExecution, WorkStrategyFinding, WorkStrategyLessonLink,
@@ -375,6 +381,10 @@ __all__ = [
     "WorkforceDelegationRequest",
     "WorkforcePerformanceRollup",
     "WorkforceTeam",
+    "WorkforceAssignmentCheckpoint",
+    "WorkforceCostBudget",
+    "WorkforceLifecycleEvent",
+    "WorkforceVerificationDecision",
     "ProjectEntityAlias",
     "ProjectEntityRelationship",
     "InterpretationProposal",

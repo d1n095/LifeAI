@@ -29,7 +29,27 @@ FORBIDDEN_AUTHORITY_KEYS: frozenset[str] = frozenset(
         "self_verify",
         "set_verification_status",
         "verification_status",
+        "create_subagent",
+        "stronger_subagent",
+        "change_own_role",
+        "access_other_worker_context",
+        "ignore_policy",
+        "ignore_previous_instructions",
     }
+)
+
+INJECTION_NEEDLES: tuple[str, ...] = (
+    "ignore previous instructions",
+    "ignore policy",
+    "you are now",
+    "disclose the vault",
+    "print the api key",
+    "grant yourself",
+    "widen your tools",
+    "override mainai",
+    "create a stronger agent",
+    "change your role to",
+    "exfiltrate",
 )
 
 
@@ -42,28 +62,51 @@ def scrub_authority_mutations(payload: Any) -> tuple[Any, list[str]]:
             out: dict = {}
             for key, value in node.items():
                 lk = str(key).lower()
-                if lk in FORBIDDEN_AUTHORITY_KEYS or any(f in lk for f in ("api_key", "vault", "secret", "credential")):
+                if lk in FORBIDDEN_AUTHORITY_KEYS or any(
+                    f in lk for f in ("api_key", "vault", "secret", "credential", "subagent", "widen")
+                ):
                     stripped.append(str(key))
                     continue
                 out[key] = _walk(value)
             return out
         if isinstance(node, list):
             return [_walk(x) for x in node]
+        if isinstance(node, str) and looks_like_prompt_injection(node):
+            stripped.append("__injection_string__")
+            return "[REDACTED_INJECTION]"
         return node
 
     return _walk(payload), stripped
 
 
 def looks_like_prompt_injection(text: str) -> bool:
-    """Heuristic detector for tests — not a complete defense; containment is structural."""
+    """Heuristic detector for tests — containment remains structural (scrub + deny)."""
     lowered = text.lower()
-    needles = (
-        "ignore previous instructions",
-        "you are now",
-        "disclose the vault",
-        "print the api key",
+    return any(n in lowered for n in INJECTION_NEEDLES)
+
+
+def fail_closed_on_secret_request(payload: dict) -> None:
+    """Raise if payload still contains secret solicitation after scrub would be required."""
+    raw = str(payload).lower()
+    for needle in ("vault", "api_key", "api key", "secret", "credential"):
+        if needle in raw and "redacted" not in raw:
+            # Structural callers should scrub first; this is a hard gate for tests.
+            from app.workforce.broker import DelegationBrokerError
+
+            raise DelegationBrokerError(f"fail-closed: secret solicitation detected ({needle})")
+
+
+def refuse_role_or_tool_self_upgrade(payload: dict) -> list[str]:
+    """Return list of refused upgrade attempts found in payload keys/values."""
+    refused: list[str] = []
+    blob = str(payload).lower()
+    for phrase in (
+        "widen tools",
+        "change own role",
+        "create stronger",
+        "elevate",
         "grant yourself",
-        "widen your tools",
-        "override mainai",
-    )
-    return any(n in lowered for n in needles)
+    ):
+        if phrase in blob:
+            refused.append(phrase)
+    return refused
