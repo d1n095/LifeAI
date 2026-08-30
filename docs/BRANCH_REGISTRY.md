@@ -136,11 +136,14 @@ Program: `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 | `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Mergad — Stage 6** @ `dca5e3b` | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **Conflict resolved**: its `MAINAI_V1_READINESS.md` snapshot predated most of #197's tonight-session updates — Claude pushed a refresh commit directly onto #207's branch before merge closing the gap, then (after #207 merged) merged this integration tip back into #197 and resolved the resulting content conflict in favor of #197's fuller version (includes Part D + its companion docs, which only exist on #197). |
 | `cursor/v1-completion-run-closeout` | [#208](https://github.com/d1n095/LifeAI/pull/208) | **Mergad — Closeout** @ `6789c2b` | Marks Cursor's own V1 completion run Stages 0A-6 complete; reviewed (Claude, clean, docs-only, respects #197 boundary) |
 
-**Claude's egen, icke-överlappande gren `v1-readiness-workstream` (PR #197, öppen, ej mergad,
-mergad FRAMÅT mot integrationstippen två gånger natten 2026-08-29→30, senast post-#208 — INTE
-längre konflikterande mot tip)** — fem riktiga, var för sig three-check-verifierade fynd
-(`git stash`-negativkontroll: varje fix' egen test misslyckas genuint på pre-fix-kod, passerar
-post-fix), alla pushade, ingen ännu founder-granskad:
+**✅ PR #197 MERGAD (2026-08-30, 12:37:56Z) @ `754f1e5`.** Claude's egen, icke-överlappande gren
+`v1-readiness-workstream`, mergad FRAMÅT mot integrationstippen FYRA gånger under natten
+2026-08-29→30 (post-#208, post-#209, post-#210 x2 för migrationsomnumreringen — se
+"Alembic-revisionskollision" nedan), godkänd och mergad av founder direkt (`merged_by: d1n095`)
+efter ett fullständigt lokalt testkörning (2278 passade, 1 känt orelaterat CEST/naive-timestamp-
+fel, se nedan) och en founder-quality diff-audit av alla 34 ändrade filer. Fem riktiga, var för
+sig three-check-verifierade fynd (`git stash`-negativkontroll: varje fix' egen test misslyckas
+genuint på pre-fix-kod, passerar post-fix):
 
 1. **`OperatorAuthorityTransitionError`** (`app/development_operator/service.py`,
    `app/development_driver/service.py`) — `run_driver()`s per-steg try/except fångade tidigare
@@ -178,6 +181,24 @@ post-fix), alla pushade, ingen ännu founder-granskad:
    denna väg utan att någon approval någonsin kontrollerats eller registrerats. Fixad genom att
    `_validate_task_execution_input_refs()` (den enda kontroll den vägen fick) nu också anropar
    `require_task_approval()`.
+
+**Känt, granskat, INTE en merge-blockerare:** `tests/backend/rag/test_library_routes.py::
+test_ops_status_shows_degraded_when_a_storage_orphan_risk_audit_row_exists` misslyckas lokalt
+på just den här Macen (`assert 7200.10454 < 60`, exakt 2 timmar = CEST-offset). Root cause
+verifierad: testens egen `datetime.now(latest.tzinfo)` degraderar tyst till lokal maskintid när
+API-svarets timestamp saknar tidszon-offset (`tzinfo=None`) — passerar rent med `TZ=UTC`.
+Orört av #197 (0 träffar i diffen), förekom redan innan denna gren öppnades, och GitHub's
+faktiska CI-runners kör UTC så det syns rimligen aldrig där. **Notera ärligt:** den riktiga
+GitHub Actions-CI:n för PR #197:s slutliga head (`86a99a4`) hann INTE bli klar innan founder
+mergade PR:n direkt (`754f1e5`, 12:37:56Z) — flera backend-jobb (`Backend — Alembic migration
+check`, `Backend — unit/integration tests`, `Backend — account lifecycle & rate-limit tests`)
+stod fortfarande som `queued`/`in_progress` vid mergetillfället och förblev så efteråt (troligen
+övergivna när PR:n stängdes). Den faktiska verifieringsgrunden vid mergetillfället var Claudes
+egen fullständiga lokala testkörning (2278 passed, samma enda kända orelaterade fel som ovan)
+plus den redan avslutade `Backend — RLS & session-security tests` (grön) och Alembic-kedjans
+egen lokala upgrade/downgrade/upgrade-verifiering — INTE ett bekräftat grönt CI-svep. Ingen
+kodfix gjord för själva testet — hör inte till #197:s scope; kandidat för en egen, minimal,
+separat framtida PR om/när någon vill härda testet mot icke-UTC lokala maskiner.
 
 **Ny arkitektur-workstream, samma gren (PR #197), founder-definierad 2026-08-30**: "MainAI
 Personal Intent & Executive Reasoning" — tre nya implementation-ready docs
