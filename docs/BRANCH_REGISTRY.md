@@ -121,9 +121,9 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
-## MAINAI V1 COMPLETION RUN — Stages 1–2 (Cursor) + Claude's parallel v1-readiness-workstream
+## MAINAI V1 COMPLETION RUN — Stages 1–6 (Cursor) + Claude's parallel v1-readiness-workstream
 
-Integration tip: post-#204 (`4388657`). Program:
+Integration tip: post-#206 (Cursor's own tip). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
@@ -131,9 +131,12 @@ Integration tip: post-#204 (`4388657`). Program:
 | `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
 | `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
 | `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | Long-run 8-12 task soak; independently reviewed by Claude pre-merge |
+| `cursor/first-bounded-self-improvement` | [#205](https://github.com/d1n095/LifeAI/pull/205) | **Mergad — Stage 4** | First bounded self-improvement (SSH egress marker test); independently reviewed post-merge (Claude) — important caveat: proved the mechanism safe, ran against a disposable worktree mirror, NOT the real checkout, so production `test_egress_policy.py` is unchanged |
+| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Öppen — Stage 5** | Path A goal intake → Worker complete; independently reviewed (Claude, clean) |
+| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Öppen — Stage 6** | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **⚠️ Known conflict, not yet resolved**: its `MAINAI_V1_READINESS.md` snapshot predates essentially all of #197's tonight-session updates (approval-gate-bypass fix, TOCTOU fix, takeover-crash fix, replan-bound fix, the self-improvement disposable-mirror caveat, Part D) — the other two docs are byte-identical to #197's, clean. Whichever of #197/#207 merges second will hit a real content conflict on that one file; resolve in favor of #197's version (strict superset). Flagged in a PR comment on #207. |
 
 **Claude's egen, icke-överlappande gren `v1-readiness-workstream` (PR #197, öppen, ej mergad,
-grenad ovanpå #203/#204)** — natt-skift 2026-08-29→30, fyra riktiga, var för sig
+grenad ovanpå #203/#204)** — natt-skift 2026-08-29→30, fem riktiga, var för sig
 three-check-verifierade fynd (`git stash`-negativkontroll: varje fix' egen test misslyckas
 genuint på pre-fix-kod, passerar post-fix), alla pushade, ingen ännu founder-granskad:
 
@@ -165,6 +168,24 @@ genuint på pre-fix-kod, passerar post-fix), alla pushade, ingen ännu founder-g
    founderns egen explicita replan. Ingen ny schema/eskaleringsmekanism behövdes — den
    redan existerande `_finalize_mainai_execution_goals`-ticken stänger målet till `failed`
    med en riktig rapport på nästa varv.
+5. **Riktig approval-gate-bypass** (`app/jobs/service.py`) — `require_task_approval()`
+   anropades ENDAST inuti `dispatch_ready_task()`. `POST /api/mainai/jobs` (en generisk,
+   founder-gated route) anropar `create_job()` direkt med `job_type="task_execution"` — en
+   helt separat, riktig, redan skeppad dörr till en `mainai_jobs`-rad, som ALDRIG kontrollerade
+   godkännande. En `approval_required=True`-task som nått `ready` kunde dispatchas verkligt via
+   denna väg utan att någon approval någonsin kontrollerats eller registrerats. Fixad genom att
+   `_validate_task_execution_input_refs()` (den enda kontroll den vägen fick) nu också anropar
+   `require_task_approval()`.
+
+**Ny arkitektur-workstream, samma gren (PR #197), founder-definierad 2026-08-30**: "MainAI
+Personal Intent & Executive Reasoning" — tre nya implementation-ready docs
+(`docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md`, `docs/MAINAI_INSPECTABLE_MEMORY_
+CONTRACT.md`, `docs/MAINAI_LONG_HORIZON_PLANNING.md`) plus `docs/MAINAI_V1_READINESS.md` Part D
+(V1/V1.1/V2-klassificering — inget av detta är en V1-blocker förutom memory-truth-invarianten,
+som founder explicit krävde designad NU). ~2/3 av det efterfrågade fanns redan under andra
+namn (founder_memory_signals, project_entities, EngineeringLesson, autonomous_gap,
+work_candidates, execution_envelopes) — se dokumentens egna "vad finns redan"-tabeller innan
+någon framtida session rör detta.
 
 ---
 
