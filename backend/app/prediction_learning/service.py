@@ -122,11 +122,66 @@ def score_prediction(
         accurate = bool(delta["blocker_match"])
 
     if accurate:
+        from app.intelligence_governance.service import record_evidence, record_execution
+        from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
+
+        # ONE canonical prove path: durable evidence FK required (same rule as Stage E / #213).
+        goal = MainAIGoal(
+            owner_id=owner_id,
+            title=f"prediction-score:{row.id}",
+            original_instruction="score_prediction",
+            created_by="prediction_learning",
+            completed_at=None,
+        )
+        db.add(goal)
+        db.flush()
+        plan = MainAIPlan(
+            owner_id=owner_id, goal_id=goal.id, version=1, rationale="prediction_score", created_by="prediction_learning"
+        )
+        db.add(plan)
+        db.flush()
+        task = MainAITask(
+            owner_id=owner_id,
+            goal_id=goal.id,
+            plan_id=plan.id,
+            task_type="repo_edit",
+            description=f"score prediction {row.id}",
+            status="pending",
+            risk_level="low",
+        )
+        db.add(task)
+        db.flush()
+        execution = record_execution(
+            db,
+            owner_id=owner_id,
+            task_id=task.id,
+            idempotency_key=f"pred-exec:{row.id}",
+            provider="internal",
+        )
+        evidence = record_evidence(
+            db,
+            owner_id=owner_id,
+            execution_id=execution.id,
+            evidence_kind="prediction_outcome",
+            payload={
+                "prediction_id": str(row.id),
+                "kind": row.kind,
+                "predicted": pred,
+                "actual": actual_value,
+                "delta": delta,
+                "accurate": True,
+            },
+            source_type="prediction_learning",
+            source_ref=f"prediction_records:{row.id}",
+            idempotency_key=f"pred-ev:{row.id}",
+            deterministic=True,
+        )
         record_proven_capability(
             db,
             owner_id=owner_id,
             capability_key=cap_key,
             domain="prediction",
+            verification_evidence_id=evidence.id,
             status_reason=f"scored_prediction:{row.id}",
         )
     else:
