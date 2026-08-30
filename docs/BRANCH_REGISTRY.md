@@ -13,13 +13,16 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-workforce-foundation-t1-t2` | [#230](https://github.com/d1n095/LifeAI/pull/230) | **Mergad** @ `dfbf1c3` | T1–T7 schema+kontrakt (0067). |
-| `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Öppen** på tip | T8/T9/T10/T13–T16/T19/T20 ops (0068). |
-| `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Öppen** stacked på #231 | Provider harness (gated), first team honesty, staff decision loop, systemic attacks. |
+| `cursor/mainai-workforce-foundation-t1-t2` | [#230](https://github.com/d1n095/LifeAI/pull/230) | **Mergad** | T1–T7 schema+kontrakt (0067). |
+| `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Mergad** | T8–T20 ops (0068). |
+| `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness (gated), first team, staff loop, systemic attacks. |
+| `cursor/workforce-registry-post-232` | [#233](https://github.com/d1n095/LifeAI/pull/233) | **Öppen** — docs/registry | Mark #230–#232 merged. |
+| `cursor/mainai-workforce-activation-prep` | [#234](https://github.com/d1n095/LifeAI/pull/234) | **Öppen** | ActivationGateSet, safe internal run, kill-switch, startup readiness; provider invoke staged disabled. |
+| `cursor/mainai-composed-executive-loop` | (öppnas) | **Aktiv** | Composed executive loop: lookaround + memory linkage + continuity + missing-piece + scenarios A–F. No provider activate. |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
-**Lane A:** #230 mergad. #231 rebasad på tip — merge när CI grön. Provider-activate fortfarande blockerad.
+**Lane A:** #230–#232 mergade. #233/#234 väntar CI. Composed executive loop är nästa integration (glue, inte ny arkitektur). Provider-activate fortfarande blockerad tills Claude-gates (#218/#229/#213/#224).
 
 ---
 

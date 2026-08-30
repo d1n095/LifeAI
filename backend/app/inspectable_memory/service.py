@@ -7,6 +7,7 @@ reality. Memory mutation here never grants execution authority.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ from enum import Enum
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.founder_memory import (
     list_founder_memory,
@@ -455,7 +458,49 @@ def founder_add_memory_note(
         provenance={"via": "founder_add_memory_note"},
         verify_now=True,
     )
+    _link_memory_to_work(
+        db,
+        owner_id=owner_id,
+        note_id=note.id,
+        note_type=note_type,
+        is_correction=False,
+    )
     return note, claim
+
+
+def _link_memory_to_work(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    note_id: uuid.UUID,
+    note_type: str,
+    is_correction: bool,
+) -> None:
+    """Best-effort Stage C park path — STORED note is never rolled back on linkage failure.
+
+    MEMORY != AUTHORITY. park_candidate=True only; never insert_subordinate / authorize.
+    """
+    try:
+        from app.memory_work_linkage import TimingClass, apply_memory_work_linkage
+
+        timing = (
+            TimingClass.NOW
+            if note_type in {"correction", "decision", "goal"} or is_correction
+            else TimingClass.LATER
+        )
+        apply_memory_work_linkage(
+            db,
+            owner_id=owner_id,
+            note_id=note_id,
+            timing=timing,
+            is_correction=is_correction or note_type == "correction",
+            park_candidate=True,
+            insert_subordinate=False,
+        )
+    except Exception:
+        logger.exception(
+            "memory_work_linkage failed after inspectable memory write; note remains stored"
+        )
 
 
 def founder_correct_memory_note(
@@ -494,6 +539,13 @@ def founder_correct_memory_note(
         idempotency_key=f"claim:{idempotency_key}",
         provenance={"via": "founder_correct_memory_note", "supersedes": str(note_id)},
         verify_now=True,
+    )
+    _link_memory_to_work(
+        db,
+        owner_id=owner_id,
+        note_id=note.id,
+        note_type=note.note_type,
+        is_correction=True,
     )
     return note, claim
 
