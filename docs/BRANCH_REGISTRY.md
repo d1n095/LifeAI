@@ -8121,4 +8121,6 @@ syskon-tasks; måste byggas innan den funktionen kan börjas.
 | `cursor/mainai-memory-quality-history-stress` | [#216](https://github.com/d1n095/LifeAI/pull/216) | **Öppen — Stage H** |
 | `cursor/mainai-long-horizon-planning` | [#217](https://github.com/d1n095/LifeAI/pull/217) | **Öppen — Stage I** |
 
-| `cursor/mainai-personal-intent-learning` | TBD | **Öppen — Stage J** (stackad på #217) | Personal intent learning; wrong terminology ≠ overwrite canonical |
+| `cursor/mainai-personal-intent-learning` | [#218](https://github.com/d1n095/LifeAI/pull/218) | **Öppen — Stage J** (stackad på #217) | Personal intent learning; wrong terminology ≠ overwrite canonical |
+
+| `cursor/mainai-contradiction-assumption-engine` | TBD | **Öppen — Stage K** (stackad på #218) |

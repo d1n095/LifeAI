@@ -66,6 +66,7 @@ from app.models.founder_memory import (
     FounderMemoryNote,
 )
 from app.models.founder_intent import FounderIntentBinding, FounderIntentCorrection
+from app.models.structured_claim import StructuredClaim, StructuredClaimEvent
 from app.models.import_job import ImportJob
 from app.models.intelligence_governance import (
     ClassificationBasis,
@@ -270,6 +271,8 @@ __all__ = [
     "FounderMemoryNote",
     "FounderIntentBinding",
     "FounderIntentCorrection",
+    "StructuredClaim",
+    "StructuredClaimEvent",
     "ImportJob",
     "ClassificationBasis",
     "ExecutionRole",
