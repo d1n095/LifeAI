@@ -92,6 +92,21 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
+## MAINAI MEMORY FRONTIER — Stages A–I (Cursor) — post-V1
+
+**Opened 2026-08-30** from tip `6789c2b` (post-#208). Program:
+`docs/ACTIVE_WORK_CURSOR_MAINAI_MEMORY_FRONTIER.md`. Claude [#197](https://github.com/d1n095/LifeAI/pull/197)
+remains Claude-owned — do not duplicate/rebase/modify that branch from this lane.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-inspectable-memory-foundation` | TBD | **Öppen — Stage A** | Inspectable memory foundation: truth claims + projection API + lesson verification_status + registry widen; no second memory store |
+
+**Migration note:** Stage A lands Alembic **0063** on tip. Claude #197's pending 0063/0064
+must renumber on rebase.
+
+---
+
 ## MAINAI V1 COMPLETION RUN — Stages 0–6 (Cursor) — KLAR
 
 **✅ CURSOR PROGRAM COMPLETE (2026-08-30).** Integration tip: post-#207 (`dca5e3b`).

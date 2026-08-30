@@ -640,6 +640,10 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # through this one narrow SECURITY DEFINER function.
         db.execute(sa_text("SELECT erase_own_candidate_learning_signal_children()"))
 
+        # --- Inspectable Memory Foundation (migration 0063): memory_truth_claims receipts.
+        # DELETE revoked from mainai_app outside this SECURITY DEFINER path.
+        db.execute(sa_text("SELECT erase_own_memory_truth_claim_children()"))
+
         # --- Life Project Entities / Interpretation Queue (migration 0054, see
         # docs/LIFE_PROJECT_ENTITIES_INTERPRETATION.md): project_entities/interpretation_
         # proposals have DELETE revoked from mainai_app the same way, deletion only through

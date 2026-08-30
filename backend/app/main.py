@@ -22,6 +22,7 @@ from app.routers import (
     documents,
     execution_envelopes,
     health,
+    inspectable_memory,
     knowledge,
     library,
     mainai_execution,
@@ -77,6 +78,7 @@ app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
 app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
+app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
 
