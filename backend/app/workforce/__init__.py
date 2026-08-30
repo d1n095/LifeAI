@@ -91,6 +91,27 @@ from app.workforce.provider_worker import (
     mark_safety_gate,
     reset_safety_gates_for_tests,
 )
+from app.workforce.activation_commit import (
+    PROVIDER_INVOKE_ENABLED,
+    activation_commit_status,
+    assert_provider_invoke_disabled,
+)
+from app.workforce.audit_receipt import DelegationAuditReceipt, build_audit_receipt
+from app.workforce.kill_switch import (
+    KillSwitchError,
+    activate_kill_switch,
+    assert_not_killed,
+    clear_kill_switch_for_recovery,
+    get_kill_switch,
+    prove_no_reusable_live_authority,
+    reset_kill_switch_for_tests,
+)
+from app.workforce.safe_internal_run import (
+    SafeInternalRunError,
+    SafeInternalRunReport,
+    require_safe_internal_readiness,
+    run_first_safe_internal_mainai_run,
+)
 from app.workforce.activation_gates import (
     REQUIRED_ACTIVATION_GATES,
     ActivationDecision,
@@ -151,6 +172,22 @@ from app.workforce.vertical_slice import LowRiskSliceResult, run_low_risk_classi
 __all__ = [
     "AGENT_LIFECYCLE_STATUSES",
     "AgentNotSelectableError",
+    "PROVIDER_INVOKE_ENABLED",
+    "SafeInternalRunError",
+    "SafeInternalRunReport",
+    "KillSwitchError",
+    "DelegationAuditReceipt",
+    "activation_commit_status",
+    "assert_provider_invoke_disabled",
+    "activate_kill_switch",
+    "assert_not_killed",
+    "build_audit_receipt",
+    "clear_kill_switch_for_recovery",
+    "get_kill_switch",
+    "prove_no_reusable_live_authority",
+    "require_safe_internal_readiness",
+    "reset_kill_switch_for_tests",
+    "run_first_safe_internal_mainai_run",
     "ProviderActivationBlocked",
     "REQUIRED_ACTIVATION_GATES",
     "ActivationDecision",

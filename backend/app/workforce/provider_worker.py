@@ -31,6 +31,7 @@ from app.workforce.authority import require_live_assignment_authority
 from app.workforce.broker import DelegationBrokerError, ingest_untrusted_result
 from app.workforce.failure import mark_failure, record_checkpoint
 from app.workforce.injection import scrub_authority_mutations
+from app.workforce.kill_switch import assert_not_killed
 from app.workforce.registry import get_workforce_agent
 
 
@@ -170,6 +171,7 @@ def execute_workforce_assignment(
     """
     if assignment.owner_id != owner_id:
         raise DelegationBrokerError("owner mismatch")
+    assert_not_killed()
     require_live_assignment_authority(assignment)
     profile = get_workforce_agent(db, owner_id=owner_id, agent_id=assignment.profile_id)
 
