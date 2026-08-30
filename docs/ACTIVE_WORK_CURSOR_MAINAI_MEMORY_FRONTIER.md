@@ -15,22 +15,21 @@ evidence-backed self-model, continuous simplification, then a real founder-langu
 
 | Stage | What | Status |
 |---|---|---|
-| A | Canonical inspectable memory foundation | **IN PROGRESS** — [#209](https://github.com/d1n095/LifeAI/pull/209) (backend unit CI fail under triage) |
-| B | Idea / concept reconciliation | **IN PROGRESS** — stacked on #209 — [#210](https://github.com/d1n095/LifeAI/pull/210) |
-| C | Memory → work linkage (no authority widening) | **IN PROGRESS** — stacked on #210 — [#211](https://github.com/d1n095/LifeAI/pull/211) |
-| D | Temporal historical intelligence | **IN PROGRESS** — stacked on #211 — [#212](https://github.com/d1n095/LifeAI/pull/212) |
-| E | Self-model / capability ledger | **IN PROGRESS** — stacked on #212 — [#213](https://github.com/d1n095/LifeAI/pull/213) |
-| F | Continuous simplification foundation | **IN PROGRESS** — stacked on #213 — [#214](https://github.com/d1n095/LifeAI/pull/214) |
-| G | First end-to-end founder-language slice | **IN PROGRESS** — stacked on #214 |
-| H | Long-term memory quality test | queued |
-| I | Long-horizon NOW/NEAR/MID/LONG planning | queued |
+| A | Canonical inspectable memory foundation | **OPEN** — [#209](https://github.com/d1n095/LifeAI/pull/209) |
+| B | Idea / concept reconciliation | **OPEN** — [#210](https://github.com/d1n095/LifeAI/pull/210) (stack on #209) |
+| C | Memory → work linkage | **OPEN** — [#211](https://github.com/d1n095/LifeAI/pull/211) (stack on #210) |
+| D | Temporal historical intelligence | **OPEN** — [#212](https://github.com/d1n095/LifeAI/pull/212) (stack on #211) |
+| E | Self-model / capability ledger | **OPEN** — [#213](https://github.com/d1n095/LifeAI/pull/213) (stack on #212) |
+| F | Continuous simplification | **OPEN** — [#214](https://github.com/d1n095/LifeAI/pull/214) (stack on #213) |
+| G | Founder-language vertical slice | **OPEN** — [#215](https://github.com/d1n095/LifeAI/pull/215) (stack on #214) |
+| H | Memory quality / history stress | **OPEN** — [#216](https://github.com/d1n095/LifeAI/pull/216) (stack on #215) |
+| I | Long-horizon NOW/NEAR/MID/LONG | **OPEN** — stacked on #216 (this PR) |
 
 ## Operating rules
 
 - MainAI = "she / hon". Claude and Cursor are not "she".
 - Interpretation != truth. Plan != authority. Memory != authority. Model output != authority.
-- Do not duplicate Claude #197. If #197 merges mid-lane, rebase from integration before the
-  next major PR and preserve both lanes semantically.
+- Do not duplicate Claude #197.
 - Do not end with "ready for next task" while safe unowned stages remain.
 
 ## Checkpoint fields (report each PR)
