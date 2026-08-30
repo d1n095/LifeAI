@@ -100,7 +100,7 @@ remains Claude-owned — do not duplicate/rebase/modify that branch from this la
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-inspectable-memory-foundation` | TBD | **Öppen — Stage A** | Inspectable memory foundation: truth claims + projection API + lesson verification_status + registry widen; no second memory store |
+| `cursor/mainai-inspectable-memory-foundation` | [#209](https://github.com/d1n095/LifeAI/pull/209) | **Öppen — Stage A** | Inspectable memory foundation: truth claims + projection API + lesson verification_status + registry widen; no second memory store |
 
 **Migration note:** Stage A lands Alembic **0063** on tip. Claude #197's pending 0063/0064
 must renumber on rebase.

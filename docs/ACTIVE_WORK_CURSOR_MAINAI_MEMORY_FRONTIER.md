@@ -15,7 +15,7 @@ evidence-backed self-model, continuous simplification, then a real founder-langu
 
 | Stage | What | Status |
 |---|---|---|
-| A | Canonical inspectable memory foundation | **IN PROGRESS** — this branch |
+| A | Canonical inspectable memory foundation | **IN PROGRESS** — [#209](https://github.com/d1n095/LifeAI/pull/209) |
 | B | Idea / concept reconciliation | queued |
 | C | Memory → work linkage (no authority widening) | queued |
 | D | Temporal historical intelligence | queued |
