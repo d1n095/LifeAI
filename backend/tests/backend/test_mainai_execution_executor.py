@@ -127,6 +127,61 @@ def test_dispatch_ready_task_stops_an_approval_required_task_with_no_grant_recor
     assert task.status == MainAITaskStatus.ready  # untouched -- the block happened before any state change
 
 
+def test_create_job_directly_also_stops_an_approval_required_task_with_no_grant_recorded(
+    db_session, superuser_db, owner_id
+):
+    """V1 readiness sweep finding: dispatch_ready_task() is not the only door to a real
+    mainai_jobs row. POST /api/mainai/jobs (app/routers/mainai_jobs.py) is a real, live,
+    founder-facing route that calls app.jobs.service.create_job() directly with
+    job_type="task_execution" -- entirely bypassing dispatch_ready_task() and, before this
+    fix, its require_task_approval() call along with it. This proves the SAME approval gate
+    now holds at this second door too, not just the one door someone remembered to add it to
+    (_validate_task_execution_input_refs()'s own docstring update explains why)."""
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, approval_required=True)
+
+    jobs_before = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(owner_id)}).scalar()
+
+    with pytest.raises(service.InvalidInputRefsError, match="requires founder approval"):
+        service.create_job(
+            db_session,
+            owner_id=owner_id,
+            job_type="task_execution",
+            input_refs=[{"type": "mainai_task", "id": str(task.id)}],
+            created_by="founder",
+        )
+    db_session.rollback()
+
+    jobs_after = superuser_db.execute(sa_text("SELECT count(*) FROM mainai_jobs WHERE owner_id = :o"), {"o": str(owner_id)}).scalar()
+    assert jobs_after == jobs_before == 0
+
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.ready  # untouched -- refused before any state change
+
+
+def test_create_job_directly_succeeds_once_approval_is_explicitly_granted(db_session, owner_id):
+    """Positive counterpart -- the second door isn't just refusing everything, it's
+    specifically the SAME approval check dispatch_ready_task() applies, and a genuinely
+    granted approval lets it through exactly as it would through the first door."""
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, approval_required=True)
+
+    grant_task_approval(db_session, task=task, approved_by="founder")
+    db_session.commit()
+
+    job = service.create_job(
+        db_session,
+        owner_id=owner_id,
+        job_type="task_execution",
+        input_refs=[{"type": "mainai_task", "id": str(task.id)}],
+        created_by="founder",
+    )
+    db_session.commit()
+
+    assert job.job_type == "task_execution"
+    assert job.status == MainAIJobStatus.queued
+
+
 def test_dispatch_ready_task_succeeds_once_approval_is_explicitly_granted(db_session, owner_id):
     goal = _goal(db_session, owner_id)
     task = _single_task_plan(db_session, goal, approval_required=True)
