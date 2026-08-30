@@ -154,31 +154,40 @@ def run_executive_cycle(
 
     workforce_dry: dict[str, Any] | None = None
     if run_workforce_dry and staffing.action in ("use_existing", "create_candidate", "refuse"):
-        # Always dry-run classification path — never provider.
-        slice_result = run_low_risk_classification_slice(
-            db,
-            owner_id=owner_id,
-            note_excerpt=founder_request[:240],
-            activate_provider=False,
-        )
-        workforce_dry = {
-            "request_id": str(slice_result.request_id),
-            "assignment_id": str(slice_result.assignment_id),
-            "verification_status": slice_result.verification_status,
-            "provider_invoked": slice_result.provider_invoked,
-            "consequential_effects": slice_result.consequential_effects,
-            "activate_provider": False,
-        }
-        completed.append("ACT_DRY_RUN")
-        if interruption_point == "after_delegation_before_result":
-            uncertain.append("delegation_result_unknown")
-            remaining = ["VERIFY", "STORE", "LEARN", "REPLAN", "CONTINUE"]
-        elif interruption_point == "after_verify_before_memory":
-            completed.append("VERIFY")
-            remaining = ["STORE", "LEARN", "REPLAN", "CONTINUE"]
-            uncertain.append("memory_update_pending")
-        else:
-            completed.append("VERIFY")
+        try:
+            from app.workforce.kill_switch import assert_not_killed
+
+            assert_not_killed()
+        except Exception as exc:
+            uncertain.append(f"kill_switch_blocked:{type(exc).__name__}")
+            run_workforce_dry = False
+            workforce_dry = None
+        if run_workforce_dry:
+            # Always dry-run classification path — never provider.
+            slice_result = run_low_risk_classification_slice(
+                db,
+                owner_id=owner_id,
+                note_excerpt=founder_request[:240],
+                activate_provider=False,
+            )
+            workforce_dry = {
+                "request_id": str(slice_result.request_id),
+                "assignment_id": str(slice_result.assignment_id),
+                "verification_status": slice_result.verification_status,
+                "provider_invoked": slice_result.provider_invoked,
+                "consequential_effects": slice_result.consequential_effects,
+                "activate_provider": False,
+            }
+            completed.append("ACT_DRY_RUN")
+            if interruption_point == "after_delegation_before_result":
+                uncertain.append("delegation_result_unknown")
+                remaining = ["VERIFY", "STORE", "LEARN", "REPLAN", "CONTINUE"]
+            elif interruption_point == "after_verify_before_memory":
+                completed.append("VERIFY")
+                remaining = ["STORE", "LEARN", "REPLAN", "CONTINUE"]
+                uncertain.append("memory_update_pending")
+            else:
+                completed.append("VERIFY")
 
     phase = ExecutivePhase.CONTINUE if not interruption_point else ExecutivePhase.ACT
     if not interruption_point:

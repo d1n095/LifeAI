@@ -98,4 +98,36 @@ def executive_status_snapshot(
         ],
         "chain_of_thought_exposed": False,
         "evidence_basis": "durable_rows_only",
+        "startup_readiness": _startup_readiness(),
+        "kill_switch": _kill_switch_status(),
     }
+
+
+def _startup_readiness() -> dict[str, Any]:
+    """Best-effort after #234 — never invents READY_FOR_SERIOUS_AUTONOMOUS_RUN."""
+    try:
+        from app.mainai_startup_readiness import evaluate_startup_readiness
+
+        # claude_reviews_satisfied=None → UNKNOWN for higher levels (fail closed)
+        report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+        return report.as_dict() if hasattr(report, "as_dict") else {
+            "level": report.level.value,
+            "source": "mainai_startup_readiness",
+            "notes": getattr(report, "notes", None),
+        }
+    except Exception as exc:  # noqa: BLE001 — observability must not fail the cycle
+        return {"level": "UNKNOWN", "error": type(exc).__name__, "source": "unavailable"}
+
+
+def _kill_switch_status() -> dict[str, Any]:
+    try:
+        from app.workforce.kill_switch import get_kill_switch
+
+        state = get_kill_switch()
+        return {
+            "active": bool(getattr(state, "active", False) or getattr(state, "killed", False)),
+            "reason": getattr(state, "reason", None),
+            "source": "workforce.kill_switch",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"active": False, "error": type(exc).__name__, "source": "unavailable"}
