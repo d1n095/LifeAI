@@ -23,7 +23,7 @@ evidence-backed self-model, continuous simplification, then a real founder-langu
 | F | Continuous simplification | **OPEN** — [#214](https://github.com/d1n095/LifeAI/pull/214) (stack on #213) |
 | G | Founder-language vertical slice | **OPEN** — [#215](https://github.com/d1n095/LifeAI/pull/215) (stack on #214) |
 | H | Memory quality / history stress | **OPEN** — [#216](https://github.com/d1n095/LifeAI/pull/216) (stack on #215) |
-| I | Long-horizon NOW/NEAR/MID/LONG | **OPEN** — stacked on #216 (this PR) |
+| I | Long-horizon NOW/NEAR/MID/LONG | **OPEN** — [#217](https://github.com/d1n095/LifeAI/pull/217) (stack on #216) |
 
 ## Operating rules
 

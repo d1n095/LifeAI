@@ -8117,3 +8117,6 @@ syskon-tasks; måste byggas innan den funktionen kan börjas.
 
 | `cursor/mainai-founder-language-vertical-slice` | [#215](https://github.com/d1n095/LifeAI/pull/215) | **Öppen — Stage G** (stackad på #214) | Founder-language vertical slice |
 | `cursor/mainai-memory-quality-history-stress` | TBD | **Öppen — Stage H** (stackad på #215) | Synthetic history stress + quality queries |
+
+| `cursor/mainai-memory-quality-history-stress` | [#216](https://github.com/d1n095/LifeAI/pull/216) | **Öppen — Stage H** |
+| `cursor/mainai-long-horizon-planning` | [#217](https://github.com/d1n095/LifeAI/pull/217) | **Öppen — Stage I** |
