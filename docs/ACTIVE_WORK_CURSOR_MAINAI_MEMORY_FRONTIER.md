@@ -18,8 +18,8 @@ evidence-backed self-model, continuous simplification, then a real founder-langu
 | A | Canonical inspectable memory foundation | **IN PROGRESS** — [#209](https://github.com/d1n095/LifeAI/pull/209) (backend unit CI fail under triage) |
 | B | Idea / concept reconciliation | **IN PROGRESS** — stacked on #209 — [#210](https://github.com/d1n095/LifeAI/pull/210) |
 | C | Memory → work linkage (no authority widening) | **IN PROGRESS** — stacked on #210 — [#211](https://github.com/d1n095/LifeAI/pull/211) |
-| D | Temporal historical intelligence | queued |
-| E | Self-model / capability ledger | queued |
+| D | Temporal historical intelligence | **IN PROGRESS** — stacked on #211 — [#212](https://github.com/d1n095/LifeAI/pull/212) |
+| E | Self-model / capability ledger | **IN PROGRESS** — stacked on #212 |
 | F | Continuous simplification foundation | queued |
 | G | First end-to-end founder-language slice | queued |
 | H | Long-term memory quality test | queued |
