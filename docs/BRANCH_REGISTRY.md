@@ -8123,4 +8123,4 @@ syskon-tasks; måste byggas innan den funktionen kan börjas.
 
 | `cursor/mainai-personal-intent-learning` | [#218](https://github.com/d1n095/LifeAI/pull/218) | **Öppen — Stage J** (stackad på #217) | Personal intent learning; wrong terminology ≠ overwrite canonical |
 
-| `cursor/mainai-contradiction-assumption-engine` | TBD | **Öppen — Stage K** (stackad på #218) |
+| `cursor/mainai-contradiction-assumption-engine` | [#219](https://github.com/d1n095/LifeAI/pull/219) | **Öppen — Stage K** (stackad på #218) |
