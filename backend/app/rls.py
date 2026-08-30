@@ -543,7 +543,7 @@ _MAINAI_EXECUTION_TABLES = (
     "structured_claim_events",
     # Migration 0069 (Prediction vs Outcome Learning)
     "prediction_records",
-    # Migration 0068 (Hot/Warm/Cold Memory)
+    # Migration 0070 (Hot/Warm/Cold Memory)
     "memory_tier_states",
     # Migration 0055 (Life Work Candidates): work_candidates plays the SAME structural role
     # founder_memory_notes/project_entities already play -- a mutable row whose status
