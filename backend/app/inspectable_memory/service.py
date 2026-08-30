@@ -85,15 +85,23 @@ def _confidence_float(value) -> float | None:
 
 
 def _from_note(note: FounderMemoryNote, *, corrections: list[uuid.UUID] | None = None) -> InspectableMemoryItem:
+    provenance = dict(note.provenance or {})
+    normalized = provenance.get("normalized_intent") or note.content
+    raw = note.source or (
+        note.content if provenance.get("normalized_intent") is None else provenance.get("raw_expression")
+    )
+    conf = provenance.get("confidence")
+    if conf is None:
+        conf = note.confidence
     return InspectableMemoryItem(
         id=note.id,
         kind="founder_memory_note",
-        raw_statement=note.source,
-        normalized_interpretation=note.content,
-        confidence=_confidence_float(note.confidence),
+        raw_statement=raw,
+        normalized_interpretation=normalized,
+        confidence=_confidence_float(conf),
         factual_status=note.status,
         truth_state=MemoryTruthState.STORED,
-        provenance=dict(note.provenance or {}),
+        provenance=provenance,
         created_at=note.created_at,
         superseded_by=None,
         corrections=list(corrections or []),

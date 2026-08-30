@@ -20,8 +20,8 @@ evidence-backed self-model, continuous simplification, then a real founder-langu
 | C | Memory → work linkage (no authority widening) | **IN PROGRESS** — stacked on #210 — [#211](https://github.com/d1n095/LifeAI/pull/211) |
 | D | Temporal historical intelligence | **IN PROGRESS** — stacked on #211 — [#212](https://github.com/d1n095/LifeAI/pull/212) |
 | E | Self-model / capability ledger | **IN PROGRESS** — stacked on #212 — [#213](https://github.com/d1n095/LifeAI/pull/213) |
-| F | Continuous simplification foundation | **IN PROGRESS** — stacked on #213 |
-| G | First end-to-end founder-language slice | queued |
+| F | Continuous simplification foundation | **IN PROGRESS** — stacked on #213 — [#214](https://github.com/d1n095/LifeAI/pull/214) |
+| G | First end-to-end founder-language slice | **IN PROGRESS** — stacked on #214 |
 | H | Long-term memory quality test | queued |
 | I | Long-horizon NOW/NEAR/MID/LONG planning | queued |
 
