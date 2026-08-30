@@ -139,6 +139,7 @@ def run_executive_cycle(
     )
     if assumption_scan.get("assumption_invalidation_requires_replan"):
         uncertain.append("assumptions_or_lesson_conflicts_need_review")
+        remaining = ["REPLAN"] + [r for r in remaining if r != "REPLAN"]
     completed.append("ASSUMPTION_SCAN")
 
     # Workforce decision (intelligence only)
@@ -295,6 +296,8 @@ def _finalize(
     obs = executive_status_snapshot(db, owner_id=owner_id, session_id=session_id)
     obs["assumption_scan"] = assumption_scan or {}
     obs["staffing_reason"] = staffing_reason
+    contradiction_refs = list((assumption_scan or {}).get("contradiction_refs") or [])
+    obs["contradiction_refs"] = contradiction_refs
     completion = assess_completion(
         feature="executive_cycle",
         evidence={
@@ -327,4 +330,5 @@ def _finalize(
         authority_denials=list(AUTHORITY_DENIALS),
         missing_pieces=missing_pieces,
         completion_assessment=completion,
+        contradiction_refs=contradiction_refs,
     )

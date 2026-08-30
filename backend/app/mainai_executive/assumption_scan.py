@@ -73,8 +73,25 @@ def scan_assumptions_and_conflicts(
     return {
         "unverified_assumptions": unverified,
         "lesson_conflict_candidates": conflict_candidates,
+        "contradiction_refs": _to_contradiction_refs(unverified, conflict_candidates),
         "silently_reauthorized": False,
         "assumption_invalidation_requires_replan": bool(unverified or conflict_candidates),
         "authority_impact": "NONE — scan only; founder/policy must re-authorize separately",
         "ai_conflict_judgment_invoked": False,
     }
+
+
+def _to_contradiction_refs(
+    unverified: list[dict[str, Any]],
+    conflict_candidates: list[dict[str, Any]],
+) -> list[str]:
+    """Stable string refs for safe_planner.FounderPlanningRequest.contradiction_refs.
+
+    Does not authorize, resolve, or judge conflicts — feed-only.
+    """
+    refs: list[str] = []
+    for row in unverified:
+        refs.append(f"assumption:{row['id']}")
+    for pair in conflict_candidates:
+        refs.append(f"lesson_conflict:{pair['lesson_a']}:{pair['lesson_b']}")
+    return refs

@@ -6,6 +6,7 @@ PLAN != AUTHORITY.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -25,6 +26,12 @@ from app.mainai_executive.types import (
 )
 from app.models.active_context import ActiveContextSet
 from app.work_candidates.service import record_work_candidate
+
+
+def _stable_candidate_key(*, owner_id: uuid.UUID, horizon: str, title: str) -> str:
+    """Owner+horizon+title — avoids minting duplicate candidates across sessions."""
+    digest = hashlib.sha256(f"{owner_id}:{horizon}:{title}".encode()).hexdigest()[:24]
+    return f"exec-scan:{digest}"
 
 
 @dataclass
@@ -188,18 +195,22 @@ def run_executive_lookaround(
                 source_entity_id=source_entity_id,
                 title=item.title[:200],
                 rationale=item.rationale,
-                idempotency_key=f"exec-scan:{session_id}:{item.horizon.value}:{item.title[:80]}",
+                idempotency_key=_stable_candidate_key(
+                    owner_id=owner_id,
+                    horizon=item.horizon.value,
+                    title=item.title[:200],
+                ),
                 priority=priority,
                 classifier_strategy="executive_lookaround_v1",
                 classifier_confidence=item.confidence,
                 dependencies=list(item.dependencies),
                 provenance={
-                    "executive_session_id": session_id,
                     "horizon": item.horizon.value,
                     "authorized": False,
                     "future_plan_is_not_authority": True,
                     "scan_step": "bounded_candidate_generation",
-                    **dict(item.provenance),
+                    "classifier_strategy": "executive_lookaround_v1",
+                    **{k: v for k, v in dict(item.provenance).items() if k != "executive_session_id"},
                 },
             )
             work_candidate_ids.append(cand.id)
@@ -212,14 +223,18 @@ def run_executive_lookaround(
                 source_entity_id=source_entity_id,
                 title="[executive scan] bound reached before full confidence",
                 rationale="ExecutiveScanBounds stopped candidate generation; remaining items retained in continuity only",
-                idempotency_key=f"exec-scan-bound:{session_id}",
+                idempotency_key=_stable_candidate_key(
+                    owner_id=owner_id,
+                    horizon="OPTIONAL",
+                    title="[executive scan] bound reached before full confidence",
+                ),
                 priority="OPTIONAL",
                 classifier_strategy="executive_lookaround_v1",
                 classifier_confidence=0.2,
                 provenance={
-                    "executive_session_id": session_id,
                     "scan_bound_reached": True,
                     "authorized": False,
+                    "future_plan_is_not_authority": True,
                 },
             )
             work_candidate_ids.append(bound_cand.id)

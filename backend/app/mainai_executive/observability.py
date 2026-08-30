@@ -38,10 +38,14 @@ def executive_status_snapshot(
     exec_cands = [
         c
         for c in candidates
-        if isinstance(c.provenance, dict) and c.provenance.get("executive_session_id")
+        if c.classifier_strategy == "executive_lookaround_v1"
+        or (isinstance(c.provenance, dict) and c.provenance.get("scan_step") == "bounded_candidate_generation")
     ]
-    if session_id:
-        exec_cands = [c for c in exec_cands if c.provenance.get("executive_session_id") == session_id]
+    if session_id and checkpoint and checkpoint.work_candidate_ids:
+        wanted = set(checkpoint.work_candidate_ids)
+        session_cands = [c for c in exec_cands if str(c.id) in wanted]
+        if session_cands:
+            exec_cands = session_cands
 
     active_assignments = list(
         db.execute(
