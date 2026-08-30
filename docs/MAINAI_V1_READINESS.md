@@ -1,23 +1,24 @@
 # MainAI V1 Readiness
 
-**Completion-run status (2026-08-30):** Cursor Stages 0A–0E and Stages 1–6 are **MERGED** on
-`claude/det-kommer-mer-879lcm` (#196/#198/#199/#200/#201, #202, #203, #204, #205, #206,
-#207 @ `dca5e3b`). Evidence reports: `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`,
-`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`, `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`,
+**Completion-run status (2026-08-30):** Cursor Stages 0A–0E and Stages 1–6 are **MERGED and
+CLOSED OUT** on `claude/det-kommer-mer-879lcm` (#196/#198/#199/#200/#201, #202, #203, #204,
+#205, #206, #207 @ `dca5e3b`, #208 closeout @ `6789c2b`). Evidence reports:
+`docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`,
 plus the Stage 1–2 tests named in `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`. All
 independently reviewed post-merge (Claude PR comments on #205/#206) — #205's self-improvement
 run has one important caveat worth reading in the table below: it proved the mechanism safe
 end-to-end but ran against a disposable worktree mirror, not the real checkout, so MainAI's
 actual codebase did not change as a result.
 
-The body below is adapted from Claude's design-lane draft (PR #197), refreshed to its
-2026-08-30 state so this landed copy is not a stale snapshot — includes four real bugs #197
-found and fixed during that same session's V1 blocker sweep (`run_driver()` mid-run-takeover
-crash, an `authorize_execution_scope()` TOCTOU race, an unbounded automatic-replan loop, and a
-real approval-gate bypass via `POST /api/mainai/jobs`), all `git stash`-negative-control
-verified. **Those four code fixes and Path B execution-scope bridge code are still on #197
-(not yet on tip)** — this doc tracks readiness claims from that lane; tip still awaits Claude
-merging #197 (currently CONFLICTING).
+The body below is Claude's own design-lane draft (PR #197), kept current with tip across two
+merges tonight — includes four real bugs #197 found and fixed during this session's V1
+blocker sweep (`run_driver()` mid-run-takeover crash, an `authorize_execution_scope()` TOCTOU
+race, an unbounded automatic-replan loop, and a real approval-gate bypass via
+`POST /api/mainai/jobs`), all `git stash`-negative-control verified, plus Part D below (a
+founder-defined Personal Intent & Executive Reasoning classification, with its three companion
+architecture docs — also on this branch, so Part D's own references resolve here) and three
+shipped V1.1 features (§ Part D's own status notes). Path B execution-scope bridge code
+remains #197's implementation lane — this doc tracks readiness, not that code drop.
 
 ---
 
@@ -209,10 +210,65 @@ happens next is a founder call, not something this readiness matrix blocks on.
 **Not blockers, explicitly scoped out of V1**: Vault V5/V8 schema implementation (separate
 initiative, its own timeline), the `multiplication_repair` recipe's narrowness (cost
 optimization only), the provider-adapter `provider_request_may_have_left` completeness gap
-(conservative-safe already), and a new, founder-defined Personal Intent & Executive Reasoning
-/ Long-Horizon Planning / Memory Truth workstream (three companion architecture docs, not yet
-landed on this tip — see PR #197's own Part D for the full V1/V1.1/V2 classification once
-those docs merge). One piece of it, the memory-truth invariant (SAID != STORED != PLANNED !=
-IMPLEMENTED != VERIFIED), is called out there as required now regardless of V1/V1.1/V2
-sequencing for the rest.
+(conservative-safe already), and the entire new Personal Intent & Executive Reasoning /
+Long-Horizon Planning / Memory Truth workstream — see Part D below for why and for the one
+piece of it (memory truth) that IS required now regardless.
 
+---
+
+## Part D — Personal Intent & Executive Reasoning: V1 classification
+
+Founder-defined new capability (2026-08-30), specified in three companion documents:
+`docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md`, `docs/MAINAI_INSPECTABLE_MEMORY_
+CONTRACT.md`, `docs/MAINAI_LONG_HORIZON_PLANNING.md`. Per the founder's own explicit
+instruction, this is **not** automatically a V1 blocker — V1 is about the execution-autonomy
+chain (Parts A-C above) being safe and complete; this workstream is about reducing founder
+instruction-effort over time, a genuinely separate capability axis layered on top of an
+already-safe V1.
+
+**V1 minimum required from this workstream: none.** Every mechanism specified across all three
+documents is additive to the already-shipped goal→plan→execute→verify→finalize chain — none
+of it is required for that chain to be correct or complete.
+
+**Required NOW regardless of V1/V1.1/V2 sequencing** — the founder's own explicit exception:
+the **memory truth invariant** (`docs/MAINAI_INSPECTABLE_MEMORY_CONTRACT.md` §2's
+`MemoryTruthState` vocabulary and §5.1's "build claims from returned rows, never from
+requests" calling convention). Reasoning, restated from that document: every producer this
+workstream will build (resolved references, generated candidates, conversational lessons)
+needs somewhere truthful to land before it's built, or the very first thing built to reduce
+founder effort recreates the exact SAID/STORED confusion the founder is asking to prevent.
+This is cheap to establish now (a vocabulary + a calling convention, not new infrastructure)
+and expensive to retrofit once call sites exist that don't follow it. Tonight's own four real
+bugs (§ the readiness table's "run_driver() mid-run-takeover", "authorize_execution_scope()
+TOCTOU", two test-fixture fixes, and the unbounded-replan loop) are concrete, already-happened
+instances of exactly this failure class, in code that predates this document — not a
+speculative risk.
+
+**V1.1** (see each document's own §8/§7/§6 for full reasoning, summarized here):
+- `ConversationalInterpretationProposal` + resolution flow (personal-intent doc §1) — reuses
+  `project_entities`' proven pattern verbatim, no new authority surface.
+- Conversational lesson recording (personal-intent doc §5) — one new caller into an
+  already-fully-built `EngineeringLesson` system.
+- `WorkCandidate.priority` NOW/NEAR/LATER/OPTIONAL/BLOCKED vocabulary widening (personal-intent
+  doc §2.3 / long-horizon doc §4.1) — a CHECK constraint change, cheap and additive.
+- Additional replan trigger sources beyond task failure (long-horizon doc §3.2) — reuses the
+  existing, tested `trigger_replan()` mechanism unchanged.
+- NEAR-radius executive scan (long-horizon doc §4).
+
+**V2:**
+- Full executive look-around orchestrator (personal-intent doc §2) — real integration work
+  across three subsystems, needs its own bounded-generation tuning before trustworthy at scale.
+- `authority_kind` generalization out of `safe_planner` into a shared classifier (personal-
+  intent doc §3) — a real refactor of a working module, not just a new caller.
+- MID/LONG-radius horizon scanning (long-horizon doc §4) — new multi-hop traversal logic,
+  needs correctness/performance validation before running automatically.
+- Inspectable-memory UI surface and background verification job scheduling (memory-contract
+  doc §6.3/§5.2) — the `MemoryTruthState` vocabulary itself ships now (see above); the UI and
+  automated verification around it are deferrable.
+
+**Standing invariant this workstream must never weaken, at any tier**: LONG-horizon items and
+executive-scan-generated `WorkCandidate` rows carry exactly zero authority — every path from
+this workstream's own output to a real effect still passes through the SAME
+`authorize_execution_scope()`/`grant_task_approval()`/`authorize_work_candidate()` gates Parts
+A-C already prove are real and tested. Nothing in Part D introduces a new way to acquire
+execution authority.

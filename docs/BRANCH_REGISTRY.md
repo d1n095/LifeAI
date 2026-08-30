@@ -6,6 +6,35 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Claude's non-överlappande lane: MainAI V1 arkitektur/readiness (2026-08-29)
+
+Parallellt med red-team-granskning av Cursors correction-pass-PR:er (#196 osv, nedan) — INTE i
+samma filer, ingen konflikt. Läs-och-dokumentera-jobb, ingen körbar kod ändrad. Fyra dokument:
+
+- `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md` — goal-intake gap-analys + task-decomposition-kontrakt.
+  Huvudfynd: kedjan founder→Worker är väsentligt mer produktions-riktig än väntat — en fullständig
+  founder-facing HTTP-API kopplar redan dokumentinmatning/direkt-goal hela vägen till autonom
+  Worker-pickup, inklusive riktig AI-driven task-decomposition (`propose_plan_via_ai` →
+  `create_plan()`, en riktig route, inte test-only).
+- `docs/MAINAI_V1_READINESS.md` — long-run authenticity-spec (maskinkontrollerbar checklista),
+  gap/repair-produktionsloop-audit (bekräftat produktions-riktig end-to-end;
+  `multiplication_repair` är en enda namngiven recipe, ren kostnadsoptimering, inte en
+  begränsning av den generella mekanismen), och fullständig V1-blockermatris.
+- `docs/MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` — säkerhetskontrakt för MainAI:s första
+  självförbättrings-körning mot sin egen kodbas. `remote_write_authorized=false`, ingen
+  provider-spend, en enda smal path/capability-scope, founder granskar allt innan push.
+- `docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md` — nytt addendum: V4/V5/V8 skarpade till exakta
+  implementations-redo beslut (inte längre bara alternativ), tydligt märkt vad som är "safe
+  default" vs. kräver explicit founder-signoff.
+
+**Enda riktiga V1-blockers, redan i rörelse:** Cursors correction-pass Phase 1-5 (se nedan),
+plus två nya, tidigare oupptäckta uppföljningar: (1) verifiera idempotens/krash-återhämtning
+mitt i `create_plan()`-decomposition (inte kollat denna omgång), (2) samma för
+mid-decomposition-cancellation. Vault V5/V8-schema är EXPLICIT INTE en V1-blocker (egen
+tidslinje, separat initiativ).
+
+---
+
 ## Aktiva PR:er (2026-08-27/28/29) — Night run autonomy hardening
 
 Integration tip: `claude/det-kommer-mer-879lcm` (post-#195, se `docs/ACTIVE_WORK_CURSOR_CORRECTION_PASS_182_183.md`s commit).
@@ -92,39 +121,109 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
-## MAINAI MEMORY FRONTIER — Stages A–I (Cursor) — post-V1
+## MAINAI V1 COMPLETION RUN — Stages 0–6 (Cursor) — KLAR + Claude's parallel v1-readiness-workstream
 
-**Opened 2026-08-30** from tip `6789c2b` (post-#208). Program:
-`docs/ACTIVE_WORK_CURSOR_MAINAI_MEMORY_FRONTIER.md`. Claude [#197](https://github.com/d1n095/LifeAI/pull/197)
-remains Claude-owned — do not duplicate/rebase/modify that branch from this lane.
-
-| Branch | PR | Status | Scope |
-|---|---|---|---|
-| `cursor/mainai-inspectable-memory-foundation` | [#209](https://github.com/d1n095/LifeAI/pull/209) | **Öppen — Stage A** | Inspectable memory foundation: truth claims + projection API + lesson verification_status + registry widen; no second memory store |
-| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Öppen — Stage B** (stackad på #209) | Concept reconciliation: fingerprint, aliases, SAME-collapse, relationship vocabulary |
-
-**Migration note:** Stage A lands Alembic **0063** on tip; Stage B lands **0064**. Claude #197's pending 0063/0064
-must renumber on rebase.
-
----
-
-## MAINAI V1 COMPLETION RUN — Stages 0–6 (Cursor) — KLAR
-
-**✅ CURSOR PROGRAM COMPLETE (2026-08-30).** Integration tip: post-#207 (`dca5e3b`).
+**✅ CURSOR PROGRAM COMPLETE (2026-08-30).** Integration tip: post-#210 (`e8c9ca6`).
 Program: `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/autonomous-gap-worker-live-loop` | [#202](https://github.com/d1n095/LifeAI/pull/202) | **Mergad — Stage 1** | Worker→Supervisor live gap/repair/reverify/unlock; no harness bridges |
 | `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
-| `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
-| `cursor/first-bounded-self-improvement` | [#205](https://github.com/d1n095/LifeAI/pull/205) | **Mergad — Stage 4** | Bounded self-improvement: SSH egress marker test via Worker→Supervisor; disposable mirror; no remote_write |
-| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Mergad — Stage 5** | Path A goal intake → Worker complete; Path B stays Claude #197 |
-| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Mergad — Stage 6** @ `dca5e3b` | Land V1 readiness + companion design docs on tip |
+| `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | Long-run 8-12 task soak; independently reviewed by Claude pre-merge |
+| `cursor/first-bounded-self-improvement` | [#205](https://github.com/d1n095/LifeAI/pull/205) | **Mergad — Stage 4** | First bounded self-improvement (SSH egress marker test); independently reviewed post-merge (Claude) — important caveat: proved the mechanism safe, ran against a disposable worktree mirror, NOT the real checkout, so production `test_egress_policy.py` is unchanged |
+| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Mergad — Stage 5** | Path A goal intake → Worker complete; independently reviewed (Claude, clean) |
+| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Mergad — Stage 6** @ `dca5e3b` | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **Conflict resolved**: its `MAINAI_V1_READINESS.md` snapshot predated most of #197's tonight-session updates — Claude pushed a refresh commit directly onto #207's branch before merge closing the gap, then (after #207 merged) merged this integration tip back into #197 and resolved the resulting content conflict in favor of #197's fuller version (includes Part D + its companion docs, which only exist on #197). |
+| `cursor/v1-completion-run-closeout` | [#208](https://github.com/d1n095/LifeAI/pull/208) | **Mergad — Closeout** @ `6789c2b` | Marks Cursor's own V1 completion run Stages 0A-6 complete; reviewed (Claude, clean, docs-only, respects #197 boundary) |
 
-**Kvar utanför Cursor-programmet:** Claude [#197](https://github.com/d1n095/LifeAI/pull/197)
-(Path B bridge + fyra tip-saknade blocker-sweep-kodfixar) — CONFLICTING, Claude-ägd lane.
-Rör den inte härifrån.
+**Claude's egen, icke-överlappande gren `v1-readiness-workstream` (PR #197, öppen, ej mergad,
+mergad FRAMÅT mot integrationstippen två gånger natten 2026-08-29→30, senast post-#208 — INTE
+längre konflikterande mot tip)** — fem riktiga, var för sig three-check-verifierade fynd
+(`git stash`-negativkontroll: varje fix' egen test misslyckas genuint på pre-fix-kod, passerar
+post-fix), alla pushade, ingen ännu founder-granskad:
+
+1. **`OperatorAuthorityTransitionError`** (`app/development_operator/service.py`,
+   `app/development_driver/service.py`) — `run_driver()`s per-steg try/except fångade tidigare
+   ENDAST `OperatorCapabilityMissing`; en mitt-i-körning-takeover/lease-expiry/founder-cancel
+   kraschade okontrollerat ut ur `run_driver()` istället för en ren `DriverResult`
+   (`STALE_AUTHORITY`-klassificering + checkpoint). Spårade och klassificerade VARJE
+   `OperatorAuthorizationError`-raise-plats i modulen (förväntad auktoritetsövergång vs.
+   genuin programmeringsdefekt) till en ny, smalare exception-subklass. Två separata
+   Driver-anropsplatser behövde fångas (`_invoke_operator` OCH `checkpoint_operator_progress`,
+   upptäckt empiriskt). Ny test bevisar även att den VINNANDE workerns nästa `run_driver()`-
+   anrop återupptar från exakt rätt checkpoint, noll duplicering.
+2. **Två test-fixtures** (`test_autonomous_gap_child_task.py`, `test_partial_plan_insertion.py`)
+   som `create_plan()`s egen (tidigare i samma gren fixade) `populate_existing=True`
+   goal-row-lock tyst kastade bort — ren testartefakt, ingen produktionsbugg (produktionskod
+   sätter aldrig `goal.approval_policy` efter konstruktion).
+3. **Genuin TOCTOU-race i `authorize_execution_scope()`** (`app/execution_envelopes/
+   service.py`) — dess egen docstring hävdade en `SELECT ... FOR UPDATE` på goal-raden FÖRE
+   envelope-transitionen; koden gjorde det aldrig, bara en sen, oavsiktlig FK-driven lås via
+   `ExecutionAuthorizationEnvelope`s egen insert. Ett riktigt, smalt fönster där
+   `execute_takeover()` kunde hinna dispatcha ett legacy V0.1-jobb precis innan governance
+   blev effektiv. Fixad med en explicit tidig lås; empiriskt bevisad med en test som pausar
+   INUTI funktionen (via `session.add()`-interception) strax före den oavsiktliga FK-låsningen.
+4. **Obegränsad automatisk replan-loop** (`app/mainai_execution/replan.py`) — en genuint
+   olöslig goal skulle replana för evigt, en riktig fakturerad AI-anrop per worker-tick, utan
+   räknare eller founder-eskalering. Fixad med `MAX_AUTO_REPLANS = 3` (matchar
+   `safe_planner.service`s egen precedent); begränsar bara den obevakade tick:en, aldrig
+   founderns egen explicita replan. Ingen ny schema/eskaleringsmekanism behövdes — den
+   redan existerande `_finalize_mainai_execution_goals`-ticken stänger målet till `failed`
+   med en riktig rapport på nästa varv.
+5. **Riktig approval-gate-bypass** (`app/jobs/service.py`) — `require_task_approval()`
+   anropades ENDAST inuti `dispatch_ready_task()`. `POST /api/mainai/jobs` (en generisk,
+   founder-gated route) anropar `create_job()` direkt med `job_type="task_execution"` — en
+   helt separat, riktig, redan skeppad dörr till en `mainai_jobs`-rad, som ALDRIG kontrollerade
+   godkännande. En `approval_required=True`-task som nått `ready` kunde dispatchas verkligt via
+   denna väg utan att någon approval någonsin kontrollerats eller registrerats. Fixad genom att
+   `_validate_task_execution_input_refs()` (den enda kontroll den vägen fick) nu också anropar
+   `require_task_approval()`.
+
+**Ny arkitektur-workstream, samma gren (PR #197), founder-definierad 2026-08-30**: "MainAI
+Personal Intent & Executive Reasoning" — tre nya implementation-ready docs
+(`docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md`, `docs/MAINAI_INSPECTABLE_MEMORY_
+CONTRACT.md`, `docs/MAINAI_LONG_HORIZON_PLANNING.md`) plus `docs/MAINAI_V1_READINESS.md` Part D
+(V1/V1.1/V2-klassificering — inget av detta är en V1-blocker förutom memory-truth-invarianten,
+som founder explicit krävde designad NU). ~2/3 av det efterfrågade fanns redan under andra
+namn (founder_memory_signals, project_entities, EngineeringLesson, autonomous_gap,
+work_candidates, execution_envelopes) — se dokumentens egna "vad finns redan"-tabeller innan
+någon framtida session rör detta. Sedan dess (samma gren) ytterligare tre riktiga, three-check-
+verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration **0065**, tidigare
+0064, tidigare 0063 — renumrerad två gånger, se nedan), entity-resolution på
+`CandidateLearningSignal` (migration **0066**, tidigare 0065, tidigare 0064), `record_lesson_from_founder_
+correction()` (ingen migration). Se PR #197s egna commits för detaljer.
+
+## MainAI Memory Frontier (Cursor, primary implementation lane, founder-godkänd 2026-08-30)
+
+**Founder har omfördelat hela Phase 2-13-arbetet (Canonical Memory Foundation, idé-
+reconciliation, memory→work-linkage, temporal recap, self-model, continuous simplification,
+osv.) till Cursor som primär implementations-lane.** Se `docs/ACTIVE_WORK_CURSOR_MAINAI_MEMORY_
+FRONTIER.md` (finns bara på Cursors egna grenar, inte ännu på integrationstippen) — 9 stadier
+(A-I), "Do not touch Claude #197" explicit i dokumentet. Claude ska INTE bygga en konkurrerande
+implementation av samma workstream — se `CLAUDE.md`s "Standardbeteende"-avsnitt. Claude's roll
+här är röd-team-granskning av Cursors PR:er, inte primärbyggare, tills annat sägs.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-inspectable-memory-foundation` | [#209](https://github.com/d1n095/LifeAI/pull/209) | **Mergad — Stage A** @ `b73a018` | Canonical inspectable memory (`memory_truth_claims`, verify-against-reality, founder API `/api/founder/memory`). Landed Alembic **0063** on tip BEFORE #197 merged — won the numbering race (see resolution below). Claude red-team review (fork): clean, `verify_truth_claim()` genuinely re-derives truth from the real target row, never trusts caller input. |
+| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Mergad — Stage B** @ `e8c9ca6`, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Landed Alembic **0064** on tip BEFORE #197 merged, colliding with #197's already-renumbered 0064 (see resolution below). Claude red-team review (fork): ONE plausible-not-yet-confirmed TOCTOU race in `promote_interpretation_proposal()`'s SAME-collapse (`find_same_concept()` unlocked SELECT → unlocked insert) — posted to PR, offered to build the two-thread empirical proof; not yet resolved, carried forward. |
+
+**Alembic-revisionskollision — LÖST TVÅ GÅNGER 2026-08-30 (basen fortsatte röra sig under
+#197s öppna fönster):** Första kollisionen: #209 mergade `0063_inspectable_memory_foundation.py`
+in på tippen medan #197 fortfarande var öppen, vilket vann numreringsracet den ursprungliga
+noten antog att #197 skulle vinna. Första lösningen: #197s två migrationer omnumrerades
+`0063_work_candidate_horizon_priority.py` → `0064` och
+`0064_candidate_signal_entity_resolution.py` → `0065`. INNAN den lösningen hann mergas landade
+#210 (stackad på #209) sin egen `0064_concept_reconciliation.py` på tippen — samma
+`down_revision=0063`, samma nya nummer `0064` som #197s redan omnumrerade fil, en ANDRA
+kollision. Slutlig lösning, verifierad vid denna merge-session (2026-08-30, samma pass som
+löste registerkonflikten ovan): #197s två migrationer omnumrerades EN GÅNG TILL,
+`0064_work_candidate_horizon_priority.py` → **`0065`** och
+`0065_candidate_signal_entity_resolution.py` → **`0066`** (down_revision-kedja: `0063`
+(#209) → `0064` (#210, `concept_reconciliation`) → `0065` (#197, `work_candidate_horizon_
+priority`) → `0066` (#197, `candidate_signal_entity_resolution`)), innehåll i övrigt
+byte-identiskt, `alembic heads` visar exakt EN head efter omnumreringen. Ingen ytterligare
+öppen Cursor-branch känd att kollidera med just nu.
 
 ---
 

@@ -73,6 +73,7 @@ RESULTS = frozenset(
         "ACTION_BOUND_REACHED",
         "COMPLETE",
         "NEEDS_SELECTION",
+        "STALE_AUTHORITY",
     }
 )
 
@@ -559,6 +560,29 @@ def run_driver(
                 unrelated_work_can_continue=exc.unrelated_work_can_continue,
                 idempotency_key=idem,
             )
+        except operator.OperatorAuthorityTransitionError as exc:
+            # Effect-time authority changed since this OperatorContext was bound (lease
+            # takeover, expiry, founder cancel raced past the check above, envelope
+            # revoke/supersede, or a concurrent worker advancing the repository) --
+            # _require_context() already refused the effect BEFORE any mutation, so this
+            # step produced zero effect. Distinct classification from CANCELLED so a
+            # founder reading the audit trail can tell "superseded" apart from "cancelled".
+            cp = _checkpoint(
+                db,
+                context,
+                task,
+                goal,
+                phase="BLOCKED",
+                classification="STALE_AUTHORITY",
+                state=state,
+            )
+            return DriverResult(
+                "BLOCKED",
+                "STALE_AUTHORITY",
+                len(state["completed"]),
+                {"reason": str(exc)},
+                cp.id,
+            )
         completed = {
             "index": index,
             "capability": step.capability,
@@ -570,17 +594,39 @@ def run_driver(
         state["step_attempts"][str(index)] = attempt + 1
         state["next_step"] += 1
         actions += 1
-        operator.checkpoint_operator_progress(
-            db,
-            context,
-            completed_action_ids=[
-                uuid.UUID(item["trace_event_id"])
-                for item in state["completed"]
-                if item.get("trace_event_id")
-            ],
-            next_phase="execute",
-            unresolved_failures=[],
-        )
+        try:
+            operator.checkpoint_operator_progress(
+                db,
+                context,
+                completed_action_ids=[
+                    uuid.UUID(item["trace_event_id"])
+                    for item in state["completed"]
+                    if item.get("trace_event_id")
+                ],
+                next_phase="execute",
+                unresolved_failures=[],
+            )
+        except operator.OperatorAuthorityTransitionError as exc:
+            # The step's own effect above already happened for real (or was itself the
+            # winning success) -- authority changed between that effect and this routine
+            # progress checkpoint. state["completed"] above already recorded the step, so
+            # completed_steps here correctly reflects it as historical, not lost.
+            cp = _checkpoint(
+                db,
+                context,
+                task,
+                goal,
+                phase="BLOCKED",
+                classification="STALE_AUTHORITY",
+                state=state,
+            )
+            return DriverResult(
+                "BLOCKED",
+                "STALE_AUTHORITY",
+                len(state["completed"]),
+                {"reason": str(exc)},
+                cp.id,
+            )
         if result.result == "capability_missing":
             cp = _checkpoint(
                 db,

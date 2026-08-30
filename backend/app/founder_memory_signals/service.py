@@ -90,6 +90,41 @@ def dismiss_candidate_signal(db: Session, *, owner_id: uuid.UUID, signal_id: uui
     return row
 
 
+def resolve_candidate_signal_entity(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    signal_id: uuid.UUID,
+    resolved_entity_type: str,
+    resolved_entity_id: uuid.UUID,
+    resolution_reasoning: str | None = None,
+) -> CandidateLearningSignal:
+    """Records WHICH existing entity a signal's source message appears to be about --
+    docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md §1.3's resolution step. Same epistemic
+    status as `classifier_confidence`: a resolver's own guess about what "that", "the other
+    thing", or an indirect reference points at, never a truth claim on its own. Does NOT
+    require or produce a FounderMemoryNote -- promote_candidate_signal() (unchanged) remains
+    the only path to real founder knowledge; a resolved entity is available as context for
+    that later, deliberate promotion decision, not a shortcut around it.
+
+    Only valid on an `unreviewed` signal (same precondition as dismiss/promote) -- resolution
+    informs a still-pending review, it does not happen after the fact."""
+
+    row = db.execute(
+        select(CandidateLearningSignal).where(CandidateLearningSignal.id == signal_id, CandidateLearningSignal.owner_id == owner_id).with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        raise CandidateLearningSignalError("candidate signal is missing or belongs to another owner")
+    if row.status != "unreviewed":
+        raise CandidateLearningSignalError(f"candidate signal is already {row.status}, not unreviewed")
+    row.resolved_entity_type = resolved_entity_type
+    row.resolved_entity_id = resolved_entity_id
+    row.resolution_reasoning = resolution_reasoning
+    row.updated_at = datetime.utcnow()
+    db.flush()
+    return row
+
+
 def promote_candidate_signal(
     db: Session,
     *,

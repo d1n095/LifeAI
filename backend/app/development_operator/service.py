@@ -57,6 +57,21 @@ class OperatorAuthorizationError(OperatorError):
     pass
 
 
+class OperatorAuthorityTransitionError(OperatorAuthorizationError):
+    """A NARROWER subclass of OperatorAuthorizationError for the specific, EXPECTED case
+    where authority genuinely changed since this OperatorContext was bound -- a lease
+    takeover, a founder cancel, an execution-envelope revoke/supersede, or the repository
+    being concurrently advanced by another worker's own committed effect. This is the
+    system working correctly (refusing an effect under authority that is no longer current),
+    never a bug -- structurally distinct from the base OperatorAuthorizationError, which
+    stays reserved for genuine invariant violations (a context that should never have been
+    constructed this way at all, e.g. "ambiguous worktree class"). A caller that only knows
+    about the base class still catches this via ordinary subclass matching; callers that
+    want to react differently to an expected transition (see run_driver()'s own per-step
+    handling) can catch this narrower type specifically. See run_driver()'s STALE_AUTHORITY
+    classification for the one place this distinction is actually acted on today."""
+
+
 class OperatorPathError(OperatorError):
     pass
 
@@ -224,28 +239,28 @@ def _require_live_execution_authority(db, context: OperatorContext, *, task: Mai
         db, owner_id=context.owner_id, goal_id=task.goal_id
     )
     if current is None or current.id != context.execution_envelope_id:
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "execution authorization changed since OperatorContext was bound; "
             "refusing to execute under stale authority"
         )
     authorized_paths = tuple(current.authorized_paths or ())
     if not authorized_paths:
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "current execution envelope has no authorized paths; refusing effect"
         )
     for path in context.allowed_paths:
         if not _path_within_authorized(path, authorized_paths):
-            raise OperatorAuthorizationError(
+            raise OperatorAuthorityTransitionError(
                 "OperatorContext path ceiling is outside the CURRENT execution envelope"
             )
     authorized_caps = tuple(current.authorized_capabilities or ())
     if not authorized_caps:
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "current execution envelope has no authorized capabilities; refusing effect"
         )
     for capability in context.allowed_capabilities:
         if capability not in authorized_caps:
-            raise OperatorAuthorizationError(
+            raise OperatorAuthorityTransitionError(
                 "OperatorContext capability ceiling is outside the CURRENT execution envelope"
             )
 
@@ -292,7 +307,7 @@ def _verify_supervisor_goal_worktree(db, context: OperatorContext, *, task: Main
         )
     ).scalar_one_or_none()
     if lease is None or lease.expires_at <= datetime.utcnow():
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "supervisor goal lease is absent, stale, or not held by this worker"
         )
 
@@ -419,7 +434,7 @@ def _require_context(
         or execution is None
         or (execution.job_id is not None and execution.job_id != context.job_id)
     ):
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "operator context is not linked to the task's current job/execution"
         )
     if (
@@ -427,15 +442,15 @@ def _require_context(
         or job.locked_by != context.worker_id
         or job.lease_generation != context.lease_generation
     ):
-        raise OperatorAuthorizationError("stale or absent MainAI job lease")
+        raise OperatorAuthorityTransitionError("stale or absent MainAI job lease")
     # Effect-time expiry: claim-time ownership is not enough if the lease clock elapsed
     # before takeover rebinds locked_by/generation.
     if job.lease_expires_at is not None and job.lease_expires_at <= datetime.utcnow():
-        raise OperatorAuthorizationError("stale or absent MainAI job lease")
+        raise OperatorAuthorityTransitionError("stale or absent MainAI job lease")
     # Founder cancel mid-flight: past effects remain historical; future filesystem /
     # remote effects must stop. Progress checkpoints of already-done work stay allowed.
     if refuse_if_cancelled and job.cancel_requested:
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "job cancel requested; refusing further filesystem effect"
         )
     root = context.repository_root.resolve()
@@ -447,7 +462,7 @@ def _require_context(
         _git(root, ["branch", "--show-current"]).stdout.strip()
         != context.expected_branch
     ):
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "repository branch does not match operator context"
         )
 
@@ -485,7 +500,7 @@ def _require_context(
             worktree.base_sha != context.expected_base_sha
             or worktree.branch != context.expected_branch
         ):
-            raise OperatorAuthorizationError(
+            raise OperatorAuthorityTransitionError(
                 "worktree base or branch identity changed unexpectedly"
             )
         return task, job, binding, worktree
@@ -497,7 +512,7 @@ def _require_context(
         return task, job, binding, None
 
     if _git(root, ["rev-parse", "HEAD"]).stdout.strip() != context.expected_base_sha:
-        raise OperatorAuthorizationError(
+        raise OperatorAuthorityTransitionError(
             "repository HEAD does not match expected base SHA"
         )
     return task, job, binding, None
@@ -1319,7 +1334,7 @@ async def push_branch(db, context: OperatorContext, *, idempotency_key: str):
         raise OperatorAuthorizationError("branch/commit identity is not ready for push")
     remote_sha = fetch_remote_branch(worktree)
     if remote_sha != context.expected_remote_sha:
-        raise OperatorAuthorizationError("remote branch state changed unexpectedly")
+        raise OperatorAuthorityTransitionError("remote branch state changed unexpectedly")
     sha = await push_worktree_branch(worktree)
     event = _audit(
         db,

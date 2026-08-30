@@ -38,6 +38,15 @@ class CandidateLearningSignal(Base):
     status: Mapped[str] = mapped_column(String(24), default="unreviewed")
     promoted_to_note_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     dismissed_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Migration 0064 (docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md §1): which existing
+    # entity this signal's source message appears to be ABOUT -- resolved_entity_type is
+    # deliberately a loose string, not yet validated against app.active_context.service's
+    # closed SUPPORTED_TYPES registry (a reasonable follow-up once real usage exists). Same
+    # epistemic status as classifier_confidence: a resolver's own guess, never a truth claim
+    # until promote_candidate_signal() (unchanged) turns it into one.
+    resolved_entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    resolved_entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    resolution_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     provenance: Mapped[dict] = mapped_column(JSON, default=dict)
     idempotency_key: Mapped[str] = mapped_column(String(128))
     observed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

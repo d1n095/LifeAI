@@ -355,3 +355,133 @@ ids, matching this ledger's own existing hash-only-content discipline. Pair with
 decision on the `conversation_id` question above, and build the actual population plumbing
 together with V5's classification-lookup call-site changes (same call sites, same "what object
 is this from" data needed by both).
+
+---
+
+# Addendum — V4/V5/V8 implementation-ready decisions
+
+Converts the options above into exact, implementation-ready choices — one answer per question
+instead of a menu — so a future implementation PR can build directly from this document. No
+schema/migration in this addendum either. V7 omitted here — the original recommendation above
+("do nothing structurally now") still stands and needs no further sharpening.
+
+## V4 — ownerless callers
+
+**Decision: Option A.** Attribute `lesson_conflicts.py`'s `detect_conflict()` and
+`agent_orchestration.py`'s `dispatch_task()`/`review_task()` to the existing `FOUNDER_USER_ID`
+sentinel (`app/founder.py`), passed as `owner_id=FOUNDER_USER_ID` at both call sites, with
+`purpose="lesson_conflict_detection"` / `purpose="agent_task_dispatch"` respectively.
+
+**Exact consequences:**
+- Both calls become fully policy-inspected (`enforce_egress_policy()`) and ledger-recorded
+  (`provider_disclosure_events`) for the first time — currently zero inspection.
+- `EngineeringLesson`/`AgentTask` themselves are NOT modified — no `owner_id` column added, no
+  schema change. Only the two `chat_with_fallback()` call sites change.
+- The disclosure ledger will show these events under `owner_id=FOUNDER_USER_ID` — since
+  `FOUNDER_USER_ID` is `uuid.UUID(int=1)`, a fixed non-secret sentinel already trusted
+  elsewhere (`require_founder()`), this is safe to query/filter on directly.
+- **Requires a code comment at both call sites** stating this is a single-tenant assumption
+  tied to `FOUNDER_USER_ID`'s existing scope — if MainAI ever becomes multi-founder, this
+  specific wiring must be revisited (not silently inherited).
+- **Founder approval needed on:** nothing structural — this is the lowest-risk of the three
+  remaining V-numbers, a 2-line change per call site, no new concepts. Recommend treating this
+  as a "safe default," approved by this document, not requiring a separate founder sign-off
+  round before implementation.
+
+## V5 — sensitivity classification
+
+**Exact enum/ladder (decision, not option):**
+```
+PUBLIC < INTERNAL < PRIVATE < CONFIDENTIAL < VAULT < SECRET < NEVER_EGRESS
+```
+Plus orthogonal boolean `IP_PROTECTED` (independent of the ladder — see the "technical
+requirement without business rationale" rationale above, unchanged here).
+
+**Where classification attaches (decision):** two-level — `Document.sensitivity_class`
+(required, ladder value) + `DocumentChunk.sensitivity_class` (nullable; when null, inherits the
+parent `Document`'s value at read/gate time, not copied permanently at chunk-creation time —
+this is a REVISION from the options above, which proposed copying at chunk-creation time;
+inheriting live avoids the failure mode where a founder reclassifies a Document but its
+already-chunked children silently keep a stale, more-permissive class).
+
+**Inheritance rule (decision):** MAX of document-level and chunk-level (unchanged) — a chunk
+can only raise the effective class above its parent's floor, never lower it.
+
+**Unknown/unclassified default (decision):** `CONFIDENTIAL` at migration time for every
+existing row (unchanged) — never `PUBLIC`. New rows created AFTER the migration lands must
+have `sensitivity_class` as a required, non-nullable field with NO application-level default at
+all (the ingest/creation code path must be forced to pass an explicit value, or the insert
+fails) — this is a sharpening beyond the options above: a nullable-with-CONFIDENTIAL-default
+column at the DB level would let a future code path silently insert NULL and re-introduce the
+"unknown becomes something too permissive" risk the founder explicitly ruled out. Only the
+one-time backfill migration gets to use CONFIDENTIAL-as-default; the column itself should be
+`NOT NULL` from day one for new inserts.
+
+**Declassification authority (decision):** founder-only, recorded as an append-only event in a
+new (not-yet-designed-here) `document_declassification_events` table — mirrors
+`execution_authorization_envelope`'s own revocation-audit shape. Exact schema is a follow-up
+implementation detail, not decided here; the AUTHORITY MODEL (founder-only, append-only, never
+automatic/model-driven) is the decision this addendum fixes.
+
+**Mixed-content / chat-history behavior (decision):** per the V5→V7 seam above — a
+conversation's replay-sensitivity floor is the MAX of every classification that has ever
+contributed to any turn in the window; once risen, it never silently drops. Unchanged.
+
+**Founder approval needed on:** the enum values and ladder order (naming bikeshed risk — worth
+one explicit founder confirmation before implementation, since renaming a ladder value later
+means a migration); the CONFIDENTIAL-default-for-backfill-only / NOT-NULL-for-new-rows split
+(this addendum's own sharpening, flag for explicit sign-off since it's stricter than the
+original proposal above).
+
+## V8 — disclosure provenance
+
+**Decision: `source_refs jsonb`** (Option A above, confirmed as the final choice, not
+re-opened). Exact shape:
+```json
+[{"type": "document", "id": "<uuid>"}, {"type": "chunk", "id": "<uuid>"}]
+```
+An empty array `[]` is a valid, honest value (e.g. for `routers/library.py`'s query-embedding
+call site, which structurally has no document source at the time of the gate check).
+
+**Population (decision):** populate `source_refs` at the SAME three call sites already
+identified above (`chat.py`'s `hits`, `ingest.py`'s `document.id`, `library.py`'s
+query-embedding call → always `[]`), using data already in scope at each site — no new queries
+needed, no new plumbing beyond passing this array into `enforce_egress_policy()`'s existing
+`_record()` call.
+
+**Conversation linkage (decision, resolving the open question above):** add a nullable
+`conversation_id uuid` column (not part of `source_refs`, since exactly one conversation
+applies per event, unlike sources which can be plural) — `chat.py`'s `conversation` object is
+already in scope at zero extra fetch cost. For non-chat call sites (`ingest.py`, `library.py`),
+this stays `NULL` — honest, not a gap, since those calls genuinely have no conversation.
+
+**Task/goal/job linkage:** already exists as columns (`task_id`/`goal_id`/`job_id`, migration
+0062) — no change needed, just note explicitly that these remain `NULL` for every RAG/chat call
+site (as found above) and that's expected, not a bug — those calls are genuinely outside any
+MainAI-execution task/goal/job scope.
+
+**Retry/correlation IDs (decision, new):** NOT adding a dedicated correlation-ID column at this
+time. Rationale: `attempted_content_hash` (already existing) already lets a founder correlate
+repeated attempts of the SAME content — a dedicated retry-ID would only add value if the system
+needs to distinguish "same content, different attempt number" from "same content,
+coincidentally requested twice," which isn't a stated founder requirement. Flagged as
+explicitly deferred, not silently dropped — revisit if the founder's audit needs ever require
+it.
+
+**Founder approval needed on:** the `conversation_id` addition (this addendum resolves the open
+question above with a recommendation, but it's new schema surface beyond what was originally
+scoped, so flag for explicit confirmation); everything else in V8 is a direct continuation of
+already-approved design, safe to implement without a further approval round.
+
+## Summary: safe-to-implement-without-further-signoff vs. needs explicit founder approval
+
+**Safe defaults (this addendum is sufficient authorization to implement):**
+- V4's `FOUNDER_USER_ID` wiring, both call sites.
+- V8's `source_refs` population at the three known call sites.
+- V8's task/goal/job linkage — no change, just confirmed as expected-NULL, not a gap.
+
+**Needs explicit founder sign-off before implementation:**
+- V5's exact enum names/ladder order (naming, hard to rename later).
+- V5's NOT-NULL-for-new-rows / CONFIDENTIAL-for-backfill-only split (stricter than the
+  original proposal above).
+- V8's new `conversation_id` column (new schema surface beyond the original scope above).

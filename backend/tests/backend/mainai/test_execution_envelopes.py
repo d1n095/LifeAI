@@ -264,3 +264,71 @@ def test_proposing_scope_for_another_owners_goal_fails_closed(superuser_db):
 
     with pytest.raises(ExecutionEnvelopeError):
         propose_execution_scope(superuser_db, owner_id=owner_b.id, goal_id=goal_a.id, idempotency_key="xowner-goal")
+
+
+def test_two_genuinely_concurrent_proposals_with_the_same_idempotency_key_converge_on_one_canonical_row(
+    superuser_db,
+):
+    """V1 Path B readiness finding: propose_execution_scope() did a plain SELECT-then-INSERT
+    with no protection against two truly simultaneous callers sharing the same
+    idempotency_key (e.g. Path A's automatic work-candidate-authorization trigger racing a
+    founder's own explicit Path B proposal, or a client-side retry). The unique constraint
+    (uq_execution_scope_proposals_idem) correctly prevented a duplicate row, but the loser's
+    plain INSERT used to raise an unhandled IntegrityError instead of gracefully returning
+    the winner's row. Fixed with INSERT ... ON CONFLICT DO NOTHING (this project's own
+    established atomic primitive for this shape) rather than a SAVEPOINT+catch -- the latter
+    was tried first and reverted after it broke RLS test isolation when run alongside other
+    execution-envelope test modules in the same session (real regression, reproduced and
+    root-caused before choosing this approach instead)."""
+    import threading
+
+    from sqlalchemy.orm import sessionmaker
+
+    owner, goal = _owner_with_goal(superuser_db)
+    superuser_db.commit()
+    owner_id, goal_id = owner.id, goal.id
+
+    bind = superuser_db.get_bind()
+    Session = sessionmaker(bind=bind)
+    barrier = threading.Barrier(2)
+    results: list[tuple] = []
+
+    def _attempt(label: str):
+        session = Session()
+        try:
+            barrier.wait(timeout=5)
+            row = propose_execution_scope(
+                session, owner_id=owner_id, goal_id=goal_id,
+                idempotency_key="concurrent-proposal-race",
+                proposed_capabilities=["read_file"], proposed_risk="low",
+            )
+            session.commit()
+            results.append(("ok", label, row.id))
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(("error", label, repr(exc)))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_attempt, args=("a",))
+    t2 = threading.Thread(target=_attempt, args=("b",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    errors = [r for r in results if r[0] == "error"]
+    assert errors == [], f"expected zero unhandled errors, got: {errors}"
+    assert len(results) == 2
+    ids = {r[2] for r in results}
+    assert len(ids) == 1, "both attempts must converge on the SAME canonical proposal row"
+
+    superuser_db.expire_all()
+    from app.models.execution_envelope import ExecutionScopeProposal as _Model
+
+    rows = (
+        superuser_db.query(_Model)
+        .filter_by(owner_id=owner_id, idempotency_key="concurrent-proposal-race")
+        .all()
+    )
+    assert len(rows) == 1  # never duplicated at the DB level either

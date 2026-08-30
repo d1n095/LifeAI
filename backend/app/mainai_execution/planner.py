@@ -216,6 +216,29 @@ def create_plan(
     if cycle is not None:
         raise PlanCycleError(" -> ".join(str(i) for i in cycle))
 
+    # Lock the goal row before reading previous_active/next_version -- two genuinely
+    # concurrent decomposition attempts for the same goal (e.g. a founder double-submit,
+    # or a retry racing an in-flight original) must serialize here, not race to insert
+    # conflicting MainAIPlan(goal_id, version) rows. Without this lock the loser's INSERT
+    # hits uq_mainai_plans_goal_version and raises an unhandled IntegrityError instead of
+    # gracefully superseding the winner's just-committed plan. Same pattern as
+    # execution_envelopes.service.authorize_execution_scope()'s and
+    # recovery_takeover.execute_takeover()'s own goal-row locks.
+    #
+    # populate_existing=True is required, not optional: a plain SELECT (even with
+    # with_for_update()) returns the SAME already-identity-mapped Python object once the
+    # lock is acquired, without refreshing its in-memory attributes from the row this
+    # transaction just blocked on -- this project's SessionLocal uses
+    # expire_on_commit=False (app/db.py), so a caller's own already-loaded `goal` object
+    # would otherwise keep showing the pre-lock, possibly-stale current_plan_version even
+    # after waiting for the winner's commit.
+    goal = db.execute(
+        select(MainAIGoal)
+        .where(MainAIGoal.id == goal.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+
     previous_active = db.execute(
         select(MainAIPlan).where(MainAIPlan.goal_id == goal.id, MainAIPlan.status == MainAIPlanStatus.active)
     ).scalar_one_or_none()

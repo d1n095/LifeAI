@@ -92,9 +92,10 @@ def owner_id(db_session, make_verified_user):
 
 
 def _goal_and_plan(db_session, owner_id, *, task_specs=None, instruction="Do the thing, carefully.", approval_policy=None):
-    goal = planner.create_goal(db_session, owner_id=owner_id, title="Test goal", original_instruction=instruction, created_by="test")
-    if approval_policy is not None:
-        goal.approval_policy = approval_policy
+    create_kwargs = {"approval_policy": approval_policy} if approval_policy is not None else {}
+    goal = planner.create_goal(
+        db_session, owner_id=owner_id, title="Test goal", original_instruction=instruction, created_by="test", **create_kwargs
+    )
     if task_specs is None:
         task_specs = [
             PlannedTaskSpec(description="A", task_type="read_only_audit"),

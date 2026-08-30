@@ -919,3 +919,119 @@ def test_first_governance_toctou_race_recovery_committed_first_then_governance_f
 
     assert results.get("new_job_id") is not None  # legacy takeover dispatched -- goal was never governed at decision time
     assert results.get("envelope_id") is not None  # founder's authorization only completes AFTER, never concurrently
+
+
+def test_authorize_execution_scope_itself_locks_the_goal_row_no_manual_prelock_needed(
+    db_session, superuser_db, owner_id
+):
+    """Negative control for the two toctou tests above: those tests manually pre-lock the goal
+    row via raw SQL (`SELECT ... FOR UPDATE`) BEFORE calling propose_execution_scope()/
+    authorize_execution_scope(). That alone isn't even the main confound: authorize_execution_
+    scope()'s own envelope INSERT carries a composite FK to mainai_goals, so Postgres takes an
+    INCIDENTAL FOR KEY SHARE lock on the goal row the moment that INSERT flushes -- meaning a
+    naive "pause after authorize_execution_scope() returns" test can't distinguish this
+    function's OWN explicit lock from that unrelated, later, incidental one; both make thread B
+    block by the time the function has already returned. To actually isolate whether
+    authorize_execution_scope() locks the goal row EARLY (right after reading the proposal, as
+    its docstring claims) versus only LATE (incidentally, via the envelope's own FK, several
+    statements later), this test pauses execution INSIDE authorize_execution_scope() itself --
+    via a session.add() interception -- at the exact instant just BEFORE the envelope is
+    constructed/added, i.e. strictly before that incidental FK lock could ever fire. Thread B's
+    real execute_takeover() is attempted while thread A is paused at that precise point: if
+    authorize_execution_scope() already holds the goal-row lock by then (post-fix), thread B
+    must block; if it does not (pre-fix -- the only lock in existence at that point would be on
+    the proposal row, never the goal row), thread B runs to completion uncontested, dispatching
+    a legacy V0.1 job the moment before governance becomes effective -- the exact forbidden
+    outcome this function's own docstring names."""
+    import asyncio
+    import threading
+
+    from app.models.execution_envelope import ExecutionAuthorizationEnvelope
+    from app.models.mainai_execution import MainAIGoal
+
+    goal = _goal(db_session, owner_id)
+    db_session.commit()
+    assert not goal_has_ever_been_envelope_governed(db_session, owner_id=owner_id, goal_id=goal.id)
+
+    task, dead_job = _task_and_dead_job(db_session, superuser_db, owner_id, goal)
+    record = asyncio.run(_through_classification(db_session, task, dead_job))
+    assert record.classification == RecoveryClassification.nothing_done
+    record_id, task_id, goal_id, dead_job_id = record.id, task.id, goal.id, dead_job.id
+    db_session.commit()
+
+    # The proposal is created and COMMITTED here, entirely before the race begins -- its own
+    # INSERT-time FK lock is long released by the time thread A starts.
+    proposal = propose_execution_scope(
+        db_session, owner_id=owner_id, goal_id=goal_id, idempotency_key=f"real-lock-prop-{uuid.uuid4()}"
+    )
+    proposal_id = proposal.id
+    db_session.commit()
+
+    about_to_insert_envelope = threading.Event()
+    release_insert = threading.Event()
+    results: dict = {}
+
+    def _thread_a_authorize_pausing_before_envelope_insert():
+        session = _make_session()
+        try:
+            real_add = session.add
+
+            def _pausing_add(instance, *a, **kw):
+                if isinstance(instance, ExecutionAuthorizationEnvelope):
+                    about_to_insert_envelope.set()
+                    release_insert.wait(timeout=10)
+                return real_add(instance, *a, **kw)
+
+            session.add = _pausing_add
+            _, envelope = authorize_execution_scope(
+                session, owner_id=owner_id, proposal_id=proposal_id, authorized_by="founder",
+                authorized_paths=["README.md"], authorized_capabilities=["read_file"], authorized_risk="low",
+                envelope_idempotency_key=f"real-lock-env-{uuid.uuid4()}",
+            )
+            results["envelope_id"] = envelope.id
+            session.commit()
+        finally:
+            session.close()
+
+    def _thread_b_takeover():
+        session = _make_session()
+        try:
+            goal_row = session.get(MainAIGoal, goal_id)
+            task_row = session.get(MainAITask, task_id)
+            record_row = session.get(MainAIRecoveryRecord, record_id)
+
+            async def _run():
+                return await execute_takeover(session, task=task_row, goal=goal_row, record=record_row, dispatched_by="real-lock-recovery")
+
+            record_out, new_job = asyncio.run(_run())
+            session.commit()
+            results["new_job_id"] = new_job.id if new_job is not None else None
+        finally:
+            session.close()
+
+    thread_a = threading.Thread(target=_thread_a_authorize_pausing_before_envelope_insert)
+    thread_a.start()
+    assert about_to_insert_envelope.wait(timeout=10), "thread A never reached the envelope-insert point"
+
+    thread_b = threading.Thread(target=_thread_b_takeover)
+    thread_b.start()
+    thread_b.join(timeout=2)
+    assert thread_b.is_alive(), (
+        "execute_takeover() did NOT block even though thread A is paused INSIDE "
+        "authorize_execution_scope(), strictly before its envelope INSERT (and its incidental "
+        "FK-driven goal lock) could fire -- proves authorize_execution_scope() never actually "
+        "acquires an EARLY goal-row lock the way its own docstring claims; a real recovery "
+        "pass could dispatch a legacy V0.1 job in exactly this window, moments before "
+        "governance becomes effective"
+    )
+
+    release_insert.set()
+    thread_a.join(timeout=15)
+    thread_b.join(timeout=15)
+    assert not thread_a.is_alive() and not thread_b.is_alive()
+
+    assert results.get("envelope_id") is not None
+    assert results.get("new_job_id") is None  # thread B correctly observed EVER_GOVERNED, declined -- never minted a V0.1 job
+
+    dead_row = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :id"), {"id": str(dead_job_id)}).one()
+    assert dead_row[0] == "failed"

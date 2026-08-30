@@ -10,6 +10,7 @@ from app.founder_memory_signals.service import (
     list_unreviewed_candidate_signals,
     promote_candidate_signal,
     record_candidate_signal,
+    resolve_candidate_signal_entity,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "list_unreviewed_candidate_signals",
     "promote_candidate_signal",
     "record_candidate_signal",
+    "resolve_candidate_signal_entity",
 ]

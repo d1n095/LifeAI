@@ -31,6 +31,13 @@ from app.models.mainai_execution import (
 
 logger = logging.getLogger("mainai.execution")
 
+# Bounds the UNATTENDED replan tick only -- a founder's own explicit replan/re-plan action
+# (app.routers.mainai_execution's propose_and_create_plan route) calls create_plan() directly,
+# never through find_replan_trigger(), so founder authority to keep iterating on a goal by hand
+# is never limited by this constant. Matches app.safe_planner.service's own max_replans=3
+# precedent for the same "give up after N automatic attempts" shape, in a different module.
+MAX_AUTO_REPLANS = 3
+
 
 def find_replan_trigger(db: Session, *, goal: MainAIGoal) -> MainAITask | None:
     """Returns the first permanently `failed` task (attempts exhausted -- see
@@ -43,7 +50,23 @@ def find_replan_trigger(db: Session, *, goal: MainAIGoal) -> MainAITask | None:
     `blocked` tasks are deliberately NOT a trigger here -- they are a downstream CONSEQUENCE of
     a failed dependency (app/mainai_execution/graph.py's recompute_task_readiness()), not an
     independent signal; the failed task itself is the one real root cause worth replanning
-    around."""
+    around.
+
+    BOUNDED (V1 readiness fix): `goal.current_plan_version - 1` is the number of automatic
+    replans already performed for this goal (the very first plan, version 1, is not itself a
+    replan). Once that count reaches MAX_AUTO_REPLANS, this returns None even if a failed task
+    exists -- without this bound, a genuinely unworkable goal (references a nonexistent file,
+    requires a permanently-unavailable capability, or a model that keeps proposing the same
+    broken approach) would replan forever, once per worker tick, indefinitely: every iteration
+    is a real, billed propose_plan_via_ai() call, with no counter or escalation anywhere in
+    this path to ever stop it or surface it to a founder. Refusing here is enough on its own --
+    the failed task stays `failed` (not silently swallowed or retried), so the worker's own
+    _finalize_mainai_execution_goals tick closes the goal to MainAIGoalStatus.failed with a
+    real final_outcome report on its very next pass (record_final_report() already treats
+    `failed` as terminal), turning an invisible infinite loop into a concrete, founder-
+    discoverable outcome with no new schema or escalation mechanism needed."""
+    if goal.current_plan_version - 1 >= MAX_AUTO_REPLANS:
+        return None
     active_plan = db.execute(
         select(MainAIPlan).where(MainAIPlan.goal_id == goal.id, MainAIPlan.status == MainAIPlanStatus.active)
     ).scalar_one_or_none()

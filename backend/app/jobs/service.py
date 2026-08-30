@@ -155,11 +155,22 @@ def _validate_task_execution_input_refs(db: Session, owner_id: uuid.UUID, input_
     call to create_job() would otherwise release the lock and durably create the job before
     any of the task's own state existed). By the time THIS validation runs, in that one call
     path, the task is therefore correctly `running`, not `ready` -- checking for `ready` there
-    would reject the exact call path it should be defending. Every OTHER caller (there are
-    none today, but this stays the real contract for any future direct create_job() call with
-    job_type='task_execution') still must pass a genuinely `ready` task -- that path has not
-    already done its own authoritative locked check, so this is the only check it gets."""
-    from app.models.mainai_execution import MainAITask, MainAITaskStatus  # local import: avoids a hard app.jobs -> app.mainai_execution dependency for callers that never touch task_execution
+    would reject the exact call path it should be defending. dispatch_ready_task() ALSO already
+    calls require_task_approval() itself, before it ever reaches create_job() -- so on that one
+    safe path the approval re-check below is redundant but harmless (same fail-closed-owns-its-
+    own-freshness doctrine _require_context() already applies elsewhere in this codebase, not a
+    behavior change).
+
+    Every OTHER caller (a real one exists today: POST /api/mainai/jobs, the generic founder-
+    facing job-creation route -- found during the V1 readiness sweep, not hypothetical) still
+    must pass a genuinely `ready` task, and -- the fix this docstring accompanies -- must ALSO
+    have a genuinely granted approval if the task's own goal policy requires one. Without this,
+    that route was a real, live way to create a durable `task_execution` job for an
+    approval_required task with zero approval ever checked or recorded: dispatch_ready_task()
+    is not the only door to a mainai_jobs row, and the approval gate must hold at every door,
+    not just the one door someone remembered to add it to."""
+    from app.mainai_execution.approval import ApprovalRequiredError, require_task_approval  # local import: avoids a hard app.jobs -> app.mainai_execution dependency for callers that never touch task_execution
+    from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus  # local import: same reason
 
     if len(input_refs) != 1:
         raise InvalidInputRefsError(f"task_execution requires exactly one input_ref, got {len(input_refs)}.")
@@ -176,6 +187,15 @@ def _validate_task_execution_input_refs(db: Session, owner_id: uuid.UUID, input_
     expected = MainAITaskStatus.running if expect_claimed else MainAITaskStatus.ready
     if task.status != expected:
         raise InvalidInputRefsError(f"MainAITask {task_id} has status '{task.status.value}', not '{expected.value}' — not a valid dispatch target.")
+    goal = db.execute(select(MainAIGoal).where(MainAIGoal.id == task.goal_id, MainAIGoal.owner_id == owner_id)).scalar_one_or_none()
+    if goal is None:
+        raise InvalidInputRefsError(f"MainAITask {task_id}'s own goal is missing or not owned by this account.")
+    try:
+        require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
+    except ApprovalRequiredError as exc:
+        raise InvalidInputRefsError(
+            f"MainAITask {task_id} requires founder approval before it can be dispatched -- {exc}"
+        ) from exc
 
 
 def create_job(
