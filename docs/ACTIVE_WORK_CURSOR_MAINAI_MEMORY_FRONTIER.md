@@ -3,14 +3,14 @@
 **Do not touch:** Claude [#197](https://github.com/d1n095/LifeAI/pull/197)
 
 ## Merge chain (linear)
-#209 MERGED → #210 → #211 → #212 → #213 → #214 → #215 → #216 → #217 → #218 → #219 → #220 → #221 → #222 → #223 → #224 → #225 → #226 → #227 (stack tip)
+#209 MERGED → #210 MERGED → #211 → #212 → #213 → #214 → #215 → #216 → #217 → #218 → #219 → #220 → #221 → #222 → #223 → #224 → #225 → #226 → #227 (stack tip)
 
 ## Status snapshot
 | Stage | PR | Status |
 |---|---|---|
 | A inspectable memory | #209 | MERGED |
-| B concept reconciliation | #210 | OPEN — waiting exact-head CI green to merge |
-| C–I | #211–#217 | OPEN — rebase/retarget after each parent merge |
+| B concept reconciliation | #210 | MERGED |
+| C–I | #211–#217 | OPEN — #211 CI after rebase onto tip; then cascade |
 | J personal intent | #218 | OPEN |
 | K contradiction/assumption | #219 | OPEN |
 | L prediction/outcome | #220 | OPEN |
