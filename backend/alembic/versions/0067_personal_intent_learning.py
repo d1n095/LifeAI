@@ -1,12 +1,12 @@
 """Stage J — Personal intent learning tables.
 
-down_revision = 0064 (Stage B concept reconciliation). Claude #197 pending migrations
+down_revision = "0066"
 must renumber on rebase independently.
 """
 
 from alembic import op
 
-revision = "0065"
+revision = "0067"
 down_revision = "0064"
 branch_labels = None
 depends_on = None

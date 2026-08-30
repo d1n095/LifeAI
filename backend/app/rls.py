@@ -533,7 +533,7 @@ _MAINAI_EXECUTION_TABLES = (
     # Migration 0064 (Concept Reconciliation): aliases bind alternate wording to one entity;
     # cleaned via ON DELETE CASCADE from project_entities erasure.
     "project_entity_aliases",
-    # Migration 0065 (Personal Intent Learning): founder phrasing → intent bindings +
+    # Migration 0067 (Personal Intent Learning): founder phrasing → intent bindings +
     # append-only correction history. Bindings are mutable (hit_count/confidence); corrections
     # are append-only.
     "founder_intent_bindings",
