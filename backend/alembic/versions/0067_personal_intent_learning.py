@@ -7,7 +7,7 @@ must renumber on rebase independently.
 from alembic import op
 
 revision = "0067"
-down_revision = "0064"
+down_revision = "0066"
 branch_labels = None
 depends_on = None
 
