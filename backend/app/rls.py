@@ -541,7 +541,7 @@ _MAINAI_EXECUTION_TABLES = (
     # Migration 0068 (Contradiction + Assumption Engine)
     "structured_claims",
     "structured_claim_events",
-    # Migration 0067 (Prediction vs Outcome Learning)
+    # Migration 0069 (Prediction vs Outcome Learning)
     "prediction_records",
     # Migration 0055 (Life Work Candidates): work_candidates plays the SAME structural role
     # founder_memory_notes/project_entities already play -- a mutable row whose status
