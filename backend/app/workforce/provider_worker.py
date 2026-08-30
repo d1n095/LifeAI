@@ -16,55 +16,33 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models.workforce import WorkforceAssignment, WorkforceAgentProfile, WorkforceContextPackage
-from app.workforce.authority import require_live_assignment_authority, AuthorityEnvelopeError
+from app.models.workforce import WorkforceAgentProfile, WorkforceAssignment, WorkforceContextPackage
+from app.workforce.activation_gates import (
+    REQUIRED_ACTIVATION_GATES,
+    activation_allowed,
+    activation_gate_status,
+    get_activation_gates,
+    mark_safety_gate,
+    require_activation_allowed,
+    reset_safety_gates_for_tests,
+    ProviderActivationBlocked,
+)
+from app.workforce.authority import require_live_assignment_authority
 from app.workforce.broker import DelegationBrokerError, ingest_untrusted_result
-from app.workforce.context import create_context_package
 from app.workforce.failure import mark_failure, record_checkpoint
 from app.workforce.injection import scrub_authority_mutations
 from app.workforce.registry import get_workforce_agent
 
 
-class ProviderActivationBlocked(Exception):
-    """Raised when real provider execution is requested but safety gates are unmet."""
-
-
-# Gates that must ALL be independently verified before activate_provider=True is allowed.
-# These are documentation + runtime checks — flipping env alone is insufficient without
-# explicit mark_safety_gate().
-REQUIRED_SAFETY_GATES: tuple[str, ...] = (
-    "personal_intent_consequential_confirmation",  # #218
-    "self_model_evidence_gates",  # #213
-    "current_truth_selection",  # #224
-    "same_collapse_race",  # #229
-    "workforce_authority_context_isolation",  # #230/#231 tests green + merged
+# Re-export for callers that imported from provider_worker historically.
+__all_gates__ = (
+    "ProviderActivationBlocked",
+    "REQUIRED_ACTIVATION_GATES",
+    "activation_allowed",
+    "activation_gate_status",
+    "mark_safety_gate",
+    "reset_safety_gates_for_tests",
 )
-
-# In-process registry of which gates have been marked satisfied for THIS process.
-# Never auto-set from CI; founder/ops must mark after independent verification.
-_SATISFIED_GATES: set[str] = set()
-
-
-def mark_safety_gate(gate: str, *, satisfied: bool = True) -> None:
-    if gate not in REQUIRED_SAFETY_GATES:
-        raise ValueError(f"unknown safety gate: {gate}")
-    if satisfied:
-        _SATISFIED_GATES.add(gate)
-    else:
-        _SATISFIED_GATES.discard(gate)
-
-
-def reset_safety_gates_for_tests() -> None:
-    _SATISFIED_GATES.clear()
-
-
-def activation_gate_status() -> dict[str, bool]:
-    return {g: (g in _SATISFIED_GATES) for g in REQUIRED_SAFETY_GATES}
-
-
-def activation_allowed() -> tuple[bool, list[str]]:
-    missing = [g for g in REQUIRED_SAFETY_GATES if g not in _SATISFIED_GATES]
-    return (not missing, missing)
 
 
 @dataclass(frozen=True)
@@ -255,11 +233,8 @@ def execute_workforce_assignment(
         )
 
     if activate_provider:
-        ok, missing = activation_allowed()
-        if not ok:
-            raise ProviderActivationBlocked(
-                "Real provider delegation blocked until gates verified: " + ", ".join(missing)
-            )
+        # Single authoritative gate object — UNKNOWN != VERIFIED → FAIL CLOSED.
+        require_activation_allowed()
         if assignment.allow_execution_effects:
             raise ProviderActivationBlocked(
                 "Consequential execution effects refused for first provider-backed slice"
@@ -279,14 +254,11 @@ def execute_workforce_assignment(
         except Exception as exc:  # pragma: no cover
             raise ProviderActivationBlocked(f"provider_spend unavailable: {exc}") from exc
 
-        # Even with gates marked, first real invoke goes through registry with egress —
-        # but we still default to raising unless explicitly force-invoked in a future PR.
-        # This harness stops at "prepared" for the activation-gated path unless
-        # FORCE_PROVIDER_INVOKE is somehow set — we intentionally do NOT read that env
-        # to avoid accidental activation. Real invoke lands in a follow-up after gates.
+        # Even with gates marked, first real invoke is staged — dedicated enablement after
+        # Claude verification. Harness prepares envelopes/receipts/spend wiring only.
         raise ProviderActivationBlocked(
-            "Gates satisfied but first real provider invoke is staged for the dedicated "
-            "activation PR — harness prepares envelopes/receipts/spend wiring only"
+            "Gates satisfied but first real provider invoke remains staged — "
+            "enable only in the post-verification activation commit"
         )
 
     # In-process worker (safe default).

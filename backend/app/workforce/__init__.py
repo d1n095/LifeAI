@@ -91,6 +91,22 @@ from app.workforce.provider_worker import (
     mark_safety_gate,
     reset_safety_gates_for_tests,
 )
+from app.workforce.activation_gates import (
+    REQUIRED_ACTIVATION_GATES,
+    ActivationDecision,
+    ActivationGateSet,
+    GateStatus,
+    get_activation_gates,
+    record_gate_verification,
+    require_activation_allowed,
+    reset_activation_gates_for_tests,
+)
+from app.workforce.department_evidence import department_capability_ledger
+from app.workforce.first_delegation_scenario import (
+    DelegationRunRecord,
+    run_low_risk_public_text_delegation,
+    run_systemic_research_learning_loop,
+)
 from app.workforce.first_team import (
     FIRST_TEAM_SPECS,
     bootstrap_first_team,
@@ -136,6 +152,18 @@ __all__ = [
     "AGENT_LIFECYCLE_STATUSES",
     "AgentNotSelectableError",
     "ProviderActivationBlocked",
+    "REQUIRED_ACTIVATION_GATES",
+    "ActivationDecision",
+    "ActivationGateSet",
+    "GateStatus",
+    "DelegationRunRecord",
+    "department_capability_ledger",
+    "get_activation_gates",
+    "record_gate_verification",
+    "require_activation_allowed",
+    "reset_activation_gates_for_tests",
+    "run_low_risk_public_text_delegation",
+    "run_systemic_research_learning_loop",
     "StaffManagerError",
     "StaffingDecision",
     "FIRST_TEAM_SPECS",
