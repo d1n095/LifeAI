@@ -192,6 +192,34 @@ verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration 0063
 resolution på `CandidateLearningSignal` (migration 0064), `record_lesson_from_founder_
 correction()` (ingen migration). Se PR #197s egna commits för detaljer.
 
+## MainAI Memory Frontier (Cursor, primary implementation lane, founder-godkänd 2026-08-30)
+
+**Founder har omfördelat hela Phase 2-13-arbetet (Canonical Memory Foundation, idé-
+reconciliation, memory→work-linkage, temporal recap, self-model, continuous simplification,
+osv.) till Cursor som primär implementations-lane.** Se `docs/ACTIVE_WORK_CURSOR_MAINAI_MEMORY_
+FRONTIER.md` (finns bara på Cursors egna grenar, inte ännu på integrationstippen) — 9 stadier
+(A-I), "Do not touch Claude #197" explicit i dokumentet. Claude ska INTE bygga en konkurrerande
+implementation av samma workstream — se `CLAUDE.md`s "Standardbeteende"-avsnitt. Claude's roll
+här är röd-team-granskning av Cursors PR:er, inte primärbyggare, tills annat sägs.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-inspectable-memory-foundation` | [#209](https://github.com/d1n095/LifeAI/pull/209) | **Öppen — Stage A** | Canonical inspectable memory (`memory_truth_claims`, verify-against-reality, founder API `/api/founder/memory`). Bas: `claude/det-kommer-mer-879lcm` (tip vid öppning, INTE #197). Alembic **0063** på sin gren. |
+| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Öppen — Stage B**, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Alembic **0064** (`down_revision=0063`), staplad på #209:s egen 0063. |
+
+**KONFLIKT — Alembic-revisionskollision, upptäckt 2026-08-30, INTE ännu löst:** #197 (Claude)
+äger REDAN migration `0063_work_candidate_horizon_priority.py` och
+`0064_candidate_signal_entity_resolution.py`, testade och pushade före #209/#210 öppnades.
+#209/#210 återanvänder OBEROENDE samma revisionsnummer `0063`/`0064` på sina egna grenar (öppna
+mot samma bas, `claude/det-kommer-mer-879lcm`, som ännu inte innehåller #197:s migrationer).
+#209:s egen PR-text erkänner detta redan ("Claude #197's pending 0063/0064 must renumber on
+rebase") men det är bara en förutsättning skriven av PR-författaren, inget beslut. **Föreslagen
+lösning, inte ännu verkställd av någon:** #197 är äldre, redan mergad-klar (grundar-auktoriserad
+"merge when clean" för denna natt), så #197 bör mergas FÖRST med sina 0063/0064 intakta;
+#209/#210 rebasar därefter och byter till `0065`/`0066` (`down_revision`-kedjan justeras i
+samma steg). Detta ska bekräftas/utföras vid nästa granskningstillfälle av endera parten — tills
+dess får INGEN av grenarna anta att den "vinner" numren.
+
 ---
 
 
