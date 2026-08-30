@@ -28,6 +28,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.capability_reality import CapabilityObservationEvent, CapabilityRecord
+from app.models.intelligence_governance import IntelligenceEvidence
+
+
+class CapabilityRealityError(ValueError):
+    """Fail-closed observation / verification errors."""
 
 
 def record_capability_observation(
@@ -54,15 +59,31 @@ def record_capability_observation(
     own `status="unknown"`/`authority="unknown"` column defaults (UNKNOWN is always valid, per
     the mission this foundation answers to).
 
-    `verification_evidence_id`, if supplied, sets `last_verification_evidence_id` and
-    `last_verified_at=now()` -- it does NOT itself change `status`; the caller still supplies
-    `status` explicitly in the SAME call, so a capability can never silently become
-    `verified_available` merely because SOME evidence reference was attached.
+    Hard rule: `status="verified_available"` REQUIRES a same-owner `intelligence_evidence` FK.
+    Confidence, success timestamps, or free-text status_reason alone NEVER prove a capability.
+    `verification_evidence_id` without an explicit verified status still does not auto-promote.
 
     `success=True`/`success=False` records `last_success_at`/`last_failure_at` respectively --
-    again, purely observational bookkeeping, never a status inference.
+    purely observational bookkeeping, never a status inference by itself.
 
     Always appends exactly one `CapabilityObservationEvent` recording what changed."""
+
+    if status == "verified_available":
+        if verification_evidence_id is None:
+            raise CapabilityRealityError(
+                "verified_available requires verification_evidence_id "
+                "(CONFIDENCE != EVIDENCE; CLAIMED CAPABILITY != PROVEN CAPABILITY)"
+            )
+        evidence = db.execute(
+            select(IntelligenceEvidence).where(
+                IntelligenceEvidence.id == verification_evidence_id,
+                IntelligenceEvidence.owner_id == owner_id,
+            )
+        ).scalar_one_or_none()
+        if evidence is None:
+            raise CapabilityRealityError(
+                f"verification_evidence_id={verification_evidence_id} is missing or belongs to another owner"
+            )
 
     now = datetime.utcnow()
     record = db.execute(
