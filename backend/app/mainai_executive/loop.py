@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.mainai_executive.assumption_scan import scan_assumptions_and_conflicts
 from app.mainai_executive.bounds import ExecutiveScanBounds
 from app.mainai_executive.completion import assess_completion
 from app.mainai_executive.continuity import (
@@ -106,6 +107,7 @@ def run_executive_cycle(
             remaining=remaining,
             interruption_point=interruption_point,
             missing_pieces=[],
+            assumption_scan={},
         )
 
     # Memory → work linkage (park only; never insert authorized tasks)
@@ -129,6 +131,15 @@ def run_executive_cycle(
 
     missing = detect_missing_pieces(founder_request=founder_request)
     completed.append("MISSING_PIECE_SCAN")
+
+    assumption_scan = scan_assumptions_and_conflicts(
+        db,
+        owner_id=owner_id,
+        lesson_tags=list(look.lesson_tags),
+    )
+    if assumption_scan.get("assumption_invalidation_requires_replan"):
+        uncertain.append("assumptions_or_lesson_conflicts_need_review")
+    completed.append("ASSUMPTION_SCAN")
 
     # Workforce decision (intelligence only)
     staffing = decide_staffing(
@@ -194,6 +205,7 @@ def run_executive_cycle(
         interruption_point=interruption_point,
         missing_pieces=[missing],
         linkage_actions=linkage_actions,
+        assumption_scan=assumption_scan,
     )
 
 
@@ -256,6 +268,7 @@ def _finalize(
     interruption_point: str | None,
     missing_pieces: list[dict[str, Any]],
     linkage_actions: list[str] | None = None,
+    assumption_scan: dict[str, Any] | None = None,
 ) -> ExecutiveCycleResult:
     wf_req = None
     if workforce_dry_run and workforce_dry_run.get("request_id"):
@@ -280,6 +293,8 @@ def _finalize(
     )
     cont_note = save_continuity_checkpoint(db, owner_id=owner_id, checkpoint=checkpoint)
     obs = executive_status_snapshot(db, owner_id=owner_id, session_id=session_id)
+    obs["assumption_scan"] = assumption_scan or {}
+    obs["staffing_reason"] = staffing_reason
     completion = assess_completion(
         feature="executive_cycle",
         evidence={
