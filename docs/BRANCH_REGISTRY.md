@@ -14,6 +14,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/mainai-workforce-foundation-t1-t2` | [#230](https://github.com/d1n095/LifeAI/pull/230) | **Mergad** | T1–T7 schema+kontrakt (0067). |
+<<<<<<< HEAD
 | `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Mergad** | T8–T20 ops (0068). |
 | `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness, first team, staff loop. |
 | `cursor/workforce-registry-post-232` | [#233](https://github.com/d1n095/LifeAI/pull/233) | **Öppen** (docs) | Registry mark #230–#232 merged. |
@@ -22,6 +23,14 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
 **Stack landad (#230–#232).** Alembic head **0068**. Provider-activate blockerad tills Claude verifierat safety gates. Inga fler workforce-tabeller i denna lane.
+=======
+| `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Mergad** | T8/T9/T10/T13–T16/T19/T20 ops (0068). |
+| `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness (gated), first team, staff loop, systemic attacks. |
+
+**Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
+
+**Stack landad (#230–#232).** Provider-activate fortfarande blockerad tills safety gates (#218 m.fl.) Claude-verifierats. Nästa: activation PR för ONE low-risk provider-backed slice efter gates.
+>>>>>>> origin/claude/det-kommer-mer-879lcm
 
 ---
 
