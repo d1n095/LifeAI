@@ -60,6 +60,9 @@ This foundation adds an **owner-scoped organizational layer** above those primit
 | Cost budgets org ceilings (T16) | **IMPLEMENTED** (gates; real spend still `provider_spend`) |
 | Hiring/learning lifecycle (T9/T10) | **IMPLEMENTED** (`workforce.lifecycle`; `trained` only for fine_tune) |
 | Low-risk vertical slice dry-run (T19) | **IMPLEMENTED** in-process; **provider activate blocked** |
+| Provider-neutral worker harness | **PREPARED** (`provider_worker`) — gates + envelope + receipts; real invoke staged |
+| First logical team (9 departments) | **BOOTSTRAPPED** as candidates — honest SAID≠IMPLEMENTED per dept |
+| Staff decision loop (need→hire/refuse) | **IMPLEMENTED** (`staff_manager`) — ROI/complexity; no endless hire |
 | Wire to live provider / CLI adapter execution | **NOT IMPLEMENTED** (waits verified safety gates) |
 | Founder UI | **NOT IMPLEMENTED** (backend snapshot only) |
 | Consequential vertical slice with real model call | **NOT YET** — refused until gates verified |
