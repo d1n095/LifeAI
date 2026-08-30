@@ -24,30 +24,19 @@ without a human translating every step.
 | 0D | Genuine cancel vs finalize race | **MERGED** #200 |
 | 0E | True restart + fresh DB session | **MERGED** #201 |
 | 1 | Autonomous gap/repair live loop | **MERGED** #202 |
-| 2 | Lease expiry + takeover continuation | **IN PROGRESS** — [#203](https://github.com/d1n095/LifeAI/pull/203) |
-| 3 | Long autonomous soak (8–12 tasks) + report | waiting |
-| 4 | First real bounded self-improvement on LifeAI | waiting |
-| 5 | Goal intake / bootstrap production path | waiting |
-| 6 | `docs/MAINAI_V1_READINESS.md` audit | waiting |
+| 2 | Lease expiry + takeover continuation | **MERGED** #203 |
+| 3 | Long autonomous soak (8–12 tasks) + report | **MERGED** #204 |
+| 4 | First real bounded self-improvement on LifeAI | **MERGED** #205 |
+| 5 | Goal intake / bootstrap production path | **MERGED** #206 |
+| 6 | `docs/MAINAI_V1_READINESS.md` audit | **IN PROGRESS** — [#207](https://github.com/d1n095/LifeAI/pull/207) |
 
-## Stage 1 proof target (landed in #202)
+## Landed evidence
 
-Worker → Supervisor only (no harness bridges):
-
-verification failure → structured gap → repair child → narrowed authority → repair executes →
-source re-verifies → downstream dependency unlocks → goal continues.
-
-Allowed founder edges: envelope/spend authorize; `grant_task_approval` for repair
-`repo_edit` under `autonomous_development_work` (listed explicitly).
-
-Forbidden harness: hand repair task / WorkBinding / PlanCandidate / status mutation /
-dependency unlock / final report.
-
-## Stage 2 proof target
-
-Real `supervisor_goal_leases` crash-hold → wall-clock expiry → Worker B reclaim (generation
-bump) → goal continues; old worker ZERO further filesystem effect. Fresh Session B after
-Session A closes (PROCESS MEMORY != AUTHORITY; ORM SESSION MEMORY != AUTHORITY).
+- Stage 1–2 tests: gap/repair live loop; lease-expiry takeover
+- Stage 3: `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`
+- Stage 4: `docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`
+- Stage 5: `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md` (Path B remains Claude #197)
+- Stage 6: this PR lands `docs/MAINAI_V1_READINESS.md` + companions on tip
 
 ## Operating rules (non-negotiable)
 

@@ -123,7 +123,7 @@ live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-a
 
 ## MAINAI V1 COMPLETION RUN — Stages 1–6 (Cursor) + Claude's parallel v1-readiness-workstream
 
-Integration tip: post-#206 (Cursor's own tip). Program:
+Integration tip: post-#207 (`dca5e3b`). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
@@ -132,12 +132,13 @@ Integration tip: post-#206 (Cursor's own tip). Program:
 | `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
 | `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | Long-run 8-12 task soak; independently reviewed by Claude pre-merge |
 | `cursor/first-bounded-self-improvement` | [#205](https://github.com/d1n095/LifeAI/pull/205) | **Mergad — Stage 4** | First bounded self-improvement (SSH egress marker test); independently reviewed post-merge (Claude) — important caveat: proved the mechanism safe, ran against a disposable worktree mirror, NOT the real checkout, so production `test_egress_policy.py` is unchanged |
-| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Öppen — Stage 5** | Path A goal intake → Worker complete; independently reviewed (Claude, clean) |
-| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Öppen — Stage 6** | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **⚠️ Known conflict, not yet resolved**: its `MAINAI_V1_READINESS.md` snapshot predates essentially all of #197's tonight-session updates (approval-gate-bypass fix, TOCTOU fix, takeover-crash fix, replan-bound fix, the self-improvement disposable-mirror caveat, Part D) — the other two docs are byte-identical to #197's, clean. Whichever of #197/#207 merges second will hit a real content conflict on that one file; resolve in favor of #197's version (strict superset). Flagged in a PR comment on #207. |
+| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Mergad — Stage 5** | Path A goal intake → Worker complete; independently reviewed (Claude, clean) |
+| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Mergad — Stage 6** | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **Conflict resolved**: its `MAINAI_V1_READINESS.md` snapshot predated most of #197's tonight-session updates — Claude pushed a refresh commit directly onto #207's branch before merge closing the gap, then (after #207 merged) merged this integration tip back into #197 and resolved the resulting content conflict in favor of #197's fuller version (includes Part D + its companion docs, which only exist on #197). |
+| `cursor/v1-completion-run-closeout` | [#208](https://github.com/d1n095/LifeAI/pull/208) | **Öppen** | Closeout: Cursor V1 completion run Stages 0–6 complete — not yet reviewed |
 
 **Claude's egen, icke-överlappande gren `v1-readiness-workstream` (PR #197, öppen, ej mergad,
-grenad ovanpå #203/#204)** — natt-skift 2026-08-29→30, fem riktiga, var för sig
-three-check-verifierade fynd (`git stash`-negativkontroll: varje fix' egen test misslyckas
+mergad FRAMÅT mot integrationstippen post-#207 natten 2026-08-29→30)** — fem riktiga, var för
+sig three-check-verifierade fynd (`git stash`-negativkontroll: varje fix' egen test misslyckas
 genuint på pre-fix-kod, passerar post-fix), alla pushade, ingen ännu founder-granskad:
 
 1. **`OperatorAuthorityTransitionError`** (`app/development_operator/service.py`,

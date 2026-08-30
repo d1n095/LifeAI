@@ -1,5 +1,28 @@
 # MainAI V1 Readiness
 
+**Completion-run status (2026-08-30):** Cursor Stages 0A–0E and Stages 1–6 are **MERGED** on
+`claude/det-kommer-mer-879lcm` (#196/#198/#199/#200/#201, #202, #203, #204, #205, #206, #207).
+Evidence reports: `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`,
+`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`, `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`,
+plus the Stage 1–2 tests named in `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`. All
+independently reviewed post-merge (Claude PR comments on #205/#206) — #205's self-improvement
+run has one important caveat worth reading in the table below: it proved the mechanism safe
+end-to-end but ran against a disposable worktree mirror, not the real checkout, so MainAI's
+actual codebase did not change as a result.
+
+The body below is Claude's own design-lane draft (PR #197), now merged forward past #207's
+own landed-on-tip snapshot (which was itself adapted from an earlier version of this same
+document) — this copy is the current one: includes four real bugs #197 found and fixed during
+this session's V1 blocker sweep (`run_driver()` mid-run-takeover crash, an
+`authorize_execution_scope()` TOCTOU race, an unbounded automatic-replan loop, and a real
+approval-gate bypass via `POST /api/mainai/jobs`), all `git stash`-negative-control verified,
+plus Part D below (a founder-defined Personal Intent & Executive Reasoning classification, with
+its three companion architecture docs — also on this branch, so Part D's own references
+resolve here, unlike #207's now-superseded trimmed copy). Path B execution-scope bridge code
+remains #197's implementation lane — this doc tracks readiness, not that code drop.
+
+---
+
 Long-run authenticity spec (Deliverable 3), gap/repair production-loop audit (Deliverable 4),
 and the full V1 blocker matrix (Deliverable 5). Companion to
 `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md` (goal intake / decomposition) and
