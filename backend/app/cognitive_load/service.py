@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
-from app.founder_memory import list_founder_memory
+from app.founder_memory import list_current_founder_memory, list_founder_memory
 from app.personal_intent import AmbiguityClass, resolve_with_learned_intent
 from app.temporal_intelligence import RecapWindow, build_recap
 
@@ -21,6 +21,32 @@ class FounderAskDecision:
     avoided_question: bool = False
     evidence_refs: list[dict] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
+
+
+def _select_current_founder_truth(matches: list) -> object:
+    """Canonical current selection — never rely on incidental DB / list order.
+
+    Among active matches: prefer tip of supersession chain, then newest
+    (observed_at, created_at, id). Superseded notes must not be selected as current.
+    """
+    if not matches:
+        raise ValueError("no matches")
+    ids = {n.id for n in matches}
+    superseded_targets = {
+        n.supersedes_note_id for n in matches if getattr(n, "supersedes_note_id", None) is not None
+    }
+    # Drop notes that another match explicitly supersedes (belt if status lag).
+    candidates = [n for n in matches if n.id not in superseded_targets]
+    if not candidates:
+        candidates = list(matches)
+    # Prefer corrections / explicit supersession tips, then temporal order.
+    def _key(n):
+        is_correction = 1 if (getattr(n, "note_type", None) == "correction" or getattr(n, "supersedes_note_id", None)) else 0
+        observed = getattr(n, "observed_at", None) or getattr(n, "created_at", None)
+        created = getattr(n, "created_at", None) or observed
+        return (is_correction, observed, created, str(n.id))
+
+    return max(candidates, key=_key)
 
 
 def consider_founder_question(
@@ -40,8 +66,15 @@ def consider_founder_question(
     )
     # Search durable memory for a direct answer
     q = (question or "").lower()
-    notes = list_founder_memory(db, owner_id=owner_id, status="active")
-    matches = [n for n in notes if any(tok in (n.content or "").lower() for tok in q.split() if len(tok) > 3)]
+    notes = list_current_founder_memory(db, owner_id=owner_id)
+    # Also consider active notes that may not yet be tip-of-chain filtered the same way —
+    # union with status=active listing, then apply deterministic current selection.
+    active = list_founder_memory(db, owner_id=owner_id, status="active")
+    by_id = {n.id: n for n in active}
+    for n in notes:
+        by_id[n.id] = n
+    pool = list(by_id.values())
+    matches = [n for n in pool if any(tok in (n.content or "").lower() for tok in q.split() if len(tok) > 3)]
     recap = build_recap(db, owner_id=owner_id, window=RecapWindow.WEEK, include_project_wide=False, limit=20)
 
     if resolution.must_surface or resolution.ambiguity == AmbiguityClass.CONSEQUENTIAL:
@@ -54,13 +87,14 @@ def consider_founder_question(
         )
 
     if matches:
+        current = _select_current_founder_truth(matches)
         metrics["unnecessary_questions_avoided"] = 1
         metrics["manual_context_reload_avoided"] = 1
         return FounderAskDecision(
             should_ask_founder=False,
-            inferred_answer=matches[0].content,
+            inferred_answer=current.content,
             avoided_question=True,
-            evidence_refs=[{"kind": "founder_memory_note", "id": str(matches[0].id)}],
+            evidence_refs=[{"kind": "founder_memory_note", "id": str(current.id)}],
             metrics=metrics,
         )
 
