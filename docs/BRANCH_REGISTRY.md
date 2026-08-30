@@ -92,9 +92,9 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
-## MAINAI V1 COMPLETION RUN — Stages 1–5 (Cursor)
+## MAINAI V1 COMPLETION RUN — Stages 1–6 (Cursor)
 
-Integration tip: post-#205 (`d215130`). Program:
+Integration tip: post-#206 (`49357c1`). Program:
 `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
@@ -103,7 +103,8 @@ Integration tip: post-#205 (`d215130`). Program:
 | `cursor/worker-live-lease-expiry-takeover` | [#203](https://github.com/d1n095/LifeAI/pull/203) | **Mergad — Stage 2** | Real supervisor_goal_leases expiry → B reclaim → A ZERO FS effect → goal continues |
 | `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | 8-task long soak: gap/repair + restart + lease takeover; Worker ticks only |
 | `cursor/first-bounded-self-improvement` | [#205](https://github.com/d1n095/LifeAI/pull/205) | **Mergad — Stage 4** | Bounded self-improvement: SSH egress marker test via Worker→Supervisor; disposable mirror; no remote_write |
-| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Öppen — Stage 5** | Path A goal intake → Worker complete; report `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`; Path B stays Claude #197 |
+| `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Mergad — Stage 5** | Path A goal intake → Worker complete; Path B stays Claude #197 |
+| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Öppen — Stage 6** | Land V1 readiness + companion design docs on tip |
 
 ---
 
