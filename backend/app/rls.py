@@ -530,6 +530,9 @@ _MAINAI_EXECUTION_TABLES = (
     "project_entities",
     "interpretation_proposals",
     "project_entity_relationships",
+    # Migration 0064 (Concept Reconciliation): aliases bind alternate wording to one entity;
+    # cleaned via ON DELETE CASCADE from project_entities erasure.
+    "project_entity_aliases",
     # Migration 0055 (Life Work Candidates): work_candidates plays the SAME structural role
     # founder_memory_notes/project_entities already play -- a mutable row whose status
     # transitions in place (unreviewed -> authorized/dismissed/superseded), never rewritten
@@ -964,6 +967,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entities FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON interpretation_proposals FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entity_relationships FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entity_aliases FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_project_entities_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_candidates FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_work_candidates_children() TO mainai_app"))
@@ -1047,6 +1051,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("project_entities", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("interpretation_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),
+            ("project_entity_aliases", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
