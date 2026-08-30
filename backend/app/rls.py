@@ -543,6 +543,8 @@ _MAINAI_EXECUTION_TABLES = (
     "structured_claim_events",
     # Migration 0069 (Prediction vs Outcome Learning)
     "prediction_records",
+    # Migration 0068 (Hot/Warm/Cold Memory)
+    "memory_tier_states",
     # Migration 0055 (Life Work Candidates): work_candidates plays the SAME structural role
     # founder_memory_notes/project_entities already play -- a mutable row whose status
     # transitions in place (unreviewed -> authorized/dismissed/superseded), never rewritten
@@ -984,6 +986,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON structured_claims FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON structured_claim_events FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON prediction_records FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON memory_tier_states FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_candidates FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_work_candidates_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_scope_proposals FROM mainai_app"))
@@ -1072,6 +1075,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("structured_claims", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("structured_claim_events", frozenset({"SELECT", "INSERT"})),
             ("prediction_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("memory_tier_states", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
