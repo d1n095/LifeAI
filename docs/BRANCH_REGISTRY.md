@@ -8114,3 +8114,6 @@ lease-omverifiering före varje durabel skrivning. **P1 (icke-blockerande, för 
 "Autonomous Gap → Child-Task Generation")**: `create_plan()` är full-supersession-bara — ingen
 primitiv för att foga in EN ny child-task under en befintlig plan utan att kansellera alla
 syskon-tasks; måste byggas innan den funktionen kan börjas.
+
+| `cursor/mainai-founder-language-vertical-slice` | [#215](https://github.com/d1n095/LifeAI/pull/215) | **Öppen — Stage G** (stackad på #214) | Founder-language vertical slice |
+| `cursor/mainai-memory-quality-history-stress` | TBD | **Öppen — Stage H** (stackad på #215) | Synthetic history stress + quality queries |
