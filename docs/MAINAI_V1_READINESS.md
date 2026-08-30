@@ -1,24 +1,23 @@
 # MainAI V1 Readiness
 
-**Completion-run status (2026-08-30):** Cursor Stages 0A–0E and Stages 1–6 are **MERGED** on
-`claude/det-kommer-mer-879lcm` (#196/#198/#199/#200/#201, #202, #203, #204, #205, #206, #207).
-Evidence reports: `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`,
-`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`, `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`,
+**Completion-run status (2026-08-30):** Cursor Stages 0A–0E and Stages 1–6 are **MERGED and
+CLOSED OUT** on `claude/det-kommer-mer-879lcm` (#196/#198/#199/#200/#201, #202, #203, #204,
+#205, #206, #207 @ `dca5e3b`, #208 closeout @ `6789c2b`). Evidence reports:
+`docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`,
 plus the Stage 1–2 tests named in `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`. All
 independently reviewed post-merge (Claude PR comments on #205/#206) — #205's self-improvement
 run has one important caveat worth reading in the table below: it proved the mechanism safe
 end-to-end but ran against a disposable worktree mirror, not the real checkout, so MainAI's
 actual codebase did not change as a result.
 
-The body below is Claude's own design-lane draft (PR #197), now merged forward past #207's
-own landed-on-tip snapshot (which was itself adapted from an earlier version of this same
-document) — this copy is the current one: includes four real bugs #197 found and fixed during
-this session's V1 blocker sweep (`run_driver()` mid-run-takeover crash, an
-`authorize_execution_scope()` TOCTOU race, an unbounded automatic-replan loop, and a real
-approval-gate bypass via `POST /api/mainai/jobs`), all `git stash`-negative-control verified,
-plus Part D below (a founder-defined Personal Intent & Executive Reasoning classification, with
-its three companion architecture docs — also on this branch, so Part D's own references
-resolve here, unlike #207's now-superseded trimmed copy). Path B execution-scope bridge code
+The body below is Claude's own design-lane draft (PR #197), kept current with tip across two
+merges tonight — includes four real bugs #197 found and fixed during this session's V1
+blocker sweep (`run_driver()` mid-run-takeover crash, an `authorize_execution_scope()` TOCTOU
+race, an unbounded automatic-replan loop, and a real approval-gate bypass via
+`POST /api/mainai/jobs`), all `git stash`-negative-control verified, plus Part D below (a
+founder-defined Personal Intent & Executive Reasoning classification, with its three companion
+architecture docs — also on this branch, so Part D's own references resolve here) and three
+shipped V1.1 features (§ Part D's own status notes). Path B execution-scope bridge code
 remains #197's implementation lane — this doc tracks readiness, not that code drop.
 
 ---
@@ -189,23 +188,24 @@ not been empirically checked) / **BLOCKED** (a real, open gap stands in the way)
 ### V1 blocker summary (the short version)
 
 **Correction-pass Phases 1-5 all closed and independently verified**: #196/#198/#199/#200/#201.
-Stage 1-3 of the MAINAI V1 COMPLETION RUN (Cursor) also merged: #202 (gap/repair live loop),
-#203 (Stage 2 lease-expiry takeover), #204 (Stage 3 long-run soak). Task-decomposition
-idempotency/crash-recovery/Path-B-authority questions flagged in Deliverable 2 are all resolved
-(concurrent-decomposition race fixed, atomicity confirmed, Path B bridge built and proven).
-This session additionally found and closed four further real gaps beyond what any Cursor
-Stage PR covered: the `run_driver()` mid-run-takeover crash (`OperatorAuthorityTransitionError`),
-the `authorize_execution_scope()` first-governance TOCTOU race, an unbounded automatic
-replan loop (`MAX_AUTO_REPLANS`), and a real approval-gate bypass (`POST /api/mainai/jobs`
-could dispatch an approval-required task with zero approval check, via a second door
-`dispatch_ready_task()`'s own gate never covered) — all empirically proven via `git stash`
-negative controls, see PR #197. Stage 4 (#205, first bounded self-improvement) and Stage 5 (#206, Path A goal
-intake) have also since merged and been independently reviewed (Claude, both PR comments) —
-**no open code blockers remain for V1's execution-autonomy scope.** The one item worth a
-founder decision, not a code gap: #205 proved the self-improvement mechanism is safe but did
-not actually change MainAI's real codebase (disposable-mirror caveat, table above) — whether a
-milestone-2 run against the real checkout happens next is a founder call, not something this
-readiness matrix blocks on.
+Cursor MAINAI V1 COMPLETION RUN Stages 1–6 all merged: #202 (gap/repair), #203 (lease-expiry
+takeover), #204 (long-run soak), #205 (first bounded self-improvement), #206 (Path A intake),
+#207 (this readiness audit on tip). Task-decomposition idempotency/crash-recovery/Path-B-
+authority questions flagged in Deliverable 2 are resolved **on Claude #197** (concurrent-
+decomposition race fixed, atomicity confirmed, Path B bridge built and proven) — **not yet
+merged to tip** (#197 is CONFLICTING). That same #197 session additionally found and closed
+four further real gaps beyond what any Cursor Stage PR covered: the `run_driver()` mid-run-
+takeover crash (`OperatorAuthorityTransitionError`), the `authorize_execution_scope()`
+first-governance TOCTOU race, an unbounded automatic replan loop (`MAX_AUTO_REPLANS`), and a
+real approval-gate bypass (`POST /api/mainai/jobs` could dispatch an approval-required task
+with zero approval check, via a second door `dispatch_ready_task()`'s own gate never covered)
+— all empirically proven via `git stash` negative controls on #197; **tip still awaits those
+code landings**. Stages 4–5 have been independently reviewed post-merge (Claude, both PR
+comments). Cursor's execution-autonomy proof program is complete; the remaining tip gap is
+Claude-owned #197. The one item worth a founder decision, not a code gap: #205 proved the
+self-improvement mechanism is safe but did not actually change MainAI's real codebase
+(disposable-mirror caveat, table above) — whether a milestone-2 run against the real checkout
+happens next is a founder call, not something this readiness matrix blocks on.
 
 **Not blockers, explicitly scoped out of V1**: Vault V5/V8 schema implementation (separate
 initiative, its own timeline), the `multiplication_repair` recipe's narrowness (cost

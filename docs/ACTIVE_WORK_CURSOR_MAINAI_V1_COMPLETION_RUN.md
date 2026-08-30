@@ -28,7 +28,10 @@ without a human translating every step.
 | 3 | Long autonomous soak (8–12 tasks) + report | **MERGED** #204 |
 | 4 | First real bounded self-improvement on LifeAI | **MERGED** #205 |
 | 5 | Goal intake / bootstrap production path | **MERGED** #206 |
-| 6 | `docs/MAINAI_V1_READINESS.md` audit | **IN PROGRESS** — [#207](https://github.com/d1n095/LifeAI/pull/207) |
+| 6 | `docs/MAINAI_V1_READINESS.md` audit | **MERGED** #207 @ `dca5e3b` |
+
+**✅ CURSOR V1 COMPLETION RUN COMPLETE (2026-08-30).** Stages 0A–6 all merged on
+`claude/det-kommer-mer-879lcm`.
 
 ## Landed evidence
 
@@ -36,7 +39,16 @@ without a human translating every step.
 - Stage 3: `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`
 - Stage 4: `docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`
 - Stage 5: `docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md` (Path B remains Claude #197)
-- Stage 6: this PR lands `docs/MAINAI_V1_READINESS.md` + companions on tip
+- Stage 6: `docs/MAINAI_V1_READINESS.md` + companions landed via #207
+
+## Remaining outside this Cursor program (do not take over)
+
+- **Claude [#197](https://github.com/d1n095/LifeAI/pull/197)** — Path B execution-scope bridge
+  code + the four tip-missing blocker-sweep fixes described in `MAINAI_V1_READINESS.md`
+  (`run_driver` mid-run takeover, `authorize_execution_scope` TOCTOU, `MAX_AUTO_REPLANS`,
+  jobs-route approval-gate). Still **CONFLICTING** vs tip; Claude-owned lane.
+- **Founder decision** — Stage 4 (#205) proved self-improvement mechanism on a disposable
+  mirror only; whether to run milestone 2 against the real checkout is not a Cursor stage.
 
 ## Operating rules (non-negotiable)
 

@@ -121,10 +121,10 @@ Claude Vault/egress — leave alone. Claude's aktiva lane just nu: Stage 1 (auto
 live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-audit) — se
 `docs/MAINAI_V1_READINESS.md`s Part B för gap/repair-kedjans redan bekräftade produktionsstatus.
 
-## MAINAI V1 COMPLETION RUN — Stages 1–6 (Cursor) + Claude's parallel v1-readiness-workstream
+## MAINAI V1 COMPLETION RUN — Stages 0–6 (Cursor) — KLAR + Claude's parallel v1-readiness-workstream
 
-Integration tip: post-#207 (`dca5e3b`). Program:
-`docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
+**✅ CURSOR PROGRAM COMPLETE (2026-08-30).** Integration tip: post-#208 (`6789c2b`).
+Program: `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
@@ -133,13 +133,14 @@ Integration tip: post-#207 (`dca5e3b`). Program:
 | `cursor/long-autonomy-soak-v1` | [#204](https://github.com/d1n095/LifeAI/pull/204) | **Mergad — Stage 3** | Long-run 8-12 task soak; independently reviewed by Claude pre-merge |
 | `cursor/first-bounded-self-improvement` | [#205](https://github.com/d1n095/LifeAI/pull/205) | **Mergad — Stage 4** | First bounded self-improvement (SSH egress marker test); independently reviewed post-merge (Claude) — important caveat: proved the mechanism safe, ran against a disposable worktree mirror, NOT the real checkout, so production `test_egress_policy.py` is unchanged |
 | `cursor/goal-intake-path-a-worker` | [#206](https://github.com/d1n095/LifeAI/pull/206) | **Mergad — Stage 5** | Path A goal intake → Worker complete; independently reviewed (Claude, clean) |
-| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Mergad — Stage 6** | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **Conflict resolved**: its `MAINAI_V1_READINESS.md` snapshot predated most of #197's tonight-session updates — Claude pushed a refresh commit directly onto #207's branch before merge closing the gap, then (after #207 merged) merged this integration tip back into #197 and resolved the resulting content conflict in favor of #197's fuller version (includes Part D + its companion docs, which only exist on #197). |
-| `cursor/v1-completion-run-closeout` | [#208](https://github.com/d1n095/LifeAI/pull/208) | **Öppen** | Closeout: Cursor V1 completion run Stages 0–6 complete — not yet reviewed |
+| `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Mergad — Stage 6** @ `dca5e3b` | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **Conflict resolved**: its `MAINAI_V1_READINESS.md` snapshot predated most of #197's tonight-session updates — Claude pushed a refresh commit directly onto #207's branch before merge closing the gap, then (after #207 merged) merged this integration tip back into #197 and resolved the resulting content conflict in favor of #197's fuller version (includes Part D + its companion docs, which only exist on #197). |
+| `cursor/v1-completion-run-closeout` | [#208](https://github.com/d1n095/LifeAI/pull/208) | **Mergad — Closeout** @ `6789c2b` | Marks Cursor's own V1 completion run Stages 0A-6 complete; reviewed (Claude, clean, docs-only, respects #197 boundary) |
 
 **Claude's egen, icke-överlappande gren `v1-readiness-workstream` (PR #197, öppen, ej mergad,
-mergad FRAMÅT mot integrationstippen post-#207 natten 2026-08-29→30)** — fem riktiga, var för
-sig three-check-verifierade fynd (`git stash`-negativkontroll: varje fix' egen test misslyckas
-genuint på pre-fix-kod, passerar post-fix), alla pushade, ingen ännu founder-granskad:
+mergad FRAMÅT mot integrationstippen två gånger natten 2026-08-29→30, senast post-#208 — INTE
+längre konflikterande mot tip)** — fem riktiga, var för sig three-check-verifierade fynd
+(`git stash`-negativkontroll: varje fix' egen test misslyckas genuint på pre-fix-kod, passerar
+post-fix), alla pushade, ingen ännu founder-granskad:
 
 1. **`OperatorAuthorityTransitionError`** (`app/development_operator/service.py`,
    `app/development_driver/service.py`) — `run_driver()`s per-steg try/except fångade tidigare
@@ -186,7 +187,10 @@ CONTRACT.md`, `docs/MAINAI_LONG_HORIZON_PLANNING.md`) plus `docs/MAINAI_V1_READI
 som founder explicit krävde designad NU). ~2/3 av det efterfrågade fanns redan under andra
 namn (founder_memory_signals, project_entities, EngineeringLesson, autonomous_gap,
 work_candidates, execution_envelopes) — se dokumentens egna "vad finns redan"-tabeller innan
-någon framtida session rör detta.
+någon framtida session rör detta. Sedan dess (samma gren) ytterligare tre riktiga, three-check-
+verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration 0063), entity-
+resolution på `CandidateLearningSignal` (migration 0064), `record_lesson_from_founder_
+correction()` (ingen migration). Se PR #197s egna commits för detaljer.
 
 ---
 
