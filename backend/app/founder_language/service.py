@@ -63,12 +63,15 @@ def process_founder_language(
     No manual test-side memory/task translation after input — this function is the production path.
     """
     intent, confidence = resolve_founder_expression(raw_expression)
+    # RAW EXPRESSION != INTERPRETATION: store founder words verbatim in content/source;
+    # keep normalized intent + confidence in provenance (and return fields).
     note, _claim = founder_add_memory_note(
         db,
         owner_id=owner_id,
-        content=intent,
+        content=raw_expression,
         note_type="observation",
         idempotency_key=idempotency_key,
+        source=raw_expression,
         provenance={
             "stage": "G",
             "raw_expression": raw_expression,

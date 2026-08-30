@@ -48,7 +48,13 @@ def test_vertical_slice_persists_and_retrieves(db_session, make_verified_user):
     assert result.linkage_thread_id is not None
     note = get_founder_memory(db_session, owner_id=user.id, note_id=result.memory_note_id)
     assert note is not None
-    assert "short founder answers" in note.content.lower()
+    # RAW EXPRESSION != INTERPRETATION
+    assert note.content == "få med det här med short founder answers preference"
+    assert note.source == note.content
+    assert (note.provenance or {}).get("normalized_intent") == result.normalized_intent
+    assert "få med" not in result.normalized_intent.lower()
+    assert "short founder answers" in result.normalized_intent.lower()
+    assert result.confidence == (note.provenance or {}).get("confidence")
 
 
 def test_same_idea_different_wording_collapses(db_session, make_verified_user):
