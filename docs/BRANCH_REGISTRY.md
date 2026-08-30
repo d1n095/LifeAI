@@ -13,7 +13,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-workforce-foundation-t1-t2` | (öppnas) | **Öppen** från tip `1aa0ab7` | T1–T7+T8/T15/T17/T19 schema+kontrakt: registry, broker, authority, context packaging, trust zones, performance ledger, selector, team formation, injection scrub, org snapshot, safe in-process vertical slice. Migration **0067**. Doc: `docs/LIFE_MAINAI_WORKFORCE_FOUNDATION.md`. **Ingen** live provider-dispatch (väntar Claude-verifierade safety gates t.ex. #218). |
+| `cursor/mainai-workforce-foundation-t1-t2` | [#230](https://github.com/d1n095/LifeAI/pull/230) | **Öppen** från tip `1aa0ab7` | T1–T7+T8/T15/T17/T19 schema+kontrakt: registry, broker, authority, context packaging, trust zones, performance ledger, selector, team formation, injection scrub, org snapshot, safe in-process vertical slice. Migration **0067**. Doc: `docs/LIFE_MAINAI_WORKFORCE_FOUNDATION.md`. **Ingen** live provider-dispatch (väntar Claude-verifierade safety gates t.ex. #218). |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
