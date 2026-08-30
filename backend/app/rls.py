@@ -517,6 +517,9 @@ _MAINAI_EXECUTION_TABLES = (
     # whose status transitions in place (unreviewed -> promoted/dismissed), never rewritten
     # content, deletion only through the SECURITY DEFINER erasure path.
     "candidate_learning_signals",
+    # Migration 0063 (Inspectable Memory Foundation): memory_truth_claims are claim receipts
+    # only — mutable verification fields, deletion only through SECURITY DEFINER erasure.
+    "memory_truth_claims",
     # Migration 0054 (Life Project Entities / Interpretation Queue): project_entities and
     # interpretation_proposals play the SAME structural role founder_memory_notes/
     # candidate_learning_signals already play -- mutable rows whose status transitions in
@@ -956,6 +959,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_corpus_trial_run_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON candidate_learning_signals FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_candidate_learning_signal_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON memory_truth_claims FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_memory_truth_claim_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entities FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON interpretation_proposals FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON project_entity_relationships FROM mainai_app"))
@@ -1038,6 +1043,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("diagnosis_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("corpus_trial_runs", _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES),
             ("candidate_learning_signals", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("memory_truth_claims", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("project_entities", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("interpretation_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),

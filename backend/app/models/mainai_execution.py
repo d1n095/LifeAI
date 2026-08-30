@@ -321,6 +321,10 @@ class EngineeringLesson(Base):
     evidence: Mapped[str] = mapped_column(Text)
     fix: Mapped[str] = mapped_column(Text)
     regression_test: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Migration 0063: naming a regression_test is not itself proof it caught the bug.
+    # Deferred so ORM SELECTs remain compatible with isolated pre-0063 probe DBs
+    # (e.g. recovery takeover downgrade probe pinned at 0061) until the attribute is loaded.
+    verification_status: Mapped[str] = mapped_column(String(40), default="unverified", deferred=True)
     general_rule: Mapped[str] = mapped_column(Text)
     # Tags/patterns a planner/verifier can match against (e.g. ["lease", "worker",
     # "privilege_boot"]) — see app/mainai_execution/lessons.py's lookup function.
