@@ -26,22 +26,23 @@ without a human translating every step.
 | 1 | Autonomous gap/repair live loop | **MERGED** #202 |
 | 2 | Lease expiry + takeover continuation | **MERGED** #203 |
 | 3 | Long autonomous soak (8–12 tasks) + report | **MERGED** #204 |
-| 4 | First real bounded self-improvement on LifeAI | **IN PROGRESS** — [#205](https://github.com/d1n095/LifeAI/pull/205) |
-| 5 | Goal intake / bootstrap production path | waiting |
+| 4 | First real bounded self-improvement on LifeAI | **MERGED** #205 |
+| 5 | Goal intake / bootstrap production path | **IN PROGRESS** — [#206](https://github.com/d1n095/LifeAI/pull/206) |
 | 6 | `docs/MAINAI_V1_READINESS.md` audit | waiting |
 
-## Stage 1–3 (landed)
+## Stage 1–4 (landed)
 
 - #202 live gap/repair Worker loop
 - #203 lease-expiry takeover + continuation
 - #204 8-task long soak + `docs/MAINAI_LONG_AUTONOMY_RUN_REPORT.md`
+- #205 first bounded self-improvement + `docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`
 
-## Stage 4 proof target
+## Stage 5 proof target
 
-Bounded self-improvement: add SSH OpenSSH marker regression coverage via Worker→Supervisor
-under a narrow test-file envelope. Report:
-`docs/MAINAI_FIRST_SELF_IMPROVEMENT_RUN_REPORT.md`. No remote_write / push / authority-core
-edits.
+Path A only: Document/KnowledgeClaim → WorkCandidate → authorize → plan → envelope →
+spend → Worker→Supervisor to goal complete. Report:
+`docs/MAINAI_GOAL_INTAKE_PATH_A_REPORT.md`. Path B execution-scope bridge stays Claude
+#197 — not duplicated here.
 
 ## Operating rules (non-negotiable)
 
