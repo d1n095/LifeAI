@@ -538,7 +538,7 @@ _MAINAI_EXECUTION_TABLES = (
     # are append-only.
     "founder_intent_bindings",
     "founder_intent_corrections",
-    # Migration 0066 (Contradiction + Assumption Engine)
+    # Migration 0068 (Contradiction + Assumption Engine)
     "structured_claims",
     "structured_claim_events",
     # Migration 0055 (Life Work Candidates): work_candidates plays the SAME structural role
