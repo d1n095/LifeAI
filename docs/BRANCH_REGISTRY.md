@@ -123,7 +123,7 @@ live-loop-attack), Stage 2 (takeover-attacker), Stage 3 (long-run authenticity-a
 
 ## MAINAI V1 COMPLETION RUN — Stages 0–6 (Cursor) — KLAR + Claude's parallel v1-readiness-workstream
 
-**✅ CURSOR PROGRAM COMPLETE (2026-08-30).** Integration tip: post-#208 (`6789c2b`).
+**✅ CURSOR PROGRAM COMPLETE (2026-08-30).** Integration tip: post-#210 (`e8c9ca6`).
 Program: `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 
 | Branch | PR | Status | Scope |
@@ -188,9 +188,9 @@ som founder explicit krävde designad NU). ~2/3 av det efterfrågade fanns redan
 namn (founder_memory_signals, project_entities, EngineeringLesson, autonomous_gap,
 work_candidates, execution_envelopes) — se dokumentens egna "vad finns redan"-tabeller innan
 någon framtida session rör detta. Sedan dess (samma gren) ytterligare tre riktiga, three-check-
-verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration 0064, ursprungligen
-0063, se ovan för renumbering p.g.a. #209:s numreringskollision), entity-resolution på
-`CandidateLearningSignal` (migration 0065, ursprungligen 0064), `record_lesson_from_founder_
+verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration **0065**, tidigare
+0064, tidigare 0063 — renumrerad två gånger, se nedan), entity-resolution på
+`CandidateLearningSignal` (migration **0066**, tidigare 0065, tidigare 0064), `record_lesson_from_founder_
 correction()` (ingen migration). Se PR #197s egna commits för detaljer.
 
 ## MainAI Memory Frontier (Cursor, primary implementation lane, founder-godkänd 2026-08-30)
@@ -206,18 +206,24 @@ här är röd-team-granskning av Cursors PR:er, inte primärbyggare, tills annat
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/mainai-inspectable-memory-foundation` | [#209](https://github.com/d1n095/LifeAI/pull/209) | **Mergad — Stage A** @ `b73a018` | Canonical inspectable memory (`memory_truth_claims`, verify-against-reality, founder API `/api/founder/memory`). Landed Alembic **0063** on tip BEFORE #197 merged — won the numbering race (see resolution below). Claude red-team review (fork): clean, `verify_truth_claim()` genuinely re-derives truth from the real target row, never trusts caller input. |
-| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Öppen — Stage B**, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Alembic on its branch still says `0064` (`down_revision=0063`) — will collide with #197's renumbered 0064 below; #210 is the one that must renumber again when it rebases past #197. Claude red-team review (fork): ONE plausible-not-yet-confirmed TOCTOU race in `promote_interpretation_proposal()`'s SAME-collapse (`find_same_concept()` unlocked SELECT → unlocked insert) — posted to PR, offered to build the two-thread empirical proof. |
+| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Mergad — Stage B** @ `e8c9ca6`, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Landed Alembic **0064** on tip BEFORE #197 merged, colliding with #197's already-renumbered 0064 (see resolution below). Claude red-team review (fork): ONE plausible-not-yet-confirmed TOCTOU race in `promote_interpretation_proposal()`'s SAME-collapse (`find_same_concept()` unlocked SELECT → unlocked insert) — posted to PR, offered to build the two-thread empirical proof; not yet resolved, carried forward. |
 
-**Alembic-revisionskollision — LÖST 2026-08-30 (reality flipped the original proposal):** #209
-merged into `claude/det-kommer-mer-879lcm` (landing `0063_inspectable_memory_foundation.py`)
-WHILE #197 was still open, winning the numbering race the original note assumed #197 would
-win. Resolution actually executed: #197's own two migrations renumbered
-`0063_work_candidate_horizon_priority.py` → **`0064`** and
-`0064_candidate_signal_entity_resolution.py` → **`0065`** (down_revision chain: `0063` →
-`0064` → `0065`), content otherwise byte-identical, re-verified via a full upgrade/downgrade/
-upgrade cycle on a disposable probe DB before re-push. #210 (still open, stacked on #209, own
-migration still numbered `0064` on its branch) is now the one that must renumber to `0066` when
-it next rebases past #197's merge.
+**Alembic-revisionskollision — LÖST TVÅ GÅNGER 2026-08-30 (basen fortsatte röra sig under
+#197s öppna fönster):** Första kollisionen: #209 mergade `0063_inspectable_memory_foundation.py`
+in på tippen medan #197 fortfarande var öppen, vilket vann numreringsracet den ursprungliga
+noten antog att #197 skulle vinna. Första lösningen: #197s två migrationer omnumrerades
+`0063_work_candidate_horizon_priority.py` → `0064` och
+`0064_candidate_signal_entity_resolution.py` → `0065`. INNAN den lösningen hann mergas landade
+#210 (stackad på #209) sin egen `0064_concept_reconciliation.py` på tippen — samma
+`down_revision=0063`, samma nya nummer `0064` som #197s redan omnumrerade fil, en ANDRA
+kollision. Slutlig lösning, verifierad vid denna merge-session (2026-08-30, samma pass som
+löste registerkonflikten ovan): #197s två migrationer omnumrerades EN GÅNG TILL,
+`0064_work_candidate_horizon_priority.py` → **`0065`** och
+`0065_candidate_signal_entity_resolution.py` → **`0066`** (down_revision-kedja: `0063`
+(#209) → `0064` (#210, `concept_reconciliation`) → `0065` (#197, `work_candidate_horizon_
+priority`) → `0066` (#197, `candidate_signal_entity_resolution`)), innehåll i övrigt
+byte-identiskt, `alembic heads` visar exakt EN head efter omnumreringen. Ingen ytterligare
+öppen Cursor-branch känd att kollidera med just nu.
 
 ---
 
