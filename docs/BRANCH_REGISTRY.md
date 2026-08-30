@@ -188,8 +188,9 @@ som founder explicit krävde designad NU). ~2/3 av det efterfrågade fanns redan
 namn (founder_memory_signals, project_entities, EngineeringLesson, autonomous_gap,
 work_candidates, execution_envelopes) — se dokumentens egna "vad finns redan"-tabeller innan
 någon framtida session rör detta. Sedan dess (samma gren) ytterligare tre riktiga, three-check-
-verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration 0063), entity-
-resolution på `CandidateLearningSignal` (migration 0064), `record_lesson_from_founder_
+verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration 0064, ursprungligen
+0063, se ovan för renumbering p.g.a. #209:s numreringskollision), entity-resolution på
+`CandidateLearningSignal` (migration 0065, ursprungligen 0064), `record_lesson_from_founder_
 correction()` (ingen migration). Se PR #197s egna commits för detaljer.
 
 ## MainAI Memory Frontier (Cursor, primary implementation lane, founder-godkänd 2026-08-30)

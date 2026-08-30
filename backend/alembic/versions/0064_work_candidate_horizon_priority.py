@@ -15,8 +15,8 @@ and any future caller of the pre-existing vocabulary are unaffected."""
 
 from alembic import op
 
-revision = "0063"
-down_revision = "0062"
+revision = "0064"
+down_revision = "0063"
 branch_labels = None
 depends_on = None
 
