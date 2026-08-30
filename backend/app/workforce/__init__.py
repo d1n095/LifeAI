@@ -78,6 +78,31 @@ from app.workforce.performance import (
     record_verified_outcome,
     verified_success_rate,
 )
+from app.workforce.provider_worker import (
+    ProviderActivationBlocked,
+    WorkerExecutionReceipt,
+    WorkerRequestEnvelope,
+    activation_allowed,
+    activation_gate_status,
+    assert_no_credentials_in_context,
+    build_worker_request_envelope,
+    execute_workforce_assignment,
+    handoff_to_verification,
+    mark_safety_gate,
+    reset_safety_gates_for_tests,
+)
+from app.workforce.first_team import (
+    FIRST_TEAM_SPECS,
+    bootstrap_first_team,
+    inspect_first_team,
+)
+from app.workforce.staff_manager import (
+    StaffManagerError,
+    StaffingDecision,
+    apply_staffing_decision,
+    decide_staffing,
+    maybe_retire_obsolete,
+)
 from app.workforce.registry import (
     AgentNotSelectableError,
     WorkforceRegistryError,
@@ -110,6 +135,25 @@ from app.workforce.vertical_slice import LowRiskSliceResult, run_low_risk_classi
 __all__ = [
     "AGENT_LIFECYCLE_STATUSES",
     "AgentNotSelectableError",
+    "ProviderActivationBlocked",
+    "StaffManagerError",
+    "StaffingDecision",
+    "FIRST_TEAM_SPECS",
+    "WorkerExecutionReceipt",
+    "WorkerRequestEnvelope",
+    "activation_allowed",
+    "activation_gate_status",
+    "apply_staffing_decision",
+    "assert_no_credentials_in_context",
+    "bootstrap_first_team",
+    "build_worker_request_envelope",
+    "decide_staffing",
+    "execute_workforce_assignment",
+    "handoff_to_verification",
+    "inspect_first_team",
+    "mark_safety_gate",
+    "maybe_retire_obsolete",
+    "reset_safety_gates_for_tests",
     "AuthorityEnvelopeError",
     "CandidateScore",
     "ContextPackagingError",

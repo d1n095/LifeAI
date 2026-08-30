@@ -13,12 +13,13 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-workforce-foundation-t1-t2` | [#230](https://github.com/d1n095/LifeAI/pull/230) | **Öppen** från tip `1aa0ab7` | T1–T7 schema+kontrakt (0067). |
-| `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Öppen** stacked på #230 | T8/T9/T10/T13–T16/T19/T20 ops: failure/takeover, verification policy, cost budgets, hiring lifecycle, team patterns, injection/red-team tests, low-risk dry slice. Migration **0068**. Provider activate **blocked**. |
+| `cursor/mainai-workforce-foundation-t1-t2` | [#230](https://github.com/d1n095/LifeAI/pull/230) | **Mergad** @ `dfbf1c3` | T1–T7 schema+kontrakt (0067). |
+| `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Öppen** på tip | T8/T9/T10/T13–T16/T19/T20 ops (0068). |
+| `cursor/mainai-workforce-runtime-harness` | (öppnas) | **Öppen** stacked på #231 | Provider harness (gated), first team honesty, staff decision loop, systemic attacks. |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
-**Lane A (fortsätter separat):** fix-PR:er #218/#229/#213/#215/#220/#224 — CI kan vara grön; **Claude-verifiering saknas fortfarande** → merge hålls.
+**Lane A:** #230 mergad. #231 rebasad på tip — merge när CI grön. Provider-activate fortfarande blockerad.
 
 ---
 
