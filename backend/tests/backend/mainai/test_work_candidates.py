@@ -83,6 +83,37 @@ def test_priority_rejects_arbitrary_values(superuser_db):
     superuser_db.rollback()
 
 
+@pytest.mark.parametrize("priority", ["NOW", "NEAR", "LATER", "OPTIONAL", "BLOCKED"])
+def test_priority_accepts_the_new_horizon_vocabulary(superuser_db, priority):
+    """Migration 0063: docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md's own
+    NOW/NEAR/LATER/OPTIONAL/BLOCKED vocabulary (a future bounded executive scan's own output
+    classification) is additive to the pre-existing low/medium/high/urgent set (migration
+    0055) -- proves each new value is genuinely accepted by the real DB constraint, not just
+    that the migration ran without error."""
+    owner, entity = _owner_with_entity(superuser_db)
+    superuser_db.commit()
+    candidate = record_work_candidate(
+        superuser_db, owner_id=owner.id, source_entity_id=entity.id, title="x",
+        idempotency_key=f"horizon-priority-{priority}", priority=priority,
+    )
+    superuser_db.commit()
+    assert candidate.priority == priority
+
+
+def test_priority_still_accepts_the_pre_existing_vocabulary_unchanged(superuser_db):
+    """The widened CHECK constraint must not have silently dropped any pre-existing value --
+    additive means additive, never a rewrite."""
+    owner, entity = _owner_with_entity(superuser_db)
+    superuser_db.commit()
+    for i, priority in enumerate(["low", "medium", "high", "urgent"]):
+        candidate = record_work_candidate(
+            superuser_db, owner_id=owner.id, source_entity_id=entity.id, title="x",
+            idempotency_key=f"legacy-priority-{i}", priority=priority,
+        )
+        superuser_db.commit()
+        assert candidate.priority == priority
+
+
 def test_authorizing_a_candidate_requires_the_callers_own_explicit_authorized_by_never_the_classifiers_confidence(superuser_db):
     """The core structural proof: a classifier_confidence=0.95 candidate does NOT imply
     authorization -- the caller must assert authorized_by themselves, and the resulting
