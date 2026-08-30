@@ -69,6 +69,7 @@ from app.models.founder_intent import FounderIntentBinding, FounderIntentCorrect
 from app.models.structured_claim import StructuredClaim, StructuredClaimEvent
 from app.models.prediction_learning import PredictionRecord
 from app.models.memory_tier import MemoryTierState
+from app.models.self_improvement_roi import SelfImprovementROIRecord
 from app.models.import_job import ImportJob
 from app.models.intelligence_governance import (
     ClassificationBasis,
@@ -277,6 +278,7 @@ __all__ = [
     "StructuredClaimEvent",
     "PredictionRecord",
     "MemoryTierState",
+    "SelfImprovementROIRecord",
     "ImportJob",
     "ClassificationBasis",
     "ExecutionRole",
