@@ -65,6 +65,7 @@ from app.models.founder_memory import (
     FOUNDER_MEMORY_NOTE_TYPES,
     FounderMemoryNote,
 )
+from app.models.founder_intent import FounderIntentBinding, FounderIntentCorrection
 from app.models.import_job import ImportJob
 from app.models.intelligence_governance import (
     ClassificationBasis,
@@ -267,6 +268,8 @@ __all__ = [
     "FOUNDER_MEMORY_NOTE_STATUSES",
     "FOUNDER_MEMORY_NOTE_TYPES",
     "FounderMemoryNote",
+    "FounderIntentBinding",
+    "FounderIntentCorrection",
     "ImportJob",
     "ClassificationBasis",
     "ExecutionRole",
