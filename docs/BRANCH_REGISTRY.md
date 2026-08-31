@@ -24,6 +24,17 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 
 **Lane A:** #230–#234 mergade. #235 composed executive loop. Provider-activate blockerad tills Claude-gates (#218/#229/#213/#224).
 
+
+## MainAI Local Intelligence School (2026-08-31)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-local-intelligence-school` | (öppnas) | **Aktiv** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
+
+**Väntar på:** #235 merge för executive-loop wire (local-attempt-first i composed cycle).
+
+---
+
 ---
 
 ## Claude's non-överlappande lane: MainAI V1 arkitektur/readiness (2026-08-29)
