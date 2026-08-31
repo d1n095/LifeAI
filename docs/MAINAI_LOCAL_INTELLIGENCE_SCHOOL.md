@@ -50,5 +50,20 @@ Provider invoke remains disabled until independent Claude gates say otherwise.
 - `specialization.py` — local specialist lifecycle (gap → teach → exam → probation → verified)
 - `self_learn.py` — self-teaching without APIs + failure-layer classification
 - `teachers.py` — domain-specific teacher scoring, disagreement (no blind majority), peer lessons
-- `memory_tiers.py` — HOT/WARM/COLD (summaries never replace provenance)
+- `memory_tiers.py` — HOT/WARM/COLD **policy only** (summaries never replace provenance)
 - `metrics.py` — EXTERNAL DEPENDENCY RATIO by domain
+
+## Reuse map (do not invent parallel stores)
+
+| Concern | Canonical | School action |
+|---|---|---|
+| Lessons | `mainai_execution.lessons` / `EngineeringLesson` | already via distill |
+| Competence | `capability_reality` | already (`school.*` keys) |
+| Agent gradebook | `workforce.performance` | wire later — no second ledger |
+| Durable HOT/WARM/COLD | `app.memory_tiers` (when on tip) | bridge classifier; no second store |
+| Pred→outcome | `prediction_learning` (frontier) | wire later for calibration |
+| Founder teaching | `record_lesson_from_founder_correction` / `founder_language` | wire after language slice on tip |
+| Self-improve ROI | `self_improvement_roi` / bounded SI spine | wire — school is curriculum, not SI editor |
+| Executive local-first | `mainai_executive` (#235) | **thin adapter** after merge |
+
+**No school Alembic migration** until a query cannot be answered from lessons + capability events + performance rollups + JSON provenance.

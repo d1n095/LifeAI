@@ -1,6 +1,10 @@
-"""HOT / WARM / COLD memory tier classification — lossless history preserved.
+"""HOT / WARM / COLD classification policy — lossless history preserved.
 
 Summaries may accelerate retrieval but NEVER replace provenance.
+
+This module is a **policy classifier only**. When durable `app.memory_tiers`
+(Stage N / frontier) is on the integration tip, school MUST delegate persist/
+demote/search there — do not grow a second tier store here.
 """
 
 from __future__ import annotations
