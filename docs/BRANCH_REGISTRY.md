@@ -17,12 +17,12 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 | `cursor/mainai-workforce-ops-t8-t20` | [#231](https://github.com/d1n095/LifeAI/pull/231) | **Mergad** | T8–T20 ops (0068). |
 | `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness (gated), first team, staff loop, systemic attacks. |
 | `cursor/workforce-registry-post-232` | [#233](https://github.com/d1n095/LifeAI/pull/233) | **Mergad** | Registry mark #230–#232 merged. |
-| `cursor/mainai-workforce-activation-prep` | [#234](https://github.com/d1n095/LifeAI/pull/234) | **Öppen** | ActivationGateSet fail-closed, startup readiness, safe internal run, kill-switch. **Ingen ny migration.** Provider invoke staged disabled. |
-| `cursor/mainai-composed-executive-loop` | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Öppen** | Composed executive loop (glue). No provider activate. |
+| `cursor/mainai-workforce-activation-prep` | [#234](https://github.com/d1n095/LifeAI/pull/234) | **Mergad** | ActivationGateSet, safe internal run, kill-switch, startup readiness; provider invoke staged disabled. |
+| `cursor/mainai-composed-executive-loop` | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Öppen** | Composed executive loop (glue) + continuity/scenarios; wires readiness/kill into observability. No provider activate. |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
-**Stack landad (#230–#233).** Alembic head **0068**. Provider-activate blockerad tills Claude verifierat safety gates (#218/#229/#213/#224).
+**Lane A:** #230–#234 mergade. #235 composed executive loop. Provider-activate blockerad tills Claude-gates (#218/#229/#213/#224).
 
 ---
 

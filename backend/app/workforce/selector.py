@@ -76,6 +76,26 @@ def score_candidates(
         # No evidence → low prior, never "trusted because new".
         evidence_score = 0.25 if success_rate is None else (0.4 + 0.6 * success_rate)
         capability_match = 1.0 if required_capability in caps else 0.2
+        # Read-only self-model signal — CAPABILITY_REALITY != AUTHORITY; never invents status.
+        reality_factor = 1.0
+        reality_status = None
+        try:
+            from app.capability_reality import get_capability_reality
+
+            reality = get_capability_reality(
+                db, owner_id=owner_id, capability_key=required_capability
+            )
+            if reality is not None:
+                reality_status = reality.status
+                if reality.status == "verified_available":
+                    reality_factor = 1.0
+                elif reality.status in ("configured_unavailable", "configured_disabled"):
+                    reality_factor = 0.35
+                else:
+                    # unknown / planned — downrank, do not refuse alone
+                    reality_factor = 0.6
+        except Exception:
+            reality_factor = 1.0
         risk_fit = 1.0
         if risk == "high" and profile.risk_tier == "low":
             risk_fit = 0.5
@@ -86,7 +106,7 @@ def score_candidates(
         if rollup and int(rollup.security_violations) + int(rollup.authority_violations) > 0:
             penalty += 0.5
 
-        score = capability_match * evidence_score * risk_fit + local_bonus - penalty
+        score = capability_match * evidence_score * risk_fit * reality_factor + local_bonus - penalty
         explanation = {
             "capability_match": capability_match,
             "evidence_score": evidence_score,
@@ -99,8 +119,11 @@ def score_candidates(
             "cost_penalty": penalty,
             "trust_zone": profile.trust_zone,
             "status": profile.status,
+            "capability_reality_status": reality_status,
+            "capability_reality_factor": reality_factor,
             # Explicit: no self-reported confidence enters this score.
             "used_agent_self_confidence": False,
+            "capability_reality_is_not_authority": True,
         }
         scored.append(
             CandidateScore(

@@ -117,6 +117,7 @@ def test_1_founder_requirement_affects_active_task(db_session, make_verified_use
         content="Requirement: Postgres durable memory storage must keep history inspectable",
         note_type="decision",
         idempotency_key="t1-note",
+        link_to_work=False,
     )
     db_session.commit()
 
@@ -151,6 +152,7 @@ def test_2_founder_corrects_prior_requirement_supersedes_candidate(db_session, m
         content="Use MongoDB for sessions",
         note_type="decision",
         idempotency_key="t2-orig",
+        link_to_work=False,
     )
     first = apply_memory_work_linkage(db_session, owner_id=user.id, note_id=original.id)
     db_session.commit()
@@ -163,6 +165,7 @@ def test_2_founder_corrects_prior_requirement_supersedes_candidate(db_session, m
         note_id=original.id,
         content="Use Postgres for sessions instead of MongoDB",
         idempotency_key="t2-fix",
+        link_to_work=False,
     )
     second = apply_memory_work_linkage(
         db_session,
@@ -194,6 +197,7 @@ def test_3_same_requirement_different_wording_collapses(db_session, make_verifie
         content="I want short founder answers",
         note_type="preference",
         idempotency_key="t3-a",
+        link_to_work=False,
     )
     note_b, _ = founder_add_memory_note(
         db_session,
@@ -201,6 +205,7 @@ def test_3_same_requirement_different_wording_collapses(db_session, make_verifie
         content="I want short founder answers!",
         note_type="preference",
         idempotency_key="t3-b",
+        link_to_work=False,
     )
     db_session.commit()
 
@@ -236,6 +241,7 @@ def test_4_requirement_affects_completed_implementation_parks_followup(db_sessio
         content="Also rate limit founder API on burst traffic",
         note_type="decision",
         idempotency_key="t4-note",
+        link_to_work=False,
     )
     db_session.commit()
 
@@ -259,6 +265,7 @@ def test_5_requirement_later_not_now(db_session, make_verified_user):
         content="Quarterly archive export should exist someday",
         note_type="goal",
         idempotency_key="t5-note",
+        link_to_work=False,
     )
     db_session.commit()
 
@@ -290,6 +297,7 @@ def test_6_requirement_contradicts_current_plan(db_session, make_verified_user):
         content="Multi-region active-active is required now",
         note_type="decision",
         idempotency_key="t6-note",
+        link_to_work=False,
     )
     db_session.commit()
 
@@ -327,6 +335,7 @@ def test_subordinate_insert_requires_authority_and_does_not_run_without_it(db_se
         content="Harden memory work linkage path with audit",
         note_type="decision",
         idempotency_key="t-auth",
+        link_to_work=False,
     )
     db_session.commit()
 
@@ -375,6 +384,7 @@ def test_replay_is_idempotent_on_thread_membership(db_session, make_verified_use
         content="Unique orphan observation about widgets",
         note_type="observation",
         idempotency_key="t-replay",
+        link_to_work=False,
     )
     db_session.commit()
     a = apply_memory_work_linkage(db_session, owner_id=user.id, note_id=note.id, park_candidate=False)
