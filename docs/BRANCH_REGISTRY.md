@@ -31,7 +31,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 |---|---|---|---|
 | `cursor/mainai-local-intelligence-school` | [#236](https://github.com/d1n095/LifeAI/pull/236) | **Aktiv** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
 
-**#235 mergad** (`26fa7b2`). Nästa: rebase klar — thin PR för local-attempt-first i executive.
+**#235 mergad** (`26fa7b2`). School wired into executive (`school_bridge` + local-attempt-first). Evidence hierarchy: TEACHER ≠ TRUTH.
 
 ---
 

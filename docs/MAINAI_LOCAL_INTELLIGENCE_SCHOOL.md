@@ -66,4 +66,16 @@ Provider invoke remains disabled until independent Claude gates say otherwise.
 | Self-improve ROI | `self_improvement_roi` / bounded SI spine | wire — school is curriculum, not SI editor |
 | Executive local-first | `mainai_executive` (#235) | **thin adapter** after merge |
 
-**No school Alembic migration** until a query cannot be answered from lessons + capability events + performance rollups + JSON provenance.
+## Executive wire (#235+)
+
+`mainai_executive.school_bridge` + `loop.run_executive_cycle`:
+
+LOCAL_CAPABILITY_CHECK → LOCAL_ATTEMPT_FIRST (workforce dry-run, `activate_provider=False`)
+→ SCHOOL_LEARN (offline cycle, no teacher invoke by default).
+
+`run_composed_safe_internal_mainai_run` proves restart + offline without API.
+
+## Evidence hierarchy (no answer key)
+
+See `evidence.py`. Prefer deterministic test / primary source / observed outcome over model opinion.
+`TEACHER ≠ TRUTH`. `MODEL CONSENSUS ≠ TRUTH`. Local may be right when evidence says so.
