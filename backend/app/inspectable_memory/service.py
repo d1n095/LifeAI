@@ -434,8 +434,13 @@ def founder_add_memory_note(
     basis: str = "manual",
     source: str | None = None,
     provenance: dict | None = None,
+    link_to_work: bool = True,
 ) -> tuple[FounderMemoryNote, MemoryTruthClaim]:
-    """Founder ADD path — delegates to record_founder_memory, then records a STORED claim from the returned row."""
+    """Founder ADD path — delegates to record_founder_memory, then records a STORED claim from the returned row.
+
+    link_to_work=True (default) runs Stage C park linkage. Tests that call
+    apply_memory_work_linkage explicitly may pass False to avoid double-apply.
+    """
     note = record_founder_memory(
         db,
         owner_id=owner_id,
@@ -458,13 +463,14 @@ def founder_add_memory_note(
         provenance={"via": "founder_add_memory_note"},
         verify_now=True,
     )
-    _link_memory_to_work(
-        db,
-        owner_id=owner_id,
-        note_id=note.id,
-        note_type=note_type,
-        is_correction=False,
-    )
+    if link_to_work:
+        _link_memory_to_work(
+            db,
+            owner_id=owner_id,
+            note_id=note.id,
+            note_type=note_type,
+            is_correction=False,
+        )
     return note, claim
 
 
@@ -511,6 +517,7 @@ def founder_correct_memory_note(
     content: str,
     idempotency_key: str,
     note_type: str | None = None,
+    link_to_work: bool = True,
 ) -> tuple[FounderMemoryNote, MemoryTruthClaim]:
     existing = db.execute(
         select(FounderMemoryNote).where(FounderMemoryNote.id == note_id, FounderMemoryNote.owner_id == owner_id)
@@ -540,13 +547,14 @@ def founder_correct_memory_note(
         provenance={"via": "founder_correct_memory_note", "supersedes": str(note_id)},
         verify_now=True,
     )
-    _link_memory_to_work(
-        db,
-        owner_id=owner_id,
-        note_id=note.id,
-        note_type=note.note_type,
-        is_correction=True,
-    )
+    if link_to_work:
+        _link_memory_to_work(
+            db,
+            owner_id=owner_id,
+            note_id=note.id,
+            note_type=note.note_type,
+            is_correction=True,
+        )
     return note, claim
 
 
