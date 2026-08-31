@@ -283,30 +283,50 @@ korrekthetsskuld.
 
 ### Konsoliderad, prioritetsordnad bugglista (Claude röd-team, 2026-08-30, kväll)
 
-1. **[#218] KRITISK — säkerhetsregression.** `must_surface = ambiguity == CONSEQUENTIAL and not
-   auto_resolved` slutar tyst kräva founder-bekräftelse för konsekvensfulla ord (deploy/
-   production/merge/delete/approve) redan vid ANDRA förekomsten av en matchande fras, eftersom
-   en tidigare bindning består oavsett ambiguity-klass. Empiriskt bevisad (disponibel worktree,
-   riktig Postgres). Minsta fix: ta bort `and not auto_resolved` — konsekvensrisk handlar om
-   HANDLING, inte tolkningssäkerhet, och får aldrig nedgraderas av en inlärd bindning.
-2. **[#210] SAME-collapse, två separata problem.** (a) Empiriskt bevisad TOCTOU: förloraren i en
-   samtidig SAME-collapse-race kraschar med en ohanterad `IntegrityError` istället för att
-   kollapsa graciöst (unique constraint förhindrar ändå riktiga dubbletter). (b) I fullskalig
-   soak (1189 events, 20 ämnen): SAME-collapse triggas i praktiken NÄSTAN ALDRIG för realistiskt
-   omformulerade dubbletter — `find_same_concept()` konsulterar aldrig sin egen redan beräknade
-   Jaccard-likhet, bara exakt fingerprint-match. (b) är allvarligare än (a) och direkt i linje
-   med founderns egna namngivna "personal language variance"-exempel.
-3. **[#213]/[#220] Self-model "confidence masquerading as evidence".** `build_self_model()`s
-   `proven`/`improved`-klassificering kontrollerar aldrig `last_proof_evidence_id`;
-   `verification_evidence_id` är valfri (default `None`). #220 har SAMMA gap men strukturellt
-   värre — `prediction_records` är inte ens kopplad till `intelligence_evidence`-systemet, så
-   riktig evidens kan inte skickas ens om anroparen ville. Minsta fix: kräv
-   `verification_evidence_id`, lägg till försvar-i-djup-filter.
-4. **[#224] Fel minnessanning vald som aktuell.** `consider_founder_question()` väljer
-   `matches[0]` från en STIGANDE-sorterad (äldst först, ingen `.desc()`) fråga — returnerar tyst
-   den ÄLDSTA matchande anteckningen som sanning och hoppar över att fråga founder. Klassisk
-   "memory claim != actual durable state". Minsta fix: sortera efter senaste, eller falla
-   tillbaka till att fråga när flera träffar finns.
+1. **[#218] KRITISK — säkerhetsregression. ✅ FIX VERIFIERAD KOMPLETT (2026-08-30/31).**
+   `must_surface = ambiguity == CONSEQUENTIAL and not auto_resolved` slutar tyst kräva
+   founder-bekräftelse för konsekvensfulla ord (deploy/production/merge/delete/approve) redan
+   vid ANDRA förekomsten av en matchande fras, eftersom en tidigare bindning består oavsett
+   ambiguity-klass. Fix (commit `678a235`, "learned phrasing must never suppress consequential
+   confirmation") empiriskt omtestad mot founderns fullständiga 7-scenario-attackmatris (1:a/
+   2:a/3:e förekomst, efter omstart, efter minnesuppslag, efter omformulering, efter alias-
+   upplösning) — ALLA 7 GODKÄNDA, plus 3 extra scenarion (10:e upprepning, ren uppslagning,
+   omformulering utan bokstavliga triggerord). Strukturellt stängd: `must_surface` beror nu
+   bara på nuvarande anrops ambiguity-klassificering, ingen historik-koppling kvar. En separat,
+   redan existerande uppföljningspunkt flaggad (INTE en återöppning): `classify_ambiguity()`s
+   regex-klassificerare är semantiskt grund — en omformulering utan bokstavliga triggerord kan
+   undgå klassificering helt, oavsett bindningshistorik.
+2. **[#210] SAME-collapse, två separata problem. ⚠️ DELVIS FIXAD.** (a) ✅ Empiriskt bevisad
+   TOCTOU: förloraren i en samtidig SAME-collapse-race kraschar med en ohanterad
+   `IntegrityError` istället för att kollapsa graciöst — FIX VERIFIERAD (commit `497ef5e`,
+   savepoint-baserad återhämtning, riktig two-session-test godkänd, ingen förgiftad
+   transaktion). (b) ❌ KVARSTÅR OLÖST: i fullskalig soak (1189 events, 20 ämnen) OCH omtestad
+   direkt mot fix-commiten: SAME-collapse triggas i praktiken NÄSTAN ALDRIG för realistiskt
+   omformulerade dubbletter (samma tre testfraser ger fortfarande 3 separata entiteter) —
+   `find_same_concept()` konsulterar fortfarande aldrig sin egen redan beräknade
+   Jaccard-likhet. Fix-commiten adresserade bara krasch-symptomet (a), inte rotorsaken (b),
+   som är den allvarligare av de två per soak-bevisningen och direkt i linje med founderns
+   egna namngivna "personal language variance"-exempel.
+3. **[#213]/[#220] Self-model "confidence masquerading as evidence". ⚠️ #220 DELVIS FIXAD, #213
+   EJ ÄNNU FIXAD.** `build_self_model()`s `proven`/`improved`-klassificering kontrollerar
+   aldrig `last_proof_evidence_id`; `verification_evidence_id` är valfri (default `None`) —
+   ingen fix-commit känd för #213 än. #220 fix (commits `bde8134`/`2b6b0cf`) omtestad mot
+   founderns 6-scenario-matris: saknad evidens PASS, fel ägare PASS, raderad/superseded
+   evidens N/A (arkitektoniskt omöjligt, append-only + ingen supersession-modell) — MEN
+   scenario 6 (misslyckat test refererat som lyckat) **BEKRÄFTAD KVARSTÅENDE BUGG**: en
+   evidensrad med `payload={"passed": False}` accepteras ändå som stöd för `proven=True`, ren
+   existens-check, aldrig en innehålls-check av vad evidensen faktiskt säger. Det djupaste och
+   viktigaste scenariot i attackmatrisen är fortfarande öppet.
+4. **[#224] Fel minnessanning vald som aktuell. ⚠️ DELVIS FIXAD.** `consider_founder_question()`
+   valde `matches[0]` från en STIGANDE-sorterad (äldst först, ingen `.desc()`) fråga — ren
+   "oldest-row"-bugg VERIFIERAD FIXAD (commit `7bd7ae4`, scenarion 1-3/5 godkända, inkl. riktig
+   RLS-medveten two-thread-race-test). MEN scenario 4 (två genuint oberoende aktiva
+   anteckningar, INGEN av dem superseder den andra — den ursprungliga buggens verkliga form)
+   **KVARSTÅENDE LUCKA**: löses fortfarande tyst via senast-i-tid istället för att flaggas som
+   tvetydigt (`should_ask_founder=False`). Scenario 6 (samtidiga korrigeringar) samma lucka en
+   nivå djupare — inget fork-detection när två trådar korrigerar samma ursprungsanteckning
+   samtidigt. Minsta fix: behandla flera icke-kedjade kandidater som tvetydiga istället för att
+   välja en.
 5. **[#215] Icke-verbatim founder-text.** `founder_memory_notes.content` lagrar MainAI:s
    normaliserade tolkning, inte founderns ordagranna ord (rå text finns bara i `provenance`);
    samtidigt sätts `authority="founder", basis="manual"` som om det vore en explicit founder-
