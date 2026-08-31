@@ -29,7 +29,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-local-intelligence-school` | (öppnas) | **Aktiv** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
+| `cursor/mainai-local-intelligence-school` | [#236](https://github.com/d1n095/LifeAI/pull/236) | **Aktiv** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
 
 **Väntar på:** #235 merge för executive-loop wire (local-attempt-first i composed cycle).
 
