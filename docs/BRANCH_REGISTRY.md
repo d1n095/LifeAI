@@ -346,6 +346,74 @@ korrekthetsskuld.
    saknar en avsiktlig sekundär sorteringsnyckel (stabil av en slump, inte design); #222:s
    `_get_or_create()` har samma olåsta TOCTOU-form som #210 men ingen live-anropare ännu.
 
+### Djupdykning i evidens-semantik (2026-08-30/31, founder-beordrad) — VÄRRE ÄN FÖRST TROTT
+
+`app.capability_reality.record_capability_observation()` (den delade funktion #213 OCH #220
+båda bygger på) har INGEN innehålls-check av evidens alls, bekräftat på 4 av 6 attack-scenarion
+(founderns egen matris): misslyckat test → accepteras, evidens explicit taggad
+`verification_failure` → accepteras, evidens för en HELT ANNAN förmåga → accepteras (ingen
+kopplings-check överhuvudtaget), blandad evidens (senare misslyckande efter tidigare
+lyckande) → status stannar felaktigt på `verified_available`. Rotorsak är schema-nivå: inga
+`outcome`/`status`-kolumner finns på `intelligence_evidence` att kontrollera mot.
+Fix-kontrakt (7 punkter: ägarmatch, kopplingsrelevans, tillåten evidens-typ, positivt utfall,
+inte underkänd/superseded, inte för gammal, faktiskt stödjer påståendet) postat i sin helhet på
+#220 och #213 (en fix stänger båda — samma delade funktion).
+
+**KRITISK ESKALERING (samma djupdykning, funnen via PR #235-granskningen):** en TREDJE,
+oberoende förekomst av exakt samma buggklass hittades i `app.capability_reality.service`, och
+den här gången med en RIKTIG, MÄTBAR effekt: #235 ("composed executive loop") låter
+förmåge-status faktiskt påverka ett riktigt urvalsbeslut — empiriskt bevisat att en påhittad,
+evidensfri `status="verified_available"`-claim höjer en förmågas urvalspoäng från 0.6 till
+1.0-faktor (poäng 0.25→0.35). Det är FÖRSTA gången i natt en tidigare latent evidens-bugg får
+en verklig nedströms-effekt — ändrar INTE huruvida riktig provider-auktoritet kan nås (#235:s
+`activate_provider=False` är hårdkodad, blockerad av en `raise RuntimeError`, se nedan), men
+gör evidens-semantik-fixen (#213/#220) mer akut, inte längre bara teoretisk.
+
+### Nyupptäckt: MainAI Internal Workforce Foundation (#230–234, redan MERGAD, ej tidigare granskad)
+
+Fem nya PR:er merged rakt in på integrationstippen UTAN föregående Claude-granskning — en helt
+ny "workforce"-subsystem (agent-delegering, staffing, kostnadsstyrning, failure/takeover).
+Granskat i efterhand (2026-08-30/31), högsta prioritet eftersom det redan är LIVE, inte bara
+öppet:
+- **#230 (T1-T7 grund): BEKRÄFTAD RIKTIG SÅRBARHET** — `authority.py::path_allowed()` gör naiv
+  sträng-prefix-matchning utan att lösa upp `..`-segment; empiriskt bevisat att
+  `path_allowed(allowed=['workspace/'], 'workspace/../../../etc/passwd', write=True)`
+  returnerar `True`. Just nu VILANDE (noll anropare någonstans i kodbasen, ingen riktig
+  filsystems-I/O kopplad än) — men detta är uppenbarligen tänkt att grinda riktig
+  agent-filåtkomst, så måste fixas FÖRE aktivering, inte bara noteras.
+- **#231 (T8-T20 drift): TROLIG, statisk** — `alternate_agent_takeover()` saknar radlås före
+  mutation av ett misslyckat uppdrag, samma TOCTOU-form som redan hittats OCH fixats i den
+  ursprungliga lease/takeover-koden tidigare i natt. Kostnadsstyrning återanvänder korrekt
+  `provider_spend` istället för att återuppfinna den.
+- **#232 (runtime-harness): REN, verifierad.** Viktigaste filen i hela stacken —
+  `execute_workforce_assignment()` har ett ovillkorligt hårt block FÖRE varje riktig
+  provider-anrop, oberoende av grindtillstånd. Genuint tvålagers försvar-i-djup.
+  Aktiverings-grindarna är explicit kopplade till att kräva oberoende verifiering av EXAKT
+  #218/#229/#213/#224 — matchar precis kvällens egna fynd.
+- **#233 (endast dokumentation): trivial, bekräftat ofarlig.**
+- **#234 (aktiveringsförberedelse): REN**, en mindre designnot (ett test-only "legacy shim" kan
+  self-certifiera grindar med syntetisk evidens — onåbart från produktionskod just nu, värt att
+  härda innan det blir en fotbössa).
+
+**Sammanfattning workforce-stacken:** en bekräftad riktig bugg (vilande), en trolig
+concurrency-lucka (vilande), resten ren eller mindre. Inget i den nya koden beviljar riktig
+exekveringsauktoritet eller anropar en riktig provider — fail-closed-designen håller under
+adversarial granskning.
+
+### PR #235 — "composed executive loop", den mest konsekventa granskningen i natt
+
+Första PR:n som faktiskt KOPPLAR IHOP tidigare isolerade stadier (lookaround → lessons →
+WorkCandidates → staffing → workforce dry-run → continuity checkpoints). Verifierat: (1)
+provider-/auktoritetsaktivering är strukturellt säker — `activate_provider=False` hårdkodad,
+callee har hård `RuntimeError` vid `True`; (2) evidens-bugg-klassen har nu en RIKTIG effekt (se
+eskalering ovan) — det viktigaste enskilda fyndet från denna granskning; (3) #218:s
+"park only"-komposition säker (`insert_subordinate` hårdkodad `False`); (4)
+continuity-checkpoints rena, korrekt avgränsade; (5) noll nya migrationer bekräftat; (6)
+testtäckning genuint adversarial men täcker INTE den specifika evidens-vägen (3) ovan
+utnyttjar — verklig täckningslucka. **Svar på "ändrar detta huruvida kvällens fynd är
+live-exploaterbara": DELVIS** — ingen ny väg till riktig exekvering öppnas, men self-model-
+output påverkar nu ett riktigt urvalsbeslut för första gången.
+
 **Systemisk cross-stage-attack (12 interaktionskedjor, founderns egen lista) — 9 av 12
 RENSADE** (mest för att inget är live-kopplat ännu), 1 verklig ej-testad lucka funnen
 (session-omstart/rekonstruktion-fidelitet över FLERA omstarter i en väldigt lång historik —
