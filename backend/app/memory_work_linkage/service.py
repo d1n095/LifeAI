@@ -32,6 +32,7 @@ from app.memory_work_linkage.types import (
 from app.models.founder_memory import FounderMemoryNote
 from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
 from app.models.project_entities import ProjectEntity
+from app.models.work_candidate import WorkCandidate
 from app.work_candidates.service import list_work_candidates, record_work_candidate
 
 _MATCH_THRESHOLD = 0.35
@@ -290,13 +291,20 @@ def apply_memory_work_linkage(
                     actor_type="system",
                 )
             else:
+                idem_key = f"memory-work:{note_id}"
+                prior = db.execute(
+                    select(WorkCandidate).where(
+                        WorkCandidate.owner_id == owner_id,
+                        WorkCandidate.idempotency_key == idem_key,
+                    )
+                ).scalar_one_or_none()
                 candidate = record_work_candidate(
                     db,
                     owner_id=owner_id,
                     source_entity_id=entity_id,
                     title=f"[memory] {note.content[:180]}",
                     rationale=note.content,
-                    idempotency_key=f"memory-work:{note_id}",
+                    idempotency_key=idem_key,
                     priority="low" if timing == TimingClass.LATER else "medium",
                     classifier_strategy="memory_work_linkage_v1",
                     classifier_confidence=0.5,
@@ -308,10 +316,16 @@ def apply_memory_work_linkage(
                         "impacts": [i.value for i in impacts],
                     },
                 )
-                created_candidates.append(candidate.id)
-                created_now.append(candidate.id)
                 canonical_candidates.append(candidate.id)
-                actions.append(LinkageAction.CANDIDATE_RECORDED)
+                if prior is not None:
+                    # Idempotent hit: do not pretend we created again.
+                    actions.append(LinkageAction.NOOP_SAME)
+                    impacts.append(ImpactKind.SAME_COLLAPSE)
+                    replayed = True
+                else:
+                    created_candidates.append(candidate.id)
+                    created_now.append(candidate.id)
+                    actions.append(LinkageAction.CANDIDATE_RECORDED)
                 add_member(
                     db,
                     owner_id=owner_id,
@@ -320,7 +334,11 @@ def apply_memory_work_linkage(
                     member_ref_id=candidate.id,
                     membership_basis="deterministic_relationship",
                     classification_basis="deterministic",
-                    provenance={"stage": "C", "timing": timing.value},
+                    provenance={
+                        "stage": "C",
+                        "timing": timing.value,
+                        "replayed": prior is not None,
+                    },
                     idempotency_key=f"mem-link-wc:{note_id}:{candidate.id}",
                     actor_type="system",
                 )
