@@ -17,7 +17,20 @@ PROVIDER_INVOKE_ENABLED: bool = False
 
 def activation_commit_status() -> dict:
     gates = get_activation_gates().evaluate()
-    readiness = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    # Wire claude_reviews_satisfied from the SAME ActivationGateSet evaluated above,
+    # rather than hardcoding None: True only when every REQUIRED_ACTIVATION_GATES key
+    # is VERIFIED (gates.allowed), False if any is explicitly FAILED, else UNKNOWN.
+    # Previously this was unconditionally None, which forced evaluate_startup_
+    # readiness()'s own "claude_reviews" check to CheckStatus.unknown forever --
+    # capping readiness.level at READY_FOR_SAFE_INTERNAL_RUN regardless of actual
+    # verified state, so ready_to_enable_after_claude could never become True.
+    if gates.failed:
+        claude_reviews_satisfied: bool | None = False
+    elif gates.allowed:
+        claude_reviews_satisfied = True
+    else:
+        claude_reviews_satisfied = None
+    readiness = evaluate_startup_readiness(claude_reviews_satisfied=claude_reviews_satisfied)
     return {
         "provider_invoke_enabled": PROVIDER_INVOKE_ENABLED,
         "gates_allowed": gates.allowed,
