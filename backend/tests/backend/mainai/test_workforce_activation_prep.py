@@ -153,3 +153,109 @@ def test_department_ledger_does_not_fake_promotion(superuser_db):
         assert row["do_not_promote_without_evidence"] is True
         assert row["evidence_proves_capability"] is False
         assert row["candidate"] is True
+
+
+def test_startup_readiness_blocking_list_does_not_drop_earlier_reasons(superuser_db, monkeypatch):
+    """P1 bug (mainai_startup_readiness/__init__.py, PR #234, live on integration tip):
+    the final `blocking` list at the READY_FOR_SAFE_INTERNAL_RUN level was OVERWRITTEN
+    (not merged) with only ('provider_delegation_safety', 'claude_reviews'), silently
+    dropping other real blockers (e.g. spend_controls:unknown) computed earlier in the
+    function. Forces spend_controls to genuinely come back unknown (deleting the
+    attribute the presence-check imports) to prove it, rather than assuming."""
+    import app.provider_spend.service as provider_spend_service
+
+    reset_activation_gates_for_tests()
+    monkeypatch.delattr(provider_spend_service, "provider_spend_is_live", raising=False)
+
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    assert report.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
+    assert any("spend_controls" in b for b in report.blocking), (
+        f"spend_controls:unknown must not be silently dropped from report.blocking, got {report.blocking}"
+    )
+    assert any("provider_delegation_safety" in b for b in report.blocking)
+    reset_activation_gates_for_tests()
+
+
+def test_blocking_migrations_check_is_real_not_hardcoded(superuser_db):
+    """P1 bug (mainai_startup_readiness/__init__.py, PR #234): the "blocking_migrations"
+    check was a bare ReadinessCheck(..., CheckStatus.healthy, "...verify ops") -- a claim
+    with no check ever run. Now backed by a real Alembic single-head structural check."""
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    check = next(c for c in report.checks if c.key == "blocking_migrations")
+    assert check.status.value == "healthy"
+    assert "verify ops" not in check.detail  # old hardcoded placeholder text is gone
+    assert "head" in check.detail
+
+
+def test_activation_commit_status_wires_claude_reviews_from_gates(superuser_db):
+    """P1 bug (workforce/activation_commit.py, PR #234, live on integration tip):
+    activation_commit_status() hardcoded claude_reviews_satisfied=None when calling
+    evaluate_startup_readiness(), which forces the claude_reviews check to
+    CheckStatus.unknown and caps readiness.level at READY_FOR_SAFE_INTERNAL_RUN forever
+    -- so ready_to_enable_after_claude could never become True regardless of actual
+    verified state."""
+    from app.workforce.activation_commit import activation_commit_status
+
+    reset_activation_gates_for_tests()
+    status_before = activation_commit_status()
+    assert status_before["readiness_level"] == "READY_FOR_SAFE_INTERNAL_RUN"
+
+    for key in REQUIRED_ACTIVATION_GATES:
+        record_gate_verification(key, status=GateStatus.verified, evidence_ref=f"ev:{key}")
+    status_after = activation_commit_status()
+    assert status_after["readiness_level"] in (
+        "READY_FOR_LOW_RISK_PROVIDER_RUN",
+        "READY_FOR_SERIOUS_AUTONOMOUS_RUN",
+    ), f"expected a higher readiness level once every gate is verified, got {status_after}"
+    reset_activation_gates_for_tests()
+
+
+def test_department_ledger_requires_durable_evidence_not_one_lucky_success(superuser_db):
+    """P1 bug (workforce/department_evidence.py, PR #234, live on integration tip):
+    department_capability_ledger() marked a capability "verified" (evidence_proves_
+    capability=True) from a single verified success, regardless of how many verified
+    failures came with it (rate > 0 is trivially true for ANY nonzero success count).
+    Durable evidence requires both a real sample size and a strong success rate."""
+    from app.workforce import get_workforce_agent_by_key, record_verified_outcome
+    from app.workforce.first_team import bootstrap_first_team
+
+    owner = _owner(superuser_db)
+    bootstrap_first_team(superuser_db, owner_id=owner.id)
+    superuser_db.commit()
+    profile = get_workforce_agent_by_key(superuser_db, owner_id=owner.id, agent_key="dept-research")
+
+    # One lucky success, mostly failures -- must NOT count as proven.
+    record_verified_outcome(
+        superuser_db, owner_id=owner.id, profile_id=profile.id,
+        capability_tag="web_research", success=True, quality_score=0.9,
+    )
+    for _ in range(4):
+        record_verified_outcome(
+            superuser_db, owner_id=owner.id, profile_id=profile.id,
+            capability_tag="web_research", success=False, quality_score=0.1,
+        )
+    superuser_db.commit()
+    rows = department_capability_ledger(superuser_db, owner_id=owner.id)
+    superuser_db.commit()
+    research_row = next(r for r in rows if r["agent_key"] == "dept-research")
+    assert "web_research" not in research_row["verified_capabilities"], (
+        "1 success out of 5 verified trials must not prove the capability"
+    )
+    assert research_row["evidence_proves_capability"] is False
+
+    # A genuinely durable track record (>=3 trials, strong majority) DOES count --
+    # a separate capability_tag so this half of the test doesn't have to first
+    # overcome the poor rollup the flaky-evidence half above deliberately built.
+    for _ in range(3):
+        record_verified_outcome(
+            superuser_db, owner_id=owner.id, profile_id=profile.id,
+            capability_tag="fact_gathering", success=True, quality_score=0.9,
+        )
+    superuser_db.commit()
+    rows2 = department_capability_ledger(superuser_db, owner_id=owner.id)
+    superuser_db.commit()
+    research_row2 = next(r for r in rows2 if r["agent_key"] == "dept-research")
+    assert "fact_gathering" in research_row2["verified_capabilities"]
+    assert research_row2["evidence_proves_capability"] is True
+    # The flaky capability from above must still not be verified.
+    assert "web_research" not in research_row2["verified_capabilities"]

@@ -16,8 +16,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
-from app.workforce.activation_gates import GateStatus, get_activation_gates
-
 
 class ReadinessLevel(str, Enum):
     BLOCKED = "BLOCKED"
@@ -74,6 +72,14 @@ def _check_workforce_foundation() -> ReadinessCheck:
 
 
 def _check_activation_gates() -> ReadinessCheck:
+    # Local import, not top-level: app.workforce's own __init__ imports (via
+    # activation_commit.py) FROM app.mainai_startup_readiness -- a top-level import
+    # here creates a real circular-import failure whenever app.mainai_startup_readiness
+    # is the first of the two packages to be imported in a fresh interpreter (confirmed:
+    # `python -c "import app.mainai_startup_readiness"` raised ImportError on unmodified
+    # origin tip). Deferring to call time breaks the cycle without changing behavior.
+    from app.workforce.activation_gates import get_activation_gates
+
     decision = get_activation_gates().evaluate()
     if decision.allowed:
         return ReadinessCheck("provider_delegation_safety", CheckStatus.healthy, "all activation gates verified")
@@ -101,6 +107,44 @@ def _check_import(key: str, import_path: str) -> ReadinessCheck:
         return ReadinessCheck(key, CheckStatus.unknown, f"not proven healthy: {exc}")
 
 
+def _check_blocking_migrations() -> ReadinessCheck:
+    """Real structural check: exactly one Alembic head, no unresolved branch/merge.
+
+    Previously this was a bare ReadinessCheck(..., CheckStatus.healthy, "verify ops") --
+    a claim with no check ever run, contradicting this module's own stated invariant
+    (UNKNOWN != VERIFIED, never claim ready without durable evidence). This project's own
+    docs/BRANCH_REGISTRY.md records repeated real Alembic revision-numbering collisions
+    (multiple branches landing conflicting "next" migration numbers) -- exactly the
+    structural failure mode a single-head check catches, filesystem-only, no DB
+    connection required.
+    """
+    try:
+        from pathlib import Path
+
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        backend_root = Path(__file__).resolve().parents[2]
+        ini_path = backend_root / "alembic.ini"
+        if not ini_path.exists():
+            return ReadinessCheck(
+                "blocking_migrations", CheckStatus.unknown, f"alembic.ini not found at {ini_path}"
+            )
+        cfg = Config(str(ini_path))
+        cfg.set_main_option("script_location", str(backend_root / "alembic"))
+        script = ScriptDirectory.from_config(cfg)
+        heads = script.get_heads()
+        if len(heads) == 1:
+            return ReadinessCheck("blocking_migrations", CheckStatus.healthy, f"single alembic head: {heads[0]}")
+        return ReadinessCheck(
+            "blocking_migrations",
+            CheckStatus.unhealthy,
+            f"expected exactly one alembic head, found {len(heads)}: {heads}",
+        )
+    except Exception as exc:
+        return ReadinessCheck("blocking_migrations", CheckStatus.unknown, f"not proven healthy: {exc}")
+
+
 def evaluate_startup_readiness(*, claude_reviews_satisfied: bool | None = None) -> StartupReadinessReport:
     """Evaluate readiness level.
 
@@ -119,11 +163,7 @@ def evaluate_startup_readiness(*, claude_reviews_satisfied: bool | None = None) 
         _check_import("authority_boundaries", "app.execution_envelopes.service.get_current_execution_envelope"),
         _check_import("spend_controls", "app.provider_spend.service.provider_spend_is_live"),
         _check_import("recovery", "app.agent_coordination.service.take_over_lease"),
-        ReadinessCheck(
-            "blocking_migrations",
-            CheckStatus.healthy,
-            "alembic single head expected at 0068 on tip (verify ops)",
-        ),
+        _check_blocking_migrations(),
         ReadinessCheck(
             "claude_reviews",
             CheckStatus.healthy
@@ -200,11 +240,17 @@ def evaluate_startup_readiness(*, claude_reviews_satisfied: bool | None = None) 
             blocking.extend(k for k in serious_keys if by_key[k].status != CheckStatus.healthy)
 
     if level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN:
-        blocking = [
+        # Append the reasons the NEXT tier (LOW_RISK_PROVIDER_RUN) wasn't reached --
+        # must NOT overwrite `blocking`, which may already carry real reasons computed
+        # above (e.g. spend_controls:unknown from the Tier 2 branch just above). The
+        # final tuple(dict.fromkeys(...)) below both dedupes and preserves order, so
+        # report.blocking always reflects every actual reason the higher tier wasn't
+        # reached, not just this tier's own subset.
+        blocking.extend(
             c.key if c.status != CheckStatus.unknown else f"{c.key}:unknown"
             for c in checks
             if c.key in ("provider_delegation_safety", "claude_reviews") and c.status != CheckStatus.healthy
-        ]
+        )
 
     return StartupReadinessReport(
         level=level,
