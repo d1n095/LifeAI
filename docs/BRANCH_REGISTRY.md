@@ -460,6 +460,30 @@ alltså same-process-bevis, inte en genuint färsk process. Safe-internal DB-gr�
 genuint verklig (separat fysisk Postgres-databas, inte bara schema-partition). Inget bekräftat
 fel i #237 självt.
 
+### Bredare evidens-semantik-revision (founder-beordrad, 2026-09-01) — TVÅ NYA YTOR PÅVERKADE
+
+Systematisk genomgång av VARJE plats evidens kan påverka ett beslut, utöver de redan kända
+#213/#220/#236-fynden:
+
+- **#236 school-routing: BEKRÄFTAD, andra live-konsumenten.** `route_local_first()` litar på
+  `capability_reality`-status utan oberoende kontroll — samma fabricerade
+  `verified_available`-post som redan bevisat kompromettera urvalspoäng (#235) gör NU att
+  routing returnerar `LOCAL_FIRST_PROVEN`/`use_external_teacher=False`. Samma rotorsaksfix
+  (innehålls-check i `record_capability_observation()`) stänger även denna — ingen separat fix
+  behövs i routing.py.
+- **#234 startup readiness: BEKRÄFTAD, allvarlig, bevisad genom konstruktion.**
+  `blocking_migrations` är HÅRDKODAD `CheckStatus.healthy` med en "(verify ops)"-kommentar;
+  `evaluate_startup_readiness()` tar inget `db`-argument alls — kan strukturellt INTE
+  kontrollera verkligt Alembic-läge. Skulle rapportera "healthy" även under EXAKT den typ av
+  migrations-huvudkollision som fixades två gånger tidigare i natt (#209/#210 vs #197). Notera:
+  den angränsande `claude_reviews_satisfied`-kontrollen är däremot korrekt designad (explicit
+  attestering, fail-closed vid okänt) — inte varje kontroll i funktionen har samma hål.
+- **Workforce trust/performance (#230-232): REN.** `record_verified_outcome()` vägrar explicit
+  en self-confidence-parameter; riktig risknivå-policy blockerar självverifiering och kräver en
+  oberoende verifierare på varje nivå.
+- Completion intelligence och verification pipeline: EJ NÅDDA än (tidsbudget), kandidater för
+  nästa runda.
+
 **Systemisk cross-stage-attack (12 interaktionskedjor, founderns egen lista) — 9 av 12
 RENSADE** (mest för att inget är live-kopplat ännu), 1 verklig ej-testad lucka funnen
 (session-omstart/rekonstruktion-fidelitet över FLERA omstarter i en väldigt lång historik —
