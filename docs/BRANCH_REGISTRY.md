@@ -391,12 +391,39 @@ Granskat i efterhand (2026-08-30/31), högsta prioritet eftersom det redan är L
   Aktiverings-grindarna är explicit kopplade till att kräva oberoende verifiering av EXAKT
   #218/#229/#213/#224 — matchar precis kvällens egna fynd.
 - **#233 (endast dokumentation): trivial, bekräftat ofarlig.**
-- **#234 (aktiveringsförberedelse): REN**, en mindre designnot (ett test-only "legacy shim" kan
-  self-certifiera grindar med syntetisk evidens — onåbart från produktionskod just nu, värt att
-  härda innan det blir en fotbössa).
+- **#234 (aktiveringsförberedelse): INTE REN — korrigering.** Ursprunglig granskning (denna
+  session) hittade bara en mindre designnot och missade två RIKTIGA säkerhetsbuggar. Samma
+  mönster som #211/PR #238: en ANNAN Claude Code-session hittade och fixade dem (PR #239,
+  "Fix cross-owner kill-switch DoS and no-op context-leak assertion"):
+  1. **Cross-owner kill-switch DoS, verklig.** `app/workforce/kill_switch.py`s `_STATE.active`
+     var en process-global flagga UTAN ägar-scoping. `activate_kill_switch(owner_id=A)`
+     återkallade korrekt bara A:s uppdrag, men satte den globala flaggan — så
+     `assert_not_killed()` (kollad vid `execute_workforce_assignment()`) blockerade ALLA ägare,
+     inte bara A. Eftersom `run_first_safe_internal_mainai_run` (dokumenterad förstaköringsväg)
+     ovillkorligt anropar `activate_kill_switch` efter VARJE lyckad körning, stängde en enda
+     ägares normala körning tyst av arbetskraftsexekvering för VARJE annan ägare i samma
+     process — ett riktigt cross-owner DoS via en legitim, förväntad kodväg i ett system menat
+     att vara multi-tenant. Fix: per-ägare state-dict, en separat explicit
+     `activate_global_kill_switch()`-funktion för det avsiktliga globala nödstoppet.
+  2. **No-op leak-assertion, verklig.** `assert_no_cross_package_leak()` (i
+     `app/workforce/context.py`) reste ALDRIG ett fel under någon indata trots namn och
+     docstring — en genuin no-op. Fix: reser nu `ContextPackagingError` när samma `trace_id`
+     delas mellan två olika agenters privata kontext-paket.
+  Uttryckligen kvarstår, INTE fixat i #239: `assert_not_killed()` kollas vid exekverings-tid
+  men inte vid tilldelnings-tid (`workforce/broker.py`s `resolve_delegation()`) — ett nytt
+  uppdrag kan fortfarande BEVILJAS för en dödad ägare, bara inte exekveras. Egen framtida fix.
+  **P1-fyndet från kväll (readiness-certifiering) förvärrar bilden ytterligare:**
+  `blocking_migrations` är inte bara hårdkodad frisk — den är INTE ens kopplad till någon
+  grindningslogik i någon nivå, så även en korrekt check skulle inte blockera något just nu.
+  Ytterligare täckningsluckor funna: ingen kill-switch-state-kontroll, ingen
+  evidens-integritets-kontroll, plus en redan trasig attributreferens
+  (`eligible_authorized_goals`) som för närvarande degraderar säkert till "okänt". Fem konkreta
+  minsta-fixar postade på #234.
 
-**Sammanfattning workforce-stacken:** en bekräftad riktig bugg (vilande), en trolig
-concurrency-lucka (vilande), resten ren eller mindre. Inget i den nya koden beviljar riktig
+**Sammanfattning workforce-stacken:** TVÅ bekräftade riktiga säkerhetsbuggar (kill-switch DoS +
+no-op leak-assertion, båda fixade i #239, verifiering pågår), en tidigare bekräftad riktig bugg
+(path traversal, vilande), en trolig concurrency-lucka (vilande), plus readiness-certifierings-
+fynden ovan. Inget i den nya koden beviljar riktig
 exekveringsauktoritet eller anropar en riktig provider — fail-closed-designen håller under
 adversarial granskning.
 
