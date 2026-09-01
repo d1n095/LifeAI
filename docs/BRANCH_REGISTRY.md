@@ -512,6 +512,31 @@ egna):
   granskningskommentaren istället för att tystlåtet föras vidare — matchar sessionens egen
   "verifiera PR-formuleringens noggrannhet"-disciplin.
 
+### P1 — Fullständig kill-switch-certifieringsmatris (8 scenarion) — 6/8 GODKÄNT, 2 verkliga dormanta luckor
+
+Testat mot `app/workforce/kill_switch.py` (efter #239:s cross-owner-DoS-fix, se ovan — OBS:
+oklart om detta test kördes mot pre- eller post-#239-kod, kräver avstämning i nästa runda).
+
+**GODKÄNT (1,2,3,4,5,7):** ägar-isolering i båda riktningar, global stop träffar båda ägare,
+boot/restart kan strukturellt INTE häva en stop (noll `clear_*`-anropare någonstans i
+boot-vägen, grep-bekräftat), scoped clear rör bara den avsedda ägaren.
+
+**#6 UNDERKÄNT — HÖG allvarlighetsgrad:** `_validate_founder_ack()` kontrollerar bara en
+deny-lista av kända-dåliga literalsträngar + ett formatregex — INGEN kryptografisk eller
+extern verifiering att en riktig founder faktiskt utfärdade den. Empiriskt bekräftat: en
+självkonstruerad sträng som `"founder_ack:i_generated_this_myself_internally"` häver
+framgångsrikt en stop. **INTE exploaterbart just nu** — noll produktionsanropare av någon
+clear-funktion existerar någonstans i kodbasen ännu.
+
+**#8 DELVIS:** när anropare skickar `expected_sequence` fungerar stale-sequence-avvisning
+korrekt (empiriskt verifierat). Men parametern är valfri — att utelämna den häver vad som än
+är aktivt just nu med noll koppling till VILKEN stop-händelse ack:et var avsett för. Samma
+dormanta-men-verkliga form som #6.
+
+**Bonus-fynd:** de två nya tabellerna bakom detta (`mainai_stop_state`/`mainai_stop_events`)
+har INGEN RLS alls — bryter mot kodbasens egen etablerade mönster för varje annan
+ägar-scopad tabell.
+
 ### P0 — Genuint fresh-process-omstart-bevis (founder-beordrad, 2026-09-01) — MESTADELS RENT
 
 **Bygger på och stärker #237:s tidigare same-process-anmärkning.** Fem RIKTIGA separata
