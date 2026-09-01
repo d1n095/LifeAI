@@ -258,7 +258,7 @@ kommentarer postade direkt på respektive PR.
 
 | PR | Stage | Status (första passet) |
 |---|---|---|
-| [#211](https://github.com/d1n095/LifeAI/pull/211) | C: memory→work linkage | Ren på auktoritetsgräns, men **INTE fullt ren** — se PR #238 (annan Claude-session hittade 2 riktiga buggar i samma modul, missade i förstapasset: idempotency + TOCTOU, fix under verifiering) |
+| [#211](https://github.com/d1n095/LifeAI/pull/211) | C: memory→work linkage | Ren på auktoritetsgräns, men **INTE fullt ren** — se PR #238 (annan Claude-session hittade 2 riktiga buggar i samma modul: idempotency + TOCTOU, båda oberoende VERIFIERADE fixade — se detaljer nedan) |
 | [#212](https://github.com/d1n095/LifeAI/pull/212) | D: temporal recap | Ren (ingen LLM i recap-vägen, allt spårbart till källrad) |
 | [#213](https://github.com/d1n095/LifeAI/pull/213) | E: self-model/capability ledger | **BEKRÄFTAD BUGG** (se lista nedan) |
 | [#214](https://github.com/d1n095/LifeAI/pull/214) | F: continuous simplification | Ren (rent förslags-lager, ingen destruktiv väg än) |
@@ -459,6 +459,31 @@ boot→shutdown→restart→resume-sekvensen trådar samma `db: Session`-objekt 
 alltså same-process-bevis, inte en genuint färsk process. Safe-internal DB-gränsen är dock
 genuint verklig (separat fysisk Postgres-databas, inte bara schema-partition). Inget bekräftat
 fel i #237 självt.
+
+### PR #238 — fix från en ANNAN Claude Code-session (inte Cursor, inte denna session)
+
+Fixar två riktiga buggar i `apply_memory_work_linkage()` (#211) som missades i förstapasset.
+Oberoende empiriskt omverifierat (denna session, egna adversariala tester, inte bara PR:ns
+egna):
+
+- **Bugg 1a (idempotency): VERIFIERAD.** Negativkontroll bekräftar: både PR:ns egen test och en
+  egen adversarial variant (en genuint annan anteckning med nästan identisk formulering
+  konflateras INTE med den första anteckningens candidate-id) misslyckas på pre-fix-kod,
+  passerar post-fix.
+- **Bugg 1b (TOCTOU-race): VERIFIERAD, med en viktig nyans.** Genom den riktiga publika
+  entrypointen, utan någon bypass, är racet INTE oberoende observerbart idag — ett oavsiktligt
+  lås i en annan funktion (`create_thread()`) serialiserar redan samma-ägare-anrop. Det nya
+  advisory-låset är ändå den arkitektoniskt korrekta fixen (matchar sessionens egen doktrin:
+  "förlita dig inte på ett oavsiktligt lås i en annan modul") och blir load-bearing så fort det
+  oavsiktliga låset ändras — men stänger INTE en idag reproducerbar-via-publikt-API-bugg. Angett
+  precist i granskningskommentaren istället för att antyda mer än så.
+- **#229-täcker-inte-detta-påståendet: VERIFIERAT SANT** (olika modul, olika mekanism,
+  bekräftat via diff).
+- **VIKTIG NOGGRANNHETS-ANMÄRKNING:** PR:ns egen beskrivning hävdar en separat kommentar postad
+  på #229 om ett "race-loser"-fynd i `reconcile_and_promote_idea()`. Denna kommentar HITTADES
+  INTE någonstans (#229, #210, #211, #238 alla genomsökta). Flaggat direkt i den postade
+  granskningskommentaren istället för att tystlåtet föras vidare — matchar sessionens egen
+  "verifiera PR-formuleringens noggrannhet"-disciplin.
 
 ### P0 — Genuint fresh-process-omstart-bevis (founder-beordrad, 2026-09-01) — MESTADELS RENT
 
