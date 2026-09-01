@@ -171,7 +171,7 @@ def execute_workforce_assignment(
     """
     if assignment.owner_id != owner_id:
         raise DelegationBrokerError("owner mismatch")
-    assert_not_killed()
+    assert_not_killed(owner_id)
     require_live_assignment_authority(assignment)
     profile = get_workforce_agent(db, owner_id=owner_id, agent_id=assignment.profile_id)
 

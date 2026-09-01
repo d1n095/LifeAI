@@ -99,7 +99,7 @@ def executive_status_snapshot(
         "chain_of_thought_exposed": False,
         "evidence_basis": "durable_rows_only",
         "startup_readiness": _startup_readiness(),
-        "kill_switch": _kill_switch_status(),
+        "kill_switch": _kill_switch_status(owner_id),
     }
 
 
@@ -119,14 +119,18 @@ def _startup_readiness() -> dict[str, Any]:
         return {"level": "UNKNOWN", "error": type(exc).__name__, "source": "unavailable"}
 
 
-def _kill_switch_status() -> dict[str, Any]:
+def _kill_switch_status(owner_id: uuid.UUID) -> dict[str, Any]:
     try:
-        from app.workforce.kill_switch import get_kill_switch
+        from app.workforce.kill_switch import get_global_kill_switch, get_kill_switch
 
-        state = get_kill_switch()
+        state = get_kill_switch(owner_id)
+        global_state = get_global_kill_switch()
+        active = bool(state.active or global_state.active)
+        reason = state.reason if state.active else (global_state.reason if global_state.active else None)
         return {
-            "active": bool(getattr(state, "active", False) or getattr(state, "killed", False)),
-            "reason": getattr(state, "reason", None),
+            "active": active,
+            "reason": reason,
+            "global_active": bool(global_state.active),
             "source": "workforce.kill_switch",
         }
     except Exception as exc:  # noqa: BLE001
