@@ -407,6 +407,18 @@ eskaleringen (ovan) är alltså nu LIVE, inte längre bara ett fynd på en öppe
 prioriteten på #213/#220-fixen ytterligare (redan flaggat som "akut, inte längre bara
 teoretiskt" ovan, nu bekräftat faktiskt live).
 
+Första PR:n som faktiskt KOPPLAR IHOP tidigare isolerade stadier (lookaround → lessons →
+WorkCandidates → staffing → workforce dry-run → continuity checkpoints). Verifierat: (1)
+provider-/auktoritetsaktivering är strukturellt säker — `activate_provider=False` hårdkodad,
+callee har hård `RuntimeError` vid `True`; (2) evidens-bugg-klassen har nu en RIKTIG effekt (se
+eskalering ovan) — det viktigaste enskilda fyndet från denna granskning; (3) #218:s
+"park only"-komposition säker (`insert_subordinate` hårdkodad `False`); (4)
+continuity-checkpoints rena, korrekt avgränsade; (5) noll nya migrationer bekräftat; (6)
+testtäckning genuint adversarial men täcker INTE den specifika evidens-vägen (3) ovan
+utnyttjar — verklig täckningslucka. **Svar på "ändrar detta huruvida kvällens fynd är
+live-exploaterbara": DELVIS** — ingen ny väg till riktig exekvering öppnas, men self-model-
+output påverkar nu ett riktigt urvalsbeslut för första gången.
+
 ### PR #236 — "MainAI Local Intelligence School" (ny, ej granskad än)
 
 Ny, stor PR (2645 rader, 24 filer) öppnad 2026-08-31, återanvänder EXAKT samma komprometterade
@@ -430,17 +442,23 @@ modell-konsensus, `majority_vote_used` sätts aldrig `True`.
 vid omstart) och cross-owner-läckande inom en process (alla ägare delar samma globala dict,
 nyckel bara `domain::teacher_id`, ingen ägar-isolering alls).
 
-Första PR:n som faktiskt KOPPLAR IHOP tidigare isolerade stadier (lookaround → lessons →
-WorkCandidates → staffing → workforce dry-run → continuity checkpoints). Verifierat: (1)
-provider-/auktoritetsaktivering är strukturellt säker — `activate_provider=False` hårdkodad,
-callee har hård `RuntimeError` vid `True`; (2) evidens-bugg-klassen har nu en RIKTIG effekt (se
-eskalering ovan) — det viktigaste enskilda fyndet från denna granskning; (3) #218:s
-"park only"-komposition säker (`insert_subordinate` hårdkodad `False`); (4)
-continuity-checkpoints rena, korrekt avgränsade; (5) noll nya migrationer bekräftat; (6)
-testtäckning genuint adversarial men täcker INTE den specifika evidens-vägen (3) ovan
-utnyttjar — verklig täckningslucka. **Svar på "ändrar detta huruvida kvällens fynd är
-live-exploaterbara": DELVIS** — ingen ny väg till riktig exekvering öppnas, men self-model-
-output påverkar nu ett riktigt urvalsbeslut för första gången.
+### PR #237 — "safe-internal startup" (boot, runbook, restart) — REN
+
+Kopplar ihop #235 (executive) och #236 (school) till en verklig bootbar process — högsta
+prioritet att granska eftersom den skulle kunna trigga de redan bekräftade #235/#236-buggarna
+AUTOMATISKT vid varje uppstart. **Bekräftat empiriskt (spy-baserad instrumentering, riktig
+Postgres): NEJ, normal boot triggar VARKEN #236:s falska tentamens-väg ELLER #235:s
+evidens-skriv-effekt** — noll anrop till `run_independent_exam()`/`record_capability_
+observation()` under en normal boot-sekvens. Nyans värd att notera: boot LÄSER
+`capability_reality` read-only för sin routing-logik, så om korrupt data redan finns (från
+någon annanstans) påverkas routing-beslutet ändå — boot SKAPAR inte korruptionen, men
+KONSUMERAR den. `provider_call_count=0`-påståendet bekräftat strukturellt äkta
+(`activate_provider=False` hårdkodad vid det faktiska anropsstället, samma mönster som #235).
+En mindre notering: "restart/resume ok"-påståendet är svagare än titeln antyder — hela
+boot→shutdown→restart→resume-sekvensen trådar samma `db: Session`-objekt genom hela vägen,
+alltså same-process-bevis, inte en genuint färsk process. Safe-internal DB-gränsen är dock
+genuint verklig (separat fysisk Postgres-databas, inte bara schema-partition). Inget bekräftat
+fel i #237 självt.
 
 **Systemisk cross-stage-attack (12 interaktionskedjor, founderns egen lista) — 9 av 12
 RENSADE** (mest för att inget är live-kopplat ännu), 1 verklig ej-testad lucka funnen
