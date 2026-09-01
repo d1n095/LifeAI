@@ -249,3 +249,72 @@ def test_promote_path_same_collapse_without_reconcile_helper(superuser_db):
     superuser_db.commit()
     assert entity_a.id == entity_b.id
     assert len(list_current_project_entities(superuser_db, owner_id=owner.id, entity_type="idea")) == 1
+
+
+def test_two_sessions_racing_same_concept_converge_without_integrity_error(superuser_db):
+    """P1 concurrency: unique fingerprint constraint alone is not enough — loser must recover.
+
+    Two genuinely concurrent promote calls with the same normalized title must:
+    - produce exactly one canonical current concept
+    - create at most one work_candidate for that concept
+    - return coherent results to both callers
+    - never raise unhandled IntegrityError / poison the session
+    """
+    import threading
+
+    from sqlalchemy.orm import sessionmaker
+
+    title = "Use Postgres for MainAI durable memory"
+    owner, _, proposal_a = _owner_claim_proposal(superuser_db, text=title + " A")
+    _, proposal_b = _second_proposal(superuser_db, owner=owner, text=title + " B")
+    superuser_db.commit()
+    owner_id = owner.id
+    proposal_a_id = proposal_a.id
+    proposal_b_id = proposal_b.id
+
+    bind = superuser_db.get_bind()
+    Session = sessionmaker(bind=bind)
+    barrier = threading.Barrier(2)
+    results: list[tuple] = []
+
+    def _attempt(label: str, proposal_id, entity_key: str):
+        session = Session()
+        try:
+            barrier.wait(timeout=5)
+            _prop, entity = promote_interpretation_proposal(
+                session,
+                owner_id=owner_id,
+                proposal_id=proposal_id,
+                entity_type="idea",
+                title=title,
+                authority="founder",
+                basis="manual",
+                entity_idempotency_key=entity_key,
+            )
+            session.commit()
+            results.append(("ok", label, entity.id))
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(("error", label, repr(exc)))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_attempt, args=("a", proposal_a_id, "race-entity-a"))
+    t2 = threading.Thread(target=_attempt, args=("b", proposal_b_id, "race-entity-b"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    errors = [r for r in results if r[0] == "error"]
+    assert errors == [], f"expected zero unhandled errors, got: {errors}"
+    assert len(results) == 2
+    entity_ids = {r[2] for r in results}
+    assert len(entity_ids) == 1, f"both must converge on one canonical entity, got {entity_ids}"
+
+    superuser_db.expire_all()
+    current = list_current_project_entities(superuser_db, owner_id=owner_id, entity_type="idea")
+    assert len(current) == 1
+    assert current[0].id in entity_ids
+    wcs = list_work_candidates(superuser_db, owner_id=owner_id)
+    assert len(wcs) == 1

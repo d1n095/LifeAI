@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.knowledge_claim import KnowledgeClaim
@@ -223,6 +224,9 @@ def promote_interpretation_proposal(
         # Do NOT create a second work_candidate for the same canonical entity.
         return row, existing
 
+    # Concurrent SAME-collapse: unique index stops duplicate canonical concepts, but the
+    # loser must not get an unhandled IntegrityError / poisoned session. Recover via
+    # SAVEPOINT → re-find → collapse onto the winner (same shape as create_job idempotency).
     entity = ProjectEntity(
         owner_id=owner_id, entity_type=entity_type, title=title, title_normalized=title_normalized, summary=summary,
         derived_from_claim_id=row.source_claim_id, idempotency_key=entity_idempotency_key,
@@ -230,8 +234,39 @@ def promote_interpretation_proposal(
         decided_by=decided_by, decided_at=decided_at, supersedes_entity_id=supersedes_entity_id,
         provenance={"promoted_from_interpretation_proposal_id": str(row.id)},
     )
-    db.add(entity)
-    db.flush()
+    savepoint = db.begin_nested()
+    try:
+        db.add(entity)
+        db.flush()
+        savepoint.commit()
+    except IntegrityError as exc:
+        constraint_name = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
+        savepoint.rollback()
+        if constraint_name != "uq_project_entities_current_fingerprint":
+            raise
+        if supersedes_entity_id is not None:
+            # Explicit supersession path is not a SAME-collapse race — fail closed.
+            raise
+        winner = find_same_concept(db, owner_id=owner_id, entity_type=entity_type, title=title)
+        if winner is None:
+            raise
+        row.status = "promoted"
+        row.promoted_to_entity_id = winner.id
+        row.updated_at = datetime.utcnow()
+        db.flush()
+        attach_alias(
+            db,
+            owner_id=owner_id,
+            entity_id=winner.id,
+            raw_text=title,
+            source_claim_id=row.source_claim_id,
+            provenance={
+                "via": "promote_interpretation_proposal_same_collapse_race_recovery",
+                "proposal_id": str(row.id),
+            },
+        )
+        return row, winner
+
     row.status = "promoted"
     row.promoted_to_entity_id = entity.id
     row.updated_at = datetime.utcnow()
