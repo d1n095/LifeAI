@@ -456,6 +456,28 @@ self-claims) FAIL (förväntat, bekräftar #213 från ny vinkel) · Invariant 5 
 auktoritetsutvidgning) PASS. Ingen O(n²)-prestandaproblematik vid denna skala (1.57x
 tidsförhållande tidigt→sent över ~1200 events).
 
+### Systemiskt mönster: semantisk kringgåelse av nyckelordsbaserade grindar (3 oberoende fynd)
+
+Samma svaghetsform hittad OBEROENDE i tre olika moduler ikväll — alla dormanta, ingen live-
+konsument ännu, men samma arkitektoniska hål: en säkerhetsrelevant klassificering görs via en
+FAST NYCKELORDSLISTA/regex, som en trivial omformulering helt kringgår.
+
+1. **#218** (redan fixad för sitt ursprungliga fynd): `classify_ambiguity()` — 13 av 15 verkliga
+   omformuleringar ("ship it", "put this live", "wipe it") missar klassificering helt.
+2. **#214**: `_touches_protected()` — ALLA 6 testade omformuleringar av skyddade koncept
+   (RLS→"row-level scoping", authority→"permission gate", audit→"provenance log", osv.)
+   returnerar `protected=False`. 100% kringgåelse, dormant (`auto_apply_allowed` hårdkodad
+   `False` överallt).
+3. **#221**: attention-ranking har INGEN pinned/undantags-mekanism alls — ett äkta
+   säkerhetsrelevant item med lågt beräknat score faller tyst bort ur topp-50, empiriskt bevisat
+   med ett 66-item-scenario. Dormant (`authority_implied` hårdkodad `False`).
+
+**Föreslagen lösning (flaggad, INTE implementerad, kräver founder-signoff eftersom det lägger
+till ett fakturerat AI-anrop i en säkerhetskritisk väg):** samma riktning föreslagen två gånger
+oberoende — behåll regex som billig fail-closed snabbväg, falla tillbaka till en riktig
+LLM-klassificerare bara när regex inte matchar. Ett arkitekturbeslut, inte en engångsfix per
+modul.
+
 ---
 
 
