@@ -40,7 +40,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-safe-internal-startup` | (öppnas) | **Aktiv** | Daily runbook, safe-internal boundary, real boot script + restart proof from tip after #236. |
+| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | **Aktiv** | Daily runbook, safe-internal boundary, real boot script + restart proof from tip after #236. |
 
 **#236 MERGAD** → tip includes Local Intelligence School + executive wire.
 
