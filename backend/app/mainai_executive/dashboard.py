@@ -25,7 +25,7 @@ def founder_executive_dashboard(
         org = organization_snapshot(db, owner_id=owner_id)
     except Exception:
         org = {"error": "org_unavailable"}
-    ks = get_kill_switch().as_dict()
+    ks = get_kill_switch(owner_id).as_dict()
     debt = list_decision_debt(db, owner_id=owner_id, limit=10)
 
     return {

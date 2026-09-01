@@ -91,7 +91,7 @@ def test_kill_switch_blocks_dry_run(superuser_db):
     owner, entity = _setup(superuser_db)
     activate_kill_switch(superuser_db, owner_id=owner.id, reason="chaos_test")
     with pytest.raises(KillSwitchError):
-        assert_not_killed()
+        assert_not_killed(owner.id)
     result = run_executive_cycle(
         superuser_db,
         owner_id=owner.id,

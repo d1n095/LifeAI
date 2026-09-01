@@ -333,6 +333,55 @@ def test_team_members_get_independent_context_packages(superuser_db):
     assert pkg_a.content_fingerprint != pkg_b.content_fingerprint
 
 
+def test_assert_no_cross_package_leak_passes_for_independent_packages(superuser_db):
+    """P1 bug: assert_no_cross_package_leak() previously never raised at all -- every code
+    path either fell through with no overlap or hit an early `return` on overlap that
+    silently treated ANY overlap as fine, a real no-op despite its own name/docstring.
+    Genuinely independent packages (no shared trace_id) must still pass cleanly."""
+    from app.workforce.context import assert_no_cross_package_leak
+
+    owner = _owner(superuser_db)
+    pkg_a = create_context_package(
+        superuser_db,
+        owner_id=owner.id,
+        trust_zone="LOCAL_INTERNAL",
+        requested_items=[{"kind": "excerpt", "excerpt": "only for A", "trace_id": "leak-check-a"}],
+    )
+    pkg_b = create_context_package(
+        superuser_db,
+        owner_id=owner.id,
+        trust_zone="LOCAL_INTERNAL",
+        requested_items=[{"kind": "excerpt", "excerpt": "only for B", "trace_id": "leak-check-b"}],
+    )
+    superuser_db.commit()
+    assert_no_cross_package_leak(package_a=pkg_a, package_b=pkg_b)  # must not raise
+
+
+def test_assert_no_cross_package_leak_raises_on_real_leak(superuser_db):
+    """The actual regression: reusing the SAME trace_id across two DIFFERENT agents'
+    private context packages is exactly the leak this function must catch -- previously
+    it never raised for this case (or any case)."""
+    from app.workforce.context import ContextPackagingError, assert_no_cross_package_leak
+
+    owner = _owner(superuser_db)
+    shared_trace_id = f"leaked-{uuid.uuid4()}"
+    pkg_a = create_context_package(
+        superuser_db,
+        owner_id=owner.id,
+        trust_zone="LOCAL_INTERNAL",
+        requested_items=[{"kind": "excerpt", "excerpt": "private to A", "trace_id": shared_trace_id}],
+    )
+    pkg_b = create_context_package(
+        superuser_db,
+        owner_id=owner.id,
+        trust_zone="LOCAL_INTERNAL",
+        requested_items=[{"kind": "excerpt", "excerpt": "copied into B's package", "trace_id": shared_trace_id}],
+    )
+    superuser_db.commit()
+    with pytest.raises(ContextPackagingError):
+        assert_no_cross_package_leak(package_a=pkg_a, package_b=pkg_b)
+
+
 def test_injection_scrub_strips_secret_requests(superuser_db):
     cleaned, stripped = scrub_authority_mutations(
         {"answer": "ok", "request_vault": True, "api_key": "x", "nested": {"override_mainai": True}}

@@ -57,7 +57,7 @@ def test_kill_switch_blocks_further_execution(superuser_db):
     reset_activation_gates_for_tests()
     owner = _owner(superuser_db)
     run_first_safe_internal_mainai_run(superuser_db, owner_id=owner.id)
-    assert get_kill_switch().active is True
+    assert get_kill_switch(owner.id).active is True
     b = register_workforce_agent(
         superuser_db,
         owner_id=owner.id,
@@ -99,8 +99,41 @@ def test_kill_switch_blocks_further_execution(superuser_db):
             goal_text="after kill",
             capability="low_risk_classification",
         )
-    clear_kill_switch_for_recovery(founder_ack="founder-ack-test")
-    assert get_kill_switch().active is False
+    clear_kill_switch_for_recovery(founder_ack="founder-ack-test", owner_id=owner.id)
+    assert get_kill_switch(owner.id).active is False
+
+
+def test_kill_switch_is_owner_scoped_not_cross_owner_dos(superuser_db):
+    """P1 bug (workforce/kill_switch.py, PR #234, live on integration tip):
+    activate_kill_switch(db, owner_id=OWNER_A, reason=...) correctly revokes only OWNER_A's
+    live assignments, but the module-level `_STATE` flag was a single process-global -- so
+    assert_not_killed() (no owner argument) raised KillSwitchError for a completely
+    unrelated OWNER_B too. Since run_first_safe_internal_mainai_run() unconditionally calls
+    activate_kill_switch() at the end of every successful run, ANY single owner completing
+    a run silently disabled workforce execution for EVERY other owner sharing the process --
+    a real cross-owner denial-of-service via a legitimate, expected code path."""
+    from app.workforce.kill_switch import assert_not_killed
+
+    reset_kill_switch_for_tests()
+    reset_activation_gates_for_tests()
+    owner_a = _owner(superuser_db)
+    owner_b = _owner(superuser_db)
+    superuser_db.commit()
+
+    run_first_safe_internal_mainai_run(superuser_db, owner_id=owner_a.id)
+    superuser_db.commit()
+
+    assert get_kill_switch(owner_a.id).active is True, "owner A's own kill switch must be active"
+
+    with pytest.raises(KillSwitchError):
+        assert_not_killed(owner_a.id)
+
+    # The actual bug: owner B was never touched by owner A's kill switch, so owner B's
+    # workforce execution must NOT be blocked.
+    assert get_kill_switch(owner_b.id).active is False, "owner B must be unaffected by owner A's kill switch"
+    assert_not_killed(owner_b.id)  # must NOT raise
+
+    reset_kill_switch_for_tests()
 
 
 def test_activation_commit_disabled_by_default(superuser_db):
