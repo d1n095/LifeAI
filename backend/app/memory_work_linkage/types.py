@@ -48,5 +48,11 @@ class LinkageResult:
     impacts: list[ImpactKind] = field(default_factory=list)
     actions: list[LinkageAction] = field(default_factory=list)
     created_task_ids: list[uuid.UUID] = field(default_factory=list)
+    # created_candidate_ids: only IDs created in THIS call (empty on replay)
     created_candidate_ids: list[uuid.UUID] = field(default_factory=list)
+    # Stable idempotent contract:
+    created_now_ids: list[uuid.UUID] = field(default_factory=list)
+    canonical_candidate_ids: list[uuid.UUID] = field(default_factory=list)
+    replayed: bool = False
+    operation_receipt_id: str | None = None
     affected: list[AffectedWorkRef] = field(default_factory=list)

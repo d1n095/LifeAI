@@ -7,6 +7,7 @@ Sequence:
   → SHUTDOWN → RESTART → RESUME
 
 No external provider. No consequential external writes.
+BOOT NEVER CLEARS KILL SWITCH.
 """
 
 from __future__ import annotations
@@ -28,14 +29,13 @@ from app.mainai_startup_readiness import evaluate_startup_readiness
 from app.models.user import User
 from app.request_context import current_user_id as current_user_id_var
 from app.workforce.kill_switch import (
+    KillSwitchError,
     assert_not_killed,
-    clear_kill_switch_for_recovery,
-    get_kill_switch,
-    reset_kill_switch_for_tests,
+    query_stop_status,
+    record_boot_blocked,
 )
 
 
-# Harmless but multi-system founder-like task (not hello-world).
 DEFAULT_FOUNDER_TASK = (
     "Review our public library hours notice and classify it for the research department: "
     "is it informational_public_text, and what NOW/NEAR follow-ups should park as "
@@ -68,6 +68,7 @@ class InternalBootReport:
     kill_switch_after: dict[str, Any]
     notes: list[str] = field(default_factory=list)
     safe_internal_boundary: dict[str, Any] = field(default_factory=dict)
+    blocked_by_kill_switch: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -93,6 +94,7 @@ SAFE_INTERNAL_FORBIDDEN = [
     "deletion",
     "approval_on_founder_behalf",
     "authority_widening",
+    "automatic_kill_switch_clear",
 ]
 
 
@@ -120,14 +122,15 @@ def startup_status_surface(
     session_id: str | None,
     school_path: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Concise founder status — no chain-of-thought."""
     dash = founder_executive_dashboard(db, owner_id=owner_id, session_id=session_id)
     readiness = evaluate_startup_readiness(claude_reviews_satisfied=None)
-    ks = get_kill_switch().as_dict()
+    stop = query_stop_status(db, owner_id=owner_id)
     school = school_path or {}
     domain_snap = snapshot_domain("research")
     return {
-        "MAINAI_STATUS": "RUNNING_SAFE_INTERNAL" if session_id else "IDLE",
+        "MAINAI_STATUS": "BLOCKED_BY_KILL_SWITCH"
+        if stop["blocked"]
+        else ("RUNNING_SAFE_INTERNAL" if session_id else "IDLE"),
         "READINESS": readiness.level.value,
         "CURRENT_GOAL": dash.get("WHAT_SHE_IS_DOING"),
         "CURRENT_PLAN": dash.get("WHAT_IS_NEXT"),
@@ -148,7 +151,7 @@ def startup_status_surface(
             "local_attempt_rate": domain_snap.local_attempt_rate,
             "provider_enabled": False,
         },
-        "KILL_SWITCH": ks,
+        "KILL_SWITCH": stop,
         "PROVIDER_ENABLED": False,
         "chain_of_thought_exposed": False,
     }
@@ -161,15 +164,51 @@ def run_first_real_internal_boot(
     founder_task: str = DEFAULT_FOUNDER_TASK,
     session_id: str | None = None,
 ) -> InternalBootReport:
-    """Boot MainAI through the composed safe-internal path with restart proof."""
+    """Boot MainAI through composed safe-internal path with restart proof.
+
+    Never clears kill switch. If stopped → BLOCKED_BY_KILL_SWITCH.
+    """
     notes: list[str] = []
     started = datetime.utcnow().isoformat() + "Z"
-    reset_kill_switch_for_tests()
-    clear_kill_switch_for_recovery(founder_ack="first_real_internal_boot")
-    assert_not_killed()
-
     owner = ensure_boot_owner(db, email=owner_email)
     notes.append(f"owner={owner.email}")
+
+    # HARD: boot must not clear stop state.
+    try:
+        assert_not_killed(db, owner_id=owner.id)
+    except KillSwitchError as exc:
+        record_boot_blocked(db, owner_id=owner.id, reason=str(exc))
+        stop = query_stop_status(db, owner_id=owner.id)
+        status = startup_status_surface(db, owner_id=owner.id, session_id=None)
+        return InternalBootReport(
+            integration_note="blocked_by_kill_switch",
+            readiness_level=evaluate_startup_readiness(claude_reviews_satisfied=None).level.value,
+            session_id=session_id or "blocked",
+            owner_id=str(owner.id),
+            founder_task=founder_task,
+            started_at=started,
+            shutdown_at=None,
+            restarted_at=None,
+            provider_call_count=0,
+            local_attempt_used=False,
+            school_used=False,
+            first_task_phase="BLOCKED_BY_KILL_SWITCH",
+            first_task_ok=False,
+            durable_receipts={"stop_status": stop, "boot_cannot_clear": True},
+            shutdown_ok=False,
+            restart_ok=False,
+            resume_ok=False,
+            status_surface=status,
+            offline_ok=False,
+            kill_switch_after=stop,
+            notes=[f"BLOCKED_BY_KILL_SWITCH:{exc.code}"],
+            safe_internal_boundary={
+                "allowed": SAFE_INTERNAL_ALLOWED,
+                "forbidden": SAFE_INTERNAL_FORBIDDEN,
+                "provider_enabled": False,
+            },
+            blocked_by_kill_switch=True,
+        )
 
     readiness = evaluate_startup_readiness(claude_reviews_satisfied=None)
     notes.append(f"readiness={readiness.level.value}")
@@ -181,7 +220,6 @@ def run_first_real_internal_boot(
 
     sid = session_id or f"boot-{uuid.uuid4()}"
 
-    # --- START EXECUTIVE + SCHOOL (local attempt) ---
     cycle = run_executive_cycle(
         db,
         owner_id=owner.id,
@@ -203,10 +241,6 @@ def run_first_real_internal_boot(
     )
     notes.append(f"first_cycle_phase={cycle.phase.value}")
 
-    status = startup_status_surface(
-        db, owner_id=owner.id, session_id=sid, school_path=school
-    )
-
     durable = {
         "continuity_note_id": str(cycle.continuity_note_id) if cycle.continuity_note_id else None,
         "session_id": sid,
@@ -217,45 +251,38 @@ def run_first_real_internal_boot(
         "school_learning_contract": (school.get("learning_contract") or {}),
         "authority_denials": list(cycle.authority_denials),
         "provider_invoked": False,
+        "boot_cleared_kill_switch": False,
     }
 
-    # --- SHUTDOWN (clear process-local kill/metrics dependence proof via reset) ---
+    # SHUTDOWN: process end only — must NOT clear durable stop state.
     shutdown_at = datetime.utcnow().isoformat() + "Z"
-    # Process memory must not be required — durable checkpoint is the resume source.
-    reset_kill_switch_for_tests()
-    clear_kill_switch_for_recovery(founder_ack="post_shutdown_clear")
     shutdown_ok = True
-    notes.append("shutdown_cleared_process_kill_switch")
+    notes.append("shutdown_without_clearing_kill_switch")
 
-    # --- RESTART + RESUME ---
+    # RESTART + RESUME from durable checkpoint (process memory irrelevant).
     restarted_at = datetime.utcnow().isoformat() + "Z"
     resumed = resume_executive_cycle(
         db, owner_id=owner.id, session_id=sid, continue_work=True
     )
     resume_ok = bool(resumed.get("resumed")) and resumed.get("authority_still_valid") is False
     restart_ok = resume_ok
-    if resume_ok:
-        notes.append("resume_from_durable_checkpoint")
-    else:
-        notes.append(f"resume_issue={resumed}")
+    notes.append("resume_from_durable_checkpoint" if resume_ok else f"resume_issue={resumed}")
 
-    # Also run composed wrapper for end-to-end receipt consistency.
     composed = run_composed_safe_internal_mainai_run(
         db,
         owner_id=owner.id,
         founder_request=founder_task[:180],
         session_id=f"{sid}-composed",
     )
-    notes.append(f"composed_restart_ok={composed.restart_ok}")
-    provider_calls += 1 if composed.provider_invoked else 0
+    if composed.phase == "BLOCKED_BY_KILL_SWITCH":
+        notes.append("composed_blocked_by_kill_switch")
+    else:
+        notes.append(f"composed_restart_ok={composed.restart_ok}")
+        provider_calls += 1 if composed.provider_invoked else 0
 
     status_after = startup_status_surface(
-        db,
-        owner_id=owner.id,
-        session_id=sid,
-        school_path=school,
+        db, owner_id=owner.id, session_id=sid, school_path=school
     )
-
     db.commit()
 
     return InternalBootReport(
@@ -278,11 +305,12 @@ def run_first_real_internal_boot(
         resume_ok=resume_ok,
         status_surface=status_after,
         offline_ok=offline_ok and composed.offline_ok,
-        kill_switch_after=get_kill_switch().as_dict(),
+        kill_switch_after=query_stop_status(db, owner_id=owner.id),
         notes=notes,
         safe_internal_boundary={
             "allowed": SAFE_INTERNAL_ALLOWED,
             "forbidden": SAFE_INTERNAL_FORBIDDEN,
             "provider_enabled": False,
         },
+        blocked_by_kill_switch=False,
     )

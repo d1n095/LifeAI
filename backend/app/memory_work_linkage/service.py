@@ -236,6 +236,9 @@ def apply_memory_work_linkage(
     )
 
     created_candidates: list[uuid.UUID] = []
+    created_now: list[uuid.UUID] = []
+    canonical_candidates: list[uuid.UUID] = []
+    replayed = False
     created_tasks: list[uuid.UUID] = []
 
     if supersede_candidate_ids:
@@ -266,6 +269,8 @@ def apply_memory_work_linkage(
             if existing_same is not None:
                 actions.append(LinkageAction.NOOP_SAME)
                 impacts.append(ImpactKind.SAME_COLLAPSE)
+                canonical_candidates.append(existing_same.id)
+                replayed = True
                 add_member(
                     db,
                     owner_id=owner_id,
@@ -279,6 +284,7 @@ def apply_memory_work_linkage(
                         "timing": timing.value,
                         "same_collapse": True,
                         "memory_note_id": str(note_id),
+                        "replayed": True,
                     },
                     idempotency_key=f"mem-link-wc-same:{note_id}:{existing_same.id}",
                     actor_type="system",
@@ -303,6 +309,8 @@ def apply_memory_work_linkage(
                     },
                 )
                 created_candidates.append(candidate.id)
+                created_now.append(candidate.id)
+                canonical_candidates.append(candidate.id)
                 actions.append(LinkageAction.CANDIDATE_RECORDED)
                 add_member(
                     db,
@@ -407,6 +415,10 @@ def apply_memory_work_linkage(
         actions=actions,
         created_task_ids=created_tasks,
         created_candidate_ids=created_candidates,
+        created_now_ids=created_now,
+        canonical_candidate_ids=canonical_candidates,
+        replayed=replayed,
+        operation_receipt_id=f"mem-link:{note_id}:{thread_id}",
         affected=affected,
     )
 

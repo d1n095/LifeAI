@@ -14,7 +14,6 @@ from app.workforce import (
     assert_provider_invoke_disabled,
     clear_kill_switch_for_recovery,
     execute_workforce_assignment,
-    get_kill_switch,
     prove_no_reusable_live_authority,
     register_workforce_agent,
     reset_activation_gates_for_tests,
@@ -23,6 +22,7 @@ from app.workforce import (
     run_first_safe_internal_mainai_run,
     submit_delegation_request,
 )
+from app.workforce.kill_switch import query_stop_status
 
 
 def _owner(db):
@@ -33,7 +33,7 @@ def _owner(db):
 
 
 def test_safe_internal_run_end_to_end(superuser_db):
-    reset_kill_switch_for_tests()
+    reset_kill_switch_for_tests(superuser_db)
     reset_activation_gates_for_tests()
     owner = _owner(superuser_db)
     report = run_first_safe_internal_mainai_run(superuser_db, owner_id=owner.id)
@@ -53,11 +53,11 @@ def test_safe_internal_run_end_to_end(superuser_db):
 
 
 def test_kill_switch_blocks_further_execution(superuser_db):
-    reset_kill_switch_for_tests()
+    reset_kill_switch_for_tests(superuser_db)
     reset_activation_gates_for_tests()
     owner = _owner(superuser_db)
     run_first_safe_internal_mainai_run(superuser_db, owner_id=owner.id)
-    assert get_kill_switch().active is True
+    assert query_stop_status(superuser_db, owner_id=owner.id)["owner"]["active"] is True
     b = register_workforce_agent(
         superuser_db,
         owner_id=owner.id,
@@ -99,8 +99,13 @@ def test_kill_switch_blocks_further_execution(superuser_db):
             goal_text="after kill",
             capability="low_risk_classification",
         )
-    clear_kill_switch_for_recovery(founder_ack="founder-ack-test")
-    assert get_kill_switch().active is False
+    clear_kill_switch_for_recovery(
+        db=superuser_db,
+        owner_id=owner.id,
+        founder_ack="founder_ack:post-kill-test-clear",
+        clear_request_id=uuid.uuid4(),
+    )
+    assert query_stop_status(superuser_db, owner_id=owner.id)["blocked"] is False
 
 
 def test_activation_commit_disabled_by_default(superuser_db):

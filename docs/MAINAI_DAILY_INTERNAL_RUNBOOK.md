@@ -123,17 +123,36 @@ Do not rely on process RAM.
 
 ## HOW TO ACTIVATE KILL SWITCH
 
-```python
-from app.workforce.kill_switch import activate_kill_switch
-activate_kill_switch(db, owner_id=..., reason="operator_stop")
-```
-
-Clear only with explicit founder ack:
+Owner stop (one owner only):
 
 ```python
-from app.workforce.kill_switch import clear_kill_switch_for_recovery
-clear_kill_switch_for_recovery(founder_ack="...")
+from app.workforce.kill_switch import activate_owner_stop
+activate_owner_stop(db, owner_id=..., reason="operator_stop")
 ```
+
+Global emergency (everyone):
+
+```python
+from app.workforce.kill_switch import activate_global_emergency_stop
+activate_global_emergency_stop(
+    db, reason="system_emergency",
+    founder_authority_ref="founder_ack:declare-global-stop",
+)
+```
+
+## HOW TO CLEAR (NEVER AUTOMATIC / NEVER FROM BOOT)
+
+```python
+from app.workforce.kill_switch import clear_owner_stop
+clear_owner_stop(
+    db, owner_id=...,
+    founder_ack="founder_ack:explicit-reason-text",
+    clear_request_id=uuid.uuid4(),  # unique; replay rejected
+)
+```
+
+Fabricated strings like `composed_safe_internal_clear` are **rejected**.
+Boot must surface `BLOCKED_BY_KILL_SWITCH` and must not clear.
 
 ---
 

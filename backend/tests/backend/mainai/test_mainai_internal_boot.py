@@ -25,8 +25,17 @@ def _priv():
 
 
 @pytest.fixture(autouse=True)
-def _ks():
-    reset_kill_switch_for_tests()
+def _ks(superuser_db):
+    reset_kill_switch_for_tests(superuser_db)
+    try:
+        superuser_db.execute(
+            __import__("sqlalchemy", fromlist=["text"]).text(
+                "UPDATE mainai_stop_state SET active=false, reason='', sequence=0"
+            )
+        )
+        superuser_db.flush()
+    except Exception:
+        pass
 
 
 def test_first_real_internal_boot_milestone(superuser_db):
