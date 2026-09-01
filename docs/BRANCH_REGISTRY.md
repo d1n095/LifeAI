@@ -400,7 +400,21 @@ concurrency-lucka (vilande), resten ren eller mindre. Inget i den nya koden bevi
 exekveringsauktoritet eller anropar en riktig provider — fail-closed-designen håller under
 adversarial granskning.
 
-### PR #235 — "composed executive loop", den mest konsekventa granskningen i natt
+### PR #235 — "composed executive loop", den mest konsekventa granskningen i natt (nu MERGAD @ tip)
+
+**Uppdatering:** #235 mergade in på integrationstippen kort efter granskningen — evidens-bugg-
+eskaleringen (ovan) är alltså nu LIVE, inte längre bara ett fynd på en öppen gren. Höjer
+prioriteten på #213/#220-fixen ytterligare (redan flaggat som "akut, inte längre bara
+teoretiskt" ovan, nu bekräftat faktiskt live).
+
+### PR #236 — "MainAI Local Intelligence School" (ny, ej granskad än)
+
+Ny, stor PR (2645 rader, 24 filer) öppnad 2026-08-31, återanvänder EXAKT samma komprometterade
+`capability_reality`/`record_capability_observation()`-funktion som #213/#220/#235:s
+evidens-bugg. Handlar fundamentalt om kompetens-/tentamen-påståenden ("curriculum/practice/
+exam competence ladder", "EXTERNAL DEPENDENCY RATIO", "ONE EXAM PASS != PERMANENT
+COMPETENCE") — mycket sannolikt sårbar för samma buggklass eller värre. Djupgranskning
+pågår (fork).
 
 Första PR:n som faktiskt KOPPLAR IHOP tidigare isolerade stadier (lookaround → lessons →
 WorkCandidates → staffing → workforce dry-run → continuity checkpoints). Verifierat: (1)
