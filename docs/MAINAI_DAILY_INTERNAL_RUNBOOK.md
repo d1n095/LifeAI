@@ -175,9 +175,52 @@ or re-run `safe_internal_boot.py` for a fresh session.
 ## HOW TO VERIFY NO PROVIDER WAS CALLED
 
 - Boot receipt: `provider_call_count == 0`
+- **Independent ledger:** `provider_ledger_crosscheck.unchanged == true`
+  (spend reservations + workforce assignment receipts — MainAI report alone is insufficient)
 - Cycle: `workforce_dry_run["provider_invoked"] is False`
 - Status: `PROVIDER_ENABLED is False`
 - Activation gates remain unverified for provider path
+
+---
+
+## EXISTING-STATE BOOT
+
+```bash
+python scripts/mainai/safe_internal_boot.py --existing-state --json /tmp/mainai-rich-boot.json
+```
+
+Seeds superseded memory, corrections, disputed claims, capability history, continuity,
+then boots and inspects CURRENT vs SUPERSEDED (see receipt `existing_state_inspect`).
+
+---
+
+## FRESH-PROCESS / COLD RESTART PROOF
+
+Same-process new Session is not enough:
+
+```bash
+python scripts/mainai/fresh_process_continuity_proof.py --json /tmp/mainai-fresh-process-proof.json
+```
+
+Process A writes + owner-stop + exits → B reconstructs → C re-checks. Expect `FRESH_PROCESS_OK=True`.
+
+---
+
+## DB BACKUP → RESTORE PROOF (local disposable)
+
+```bash
+python scripts/mainai/safe_internal_backup_restore_proof.py --json /tmp/mainai-backup-restore-proof.json
+```
+
+Uses disposable DB `lifeos_safe_internal_bak_proof` only. Expect `BACKUP_RESTORE_OK=True`.
+
+For operator survival of the daily `lifeos_safe_internal` DB:
+
+```bash
+pg_dump -Fc -f /tmp/lifeos_safe_internal.dump "$DATABASE_URL"
+# after confirmed need:
+# drop/recreate target → pg_restore --no-owner --dbname "$DATABASE_URL" /tmp/lifeos_safe_internal.dump
+```
 
 ---
 

@@ -40,7 +40,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | **Aktiv — DO NOT MERGE yet (pre-start certification)** | Daily runbook, safe-internal boundary, real boot script + restart proof from tip after #236. |
+| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | **Aktiv — DO NOT MERGE yet (pre-start certification)** | Daily runbook, safe-internal boundary, boot + P0 cert fixes + P1 existing-state/provider-ledger/backup/fresh-process. Claude exam on `5b15f02` (+ later heads). |
 
 **#236 MERGAD** → tip includes Local Intelligence School + executive wire.
 

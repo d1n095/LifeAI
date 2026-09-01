@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
@@ -24,49 +24,70 @@ class ProviderAttemptSnapshot:
         }
 
 
+def _safe_scalar(db: Session, sql: str, params: dict[str, Any] | None = None) -> tuple[int | None, str | None]:
+    """Run count query in a SAVEPOINT so missing tables never poison the outer txn."""
+    try:
+        with db.begin_nested():
+            val = db.execute(text(sql), params or {}).scalar()
+            return int(val or 0), None
+    except Exception as exc:  # noqa: BLE001 — best-effort ledger
+        return None, f"{type(exc).__name__}"
+
+
 def snapshot_provider_attempts(db: Session, *, owner_id: UUID | None = None) -> ProviderAttemptSnapshot:
     """Best-effort cross-check against spend + assignment receipts.
 
     Does not invent a second provider system. Missing tables → count 0 with note.
+    Uses SAVEPOINTs so probe failures cannot abort the caller's transaction.
     """
     notes: list[str] = []
     spend = 0
     receipts = 0
-    try:
-        q = text("SELECT count(*) FROM provider_spend_reservations")
-        if owner_id is not None:
-            # table may or may not be owner-scoped depending on migration
-            try:
-                spend = int(
-                    db.execute(
-                        text(
-                            "SELECT count(*) FROM provider_spend_reservations WHERE owner_id = :oid"
-                        ),
-                        {"oid": str(owner_id)},
-                    ).scalar()
-                    or 0
-                )
-            except Exception:
-                spend = int(db.execute(q).scalar() or 0)
+
+    if owner_id is not None:
+        n, err = _safe_scalar(
+            db,
+            "SELECT count(*) FROM provider_spend_reservations WHERE owner_id = :oid",
+            {"oid": str(owner_id)},
+        )
+        if err:
+            n2, err2 = _safe_scalar(db, "SELECT count(*) FROM provider_spend_reservations")
+            if err2:
+                notes.append(f"spend_unavailable:{err2}")
+            else:
+                spend = int(n2 or 0)
                 notes.append("spend_reservations_not_owner_filtered")
         else:
-            spend = int(db.execute(q).scalar() or 0)
-    except Exception as exc:
-        notes.append(f"spend_unavailable:{type(exc).__name__}")
+            spend = int(n or 0)
+    else:
+        n, err = _safe_scalar(db, "SELECT count(*) FROM provider_spend_reservations")
+        if err:
+            notes.append(f"spend_unavailable:{err}")
+        else:
+            spend = int(n or 0)
 
-    try:
-        # Assignments that claim provider was invoked
-        stmt = text(
+    if owner_id is not None:
+        n, err = _safe_scalar(
+            db,
             """
             SELECT count(*) FROM workforce_assignments
             WHERE coalesce((result_payload->>'provider_invoked')::boolean, false) = true
-            """
-            + (" AND owner_id = :oid" if owner_id else "")
+              AND owner_id = :oid
+            """,
+            {"oid": str(owner_id)},
         )
-        params = {"oid": str(owner_id)} if owner_id else {}
-        receipts = int(db.execute(stmt, params).scalar() or 0)
-    except Exception as exc:
-        notes.append(f"assignment_receipts_unavailable:{type(exc).__name__}")
+    else:
+        n, err = _safe_scalar(
+            db,
+            """
+            SELECT count(*) FROM workforce_assignments
+            WHERE coalesce((result_payload->>'provider_invoked')::boolean, false) = true
+            """,
+        )
+    if err:
+        notes.append(f"assignment_receipts_unavailable:{err}")
+    else:
+        receipts = int(n or 0)
 
     return ProviderAttemptSnapshot(
         spend_reservations=spend,

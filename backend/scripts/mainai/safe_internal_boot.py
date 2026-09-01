@@ -28,7 +28,11 @@ _BACKEND = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_BACKEND))
 
 _BOOT_DB = os.environ.get("LIFEAI_BOOT_DATABASE_NAME", "lifeos_safe_internal")
-os.environ.setdefault("DATABASE_URL", f"postgresql://lifeos@localhost:5433/{_BOOT_DB}")
+_raw = os.environ.get("DATABASE_URL", f"postgresql://lifeos@localhost:5433/{_BOOT_DB}")
+# Refuse to migrate the cluster maintenance DB by accident.
+if urlparse(_raw).path.lstrip("/") in ("", "postgres"):
+    _raw = f"postgresql://lifeos@localhost:5433/{_BOOT_DB}"
+os.environ["DATABASE_URL"] = _raw
 os.environ.setdefault(
     "APP_DATABASE_URL", f"postgresql://mainai_app:mainai_app_pw@localhost:5433/{_BOOT_DB}"
 )
@@ -119,6 +123,11 @@ def main() -> int:
         action="store_true",
         help="Assume DATABASE_URL already migrated (advanced)",
     )
+    parser.add_argument(
+        "--existing-state",
+        action="store_true",
+        help="Seed rich history before boot (existing-state certification)",
+    )
     args = parser.parse_args()
 
     if not args.skip_db_ensure:
@@ -142,6 +151,7 @@ def main() -> int:
             owner_email=args.owner_email,
             founder_task=args.task or DEFAULT_FOUNDER_TASK,
             session_id=args.session_id,
+            seed_existing_state=args.existing_state,
         )
         payload = report.as_dict()
         if args.json_out:
@@ -155,6 +165,8 @@ def main() -> int:
             f"local_attempt_used={report.local_attempt_used} school_used={report.school_used}"
         )
         print(f"provider_call_count={report.provider_call_count}")
+        ledger = report.provider_ledger_crosscheck or {}
+        print(f"provider_ledger_unchanged={ledger.get('unchanged')}")
         print(
             f"shutdown_ok={report.shutdown_ok} restart_ok={report.restart_ok} resume_ok={report.resume_ok}"
         )
@@ -168,6 +180,7 @@ def main() -> int:
             and report.provider_call_count == 0
             and report.local_attempt_used
             and report.school_used
+            and ledger.get("unchanged") is True
         )
         print(f"BOOT_SUCCESS={ok}")
         return 0 if ok else 2

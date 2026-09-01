@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.mainai_executive.observability import executive_status_snapshot
 from app.mainai_executive.why_graph import list_decision_debt
-from app.workforce.kill_switch import get_kill_switch
 from app.workforce.org_view import organization_snapshot
 
 
@@ -25,7 +24,9 @@ def founder_executive_dashboard(
         org = organization_snapshot(db, owner_id=owner_id)
     except Exception:
         org = {"error": "org_unavailable"}
-    ks = get_kill_switch().as_dict()
+    from app.workforce.kill_switch import query_stop_status
+
+    ks = query_stop_status(db, owner_id=owner_id)
     debt = list_decision_debt(db, owner_id=owner_id, limit=10)
 
     return {

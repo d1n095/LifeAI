@@ -34,6 +34,10 @@ from app.workforce.kill_switch import (
     query_stop_status,
     record_boot_blocked,
 )
+from app.workforce.provider_attempt_ledger import (
+    assert_provider_attempts_unchanged,
+    snapshot_provider_attempts,
+)
 
 
 DEFAULT_FOUNDER_TASK = (
@@ -69,6 +73,8 @@ class InternalBootReport:
     notes: list[str] = field(default_factory=list)
     safe_internal_boundary: dict[str, Any] = field(default_factory=dict)
     blocked_by_kill_switch: bool = False
+    provider_ledger_crosscheck: dict[str, Any] = field(default_factory=dict)
+    existing_state_inspect: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -163,15 +169,47 @@ def run_first_real_internal_boot(
     owner_email: str | None = None,
     founder_task: str = DEFAULT_FOUNDER_TASK,
     session_id: str | None = None,
+    seed_existing_state: bool = False,
 ) -> InternalBootReport:
     """Boot MainAI through composed safe-internal path with restart proof.
 
     Never clears kill switch. If stopped → BLOCKED_BY_KILL_SWITCH.
+    When seed_existing_state=True, seeds rich history first (existing-state boot).
     """
     notes: list[str] = []
     started = datetime.utcnow().isoformat() + "Z"
+    existing_inspect: dict[str, Any] = {}
+
+    if seed_existing_state:
+        from app.mainai_executive.existing_state import (
+            inspect_existing_state_after_boot,
+            seed_rich_safe_internal_state,
+        )
+
+        seeded = seed_rich_safe_internal_state(db, owner_email=owner_email)
+        owner_email = seeded["owner_email"]
+        notes.append(f"seeded_existing_state tag={seeded['tag']}")
+        # Pre-inspect before the boot cycle proper (continuity already present).
+        existing_inspect["pre_boot"] = inspect_existing_state_after_boot(
+            db,
+            owner_id=uuid.UUID(seeded["owner_id"]),
+            session_id=seeded["session_id"],
+        )
+        existing_inspect["seed"] = {
+            k: seeded[k]
+            for k in (
+                "owner_id",
+                "old_note_id",
+                "current_correction_id",
+                "session_id",
+                "continuity_note_id",
+            )
+        }
+
     owner = ensure_boot_owner(db, email=owner_email)
     notes.append(f"owner={owner.email}")
+
+    provider_before = snapshot_provider_attempts(db, owner_id=owner.id)
 
     # HARD: boot must not clear stop state.
     try:
@@ -208,6 +246,11 @@ def run_first_real_internal_boot(
                 "provider_enabled": False,
             },
             blocked_by_kill_switch=True,
+            provider_ledger_crosscheck={
+                "before": provider_before.as_dict(),
+                "mainai_report_alone_insufficient": True,
+            },
+            existing_state_inspect=existing_inspect,
         )
 
     readiness = evaluate_startup_readiness(claude_reviews_satisfied=None)
@@ -280,6 +323,29 @@ def run_first_real_internal_boot(
         notes.append(f"composed_restart_ok={composed.restart_ok}")
         provider_calls += 1 if composed.provider_invoked else 0
 
+    provider_after = snapshot_provider_attempts(db, owner_id=owner.id)
+    ledger_check = assert_provider_attempts_unchanged(provider_before, provider_after)
+    if not ledger_check["unchanged"]:
+        raise RuntimeError(
+            "independent provider ledger changed during safe-internal boot — abort "
+            f"{ledger_check}"
+        )
+    notes.append("provider_ledger_unchanged")
+
+    if seed_existing_state:
+        from app.mainai_executive.existing_state import inspect_existing_state_after_boot
+
+        existing_inspect["post_boot"] = inspect_existing_state_after_boot(
+            db, owner_id=owner.id, session_id=sid
+        )
+        inv = (existing_inspect["post_boot"].get("invariants") or {})
+        if not inv.get("no_oldest_row_as_current"):
+            notes.append("WARN_existing_state_oldest_as_current")
+        if not inv.get("superseded_not_in_current"):
+            notes.append("WARN_existing_state_superseded_in_current")
+        if not inv.get("no_false_provider_competence"):
+            raise RuntimeError("existing-state boot invented provider competence")
+
     status_after = startup_status_surface(
         db, owner_id=owner.id, session_id=sid, school_path=school
     )
@@ -313,4 +379,6 @@ def run_first_real_internal_boot(
             "provider_enabled": False,
         },
         blocked_by_kill_switch=False,
+        provider_ledger_crosscheck=ledger_check,
+        existing_state_inspect=existing_inspect,
     )
