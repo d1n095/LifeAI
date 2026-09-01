@@ -460,6 +460,30 @@ alltså same-process-bevis, inte en genuint färsk process. Safe-internal DB-gr�
 genuint verklig (separat fysisk Postgres-databas, inte bara schema-partition). Inget bekräftat
 fel i #237 självt.
 
+### P0 — Genuint fresh-process-omstart-bevis (founder-beordrad, 2026-09-01) — MESTADELS RENT
+
+**Bygger på och stärker #237:s tidigare same-process-anmärkning.** Fem RIKTIGA separata
+OS-subprocesser (A→B→C→D→E, ingen delad Python-process, inget delat minne, endast delad
+databas) verifierade via direkt Postgres-inspektion över processgränser:
+
+- **Continuity-checkpointing: FUNGERAR KORREKT.** Varje färsk boot skapar en ny checkpoint som
+  korrekt `supersedes` föregående process' senaste — genuin append-only durabilitet, inte
+  process-minnesberoende.
+- **Kill-switch överlever korrekt: BEKRÄFTAT.** Ett stopp aktiverat i en subprocess blockerade
+  korrekt en helt orelaterad färsk-process-boot (`BLOCKED_BY_KILL_SWITCH`); att häva det via
+  `clear_owner_stop()` (ack-formatvalidering, replay-skyddad `clear_request_id`) tillät korrekt
+  en efterföljande färsk boot.
+- **Ägaridentitet: stabil** över alla 5 processer.
+- **Eskalerat, redan känt fynd:** `teacher_ledger.py`s `_LEDGER` (redan flaggad ikväll som
+  cross-owner-läckande) bekräftas nu ÄVEN vara icke-durabel av konstruktion — en ren in-memory
+  dict, bevisligen tom vid varje färsk process. Dormant just nu (normal boot når aldrig
+  exam/teacher-outcome-inspelningsvägen).
+- **Multi-omstart-historik (lättare, tidsbudgeterad):** korrigerings-/motsägelse-kedjor
+  verifierade korrekta på lagringsnivå över en färsk-process-fråga — supersession fungerar, och
+  en genuint olöst motsägelse förblir korrekt två oberoende aktiva poster istället för att tyst
+  väljas (samma redan kända #224-lucka, inte ny). Den fullskaliga syntetiska historiken (rik,
+  många-events) byggdes INTE p.g.a. tidsbudget — kandidat för nästa runda.
+
 ### Bredare evidens-semantik-revision (founder-beordrad, 2026-09-01) — TVÅ NYA YTOR PÅVERKADE
 
 Systematisk genomgång av VARJE plats evidens kan påverka ett beslut, utöver de redan kända
