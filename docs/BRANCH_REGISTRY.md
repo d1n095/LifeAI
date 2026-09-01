@@ -25,6 +25,31 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 **Lane A:** #230–#234 mergade. #235 composed executive loop. Provider-activate blockerad tills Claude-gates (#218/#229/#213/#224).
 
 
+## Claude red-team hotfixes — live merged bugs in #211/#234 (2026-09-01)
+
+Fixes for bugs found by red-team review of #211 (Stage C memory-work-linkage) and #234
+(activation prep) **before** they could be reviewed pre-merge — both PRs merged with the
+bugs still live on `claude/det-kommer-mer-879lcm`. Three focused PRs, split by theme per
+`CLAUDE.md`s isolation principle (not stacked on each other — each based directly on
+integration tip, no interdependency).
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/memory-work-linkage-idempotency-toctou-fix` | [#238](https://github.com/d1n095/LifeAI/pull/238) | **Öppen** | #211: `apply_memory_work_linkage()` idempotency (retry lost `created_candidate_ids`) + SAME-collapse TOCTOU race (advisory lock, `pg_advisory_xact_lock` seed 3). Cross-checked against #229 (open) — different module/mechanism, does not cover this gap; verdict posted as review comment on #229. |
+| `claude/workforce-kill-switch-owner-scoping` | [#239](https://github.com/d1n095/LifeAI/pull/239) | **Öppen** | #234: kill switch was a single process-global flag — one owner's `activate_kill_switch()` disabled workforce execution for EVERY owner (cross-owner DoS via `run_first_safe_internal_mainai_run`'s own unconditional call). Now per-owner state (`_STATE: dict[UUID, KillSwitchState]`); true global stop kept as an explicit separate `activate_global_kill_switch()`. Also fixes `workforce/context.py`'s `assert_no_cross_package_leak()`, previously a no-op that never raised under any input. |
+| `claude/startup-readiness-reporting-fixes` | [#240](https://github.com/d1n095/LifeAI/pull/240) | **Öppen** | #234: `evaluate_startup_readiness()`'s `blocking` list was overwritten (not merged) at the `READY_FOR_SAFE_INTERNAL_RUN` tier, silently dropping real blockers like `spend_controls:unknown`; `blocking_migrations` check was hardcoded healthy with no check ever run (now a real single-Alembic-head structural check); `activation_commit_status()` hardcoded `claude_reviews_satisfied=None` forever, capping readiness; `department_capability_ledger()` let a single lucky success "prove" a capability regardless of failure count. Also fixes a pre-existing circular import (`app.mainai_startup_readiness` ↔ `app.workforce`) found while testing. |
+
+**Ej i scope, flaggat för uppföljning (inte löst här):** `assert_not_killed()` gates
+assignment *execution* (`provider_worker.py`) but not assignment *grant*
+(`workforce/broker.py`'s `resolve_delegation()`) — a new assignment can still be granted
+for a killed owner. Also two sibling IntegrityError races in `record_work_candidate()`/
+`record_interpretation_proposal()` (same shape as the memory_work_linkage race but
+different call sites), and `app/mainai_school/safe_composed_run.py` (#236, merged
+separately) may need a caller-side update once reviewed against the new kill-switch
+per-owner/global split.
+
+---
+
 ## MainAI Local Intelligence School (2026-08-31)
 
 | Branch | PR | Status | Scope |
