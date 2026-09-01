@@ -413,8 +413,22 @@ Ny, stor PR (2645 rader, 24 filer) öppnad 2026-08-31, återanvänder EXAKT samm
 `capability_reality`/`record_capability_observation()`-funktion som #213/#220/#235:s
 evidens-bugg. Handlar fundamentalt om kompetens-/tentamen-påståenden ("curriculum/practice/
 exam competence ladder", "EXTERNAL DEPENDENCY RATIO", "ONE EXAM PASS != PERMANENT
-COMPETENCE") — mycket sannolikt sårbar för samma buggklass eller värre. Djupgranskning
-pågår (fork).
+COMPETENCE") — mycket sannolikt sårbar för samma buggklass eller värre.
+
+**Djupgranskning KLAR — BEKRÄFTAT, VÄRRE ÄN #220:** `run_independent_exam()` tar
+`local_passed: bool`/`score: float` som RÅA anropar-tillhandahållna parametrar — ingen riktig
+tentamensuppgift, rättning, eller evidensrad existerar någonstans. Empiriskt bevisat: tre
+fabricerade anrop når `LOCALLY_VERIFIED`/`verified_available` utan någon verklig verifiering
+alls. Även Cursors egna tester anropar funktionen med hårdkodade `local_passed=True`-literaler,
+så denna lucka är otestad även i deras egen svit. Detta är ETT STEG VÄRRE än #220 — #220 hade
+åtminstone en (otillräcklig) evidens-FK-check; här finns ingen check överhuvudtaget.
+`resolve_local_vs_teacher()` är dock KORREKT — vägrar korrekt lösa upp via ren
+modell-konsensus, `majority_vote_used` sätts aldrig `True`.
+
+**Ny, oberoende bugg funnen (inte del av evidens-buggklassen):** `teacher_ledger.py`s
+`_LEDGER` är en modul-nivå in-memory dict med NOLL owner_id-scoping — icke-durabel (förloras
+vid omstart) och cross-owner-läckande inom en process (alla ägare delar samma globala dict,
+nyckel bara `domain::teacher_id`, ingen ägar-isolering alls).
 
 Första PR:n som faktiskt KOPPLAR IHOP tidigare isolerade stadier (lookaround → lessons →
 WorkCandidates → staffing → workforce dry-run → continuity checkpoints). Verifierat: (1)
