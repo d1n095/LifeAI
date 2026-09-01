@@ -99,5 +99,7 @@ class ExecutiveCycleResult:
     authority_denials: list[str] = field(default_factory=list)
     missing_pieces: list[dict[str, Any]] = field(default_factory=list)
     completion_assessment: dict[str, Any] | None = None
-    # Feed-only refs for safe_planner — never authority.
+    # Contradiction_refs / completion_assessment feed-only refs for safe_planner — never authority.
     contradiction_refs: list[str] = field(default_factory=list)
+    # Local Intelligence School path (local-attempt-first); never provider activation.
+    school_path: dict[str, Any] | None = None

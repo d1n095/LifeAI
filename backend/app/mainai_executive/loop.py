@@ -49,6 +49,9 @@ AUTHORITY_DENIALS = [
     "STAFFING_DECISION_IS_NOT_AUTHORITY",
     "WORKFORCE_DRY_RUN_IS_NOT_PROVIDER_ACTIVATION",
     "EXECUTIVE_CYCLE_DOES_NOT_AUTHORIZE_WORK",
+    "TEACHER_IS_NOT_TRUTH",
+    "EXTERNAL_MODEL_IS_NOT_MAINAI",
+    "MODEL_CONSENSUS_IS_NOT_TRUTH",
 ]
 
 
@@ -108,6 +111,7 @@ def run_executive_cycle(
             interruption_point=interruption_point,
             missing_pieces=[],
             assumption_scan={},
+            school_path=None,
         )
 
     # Memory → work linkage (park only; never insert authorized tasks)
@@ -152,6 +156,22 @@ def run_executive_cycle(
     )
     completed.append("STAFFING_DECISION")
 
+    # LOCAL CAPABILITY CHECK before act — school routing; never provider-as-default.
+    from app.mainai_executive.school_bridge import derive_task_class, run_local_first_school_step
+    from app.mainai_school.routing import route_local_first
+
+    domain, task_class = derive_task_class(need_capability)
+    pre_route = route_local_first(
+        db,
+        owner_id=owner_id,
+        domain=domain,
+        task_class=task_class,
+        local_confidence=0.55,
+        evidence_jobs=0,
+        new_or_hard_domain=False,
+    )
+    completed.append("LOCAL_CAPABILITY_CHECK")
+
     workforce_dry: dict[str, Any] | None = None
     if run_workforce_dry and staffing.action in ("use_existing", "create_candidate", "refuse"):
         try:
@@ -163,7 +183,7 @@ def run_executive_cycle(
             run_workforce_dry = False
             workforce_dry = None
         if run_workforce_dry:
-            # Always dry-run classification path — never provider.
+            # Always dry-run classification path — never provider. LOCAL ATTEMPT FIRST.
             slice_result = run_low_risk_classification_slice(
                 db,
                 owner_id=owner_id,
@@ -177,8 +197,11 @@ def run_executive_cycle(
                 "provider_invoked": slice_result.provider_invoked,
                 "consequential_effects": slice_result.consequential_effects,
                 "activate_provider": False,
+                "local_attempt_first": True,
+                "school_route": pre_route.decision.value,
             }
             completed.append("ACT_DRY_RUN")
+            completed.append("LOCAL_ATTEMPT_FIRST")
             if interruption_point == "after_delegation_before_result":
                 uncertain.append("delegation_result_unknown")
                 remaining = ["VERIFY", "STORE", "LEARN", "REPLAN", "CONTINUE"]
@@ -188,6 +211,38 @@ def run_executive_cycle(
                 uncertain.append("memory_update_pending")
             else:
                 completed.append("VERIFY")
+
+    school_path: dict[str, Any] | None = None
+    if not interruption_point:
+        local_ok = None
+        if workforce_dry is not None:
+            local_ok = (
+                not workforce_dry.get("provider_invoked")
+                and workforce_dry.get("verification_status") in (None, "passed", "ok", "verified", "accepted")
+            )
+            # Treat dry-run completion without provider as local attempt success when verified-ish.
+            if workforce_dry.get("provider_invoked"):
+                local_ok = False
+            elif workforce_dry.get("verification_status") in ("failed", "rejected", "error"):
+                local_ok = False
+            else:
+                local_ok = True
+        try:
+            school_path = run_local_first_school_step(
+                db,
+                owner_id=owner_id,
+                founder_request=founder_request,
+                need_capability=need_capability,
+                local_success=local_ok,
+                local_confidence=0.6 if local_ok else 0.35,
+                workforce_dry_run=workforce_dry,
+            )
+            completed.append("SCHOOL_LEARN")
+            if school_path.get("seek_external_teacher"):
+                uncertain.append("external_teacher_optional_not_invoked")
+        except Exception:
+            logger.exception("school bridge failed; continuing without authority escalation")
+            uncertain.append("school_bridge_failed")
 
     phase = ExecutivePhase.CONTINUE if not interruption_point else ExecutivePhase.ACT
     if not interruption_point:
@@ -216,6 +271,7 @@ def run_executive_cycle(
         missing_pieces=[missing],
         linkage_actions=linkage_actions,
         assumption_scan=assumption_scan,
+        school_path=school_path,
     )
 
 
@@ -279,6 +335,7 @@ def _finalize(
     missing_pieces: list[dict[str, Any]],
     linkage_actions: list[str] | None = None,
     assumption_scan: dict[str, Any] | None = None,
+    school_path: dict[str, Any] | None = None,
 ) -> ExecutiveCycleResult:
     wf_req = None
     if workforce_dry_run and workforce_dry_run.get("request_id"):
@@ -307,6 +364,9 @@ def _finalize(
     obs["staffing_reason"] = staffing_reason
     contradiction_refs = list((assumption_scan or {}).get("contradiction_refs") or [])
     obs["contradiction_refs"] = contradiction_refs
+    obs["school"] = school_path or {}
+    obs["local_attempt_first"] = bool((school_path or {}).get("local_attempt_first"))
+    obs["teacher_is_not_truth"] = True
     completion = assess_completion(
         feature="executive_cycle",
         evidence={
@@ -340,4 +400,5 @@ def _finalize(
         missing_pieces=missing_pieces,
         completion_assessment=completion,
         contradiction_refs=contradiction_refs,
+        school_path=school_path,
     )
