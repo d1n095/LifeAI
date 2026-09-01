@@ -14,7 +14,7 @@ From repo `backend/` (local ops/test DB — never silently prod):
 
 ```bash
 cd backend
-unset DATABASE_URL APP_DATABASE_URL   # or set explicitly to the intended local DB
+# Creates/migrates lifeos_safe_internal on localhost:5433 if needed.
 python scripts/mainai/safe_internal_boot.py --json /tmp/mainai-boot-receipt.json
 ```
 
