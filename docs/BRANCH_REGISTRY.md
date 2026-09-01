@@ -474,7 +474,7 @@ self-claims) FAIL (förväntat, bekräftar #213 från ny vinkel) · Invariant 5 
 auktoritetsutvidgning) PASS. Ingen O(n²)-prestandaproblematik vid denna skala (1.57x
 tidsförhållande tidigt→sent över ~1200 events).
 
-### Systemiskt mönster: semantisk kringgåelse av nyckelordsbaserade grindar (3 oberoende fynd)
+### Systemiskt mönster: semantisk kringgåelse av nyckelordsbaserade grindar (4 oberoende fynd + falska positiva)
 
 Samma svaghetsform hittad OBEROENDE i tre olika moduler ikväll — alla dormanta, ingen live-
 konsument ännu, men samma arkitektoniska hål: en säkerhetsrelevant klassificering görs via en
@@ -489,12 +489,30 @@ FAST NYCKELORDSLISTA/regex, som en trivial omformulering helt kringgår.
 3. **#221**: attention-ranking har INGEN pinned/undantags-mekanism alls — ett äkta
    säkerhetsrelevant item med lågt beräknat score faller tyst bort ur topp-50, empiriskt bevisat
    med ett 66-item-scenario. Dormant (`authority_implied` hårdkodad `False`).
+4. **`app.safe_planner.FORBIDDEN_WORDS`**: en FJÄRDE oberoende förekomst av samma spröda
+   regex-mönster, funnen men INTE ännu empiriskt testad (kandidat för nästa attack-runda).
 
-**Föreslagen lösning (flaggad, INTE implementerad, kräver founder-signoff eftersom det lägger
-till ett fakturerat AI-anrop i en säkerhetskritisk väg):** samma riktning föreslagen två gånger
-oberoende — behåll regex som billig fail-closed snabbväg, falla tillbaka till en riktig
-LLM-klassificerare bara när regex inte matchar. Ett arkitekturbeslut, inte en engångsfix per
-modul.
+**FALSKA POSITIVA — motsatt fel, också bekräftat empiriskt ikväll:** samma nyckelordslistor
+triggar även FEL på ofarlig text som råkar innehålla en delsträng.
+- **#214** (`_touches_protected()`): **7 av 8** testade kandidater felutlöser — REN
+  delsträngs-matchning, NOLL ordgränsskydd. "girls"/"curls"/"pearls" triggar via `rls`,
+  "audition" via `audit`, "leaseholder" via `lease`. Allvarligare än #218:s motsvarande fel.
+- **#218** (`classify_ambiguity()`): **5 av 9** kandidater felutlöser, men BARA
+  bindestreck-sammansättningar ("production-notes", "delete-old-branch",
+  "merge-conflict-resolver") — dess befintliga `\b`-ordgräns-regex skyddar korrekt mot
+  suffix-fäste sammansättningar (emergency/workforce/deployment passerar korrekt).
+
+**Billig, omedelbar delfix (verifierad, redo att landas, INGEN AI-kostnad):** att bredda
+ordgränsdefinitionen till att behandla `-` som ett ordtecken stänger 100% av de falska
+positiva i BÅDA modulerna utan att förlora någon sann positiv. Patch postad på både #214 och
+#218 — löser INTE huvudproblemet (falska negativa/omformulerings-kringgåelse, som fortfarande
+kräver arkitekturbeslutet nedan), men är en fristående, riskfri förbättring redo att landas nu.
+
+**Föreslagen lösning på huvudproblemet (flaggad, INTE implementerad, kräver founder-signoff
+eftersom det lägger till ett fakturerat AI-anrop i en säkerhetskritisk väg), design postad på
+#227:** delad `app.action_classification`-modul med en riktig `ActionType`-vokabulär, regex
+som billig fail-closed snabbväg, LLM-klassificerare bara vid gränsfall — samma riktning
+föreslagen tre gånger oberoende nu. Ett arkitekturbeslut, inte en engångsfix per modul.
 
 ---
 
