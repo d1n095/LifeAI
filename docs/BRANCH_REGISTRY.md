@@ -487,6 +487,36 @@ alltså same-process-bevis, inte en genuint färsk process. Safe-internal DB-gr�
 genuint verklig (separat fysisk Postgres-databas, inte bara schema-partition). Inget bekräftat
 fel i #237 självt.
 
+### PR #240 — readiness-rapporteringsfixar (samma andra Claude Code-session) — ALLA 5 VERIFIERADE
+
+Fixar exakt de luckor kvällens readiness-certifieringsmatris hittade i #234, plus en femte
+oberoende förekomst av evidens-bugg-klassen. Oberoende empiriskt omverifierat, alla 5
+BEKRÄFTADE, inga avvisade:
+
+1. **Tappade blockerare (överskrivning, inte merge):** verifierat — 3 samtidiga blockerare
+   överlever nu in i `report.blocking`.
+2. **Falsk migrations-check:** checken själv är nu genuint korrekt (empiriskt konstruerad
+   riktig multi-head-Alembic-kollision, bekräftat rapporterar `unhealthy`). **MEN bekräftat via
+   grep att checken FORTFARANDE aldrig konsulteras av någon nivå-grindningslogik** — med den
+   injicerade multi-head-staten + alla grindar verifierade nådde readiness ändå
+   `READY_FOR_LOW_RISK_PROVIDER_RUN` och migrationsproblemet dök aldrig upp i `blocking`.
+   Ärlig nu, fortfarande inte verkställd.
+3. **Hårdkodad review-status:** verifierat korrekt i båda riktningar (okända grindar OCH
+   alla-verifierade-grindar).
+4. **Evidens-gräns (department_capability_ledger) — VIKTIGASTE FYNDET:** uttömmande testat
+   alla 4 gränsfall inklusive exakt 0.667-gränsen (2 lyckade/1 misslyckad) utan
+   flyttal-gränsbugg. **Kritiskt: `department_evidence.py` har NOLL referenser till
+   `capability_reality`/`record_capability_observation` — detta är en HELT SEPARAT, oberoende
+   mekanism från #213/#220:s fortfarande öppna evidens-bugg.** Att fixa detta stänger INTE
+   #213/#220 ens delvis — femte oberoende förekomst av samma buggklass, egen kodväg.
+5. **Cirkulär import:** verifierat fixad i båda importordningarna, bredare import-sanity-check
+   OK.
+
+**Bonus-fynd (incidentellt):** `v1_autonomous_engine`-checken är just nu trasig
+(`AttributeError` på `eligible_authorized_goals`) — degraderar säkert till "okänt", men är den
+FAKTISKA blockeraren för högsta readiness-nivå just nu, oberoende av denna PR. Matchar ett
+tidigare fynd från kvällens readiness-certifieringsrunda.
+
 ### PR #238 — fix från en ANNAN Claude Code-session (inte Cursor, inte denna session)
 
 Fixar två riktiga buggar i `apply_memory_work_linkage()` (#211) som missades i förstapasset.
