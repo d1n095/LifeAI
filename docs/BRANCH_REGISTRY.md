@@ -258,7 +258,7 @@ kommentarer postade direkt på respektive PR.
 
 | PR | Stage | Status (första passet) |
 |---|---|---|
-| [#211](https://github.com/d1n095/LifeAI/pull/211) | C: memory→work linkage | Ren (empiriskt verifierad auktoritetsgräns) |
+| [#211](https://github.com/d1n095/LifeAI/pull/211) | C: memory→work linkage | Ren på auktoritetsgräns, men **INTE fullt ren** — se PR #238 (annan Claude-session hittade 2 riktiga buggar i samma modul, missade i förstapasset: idempotency + TOCTOU, fix under verifiering) |
 | [#212](https://github.com/d1n095/LifeAI/pull/212) | D: temporal recap | Ren (ingen LLM i recap-vägen, allt spårbart till källrad) |
 | [#213](https://github.com/d1n095/LifeAI/pull/213) | E: self-model/capability ledger | **BEKRÄFTAD BUGG** (se lista nedan) |
 | [#214](https://github.com/d1n095/LifeAI/pull/214) | F: continuous simplification | Ren (rent förslags-lager, ingen destruktiv väg än) |
