@@ -676,6 +676,30 @@ kandidat, identiska med de enskilda gren-fynden.** Rekommendation: landa
 migration-gating-förbättringen (med unknown-ska-blockera-fixen tillagd) medan explicita fixar
 fortfarande krävs för de andra två innan omcertifiering försöks.
 
+**Kvarstående examenspunkter 7/10/12/13 stängda (2026-09-02), oberoende av de fyra
+blockerarna Cursor nu fixar:**
+- **7 (multi-omstart-kontinuitet): VERIFIERAD REN.** 6 genuint separata subprocess-omstarter
+  mot exakt denna SHA. Supersession-kedja byggd över två olika processer, en genuin
+  motsägelse förblev olöst (ingen auto-val), kill-switch-state byte-identiskt över 3
+  oberoende färsk-process-kontroller. NOLL avvikelse från den tidigare 10-process-kampanjens
+  rena resultat — ingen komposition-specifik regression.
+- **10 (backup/restore): VERIFIERAD, existerar.** `safe_internal_backup_restore_proof.py` är
+  riktig (225 rader); körd direkt — genuint innehålls-nivå-bevis (en specifik korrigering
+  skapad, säkerhetskopierad, borttagen, återställd, bekräftad återhämtad), inte bara en
+  `pg_dump`-exitkod-check.
+- **12 (concurrency-sanity): REN, ingen interaktion möjlig.** #238s advisory-lås
+  (`pg_advisory_xact_lock`, hash-nyckel) och #243s rad-nivå-`FOR SHARE`/`FOR UPDATE`-låsning
+  är strukturellt olika primitiv på orelaterade tabeller — kan inte kollidera.
+  Readiness-koden har noll referenser till kill-switch någonstans — helt frikopplat.
+- **13 (#218-regression): N/A, INTE en regression — VIKTIGT FYND.** Bekräftat via
+  `git merge-base --is-ancestor` att PR #218s egen commit INTE är en ancestor till denna
+  komponerade kandidat alls. **#218 lever på en separat, fortfarande omergad gren (del av den
+  17-PR:s Memory Frontier-stacken) och var ALDRIG en av #244s fem namngivna källgrenar.**
+  Ingenting har ångrats — modulen finns bara inte med ännu. **VIKTIGT ATT VETA:** en framtida
+  "safe-internal certifierad"-etikett på #244 får INTE antyda att personal-intent-learning
+  (#218s modul) omfattas — det gör den inte. Certifieringens scope måste vara explicit om
+  detta.
+
 ### PR #243 — kill-switch/grant-time auktoritetsrace-fix — VERIFIERAD (kvällens allvarligaste fynd, nu stängt)
 
 Byggd på #239s gren, stänger exakt den lucka #239 själv flaggade som utanför sitt scope:
