@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.mainai_executive.loop import resume_executive_cycle, run_executive_cycle
 from app.mainai_school.offline import audit_offline_capabilities
-from app.workforce.kill_switch import assert_not_killed, clear_kill_switch_for_recovery
+from app.workforce.kill_switch import assert_not_killed
 
 
 @dataclass
@@ -58,9 +58,29 @@ def run_composed_safe_internal_mainai_run(
 ) -> ComposedSafeInternalReport:
     """Full chain without external APIs."""
     notes: list[str] = []
-    # Ensure kill switch is clear for the run (safe_internal may have armed it earlier).
-    clear_kill_switch_for_recovery(founder_ack="composed_safe_internal_clear")
-    assert_not_killed()
+    # NEVER clear kill switch on boot — BOOT != FOUNDER ACK.
+    try:
+        assert_not_killed(db, owner_id=owner_id)
+    except Exception as exc:
+        from app.workforce.kill_switch import KillSwitchError, record_boot_blocked, query_stop_status
+
+        if isinstance(exc, KillSwitchError):
+            record_boot_blocked(db, owner_id=owner_id, reason=str(exc))
+            status = query_stop_status(db, owner_id=owner_id)
+            return ComposedSafeInternalReport(
+                session_id=session_id or "blocked",
+                phase="BLOCKED_BY_KILL_SWITCH",
+                local_attempt_first=False,
+                school_wired=False,
+                provider_invoked=False,
+                restart_ok=False,
+                offline_ok=False,
+                teacher_invoked=False,
+                authority_denials=["BOOT_CANNOT_CLEAR_KILL_SWITCH"],
+                notes=[f"blocked:{exc.code}", str(status)],
+                observability={"stop_status": status, "code": exc.code},
+            )
+        raise
 
     offline = audit_offline_capabilities()
     offline_ok = bool(offline.get("offline_meaningful")) and not offline.get(

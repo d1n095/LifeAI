@@ -117,7 +117,7 @@ def run_local_first_school_step(
             "authority_widened": False,
         },
         "learning_contract": contract.as_dict(),
-        "independence": snapshot_domain(domain).__dict__,
+        "independence": snapshot_domain(domain, owner_id=str(owner_id)).__dict__,
         "evidence_policy": evidence_policy_dict(),
         "external_model_is_not_mainai": True,
         "teacher_is_not_truth": True,

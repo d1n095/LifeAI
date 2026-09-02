@@ -577,6 +577,8 @@ _MAINAI_EXECUTION_TABLES = (
     "workforce_lifecycle_events",
     "workforce_cost_budgets",
     "workforce_verification_decisions",
+    "mainai_stop_state",
+    "mainai_stop_events",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})

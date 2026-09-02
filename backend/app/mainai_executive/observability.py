@@ -99,7 +99,7 @@ def executive_status_snapshot(
         "chain_of_thought_exposed": False,
         "evidence_basis": "durable_rows_only",
         "startup_readiness": _startup_readiness(),
-        "kill_switch": _kill_switch_status(),
+        "kill_switch": _kill_switch_status(db, owner_id=owner_id),
     }
 
 
@@ -119,15 +119,22 @@ def _startup_readiness() -> dict[str, Any]:
         return {"level": "UNKNOWN", "error": type(exc).__name__, "source": "unavailable"}
 
 
-def _kill_switch_status() -> dict[str, Any]:
+def _kill_switch_status(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]:
     try:
-        from app.workforce.kill_switch import get_kill_switch
+        from app.workforce.kill_switch import query_stop_status
 
-        state = get_kill_switch()
+        status = query_stop_status(db, owner_id=owner_id)
+        reason = None
+        if status.get("global", {}).get("active"):
+            reason = status["global"].get("reason")
+        elif status.get("owner", {}).get("active"):
+            reason = status["owner"].get("reason")
         return {
-            "active": bool(getattr(state, "active", False) or getattr(state, "killed", False)),
-            "reason": getattr(state, "reason", None),
-            "source": "workforce.kill_switch",
+            "active": bool(status.get("blocked")),
+            "reason": reason,
+            "code": status.get("code"),
+            "source": "workforce.kill_switch.query_stop_status",
+            "durable": status,
         }
     except Exception as exc:  # noqa: BLE001
         return {"active": False, "error": type(exc).__name__, "source": "unavailable"}
