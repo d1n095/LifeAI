@@ -253,7 +253,9 @@ def resolve_with_learned_intent(
     # If we auto-resolved via learned binding, downgrade LOW_RISK ambiguity.
     if auto_resolved and ambiguity == AmbiguityClass.LOW_RISK:
         ambiguity = AmbiguityClass.NONE
-    must_surface = ambiguity == AmbiguityClass.CONSEQUENTIAL and not auto_resolved
+        # PAST LANGUAGE MEMORY != CURRENT AUTHORIZATION:
+    # auto_resolved must NEVER suppress consequential confirmation.
+must_surface = ambiguity == AmbiguityClass.CONSEQUENTIAL
 
     if persist and binding_id is None:
         key = idempotency_key or f"intent:{owner_id}:{_phrase_key(raw_expression)}:{uuid.uuid4()}"
