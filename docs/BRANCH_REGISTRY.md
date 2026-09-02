@@ -542,6 +542,53 @@ egna):
   granskningskommentaren istället för att tystlåtet föras vidare — matchar sessionens egen
   "verifiera PR-formuleringens noggrannhet"-disciplin.
 
+### P0 — Evidens-semantik: DEFINITIV #213/#220-matris + central portdesign (founder-krav, 2026-09-02)
+
+**Del 1 — den delade `record_capability_observation()`-funktionen (använd av #213/#220),
+definitiv 10-scenario-matris, FORTFARANDE HELT ÖPPEN.** Bekräftat via `git log` att
+`app/capability_reality/` bara har EN commit någonsin (grundläggningen) — INGEN av kvällens
+fixar (#238/#239/#240) har rört den.
+
+| # | Scenario | Resultat |
+|---|---|---|
+| 1 | Riktig framgång | PASS (baseline) |
+| 2 | Misslyckad verifiering | **BEKRÄFTAD BUGG** |
+| 3 | Avvisad verifiering | **BEKRÄFTAD BUGG** |
+| 4 | Orelaterad evidens | **BEKRÄFTAD BUGG** |
+| 5 | Fel ägare | **PASS, genuint säkert** — blockeras av ett DB-composite-FK (`fk_capability_records_evidence_owner`), inte applikationskod |
+| 6 | Fel subjekt (evidens för X stödjer Y) | **BEKRÄFTAD BUGG** |
+| 7 | Superseded evidens | N/A, inte modellerat på schema-nivå alls |
+| 8 | Äldre framgång + nyare misslyckande | **BEKRÄFTAD BUGG** (status motsäger `last_failure_at` inom samma anrop) |
+| 9 | Äldre misslyckande + nyare framgång | passerar bara via anroparens ärlighet, undermineras av #8 |
+| 10 | Motsägande evidens i ett anrop | **BEKRÄFTAD BUGG** |
+
+**6 av 10 tillämpliga scenarion BEKRÄFTAT TRASIGA.** #240:s fix rörde INTE denna funktion —
+helt separat, fortfarande helt öppen.
+
+**Del 2 — central portdesign, föreslagen (INTE implementerad):** delad
+`supports_claim(evidence, owner_id, subject_type, subject_id, proposition, required_outcome)`.
+Kräver två nya kolumner på `intelligence_evidence` (ett riktigt `outcome`-enum, samt
+`subject_type`/`subject_id` för att koppla evidens till ett SPECIFIKT påstående — de två
+luckorna bakom scenario 2/3/8/10 respektive 4/6). Rent additiv migration, NOLL ny AI-kostnad,
+kräver INTE att röra #218/#239/#240 igen. Uttryckligen skild från det separata
+#218/#214-parafras-kringgåelse-tråden (som VERKLIGEN behöver en LLM-reserv och
+founder-signoff) — den här behöver det INTE, det är ett strukturellt/schema-problem.
+
+### Sjätte oberoende förekomst: `app/workforce/verification.py` — HÖGRISK-nivåns egen grind trasig
+
+`apply_verification_decision()` grindar HÖGRISK `VERIFIED`-status på `test_evidence_ref`/
+`founder_approval_ref` — men kontrollerar bara SANNHETSVÄRDE, aldrig innehåll, ingen FK till
+en riktig evidens-/godkännanderad. Bevisat direkt från Cursors EGEN existerande test
+(`test_workforce_ops.py:245`): en fabricerad icke-existerande testsökväg OCH en uppenbart
+fejkad godkännande-sträng tillfredsställer båda den HÖGSTA risknivåns verifieringsgrind.
+
+**Övriga ytor i denna revisionsrunda:** goal/task-completion, verification pipeline (den
+äldre V0.1-V0.3-motorn), CI-wait-vägen — ALLA REN, härleder genuint `passed`/completion från
+riktiga kontroller (verkliga subprocess-pytest-körningar, riktiga externa GitHub CI-pollningar)
+— aldrig ett anropar-tillhandahållet påstående. `EngineeringLesson.verification_status`
+fortfarande dormant, noll skrivare. `memory_truth_claims` inte omtestad mot den fullständiga
+matrisen denna runda (redan bekräftad ren på kärndimensionen tidigare).
+
 ### P0 — Migration-gating: BEKRÄFTAD BLOCKERARE, formaliserad (founder-krav, 2026-09-02)
 
 **Invariant:** DETECTED BLOCKER != ENFORCED BLOCKER. "Systemet vet att den har fel" är INTE
