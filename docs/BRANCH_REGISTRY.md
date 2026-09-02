@@ -634,6 +634,47 @@ dormanta-men-verkliga form som #6.
 har INGEN RLS alls — bryter mot kodbasens egen etablerade mönster för varje annan
 ägar-scopad tabell.
 
+### P0 — Fullskalig multi-omstart-historiekampanj (founder-beordrad, 2026-09-02) — 10/10 GODKÄNT, INGEN DEGRADERING
+
+**Det starkaste positiva beviset hittills för "dö helt, starta om, veta ändå vem hon är."**
+10 GENUINT separata OS-subprocesser (P1→P10), varje en riktig `subprocess.run()`, färsk
+Python-interpreter, färskt SQLAlchemy-engine, ingen delad in-process-state. Byggd mot en
+worktree som kombinerar integrationstippen + alla 4 öppna pre-start-grenar (#237/#238/#239/
+#240) — en riktig mergekonflikt i `memory_work_linkage/service.py` löst (båda grenarna hade
+oberoende konvergerat mot samma fix; behöll den mest fullständiga sidan).
+
+**Sekvens:** frö rik historik + aktivera kill-switch → läs-endast-baslinje → fördjupa en
+2-länks supersession-kedja → skapa en genuin olöst motsägelse → förmåge-regression +
+återupplivnings-försök (korrekt avvisat) → cancel/park-arbetslivscykel → verifiera att
+kill-switch består oförändrad → avbrutet mål → lös uttryckligen den tidigare motsägelsen →
+slutlig färsk-process-assertion.
+
+**ALLA 10 KRÄVDA ASSERTIONS GODKÄNDA:** aktuell sanning är aktuell, superseded förblir bara
+historia, misslyckad förmåga återupplivades inte (reste `CapabilityEvidenceError`), avbrutet
+arbete återupptogs inte, parkerat arbete förblev sökbart, decision debt växte korrekt (2→4,
+inget tappat), auktoritet rekonstruerades inte från minne, kill-switch-state var
+byte-identiskt över 3 oberoende processkontroller (P1/P7/P10), provider förblev noll genom
+hela kampanjen. De fyra kärnkorrekthets-invarianterna omfrågades färskt vid alla 9
+omstarts-punkter och returnerade identiskt `True` varje gång — INGEN flimmer, INGEN drift,
+monotont och korrekt växande resultatmängd. **SVAR PÅ HUVUDFRÅGAN: NEJ, ingen semantisk
+fidelitets-degradering upptäckt när historiken växer.**
+
+**VIKTIGT, KRÄVER OMEDELBAR UPPFÖLJNING:** PR #237s egen gren innehåller redan ett
+självförfattat certifieringsarbete (`docs/MAINAI_PRE_START_DEFECT_LEDGER.md`,
+`docs/CLAUDE_CERTIFICATION_ATTACK_5b15f02.md`) som hävdar flera P0-punkter — INKLUSIVE den
+centrala #213/#220-evidens-semantik-fixen (`app/evidence_claim.py`s
+`evidence_supports_claim()`) — som "LOCALLY_FIXED". INTE oberoende omverifierat än (utanför
+denna forks scope). Eftersom denna sessions egen `git log`-kontroll (ovan) bekräftade
+`app/capability_reality/` orörd — betyder detta antingen (a) en ny, separat modul
+(`evidence_claim.py`) som ANNAT anropar in i finns men INTE ännu är kopplad till
+`capability_reality.record_capability_observation()`, eller (b) en verklig fix som denna
+sessions egen matris missade att upptäcka pga att den kollade fel modul. Kräver akut
+avstämning nästa runda — se nedan.
+
+Ärligt bortprioriterat i denna körning: `supersede_work_candidate()`-vägen otestad (bara
+`dismiss` övades), inget positivt "avslutat arbete"-testfall, school/teacher-ledger-state
+inte återsådd (redan bekräftad icke-durabel av en tidigare fork).
+
 ### P0 — Genuint fresh-process-omstart-bevis (founder-beordrad, 2026-09-01) — MESTADELS RENT
 
 **Bygger på och stärker #237:s tidigare same-process-anmärkning.** Fem RIKTIGA separata
