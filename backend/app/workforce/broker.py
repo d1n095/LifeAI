@@ -84,6 +84,11 @@ def resolve_delegation(
         raise DelegationBrokerError(f"request status={request.status} is not open")
 
     prefer_local = prefer_local_only or request.data_sensitivity in ("vault", "secret", "high")
+    # Durable fence: refuse mint while stopped; serialize vs concurrent activate_*.
+    from app.workforce.kill_switch import assert_authority_grant_allowed
+
+    grant_fence = assert_authority_grant_allowed(db, owner_id=owner_id)
+
     best = select_best_candidate(
         db,
         owner_id=owner_id,
@@ -146,6 +151,7 @@ def resolve_delegation(
                 "EXTERNAL_MODEL_OUTPUT_NE_TRUSTED_FACT",
             ],
             "authority_granted_extra": False,
+            "authority_fence": grant_fence,
         },
     )
     db.add(assignment)

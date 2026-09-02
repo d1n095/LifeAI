@@ -25,7 +25,7 @@ from app.workforce.activation_gates import (
     get_activation_gates,
     record_gate_verification,
 )
-from app.workforce.authority import revoke_assignment_authority
+from app.workforce.authority import assignment_authority_is_live, revoke_assignment_authority
 
 # Fabricated strings used historically by boot/composed paths — forever rejected.
 _FABRICATED_ACK_DENYLIST = frozenset(
@@ -95,6 +95,7 @@ def _validate_founder_ack(founder_ack: str) -> None:
 
 
 def _get_or_create_state(db: Session, *, scope: str, owner_id: uuid.UUID | None) -> dict[str, Any]:
+    """Race-safe ensure of stop-state row (unique indexes on global/owner)."""
     if scope == "global":
         row = db.execute(
             text(
@@ -102,16 +103,27 @@ def _get_or_create_state(db: Session, *, scope: str, owner_id: uuid.UUID | None)
                 "FROM mainai_stop_state WHERE scope = 'global' LIMIT 1"
             )
         ).mappings().first()
-        if row is None:
-            db.execute(
-                text(
-                    "INSERT INTO mainai_stop_state (scope, owner_id, active, reason, sequence) "
-                    "VALUES ('global', NULL, false, '', 0)"
+        if row is not None:
+            return dict(row)
+        try:
+            with db.begin_nested():
+                db.execute(
+                    text(
+                        "INSERT INTO mainai_stop_state (scope, owner_id, active, reason, sequence) "
+                        "VALUES ('global', NULL, false, '', 0)"
+                    )
                 )
+        except Exception:
+            # Concurrent creator won unique index — fall through to SELECT.
+            pass
+        row = db.execute(
+            text(
+                "SELECT id, scope, owner_id, active, reason, sequence, updated_at "
+                "FROM mainai_stop_state WHERE scope = 'global' LIMIT 1"
             )
-            db.flush()
-            return _get_or_create_state(db, scope="global", owner_id=None)
+        ).mappings().one()
         return dict(row)
+
     row = db.execute(
         text(
             "SELECT id, scope, owner_id, active, reason, sequence, updated_at "
@@ -119,16 +131,26 @@ def _get_or_create_state(db: Session, *, scope: str, owner_id: uuid.UUID | None)
         ),
         {"oid": str(owner_id)},
     ).mappings().first()
-    if row is None:
-        db.execute(
-            text(
-                "INSERT INTO mainai_stop_state (scope, owner_id, active, reason, sequence) "
-                "VALUES ('owner', :oid, false, '', 0)"
-            ),
-            {"oid": str(owner_id)},
-        )
-        db.flush()
-        return _get_or_create_state(db, scope="owner", owner_id=owner_id)
+    if row is not None:
+        return dict(row)
+    try:
+        with db.begin_nested():
+            db.execute(
+                text(
+                    "INSERT INTO mainai_stop_state (scope, owner_id, active, reason, sequence) "
+                    "VALUES ('owner', :oid, false, '', 0)"
+                ),
+                {"oid": str(owner_id)},
+            )
+    except Exception:
+        pass
+    row = db.execute(
+        text(
+            "SELECT id, scope, owner_id, active, reason, sequence, updated_at "
+            "FROM mainai_stop_state WHERE scope = 'owner' AND owner_id = :oid LIMIT 1"
+        ),
+        {"oid": str(owner_id)},
+    ).mappings().one()
     return dict(row)
 
 
@@ -229,14 +251,65 @@ def assert_not_killed(db: Session | None = None, *, owner_id: uuid.UUID | None =
         )
 
 
+def _lock_authority_fence(db: Session, *, owner_id: uuid.UUID | None) -> dict[str, Any]:
+    """Durable serialization between STOP and GRANT.
+
+    Locks global stop row (+ owner row when owner_id set) with FOR UPDATE so a concurrent
+    grant cannot commit live authority after stop has revoked-and-activated (or vice versa).
+    PROCESS FLAGS ARE NOT AUTHORITY.
+    """
+    # Ensure rows exist first (plain path), then lock.
+    _get_or_create_state(db, scope="global", owner_id=None)
+    if owner_id is not None:
+        _get_or_create_state(db, scope="owner", owner_id=owner_id)
+    db.flush()
+    global_row = db.execute(
+        text(
+            "SELECT id, scope, owner_id, active, reason, sequence, updated_at "
+            "FROM mainai_stop_state WHERE scope = 'global' FOR UPDATE"
+        )
+    ).mappings().one()
+    owner_row = None
+    if owner_id is not None:
+        owner_row = db.execute(
+            text(
+                "SELECT id, scope, owner_id, active, reason, sequence, updated_at "
+                "FROM mainai_stop_state WHERE scope = 'owner' AND owner_id = :oid FOR UPDATE"
+            ),
+            {"oid": str(owner_id)},
+        ).mappings().one()
+    return {"global": dict(global_row), "owner": dict(owner_row) if owner_row else None}
+
+
+def assert_authority_grant_allowed(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]:
+    """Call BEFORE minting any live WorkforceAssignment.
+
+    Holds the durable stop fence lock for the remainder of the caller's transaction so a
+    concurrent activate_* cannot slip a stop between this check and the grant INSERT.
+    """
+    fence = _lock_authority_fence(db, owner_id=owner_id)
+    assert_not_killed(db, owner_id=owner_id)
+    return {
+        "global_sequence": int(fence["global"]["sequence"]),
+        "owner_sequence": int(fence["owner"]["sequence"]) if fence["owner"] else 0,
+        "fence": "mainai_stop_state_for_update",
+    }
+
+
 def activate_owner_stop(
     db: Session,
     *,
     owner_id: uuid.UUID,
     reason: str,
 ) -> KillSwitchState:
-    """OWNER STOP — blocks only this owner's workforce/assignments."""
-    state = _get_or_create_state(db, scope="owner", owner_id=owner_id)
+    """OWNER STOP — blocks only this owner's workforce/assignments.
+
+    Serialized with grants via FOR UPDATE on mainai_stop_state.
+    AFTER STOP COMMIT → no reusable live authority for this owner.
+    """
+    fence = _lock_authority_fence(db, owner_id=owner_id)
+    state = fence["owner"]
+    assert state is not None
     new_seq = int(state["sequence"]) + 1
     revoked = _revoke_owner_assignments(db, owner_id=owner_id, reason=reason)
     db.execute(
@@ -254,8 +327,15 @@ def activate_owner_stop(
         sequence=new_seq,
         reason=reason,
         actor_kind="operator",
-        provenance={"revoked": revoked},
+        provenance={"revoked": revoked, "fence": "mainai_stop_state_for_update"},
     )
+    db.flush()
+    if not prove_no_reusable_live_authority(db, owner_id=owner_id):
+        raise KillSwitchError(
+            "AFTER STOP COMMIT invariant failed: reusable live authority remains",
+            code="AUTHORITY_SURVIVED_STOP",
+            details={"revoked": revoked, "owner_id": str(owner_id)},
+        )
     _PROCESS_CACHE.setdefault("owners", {})[str(owner_id)] = True
     return KillSwitchState(
         active=True,
@@ -274,13 +354,17 @@ def activate_global_emergency_stop(
     reason: str,
     founder_authority_ref: str,
 ) -> KillSwitchState:
-    """GLOBAL SYSTEM EMERGENCY STOP — blocks everyone. Explicit separate control."""
+    """GLOBAL SYSTEM EMERGENCY STOP — blocks everyone. Explicit separate control.
+
+    Revokes ALL live assignments across owners under the durable fence.
+    """
     if not founder_authority_ref or not str(founder_authority_ref).startswith("founder_ack:"):
         raise KillSwitchError(
             "global emergency requires founder_authority_ref starting with founder_ack:",
             code="ACK_REQUIRED",
         )
-    state = _get_or_create_state(db, scope="global", owner_id=None)
+    fence = _lock_authority_fence(db, owner_id=None)
+    state = fence["global"]
     new_seq = int(state["sequence"]) + 1
     # Clear activation gates globally so provider path fail-closes.
     for key in REQUIRED_ACTIVATION_GATES:
@@ -292,6 +376,7 @@ def activate_global_emergency_stop(
                 evidence_ref=None,
                 notes=f"cleared_by_global_emergency:{reason}",
             )
+    revoked = _revoke_all_live_assignments(db, reason=reason)
     db.execute(
         text(
             "UPDATE mainai_stop_state SET active = true, reason = :reason, "
@@ -308,13 +393,26 @@ def activate_global_emergency_stop(
         reason=reason,
         actor_kind="founder",
         founder_ack=founder_authority_ref,
-        provenance={"global_emergency": True},
+        provenance={"global_emergency": True, "revoked": revoked, "fence": "mainai_stop_state_for_update"},
     )
+    db.flush()
+    # Global: every owner with any assignment must have no live authority.
+    lingering = db.execute(
+        select(WorkforceAssignment).where(WorkforceAssignment.revoked_at.is_(None))
+    ).scalars().all()
+    for asg in lingering:
+        if assignment_authority_is_live(asg).live:
+            raise KillSwitchError(
+                "AFTER GLOBAL STOP: reusable live authority remains",
+                code="AUTHORITY_SURVIVED_STOP",
+                details={"assignment_id": str(asg.id), "owner_id": str(asg.owner_id)},
+            )
     _PROCESS_CACHE["global_active"] = True
     return KillSwitchState(
         active=True,
         reason=reason,
         activated_at=_now().isoformat() + "Z",
+        revoked_assignment_ids=revoked,
         scope="global",
         sequence=new_seq,
     )
@@ -474,17 +572,38 @@ def clear_kill_switch_for_recovery(
 
 
 def record_boot_blocked(db: Session, *, owner_id: uuid.UUID | None, reason: str) -> None:
+    """Audit boot refusal — scope/sequence/reason must come from ONE blocking stop identity."""
     status = query_stop_status(db, owner_id=owner_id)
-    seq = int((status.get("owner") or status["global"]).get("sequence") or 0)
+    if status.get("global", {}).get("active"):
+        scope = "global"
+        event_owner_id = None
+        seq = int(status["global"]["sequence"])
+        stop_reason = status["global"].get("reason") or reason
+    elif status.get("owner", {}).get("active"):
+        scope = "owner"
+        event_owner_id = owner_id
+        seq = int(status["owner"]["sequence"])
+        stop_reason = status["owner"].get("reason") or reason
+    else:
+        # Boot blocked without active stop (should be rare) — still audit as system.
+        scope = "global"
+        event_owner_id = None
+        seq = int((status.get("global") or {}).get("sequence") or 0)
+        stop_reason = reason
     _append_event(
         db,
-        scope="owner" if owner_id and status.get("owner", {}).get("active") else "global",
-        owner_id=owner_id if status.get("owner", {}).get("active") else None,
+        scope=scope,
+        owner_id=event_owner_id,
         event_kind="boot_blocked",
         sequence=seq,
-        reason=reason,
+        reason=stop_reason,
         actor_kind="system",
-        provenance={"boot_cannot_clear": True, "status": status},
+        provenance={
+            "boot_cannot_clear": True,
+            "status": status,
+            "caller_reason": reason,
+            "blocking_identity": scope,
+        },
     )
 
 
@@ -511,8 +630,6 @@ def reset_kill_switch_for_tests(db: Session | None = None) -> None:
 
 
 def prove_no_reusable_live_authority(db: Session, *, owner_id: uuid.UUID) -> bool:
-    from app.workforce.authority import assignment_authority_is_live
-
     terminal = frozenset(
         {"completed", "failed", "cancelled", "revoked", "expired", "superseded"}
     )
@@ -530,19 +647,31 @@ def prove_no_reusable_live_authority(db: Session, *, owner_id: uuid.UUID) -> boo
 
 
 def _revoke_owner_assignments(db: Session, *, owner_id: uuid.UUID, reason: str) -> list[str]:
-    live = list(
+    """Revoke every still-live assignment for owner (not status-list alone)."""
+    rows = list(
         db.execute(
-            select(WorkforceAssignment).where(
-                WorkforceAssignment.owner_id == owner_id,
-                WorkforceAssignment.status.in_(
-                    ("assigned", "running", "awaiting_verification")
-                ),
-            )
+            select(WorkforceAssignment).where(WorkforceAssignment.owner_id == owner_id)
         ).scalars()
     )
     revoked: list[str] = []
-    for asg in live:
+    for asg in rows:
+        if not assignment_authority_is_live(asg).live:
+            continue
         revoke_assignment_authority(asg, reason=f"kill_switch:{reason}")
+        asg.status = "revoked"
+        asg.updated_at = datetime.utcnow()
+        revoked.append(str(asg.id))
+    db.flush()
+    return revoked
+
+
+def _revoke_all_live_assignments(db: Session, *, reason: str) -> list[str]:
+    rows = list(db.execute(select(WorkforceAssignment)).scalars())
+    revoked: list[str] = []
+    for asg in rows:
+        if not assignment_authority_is_live(asg).live:
+            continue
+        revoke_assignment_authority(asg, reason=f"kill_switch_global:{reason}")
         asg.status = "revoked"
         asg.updated_at = datetime.utcnow()
         revoked.append(str(asg.id))

@@ -81,7 +81,7 @@ def test_kill_switch_blocks_further_execution(superuser_db):
         status="active",
         trust_zone="LOCAL_INTERNAL",
     )
-    # New assignment while kill switch on — execute must fail closed
+    # New assignment while kill switch on — GRANT must fail closed (not only execute).
     req = submit_delegation_request(
         superuser_db,
         owner_id=owner.id,
@@ -89,16 +89,9 @@ def test_kill_switch_blocks_further_execution(superuser_db):
         required_capability="low_risk_classification",
         verification_requirement="independent_verifier",
     )
-    # Selector may fail if no matching agent with evidence — register capability already
-    asg = resolve_delegation(superuser_db, owner_id=owner.id, request=req, verifier_profile_id=v.id)
     with pytest.raises(KillSwitchError):
-        execute_workforce_assignment(
-            superuser_db,
-            owner_id=owner.id,
-            assignment=asg,
-            goal_text="after kill",
-            capability="low_risk_classification",
-        )
+        resolve_delegation(superuser_db, owner_id=owner.id, request=req, verifier_profile_id=v.id)
+    assert prove_no_reusable_live_authority(superuser_db, owner_id=owner.id) is True
     clear_kill_switch_for_recovery(
         db=superuser_db,
         owner_id=owner.id,

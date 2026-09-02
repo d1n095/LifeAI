@@ -310,12 +310,16 @@ def evaluate_startup_readiness(
     if by_key["blocking_migrations"].status == CheckStatus.unhealthy:
         blocking.append("blocking_migrations")
 
-    if by_key["provider_disabled"].status != CheckStatus.healthy or by_key["kill_switch_health"].status == CheckStatus.unhealthy:
+    if (
+        by_key["provider_disabled"].status != CheckStatus.healthy
+        or by_key["kill_switch_health"].status == CheckStatus.unhealthy
+        or by_key["blocking_migrations"].status == CheckStatus.unhealthy
+    ):
         return StartupReadinessReport(
             ReadinessLevel.BLOCKED,
             tuple(checks),
             tuple(dict.fromkeys(blocking)),
-            "provider or kill-switch not proven",
+            "provider, kill-switch, or migrations not proven",
             receipts,
         )
 
