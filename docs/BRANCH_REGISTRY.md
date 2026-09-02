@@ -752,6 +752,31 @@ direkt: evidens om `test_capX_completely_different.py` accepterades som bevis f�
 orelaterad `capY_the_one_we_claim`. Minsta fix: strama åt den bypass:en till att fortfarande
 kräva subjekt-relevans.
 
+**DEFINITIV 6-FALLS-ATTACK KLAR (2026-09-02) — TVÅ SEPARATA ROTORSAKER, 4/6 TRASIGA.**
+
+| Fall | Resultat |
+|---|---|
+| 1. Annan förmåga, ingen nyckel i payload | **BEKRÄFTAD BUGG** (redan känd) |
+| 2. Samma domän, annan skill | **BEKRÄFTAD BUGG** |
+| 3. Liknande formulering (substräng) | **BEKRÄFTAD BUGG (NY)** |
+| 4. Förälder/barn-förmåga | **BEKRÄFTAD BUGG (NY)** |
+| 5. Fel target-id-mekanism | N/A — ingen sådan kolumn finns |
+| 6. Omdöpt förmåga, gammal evidens återanvänd | PASS — korrekt avvisad |
+
+**Bugg A** (fall 1-2, redan känd): när `capability_key` saknas i payloaden accepterar en
+bred `test_run_result` + `passed=True`-reservväg VILKET godkänt test som helst oavsett subjekt.
+**Bugg B** (fall 3-4, NY): även när `capability_key` FINNS använder `subject_ok`
+SUBSTRÄNGS-INNESLUTNING (`subject_key in capability_key`) istället för exakt likhet — så
+`"send_email" in "send_email_v2"` och `"file_operations" in "file_operations.delete"` passerar
+båda felaktigt, kringgår korrekt missmatch-detekteringskod som finns två grenar längre ner och
+aldrig nås. **Samma substräng-istället-för-exakt-matchning-misstag som redan orsakat
+falsk-positiv-buggarna i nyckelords-klassificerarna (#214/#218) tidigare i natt — en TREDJE
+arkitektonisk eko av samma misstagsform, i en helt annan modul.** Minsta fix: (1) byt
+substräng mot exakt likhet — en rad, stänger fall 3/4; (2) strama åt
+`capability_key`-saknas-reservvägen till att kräva att `subject_key` faktiskt förekommer i
+`source_ref` — stänger fall 1/2. Båda är lokala `evidence_claim.py`-ändringar, INGEN
+schema-migration behövs för just denna lucka.
+
 Scenario 7 (superseded) och 9 (äldre-misslyckande-sen-nyare-framgång) inte oberoende
 omtestade denna runda — koden HAR logik för det förra, värt en uppföljningskontroll.
 
