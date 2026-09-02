@@ -13,7 +13,6 @@ from app.workforce import (
     activation_commit_status,
     assert_provider_invoke_disabled,
     clear_kill_switch_for_recovery,
-    execute_workforce_assignment,
     get_kill_switch,
     prove_no_reusable_live_authority,
     register_workforce_agent,

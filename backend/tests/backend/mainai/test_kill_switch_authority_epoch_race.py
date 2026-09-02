@@ -378,7 +378,7 @@ def test_scenario_5_owner_scoped_stop_only_affects_that_owner(superuser_db):
     owner_b = _owner(setup)
     _, v_a = _register_agents(setup, owner_a.id)
     _, v_b = _register_agents(setup, owner_b.id)
-    owner_a_id, owner_b_id, v_a_id, v_b_id = owner_a.id, owner_b.id, v_a.id, v_b.id
+    owner_a_id, owner_b_id, v_b_id = owner_a.id, owner_b.id, v_b.id
     setup.commit()
     setup.close()
 
