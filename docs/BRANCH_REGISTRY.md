@@ -542,6 +542,26 @@ egna):
   granskningskommentaren istället för att tystlåtet föras vidare — matchar sessionens egen
   "verifiera PR-formuleringens noggrannhet"-disciplin.
 
+### P0 — Migration-gating: BEKRÄFTAD BLOCKERARE, formaliserad (founder-krav, 2026-09-02)
+
+**Invariant:** DETECTED BLOCKER != ENFORCED BLOCKER. "Systemet vet att den har fel" är INTE
+samma sak som "systemet stannar faktiskt." Detta MÅSTE stängas före certifiering.
+
+**Nuläge, redan bevisat (från #240:s omverifiering ovan, formaliserat här som ett tydligt
+blockerande fynd):** med en genuint injicerad multi-head-Alembic-kollision OCH alla andra
+grindar verifierade, når `evaluate_startup_readiness()` ändå `READY_FOR_LOW_RISK_PROVIDER_RUN`
+— migrationsproblemet visas korrekt i checkens EGET resultat men konsulteras aldrig av
+nivå-härledningslogiken (`core`/`need()`/`serious_keys` refererar aldrig
+`"blocking_migrations"`). **CONFIRMED BLOCKER**, kräver egen fix (inte del av #240).
+
+**Acceptanskriterier för nästa granskningsrunda, när Cursor landar en fix:**
+- Fel head → readiness BLOCKERAD (inte bara rapporterad).
+- Flera heads → BLOCKERAD.
+- Verifieringsfel/kommandofel → UNKNOWN/BLOCKERAD (fail-closed, inte fail-open).
+- Korrekt exakt head → kan fortsätta som normalt.
+Ska omverifieras empiriskt med samma multi-head-konstruktionsteknik som redan bevisat
+CONFIRMED-statusen ovan.
+
 ### P1 — Fullständig kill-switch-certifieringsmatris (8 scenarion) — 6/8 GODKÄNT, 2 verkliga dormanta luckor
 
 Testat mot `app/workforce/kill_switch.py` (efter #239:s cross-owner-DoS-fix, se ovan — OBS:
