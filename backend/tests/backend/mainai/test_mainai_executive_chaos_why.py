@@ -87,11 +87,11 @@ def test_chaos_interrupts_leave_no_authority(superuser_db, interrupt):
 
 
 def test_kill_switch_blocks_dry_run(superuser_db):
-    reset_kill_switch_for_tests()
+    reset_kill_switch_for_tests(superuser_db)
     owner, entity = _setup(superuser_db)
     activate_kill_switch(superuser_db, owner_id=owner.id, reason="chaos_test")
     with pytest.raises(KillSwitchError):
-        assert_not_killed(owner.id)
+        assert_not_killed(superuser_db, owner.id)
     result = run_executive_cycle(
         superuser_db,
         owner_id=owner.id,
@@ -106,7 +106,7 @@ def test_kill_switch_blocks_dry_run(superuser_db):
         .load_continuity_checkpoint(superuser_db, owner_id=owner.id, session_id=result.session_id)
         .uncertain
     ))
-    reset_kill_switch_for_tests()
+    reset_kill_switch_for_tests(superuser_db)
 
 
 def test_why_graph_and_decision_debt(superuser_db):

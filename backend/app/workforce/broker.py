@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest, WorkforceTeam
 from app.workforce.authority import TaskScopedAuthority, revoke_assignment_authority
 from app.workforce.context import create_context_package
+from app.workforce.kill_switch import assert_grant_allowed
 from app.workforce.performance import record_job_attempt
 from app.workforce.registry import assert_agent_selectable, get_workforce_agent
 from app.workforce.selector import select_best_candidate
@@ -120,6 +121,14 @@ def resolve_delegation(
         requested_items=list(context_items or []),
         provenance={"delegation_request_id": str(request.id), "profile_id": str(profile.id)},
     )
+
+    # Grant-time kill-switch gate — THE fix for the authority-widening kill-switch race
+    # (see app/workforce/kill_switch.py's module docstring). Must run, in this same
+    # transaction, immediately before the WorkforceAssignment insert below: it takes a row
+    # lock that a concurrent activate_kill_switch()/activate_global_kill_switch() call
+    # contends for as part of its own commit, so the database enforces one strict ordering
+    # between this grant and any concurrent stop — no application-level timing assumption.
+    assert_grant_allowed(db, owner_id=owner_id)
 
     assignment = WorkforceAssignment(
         owner_id=owner_id,
