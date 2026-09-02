@@ -18,20 +18,62 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 | `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness (gated), first team, staff loop, systemic attacks. |
 | `cursor/workforce-registry-post-232` | [#233](https://github.com/d1n095/LifeAI/pull/233) | **Mergad** | Registry mark #230–#232 merged. |
 | `cursor/mainai-workforce-activation-prep` | [#234](https://github.com/d1n095/LifeAI/pull/234) | **Mergad** | ActivationGateSet, safe internal run, kill-switch, startup readiness; provider invoke staged disabled. |
-| `cursor/mainai-composed-executive-loop` (**MERGAD #235**) | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Öppen** | Composed executive loop (glue) + continuity/scenarios; wires readiness/kill into observability. No provider activate. |
+| `cursor/mainai-composed-executive-loop` (**MERGAD #235**) | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Mergad** | Composed executive loop (glue) + continuity/scenarios; wires readiness/kill into observability. No provider activate. |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
 **Lane A:** #230–#234 mergade. #235 composed executive loop. Provider-activate blockerad tills Claude-gates (#218/#229/#213/#224).
 
 
+## Claude red-team hotfixes — live merged bugs in #211/#234 (2026-09-01/02)
+
+Fixes for bugs found by a multi-agent red-team campaign against #211 (Stage C
+memory-work-linkage) and #234 (activation prep) **before** they could be reviewed
+pre-merge — both PRs merged with the bugs still live on `claude/det-kommer-mer-879lcm`.
+Four focused PRs, split by theme per `CLAUDE.md`s isolation principle. #238/#239/#240 are
+each based directly on integration tip (no interdependency between them); #243 is based on
+**#239's own branch** (not integration tip) because it fixes the one gap #239's own PR
+description explicitly flagged as out of its scope — see #243's row below.
+
+*(This table also exists, independently drafted with the same content for #238–#240, on
+`claude/branch-registry-mark-238-239-240` — not yet merged as of this writing. Whichever of
+that branch or this one merges first, the other's `docs/BRANCH_REGISTRY.md` diff for those
+three rows will be redundant with what's already on `claude/det-kommer-mer-879lcm`; the #243
+row is only here.)*
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/memory-work-linkage-idempotency-toctou-fix` | [#238](https://github.com/d1n095/LifeAI/pull/238) | **Öppen** | #211: `apply_memory_work_linkage()` idempotency (retry lost `created_candidate_ids`) + SAME-collapse TOCTOU race (advisory lock, `pg_advisory_xact_lock` seed 3). Cross-checked against #229 (open) — different module/mechanism, does not cover this gap; verdict posted as review comment on #229. |
+| `claude/workforce-kill-switch-owner-scoping` | [#239](https://github.com/d1n095/LifeAI/pull/239) | **Öppen** | #234: kill switch was a single process-global flag — one owner's `activate_kill_switch()` disabled workforce execution for EVERY owner (cross-owner DoS via `run_first_safe_internal_mainai_run`'s own unconditional call). Now per-owner state (`_STATE: dict[UUID, KillSwitchState]`, still process-local — see #243); true global stop kept as an explicit separate `activate_global_kill_switch()`. Also fixes `workforce/context.py`'s `assert_no_cross_package_leak()`, previously a no-op that never raised under any input. |
+| `claude/startup-readiness-reporting-fixes` | [#240](https://github.com/d1n095/LifeAI/pull/240) | **Öppen** | #234: `evaluate_startup_readiness()`'s `blocking` list was overwritten (not merged) at the `READY_FOR_SAFE_INTERNAL_RUN` tier, silently dropping real blockers like `spend_controls:unknown`; `blocking_migrations` check was hardcoded healthy with no check ever run (now a real single-Alembic-head structural check); `activation_commit_status()` hardcoded `claude_reviews_satisfied=None` forever, capping readiness; `department_capability_ledger()` let a single lucky success "prove" a capability regardless of failure count. Also fixes a pre-existing circular import (`app.mainai_startup_readiness` ↔ `app.workforce`) found while testing. |
+| `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | **Öppen — bygger på #239, kräver #239 mergad först** | **P0, mest allvarliga fyndet i hela kampanjen.** The exact gap #239's own PR description flagged as out of scope: `activate_kill_switch()`'s "revoke all live assignments" SELECT was not serialized against a genuinely concurrent NEW assignment grant (`broker.resolve_delegation()`) — a grant that commits in the gap between that SELECT returning empty and the kill switch's own commit survived PERMANENTLY as live, unrevoked execution authority while the kill switch itself reported `active=True` (`prove_no_reusable_live_authority()` — the system's own safety oracle — correctly returned `False`). Fix: durable `workforce_authority_epoch` table (migration 0069, one row per owner + one GLOBAL row); the grant path (`broker.resolve_delegation` → new `assert_grant_allowed()`) takes `SELECT .. FOR SHARE` on GLOBAL then the owner's row in the SAME transaction as the assignment insert, before creating it; the stop path takes a conflicting `SELECT .. FOR UPDATE` on the same row(s) — Postgres's own lock manager, not application timing, enforces one strict ordering. Also closes the process-local-state gap #239 left open (see #239's own row above): kill-switch state is now fully DB-backed, not a process dict, so a stop committed by one worker process is immediately enforced by every other. 7 required concurrent two-connection scenarios (grant-first/stop-first/simultaneous/many-concurrent-grants/owner-scoped/global/process-restart), all passing; pre-fix git-stash negative control confirms the race reproduces (both core interleavings) without the fix. **Known pre-existing, unrelated issue found but NOT fixed here** (per the isolation principle): `app/mainai_executive/safe_composed_run.py`'s `run_composed_safe_internal_mainai_run()` calls `assert_not_killed()`/`clear_kill_switch_for_recovery(founder_ack=...)` with the pre-#239 zero-`owner_id` signature — already broken (`TypeError`) as soon as #239 merges, independent of #243; #239's own PR description flagged this same call site (as `app/mainai_school/safe_composed_run.py`, a path typo) as out of its scope too. Needs its own small follow-up branch/PR once #239 (and ideally #243) are merged. |
+
+**Ej i scope, flaggat för uppföljning (inte löst av #238/#239/#240/#243):** two sibling
+IntegrityError races in `record_work_candidate()`/`record_interpretation_proposal()` (same
+shape as #238's memory_work_linkage race but different call sites); the
+`safe_composed_run.py` signature-mismatch bug described in #243's row above.
+
+---
+
+
 ## MainAI Local Intelligence School (2026-08-31)
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-local-intelligence-school` | [#236](https://github.com/d1n095/LifeAI/pull/236) | **Aktiv** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
+| `cursor/mainai-local-intelligence-school` | [#236](https://github.com/d1n095/LifeAI/pull/236) | **MERGAD** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
 
 **#235 mergad** (`26fa7b2`). School wired into executive (`school_bridge` + local-attempt-first). Evidence hierarchy: TEACHER ≠ TRUTH.
+
+---
+
+
+## MainAI Safe-Internal Startup (2026-09-01)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | **Aktiv — DO NOT MERGE yet (pre-start certification)** | Daily runbook, safe-internal boundary, boot + P0 cert fixes + P1 existing-state/provider-ledger/backup/fresh-process. Claude exam on `5b15f02` (+ later heads). |
+
+**#236 MERGAD** → tip includes Local Intelligence School + executive wire.
 
 ---
 

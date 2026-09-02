@@ -28,13 +28,18 @@ def scan_assumptions_and_conflicts(
     conflict_candidates: list[dict[str, Any]] = []
 
     try:
-        from app.models.problem_learning import LifeProblemAssumption
+        from app.models.problem_learning import LifeProblem, LifeProblemAssumption
 
+        # Only assumptions on STILL-OPEN problems can force replan.
+        # Closed parent (resolved/invalidated/superseded) → stale, not live contradiction.
+        _OPEN = ("open", "investigating", "blocked", "partially_resolved", "unknown")
         rows = db.execute(
             select(LifeProblemAssumption)
+            .join(LifeProblem, LifeProblem.id == LifeProblemAssumption.problem_id)
             .where(
                 LifeProblemAssumption.owner_id == owner_id,
                 LifeProblemAssumption.status.in_(("untested", "unknown")),
+                LifeProblem.status.in_(_OPEN),
             )
             .limit(20)
         ).scalars()

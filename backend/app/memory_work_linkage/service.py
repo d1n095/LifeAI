@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from app.concept_reconciliation.normalize import jaccard, normalize_concept_text, token_set
@@ -32,6 +33,7 @@ from app.memory_work_linkage.types import (
 from app.models.founder_memory import FounderMemoryNote
 from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
 from app.models.project_entities import ProjectEntity
+from app.models.work_candidate import WorkCandidate
 from app.work_candidates.service import list_work_candidates, record_work_candidate
 
 _MATCH_THRESHOLD = 0.35
@@ -236,6 +238,9 @@ def apply_memory_work_linkage(
     )
 
     created_candidates: list[uuid.UUID] = []
+    created_now: list[uuid.UUID] = []
+    canonical_candidates: list[uuid.UUID] = []
+    replayed = False
     created_tasks: list[uuid.UUID] = []
 
     if supersede_candidate_ids:
@@ -262,10 +267,45 @@ def apply_memory_work_linkage(
     if should_park and note.note_type in {"correction", "decision", "goal", "observation", "preference"}:
         entity_id = _best_entity_id(affected)
         if entity_id is not None:
-            existing_same = _find_similar_unreviewed_candidate(db, owner_id=owner_id, text=note.content)
+            # Transaction-scoped advisory lock serializing the SAME-collapse decide-then-write
+            # region for this owner: _find_similar_unreviewed_candidate()'s fuzzy Jaccard match
+            # has no corresponding database UNIQUE constraint (unlike work_candidates' own
+            # exact (owner_id, idempotency_key) constraint), so without this lock two genuinely
+            # concurrent, differently-worded notes can both read "no similar candidate yet"
+            # before either commits, both create a parked candidate, and defeat the
+            # SAME-collapse guarantee docs/MAINAI_MEMORY_WORK_LINKAGE.md promises. Same idiom
+            # as app/mainai_execution/plan_insertion.py's _acquire_plan_insertion_lock() /
+            # app/storage/references.py's acquire_storage_key_lock() -- seed 3, since 0/1
+            # (storage/references.py) and 2 (plan_insertion.py) are already taken.
+            db.execute(
+                sa_text(
+                    "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:key, 3))"
+                ),
+                {"key": f"memory_work_linkage_same_collapse:{owner_id}"},
+            )
+
+            self_idempotency_key = f"memory-work:{note_id}"
+            existing_same = None
+            self_candidate = _find_candidate_by_idempotency_key(
+                db, owner_id=owner_id, idempotency_key=self_idempotency_key
+            )
+            if self_candidate is None:
+                # Only look for a cross-note SAME-collapse target when THIS note has never
+                # parked a candidate of its own. Previously this search ran unconditionally,
+                # so a retry of this exact call found the candidate ITS OWN first call had
+                # just created (same title/text, classifier_strategy=
+                # "memory_work_linkage_v1") and took the NOOP_SAME branch below instead of
+                # replaying record_work_candidate()'s own idempotency -- created_candidate_ids
+                # silently came back empty on retry, losing it for any caller keying off that
+                # field for notification/tracking. A genuine retry now short-circuits straight
+                # to the record_work_candidate() call further down, which is idempotent per
+                # (owner_id, idempotency_key) and returns the SAME row again.
+                existing_same = _find_similar_unreviewed_candidate(db, owner_id=owner_id, text=note.content)
             if existing_same is not None:
                 actions.append(LinkageAction.NOOP_SAME)
                 impacts.append(ImpactKind.SAME_COLLAPSE)
+                canonical_candidates.append(existing_same.id)
+                replayed = True
                 add_member(
                     db,
                     owner_id=owner_id,
@@ -279,18 +319,24 @@ def apply_memory_work_linkage(
                         "timing": timing.value,
                         "same_collapse": True,
                         "memory_note_id": str(note_id),
+                        "replayed": True,
                     },
                     idempotency_key=f"mem-link-wc-same:{note_id}:{existing_same.id}",
                     actor_type="system",
                 )
             else:
+                # Either this is the first time this note has parked a candidate, or
+                # self_candidate already exists (a genuine retry) -- record_work_candidate()
+                # is idempotent per (owner_id, idempotency_key). Prefer #238's TOCTOU lock
+                # + self_idempotency_key; keep #237's replay labeling via prior=self_candidate.
+                prior = self_candidate
                 candidate = record_work_candidate(
                     db,
                     owner_id=owner_id,
                     source_entity_id=entity_id,
                     title=f"[memory] {note.content[:180]}",
                     rationale=note.content,
-                    idempotency_key=f"memory-work:{note_id}",
+                    idempotency_key=self_idempotency_key,
                     priority="low" if timing == TimingClass.LATER else "medium",
                     classifier_strategy="memory_work_linkage_v1",
                     classifier_confidence=0.5,
@@ -302,8 +348,18 @@ def apply_memory_work_linkage(
                         "impacts": [i.value for i in impacts],
                     },
                 )
-                created_candidates.append(candidate.id)
-                actions.append(LinkageAction.CANDIDATE_RECORDED)
+                canonical_candidates.append(candidate.id)
+                if prior is not None:
+                    # Self-idempotent replay of THIS note's park key (#238): surface the
+                    # same candidate id for callers. Reserve NOOP_SAME for cross-note
+                    # SAME-collapse above. created_now stays empty (#237 replay contract).
+                    created_candidates.append(candidate.id)
+                    actions.append(LinkageAction.CANDIDATE_RECORDED)
+                    replayed = True
+                else:
+                    created_candidates.append(candidate.id)
+                    created_now.append(candidate.id)
+                    actions.append(LinkageAction.CANDIDATE_RECORDED)
                 add_member(
                     db,
                     owner_id=owner_id,
@@ -312,6 +368,8 @@ def apply_memory_work_linkage(
                     member_ref_id=candidate.id,
                     membership_basis="deterministic_relationship",
                     classification_basis="deterministic",
+                    # Provenance must be stable across replay — changing keys here
+                    # trips "idempotency key reused for different membership".
                     provenance={"stage": "C", "timing": timing.value},
                     idempotency_key=f"mem-link-wc:{note_id}:{candidate.id}",
                     actor_type="system",
@@ -407,6 +465,10 @@ def apply_memory_work_linkage(
         actions=actions,
         created_task_ids=created_tasks,
         created_candidate_ids=created_candidates,
+        created_now_ids=created_now,
+        canonical_candidate_ids=canonical_candidates,
+        replayed=replayed,
+        operation_receipt_id=f"mem-link:{note_id}:{thread_id}",
         affected=affected,
     )
 
@@ -416,6 +478,21 @@ def _best_entity_id(affected: list[AffectedWorkRef]) -> uuid.UUID | None:
         if ref.kind == "project_entity":
             return ref.id
     return None
+
+
+def _find_candidate_by_idempotency_key(db: Session, *, owner_id: uuid.UUID, idempotency_key: str):
+    """Look up a work_candidate by its own exact (owner_id, idempotency_key) -- used to detect
+    a genuine retry of THIS note's own park-candidate call, as distinct from a cross-note
+    SAME-collapse match (`_find_similar_unreviewed_candidate` below), which must never
+    intercept a retry of the same call."""
+    from app.models.work_candidate import WorkCandidate
+
+    return db.execute(
+        select(WorkCandidate).where(
+            WorkCandidate.owner_id == owner_id,
+            WorkCandidate.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
 
 
 def _find_similar_unreviewed_candidate(db: Session, *, owner_id: uuid.UUID, text: str):

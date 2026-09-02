@@ -13,7 +13,6 @@ from app.workforce import (
     activation_commit_status,
     assert_provider_invoke_disabled,
     clear_kill_switch_for_recovery,
-    execute_workforce_assignment,
     get_kill_switch,
     prove_no_reusable_live_authority,
     register_workforce_agent,
@@ -33,7 +32,7 @@ def _owner(db):
 
 
 def test_safe_internal_run_end_to_end(superuser_db):
-    reset_kill_switch_for_tests()
+    reset_kill_switch_for_tests(superuser_db)
     reset_activation_gates_for_tests()
     owner = _owner(superuser_db)
     report = run_first_safe_internal_mainai_run(superuser_db, owner_id=owner.id)
@@ -53,11 +52,11 @@ def test_safe_internal_run_end_to_end(superuser_db):
 
 
 def test_kill_switch_blocks_further_execution(superuser_db):
-    reset_kill_switch_for_tests()
+    reset_kill_switch_for_tests(superuser_db)
     reset_activation_gates_for_tests()
     owner = _owner(superuser_db)
     run_first_safe_internal_mainai_run(superuser_db, owner_id=owner.id)
-    assert get_kill_switch().active is True
+    assert get_kill_switch(superuser_db, owner.id).active is True
     b = register_workforce_agent(
         superuser_db,
         owner_id=owner.id,
@@ -81,7 +80,9 @@ def test_kill_switch_blocks_further_execution(superuser_db):
         status="active",
         trust_zone="LOCAL_INTERNAL",
     )
-    # New assignment while kill switch on — execute must fail closed
+    # New assignment while kill switch on — GRANT must now fail closed (the authority-
+    # widening race fix: assert_grant_allowed() refuses at broker.resolve_delegation()
+    # itself, not just at execution time).
     req = submit_delegation_request(
         superuser_db,
         owner_id=owner.id,
@@ -89,18 +90,50 @@ def test_kill_switch_blocks_further_execution(superuser_db):
         required_capability="low_risk_classification",
         verification_requirement="independent_verifier",
     )
-    # Selector may fail if no matching agent with evidence — register capability already
-    asg = resolve_delegation(superuser_db, owner_id=owner.id, request=req, verifier_profile_id=v.id)
     with pytest.raises(KillSwitchError):
-        execute_workforce_assignment(
-            superuser_db,
-            owner_id=owner.id,
-            assignment=asg,
-            goal_text="after kill",
-            capability="low_risk_classification",
-        )
-    clear_kill_switch_for_recovery(founder_ack="founder-ack-test")
-    assert get_kill_switch().active is False
+        resolve_delegation(superuser_db, owner_id=owner.id, request=req, verifier_profile_id=v.id)
+    # Deliberately NOT rolling back here: nothing in this test has been committed yet (the
+    # owner/agents/kill-switch-armed state above all live only in this session's still-open
+    # transaction), so a rollback would discard them too, not just the refused grant's
+    # partial writes -- assert_grant_allowed() raises a plain Python exception before any
+    # DB-level error, so the transaction itself is not aborted and is safe to keep using.
+
+    clear_kill_switch_for_recovery(superuser_db, founder_ack="founder_ack:test-clear", owner_id=owner.id)
+    superuser_db.commit()
+    assert get_kill_switch(superuser_db, owner.id).active is False
+
+
+def test_kill_switch_is_owner_scoped_not_cross_owner_dos(superuser_db):
+    """P1 bug (workforce/kill_switch.py, PR #234, live on integration tip):
+    activate_kill_switch(db, owner_id=OWNER_A, reason=...) correctly revokes only OWNER_A's
+    live assignments, but the module-level `_STATE` flag was a single process-global -- so
+    assert_not_killed() (no owner argument) raised KillSwitchError for a completely
+    unrelated OWNER_B too. Since run_first_safe_internal_mainai_run() unconditionally calls
+    activate_kill_switch() at the end of every successful run, ANY single owner completing
+    a run silently disabled workforce execution for EVERY other owner sharing the process --
+    a real cross-owner denial-of-service via a legitimate, expected code path."""
+    from app.workforce.kill_switch import assert_not_killed
+
+    reset_kill_switch_for_tests(superuser_db)
+    reset_activation_gates_for_tests()
+    owner_a = _owner(superuser_db)
+    owner_b = _owner(superuser_db)
+    superuser_db.commit()
+
+    run_first_safe_internal_mainai_run(superuser_db, owner_id=owner_a.id)
+    superuser_db.commit()
+
+    assert get_kill_switch(superuser_db, owner_a.id).active is True, "owner A's own kill switch must be active"
+
+    with pytest.raises(KillSwitchError):
+        assert_not_killed(superuser_db, owner_a.id)
+
+    # The actual bug: owner B was never touched by owner A's kill switch, so owner B's
+    # workforce execution must NOT be blocked.
+    assert get_kill_switch(superuser_db, owner_b.id).active is False, "owner B must be unaffected by owner A's kill switch"
+    assert_not_killed(superuser_db, owner_b.id)  # must NOT raise
+
+    reset_kill_switch_for_tests(superuser_db)
 
 
 def test_activation_commit_disabled_by_default(superuser_db):

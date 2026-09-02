@@ -78,7 +78,7 @@ def create_or_update_specialist(
         owner_id=owner_id,
         capability_key=f"school.specialist.{domain}.{specialty}",
         domain=f"school.{domain}",
-        status="planned" if status != CompetenceStatus.LOCALLY_VERIFIED else "verified_available",
+        status="planned",
         status_reason=f"specialist={status.value}",
         authority="deterministic_source",
         success=status
@@ -92,6 +92,7 @@ def create_or_update_specialist(
             "requires_external_api": False,
             "authority_widened": False,
             "weight_training_ran": False,
+            "not_capability_verified_available": True,
             "recorded_at": datetime.utcnow().isoformat() + "Z",
         },
     )

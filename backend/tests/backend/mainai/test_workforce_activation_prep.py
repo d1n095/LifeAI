@@ -96,19 +96,25 @@ def test_all_gates_verified_still_stages_invoke(superuser_db):
 
 def test_startup_readiness_levels_not_one_boolean(superuser_db):
     reset_activation_gates_for_tests()
-    report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None, db=superuser_db)
     assert report.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
-    assert "provider_delegation_safety" in " ".join(report.blocking) or any(
-        "provider_delegation_safety" in b for b in report.blocking
-    )
     assert report.as_dict()["invariant"] == "NEVER_COLLAPSE_TO_ONE_BOOLEAN"
-
+    # Claude True alone must NOT unlock provider tier without durable evidence
     for key in REQUIRED_ACTIVATION_GATES:
         record_gate_verification(key, status=GateStatus.verified, evidence_ref=f"ev:{key}")
-    report2 = evaluate_startup_readiness(claude_reviews_satisfied=True)
-    assert report2.level in (
+    report2 = evaluate_startup_readiness(claude_reviews_satisfied=True, db=superuser_db)
+    assert report2.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
+    assert any("claude_reviews" in b for b in report2.blocking)
+    # With durable evidence_ref → may reach provider tier
+    report3 = evaluate_startup_readiness(
+        claude_reviews_satisfied=True,
+        db=superuser_db,
+        receipts={"claude_reviews_evidence_ref": "claude-pr-review:example"},
+    )
+    assert report3.level in (
         ReadinessLevel.READY_FOR_LOW_RISK_PROVIDER_RUN,
         ReadinessLevel.READY_FOR_SERIOUS_AUTONOMOUS_RUN,
+        ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN,  # spend may still block
     )
     reset_activation_gates_for_tests()
 
@@ -153,3 +159,135 @@ def test_department_ledger_does_not_fake_promotion(superuser_db):
         assert row["do_not_promote_without_evidence"] is True
         assert row["evidence_proves_capability"] is False
         assert row["candidate"] is True
+
+
+def test_startup_readiness_blocking_list_does_not_drop_earlier_reasons(superuser_db, monkeypatch):
+    """Blocker lists must accumulate — never overwrite (tip bug in PR #234)."""
+    import app.provider_spend.service as provider_spend_service
+    from app.mainai_startup_readiness import receipts as readiness_receipts
+    from app.mainai_startup_readiness.receipts import CheckStatus, ReadinessCheck
+
+    reset_activation_gates_for_tests()
+    monkeypatch.delattr(provider_spend_service, "provider_spend_is_live", raising=False)
+
+    report_blocked = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    assert any("spend_controls" in b for b in report_blocked.blocking), (
+        f"spend_controls must not be silently dropped, got {report_blocked.blocking}"
+    )
+
+    real_check = readiness_receipts._check_import
+
+    def _spend_unknown(key: str, import_path: str):
+        if key == "spend_controls":
+            return ReadinessCheck(key, CheckStatus.unknown, "forced unknown for accumulation test")
+        return real_check(key, import_path)
+
+    monkeypatch.setattr(readiness_receipts, "_check_import", _spend_unknown)
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    assert report.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
+    assert any("spend_controls" in b for b in report.blocking), (
+        f"spend_controls:unknown must not be silently dropped from report.blocking, got {report.blocking}"
+    )
+    assert any(
+        "provider_delegation" in b or "claude_reviews" in b or "activation_gates" in b
+        for b in report.blocking
+    ), f"provider/claude blockers missing from {report.blocking}"
+    reset_activation_gates_for_tests()
+
+
+def test_blocking_migrations_check_is_real_not_hardcoded(superuser_db):
+    """P1 bug (mainai_startup_readiness/__init__.py, PR #234): the "blocking_migrations"
+    check was a bare ReadinessCheck(..., CheckStatus.healthy, "...verify ops") -- a claim
+    with no check ever run. Now backed by a real Alembic single-head structural check."""
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    check = next(c for c in report.checks if c.key == "blocking_migrations")
+    assert check.status.value == "healthy"
+    assert "verify ops" not in check.detail  # old hardcoded placeholder text is gone
+    assert "head" in check.detail
+
+
+def test_activation_commit_status_wires_claude_reviews_from_gates(superuser_db):
+    """#240 fix: do not hardcode claude_reviews_satisfied=None.
+
+    Canonical #237 receipts still require durable evidence_ref + spend receipt before
+    READY_FOR_LOW_RISK_PROVIDER_RUN. Prove gate wiring + receipt attach, then promotion
+    when spend_controls_verified receipt is also present.
+    """
+    from app.workforce.activation_commit import activation_commit_status
+    from app.mainai_startup_readiness import evaluate_startup_readiness
+
+    reset_activation_gates_for_tests()
+    status_before = activation_commit_status()
+    assert status_before["readiness_level"] in (
+        "BLOCKED",
+        "READY_FOR_SAFE_INTERNAL_RUN",
+    )
+
+    for key in REQUIRED_ACTIVATION_GATES:
+        record_gate_verification(key, status=GateStatus.verified, evidence_ref=f"ev:{key}")
+    status_after = activation_commit_status()
+    assert status_after["gates_allowed"] is True
+    assert status_after.get("receipts", {}).get("claude_reviews_evidence_ref")
+    # Full provider-tier promotion still needs spend receipt (IMPORTABLE != HEALTHY).
+    promoted = evaluate_startup_readiness(
+        claude_reviews_satisfied=True,
+        receipts={
+            "claude_reviews_evidence_ref": status_after["receipts"]["claude_reviews_evidence_ref"],
+            "spend_controls_verified": True,
+        },
+    )
+    assert promoted.level in (
+        ReadinessLevel.READY_FOR_LOW_RISK_PROVIDER_RUN,
+        ReadinessLevel.READY_FOR_SERIOUS_AUTONOMOUS_RUN,
+    ), f"expected provider-tier with spend receipt, got {promoted.level} blocking={promoted.blocking}"
+    reset_activation_gates_for_tests()
+
+def test_department_ledger_requires_durable_evidence_not_one_lucky_success(superuser_db):
+    """P1 bug (workforce/department_evidence.py, PR #234, live on integration tip):
+    department_capability_ledger() marked a capability "verified" (evidence_proves_
+    capability=True) from a single verified success, regardless of how many verified
+    failures came with it (rate > 0 is trivially true for ANY nonzero success count).
+    Durable evidence requires both a real sample size and a strong success rate."""
+    from app.workforce import get_workforce_agent_by_key, record_verified_outcome
+    from app.workforce.first_team import bootstrap_first_team
+
+    owner = _owner(superuser_db)
+    bootstrap_first_team(superuser_db, owner_id=owner.id)
+    superuser_db.commit()
+    profile = get_workforce_agent_by_key(superuser_db, owner_id=owner.id, agent_key="dept-research")
+
+    # One lucky success, mostly failures -- must NOT count as proven.
+    record_verified_outcome(
+        superuser_db, owner_id=owner.id, profile_id=profile.id,
+        capability_tag="web_research", success=True, quality_score=0.9,
+    )
+    for _ in range(4):
+        record_verified_outcome(
+            superuser_db, owner_id=owner.id, profile_id=profile.id,
+            capability_tag="web_research", success=False, quality_score=0.1,
+        )
+    superuser_db.commit()
+    rows = department_capability_ledger(superuser_db, owner_id=owner.id)
+    superuser_db.commit()
+    research_row = next(r for r in rows if r["agent_key"] == "dept-research")
+    assert "web_research" not in research_row["verified_capabilities"], (
+        "1 success out of 5 verified trials must not prove the capability"
+    )
+    assert research_row["evidence_proves_capability"] is False
+
+    # A genuinely durable track record (>=3 trials, strong majority) DOES count --
+    # a separate capability_tag so this half of the test doesn't have to first
+    # overcome the poor rollup the flaky-evidence half above deliberately built.
+    for _ in range(3):
+        record_verified_outcome(
+            superuser_db, owner_id=owner.id, profile_id=profile.id,
+            capability_tag="fact_gathering", success=True, quality_score=0.9,
+        )
+    superuser_db.commit()
+    rows2 = department_capability_ledger(superuser_db, owner_id=owner.id)
+    superuser_db.commit()
+    research_row2 = next(r for r in rows2 if r["agent_key"] == "dept-research")
+    assert "fact_gathering" in research_row2["verified_capabilities"]
+    assert research_row2["evidence_proves_capability"] is True
+    # The flaky capability from above must still not be verified.
+    assert "web_research" not in research_row2["verified_capabilities"]
