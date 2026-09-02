@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.evidence_claim import require_supporting_evidence_for_verified
@@ -77,7 +78,27 @@ def record_capability_observation(
         record = CapabilityRecord(
             owner_id=owner_id, capability_key=capability_key, domain=domain
         )
-        db.add(record)
+        savepoint = db.begin_nested()
+        try:
+            db.add(record)
+            db.flush()
+            savepoint.commit()
+        except IntegrityError as exc:
+            constraint_name = getattr(
+                getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None
+            )
+            savepoint.rollback()
+            if constraint_name != "uq_capability_records_owner_key":
+                raise
+            record = db.execute(
+                select(CapabilityRecord).where(
+                    CapabilityRecord.owner_id == owner_id,
+                    CapabilityRecord.capability_key == capability_key,
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                raise
+            is_new = False
 
     status_changed = is_new or record.status != status
     record.domain = domain
