@@ -1,354 +1,335 @@
-# Claude independent exam — exact #237 head
+# Claude independent exam — P0 @ 5b15f02 then P1 @ 81f9b07
 
-**DO NOT MERGE.** Cursor continues P1 in parallel; this doc is Claude’s attack brief.
+**DO NOT MERGE #237.** Cursor’s pre-start build is done; Claude is the examiner.
 
-**Exact target SHA:** `5b15f02a581fcb12ddd4c37f569175fcfb44a5d9`  
-**PR:** https://github.com/d1n095/LifeAI/pull/237
+| Track | Exact SHA |
+|---|---|
+| **P0 attack first** | `5b15f02a581fcb12ddd4c37f569175fcfb44a5d9` |
+| **Then P1 / composed head** | `81f9b0742a85be3c46014a38c3004b8bcc36905c` |
+| **PR** | https://github.com/d1n095/LifeAI/pull/237 |
 
-If HEAD moves past this SHA, record the new SHA and re-run only changed surfaces (section F).
+Do **not** start over. Finish P0 verdict on `5b15f02`, then inspect `5b15f02..81f9b07` and re-run only affected surfaces + composition.
+
+Original P0 brief (kill switch / readiness / evidence / memory→work) remains binding for `5b15f02` — see prior sections in git history / PR comments if needed; the update below adds P1 and final certification gates.
 
 ---
 
 ```text
-NEW EXACT CERTIFICATION TARGET
+IMPORTANT UPDATE — CURSOR P1 HAS LANDED, #237 STILL MUST NOT MERGE
 
-Cursor has continued the pre-start certification campaign.
+Cursor has completed the parallel P1 certification work.
 
-DO NOT review an older #237 head.
+P0 exact target you were given remains:
 
-Exact current target:
-
-PR #237
-HEAD:
 5b15f02a581fcb12ddd4c37f569175fcfb44a5d9
 
-DO NOT MERGE.
+for the original independent P0 attack.
+
+Cursor has now advanced #237 to:
+
+81f9b0742a85be3c46014a38c3004b8bcc36905c
+
+P1 additions on top:
+
+- existing-state rich-history boot
+- CURRENT/SUPERSEDED inspection
+- independent provider ledger cross-check in boot receipt
+- backup → mutate → restore proof
+- true fresh-process A→B→C continuity proof
+- dashboard/observability now reads durable query_stop_status
+- boot refuses to migrate PostgreSQL maintenance DB
+
+DO NOT START OVER FROM SCRATCH.
+
+Complete the P0 verdict on 5b15f02 first.
+
+Then inspect the diff:
+
+5b15f02..81f9b07
+
+and re-run only affected/integrated surfaces plus necessary composition tests.
 
 ==================================================
-WHAT CURSOR CLAIMS IS FIXED ON THIS HEAD
+P1 — EXISTING-STATE BOOT INDEPENDENT ATTACK
 ==================================================
 
-P0:
+Do not accept seeded richness merely because rows exist.
 
-1. KILL SWITCH
-- owner stop separated from global emergency stop
-- durable stop state
-- boot cannot auto-clear
-- fabricated founder ack rejected
-- explicit clear request id
-- restart should preserve stop semantics
+Verify that the boot actually reconstructs correct semantics.
 
-2. STARTUP READINESS
-- IMPORTABLE != HEALTHY
-- receipt-oriented readiness
-- migration actually checked
-- blockers accumulate rather than overwrite
-- claude_reviews_satisfied=True alone cannot unlock provider tier
+Seed/inspect at minimum:
 
-3. EVIDENCE TRUTH
-- shared evidence_supports_claim validator
-- failed evidence rejected
-- unrelated evidence rejected
-- school specialization no longer marks verified_available merely from school status
+old memory
+current correction
+superseded decision
+disputed claim
+verified capability
+failed/regressed capability
+open work
+completed work
+continuity checkpoint
+decision debt.
 
-4. MEMORY→WORK REPLAY
-- canonical candidate identity retained
-- replay distinguished from created_now
-- idempotent record_work_candidate park-path gap patched in latest commit
+Required after boot:
 
-==================================================
-YOUR JOB — INDEPENDENT EXAM
-==================================================
+CURRENT does not include superseded truth.
+SUPERSEDED remains inspectable.
+failed/regressed capability does not appear verified.
+completed work is not revived.
+open work remains recoverable.
+authority is not reconstructed from memory/history.
+provider remains disabled.
 
-Do not inspect only tests.
-
-Re-run the original reproductions and invent new variants.
-
-Return only empirical verdicts:
-
-VERIFIED
-PARTIAL
-REJECTED
-UNKNOWN.
+Then repeat through fresh processes B and C if the P1 path supports it.
 
 ==================================================
-A. KILL-SWITCH ATTACK
+P1 — PROVIDER LEDGER CROSS-CHECK
 ==================================================
 
-Use real DB sessions and at least two owners.
+Cursor claims boot now compares an independent provider ledger.
 
-Prove:
+Attack the independence claim.
 
-owner A stop → A blocked
-owner A stop → B unaffected
+Check exactly what it counts.
 
-owner B stop → B blocked
-owner B stop → A unaffected
+It must not simply read the same boolean/receipt that MainAI writes.
 
-global emergency → both blocked
+Before boot capture:
 
-clear A → does not clear B/global
+provider attempts
+spend reservations
+workforce/provider receipts
+other broker-level provider traces available.
 
-clear global → does not clear owner A/B
-
-boot while owner stop active:
-MUST NOT CLEAR
-
-boot while global stop active:
-MUST NOT CLEAR
-
-process restart:
-state survives according to contract
-
-MainAI cannot generate valid founder/operator acknowledgement for herself.
-
-Attack clear_request_id:
-
-same request replay
-older clear after newer stop
-different owner
-wrong scope
-empty/weak ack
-forged-looking ack string.
-
-Check whether ack is merely a string convention or actually tied to authority/authentication.
-
-If the implementation only checks prefixes such as:
-
-founder_ack:
-operator_ack:
-
-then determine whether this is actually security or merely syntax.
-
-That distinction matters.
-
-==================================================
-B. READINESS ATTACK
-==================================================
-
-Attack exact current readiness implementation.
-
-Scenarios:
-
-module import succeeds but runtime dependency broken
-wrong migration head
-multiple migration heads
-migration command failure
-stale receipt from older SHA
-receipt for different branch
-old success followed by new failure
-missing receipt
-invalid receipt
-multiple simultaneous blockers
-provider gates unknown
-claude attestation True but no durable evidence.
+After boot compare.
 
 Required:
 
-READY means CURRENT EVIDENCE for CURRENT SHA.
+MainAI says 0
+AND
+independent ledger unchanged.
 
-Not:
-old evidence
-string assertion
-caller boolean
-import success.
+Attack:
 
-Check whether receipts themselves have provenance/integrity or can be fabricated by arbitrary internal caller.
+missing table
+schema mismatch
+query error
+SAVEPOINT recovery
+ledger unavailable
+partial ledger availability.
 
-==================================================
-C. EVIDENCE_SUPPORTS_CLAIM ATTACK
-==================================================
+A failure to observe provider state must not silently become:
 
-Use the shared function directly and through real callers.
+UNCHANGED = TRUE.
 
-Matrix:
+UNKNOWN != ZERO.
 
-verified success for same capability → accept
-failed test → reject
-rejected verification → reject
-unrelated capability → reject
-wrong owner → reject
-wrong subject → reject
-superseded evidence → reject
-stale evidence → policy-correct
-older success + newer failure → NOT currently verified
-older failure + newer success → current state according to explicit policy
-mixed contradictory evidence → no naive existential proof.
-
-Then test integration through:
-
-capability_reality
-self-model
-prediction learning
-school routing.
-
-Main question:
-
-did Cursor fix the BUG CLASS
-or only the known examples?
+This is important.
 
 ==================================================
-D. MEMORY→WORK REPLAY ATTACK
+P1 — BACKUP/RESTORE ATTACK
 ==================================================
 
-Exact original operation:
+Verify Cursor's proof is real:
 
-same note
-same args
-park enabled.
+backup created
+canonical pre-backup state recorded
+state intentionally mutated
+mutation confirmed
+restore executed
+new DB connection/session opened
+original canonical state recovered.
 
-Run repeatedly:
+Check multiple truth classes:
 
-call 1
-call 2
-call 3
+memory
+work
+capability
+stop state
+continuity if included.
 
-Then:
+Do not accept a restore proof that only checks one arbitrary row.
 
-commit
-new Session
-replay
+Also verify:
 
-Then:
+proof is restricted to disposable/local database
+cannot point accidentally at prod/maintenance DB without explicit safeguards.
 
-fresh process if practical
-replay.
+==================================================
+P1 — FRESH-PROCESS A→B→C
+==================================================
+
+This is important because you previously identified same-process resume as insufficient.
+
+Prove these are genuinely separate OS processes / Python interpreters.
+
+Process A:
+writes/checkpoints, exits.
+
+Process B:
+starts after A exits,
+no shared Python globals,
+new engine,
+new session,
+reconstructs.
+
+B writes another state transition and exits.
+
+Process C:
+new process,
+reconstructs both durable phases.
+
+Check:
+
+active/current goal
+completed vs remaining
+corrections/supersession
+capability truth
+decision debt
+stop state
+continuity.
+
+PROCESS MEMORY != DURABLE STATE.
+
+==================================================
+P1 — MAINTENANCE DB GUARD
+==================================================
+
+Cursor's fresh-process run discovered that an initial script could migrate the PostgreSQL `postgres` maintenance DB.
+
+He added a guard afterward.
+
+Attack that guard.
+
+Inputs:
+
+postgres
+postgres/
+empty DB path
+URL with query parameters
+APP_DATABASE_URL mismatch
+DATABASE_URL=maintenance while LIFEAI_BOOT_DATABASE_NAME is safe
+encoded/surprising URL forms if relevant.
 
 Required:
 
-one canonical candidate only.
+safe refusal/reroute according to explicit contract.
 
-Result semantics must distinguish:
+No silent migration of maintenance DB.
 
-created_now
-canonical_existing
-replayed.
+Check whether the same unsafe pattern exists in:
 
-Canonical candidate ID must remain recoverable.
+backup/restore
+other startup scripts
+migration helpers.
 
-No duplicate notifications/work due to result ambiguity.
+Generalize the lesson if so.
 
-Then attack equivalent wording/SAME-collapse path.
+==================================================
+REGRESSION — DURABLE STOP OBSERVABILITY
+==================================================
 
-Also real concurrency:
-
-two sessions race at the exact boundary.
+Cursor changed dashboard/observability away from process cache.
 
 Verify:
 
-no duplicates
-no raw IntegrityError
-no poisoned transaction
-canonical result recoverable by both callers.
+Owner A status shown only for A.
+Owner B unaffected.
+Global stop shown globally.
+restart preserves displayed stop state.
+dashboard cannot disagree with workforce enforcement.
+
+DISPLAYED SAFETY STATE == ENFORCED SAFETY STATE.
 
 ==================================================
-E. CHECK #237 FOR CERTIFICATION-SPECIFIC REGRESSIONS
+FULL FINAL #237 ATTACK
 ==================================================
 
-Search exact diff for:
+After the P0 and P1 independent passes:
 
-*_for_tests used in runtime
-reset_* used in runtime
-test-only helpers
-module globals representing durable truth
-fake/synthetic founder authority
-caller-controlled booleans that become trust
-receipt generation immediately followed by self-consumption without independence
-“verified” statuses created by the subsystem being verified.
+review current HEAD 81f9b07 as the composed candidate.
 
-==================================================
-F. NEW HEAD WATCHER
-==================================================
+Especially look for bugs caused by interaction between P0/P1 fixes.
 
-Cursor is continuing P1.
+Examples:
 
-Keep watching #237.
-
-If HEAD moves from 5b15f02:
-
-record new SHA.
-
-Do not automatically discard completed proofs if untouched code remains identical, but re-run anything whose code/dependencies changed.
+receipt-backed readiness depends on provider ledger which errors
+existing-state seed affects evidence truth
+backup captures active unsafe transient state
+fresh restart reconstructs stale kill switch
+dashboard says stopped while executor runs
+boot creates new owner instead of resuming intended owner
+CURRENT/SUPERSEDED query itself has oldest-row/current-truth bug.
 
 ==================================================
-P1 WHEN CURSOR LANDS IT
+CERTIFICATION REQUIREMENT
 ==================================================
 
-Independently attack:
+Final startup certification must require:
+
+P0 independent verification
+P1 independent verification
+exact-head CI green
+then merge
+then post-merge exact-tip proof.
+
+Do not certify branch head as final deployed truth.
+
+==================================================
+FINAL REPORT
+==================================================
+
+Return:
+
+P0 TARGET TESTED:
+5b15f02 yes/no
+
+P0 KILL SWITCH
+P0 READINESS
+P0 EVIDENCE
+P0 MEMORY→WORK
+
+P1 TARGET TESTED:
+81f9b07 yes/no
 
 EXISTING-STATE BOOT
-PROVIDER LEDGER CROSS-CHECK
-BACKUP/RESTORE.
+PROVIDER LEDGER
+BACKUP/RESTORE
+FRESH PROCESS A→B→C
+MAINTENANCE DB GUARD
+DURABLE STOP OBSERVABILITY
 
-Existing-state boot must include a rich history, not only a fresh DB.
+NEW BUGS
+PARTIAL FIXES
+VERIFIED FIXES
 
-Provider proof must be independent of MainAI's own provider_invoked boolean.
-
-Backup/restore must demonstrate:
-
-backup made
-state changed
-restore performed
-canonical memory/work/authority state recovered.
-
-==================================================
-IMPORTANT — FRESH PROCESS
-==================================================
-
-Still require the previously identified fresh-process proof.
-
-Same-process new SQLAlchemy session is not enough.
-
-At least:
-
-Process A writes state and exits.
-Process B reconstructs from DB.
-Process C reconstructs again after more work.
-
-No inherited Python globals.
-
-==================================================
-FINAL RESPONSE
-==================================================
-
-After a substantial batch report:
-
-TARGET SHA ACTUALLY TESTED
-
-KILL SWITCH:
-VERIFIED/PARTIAL/REJECTED
-new bugs
-
-READINESS:
-VERIFIED/PARTIAL/REJECTED
-new bugs
-
-EVIDENCE SEMANTICS:
-VERIFIED/PARTIAL/REJECTED
-new bugs
-
-MEMORY→WORK REPLAY:
-VERIFIED/PARTIAL/REJECTED
-concurrency result
-
-FRESH PROCESS:
-status
-
-#237 REGRESSIONS:
-findings
-
-P1:
-status
-
-NEW HEAD:
-if changed
+CURRENT #237 HEAD
+CI STATUS
 
 OPEN P0
 OPEN P1
 
-FINAL START CERTIFICATION:
-YES or NO
+SAFE-INTERNAL CERTIFICATION:
+YES / NO
 
-Do not merge anything.
-Do not certify your own fixes.
+MERGE RECOMMENDATION:
+MERGE / DO NOT MERGE
+
+If YES:
+state the exact SHA that was independently verified.
+
+Do not merge it yourself.
 ```
+
+---
+
+## Founder gate (after Claude)
+
+Only if Claude returns SAFE-INTERNAL CERTIFICATION = YES + MERGE:
+
+1. Exact-head CI green on verified SHA  
+2. Merge #237  
+3. **One** post-merge exact-tip boot + fresh-process check  
+4. Then claim `READY_FOR_SAFE_INTERNAL_CERTIFIED`
+
+Cursor does not self-certify and does not merge.
