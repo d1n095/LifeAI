@@ -68,6 +68,7 @@ from app.models.founder_memory import (
 from app.models.founder_intent import FounderIntentBinding, FounderIntentCorrection
 from app.models.structured_claim import StructuredClaim, StructuredClaimEvent
 from app.models.prediction_learning import PredictionRecord
+from app.models.memory_tier import MemoryTierState
 from app.models.import_job import ImportJob
 from app.models.intelligence_governance import (
     ClassificationBasis,
@@ -275,6 +276,7 @@ __all__ = [
     "StructuredClaim",
     "StructuredClaimEvent",
     "PredictionRecord",
+    "MemoryTierState",
     "ImportJob",
     "ClassificationBasis",
     "ExecutionRole",
