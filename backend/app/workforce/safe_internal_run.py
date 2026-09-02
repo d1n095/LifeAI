@@ -84,7 +84,7 @@ def run_first_safe_internal_mainai_run(
     - durable receipts
     """
     notes: list[str] = []
-    assert_not_killed(owner_id)
+    assert_not_killed(db, owner_id)
     require_safe_internal_readiness(claude_reviews_satisfied=None)
     readiness = evaluate_startup_readiness(claude_reviews_satisfied=None)
     notes.append(f"readiness={readiness.level.value}")
