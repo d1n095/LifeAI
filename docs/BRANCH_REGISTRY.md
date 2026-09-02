@@ -609,6 +609,46 @@ nivå-härledningslogiken (`core`/`need()`/`serious_keys` refererar aldrig
 Ska omverifieras empiriskt med samma multi-head-konstruktionsteknik som redan bevisat
 CONFIRMED-statusen ovan.
 
+### PR #243 — kill-switch/grant-time auktoritetsrace-fix — VERIFIERAD (kvällens allvarligaste fynd, nu stängt)
+
+Byggd på #239s gren, stänger exakt den lucka #239 själv flaggade som utanför sitt scope:
+`assert_not_killed()` grindade exekvering men INTE beviljande — ett nytt uppdrag kunde
+fortfarande BEVILJAS för en dödad ägare. Detta är kvällens FÖRSTA fynd som är ett genuint
+auktoritets-utvidgnings-race (inte bara data-/evidens-korrekthet): kill-switchens "återkalla
+alla live-uppdrag"-SELECT var inte serialiserad mot ett genuint samtidigt nytt
+uppdrags-beviljande på en separat DB-anslutning — ett precis beviljat uppdrag kunde överleva
+PERMANENT som live, oåterkallad exekveringsauktoritet, medan kill-switchen själv rapporterade
+`active=True`.
+
+**Fix:** varje scope (GLOBAL + per-ägare) får en durabel `authority_epoch`-rad (migration
+0069). Beviljande-vägen tar `SELECT .. FOR SHARE` på GLOBAL sen ägar-raden, I SAMMA
+transaktion som uppdrags-inserten, FÖRE den inserten. Stopp-vägen tar ett motstridigt
+`SELECT .. FOR UPDATE` på samma rad(er) som en del av samma transaktion som återkallar
+live-uppdrag. Tar också bort ALL process-lokal kill-switch-state (modul-globaler) — nu helt
+DB-baserad, stänger en durabilitets-lucka som fanns kvar även efter #239s ägar-scoping-fix
+(osynlig över uvicorn/gunicorn-workers).
+
+**Oberoende VERIFIERAD, denna session, mot maximal skepsis:**
+- Låsordningen (GLOBAL alltid före ägar-scopad) strukturellt bekräftad deadlock-fri via
+  kodläsning — bara `assert_grant_allowed()` håller någonsin två lås.
+- PR:ns egna 7 scenarion (två-anslutnings/två-sessions-race, riktig subprocess-omstart för
+  scenario 7) körda OBEROENDE: 7/7 GODKÄNDA.
+- EGEN negativkontroll (inte bara deras): bekräftat via grep att #239s gren har NOLL
+  beviljande-tids-kontroll alls — inte ens racy, helt FRÅNVARANDE. Ett enkelt sekventiellt
+  stopp-sen-beviljande-skript reproducerar buggen rent på pre-fix-kod, avvisas korrekt på
+  fixad kod.
+- EGEN nionde interleaving (inte bland deras 7): lazy row-creation-race — 5 samtidiga
+  första-gången-beviljanden för en helt ny ägare utan existerande epoch-rad — alla lyckades
+  korrekt, exakt EN epoch-rad skapad, ingen bugg funnen.
+- Regression: `110 passed, 593 deselected` — matchar PR:ns påstående exakt.
+- `safe_composed_run.py`-flaggat problem bekräftat FORTFARANDE trasigt (`TypeError`, fel
+  antal argument) och genuint utanför denna PR:s scope (pre-existerande, föregår #243) — egen
+  liten framtida fix.
+- INTE oberoende empiriskt testat (tidsbudget): clear-vs-grant-interaktion — kodläsning
+  bekräftar samma låsprimitiv återanvänds, men värt en explicit empirisk test i nästa runda.
+
+**Rekommendation: REDO ATT LANDAS.** Ingen ny bugg funnen trots adversarial ansträngning.
+
 ### P1 — Fullständig kill-switch-certifieringsmatris (8 scenarion) — 6/8 GODKÄNT, 2 verkliga dormanta luckor
 
 Testat mot `app/workforce/kill_switch.py` (efter #239:s cross-owner-DoS-fix, se ovan — OBS:
