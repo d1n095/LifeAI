@@ -131,6 +131,7 @@ def run_learning_cycle(
         external_as_doer=False,
         exam_taken=exam is not None,
         exam_passed=bool(exam.passed) if exam else False,
+        owner_id=str(owner_id),
     )
 
     return LearningCycleResult(

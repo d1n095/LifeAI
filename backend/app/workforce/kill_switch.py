@@ -42,6 +42,7 @@ grant already committed but before that assignment executes is still caught ther
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -66,7 +67,10 @@ _GLOBAL_SCOPE_KEY = "GLOBAL"
 
 
 class KillSwitchError(Exception):
-    pass
+    def __init__(self, message: str, *, code: str = "KILL_SWITCH_ACTIVE", details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 @dataclass
@@ -75,6 +79,9 @@ class KillSwitchState:
     reason: str = ""
     activated_at: str | None = None
     revoked_assignment_ids: list[str] = field(default_factory=list)
+    scope: str | None = None
+    owner_id: str | None = None
+    sequence: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -82,7 +89,40 @@ class KillSwitchState:
             "reason": self.reason,
             "activated_at": self.activated_at,
             "revoked_assignment_ids": list(self.revoked_assignment_ids),
+            "scope": self.scope,
+            "owner_id": self.owner_id,
+            "sequence": self.sequence,
         }
+
+
+# BOOT != FOUNDER ACK — fabricated clear strings must never unlock stop.
+_FABRICATED_ACK_DENYLIST = frozenset(
+    {
+        "composed_safe_internal_clear",
+        "boot_clear",
+        "auto_clear",
+        "startup_clear",
+        "safe_internal_clear",
+    }
+)
+_ACK_PREFIX_RE = re.compile(r"^(founder_ack|operator_ack):.+\S")
+
+
+def _validate_founder_ack(founder_ack: str) -> None:
+    if not founder_ack or not str(founder_ack).strip():
+        raise KillSwitchError("founder_ack required to clear kill switch", code="ACK_REQUIRED")
+    ack = str(founder_ack).strip()
+    if ack in _FABRICATED_ACK_DENYLIST or ack.lower() in _FABRICATED_ACK_DENYLIST:
+        raise KillSwitchError(
+            "fabricated founder_ack rejected — BOOT != FOUNDER ACK",
+            code="FABRICATED_ACK",
+            details={"ack": ack},
+        )
+    if not _ACK_PREFIX_RE.match(ack):
+        raise KillSwitchError(
+            "founder_ack must be 'founder_ack:<explicit text>' or 'operator_ack:<explicit text>'",
+            code="ACK_FORMAT",
+        )
 
 
 def _owner_scope_key(owner_id: uuid.UUID) -> str:
@@ -224,16 +264,22 @@ def assert_not_killed(db: Session, owner_id: uuid.UUID) -> None:
         {"k": _GLOBAL_SCOPE_KEY},
     ).mappings().first()
     if global_row and global_row["stopped"]:
-        raise KillSwitchError(f"workforce kill switch active (global): {global_row['reason']}")
+        raise KillSwitchError(
+            f"workforce kill switch active (global): {global_row['reason']}",
+            code="BLOCKED_BY_GLOBAL_EMERGENCY_STOP",
+        )
     owner_row = db.execute(
         text("SELECT stopped, reason FROM workforce_authority_epoch WHERE scope_key = :k"),
         {"k": _owner_scope_key(owner_id)},
     ).mappings().first()
     if owner_row and owner_row["stopped"]:
-        raise KillSwitchError(f"workforce kill switch active: {owner_row['reason']}")
+        raise KillSwitchError(
+            f"workforce kill switch active: {owner_row['reason']}",
+            code="BLOCKED_BY_OWNER_STOP",
+        )
 
 
-def assert_grant_allowed(db: Session, *, owner_id: uuid.UUID) -> None:
+def assert_grant_allowed(db: Session, *, owner_id: uuid.UUID) -> dict:
     """THE fix for the authority-widening kill-switch race. Must be called by the grant
     path (broker.resolve_delegation), in the SAME transaction that will insert the new
     WorkforceAssignment, BEFORE that insert -- and that transaction must not commit until
@@ -247,13 +293,32 @@ def assert_grant_allowed(db: Session, *, owner_id: uuid.UUID) -> None:
     SELECT .. FOR UPDATE on the SAME row as part of ITS OWN commit, so the database's lock
     manager -- not application timing -- enforces one strict ordering between this grant
     and any concurrent stop for the scopes involved.
+
+    Returns fence metadata for assignment provenance (compatible with #237 callers).
     """
     global_row = _lock_epoch_row_for_share(db, scope_key=_GLOBAL_SCOPE_KEY, owner_id=None)
     if global_row["stopped"]:
-        raise KillSwitchError(f"workforce kill switch active (global): {global_row['reason']}")
+        raise KillSwitchError(
+            f"workforce kill switch active (global): {global_row['reason']}",
+            code="BLOCKED_BY_GLOBAL_EMERGENCY_STOP",
+        )
     owner_row = _lock_epoch_row_for_share(db, scope_key=_owner_scope_key(owner_id), owner_id=owner_id)
     if owner_row["stopped"]:
-        raise KillSwitchError(f"workforce kill switch active: {owner_row['reason']}")
+        raise KillSwitchError(
+            f"workforce kill switch active: {owner_row['reason']}",
+            code="BLOCKED_BY_OWNER_STOP",
+        )
+    return {
+        "mechanism": "workforce_authority_epoch",
+        "global_epoch": int(global_row.get("epoch") or 0),
+        "owner_epoch": int(owner_row.get("epoch") or 0),
+        "owner_id": str(owner_id),
+    }
+
+
+def assert_authority_grant_allowed(db: Session, *, owner_id: uuid.UUID) -> dict:
+    """Alias for assert_grant_allowed — single canonical fence (#243)."""
+    return assert_grant_allowed(db, owner_id=owner_id)
 
 
 def _revoke_live_assignments(db: Session, *, owner_id: uuid.UUID | None, reason: str) -> list[str]:
@@ -314,12 +379,26 @@ def activate_kill_switch(
     _lock_epoch_row_for_update(db, scope_key=scope_key, owner_id=owner_id)
     revoked = _revoke_live_assignments(db, owner_id=owner_id, reason=reason)
     now = _write_stop_state(db, scope_key=scope_key, reason=reason, revoked=revoked)
+    if not prove_no_reusable_live_authority(db, owner_id=owner_id):
+        raise KillSwitchError(
+            "stop postcondition failed: reusable live authority remains",
+            code="STOP_POSTCONDITION",
+        )
     return KillSwitchState(
         active=True,
         reason=reason,
         activated_at=now.isoformat() + "Z",
         revoked_assignment_ids=revoked,
+        scope="owner",
+        owner_id=str(owner_id),
     )
+
+
+def activate_owner_stop(
+    db: Session, *, owner_id: uuid.UUID, reason: str
+) -> KillSwitchState:
+    """#237 name → canonical owner stop."""
+    return activate_kill_switch(db, owner_id=owner_id, reason=reason)
 
 
 def activate_global_kill_switch(db: Session, *, reason: str) -> KillSwitchState:
@@ -353,7 +432,17 @@ def activate_global_kill_switch(db: Session, *, reason: str) -> KillSwitchState:
         reason=reason,
         activated_at=now.isoformat() + "Z",
         revoked_assignment_ids=revoked,
+        scope="global",
     )
+
+
+def activate_global_emergency_stop(
+    db: Session, *, reason: str, founder_authority_ref: str | None = None
+) -> KillSwitchState:
+    """#237 name → canonical global stop. founder_authority_ref is recorded in reason only."""
+    if founder_authority_ref:
+        reason = f"{reason}|authority:{founder_authority_ref}"
+    return activate_global_kill_switch(db, reason=reason)
 
 
 def clear_kill_switch_for_recovery(
@@ -367,8 +456,7 @@ def clear_kill_switch_for_recovery(
     generation number, not a "currently stopped" flag (that's the separate `stopped`
     column).
     """
-    if not founder_ack:
-        raise KillSwitchError("founder_ack required to clear kill switch")
+    _validate_founder_ack(founder_ack)
     scope_key = _GLOBAL_SCOPE_KEY if owner_id is None else _owner_scope_key(owner_id)
     _lock_epoch_row_for_update(db, scope_key=scope_key, owner_id=owner_id)
     reason = f"cleared:{founder_ack}"
@@ -385,6 +473,102 @@ def clear_kill_switch_for_recovery(
     )
     db.flush()
     return KillSwitchState(active=False, reason=reason)
+
+
+def clear_owner_stop(
+    db: Session, *, owner_id: uuid.UUID, founder_ack: str, clear_request_id: uuid.UUID | None = None
+) -> KillSwitchState:
+    """#237 clear API → canonical owner clear (clear_request_id reserved for 0070 audit)."""
+    _ = clear_request_id
+    return clear_kill_switch_for_recovery(db, founder_ack=founder_ack, owner_id=owner_id)
+
+
+def clear_global_emergency_stop(
+    db: Session, *, founder_ack: str, clear_request_id: uuid.UUID | None = None
+) -> KillSwitchState:
+    _ = clear_request_id
+    return clear_kill_switch_for_recovery(db, founder_ack=founder_ack, owner_id=None)
+
+
+def query_stop_status(db: Session, *, owner_id: uuid.UUID | None = None) -> dict:
+    """Canonical observability over workforce_authority_epoch (not a second stop SoT)."""
+    global_state = get_global_kill_switch(db)
+    owner_state = get_kill_switch(db, owner_id) if owner_id is not None else None
+    global_row = db.execute(
+        text("SELECT epoch FROM workforce_authority_epoch WHERE scope_key = :k"),
+        {"k": _GLOBAL_SCOPE_KEY},
+    ).mappings().first()
+    owner_epoch = 0
+    if owner_id is not None:
+        orow = db.execute(
+            text("SELECT epoch FROM workforce_authority_epoch WHERE scope_key = :k"),
+            {"k": _owner_scope_key(owner_id)},
+        ).mappings().first()
+        owner_epoch = int((orow or {}).get("epoch") or 0)
+    blocked = bool(global_state.active) or bool(owner_state and owner_state.active)
+    code = None
+    if global_state.active:
+        code = "BLOCKED_BY_GLOBAL_EMERGENCY_STOP"
+    elif owner_state and owner_state.active:
+        code = "BLOCKED_BY_OWNER_STOP"
+    return {
+        "blocked": blocked,
+        "code": code,
+        "canonical_table": "workforce_authority_epoch",
+        "global": {
+            "active": bool(global_state.active),
+            "reason": global_state.reason,
+            "sequence": int((global_row or {}).get("epoch") or 0),
+        },
+        "owner": (
+            {
+                "active": bool(owner_state.active),
+                "reason": owner_state.reason,
+                "sequence": owner_epoch,
+                "owner_id": str(owner_id),
+            }
+            if owner_state is not None
+            else None
+        ),
+    }
+
+
+def record_boot_blocked(db: Session, *, owner_id: uuid.UUID | None, reason: str) -> None:
+    """Audit boot refusal against ONE blocking identity from query_stop_status.
+
+    Events table (0070) may append later; identity must still be single-row coherent now.
+    """
+    status = query_stop_status(db, owner_id=owner_id)
+    # Touch updated_at on the blocking epoch row so audit is durable without a second SoT.
+    if status.get("global", {}).get("active"):
+        scope_key = _GLOBAL_SCOPE_KEY
+        oid = None
+    elif status.get("owner", {}).get("active") and owner_id is not None:
+        scope_key = _owner_scope_key(owner_id)
+        oid = owner_id
+    else:
+        scope_key = _GLOBAL_SCOPE_KEY
+        oid = None
+    _ensure_epoch_row(db, scope_key=scope_key, owner_id=oid)
+    db.execute(
+        text(
+            """
+            UPDATE workforce_authority_epoch
+            SET updated_at = :now,
+                reason = CASE
+                    WHEN stopped THEN reason
+                    ELSE :reason
+                END
+            WHERE scope_key = :scope_key
+            """
+        ),
+        {
+            "now": datetime.utcnow(),
+            "reason": f"boot_blocked:{reason}"[:500],
+            "scope_key": scope_key,
+        },
+    )
+    db.flush()
 
 
 def prove_no_reusable_live_authority(db: Session, *, owner_id: uuid.UUID) -> bool:

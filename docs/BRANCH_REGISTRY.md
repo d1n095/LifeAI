@@ -18,7 +18,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 | `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness (gated), first team, staff loop, systemic attacks. |
 | `cursor/workforce-registry-post-232` | [#233](https://github.com/d1n095/LifeAI/pull/233) | **Mergad** | Registry mark #230–#232 merged. |
 | `cursor/mainai-workforce-activation-prep` | [#234](https://github.com/d1n095/LifeAI/pull/234) | **Mergad** | ActivationGateSet, safe internal run, kill-switch, startup readiness; provider invoke staged disabled. |
-| `cursor/mainai-composed-executive-loop` (**MERGAD #235**) | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Öppen** | Composed executive loop (glue) + continuity/scenarios; wires readiness/kill into observability. No provider activate. |
+| `cursor/mainai-composed-executive-loop` (**MERGAD #235**) | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Mergad** | Composed executive loop (glue) + continuity/scenarios; wires readiness/kill into observability. No provider activate. |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 
@@ -60,9 +60,20 @@ shape as #238's memory_work_linkage race but different call sites); the
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-local-intelligence-school` | [#236](https://github.com/d1n095/LifeAI/pull/236) | **Aktiv** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
+| `cursor/mainai-local-intelligence-school` | [#236](https://github.com/d1n095/LifeAI/pull/236) | **MERGAD** | Local-first learning school: routing, distill, curriculum/practice/exam, independence metrics, HOT/WARM/COLD, offline audit. External APIs = teachers not brain. No new migration. Reuses lessons + capability_reality + founder_memory. |
 
 **#235 mergad** (`26fa7b2`). School wired into executive (`school_bridge` + local-attempt-first). Evidence hierarchy: TEACHER ≠ TRUTH.
+
+---
+
+
+## MainAI Safe-Internal Startup (2026-09-01)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | **Aktiv — DO NOT MERGE yet (pre-start certification)** | Daily runbook, safe-internal boundary, boot + P0 cert fixes + P1 existing-state/provider-ledger/backup/fresh-process. Claude exam on `5b15f02` (+ later heads). |
+
+**#236 MERGAD** → tip includes Local Intelligence School + executive wire.
 
 ---
 

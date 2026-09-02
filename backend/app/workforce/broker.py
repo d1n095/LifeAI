@@ -85,6 +85,7 @@ def resolve_delegation(
         raise DelegationBrokerError(f"request status={request.status} is not open")
 
     prefer_local = prefer_local_only or request.data_sensitivity in ("vault", "secret", "high")
+
     best = select_best_candidate(
         db,
         owner_id=owner_id,
@@ -128,7 +129,7 @@ def resolve_delegation(
     # lock that a concurrent activate_kill_switch()/activate_global_kill_switch() call
     # contends for as part of its own commit, so the database enforces one strict ordering
     # between this grant and any concurrent stop — no application-level timing assumption.
-    assert_grant_allowed(db, owner_id=owner_id)
+    grant_fence = assert_grant_allowed(db, owner_id=owner_id)
 
     assignment = WorkforceAssignment(
         owner_id=owner_id,
@@ -155,6 +156,7 @@ def resolve_delegation(
                 "EXTERNAL_MODEL_OUTPUT_NE_TRUSTED_FACT",
             ],
             "authority_granted_extra": False,
+            "authority_fence": grant_fence,
         },
     )
     db.add(assignment)

@@ -98,7 +98,7 @@ def test_kill_switch_blocks_further_execution(superuser_db):
     # partial writes -- assert_grant_allowed() raises a plain Python exception before any
     # DB-level error, so the transaction itself is not aborted and is safe to keep using.
 
-    clear_kill_switch_for_recovery(superuser_db, founder_ack="founder-ack-test", owner_id=owner.id)
+    clear_kill_switch_for_recovery(superuser_db, founder_ack="founder_ack:test-clear", owner_id=owner.id)
     superuser_db.commit()
     assert get_kill_switch(superuser_db, owner.id).active is False
 

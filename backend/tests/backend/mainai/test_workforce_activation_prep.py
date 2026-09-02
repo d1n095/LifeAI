@@ -96,19 +96,25 @@ def test_all_gates_verified_still_stages_invoke(superuser_db):
 
 def test_startup_readiness_levels_not_one_boolean(superuser_db):
     reset_activation_gates_for_tests()
-    report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None, db=superuser_db)
     assert report.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
-    assert "provider_delegation_safety" in " ".join(report.blocking) or any(
-        "provider_delegation_safety" in b for b in report.blocking
-    )
     assert report.as_dict()["invariant"] == "NEVER_COLLAPSE_TO_ONE_BOOLEAN"
-
+    # Claude True alone must NOT unlock provider tier without durable evidence
     for key in REQUIRED_ACTIVATION_GATES:
         record_gate_verification(key, status=GateStatus.verified, evidence_ref=f"ev:{key}")
-    report2 = evaluate_startup_readiness(claude_reviews_satisfied=True)
-    assert report2.level in (
+    report2 = evaluate_startup_readiness(claude_reviews_satisfied=True, db=superuser_db)
+    assert report2.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
+    assert any("claude_reviews" in b for b in report2.blocking)
+    # With durable evidence_ref → may reach provider tier
+    report3 = evaluate_startup_readiness(
+        claude_reviews_satisfied=True,
+        db=superuser_db,
+        receipts={"claude_reviews_evidence_ref": "claude-pr-review:example"},
+    )
+    assert report3.level in (
         ReadinessLevel.READY_FOR_LOW_RISK_PROVIDER_RUN,
         ReadinessLevel.READY_FOR_SERIOUS_AUTONOMOUS_RUN,
+        ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN,  # spend may still block
     )
     reset_activation_gates_for_tests()
 

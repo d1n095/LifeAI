@@ -500,7 +500,7 @@ def test_scenario_6_global_stop_affects_all_owners(superuser_db):
     # Clean up the global stop so it cannot leak into other test modules in this process.
     cleanup = _new_session()
     try:
-        clear_kill_switch_for_recovery(cleanup, founder_ack="scenario-6-cleanup", owner_id=None)
+        clear_kill_switch_for_recovery(cleanup, founder_ack="founder_ack:scenario-6-cleanup", owner_id=None)
         cleanup.commit()
     finally:
         cleanup.close()
