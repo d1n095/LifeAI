@@ -659,17 +659,28 @@ omstarts-punkter och returnerade identiskt `True` varje gång — INGEN flimmer,
 monotont och korrekt växande resultatmängd. **SVAR PÅ HUVUDFRÅGAN: NEJ, ingen semantisk
 fidelitets-degradering upptäckt när historiken växer.**
 
-**VIKTIGT, KRÄVER OMEDELBAR UPPFÖLJNING:** PR #237s egen gren innehåller redan ett
-självförfattat certifieringsarbete (`docs/MAINAI_PRE_START_DEFECT_LEDGER.md`,
-`docs/CLAUDE_CERTIFICATION_ATTACK_5b15f02.md`) som hävdar flera P0-punkter — INKLUSIVE den
-centrala #213/#220-evidens-semantik-fixen (`app/evidence_claim.py`s
-`evidence_supports_claim()`) — som "LOCALLY_FIXED". INTE oberoende omverifierat än (utanför
-denna forks scope). Eftersom denna sessions egen `git log`-kontroll (ovan) bekräftade
-`app/capability_reality/` orörd — betyder detta antingen (a) en ny, separat modul
-(`evidence_claim.py`) som ANNAT anropar in i finns men INTE ännu är kopplad till
-`capability_reality.record_capability_observation()`, eller (b) en verklig fix som denna
-sessions egen matris missade att upptäcka pga att den kollade fel modul. Kräver akut
-avstämning nästa runda — se nedan.
+**AVSTÄMT (2026-09-02) — INGEN MOTSÄGELSE, VERKLIGT FRAMSTEG.** PR #237s egen gren
+(`cursor/mainai-safe-internal-startup`) har en riktig, substantiell fix: en ny
+`app/evidence_claim.py`-modul med `evidence_supports_claim()`/
+`require_supporting_evidence_for_verified()`, GENUINT INKOPPLAD — `capability_reality/
+service.py` importerar och anropar den direkt, reser `CapabilityEvidenceError` vid avvisning,
+INTE en dormant parallell funktion. Denna sessions "helt öppen"-fynd var korrekt för
+INTEGRATIONSTIPPEN (som genuint aldrig rörts) — motsäger inte alls det nya fyndet på #237s
+gren specifikt.
+
+**Empiriskt omkört 10-scenario-matris mot #237s gren: 6 av 8 direkttestade scenarion GODKÄNDA**
+(misslyckad evidens, avvisad evidens, orelaterad-förmåga-med-explicit-nyckel-mismatch, fel
+ägare, äldre-framgång-sen-nyare-misslyckande, motsägande evidens i samma payload).
+
+**En verklig kvarstående lucka BEKRÄFTAD (scenario 6, fel subjekt):** ett `test_run_result`
+med `passed: True` och INGEN explicit `capability_key` i payloaden accepteras för VILKEN
+capability_key som helst, oavsett vad evidensens `source_ref` faktiskt namnger. Reproducerat
+direkt: evidens om `test_capX_completely_different.py` accepterades som bevis för en
+orelaterad `capY_the_one_we_claim`. Minsta fix: strama åt den bypass:en till att fortfarande
+kräva subjekt-relevans.
+
+Scenario 7 (superseded) och 9 (äldre-misslyckande-sen-nyare-framgång) inte oberoende
+omtestade denna runda — koden HAR logik för det förra, värt en uppföljningskontroll.
 
 Ärligt bortprioriterat i denna körning: `supersede_work_candidate()`-vägen otestad (bara
 `dismiss` övades), inget positivt "avslutat arbete"-testfall, school/teacher-ledger-state
