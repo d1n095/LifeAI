@@ -177,7 +177,7 @@ def run_executive_cycle(
         try:
             from app.workforce.kill_switch import assert_not_killed
 
-            assert_not_killed()
+            assert_not_killed(owner_id)
         except Exception as exc:
             uncertain.append(f"kill_switch_blocked:{type(exc).__name__}")
             run_workforce_dry = False
