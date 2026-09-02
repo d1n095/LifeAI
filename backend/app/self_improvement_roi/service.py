@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.self_improvement_roi import SelfImprovementROIRecord
@@ -84,6 +85,23 @@ def record_roi(
         rationale=decision.rationale,
         idempotency_key=idempotency_key,
     )
-    db.add(row)
-    db.flush()
-    return row
+    savepoint = db.begin_nested()
+    try:
+        db.add(row)
+        db.flush()
+        savepoint.commit()
+        return row
+    except IntegrityError as exc:
+        constraint_name = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
+        savepoint.rollback()
+        if constraint_name != "uq_self_improvement_roi_idem":
+            raise
+        existing = db.execute(
+            select(SelfImprovementROIRecord).where(
+                SelfImprovementROIRecord.owner_id == owner_id,
+                SelfImprovementROIRecord.idempotency_key == idempotency_key,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        return existing
