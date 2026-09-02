@@ -642,6 +642,40 @@ behöver TVÅ delar:** (1) DB-medveten upptäckt (faktiskt fråga `alembic_versi
 filsystemet), (2) lägga till nyckeln i `core`-grindnings-tupeln. Denna 5-falls-matris ÄR den
 exakta reproducer Cursor ska verifiera sin fix mot.
 
+### PR #244 — FINAL COMPOSED SAFE-INTERNAL EXAM (exakt SHA `beae39c7`) — INTE REDO ATT LANDAS
+
+Cursor komponerade en enda kandidat-tip av alla fem oberoende verifierade fix-grenar
+(#237+#238+#239+#240+#243). Attackerad direkt på den exakta angivna SHA:n, inte bara
+branch-tippen.
+
+- **Kill switch: VERIFIERAD** — 17/17 befintliga tester passerar, överfördes rent.
+- **Clear/grant: DELVIS, oförändrat** — förlegenhets-skydd finns men är valfritt.
+- **Migration-gating: VÄSENTLIGT FÖRBÄTTRAD, INTE fullt stängd.** `verify_migration_head()`
+  är nu genuint DB-medveten (riktig fix, ingen stubb) — empiriskt bekräftat att en genuin
+  multi-head-kollision nu ger `ReadinessLevel.BLOCKED` övergripande, vilket den inte gjorde
+  förut. Två kvarstående luckor: "unknown"-status blockerar INTE (bara "unhealthy" gör det,
+  bryter mot det krävda invariantet), och `blocking`-listan utelämnar
+  `blocking_migrations` även när det är den faktiska orsaken.
+- **Migrationer: VERIFIERAD** — en ren head.
+- **Evidens-subjekt-relevans: BEKRÄFTAT FORTFARANDE TRASIG.** Empiriskt omkört 3 fall direkt
+  mot denna exakta SHA — alla 3 misslyckas identiskt, byte-för-byte samma trasiga
+  substräng-matchningskod som tidigare.
+- **HÖGRISK-verifieringsgrind: BEKRÄFTAT FORTFARANDE TRASIG.** INGEN koppling till
+  `evidence_claim.py`-porten alls — `apply_verification_decision()` oförändrad, fortfarande
+  ren sannhetsvärde-kontroll, fortfarande ingen nedströms-backstop.
+- **Designupplösningen** (att släppa #237s konkurrerande `mainai_stop_state`): VERIFIERAD SANN,
+  ren.
+- Punkt 7-10, 12-13 inte omverifierade denna runda (tidsbudgeterat mot de två
+  founder-namngivna prioriteringarna).
+- **Ägar-isolering:** `workforce_authority_epoch` har fortfarande ingen RLS.
+
+**SLUTSATS: migration-gating fick en riktig, substantiell fix i denna komponerade kandidat,
+men de TVÅ punkter founder uttryckligen sa MÅSTE stängas före certifiering — evidens-
+subjekt-relevans och HÖGRISK-verifieringsgrinden — är BÅDA HELT ORÖRDA i denna komponerade
+kandidat, identiska med de enskilda gren-fynden.** Rekommendation: landa
+migration-gating-förbättringen (med unknown-ska-blockera-fixen tillagd) medan explicita fixar
+fortfarande krävs för de andra två innan omcertifiering försöks.
+
 ### PR #243 — kill-switch/grant-time auktoritetsrace-fix — VERIFIERAD (kvällens allvarligaste fynd, nu stängt)
 
 Byggd på #239s gren, stänger exakt den lucka #239 själv flaggade som utanför sitt scope:
