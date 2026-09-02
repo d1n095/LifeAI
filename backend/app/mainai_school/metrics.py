@@ -22,8 +22,8 @@ class DomainCounters:
     external_doer_uses: int = 0  # should trend down
 
 
-# Process-local ledger for tests / soak; durable export via as_dict.
-_COUNTERS: dict[str, DomainCounters] = {}
+# Process-local ledger keyed by owner+domain — never leak cross-owner metrics.
+_COUNTERS: dict[tuple[str, str], DomainCounters] = {}
 
 
 def reset_metrics_for_tests() -> None:
@@ -40,8 +40,10 @@ def record_task_outcome(
     exam_taken: bool = False,
     exam_passed: bool = False,
     external_as_doer: bool = False,
+    owner_id: str | None = None,
 ) -> IndependenceSnapshot:
-    c = _COUNTERS.setdefault(domain, DomainCounters())
+    key = (str(owner_id or "_unset"), domain)
+    c = _COUNTERS.setdefault(key, DomainCounters())
     if local_attempted:
         c.local_attempts += 1
         if local_success:
@@ -56,11 +58,12 @@ def record_task_outcome(
             c.exams_passed += 1
     if external_as_doer:
         c.external_doer_uses += 1
-    return snapshot_domain(domain)
+    return snapshot_domain(domain, owner_id=owner_id)
 
 
-def snapshot_domain(domain: str) -> IndependenceSnapshot:
-    c = _COUNTERS.get(domain, DomainCounters())
+def snapshot_domain(domain: str, *, owner_id: str | None = None) -> IndependenceSnapshot:
+    key = (str(owner_id or "_unset"), domain)
+    c = _COUNTERS.get(key, DomainCounters())
     attempts = max(1, c.local_attempts + c.external_doer_uses)
     dep = (c.teacher_helps + c.external_doer_uses) / attempts
     return IndependenceSnapshot(
@@ -73,6 +76,8 @@ def snapshot_domain(domain: str) -> IndependenceSnapshot:
         external_dependency_ratio=dep,
         evidence={
             "counters": c.__dict__.copy(),
+            "owner_scoped": True,
+            "owner_id": owner_id,
             "goal": "MINIMUM_EXTERNAL_DEPENDENCY_NECESSARY_FOR_QUALITY",
             "cheaper_is_not_better_if_wrong": True,
         },
@@ -80,4 +85,7 @@ def snapshot_domain(domain: str) -> IndependenceSnapshot:
 
 
 def all_domain_snapshots() -> dict[str, Any]:
-    return {d: snapshot_domain(d).__dict__ for d in sorted(_COUNTERS)}
+    return {
+        f"{oid}:{domain}": snapshot_domain(domain, owner_id=oid).__dict__
+        for (oid, domain) in sorted(_COUNTERS)
+    }

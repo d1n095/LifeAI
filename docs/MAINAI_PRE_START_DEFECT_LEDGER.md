@@ -1,4 +1,4 @@
-# MainAI Pre-Start Defect Ledger (certification)
+# MainAI Pre-Start Defect Ledger (blocker eradication)
 
 Status vocabulary: DISCOVERED → REPRODUCED → ROOT_CAUSED → FIX_IN_PROGRESS →
 LOCALLY_FIXED → INDEPENDENTLY_VERIFIED → MERGED → POST_MERGE_PROVEN → CLOSED.
@@ -7,21 +7,31 @@ CLOSED requires independent Claude evidence on exact tip SHA — not Cursor self
 
 | ID | Issue | Status | Notes |
 |---|---|---|---|
-| KS-OWNER-GLOBAL | #234 process-global kill switch / cross-owner DoS | LOCALLY_FIXED | Durable `mainai_stop_state` owner vs global (0069); dashboard/observability now use `query_stop_status` |
-| KS-BOOT-CLEAR | Boot/composed auto clear | LOCALLY_FIXED | Boot surfaces BLOCKED_BY_KILL_SWITCH; fabricated ack denied |
-| READY-IMPORT | Readiness importable==healthy | LOCALLY_FIXED | receipts.py: IMPORTABLE≠HEALTHY |
-| READY-MIG | Migration check hardcoded healthy | LOCALLY_FIXED | verify_migration_head runs alembic |
-| READY-BLOCKERS | Blocker list overwrite | LOCALLY_FIXED | accumulate via dict.fromkeys |
-| EVID-SEM | #213/#220 evidence exists≠supports | LOCALLY_FIXED | `evidence_supports_claim` + gate verified_available |
-| MEM-REPLAY | #211 memory→work replay contract | LOCALLY_FIXED | created_now_ids / canonical / replayed; idempotent park-path on `5b15f02` |
-| P1-EXISTING-STATE | Existing-state rich DB boot | LOCALLY_FIXED | `seed_rich_safe_internal_state` + `--existing-state` |
-| P1-PROVIDER-LEDGER | Independent provider zero-proof | LOCALLY_FIXED | boot receipt `provider_ledger_crosscheck` |
-| P1-BACKUP-RESTORE | Safe-internal backup→restore | LOCALLY_FIXED | `safe_internal_backup_restore_proof.py` |
-| P1-FRESH-PROCESS | Cold multi-process continuity | LOCALLY_FIXED | `fresh_process_continuity_proof.py` (A→B→C) |
-| #218 | paraphrase follow-up | OPEN | deferred unless blocks start |
-| #229 | independent race verdict | OPEN | Claude-owned; do not self-verify |
-| #224 | current-truth/cognitive-load | OPEN | Claude-owned |
-| #227 | 1000-tick soak | DEFERRED | post-start / serious autonomy |
+| AUTH-STOP-GRANT | Kill-switch vs grant race — live authority after STOP | LOCALLY_FIXED | FOR UPDATE fence; grant refuses while stopped; global revokes all; race test |
+| KS-OWNER-GLOBAL | Durable owner/global stop | LOCALLY_FIXED | 0069 + observability durable |
+| KS-BOOT-CLEAR | Boot auto-clear | LOCALLY_FIXED | |
+| READY-IMPORT | Importable==healthy | LOCALLY_FIXED | |
+| READY-MIG-GATE | blocking_migrations did not gate readiness | LOCALLY_FIXED | now BLOCKED |
+| READY-BOOT-AUDIT | record_boot_blocked scope/seq mix | LOCALLY_FIXED | one blocking identity |
+| EVID-SEM | #213/#220 evidence supports claim | LOCALLY_FIXED on #237 | tip still needs merge |
+| MEM-REPLAY | #211 replay contract | LOCALLY_FIXED | |
+| #236.1 | safe_composed auto-clear | LOCALLY_FIXED on #237 | LIVE on tip until merge |
+| #236.2 | cross-owner metrics | LOCALLY_FIXED | owner-scoped counters |
+| #236.3 | verification_status case | LOCALLY_FIXED | normalize case; fail closed |
+| #236.4 | curriculum random idempotency | LOCALLY_FIXED | stable owner/domain/skill key |
+| #236.5 | double route_local_first | LOCALLY_FIXED | removed pre-route |
+| #236.6 | registry #235 Öppen vs mergad | LOCALLY_FIXED | status Mergad |
+| #235-REPLAN | stale assumption indefinite replan | LOCALLY_FIXED | open-problem join only |
+| #235-CONCUR | same-owner cycle deadlock | LOCALLY_FIXED | advisory xact lock + scoped keys |
+| #218-PROP | must_surface cleared on stacked K–S | LOCALLY_FIXED | ported to #219–#227 |
+| #229-LABEL | race loser labeled created | OPEN | P1 |
+| SIBLING-RACES | work_candidate/proposal/prediction/roi/capability | OPEN | P1 |
+| #219-ISO | structured_claims cross-owner FK | OPEN | P1 |
+| #218 | Claude independent verify | OPEN | Claude-owned |
+| #229 | Claude race verdict | OPEN | Claude-owned |
+| #224 | cognitive-load | OPEN | Claude-owned |
+| #227 | 1000-tick soak | DEFERRED | post-start |
 
-**Claude exam target (P0):** `5b15f02a581fcb12ddd4c37f569175fcfb44a5d9` — see `docs/CLAUDE_CERTIFICATION_ATTACK_5b15f02.md`.
-If HEAD moves, record new SHA; re-run changed surfaces only.
+**#237 MUST NOT MERGE** until Claude independent attack on latest head.
+
+Current candidate after this eradication pass: record SHA from `git rev-parse HEAD` on `cursor/mainai-safe-internal-startup`.

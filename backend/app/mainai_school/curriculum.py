@@ -214,7 +214,7 @@ def persist_curriculum_note(
         owner_id=owner_id,
         note_type="observation",
         content=f"[school curriculum] {item.domain}:{item.skill}",
-        idempotency_key=f"school-curr:{uuid.uuid4()}",
+        idempotency_key=f"school-curr:{owner_id}:{item.domain}:{item.skill}",
         authority="deterministic_source",
         basis="deterministic",
         provenance={

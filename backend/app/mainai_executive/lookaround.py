@@ -28,9 +28,17 @@ from app.models.active_context import ActiveContextSet
 from app.work_candidates.service import record_work_candidate
 
 
-def _stable_candidate_key(*, owner_id: uuid.UUID, horizon: str, title: str) -> str:
-    """Owner+horizon+title — avoids minting duplicate candidates across sessions."""
-    digest = hashlib.sha256(f"{owner_id}:{horizon}:{title}".encode()).hexdigest()[:24]
+def _stable_candidate_key(
+    *,
+    owner_id: uuid.UUID,
+    horizon: str,
+    title: str,
+    session_id: str | None = None,
+    source_entity_id: uuid.UUID | None = None,
+) -> str:
+    """Owner+session/entity+horizon+title — avoid cross-topic / concurrent key collisions."""
+    scope = session_id or (str(source_entity_id) if source_entity_id else "noscope")
+    digest = hashlib.sha256(f"{owner_id}:{scope}:{horizon}:{title}".encode()).hexdigest()[:24]
     return f"exec-scan:{digest}"
 
 
@@ -199,6 +207,8 @@ def run_executive_lookaround(
                     owner_id=owner_id,
                     horizon=item.horizon.value,
                     title=item.title[:200],
+                    session_id=session_id,
+                    source_entity_id=source_entity_id,
                 ),
                 priority=priority,
                 classifier_strategy="executive_lookaround_v1",
@@ -227,6 +237,8 @@ def run_executive_lookaround(
                     owner_id=owner_id,
                     horizon="OPTIONAL",
                     title="[executive scan] bound reached before full confidence",
+                    session_id=session_id,
+                    source_entity_id=source_entity_id,
                 ),
                 priority="OPTIONAL",
                 classifier_strategy="executive_lookaround_v1",

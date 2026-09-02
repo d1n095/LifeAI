@@ -132,7 +132,7 @@ def startup_status_surface(
     readiness = evaluate_startup_readiness(claude_reviews_satisfied=None)
     stop = query_stop_status(db, owner_id=owner_id)
     school = school_path or {}
-    domain_snap = snapshot_domain("research")
+    domain_snap = snapshot_domain("research", owner_id=str(owner_id))
     return {
         "MAINAI_STATUS": "BLOCKED_BY_KILL_SWITCH"
         if stop["blocked"]

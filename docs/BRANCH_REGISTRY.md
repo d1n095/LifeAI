@@ -18,7 +18,7 @@ konkurrerande MainAI — organisatoriskt lager där MainAI är executive.
 | `cursor/mainai-workforce-runtime-harness` | [#232](https://github.com/d1n095/LifeAI/pull/232) | **Mergad** | Provider harness (gated), first team, staff loop, systemic attacks. |
 | `cursor/workforce-registry-post-232` | [#233](https://github.com/d1n095/LifeAI/pull/233) | **Mergad** | Registry mark #230–#232 merged. |
 | `cursor/mainai-workforce-activation-prep` | [#234](https://github.com/d1n095/LifeAI/pull/234) | **Mergad** | ActivationGateSet, safe internal run, kill-switch, startup readiness; provider invoke staged disabled. |
-| `cursor/mainai-composed-executive-loop` (**MERGAD #235**) | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Öppen** | Composed executive loop (glue) + continuity/scenarios; wires readiness/kill into observability. No provider activate. |
+| `cursor/mainai-composed-executive-loop` (**MERGAD #235**) | [#235](https://github.com/d1n095/LifeAI/pull/235) | **Mergad** | Composed executive loop (glue) + continuity/scenarios; wires readiness/kill into observability. No provider activate. |
 
 **Återanvänder:** `agent_coordination`, `execution_envelopes`, `provider_spend`, egress/disclosure, `intelligence_governance`, `capability_reality`. Skapar inte parallell broker/memory.
 

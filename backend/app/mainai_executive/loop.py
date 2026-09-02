@@ -69,8 +69,17 @@ def run_executive_cycle(
     interruption_point: str | None = None,
 ) -> ExecutiveCycleResult:
     """Run one composed executive cycle. Planning + dry-run only."""
+    from sqlalchemy import text as sa_text
+
     bounds = bounds or ExecutiveScanBounds()
     session_id = session_id or str(uuid.uuid4())
+    # Same-owner cycles serialize on a durable advisory lock — never deadlock uncaught.
+    # Key is stable hash of owner_id (two int4 halves of UUID int).
+    oid_int = owner_id.int
+    db.execute(
+        sa_text("SELECT pg_advisory_xact_lock(:k1, :k2)"),
+        {"k1": (oid_int >> 32) & 0x7FFFFFFF, "k2": oid_int & 0x7FFFFFFF},
+    )
     completed: list[str] = []
     uncertain: list[str] = []
     remaining: list[str] = [
@@ -156,20 +165,11 @@ def run_executive_cycle(
     )
     completed.append("STAFFING_DECISION")
 
-    # LOCAL CAPABILITY CHECK before act — school routing; never provider-as-default.
+    # LOCAL CAPABILITY CHECK — school bridge routes once with real dry-run evidence.
+    # Do not pre-route with synthetic confidence (disagreeing double-route).
     from app.mainai_executive.school_bridge import derive_task_class, run_local_first_school_step
-    from app.mainai_school.routing import route_local_first
 
     domain, task_class = derive_task_class(need_capability)
-    pre_route = route_local_first(
-        db,
-        owner_id=owner_id,
-        domain=domain,
-        task_class=task_class,
-        local_confidence=0.55,
-        evidence_jobs=0,
-        new_or_hard_domain=False,
-    )
     completed.append("LOCAL_CAPABILITY_CHECK")
 
     workforce_dry: dict[str, Any] | None = None
@@ -198,7 +198,6 @@ def run_executive_cycle(
                 "consequential_effects": slice_result.consequential_effects,
                 "activate_provider": False,
                 "local_attempt_first": True,
-                "school_route": pre_route.decision.value,
             }
             completed.append("ACT_DRY_RUN")
             completed.append("LOCAL_ATTEMPT_FIRST")
@@ -216,17 +215,16 @@ def run_executive_cycle(
     if not interruption_point:
         local_ok = None
         if workforce_dry is not None:
-            local_ok = (
-                not workforce_dry.get("provider_invoked")
-                and workforce_dry.get("verification_status") in (None, "passed", "ok", "verified", "accepted")
-            )
-            # Treat dry-run completion without provider as local attempt success when verified-ish.
+            vstatus = str(workforce_dry.get("verification_status") or "").strip().lower()
             if workforce_dry.get("provider_invoked"):
                 local_ok = False
-            elif workforce_dry.get("verification_status") in ("failed", "rejected", "error"):
+            elif vstatus in {"failed", "rejected", "error", "unverified", "superseded"}:
                 local_ok = False
-            else:
+            elif vstatus in {"passed", "ok", "verified", "accepted", "success"}:
                 local_ok = True
+            else:
+                # Missing/unknown status must not invent local success.
+                local_ok = False
         try:
             school_path = run_local_first_school_step(
                 db,
