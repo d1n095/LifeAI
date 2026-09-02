@@ -677,10 +677,27 @@ DB-baserad, stänger en durabilitets-lucka som fanns kvar även efter #239s äga
 - `safe_composed_run.py`-flaggat problem bekräftat FORTFARANDE trasigt (`TypeError`, fel
   antal argument) och genuint utanför denna PR:s scope (pre-existerande, föregår #243) — egen
   liten framtida fix.
-- INTE oberoende empiriskt testat (tidsbudget): clear-vs-grant-interaktion — kodläsning
-  bekräftar samma låsprimitiv återanvänds, men värt en explicit empirisk test i nästa runda.
+**Clear-vs-grant-luckan NU STÄNGD (2026-09-02):** 5 riktiga two-connection-race-tester byggda
+och körda. 4/5 GODKÄNDA (empiriskt bevisad låsblockering via `is_alive()`-liveness-checkar,
+inte antagen; clear återupplivar aldrig ett redan återkallat uppdrag; ägar-scopad och global
+clear strukturellt oberoende, olika DB-rader). **1 BEKRÄFTAD BUGG (fall 3, "ny stopp efter
+förlegad clear"):** `clear_kill_switch_for_recovery()` har NOLL förlegenhets-/
+generations-skydd — grep bekräftar att varken `expected_epoch`/`expected_sequence`/
+`clear_request_id` existerar någonstans i `app/workforce/` på denna gren, bara en ren
+sannhetsvärde-kontroll på `founder_ack`. Reproducerat sekventiellt (inget race behövs): stoppa
+incident-A → stoppa incident-B (orelaterad, epoch avancerar) → en förlegad clear avsedd för
+incident-A häver TYST även incident-B:s stopp, som founder aldrig bekräftade. Detta är en
+saknad-identitets-check-bugg, INTE en concurrency-bugg — själva grant/stop-race-fixen är
+opåverkad. Dormant just nu (inga produktionsanropare).
 
-**Rekommendation: REDO ATT LANDAS.** Ingen ny bugg funnen trots adversarial ansträngning.
+**Noterbar diskrepans:** denna grens `clear_kill_switch_for_recovery()` är enklare än vad en
+tidigare fork ikväll beskrev (`_validate_founder_ack()` med deny-lista/regex, delvis
+`expected_sequence`-stöd) — INGENDERA finns här. Kräver avstämning: vilken version är avsedd
+att skeppas.
+
+**Rekommendation: REDO ATT LANDAS** (kärn-race-fixen), med clear-identitets-luckan som en egen
+liten uppföljningsfix. Ingen ny bugg som rör själva auktoritets-racet funnen trots adversarial
+ansträngning.
 
 ### P1 — Fullständig kill-switch-certifieringsmatris (8 scenarion) — 6/8 GODKÄNT, 2 verkliga dormanta luckor
 
