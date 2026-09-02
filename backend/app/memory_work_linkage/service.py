@@ -350,9 +350,11 @@ def apply_memory_work_linkage(
                 )
                 canonical_candidates.append(candidate.id)
                 if prior is not None:
-                    # Idempotent hit: do not pretend we created again.
-                    actions.append(LinkageAction.NOOP_SAME)
-                    impacts.append(ImpactKind.SAME_COLLAPSE)
+                    # Self-idempotent replay of THIS note's park key (#238): surface the
+                    # same candidate id for callers. Reserve NOOP_SAME for cross-note
+                    # SAME-collapse above. created_now stays empty (#237 replay contract).
+                    created_candidates.append(candidate.id)
+                    actions.append(LinkageAction.CANDIDATE_RECORDED)
                     replayed = True
                 else:
                     created_candidates.append(candidate.id)
@@ -366,11 +368,9 @@ def apply_memory_work_linkage(
                     member_ref_id=candidate.id,
                     membership_basis="deterministic_relationship",
                     classification_basis="deterministic",
-                    provenance={
-                        "stage": "C",
-                        "timing": timing.value,
-                        "replayed": prior is not None,
-                    },
+                    # Provenance must be stable across replay — changing keys here
+                    # trips "idempotency key reused for different membership".
+                    provenance={"stage": "C", "timing": timing.value},
                     idempotency_key=f"mem-link-wc:{note_id}:{candidate.id}",
                     actor_type="system",
                 )

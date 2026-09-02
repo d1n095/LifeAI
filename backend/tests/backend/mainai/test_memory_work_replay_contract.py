@@ -35,8 +35,9 @@ def test_memory_work_replay_keeps_canonical_ids(db_session, make_verified_user):
     second = apply_memory_work_linkage(db_session, owner_id=user.id, note_id=note.id)
     db_session.commit()
     assert second.created_now_ids == []
-    assert second.created_candidate_ids == []
+    # Self-replay still surfaces the candidate id (#238); created_now stays empty (#237).
+    assert second.created_candidate_ids == canonical
     assert second.canonical_candidate_ids == canonical
     assert second.replayed is True
-    assert LinkageAction.NOOP_SAME in second.actions
+    assert LinkageAction.CANDIDATE_RECORDED in second.actions
     assert second.operation_receipt_id

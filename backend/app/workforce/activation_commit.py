@@ -26,11 +26,29 @@ def activation_commit_status() -> dict:
     # verified state, so ready_to_enable_after_claude could never become True.
     if gates.failed:
         claude_reviews_satisfied: bool | None = False
+        receipts: dict = {}
     elif gates.allowed:
         claude_reviews_satisfied = True
+        # IMPORTABLE != HEALTHY / True alone != unlock: attach durable evidence_refs
+        # from the verified gates themselves (each VERIFIED gate already required one).
+        gate_set = get_activation_gates()
+        refs = sorted(
+            {
+                g.evidence_ref
+                for g in gate_set.gates.values()
+                if getattr(g, "evidence_ref", None)
+            }
+        )
+        receipts = {
+            "claude_reviews_evidence_ref": ",".join(refs) if refs else "gates:all_verified",
+        }
     else:
         claude_reviews_satisfied = None
-    readiness = evaluate_startup_readiness(claude_reviews_satisfied=claude_reviews_satisfied)
+        receipts = {}
+    readiness = evaluate_startup_readiness(
+        claude_reviews_satisfied=claude_reviews_satisfied,
+        receipts=receipts,
+    )
     return {
         "provider_invoke_enabled": PROVIDER_INVOKE_ENABLED,
         "gates_allowed": gates.allowed,
@@ -47,6 +65,7 @@ def activation_commit_status() -> dict:
             and PROVIDER_INVOKE_ENABLED is False
         ),
         "note": "Enable only after evidence-backed gate verification + dedicated enablement commit",
+        "receipts": receipts,
     }
 
 

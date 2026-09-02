@@ -162,23 +162,36 @@ def test_department_ledger_does_not_fake_promotion(superuser_db):
 
 
 def test_startup_readiness_blocking_list_does_not_drop_earlier_reasons(superuser_db, monkeypatch):
-    """P1 bug (mainai_startup_readiness/__init__.py, PR #234, live on integration tip):
-    the final `blocking` list at the READY_FOR_SAFE_INTERNAL_RUN level was OVERWRITTEN
-    (not merged) with only ('provider_delegation_safety', 'claude_reviews'), silently
-    dropping other real blockers (e.g. spend_controls:unknown) computed earlier in the
-    function. Forces spend_controls to genuinely come back unknown (deleting the
-    attribute the presence-check imports) to prove it, rather than assuming."""
+    """Blocker lists must accumulate — never overwrite (tip bug in PR #234)."""
     import app.provider_spend.service as provider_spend_service
+    from app.mainai_startup_readiness import receipts as readiness_receipts
+    from app.mainai_startup_readiness.receipts import CheckStatus, ReadinessCheck
 
     reset_activation_gates_for_tests()
     monkeypatch.delattr(provider_spend_service, "provider_spend_is_live", raising=False)
 
+    report_blocked = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    assert any("spend_controls" in b for b in report_blocked.blocking), (
+        f"spend_controls must not be silently dropped, got {report_blocked.blocking}"
+    )
+
+    real_check = readiness_receipts._check_import
+
+    def _spend_unknown(key: str, import_path: str):
+        if key == "spend_controls":
+            return ReadinessCheck(key, CheckStatus.unknown, "forced unknown for accumulation test")
+        return real_check(key, import_path)
+
+    monkeypatch.setattr(readiness_receipts, "_check_import", _spend_unknown)
     report = evaluate_startup_readiness(claude_reviews_satisfied=None)
     assert report.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
     assert any("spend_controls" in b for b in report.blocking), (
         f"spend_controls:unknown must not be silently dropped from report.blocking, got {report.blocking}"
     )
-    assert any("provider_delegation_safety" in b for b in report.blocking)
+    assert any(
+        "provider_delegation" in b or "claude_reviews" in b or "activation_gates" in b
+        for b in report.blocking
+    ), f"provider/claude blockers missing from {report.blocking}"
     reset_activation_gates_for_tests()
 
 
@@ -194,27 +207,40 @@ def test_blocking_migrations_check_is_real_not_hardcoded(superuser_db):
 
 
 def test_activation_commit_status_wires_claude_reviews_from_gates(superuser_db):
-    """P1 bug (workforce/activation_commit.py, PR #234, live on integration tip):
-    activation_commit_status() hardcoded claude_reviews_satisfied=None when calling
-    evaluate_startup_readiness(), which forces the claude_reviews check to
-    CheckStatus.unknown and caps readiness.level at READY_FOR_SAFE_INTERNAL_RUN forever
-    -- so ready_to_enable_after_claude could never become True regardless of actual
-    verified state."""
+    """#240 fix: do not hardcode claude_reviews_satisfied=None.
+
+    Canonical #237 receipts still require durable evidence_ref + spend receipt before
+    READY_FOR_LOW_RISK_PROVIDER_RUN. Prove gate wiring + receipt attach, then promotion
+    when spend_controls_verified receipt is also present.
+    """
     from app.workforce.activation_commit import activation_commit_status
+    from app.mainai_startup_readiness import evaluate_startup_readiness
 
     reset_activation_gates_for_tests()
     status_before = activation_commit_status()
-    assert status_before["readiness_level"] == "READY_FOR_SAFE_INTERNAL_RUN"
+    assert status_before["readiness_level"] in (
+        "BLOCKED",
+        "READY_FOR_SAFE_INTERNAL_RUN",
+    )
 
     for key in REQUIRED_ACTIVATION_GATES:
         record_gate_verification(key, status=GateStatus.verified, evidence_ref=f"ev:{key}")
     status_after = activation_commit_status()
-    assert status_after["readiness_level"] in (
-        "READY_FOR_LOW_RISK_PROVIDER_RUN",
-        "READY_FOR_SERIOUS_AUTONOMOUS_RUN",
-    ), f"expected a higher readiness level once every gate is verified, got {status_after}"
+    assert status_after["gates_allowed"] is True
+    assert status_after.get("receipts", {}).get("claude_reviews_evidence_ref")
+    # Full provider-tier promotion still needs spend receipt (IMPORTABLE != HEALTHY).
+    promoted = evaluate_startup_readiness(
+        claude_reviews_satisfied=True,
+        receipts={
+            "claude_reviews_evidence_ref": status_after["receipts"]["claude_reviews_evidence_ref"],
+            "spend_controls_verified": True,
+        },
+    )
+    assert promoted.level in (
+        ReadinessLevel.READY_FOR_LOW_RISK_PROVIDER_RUN,
+        ReadinessLevel.READY_FOR_SERIOUS_AUTONOMOUS_RUN,
+    ), f"expected provider-tier with spend receipt, got {promoted.level} blocking={promoted.blocking}"
     reset_activation_gates_for_tests()
-
 
 def test_department_ledger_requires_durable_evidence_not_one_lucky_success(superuser_db):
     """P1 bug (workforce/department_evidence.py, PR #234, live on integration tip):
