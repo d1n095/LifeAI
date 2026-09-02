@@ -98,3 +98,44 @@ def test_context_specific_claim(superuser_db):
     )
     superuser_db.commit()
     assert row.kind == "context_specific"
+
+
+def test_structured_claim_rejects_cross_owner_entity_refs(superuser_db):
+    """Owner A must not attach related/contradicts refs to Owner B entities."""
+    import pytest
+    from app.contradiction_engine.service import ContradictionEngineError
+    from app.models.project_entities import ProjectEntity
+
+    a = _owner(superuser_db)
+    b = _owner(superuser_db)
+    foreign = ProjectEntity(
+        owner_id=b.id,
+        entity_type="idea",
+        title="B private concept",
+        title_normalized="b private concept",
+        idempotency_key=f"ent-b-{uuid.uuid4().hex[:8]}",
+        authority="founder",
+        basis="manual",
+        status="active",
+    )
+    superuser_db.add(foreign)
+    superuser_db.flush()
+
+    with pytest.raises(ContradictionEngineError):
+        record_structured_claim(
+            superuser_db,
+            owner_id=a.id,
+            kind="ASSUMPTION",
+            statement="A tries to point at B entity",
+            related_entity_id=foreign.id,
+            idempotency_key=f"cross-rel-{uuid.uuid4().hex[:8]}",
+        )
+    with pytest.raises(ContradictionEngineError):
+        record_structured_claim(
+            superuser_db,
+            owner_id=a.id,
+            kind="CONTRADICTS",
+            statement="A tries to contradict B entity",
+            contradicts_entity_id=foreign.id,
+            idempotency_key=f"cross-con-{uuid.uuid4().hex[:8]}",
+        )

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.concept_reconciliation import relate_concepts
 from app.memory_work_linkage import find_affected_work
+from app.models.project_entities import ProjectEntity
 from app.models.structured_claim import StructuredClaim, StructuredClaimEvent
 
 _KIND_MAP = {
@@ -100,6 +101,28 @@ def record_structured_claim(
                 claim_id=old.id,
                 event_type="superseded",
                 detail={"by": idempotency_key},
+            )
+
+
+    if related_entity_id is not None:
+        ent = db.execute(
+            select(ProjectEntity).where(
+                ProjectEntity.id == related_entity_id, ProjectEntity.owner_id == owner_id
+            )
+        ).scalar_one_or_none()
+        if ent is None:
+            raise ContradictionEngineError(
+                f"related_entity_id={related_entity_id} does not belong to owner_id={owner_id}"
+            )
+    if contradicts_entity_id is not None:
+        ent = db.execute(
+            select(ProjectEntity).where(
+                ProjectEntity.id == contradicts_entity_id, ProjectEntity.owner_id == owner_id
+            )
+        ).scalar_one_or_none()
+        if ent is None:
+            raise ContradictionEngineError(
+                f"contradicts_entity_id={contradicts_entity_id} does not belong to owner_id={owner_id}"
             )
 
     row = StructuredClaim(

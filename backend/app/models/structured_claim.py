@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, ForeignKeyConstraint, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -17,6 +17,20 @@ class StructuredClaim(Base):
     """Durable structured claim/assumption/fact. History is preserved via status + events."""
 
     __tablename__ = "structured_claims"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["related_entity_id", "owner_id"],
+            ["project_entities.id", "project_entities.owner_id"],
+            name="fk_structured_claims_related_entity_owner",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["contradicts_entity_id", "owner_id"],
+            ["project_entities.id", "project_entities.owner_id"],
+            name="fk_structured_claims_contradicts_entity_owner",
+            ondelete="SET NULL",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
