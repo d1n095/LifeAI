@@ -609,6 +609,24 @@ nivå-härledningslogiken (`core`/`need()`/`serious_keys` refererar aldrig
 Ska omverifieras empiriskt med samma multi-head-konstruktionsteknik som redan bevisat
 CONFIRMED-statusen ovan.
 
+**DEFINITIV 5-FALLS-MATRIS KLAR (2026-09-02) — VÄRRE ÄN KÄNT.**
+
+| # | Felläge | Upptäckt | Verkställd |
+|---|---|---|---|
+| 1 | Fel head (filsystem har 1 head, DB ligger efter) | **NEJ** (checken frågar aldrig DB) | N/A |
+| 2 | Flera heads | JA (`unhealthy`) | **NEJ** |
+| 3 | Verifieringsfel (korrupt migrationsfil) | JA (faller säkert till `unknown`) | **NEJ** |
+| 4 | Saknad `alembic_version`-tabell | **NEJ** | N/A |
+| 5 | Schema-drift (tabell omdöpt, version påstår korrekt) | **NEJ** | N/A |
+
+Luckan är VÄRRE än "upptäckt men inte verkställd" — 3 av 5 felägen upptäcks INTE ens, eftersom
+`_check_blocking_migrations()` är strukturellt rent filsystems-baserad och öppnar aldrig en
+DB-anslutning. Verkställande är 0/5 oavsett. Rotorsak: `evaluate_startup_readiness()`s
+`core`/`need()`/`serious_keys` refererar aldrig `"blocking_migrations"` någonstans. **Fixen
+behöver TVÅ delar:** (1) DB-medveten upptäckt (faktiskt fråga `alembic_version`, inte bara
+filsystemet), (2) lägga till nyckeln i `core`-grindnings-tupeln. Denna 5-falls-matris ÄR den
+exakta reproducer Cursor ska verifiera sin fix mot.
+
 ### PR #243 — kill-switch/grant-time auktoritetsrace-fix — VERIFIERAD (kvällens allvarligaste fynd, nu stängt)
 
 Byggd på #239s gren, stänger exakt den lucka #239 själv flaggade som utanför sitt scope:
