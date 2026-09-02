@@ -582,6 +582,21 @@ en riktig evidens-/godkännanderad. Bevisat direkt från Cursors EGEN existerand
 (`test_workforce_ops.py:245`): en fabricerad icke-existerande testsökväg OCH en uppenbart
 fejkad godkännande-sträng tillfredsställer båda den HÖGSTA risknivåns verifieringsgrind.
 
+**DEFINITIV 7-FALLS-MATRIS KLAR (2026-09-02) — 5/7 TRASIGA, INGEN BACKSTOP.** Bara fall 1
+(saknad verifierare) och fall 4 (ogiltigt beslut-enum) avvisar korrekt. Fall 2/3/5/6/7
+(misslyckad-innehåll-evidens, overifierade påståenden, förlegade/återanvända referenser,
+fel-uppgift-referenser, cross-owner-referenser) passerar ALLA en helt trasig grind —
+`test_evidence_ref`/`deterministic_validator`/`founder_approval_ref` är fritext-strängar med
+bara sannhetsvärde-kontroll, ingen FK, ingen innehålls-check, ingen subjekt-koppling.
+**Nedströms-konsekvens: BEKRÄFTAD ALLVARLIG, INGEN BACKSTOP** — att passera den trasiga
+grinden sätter DIREKT och OMEDELBART `assignment.status = "completed"` inuti samma funktion —
+ingen oberoende sekundär kontroll existerar någonstans i returvägen. **Fixväg identifierad:**
+PR #237s gren har redan `app/evidence_claim.py`s `evidence_supports_claim()` byggd och
+6/8-verifierad för samma buggklass på annat håll — att koppla `apply_verification_decision()`
+till den DELADE porten (istället för en skräddarsydd fix) skulle stänga detta med redan byggd
+infrastruktur. Reproducer postad på PR #231 (som faktiskt introducerade filen, bekräftat via
+`git log --follow`).
+
 **Övriga ytor i denna revisionsrunda:** goal/task-completion, verification pipeline (den
 äldre V0.1-V0.3-motorn), CI-wait-vägen — ALLA REN, härleder genuint `passed`/completion från
 riktiga kontroller (verkliga subprocess-pytest-körningar, riktiga externa GitHub CI-pollningar)
