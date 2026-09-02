@@ -125,9 +125,25 @@ def test_record_capability_gap_is_a_thin_wrapper_that_stays_planned(superuser_db
 
 def test_list_capability_records_filters_by_domain_and_status(superuser_db):
     owner = _owner(superuser_db)
-    record_capability_observation(superuser_db, owner_id=owner.id, capability_key="b.one", domain="b", status="verified_available")
+    task = _task(superuser_db, owner.id)
+    execution = record_execution(superuser_db, owner_id=owner.id, task_id=task.id, idempotency_key="list-exec", provider="internal")
+    ev_b = record_evidence(
+        superuser_db, owner_id=owner.id, execution_id=execution.id, evidence_kind="test_run_result",
+        payload={"passed": True}, source_type="pytest", source_ref="b", idempotency_key="list-ev-b", deterministic=True,
+    )
+    ev_c = record_evidence(
+        superuser_db, owner_id=owner.id, execution_id=execution.id, evidence_kind="test_run_result",
+        payload={"passed": True}, source_type="pytest", source_ref="c", idempotency_key="list-ev-c", deterministic=True,
+    )
+    record_capability_observation(
+        superuser_db, owner_id=owner.id, capability_key="b.one", domain="b", status="verified_available",
+        verification_evidence_id=ev_b.id, success=True,
+    )
     record_capability_observation(superuser_db, owner_id=owner.id, capability_key="b.two", domain="b", status="planned")
-    record_capability_observation(superuser_db, owner_id=owner.id, capability_key="c.one", domain="c", status="verified_available")
+    record_capability_observation(
+        superuser_db, owner_id=owner.id, capability_key="c.one", domain="c", status="verified_available",
+        verification_evidence_id=ev_c.id, success=True,
+    )
     superuser_db.commit()
 
     all_b = list_capability_records(superuser_db, owner_id=owner.id, domain="b")
@@ -139,7 +155,16 @@ def test_list_capability_records_filters_by_domain_and_status(superuser_db):
 
 def test_list_capability_gaps_excludes_verified_available_and_includes_everything_else(superuser_db):
     owner = _owner(superuser_db)
-    record_capability_observation(superuser_db, owner_id=owner.id, capability_key="a.verified", domain="a", status="verified_available")
+    task = _task(superuser_db, owner.id)
+    execution = record_execution(superuser_db, owner_id=owner.id, task_id=task.id, idempotency_key="gap-exec", provider="internal")
+    ev = record_evidence(
+        superuser_db, owner_id=owner.id, execution_id=execution.id, evidence_kind="test_run_result",
+        payload={"passed": True}, source_type="pytest", source_ref="a", idempotency_key="gap-ev", deterministic=True,
+    )
+    record_capability_observation(
+        superuser_db, owner_id=owner.id, capability_key="a.verified", domain="a", status="verified_available",
+        verification_evidence_id=ev.id, success=True,
+    )
     record_capability_observation(superuser_db, owner_id=owner.id, capability_key="a.disabled", domain="a", status="configured_disabled")
     record_capability_observation(superuser_db, owner_id=owner.id, capability_key="a.unavailable", domain="a", status="configured_unavailable")
     record_capability_gap(superuser_db, owner_id=owner.id, capability_key="a.planned", domain="a", reason="not built")
