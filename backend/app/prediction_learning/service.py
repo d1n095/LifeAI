@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.prediction_learning import PredictionRecord
@@ -72,12 +73,27 @@ def record_prediction(
         heuristic_tags=list(heuristic_tags or []),
         idempotency_key=idempotency_key,
     )
-    db.add(row)
-    db.flush()
-    return row
-
-
-def score_prediction(
+        savepoint = db.begin_nested()
+    try:
+        db.add(row)
+        db.flush()
+        savepoint.commit()
+        return row
+    except IntegrityError as exc:
+        constraint_name = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
+        savepoint.rollback()
+        if constraint_name != "uq_prediction_records_idem":
+            raise
+        existing = db.execute(
+            select(PredictionRecord).where(
+                PredictionRecord.owner_id == owner_id,
+                PredictionRecord.idempotency_key == idempotency_key,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        return existing
+f score_prediction(
     db: Session,
     *,
     owner_id: uuid.UUID,
