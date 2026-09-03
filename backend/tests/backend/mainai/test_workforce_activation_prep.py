@@ -170,7 +170,7 @@ def test_startup_readiness_blocking_list_does_not_drop_earlier_reasons(superuser
     reset_activation_gates_for_tests()
     monkeypatch.delattr(provider_spend_service, "provider_spend_is_live", raising=False)
 
-    report_blocked = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    report_blocked = evaluate_startup_readiness(claude_reviews_satisfied=None, db=superuser_db)
     assert any("spend_controls" in b for b in report_blocked.blocking), (
         f"spend_controls must not be silently dropped, got {report_blocked.blocking}"
     )
@@ -183,7 +183,7 @@ def test_startup_readiness_blocking_list_does_not_drop_earlier_reasons(superuser
         return real_check(key, import_path)
 
     monkeypatch.setattr(readiness_receipts, "_check_import", _spend_unknown)
-    report = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None, db=superuser_db)
     assert report.level == ReadinessLevel.READY_FOR_SAFE_INTERNAL_RUN
     assert any("spend_controls" in b for b in report.blocking), (
         f"spend_controls:unknown must not be silently dropped from report.blocking, got {report.blocking}"
@@ -204,6 +204,54 @@ def test_blocking_migrations_check_is_real_not_hardcoded(superuser_db):
     assert check.status.value == "healthy"
     assert "verify ops" not in check.detail  # old hardcoded placeholder text is gone
     assert "head" in check.detail
+
+
+def test_migration_unknown_status_blocks_readiness(superuser_db, monkeypatch):
+    """P0 closeout: UNKNOWN SAFETY STATE != SAFE. A migration verification that returns
+    unknown (e.g. subprocess/inspection failure, not a clean unhealthy multi-head result)
+    must block readiness exactly like unhealthy does -- previously only unhealthy blocked,
+    letting an unknown migration state silently proceed to a "ready" level."""
+    import app.mainai_startup_readiness.receipts as receipts_mod
+
+    def _fake_unknown(db=None):
+        return receipts_mod.ReadinessCheck(
+            "blocking_migrations", receipts_mod.CheckStatus.unknown, "simulated verification error"
+        )
+
+    monkeypatch.setattr(receipts_mod, "verify_migration_head", _fake_unknown)
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None, db=superuser_db)
+    assert report.level == ReadinessLevel.BLOCKED, f"expected BLOCKED, got {report.level} blocking={report.blocking}"
+    assert any("blocking_migrations" in b for b in report.blocking), report.blocking
+
+
+def test_kill_switch_unknown_status_blocks_readiness(superuser_db):
+    """Same invariant for kill_switch_health: no db session -> unknown -> must block, not
+    silently pass through to a ready level."""
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None, db=None)
+    check = next(c for c in report.checks if c.key == "kill_switch_health")
+    assert check.status.value == "unknown"
+    assert report.level == ReadinessLevel.BLOCKED, f"expected BLOCKED, got {report.level} blocking={report.blocking}"
+    assert any("kill_switch_health" in b for b in report.blocking), report.blocking
+
+
+def test_multi_head_migration_collision_blocks_overall_readiness(superuser_db, monkeypatch):
+    """The exact scenario proven broken tonight: a genuine multi-head Alembic collision
+    must not just be individually detected -- it must actually BLOCK the overall readiness
+    level, not merely be reported while readiness still reaches a ready tier."""
+    import app.mainai_startup_readiness.receipts as receipts_mod
+
+    def _fake_multi_head(db=None):
+        return receipts_mod.ReadinessCheck(
+            "blocking_migrations",
+            receipts_mod.CheckStatus.unhealthy,
+            "expected single alembic head, got ['0069', '0070-conflict']",
+            evidence={"heads": ["0069", "0070-conflict"]},
+        )
+
+    monkeypatch.setattr(receipts_mod, "verify_migration_head", _fake_multi_head)
+    report = evaluate_startup_readiness(claude_reviews_satisfied=None, db=superuser_db)
+    assert report.level == ReadinessLevel.BLOCKED, f"expected BLOCKED, got {report.level} blocking={report.blocking}"
+    assert "blocking_migrations" in report.blocking
 
 
 def test_activation_commit_status_wires_claude_reviews_from_gates(superuser_db):
@@ -231,6 +279,7 @@ def test_activation_commit_status_wires_claude_reviews_from_gates(superuser_db):
     # Full provider-tier promotion still needs spend receipt (IMPORTABLE != HEALTHY).
     promoted = evaluate_startup_readiness(
         claude_reviews_satisfied=True,
+        db=superuser_db,
         receipts={
             "claude_reviews_evidence_ref": status_after["receipts"]["claude_reviews_evidence_ref"],
             "spend_controls_verified": True,

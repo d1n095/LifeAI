@@ -308,17 +308,31 @@ def evaluate_startup_readiness(
     # need healthy via receipt OR we allow unknown only if module importable AND migration known?
     # Campaign: IMPORTABLE != HEALTHY. For safe internal we previously allowed import.
     # Tighten: require provider_disabled healthy + kill_switch healthy + migration not unhealthy.
+    # UNKNOWN SAFETY STATE != SAFE — these three are hard, startup-critical gates at the
+    # safe-internal tier (unlike workforce_foundation/vault_egress/authority_boundaries
+    # below, which are deliberately allowed to stay UNKNOWN/import-only at this tier).
+    # A verification error, a missing DB session, or any other non-healthy outcome must
+    # block exactly like an explicit "unhealthy" result -- the exact cause key is always
+    # preserved (never a generic replacement) so the real reason survives into the report.
     if by_key["provider_disabled"].status != CheckStatus.healthy:
         blocking.append("provider_disabled")
-    if by_key["kill_switch_health"].status == CheckStatus.unhealthy:
-        blocking.append("kill_switch_health")
-    if by_key["blocking_migrations"].status == CheckStatus.unhealthy:
-        blocking.append("blocking_migrations")
+    if by_key["kill_switch_health"].status != CheckStatus.healthy:
+        blocking.append(
+            "kill_switch_health"
+            if by_key["kill_switch_health"].status == CheckStatus.unhealthy
+            else "kill_switch_health:unknown"
+        )
+    if by_key["blocking_migrations"].status != CheckStatus.healthy:
+        blocking.append(
+            "blocking_migrations"
+            if by_key["blocking_migrations"].status == CheckStatus.unhealthy
+            else "blocking_migrations:unknown"
+        )
 
     if (
         by_key["provider_disabled"].status != CheckStatus.healthy
-        or by_key["kill_switch_health"].status == CheckStatus.unhealthy
-        or by_key["blocking_migrations"].status == CheckStatus.unhealthy
+        or by_key["kill_switch_health"].status != CheckStatus.healthy
+        or by_key["blocking_migrations"].status != CheckStatus.healthy
     ):
         return StartupReadinessReport(
             ReadinessLevel.BLOCKED,

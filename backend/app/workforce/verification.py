@@ -11,6 +11,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.evidence_claim import evidence_supports_claim
 from app.models.workforce import WorkforceAssignment
 from app.models.workforce_ops import WorkforceVerificationDecision
 from app.workforce.broker import VerificationError
@@ -107,8 +108,27 @@ def apply_verification_decision(
                 raise VerificationError("second verifier must be independent of builder and first verifier")
             if agreement is not True:
                 raise VerificationError("two-agent agreement not confirmed")
-        if policy.require_test_evidence and not test_evidence_ref:
-            raise VerificationError("test evidence required for this risk")
+        if policy.require_test_evidence:
+            # EVIDENCE ROW EXISTS != VERIFIED. A truthy string is not evidence -- it must
+            # name a real IntelligenceEvidence row, owned by this owner, that actually
+            # supports THIS assignment (never another task's evidence), with a genuine
+            # positive/current outcome. Reuses the same shared gate as capability_reality
+            # (app.evidence_claim) rather than reinventing evidence semantics here.
+            if not test_evidence_ref:
+                raise VerificationError("test evidence required for this risk")
+            try:
+                evidence_uuid = uuid.UUID(str(test_evidence_ref))
+            except (ValueError, AttributeError, TypeError):
+                raise VerificationError("test_evidence_ref must reference a real evidence record") from None
+            support = evidence_supports_claim(
+                db,
+                owner_id=owner_id,
+                subject_key=str(assignment.id),
+                proposition="verified_available",
+                evidence_id=evidence_uuid,
+            )
+            if not support.supports:
+                raise VerificationError(f"test evidence does not support this assignment: {', '.join(support.reasons)}")
         if policy.require_deterministic_validator and not deterministic_validator:
             raise VerificationError("deterministic validator required for this risk")
         if policy.require_founder_approval and not founder_approval_ref:

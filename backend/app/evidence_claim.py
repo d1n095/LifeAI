@@ -117,30 +117,44 @@ def evidence_supports_claim(
     if require_deterministic and not bool(row.deterministic):
         reasons.append("not_deterministic")
 
-    # Subject/proposition relevance via payload + source_ref (minimal, explicit)
+    # Subject/proposition relevance: structured identity fields (exact match) take priority
+    # over source_ref (a path/filename, where a substring relationship is legitimate) --
+    # OWNER MATCH != SUBJECT MATCH, STRING SIMILARITY != SUBJECT IDENTITY. A structured field
+    # that's present and doesn't match exactly must never be overridden by a looser signal
+    # (this is the bug: a bare "test_run_result"+passed=True previously bypassed subject
+    # checking entirely whenever capability_key was merely absent from the payload).
     payload = row.payload if isinstance(row.payload, dict) else {}
-    subject_ok = (
-        subject_key in str(payload.get("capability_key") or "")
-        or subject_key in str(payload.get("subject") or "")
-        or subject_key in str(row.source_ref or "")
-        or subject_key in str(payload.get("proposition") or "")
-        or proposition in str(payload.get("proposition") or "")
-        # Allow test_run_result that names the capability in source_ref path
-        or subject_key.split(".")[-1] in str(row.source_ref or "")
-    )
+    payload_capability_key = payload.get("capability_key")
+    payload_subject = payload.get("subject")
+    payload_proposition = payload.get("proposition")
+
+    subject_ok = False
+    mismatch_reason: str | None = None
+    if payload_capability_key is not None:
+        subject_ok = str(payload_capability_key) == subject_key
+        if not subject_ok:
+            mismatch_reason = "capability_key_mismatch"
+    elif payload_subject is not None:
+        subject_ok = str(payload_subject) == subject_key
+        if not subject_ok:
+            mismatch_reason = "subject_mismatch"
+    elif payload_proposition is not None:
+        subject_ok = str(payload_proposition) == proposition or str(payload_proposition) == subject_key
+        if not subject_ok:
+            mismatch_reason = "proposition_mismatch"
+    else:
+        # No structured subject field at all on this evidence row -- the ONLY remaining
+        # signal is a source_ref (path/filename) fragment match, deliberately the weakest
+        # tier and never allowed to override an explicit-but-mismatched field above.
+        last_segment = subject_key.split(".")[-1]
+        subject_ok = subject_key in str(row.source_ref or "") or last_segment in str(row.source_ref or "")
+        if not subject_ok:
+            mismatch_reason = "unrelated_evidence"
+
     if not subject_ok and proposition not in ("verified_available", "local_competence"):
         reasons.append("subject_or_proposition_not_tied_to_evidence")
     elif not subject_ok:
-        # For verified_available, require capability key somewhere or explicit subject
-        if "capability_key" in payload and payload.get("capability_key") != subject_key:
-            reasons.append("capability_key_mismatch")
-        elif "capability_key" not in payload and subject_key not in str(row.source_ref or ""):
-            # Still allow deterministic test_run with passed=True if source_ref present
-            # but mark weak unless source_ref contains a fragment
-            if row.evidence_kind == "test_run_result" and payload.get("passed") is True:
-                pass  # accepted as supporting test for the caller's asserted capability
-            else:
-                reasons.append("unrelated_evidence")
+        reasons.append(mismatch_reason or "unrelated_evidence")
 
     positive, fail_reason = _payload_positive(payload)
     if not positive:
