@@ -214,6 +214,28 @@ verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration **00
 `CandidateLearningSignal` (migration **0066**, tidigare 0065, tidigare 0064), `record_lesson_from_founder_
 correction()` (ingen migration). Se PR #197s egna commits för detaljer.
 
+## MainAI V2 — Sovereign Local Intelligence (Claude, ny isolerad design-lane, 2026-09-03)
+
+**PR #246** (`claude/mainai-v2-sovereign`, gren från `claude/det-kommer-mer-879lcm` — INTE
+från PR #245s gren), 10 nya dokument i `docs/mainai_v2/` (~2000 rader, rent additivt, noll
+ändring av något existerande). Founder-definierad produktvision: MainAI som primärt
+UI-lager (orb, inte dashboard), plus Sentinel-säkerhetsplattform, Guardian/Trust Kernel,
+Local Specialist Workforce, Privacy Boundary Engine, Offline Knowledge Packs, Sovereign
+Identity/Recovery. Se `docs/mainai_v2/MAINAI_V2_IMPLEMENTATION_PLAN.md` (V2-J) för
+beroendegraf, byggordning, och en uttrycklig lista över vad som är säkert att bygga NU
+kontra vad som måste vänta tills PR #245s oberoende certifiering är klar.
+
+**Kritiskt: rör INTE PR #245 / exakt kandidat-SHA `818dfb7`.** Certifieringskandidaten
+förblir fryst för oberoende motattack — verifierat: diff mot integrationsbasen visar bara
+10 NYA filer, noll ändrade, noll borttagna.
+
+**Notervärt fynd under skrivandet (ej fixat, bara flaggat i V2-D):** `app/workforce/
+injection.py`s `INJECTION_NEEDLES` är en ren substränglista — mycket sannolikt samma
+semantiska-kringgåelse-svaghet som redan bekräftad tre gånger tidigare i natt (#214/#218/
+#237s subjekt-matchning). Fjärde oberoende förekomst av samma mönster, inte fixad här
+(utanför denna design-endast-lanes scope) — kandidat för samma delade arkitekturfix som
+redan föreslagits (#227).
+
 ## MainAI Memory Frontier (Cursor, primary implementation lane, founder-godkänd 2026-08-30)
 
 **Founder har omfördelat hela Phase 2-13-arbetet (Canonical Memory Foundation, idé-
