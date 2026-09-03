@@ -175,6 +175,60 @@ runtime authority/security paths yet. Concretely safe to build NOW, fully isolat
 - Any Guardian code that would gate the real `resolve_delegation()`/`apply_verification_decision()`
   call sites #245 just fixed.
 
+## 6a. Whole-architecture egress-hazard search (2026-09-03, read-only, no refactor)
+
+Real code search across the existing certified runtime, to answer "where must V2-C's
+Privacy Boundary Engine eventually sit." This is a survey, not a refactor plan — nothing
+below was changed.
+
+**Already gated (no new hazard):** `app.providers.registry`, `app.provider_planning.service`,
+`app.routers.chat/library/workbench`, `app.rag.ingest/media_import`,
+`app.jobs.handlers.corpus_review` — all already route through the existing
+`app.egress_policy` gate before any external AI provider call. V2-C's own design doc
+(§ found while writing it) correctly identified this and designed to extend, not replace,
+this gate. Confirmed by direct search: this is the single largest already-safe surface.
+
+**Real AI-provider call sites** (the actual outbound network boundary, one layer below the
+`egress_policy`-gated callers above): `app.providers.anthropic_provider` /
+`openai_provider` / `gemini_provider` / `verification`, `app.agent_orchestration`,
+`app.mainai_execution.execution_job` / `planner` / `lesson_conflicts`,
+`app.mainai_runtime_contract`, `app.routers.agents`. These are the actual functions that
+serialize a prompt/context payload onto the wire — the eventual integration point for
+V2-C's semantic classify/minimize/generalize layer is here, upstream of `egress_policy`'s
+own redaction step (matching V2-C's own "sits upstream of egress_policy" design).
+
+**Genuinely unguarded hazard surface (no privacy-boundary-style gate exists today):**
+- **File upload/storage**: `app.routers.documents`, `app.models.document`,
+  `app.storage.references` — a document upload path has no equivalent
+  classify/minimize/sanitize step; whatever a user uploads goes to storage as-is (correct
+  for *local* storage, but this is exactly the boundary V2-C's pipeline would need to sit
+  in front of before anything derived from an uploaded document could ever egress as a
+  learning/telemetry signal).
+- **Raw stack-trace exposure**: `app.routers.chat`, `app.project_entities.service`,
+  `app.work_candidates.service`, `app.rag.claims`, `app.storage.references` all use
+  `traceback.format_exc()`/`exc_info=True` — a stack trace can legitimately contain local
+  file paths, usernames, and occasionally interpolated variable values. None of these are
+  currently routed through any sanitization step before landing in logs. This is the
+  single most concrete, near-term-actionable finding from this search: V2-C's
+  `sanitize_text()` (already implemented, 22/22 tests passing) is a drop-in candidate for
+  a log-formatter integration here — LOW effort, HIGH value, and does not touch any
+  authority/security path (§4/§5's before/after-#245 split still applies: this would be
+  new, additive logging-formatter code, not a modification of `execution_envelopes`/
+  `evidence_claim`/`kill_switch`, so it qualifies as "safe to build now" under §4 — but is
+  intentionally NOT built in this round, since it touches real, currently-running log
+  output and deserves its own focused PR + review, not a side effect of this foundation
+  round).
+- **General logging** (39 files import `logging` directly): not exhaustively audited line
+  by line in this pass — flagged as a systematic risk class (the same PII-in-logs pattern
+  as the stack-trace finding above, just not yet traced to specific call sites) rather than
+  claiming a false completeness here.
+
+**Migration map (order Privacy Boundary integration should happen in, once V2-C exits the
+foundation stage):** (1) log-formatter sanitization hook (smallest, safest, highest
+immediate value) → (2) real AI-provider call sites, upstream of the existing
+`egress_policy` gate → (3) file-upload-derived-signal paths → (4) full audit of the
+remaining ~35 unaudited logging call sites.
+
 ## 6. Open design risks (stated honestly, not glossed over)
 
 - **TAKEOVER_STATE's OS-level enforcement** genuinely differs in feasibility across
