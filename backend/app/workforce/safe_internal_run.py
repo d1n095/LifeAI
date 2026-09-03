@@ -54,8 +54,8 @@ class SafeInternalRunReport:
         }
 
 
-def require_safe_internal_readiness(*, claude_reviews_satisfied: bool | None = None) -> None:
-    report = evaluate_startup_readiness(claude_reviews_satisfied=claude_reviews_satisfied)
+def require_safe_internal_readiness(db: Session, *, claude_reviews_satisfied: bool | None = None) -> None:
+    report = evaluate_startup_readiness(claude_reviews_satisfied=claude_reviews_satisfied, db=db)
     if report.level == ReadinessLevel.BLOCKED:
         raise SafeInternalRunError(f"startup BLOCKED: {report.blocking}")
     # SAFE_INTERNAL is the minimum; higher levels are also fine for internal run.
@@ -85,8 +85,8 @@ def run_first_safe_internal_mainai_run(
     """
     notes: list[str] = []
     assert_not_killed(db, owner_id)
-    require_safe_internal_readiness(claude_reviews_satisfied=None)
-    readiness = evaluate_startup_readiness(claude_reviews_satisfied=None)
+    require_safe_internal_readiness(db, claude_reviews_satisfied=None)
+    readiness = evaluate_startup_readiness(claude_reviews_satisfied=None, db=db)
     notes.append(f"readiness={readiness.level.value}")
 
     bootstrap_first_team(db, owner_id=owner_id)
