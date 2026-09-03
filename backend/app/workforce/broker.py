@@ -206,11 +206,22 @@ def mark_verification(
     assignment: WorkforceAssignment,
     status: str,
     verifier_profile_id: uuid.UUID,
+    risk: str = "low",
 ) -> WorkforceAssignment:
+    """Raw, LOW-RISK-ONLY verification setter. HIGH_RISK != NORMAL_RISK: this function has
+    no evidence/founder-approval/two-agent-agreement policy of its own -- it must never be
+    reachable as a bypass around apply_verification_decision()'s real policy gate for
+    anything above low risk. Callers with risk != "low" must use apply_verification_decision()
+    instead, which enforces the shared app.evidence_claim evidence gate."""
     if status not in VERIFICATION_STATUSES:
         raise VerificationError(f"invalid verification status: {status}")
     if assignment.owner_id != owner_id:
         raise DelegationBrokerError("owner mismatch")
+    if (risk or "low").lower() != "low" and status == "VERIFIED":
+        raise VerificationError(
+            f"mark_verification() cannot VERIFY risk={risk!r} work -- use apply_verification_decision() "
+            "for anything above low risk, it enforces the real evidence/approval policy"
+        )
     if status == "VERIFIED":
         if verifier_profile_id == assignment.profile_id:
             raise VerificationError("BUILDER_CANNOT_SELF_VERIFY")

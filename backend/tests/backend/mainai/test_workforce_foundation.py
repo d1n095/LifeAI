@@ -198,6 +198,37 @@ def test_delegation_broker_vertical_slice_safe_no_provider(superuser_db):
     assert snap["performance"]
 
 
+def test_mark_verification_cannot_bypass_high_risk_evidence_policy(superuser_db):
+    """P0 self-red-team finding: mark_verification() is a raw, policy-free setter with no
+    evidence/founder-approval/two-agent-agreement requirements of its own -- calling it
+    directly for a HIGH-RISK assignment would completely bypass apply_verification_decision()'s
+    real evidence gate (app.evidence_claim). It must refuse to VERIFY anything above low risk,
+    forcing callers through the actually-gated function instead."""
+    owner = _owner(superuser_db)
+    builder, verifier = _seed_pair(superuser_db, owner.id)
+    superuser_db.commit()
+    req = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="high risk work",
+        required_capability="low_risk_classification",
+        risk="high",
+        verification_requirement="independent_verifier",
+    )
+    assignment = resolve_delegation(superuser_db, owner_id=owner.id, request=req, verifier_profile_id=verifier.id)
+    superuser_db.commit()
+    with pytest.raises(VerificationError):
+        mark_verification(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment,
+            status="VERIFIED",
+            verifier_profile_id=verifier.id,
+            risk="high",
+        )
+    assert assignment.verification_status == "UNVERIFIED"
+
+
 def test_retired_and_revoked_cannot_run(superuser_db):
     owner = _owner(superuser_db)
     builder, verifier = _seed_pair(superuser_db, owner.id)

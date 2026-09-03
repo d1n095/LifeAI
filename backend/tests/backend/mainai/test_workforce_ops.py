@@ -79,6 +79,42 @@ def _pair(db, owner_id, *, suffix=""):
     return b, v
 
 
+def _evidence_for_assignment(db, owner_id, assignment, *, passed=True, subject_override=None):
+    """Creates a real, genuinely-linked IntelligenceEvidence row (goal/plan/task/execution
+    chain + evidence, payload.subject == this assignment's own id) and returns its UUID
+    string, suitable as a real test_evidence_ref for apply_verification_decision()."""
+    from app.intelligence_governance.service import record_evidence, record_execution
+    from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
+
+    goal = MainAIGoal(owner_id=owner_id, title="wf-verify", original_instruction="verify", created_by="test")
+    db.add(goal)
+    db.flush()
+    plan = MainAIPlan(owner_id=owner_id, goal_id=goal.id, version=1, rationale="test", created_by="test")
+    db.add(plan)
+    db.flush()
+    task = MainAITask(
+        owner_id=owner_id, goal_id=goal.id, plan_id=plan.id, task_type="repo_edit",
+        description="t", status="pending", risk_level="high",
+    )
+    db.add(task)
+    db.flush()
+    execution = record_execution(
+        db, owner_id=owner_id, task_id=task.id, idempotency_key=f"wfve-{uuid.uuid4()}", provider="internal",
+    )
+    evidence = record_evidence(
+        db,
+        owner_id=owner_id,
+        execution_id=execution.id,
+        evidence_kind="test_run_result",
+        payload={"passed": passed, "subject": subject_override or str(assignment.id)},
+        source_type="pytest",
+        source_ref=f"tests/workforce/test_assignment_{assignment.id}.py",
+        idempotency_key=f"wfev-{uuid.uuid4()}",
+        deterministic=True,
+    )
+    return str(evidence.id)
+
+
 # --- T13 ---
 
 
@@ -233,6 +269,7 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
             risk="high",
             verifier_profile_id=b.id,  # self
         )
+    real_evidence_ref = _evidence_for_assignment(superuser_db, owner.id, a, passed=True)
     apply_verification_decision(
         superuser_db,
         owner_id=owner.id,
@@ -242,12 +279,93 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
         verifier_profile_id=v.id,
         second_verifier_profile_id=v2.id,
         agreement=True,
-        test_evidence_ref="tests/x.py::test_y",
+        test_evidence_ref=real_evidence_ref,
         deterministic_validator="schema_v1",
         founder_approval_ref="founder:ok:1",
     )
     superuser_db.commit()
     assert a.verification_status == "VERIFIED"
+
+
+# --- P0 HIGH-RISK verification gate closeout: evidence must be REAL and SUBJECT-SPECIFIC ---
+#
+# apply_verification_decision() previously only checked test_evidence_ref truthiness -- any
+# non-empty string satisfied it, including a fabricated non-existent path. It now requires a
+# real IntelligenceEvidence row that genuinely supports THIS assignment via app.evidence_claim
+# (the same shared gate used by capability_reality).
+
+
+def _high_risk_setup(superuser_db, suffix):
+    owner = _owner(superuser_db)
+    b, v = _pair(superuser_db, owner.id, suffix=suffix)
+    v2 = register_workforce_agent(
+        superuser_db, owner_id=owner.id, agent_key=f"v2{suffix}", name="V2", role="verifier",
+        agent_type="VERIFIER", trust_zone="LOCAL_INTERNAL", capability_tags=["verification"], status="active",
+    )
+    req = submit_delegation_request(
+        superuser_db, owner_id=owner.id, goal_text="x", required_capability="low_risk_classification",
+        risk="high", verification_requirement="independent_verifier",
+    )
+    a = resolve_delegation(superuser_db, owner_id=owner.id, request=req, verifier_profile_id=v.id)
+    return owner, a, v, v2
+
+
+def _verify_kwargs(owner, a, v, v2, *, test_evidence_ref):
+    return dict(
+        owner_id=owner.id, assignment=a, decision="VERIFIED", risk="high",
+        verifier_profile_id=v.id, second_verifier_profile_id=v2.id, agreement=True,
+        test_evidence_ref=test_evidence_ref, deterministic_validator="schema_v1",
+        founder_approval_ref="founder:ok:1",
+    )
+
+
+def test_high_risk_fake_string_evidence_rejected(superuser_db):
+    """The exact original bug: a fabricated, non-existent test path must not satisfy the
+    HIGH-RISK evidence gate."""
+    owner, a, v, v2 = _high_risk_setup(superuser_db, "-fake")
+    with pytest.raises(VerificationError):
+        apply_verification_decision(
+            superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref="tests/nonexistent/fake_path.py::test_fake")
+        )
+
+
+def test_high_risk_missing_verification_rejected(superuser_db):
+    owner, a, v, v2 = _high_risk_setup(superuser_db, "-missing")
+    with pytest.raises(VerificationError):
+        apply_verification_decision(superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref=None))
+
+
+def test_high_risk_failed_evidence_rejected(superuser_db):
+    owner, a, v, v2 = _high_risk_setup(superuser_db, "-failed")
+    ref = _evidence_for_assignment(superuser_db, owner.id, a, passed=False)
+    with pytest.raises(VerificationError):
+        apply_verification_decision(superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref=ref))
+
+
+def test_high_risk_wrong_task_evidence_rejected(superuser_db):
+    """Real, passing, correctly-owned evidence -- but for a DIFFERENT assignment."""
+    owner, a, v, v2 = _high_risk_setup(superuser_db, "-wrongtask")
+    _, other_a, _, _ = _high_risk_setup(superuser_db, "-wrongtask-other")
+    ref = _evidence_for_assignment(superuser_db, owner.id, other_a, passed=True)
+    with pytest.raises(VerificationError):
+        apply_verification_decision(superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref=ref))
+
+
+def test_high_risk_wrong_owner_evidence_rejected(superuser_db):
+    owner, a, v, v2 = _high_risk_setup(superuser_db, "-wrongowner")
+    other_owner = _owner(superuser_db)
+    ref = _evidence_for_assignment(superuser_db, other_owner.id, a, passed=True, subject_override=str(a.id))
+    with pytest.raises(VerificationError):
+        apply_verification_decision(superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref=ref))
+
+
+def test_high_risk_real_matching_evidence_accepted(superuser_db):
+    owner, a, v, v2 = _high_risk_setup(superuser_db, "-real")
+    ref = _evidence_for_assignment(superuser_db, owner.id, a, passed=True)
+    apply_verification_decision(superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref=ref))
+    superuser_db.commit()
+    assert a.verification_status == "VERIFIED"
+    assert a.status == "completed"
 
 
 # --- T15 / T20 ---
