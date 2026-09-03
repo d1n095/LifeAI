@@ -1,0 +1,201 @@
+# MainAI V2 — Implementation Plan, Dependency Graph, Phasing (Stage V2-J)
+
+**Status:** design-only synthesis. Does not modify, rebase, or depend on PR #245 / candidate
+SHA `818dfb732da47901eb5ae06ffdd9c829fe00c4c5`. This document ties together V2-A through V2-I
+(all in this directory) into one buildable sequence.
+
+---
+
+## 1. Dependency graph
+
+```
+V2-A  Architecture Map (vocabulary, trust chain, constitution)
+  │
+  ├──▶ V2-B  Guardian / Trust Kernel ──────────────┐
+  │                                                  │
+  ├──▶ V2-G  Sovereign Identity ────────────────────┤  (Guardian needs a real identity
+  │         (key hierarchy, RootAuthorityProof)      │   primitive to verify against;
+  │                                                  │   Identity needs Guardian as the
+  │                                                  │   thing it's authenticating INTO)
+  │                                                  ▼
+  │                                        V2-B + V2-G together =
+  │                                        the actual root-of-trust, required
+  │                                        before anything below can be "real"
+  │                                        rather than "designed"
+  │
+  ├──▶ V2-C  Privacy Boundary Engine (extends existing app.egress_policy)
+  │
+  ├──▶ V2-D  Sentinel (event mesh + defensive autonomy)
+  │         requires: V2-B (defensive-autonomy pre-authorization is a Guardian-issued
+  │                    scope object, per V2-D's own design) + existing execution_envelopes
+  │
+  ├──▶ V2-E  Local Workforce (extends existing app.workforce)
+  │         requires: V2-F (knowledge_pack_bindings field references packs that must
+  │                    have a real format first)
+  │
+  ├──▶ V2-F  Offline Knowledge Packs
+  │
+  └──▶ V2-H  Sovereign Recovery (Encrypted Life Image, Fast Restore)
+            requires: V2-G (key hierarchy IS the recovery key hierarchy — same keys)
+                      + the ALREADY-PROVEN same-device restart durability pattern
+                        (tonight's 10-subprocess campaign) for the same-device half;
+                        genuinely new work only for the cross-device half
+
+V2-I  Orb Operating Shell
+  requires: V2-A §1 vocabulary (direct) + V2-E (invisible routing dispatches to
+            Local Workforce specialists) + V2-D (VISIBLE_SURFACE "show security"
+            reveals Sentinel's incident view) + V2-H (VISIBLE_SURFACE "show recovery")
+  — i.e. V2-I is the LAST thing that can be real, since it's the surface over everything else.
+```
+
+**Reading order for a human reviewing this program:** A → B → G → C → D → E → F → H → I → J
+(this document). That is also, not coincidentally, close to the correct *build* order — root
+of trust first, then the systems that need it, then the shell that surfaces them all.
+
+## 2. What already exists and needs zero new build (confirmed by direct code reading across all forks)
+
+- `app.execution_envelopes` — authority proposal/authorization split. V2-B's Guardian sits
+  as a precondition on top of this, does not replace it.
+- `app.evidence_claim` — the shared evidence-truth gate (subject-exact-match, real outcome
+  required), independently re-verified 6/8 scenarios tonight, currently under independent
+  certification via PR #245.
+- `app.workforce.kill_switch` / `workforce_authority_epoch` — the DB-backed, race-proof
+  defensive-containment primitive V2-B's Guardian and V2-D's defensive autonomy both
+  generalize rather than reimplement.
+- `app.workforce` (Stage T) — `WorkforceAssignment`'s authority-envelope fields, which V2-E's
+  Agent Contract maps onto directly (4 new columns identified, no redesign).
+  `app.workforce.department_evidence` — the department concept V2-E's specialist domains
+  extend.
+  `app.workforce.injection` — `looks_like_prompt_injection`/`scrub_authority_mutations`,
+  which V2-D's input-security pipeline generalizes from "agent output" to "arbitrary
+  file/link content."
+- `app.mainai_school` — the exam/competence machinery V2-E's competence-state STALE
+  transition and V2-F's knowledge-pack exam-suite linkage both reuse (with the
+  already-known, already-being-fixed "fake exam" gap from tonight's campaign noted as a
+  dependency to close, not re-litigate).
+- `app.egress_policy` — a real, working default-deny egress gate V2-C extends (adds
+  semantic classify/minimize/generalize stages) rather than replaces.
+- `docs/AUTH_THREAT_MODEL.md` / today's session-cookie auth — stays completely untouched;
+  V2-G's Sovereign Identity is layered strictly above it (`SESSION ACCESS != ROOT
+  AUTHORITY`), never modifies it.
+- Tonight's proven same-device, multi-restart durability pattern (10 genuine subprocess
+  restarts, zero fidelity decay, real append-only checkpoints) — the actual mechanism V2-H's
+  Fast Restore and V2-I's Intent Object persistence both build on for the same-device case.
+
+**This matters for phasing:** roughly half of V2's total design surface is "extend a
+proven, tested V1 primitive," not "build from zero." The genuinely new engineering is
+concentrated in: Guardian's own small kernel, Sentinel's detection engines, the Privacy
+Boundary Engine's semantic minimization logic, Sovereign Identity's key hierarchy and
+`RootAuthorityProof`, Offline Knowledge Packs' format + distribution, Sovereign Recovery's
+cross-device half, and the Orb's actual OS-level input/window-control integration.
+
+## 3. Implementation phases
+
+**Phase 0 — Foundations (can start immediately, zero runtime risk):**
+- Finalize V2-A's constitution as the canonical, single-source-of-truth doc (already done).
+- Schema design for V2-E's 4 new `WorkforceAgentProfile`/`WorkforceAssignment` columns
+  (`domain`, `vault_policy`, `require_local_model`, `knowledge_pack_bindings`) — additive
+  migration, reviewable and mergeable independent of everything else, since it only ADDS
+  nullable columns nothing yet reads.
+- Offline Knowledge Pack schema (V2-F) as a standalone Python dataclass module + JSON
+  Schema, with unit tests against the schema itself — no runtime wiring.
+
+**Phase 1 — Root of trust (Guardian + Sovereign Identity, V2-B + V2-G):**
+- This MUST land before anything in Phase 2+ can be considered "real" rather than
+  "designed," because Sentinel's defensive autonomy, Recovery's key hierarchy, and the
+  Orb's takeover-state enforcement all cite Guardian/Identity primitives that don't exist
+  yet as code.
+- Concretely: the `RootAuthorityProof` challenge-response mechanism (replacing the weak
+  founder-ack denylist+regex check found tonight) is the single highest-value first build
+  — it closes a REAL, already-identified gap in currently-shipping code (the
+  `clear_kill_switch_for_recovery()` ack check), not just a V2 aspiration.
+- Guardian's generalized containment scope (built on `workforce_authority_epoch`) ships
+  second, since it depends on `RootAuthorityProof` for its own "who can invoke recovery"
+  question.
+
+**Phase 2 — Privacy Boundary Engine (V2-C):**
+- Extends `app.egress_policy`. Independent of Phase 1 except for using Guardian's audit
+  trail conventions. Can build in parallel with Phase 1 once Phase 0's schema work lands.
+
+**Phase 3 — Sentinel foundation (V2-D):**
+- Event mesh schema + correlation engine can build without Guardian (pure data pipeline).
+- Defensive autonomy's actual *execution* (the pre-authorized action list) requires Phase 1
+  complete, since every defensive action is Guardian-scoped by design.
+
+**Phase 4 — Local Workforce domain content (V2-E) + Knowledge Packs (V2-F):**
+- The mechanism (Stage T) already exists; this phase is populating real specialist
+  contracts and real knowledge packs (starting with 1-2 domains, not all 11, to prove the
+  pattern before scaling — Swedish Consumer Law + one security domain are good first picks
+  given existing project focus).
+
+**Phase 5 — Sovereign Recovery (V2-H):**
+- Same-device half reuses proven infrastructure — low risk, can start once V2-G's key
+  hierarchy exists (Phase 1).
+- Cross-device half (Recovery Capsule, progressive hydration) is genuinely new and should
+  be its own sub-phase with its own adversarial testing pass (data loss during hydration is
+  a severe, hard-to-detect failure mode — matches this session's own "prove it doesn't
+  decay under real restarts" standard, extended to cross-device).
+
+**Phase 6 — Orb Operating Shell (V2-I):**
+- Deliberately last. It's the integration surface over everything else, and its own
+  hardest problem (OS-level TAKEOVER_STATE input pre-emption) is platform-specific
+  engineering, not architecture — should not block earlier phases' progress.
+- Start with the Intent Object persistence layer (reuses proven durability pattern,
+  low risk) before the actual window-control/input-hook integration (platform-specific,
+  higher risk, should be prototyped per-OS before committing to one approach).
+
+## 4. What can be built before PR #245's independent certification completes
+
+Per the founder's explicit instruction, nothing in this V2 lane may modify existing
+runtime authority/security paths yet. Concretely safe to build NOW, fully isolated:
+
+- All architecture docs (done, this stage).
+- V2-F's Knowledge Pack schema as a standalone module with its own tests (no runtime import
+  from anything in the workforce/authority path).
+- V2-E's schema migration (additive-only, nullable columns, zero existing code reads them
+  yet — genuinely inert until wired).
+- Sentinel's event-mesh data model and correlation-engine logic as a standalone module,
+  tested against synthetic event fixtures, not wired to any real event source yet.
+- Prototype/spike code for V2-G's key-wrapping flow, in isolation, with its own test suite
+  proving the wrap/unwrap math — no integration with the real session/auth system.
+
+## 5. What must wait until after #245's certification (and why)
+
+- Anything that touches `app.evidence_claim`, `app.workforce.kill_switch`, or
+  `app.execution_envelopes` in a way that changes their *behavior* (extending Guardian's
+  containment generalization beyond a design doc into real code that calls these modules).
+  Reason: these are exactly the modules #245 is being independently re-attacked on right
+  now; landing V2 code that depends on their current shape risks needing rework if the
+  independent examiner finds something #245's own builder (this session) missed — matches
+  the whole night's own lesson that first-pass review, even careful review, misses real
+  bugs about 1 time in 3 so far.
+- `RootAuthorityProof` wiring into the REAL `clear_kill_switch_for_recovery()` call site —
+  design and standalone-test it now, but the actual swap-in should happen after #245 lands
+  cleanly, so the fix doesn't get entangled with whatever #245's independent re-attack finds.
+- Any Guardian code that would gate the real `resolve_delegation()`/`apply_verification_decision()`
+  call sites #245 just fixed.
+
+## 6. Open design risks (stated honestly, not glossed over)
+
+- **TAKEOVER_STATE's OS-level enforcement** genuinely differs in feasibility across
+  platforms (Wayland restricts the class of global input observation this needs) — V2-I
+  flags this, this document reiterates it as a real, unresolved engineering risk, not a
+  solved problem.
+- **Cross-device Sovereign Recovery** has no proof-of-durability yet, unlike the
+  same-device case — this is the single largest "designed but not yet empirically hardened"
+  gap in the whole V2 program and should get the same adversarial-testing rigor this
+  session applied to same-device restart before anyone treats it as trustworthy.
+- **Sentinel's actual detection engines** (malware scanning, exploit monitoring, etc.) are
+  architecturally scoped here but are themselves large, specialized engineering efforts
+  (potentially involving third-party security engines, not just LifeAI-original code) —
+  this document deliberately does not pretend V2-D's design makes that engineering trivial.
+- **Guardian's "remain small" constraint** is a real tension against Sentinel's correlation
+  engine needing enough context to make good containment decisions fast — V2-B and V2-D's
+  designs resolve this by keeping Guardian mechanical (no judgment calls, only checking
+  pre-authorized scopes), but this boundary should be re-examined once real defensive
+  scenarios are prototyped, since it's easy to erode "small" under real-world pressure to
+  make Guardian "just a little smarter."
+- **Knowledge Pack jurisdiction currency** (a pack claiming to be current Swedish law) is a
+  genuine ongoing-maintenance problem, not a one-time build — V2-F's update-manifest design
+  handles the mechanism, but the actual staffing/process for keeping packs current is a
+  business/operations question outside this document's scope.
