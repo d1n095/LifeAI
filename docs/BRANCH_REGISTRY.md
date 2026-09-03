@@ -167,11 +167,14 @@ Program: `docs/ACTIVE_WORK_CURSOR_MAINAI_V1_COMPLETION_RUN.md`.
 | `cursor/mainai-v1-readiness-audit` | [#207](https://github.com/d1n095/LifeAI/pull/207) | **Mergad — Stage 6** @ `dca5e3b` | Lands `MAINAI_V1_READINESS.md`/`MAINAI_V1_GOAL_TO_AUTONOMY.md`/`MAINAI_SELF_IMPROVEMENT_ACCEPTANCE.md` on Cursor's tip. **Conflict resolved**: its `MAINAI_V1_READINESS.md` snapshot predated most of #197's tonight-session updates — Claude pushed a refresh commit directly onto #207's branch before merge closing the gap, then (after #207 merged) merged this integration tip back into #197 and resolved the resulting content conflict in favor of #197's fuller version (includes Part D + its companion docs, which only exist on #197). |
 | `cursor/v1-completion-run-closeout` | [#208](https://github.com/d1n095/LifeAI/pull/208) | **Mergad — Closeout** @ `6789c2b` | Marks Cursor's own V1 completion run Stages 0A-6 complete; reviewed (Claude, clean, docs-only, respects #197 boundary) |
 
-**Claude's egen, icke-överlappande gren `v1-readiness-workstream` (PR #197, öppen, ej mergad,
-mergad FRAMÅT mot integrationstippen två gånger natten 2026-08-29→30, senast post-#208 — INTE
-längre konflikterande mot tip)** — fem riktiga, var för sig three-check-verifierade fynd
-(`git stash`-negativkontroll: varje fix' egen test misslyckas genuint på pre-fix-kod, passerar
-post-fix), alla pushade, ingen ännu founder-granskad:
+**✅ PR #197 MERGAD (2026-08-30, 12:37:56Z) @ `754f1e5`.** Claude's egen, icke-överlappande gren
+`v1-readiness-workstream`, mergad FRAMÅT mot integrationstippen FYRA gånger under natten
+2026-08-29→30 (post-#208, post-#209, post-#210 x2 för migrationsomnumreringen — se
+"Alembic-revisionskollision" nedan), godkänd och mergad av founder direkt (`merged_by: d1n095`)
+efter ett fullständigt lokalt testkörning (2278 passade, 1 känt orelaterat CEST/naive-timestamp-
+fel, se nedan) och en founder-quality diff-audit av alla 34 ändrade filer. Fem riktiga, var för
+sig three-check-verifierade fynd (`git stash`-negativkontroll: varje fix' egen test misslyckas
+genuint på pre-fix-kod, passerar post-fix):
 
 1. **`OperatorAuthorityTransitionError`** (`app/development_operator/service.py`,
    `app/development_driver/service.py`) — `run_driver()`s per-steg try/except fångade tidigare
@@ -210,6 +213,24 @@ post-fix), alla pushade, ingen ännu founder-granskad:
    `_validate_task_execution_input_refs()` (den enda kontroll den vägen fick) nu också anropar
    `require_task_approval()`.
 
+**Känt, granskat, INTE en merge-blockerare:** `tests/backend/rag/test_library_routes.py::
+test_ops_status_shows_degraded_when_a_storage_orphan_risk_audit_row_exists` misslyckas lokalt
+på just den här Macen (`assert 7200.10454 < 60`, exakt 2 timmar = CEST-offset). Root cause
+verifierad: testens egen `datetime.now(latest.tzinfo)` degraderar tyst till lokal maskintid när
+API-svarets timestamp saknar tidszon-offset (`tzinfo=None`) — passerar rent med `TZ=UTC`.
+Orört av #197 (0 träffar i diffen), förekom redan innan denna gren öppnades, och GitHub's
+faktiska CI-runners kör UTC så det syns rimligen aldrig där. **Notera ärligt:** den riktiga
+GitHub Actions-CI:n för PR #197:s slutliga head (`86a99a4`) hann INTE bli klar innan founder
+mergade PR:n direkt (`754f1e5`, 12:37:56Z) — flera backend-jobb (`Backend — Alembic migration
+check`, `Backend — unit/integration tests`, `Backend — account lifecycle & rate-limit tests`)
+stod fortfarande som `queued`/`in_progress` vid mergetillfället och förblev så efteråt (troligen
+övergivna när PR:n stängdes). Den faktiska verifieringsgrunden vid mergetillfället var Claudes
+egen fullständiga lokala testkörning (2278 passed, samma enda kända orelaterade fel som ovan)
+plus den redan avslutade `Backend — RLS & session-security tests` (grön) och Alembic-kedjans
+egen lokala upgrade/downgrade/upgrade-verifiering — INTE ett bekräftat grönt CI-svep. Ingen
+kodfix gjord för själva testet — hör inte till #197:s scope; kandidat för en egen, minimal,
+separat framtida PR om/när någon vill härda testet mot icke-UTC lokala maskiner.
+
 **Ny arkitektur-workstream, samma gren (PR #197), founder-definierad 2026-08-30**: "MainAI
 Personal Intent & Executive Reasoning" — tre nya implementation-ready docs
 (`docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md`, `docs/MAINAI_INSPECTABLE_MEMORY_
@@ -224,6 +245,28 @@ verifierade V1.1-leveranser: `WorkCandidate.priority`-vokabulär (migration **00
 `CandidateLearningSignal` (migration **0066**, tidigare 0065, tidigare 0064), `record_lesson_from_founder_
 correction()` (ingen migration). Se PR #197s egna commits för detaljer.
 
+## MainAI V2 — Sovereign Local Intelligence (Claude, ny isolerad design-lane, 2026-09-03)
+
+**PR #246** (`claude/mainai-v2-sovereign`, gren från `claude/det-kommer-mer-879lcm` — INTE
+från PR #245s gren), 10 nya dokument i `docs/mainai_v2/` (~2000 rader, rent additivt, noll
+ändring av något existerande). Founder-definierad produktvision: MainAI som primärt
+UI-lager (orb, inte dashboard), plus Sentinel-säkerhetsplattform, Guardian/Trust Kernel,
+Local Specialist Workforce, Privacy Boundary Engine, Offline Knowledge Packs, Sovereign
+Identity/Recovery. Se `docs/mainai_v2/MAINAI_V2_IMPLEMENTATION_PLAN.md` (V2-J) för
+beroendegraf, byggordning, och en uttrycklig lista över vad som är säkert att bygga NU
+kontra vad som måste vänta tills PR #245s oberoende certifiering är klar.
+
+**Kritiskt: rör INTE PR #245 / exakt kandidat-SHA `818dfb7`.** Certifieringskandidaten
+förblir fryst för oberoende motattack — verifierat: diff mot integrationsbasen visar bara
+10 NYA filer, noll ändrade, noll borttagna.
+
+**Notervärt fynd under skrivandet (ej fixat, bara flaggat i V2-D):** `app/workforce/
+injection.py`s `INJECTION_NEEDLES` är en ren substränglista — mycket sannolikt samma
+semantiska-kringgåelse-svaghet som redan bekräftad tre gånger tidigare i natt (#214/#218/
+#237s subjekt-matchning). Fjärde oberoende förekomst av samma mönster, inte fixad här
+(utanför denna design-endast-lanes scope) — kandidat för samma delade arkitekturfix som
+redan föreslagits (#227).
+
 ## MainAI Memory Frontier (Cursor, primary implementation lane, founder-godkänd 2026-08-30)
 
 **Founder har omfördelat hela Phase 2-13-arbetet (Canonical Memory Foundation, idé-
@@ -237,7 +280,7 @@ här är röd-team-granskning av Cursors PR:er, inte primärbyggare, tills annat
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/mainai-inspectable-memory-foundation` | [#209](https://github.com/d1n095/LifeAI/pull/209) | **Mergad — Stage A** @ `b73a018` | Canonical inspectable memory (`memory_truth_claims`, verify-against-reality, founder API `/api/founder/memory`). Landed Alembic **0063** on tip BEFORE #197 merged — won the numbering race (see resolution below). Claude red-team review (fork): clean, `verify_truth_claim()` genuinely re-derives truth from the real target row, never trusts caller input. |
-| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Mergad — Stage B** @ `e8c9ca6`, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Landed Alembic **0064** on tip BEFORE #197 merged, colliding with #197's already-renumbered 0064 (see resolution below). Claude red-team review (fork): ONE plausible-not-yet-confirmed TOCTOU race in `promote_interpretation_proposal()`'s SAME-collapse (`find_same_concept()` unlocked SELECT → unlocked insert) — posted to PR, offered to build the two-thread empirical proof; not yet resolved, carried forward. |
+| `cursor/mainai-concept-reconciliation` | [#210](https://github.com/d1n095/LifeAI/pull/210) | **Mergad — Stage B** @ `e8c9ca6`, staplad på #209 | Idé/koncept-reconciliation (SAME-collapse), utökar `project_entities`. Landed Alembic **0064** on tip BEFORE #197 merged, colliding with #197's already-renumbered 0064 (see resolution below). **CONFIRMED empiriskt** (uppdaterat, se konsoliderad bugglista nedan): TOCTOU-race i `find_same_concept()` (unlocked SELECT → unlocked insert) ger en riktig, ohanterad `IntegrityError` för förloraren; det unika constraintet självt förhindrar dock alltid faktiska dubbletter. Dessutom: fullskalig soak (1189 events) visar att SAME-collapse i praktiken NÄSTAN ALDRIG triggas för omformulerade dubbletter (20/20 ämnen kolliderade inte) — mycket allvarligare än det ursprungliga race-fyndet. |
 
 **Alembic-revisionskollision — LÖST TVÅ GÅNGER 2026-08-30 (basen fortsatte röra sig under
 #197s öppna fönster):** Första kollisionen: #209 mergade `0063_inspectable_memory_foundation.py`
@@ -255,6 +298,721 @@ löste registerkonflikten ovan): #197s två migrationer omnumrerades EN GÅNG TI
 priority`) → `0066` (#197, `candidate_signal_entity_resolution`)), innehåll i övrigt
 byte-identiskt, `alembic heads` visar exakt EN head efter omnumreringen. Ingen ytterligare
 öppen Cursor-branch känd att kollidera med just nu.
+
+### Stages C–S (17 PRs, #211–#227) — fullständig stack, en enda kväll (2026-08-30)
+
+Cursor öppnade hela resten av Memory Frontier-programmet som EN stackad kedja (#211→#212→…
+→#227, varje PR:s bas är föregående PR:s branch — det betyder att `#227`:s branchtipp redan
+innehåller ALLA 17 stadier kombinerade, utan att vänta på GitHub-mergningar). Långt utöver den
+ursprungliga A–I-planen (9 stadier); den faktiska omfattningen är A–S (19 stadier räknat från
+#209). Claude granskade samtliga 17 med paralleliserade forks (individuell diff-granskning +
+en separat systemisk cross-stage-attack + en riktig long-memory-soak-testkörning), alla
+kommentarer postade direkt på respektive PR.
+
+| PR | Stage | Status (första passet) |
+|---|---|---|
+| [#211](https://github.com/d1n095/LifeAI/pull/211) | C: memory→work linkage | Ren på auktoritetsgräns, men **INTE fullt ren** — se PR #238 (annan Claude-session hittade 2 riktiga buggar i samma modul: idempotency + TOCTOU, båda oberoende VERIFIERADE fixade — se detaljer nedan) |
+| [#212](https://github.com/d1n095/LifeAI/pull/212) | D: temporal recap | Ren (ingen LLM i recap-vägen, allt spårbart till källrad) |
+| [#213](https://github.com/d1n095/LifeAI/pull/213) | E: self-model/capability ledger | **BEKRÄFTAD BUGG** (se lista nedan) |
+| [#214](https://github.com/d1n095/LifeAI/pull/214) | F: continuous simplification | Ren (rent förslags-lager, ingen destruktiv väg än) |
+| [#215](https://github.com/d1n095/LifeAI/pull/215) | G: founder-language slice | **TROLIG BUGG** (statisk, se lista nedan) |
+| [#216](https://github.com/d1n095/LifeAI/pull/216) | H: memory quality/history stress | Ren, men egen "stress"-test har noll concurrency |
+| [#217](https://github.com/d1n095/LifeAI/pull/217) | I: long-horizon planning | Ren (verifierat: ingen väg till verklig exekveringsauktoritet) |
+| [#218](https://github.com/d1n095/LifeAI/pull/218) | J: personal intent learning | **BEKRÄFTAD BUGG, KRITISK** (se lista nedan) |
+| [#219](https://github.com/d1n095/LifeAI/pull/219) | K: contradiction/assumption engine | Ren (ingen auto-vinnare vid motsägelse) |
+| [#220](https://github.com/d1n095/LifeAI/pull/220) | L: prediction vs outcome | **BEKRÄFTAD BUGG** (se lista nedan) |
+| [#221](https://github.com/d1n095/LifeAI/pull/221) | M: attention/priority engine | Ren (ingen dataförlust, men ingen auktoritets-floor) |
+| [#222](https://github.com/d1n095/LifeAI/pull/222) | N: hot/warm/cold memory tiers | Ren (provenance-påstående verifierat sant) |
+| [#223](https://github.com/d1n095/LifeAI/pull/223) | O: memory repack/health | Ren (rent läs-lager, ingen skrivväg) |
+| [#224](https://github.com/d1n095/LifeAI/pull/224) | P: cognitive load reduction | **BEKRÄFTAD BUGG** (se lista nedan) |
+| [#225](https://github.com/d1n095/LifeAI/pull/225) | Q: interruption recovery | Ren |
+| [#226](https://github.com/d1n095/LifeAI/pull/226) | R: self-improvement ROI | Ren (inert, rör inte det verkliga self-improvement-auktoritetsgrindet) |
+| [#227](https://github.com/d1n095/LifeAI/pull/227) | S: 1000-tick soak, stacktipp | **BEKRÄFTAD BUGG** (testtäckningsgap, se lista nedan) |
+
+**Systemisk fynd, viktigast av allt för prioritering:** **hela 17-PR-stacken saknar HELT
+router-/HTTP-koppling** — ingenting är nåbart från en riktig founder-facing yta ännu. Alla
+buggar nedan är just nu latenta, inte live-exploaterbara. Ändrar prioritetsordning, inte
+korrekthetsskuld.
+
+### Konsoliderad, prioritetsordnad bugglista (Claude röd-team, 2026-08-30, kväll)
+
+1. **[#218] KRITISK — säkerhetsregression. ✅ FIX VERIFIERAD KOMPLETT (2026-08-30/31).**
+   `must_surface = ambiguity == CONSEQUENTIAL and not auto_resolved` slutar tyst kräva
+   founder-bekräftelse för konsekvensfulla ord (deploy/production/merge/delete/approve) redan
+   vid ANDRA förekomsten av en matchande fras, eftersom en tidigare bindning består oavsett
+   ambiguity-klass. Fix (commit `678a235`, "learned phrasing must never suppress consequential
+   confirmation") empiriskt omtestad mot founderns fullständiga 7-scenario-attackmatris (1:a/
+   2:a/3:e förekomst, efter omstart, efter minnesuppslag, efter omformulering, efter alias-
+   upplösning) — ALLA 7 GODKÄNDA, plus 3 extra scenarion (10:e upprepning, ren uppslagning,
+   omformulering utan bokstavliga triggerord). Strukturellt stängd: `must_surface` beror nu
+   bara på nuvarande anrops ambiguity-klassificering, ingen historik-koppling kvar. En separat,
+   redan existerande uppföljningspunkt flaggad (INTE en återöppning): `classify_ambiguity()`s
+   regex-klassificerare är semantiskt grund — en omformulering utan bokstavliga triggerord kan
+   undgå klassificering helt, oavsett bindningshistorik.
+2. **[#210] SAME-collapse, två separata problem. ⚠️ DELVIS FIXAD.** (a) ✅ Empiriskt bevisad
+   TOCTOU: förloraren i en samtidig SAME-collapse-race kraschar med en ohanterad
+   `IntegrityError` istället för att kollapsa graciöst — FIX VERIFIERAD (commit `497ef5e`,
+   savepoint-baserad återhämtning, riktig two-session-test godkänd, ingen förgiftad
+   transaktion). (b) ❌ KVARSTÅR OLÖST: i fullskalig soak (1189 events, 20 ämnen) OCH omtestad
+   direkt mot fix-commiten: SAME-collapse triggas i praktiken NÄSTAN ALDRIG för realistiskt
+   omformulerade dubbletter (samma tre testfraser ger fortfarande 3 separata entiteter) —
+   `find_same_concept()` konsulterar fortfarande aldrig sin egen redan beräknade
+   Jaccard-likhet. Fix-commiten adresserade bara krasch-symptomet (a), inte rotorsaken (b),
+   som är den allvarligare av de två per soak-bevisningen och direkt i linje med founderns
+   egna namngivna "personal language variance"-exempel.
+3. **[#213]/[#220] Self-model "confidence masquerading as evidence". ⚠️ #220 DELVIS FIXAD, #213
+   EJ ÄNNU FIXAD.** `build_self_model()`s `proven`/`improved`-klassificering kontrollerar
+   aldrig `last_proof_evidence_id`; `verification_evidence_id` är valfri (default `None`) —
+   ingen fix-commit känd för #213 än. #220 fix (commits `bde8134`/`2b6b0cf`) omtestad mot
+   founderns 6-scenario-matris: saknad evidens PASS, fel ägare PASS, raderad/superseded
+   evidens N/A (arkitektoniskt omöjligt, append-only + ingen supersession-modell) — MEN
+   scenario 6 (misslyckat test refererat som lyckat) **BEKRÄFTAD KVARSTÅENDE BUGG**: en
+   evidensrad med `payload={"passed": False}` accepteras ändå som stöd för `proven=True`, ren
+   existens-check, aldrig en innehålls-check av vad evidensen faktiskt säger. Det djupaste och
+   viktigaste scenariot i attackmatrisen är fortfarande öppet.
+4. **[#224] Fel minnessanning vald som aktuell. ⚠️ DELVIS FIXAD.** `consider_founder_question()`
+   valde `matches[0]` från en STIGANDE-sorterad (äldst först, ingen `.desc()`) fråga — ren
+   "oldest-row"-bugg VERIFIERAD FIXAD (commit `7bd7ae4`, scenarion 1-3/5 godkända, inkl. riktig
+   RLS-medveten two-thread-race-test). MEN scenario 4 (två genuint oberoende aktiva
+   anteckningar, INGEN av dem superseder den andra — den ursprungliga buggens verkliga form)
+   **KVARSTÅENDE LUCKA**: löses fortfarande tyst via senast-i-tid istället för att flaggas som
+   tvetydigt (`should_ask_founder=False`). Scenario 6 (samtidiga korrigeringar) samma lucka en
+   nivå djupare — inget fork-detection när två trådar korrigerar samma ursprungsanteckning
+   samtidigt. Minsta fix: behandla flera icke-kedjade kandidater som tvetydiga istället för att
+   välja en.
+5. **[#215] Icke-verbatim founder-text.** `founder_memory_notes.content` lagrar MainAI:s
+   normaliserade tolkning, inte founderns ordagranna ord (rå text finns bara i `provenance`);
+   samtidigt sätts `authority="founder", basis="manual"` som om det vore en explicit founder-
+   handling, utan markör som skiljer "founder sa detta" från "MainAI:s regex producerade
+   detta". Bryter mot samma "citera, inte parafrasera"-princip som redan etablerats i
+   `record_lesson_from_founder_correction()` (PR #197).
+6. **[#227] Falsk "1000-tick"-täckningsgap (delvis motbevisad).** Ursprungligt fynd: bara 12
+   ticks var testtäckta, standard-körning är 20. UPPFÖLJNING (skalad soak): Cursors egen
+   `run_bounded_memory_soak()` körs FAKTISKT rent vid riktiga 1000 ticks (2.5s, inga anomalier)
+   när den anropas direkt — det är alltså ett testtäcknings-gap, inte en runtime-bugg. Kvarstår
+   som en riktig brist (koden är overifierad i CI/testsviten vid den faktiska skalan) men mindre
+   allvarligt än ursprungligen trott.
+7. **[#216]/allmänt] Låg allvarlighetsgrad, latenta, inga live-anroparen ännu:** #221:s
+   attention-ranking har ingen auktoritets-/säkerhets-floor (`items[:limit]` kan tyst begrava
+   ett säkerhetsrelevant item); #223:s `changes_canonical_meaning` är alltid `False` (gör
+   `ok_to_repack` vakuöst sant); `list_founder_memory()`s tie-break vid identiska timestamps
+   saknar en avsiktlig sekundär sorteringsnyckel (stabil av en slump, inte design); #222:s
+   `_get_or_create()` har samma olåsta TOCTOU-form som #210 men ingen live-anropare ännu.
+
+### Djupdykning i evidens-semantik (2026-08-30/31, founder-beordrad) — VÄRRE ÄN FÖRST TROTT
+
+`app.capability_reality.record_capability_observation()` (den delade funktion #213 OCH #220
+båda bygger på) har INGEN innehålls-check av evidens alls, bekräftat på 4 av 6 attack-scenarion
+(founderns egen matris): misslyckat test → accepteras, evidens explicit taggad
+`verification_failure` → accepteras, evidens för en HELT ANNAN förmåga → accepteras (ingen
+kopplings-check överhuvudtaget), blandad evidens (senare misslyckande efter tidigare
+lyckande) → status stannar felaktigt på `verified_available`. Rotorsak är schema-nivå: inga
+`outcome`/`status`-kolumner finns på `intelligence_evidence` att kontrollera mot.
+Fix-kontrakt (7 punkter: ägarmatch, kopplingsrelevans, tillåten evidens-typ, positivt utfall,
+inte underkänd/superseded, inte för gammal, faktiskt stödjer påståendet) postat i sin helhet på
+#220 och #213 (en fix stänger båda — samma delade funktion).
+
+**KRITISK ESKALERING (samma djupdykning, funnen via PR #235-granskningen):** en TREDJE,
+oberoende förekomst av exakt samma buggklass hittades i `app.capability_reality.service`, och
+den här gången med en RIKTIG, MÄTBAR effekt: #235 ("composed executive loop") låter
+förmåge-status faktiskt påverka ett riktigt urvalsbeslut — empiriskt bevisat att en påhittad,
+evidensfri `status="verified_available"`-claim höjer en förmågas urvalspoäng från 0.6 till
+1.0-faktor (poäng 0.25→0.35). Det är FÖRSTA gången i natt en tidigare latent evidens-bugg får
+en verklig nedströms-effekt — ändrar INTE huruvida riktig provider-auktoritet kan nås (#235:s
+`activate_provider=False` är hårdkodad, blockerad av en `raise RuntimeError`, se nedan), men
+gör evidens-semantik-fixen (#213/#220) mer akut, inte längre bara teoretisk.
+
+### Nyupptäckt: MainAI Internal Workforce Foundation (#230–234, redan MERGAD, ej tidigare granskad)
+
+Fem nya PR:er merged rakt in på integrationstippen UTAN föregående Claude-granskning — en helt
+ny "workforce"-subsystem (agent-delegering, staffing, kostnadsstyrning, failure/takeover).
+Granskat i efterhand (2026-08-30/31), högsta prioritet eftersom det redan är LIVE, inte bara
+öppet:
+- **#230 (T1-T7 grund): BEKRÄFTAD RIKTIG SÅRBARHET** — `authority.py::path_allowed()` gör naiv
+  sträng-prefix-matchning utan att lösa upp `..`-segment; empiriskt bevisat att
+  `path_allowed(allowed=['workspace/'], 'workspace/../../../etc/passwd', write=True)`
+  returnerar `True`. Just nu VILANDE (noll anropare någonstans i kodbasen, ingen riktig
+  filsystems-I/O kopplad än) — men detta är uppenbarligen tänkt att grinda riktig
+  agent-filåtkomst, så måste fixas FÖRE aktivering, inte bara noteras.
+- **#231 (T8-T20 drift): TROLIG, statisk** — `alternate_agent_takeover()` saknar radlås före
+  mutation av ett misslyckat uppdrag, samma TOCTOU-form som redan hittats OCH fixats i den
+  ursprungliga lease/takeover-koden tidigare i natt. Kostnadsstyrning återanvänder korrekt
+  `provider_spend` istället för att återuppfinna den.
+- **#232 (runtime-harness): REN, verifierad.** Viktigaste filen i hela stacken —
+  `execute_workforce_assignment()` har ett ovillkorligt hårt block FÖRE varje riktig
+  provider-anrop, oberoende av grindtillstånd. Genuint tvålagers försvar-i-djup.
+  Aktiverings-grindarna är explicit kopplade till att kräva oberoende verifiering av EXAKT
+  #218/#229/#213/#224 — matchar precis kvällens egna fynd.
+- **#233 (endast dokumentation): trivial, bekräftat ofarlig.**
+- **#234 (aktiveringsförberedelse): INTE REN — korrigering.** Ursprunglig granskning (denna
+  session) hittade bara en mindre designnot och missade två RIKTIGA säkerhetsbuggar. Samma
+  mönster som #211/PR #238: en ANNAN Claude Code-session hittade och fixade dem (PR #239,
+  "Fix cross-owner kill-switch DoS and no-op context-leak assertion"):
+  1. **Cross-owner kill-switch DoS, verklig.** `app/workforce/kill_switch.py`s `_STATE.active`
+     var en process-global flagga UTAN ägar-scoping. `activate_kill_switch(owner_id=A)`
+     återkallade korrekt bara A:s uppdrag, men satte den globala flaggan — så
+     `assert_not_killed()` (kollad vid `execute_workforce_assignment()`) blockerade ALLA ägare,
+     inte bara A. Eftersom `run_first_safe_internal_mainai_run` (dokumenterad förstaköringsväg)
+     ovillkorligt anropar `activate_kill_switch` efter VARJE lyckad körning, stängde en enda
+     ägares normala körning tyst av arbetskraftsexekvering för VARJE annan ägare i samma
+     process — ett riktigt cross-owner DoS via en legitim, förväntad kodväg i ett system menat
+     att vara multi-tenant. Fix: per-ägare state-dict, en separat explicit
+     `activate_global_kill_switch()`-funktion för det avsiktliga globala nödstoppet.
+  2. **No-op leak-assertion, verklig.** `assert_no_cross_package_leak()` (i
+     `app/workforce/context.py`) reste ALDRIG ett fel under någon indata trots namn och
+     docstring — en genuin no-op. Fix: reser nu `ContextPackagingError` när samma `trace_id`
+     delas mellan två olika agenters privata kontext-paket.
+  Uttryckligen kvarstår, INTE fixat i #239: `assert_not_killed()` kollas vid exekverings-tid
+  men inte vid tilldelnings-tid (`workforce/broker.py`s `resolve_delegation()`) — ett nytt
+  uppdrag kan fortfarande BEVILJAS för en dödad ägare, bara inte exekveras. Egen framtida fix.
+  **P1-fyndet från kväll (readiness-certifiering) förvärrar bilden ytterligare:**
+  `blocking_migrations` är inte bara hårdkodad frisk — den är INTE ens kopplad till någon
+  grindningslogik i någon nivå, så även en korrekt check skulle inte blockera något just nu.
+  Ytterligare täckningsluckor funna: ingen kill-switch-state-kontroll, ingen
+  evidens-integritets-kontroll, plus en redan trasig attributreferens
+  (`eligible_authorized_goals`) som för närvarande degraderar säkert till "okänt". Fem konkreta
+  minsta-fixar postade på #234.
+
+**Sammanfattning workforce-stacken:** TVÅ bekräftade riktiga säkerhetsbuggar (kill-switch DoS +
+no-op leak-assertion, båda fixade i #239, verifiering pågår), en tidigare bekräftad riktig bugg
+(path traversal, vilande), en trolig concurrency-lucka (vilande), plus readiness-certifierings-
+fynden ovan. Inget i den nya koden beviljar riktig
+exekveringsauktoritet eller anropar en riktig provider — fail-closed-designen håller under
+adversarial granskning.
+
+### PR #235 — "composed executive loop", den mest konsekventa granskningen i natt (nu MERGAD @ tip)
+
+**Uppdatering:** #235 mergade in på integrationstippen kort efter granskningen — evidens-bugg-
+eskaleringen (ovan) är alltså nu LIVE, inte längre bara ett fynd på en öppen gren. Höjer
+prioriteten på #213/#220-fixen ytterligare (redan flaggat som "akut, inte längre bara
+teoretiskt" ovan, nu bekräftat faktiskt live).
+
+Första PR:n som faktiskt KOPPLAR IHOP tidigare isolerade stadier (lookaround → lessons →
+WorkCandidates → staffing → workforce dry-run → continuity checkpoints). Verifierat: (1)
+provider-/auktoritetsaktivering är strukturellt säker — `activate_provider=False` hårdkodad,
+callee har hård `RuntimeError` vid `True`; (2) evidens-bugg-klassen har nu en RIKTIG effekt (se
+eskalering ovan) — det viktigaste enskilda fyndet från denna granskning; (3) #218:s
+"park only"-komposition säker (`insert_subordinate` hårdkodad `False`); (4)
+continuity-checkpoints rena, korrekt avgränsade; (5) noll nya migrationer bekräftat; (6)
+testtäckning genuint adversarial men täcker INTE den specifika evidens-vägen (3) ovan
+utnyttjar — verklig täckningslucka. **Svar på "ändrar detta huruvida kvällens fynd är
+live-exploaterbara": DELVIS** — ingen ny väg till riktig exekvering öppnas, men self-model-
+output påverkar nu ett riktigt urvalsbeslut för första gången.
+
+### PR #236 — "MainAI Local Intelligence School" (ny, ej granskad än)
+
+Ny, stor PR (2645 rader, 24 filer) öppnad 2026-08-31, återanvänder EXAKT samma komprometterade
+`capability_reality`/`record_capability_observation()`-funktion som #213/#220/#235:s
+evidens-bugg. Handlar fundamentalt om kompetens-/tentamen-påståenden ("curriculum/practice/
+exam competence ladder", "EXTERNAL DEPENDENCY RATIO", "ONE EXAM PASS != PERMANENT
+COMPETENCE") — mycket sannolikt sårbar för samma buggklass eller värre.
+
+**Djupgranskning KLAR — BEKRÄFTAT, VÄRRE ÄN #220:** `run_independent_exam()` tar
+`local_passed: bool`/`score: float` som RÅA anropar-tillhandahållna parametrar — ingen riktig
+tentamensuppgift, rättning, eller evidensrad existerar någonstans. Empiriskt bevisat: tre
+fabricerade anrop når `LOCALLY_VERIFIED`/`verified_available` utan någon verklig verifiering
+alls. Även Cursors egna tester anropar funktionen med hårdkodade `local_passed=True`-literaler,
+så denna lucka är otestad även i deras egen svit. Detta är ETT STEG VÄRRE än #220 — #220 hade
+åtminstone en (otillräcklig) evidens-FK-check; här finns ingen check överhuvudtaget.
+`resolve_local_vs_teacher()` är dock KORREKT — vägrar korrekt lösa upp via ren
+modell-konsensus, `majority_vote_used` sätts aldrig `True`.
+
+**Ny, oberoende bugg funnen (inte del av evidens-buggklassen):** `teacher_ledger.py`s
+`_LEDGER` är en modul-nivå in-memory dict med NOLL owner_id-scoping — icke-durabel (förloras
+vid omstart) och cross-owner-läckande inom en process (alla ägare delar samma globala dict,
+nyckel bara `domain::teacher_id`, ingen ägar-isolering alls).
+
+### PR #237 — "safe-internal startup" (boot, runbook, restart) — REN
+
+Kopplar ihop #235 (executive) och #236 (school) till en verklig bootbar process — högsta
+prioritet att granska eftersom den skulle kunna trigga de redan bekräftade #235/#236-buggarna
+AUTOMATISKT vid varje uppstart. **Bekräftat empiriskt (spy-baserad instrumentering, riktig
+Postgres): NEJ, normal boot triggar VARKEN #236:s falska tentamens-väg ELLER #235:s
+evidens-skriv-effekt** — noll anrop till `run_independent_exam()`/`record_capability_
+observation()` under en normal boot-sekvens. Nyans värd att notera: boot LÄSER
+`capability_reality` read-only för sin routing-logik, så om korrupt data redan finns (från
+någon annanstans) påverkas routing-beslutet ändå — boot SKAPAR inte korruptionen, men
+KONSUMERAR den. `provider_call_count=0`-påståendet bekräftat strukturellt äkta
+(`activate_provider=False` hårdkodad vid det faktiska anropsstället, samma mönster som #235).
+En mindre notering: "restart/resume ok"-påståendet är svagare än titeln antyder — hela
+boot→shutdown→restart→resume-sekvensen trådar samma `db: Session`-objekt genom hela vägen,
+alltså same-process-bevis, inte en genuint färsk process. Safe-internal DB-gränsen är dock
+genuint verklig (separat fysisk Postgres-databas, inte bara schema-partition). Inget bekräftat
+fel i #237 självt.
+
+### PR #240 — readiness-rapporteringsfixar (samma andra Claude Code-session) — ALLA 5 VERIFIERADE
+
+Fixar exakt de luckor kvällens readiness-certifieringsmatris hittade i #234, plus en femte
+oberoende förekomst av evidens-bugg-klassen. Oberoende empiriskt omverifierat, alla 5
+BEKRÄFTADE, inga avvisade:
+
+1. **Tappade blockerare (överskrivning, inte merge):** verifierat — 3 samtidiga blockerare
+   överlever nu in i `report.blocking`.
+2. **Falsk migrations-check:** checken själv är nu genuint korrekt (empiriskt konstruerad
+   riktig multi-head-Alembic-kollision, bekräftat rapporterar `unhealthy`). **MEN bekräftat via
+   grep att checken FORTFARANDE aldrig konsulteras av någon nivå-grindningslogik** — med den
+   injicerade multi-head-staten + alla grindar verifierade nådde readiness ändå
+   `READY_FOR_LOW_RISK_PROVIDER_RUN` och migrationsproblemet dök aldrig upp i `blocking`.
+   Ärlig nu, fortfarande inte verkställd.
+3. **Hårdkodad review-status:** verifierat korrekt i båda riktningar (okända grindar OCH
+   alla-verifierade-grindar).
+4. **Evidens-gräns (department_capability_ledger) — VIKTIGASTE FYNDET:** uttömmande testat
+   alla 4 gränsfall inklusive exakt 0.667-gränsen (2 lyckade/1 misslyckad) utan
+   flyttal-gränsbugg. **Kritiskt: `department_evidence.py` har NOLL referenser till
+   `capability_reality`/`record_capability_observation` — detta är en HELT SEPARAT, oberoende
+   mekanism från #213/#220:s fortfarande öppna evidens-bugg.** Att fixa detta stänger INTE
+   #213/#220 ens delvis — femte oberoende förekomst av samma buggklass, egen kodväg.
+5. **Cirkulär import:** verifierat fixad i båda importordningarna, bredare import-sanity-check
+   OK.
+
+**Bonus-fynd (incidentellt):** `v1_autonomous_engine`-checken är just nu trasig
+(`AttributeError` på `eligible_authorized_goals`) — degraderar säkert till "okänt", men är den
+FAKTISKA blockeraren för högsta readiness-nivå just nu, oberoende av denna PR. Matchar ett
+tidigare fynd från kvällens readiness-certifieringsrunda.
+
+### PR #238 — fix från en ANNAN Claude Code-session (inte Cursor, inte denna session)
+
+Fixar två riktiga buggar i `apply_memory_work_linkage()` (#211) som missades i förstapasset.
+Oberoende empiriskt omverifierat (denna session, egna adversariala tester, inte bara PR:ns
+egna):
+
+- **Bugg 1a (idempotency): VERIFIERAD.** Negativkontroll bekräftar: både PR:ns egen test och en
+  egen adversarial variant (en genuint annan anteckning med nästan identisk formulering
+  konflateras INTE med den första anteckningens candidate-id) misslyckas på pre-fix-kod,
+  passerar post-fix.
+- **Bugg 1b (TOCTOU-race): VERIFIERAD, med en viktig nyans.** Genom den riktiga publika
+  entrypointen, utan någon bypass, är racet INTE oberoende observerbart idag — ett oavsiktligt
+  lås i en annan funktion (`create_thread()`) serialiserar redan samma-ägare-anrop. Det nya
+  advisory-låset är ändå den arkitektoniskt korrekta fixen (matchar sessionens egen doktrin:
+  "förlita dig inte på ett oavsiktligt lås i en annan modul") och blir load-bearing så fort det
+  oavsiktliga låset ändras — men stänger INTE en idag reproducerbar-via-publikt-API-bugg. Angett
+  precist i granskningskommentaren istället för att antyda mer än så.
+- **#229-täcker-inte-detta-påståendet: VERIFIERAT SANT** (olika modul, olika mekanism,
+  bekräftat via diff).
+- **VIKTIG NOGGRANNHETS-ANMÄRKNING:** PR:ns egen beskrivning hävdar en separat kommentar postad
+  på #229 om ett "race-loser"-fynd i `reconcile_and_promote_idea()`. Denna kommentar HITTADES
+  INTE någonstans (#229, #210, #211, #238 alla genomsökta). Flaggat direkt i den postade
+  granskningskommentaren istället för att tystlåtet föras vidare — matchar sessionens egen
+  "verifiera PR-formuleringens noggrannhet"-disciplin.
+
+### P0 — Evidens-semantik: DEFINITIV #213/#220-matris + central portdesign (founder-krav, 2026-09-02)
+
+**Del 1 — den delade `record_capability_observation()`-funktionen (använd av #213/#220),
+definitiv 10-scenario-matris, FORTFARANDE HELT ÖPPEN.** Bekräftat via `git log` att
+`app/capability_reality/` bara har EN commit någonsin (grundläggningen) — INGEN av kvällens
+fixar (#238/#239/#240) har rört den.
+
+| # | Scenario | Resultat |
+|---|---|---|
+| 1 | Riktig framgång | PASS (baseline) |
+| 2 | Misslyckad verifiering | **BEKRÄFTAD BUGG** |
+| 3 | Avvisad verifiering | **BEKRÄFTAD BUGG** |
+| 4 | Orelaterad evidens | **BEKRÄFTAD BUGG** |
+| 5 | Fel ägare | **PASS, genuint säkert** — blockeras av ett DB-composite-FK (`fk_capability_records_evidence_owner`), inte applikationskod |
+| 6 | Fel subjekt (evidens för X stödjer Y) | **BEKRÄFTAD BUGG** |
+| 7 | Superseded evidens | N/A, inte modellerat på schema-nivå alls |
+| 8 | Äldre framgång + nyare misslyckande | **BEKRÄFTAD BUGG** (status motsäger `last_failure_at` inom samma anrop) |
+| 9 | Äldre misslyckande + nyare framgång | passerar bara via anroparens ärlighet, undermineras av #8 |
+| 10 | Motsägande evidens i ett anrop | **BEKRÄFTAD BUGG** |
+
+**6 av 10 tillämpliga scenarion BEKRÄFTAT TRASIGA.** #240:s fix rörde INTE denna funktion —
+helt separat, fortfarande helt öppen.
+
+**Del 2 — central portdesign, föreslagen (INTE implementerad):** delad
+`supports_claim(evidence, owner_id, subject_type, subject_id, proposition, required_outcome)`.
+Kräver två nya kolumner på `intelligence_evidence` (ett riktigt `outcome`-enum, samt
+`subject_type`/`subject_id` för att koppla evidens till ett SPECIFIKT påstående — de två
+luckorna bakom scenario 2/3/8/10 respektive 4/6). Rent additiv migration, NOLL ny AI-kostnad,
+kräver INTE att röra #218/#239/#240 igen. Uttryckligen skild från det separata
+#218/#214-parafras-kringgåelse-tråden (som VERKLIGEN behöver en LLM-reserv och
+founder-signoff) — den här behöver det INTE, det är ett strukturellt/schema-problem.
+
+### Sjätte oberoende förekomst: `app/workforce/verification.py` — HÖGRISK-nivåns egen grind trasig
+
+`apply_verification_decision()` grindar HÖGRISK `VERIFIED`-status på `test_evidence_ref`/
+`founder_approval_ref` — men kontrollerar bara SANNHETSVÄRDE, aldrig innehåll, ingen FK till
+en riktig evidens-/godkännanderad. Bevisat direkt från Cursors EGEN existerande test
+(`test_workforce_ops.py:245`): en fabricerad icke-existerande testsökväg OCH en uppenbart
+fejkad godkännande-sträng tillfredsställer båda den HÖGSTA risknivåns verifieringsgrind.
+
+**DEFINITIV 7-FALLS-MATRIS KLAR (2026-09-02) — 5/7 TRASIGA, INGEN BACKSTOP.** Bara fall 1
+(saknad verifierare) och fall 4 (ogiltigt beslut-enum) avvisar korrekt. Fall 2/3/5/6/7
+(misslyckad-innehåll-evidens, overifierade påståenden, förlegade/återanvända referenser,
+fel-uppgift-referenser, cross-owner-referenser) passerar ALLA en helt trasig grind —
+`test_evidence_ref`/`deterministic_validator`/`founder_approval_ref` är fritext-strängar med
+bara sannhetsvärde-kontroll, ingen FK, ingen innehålls-check, ingen subjekt-koppling.
+**Nedströms-konsekvens: BEKRÄFTAD ALLVARLIG, INGEN BACKSTOP** — att passera den trasiga
+grinden sätter DIREKT och OMEDELBART `assignment.status = "completed"` inuti samma funktion —
+ingen oberoende sekundär kontroll existerar någonstans i returvägen. **Fixväg identifierad:**
+PR #237s gren har redan `app/evidence_claim.py`s `evidence_supports_claim()` byggd och
+6/8-verifierad för samma buggklass på annat håll — att koppla `apply_verification_decision()`
+till den DELADE porten (istället för en skräddarsydd fix) skulle stänga detta med redan byggd
+infrastruktur. Reproducer postad på PR #231 (som faktiskt introducerade filen, bekräftat via
+`git log --follow`).
+
+**Övriga ytor i denna revisionsrunda:** goal/task-completion, verification pipeline (den
+äldre V0.1-V0.3-motorn), CI-wait-vägen — ALLA REN, härleder genuint `passed`/completion från
+riktiga kontroller (verkliga subprocess-pytest-körningar, riktiga externa GitHub CI-pollningar)
+— aldrig ett anropar-tillhandahållet påstående. `EngineeringLesson.verification_status`
+fortfarande dormant, noll skrivare. `memory_truth_claims` inte omtestad mot den fullständiga
+matrisen denna runda (redan bekräftad ren på kärndimensionen tidigare).
+
+### P0 — Migration-gating: BEKRÄFTAD BLOCKERARE, formaliserad (founder-krav, 2026-09-02)
+
+**Invariant:** DETECTED BLOCKER != ENFORCED BLOCKER. "Systemet vet att den har fel" är INTE
+samma sak som "systemet stannar faktiskt." Detta MÅSTE stängas före certifiering.
+
+**Nuläge, redan bevisat (från #240:s omverifiering ovan, formaliserat här som ett tydligt
+blockerande fynd):** med en genuint injicerad multi-head-Alembic-kollision OCH alla andra
+grindar verifierade, når `evaluate_startup_readiness()` ändå `READY_FOR_LOW_RISK_PROVIDER_RUN`
+— migrationsproblemet visas korrekt i checkens EGET resultat men konsulteras aldrig av
+nivå-härledningslogiken (`core`/`need()`/`serious_keys` refererar aldrig
+`"blocking_migrations"`). **CONFIRMED BLOCKER**, kräver egen fix (inte del av #240).
+
+**Acceptanskriterier för nästa granskningsrunda, när Cursor landar en fix:**
+- Fel head → readiness BLOCKERAD (inte bara rapporterad).
+- Flera heads → BLOCKERAD.
+- Verifieringsfel/kommandofel → UNKNOWN/BLOCKERAD (fail-closed, inte fail-open).
+- Korrekt exakt head → kan fortsätta som normalt.
+Ska omverifieras empiriskt med samma multi-head-konstruktionsteknik som redan bevisat
+CONFIRMED-statusen ovan.
+
+**DEFINITIV 5-FALLS-MATRIS KLAR (2026-09-02) — VÄRRE ÄN KÄNT.**
+
+| # | Felläge | Upptäckt | Verkställd |
+|---|---|---|---|
+| 1 | Fel head (filsystem har 1 head, DB ligger efter) | **NEJ** (checken frågar aldrig DB) | N/A |
+| 2 | Flera heads | JA (`unhealthy`) | **NEJ** |
+| 3 | Verifieringsfel (korrupt migrationsfil) | JA (faller säkert till `unknown`) | **NEJ** |
+| 4 | Saknad `alembic_version`-tabell | **NEJ** | N/A |
+| 5 | Schema-drift (tabell omdöpt, version påstår korrekt) | **NEJ** | N/A |
+
+Luckan är VÄRRE än "upptäckt men inte verkställd" — 3 av 5 felägen upptäcks INTE ens, eftersom
+`_check_blocking_migrations()` är strukturellt rent filsystems-baserad och öppnar aldrig en
+DB-anslutning. Verkställande är 0/5 oavsett. Rotorsak: `evaluate_startup_readiness()`s
+`core`/`need()`/`serious_keys` refererar aldrig `"blocking_migrations"` någonstans. **Fixen
+behöver TVÅ delar:** (1) DB-medveten upptäckt (faktiskt fråga `alembic_version`, inte bara
+filsystemet), (2) lägga till nyckeln i `core`-grindnings-tupeln. Denna 5-falls-matris ÄR den
+exakta reproducer Cursor ska verifiera sin fix mot.
+
+### PR #244 — FINAL COMPOSED SAFE-INTERNAL EXAM (exakt SHA `beae39c7`) — INTE REDO ATT LANDAS
+
+Cursor komponerade en enda kandidat-tip av alla fem oberoende verifierade fix-grenar
+(#237+#238+#239+#240+#243). Attackerad direkt på den exakta angivna SHA:n, inte bara
+branch-tippen.
+
+- **Kill switch: VERIFIERAD** — 17/17 befintliga tester passerar, överfördes rent.
+- **Clear/grant: DELVIS, oförändrat** — förlegenhets-skydd finns men är valfritt.
+- **Migration-gating: VÄSENTLIGT FÖRBÄTTRAD, INTE fullt stängd.** `verify_migration_head()`
+  är nu genuint DB-medveten (riktig fix, ingen stubb) — empiriskt bekräftat att en genuin
+  multi-head-kollision nu ger `ReadinessLevel.BLOCKED` övergripande, vilket den inte gjorde
+  förut. Två kvarstående luckor: "unknown"-status blockerar INTE (bara "unhealthy" gör det,
+  bryter mot det krävda invariantet), och `blocking`-listan utelämnar
+  `blocking_migrations` även när det är den faktiska orsaken.
+- **Migrationer: VERIFIERAD** — en ren head.
+- **Evidens-subjekt-relevans: BEKRÄFTAT FORTFARANDE TRASIG.** Empiriskt omkört 3 fall direkt
+  mot denna exakta SHA — alla 3 misslyckas identiskt, byte-för-byte samma trasiga
+  substräng-matchningskod som tidigare.
+- **HÖGRISK-verifieringsgrind: BEKRÄFTAT FORTFARANDE TRASIG.** INGEN koppling till
+  `evidence_claim.py`-porten alls — `apply_verification_decision()` oförändrad, fortfarande
+  ren sannhetsvärde-kontroll, fortfarande ingen nedströms-backstop.
+- **Designupplösningen** (att släppa #237s konkurrerande `mainai_stop_state`): VERIFIERAD SANN,
+  ren.
+- Punkt 7-10, 12-13 inte omverifierade denna runda (tidsbudgeterat mot de två
+  founder-namngivna prioriteringarna).
+- **Ägar-isolering:** `workforce_authority_epoch` har fortfarande ingen RLS.
+
+**SLUTSATS: migration-gating fick en riktig, substantiell fix i denna komponerade kandidat,
+men de TVÅ punkter founder uttryckligen sa MÅSTE stängas före certifiering — evidens-
+subjekt-relevans och HÖGRISK-verifieringsgrinden — är BÅDA HELT ORÖRDA i denna komponerade
+kandidat, identiska med de enskilda gren-fynden.** Rekommendation: landa
+migration-gating-förbättringen (med unknown-ska-blockera-fixen tillagd) medan explicita fixar
+fortfarande krävs för de andra två innan omcertifiering försöks.
+
+**Kvarstående examenspunkter 7/10/12/13 stängda (2026-09-02), oberoende av de fyra
+blockerarna Cursor nu fixar:**
+- **7 (multi-omstart-kontinuitet): VERIFIERAD REN.** 6 genuint separata subprocess-omstarter
+  mot exakt denna SHA. Supersession-kedja byggd över två olika processer, en genuin
+  motsägelse förblev olöst (ingen auto-val), kill-switch-state byte-identiskt över 3
+  oberoende färsk-process-kontroller. NOLL avvikelse från den tidigare 10-process-kampanjens
+  rena resultat — ingen komposition-specifik regression.
+- **10 (backup/restore): VERIFIERAD, existerar.** `safe_internal_backup_restore_proof.py` är
+  riktig (225 rader); körd direkt — genuint innehålls-nivå-bevis (en specifik korrigering
+  skapad, säkerhetskopierad, borttagen, återställd, bekräftad återhämtad), inte bara en
+  `pg_dump`-exitkod-check.
+- **12 (concurrency-sanity): REN, ingen interaktion möjlig.** #238s advisory-lås
+  (`pg_advisory_xact_lock`, hash-nyckel) och #243s rad-nivå-`FOR SHARE`/`FOR UPDATE`-låsning
+  är strukturellt olika primitiv på orelaterade tabeller — kan inte kollidera.
+  Readiness-koden har noll referenser till kill-switch någonstans — helt frikopplat.
+- **13 (#218-regression): N/A, INTE en regression — VIKTIGT FYND.** Bekräftat via
+  `git merge-base --is-ancestor` att PR #218s egen commit INTE är en ancestor till denna
+  komponerade kandidat alls. **#218 lever på en separat, fortfarande omergad gren (del av den
+  17-PR:s Memory Frontier-stacken) och var ALDRIG en av #244s fem namngivna källgrenar.**
+  Ingenting har ångrats — modulen finns bara inte med ännu. **VIKTIGT ATT VETA:** en framtida
+  "safe-internal certifierad"-etikett på #244 får INTE antyda att personal-intent-learning
+  (#218s modul) omfattas — det gör den inte. Certifieringens scope måste vara explicit om
+  detta.
+
+### PR #243 — kill-switch/grant-time auktoritetsrace-fix — VERIFIERAD (kvällens allvarligaste fynd, nu stängt)
+
+Byggd på #239s gren, stänger exakt den lucka #239 själv flaggade som utanför sitt scope:
+`assert_not_killed()` grindade exekvering men INTE beviljande — ett nytt uppdrag kunde
+fortfarande BEVILJAS för en dödad ägare. Detta är kvällens FÖRSTA fynd som är ett genuint
+auktoritets-utvidgnings-race (inte bara data-/evidens-korrekthet): kill-switchens "återkalla
+alla live-uppdrag"-SELECT var inte serialiserad mot ett genuint samtidigt nytt
+uppdrags-beviljande på en separat DB-anslutning — ett precis beviljat uppdrag kunde överleva
+PERMANENT som live, oåterkallad exekveringsauktoritet, medan kill-switchen själv rapporterade
+`active=True`.
+
+**Fix:** varje scope (GLOBAL + per-ägare) får en durabel `authority_epoch`-rad (migration
+0069). Beviljande-vägen tar `SELECT .. FOR SHARE` på GLOBAL sen ägar-raden, I SAMMA
+transaktion som uppdrags-inserten, FÖRE den inserten. Stopp-vägen tar ett motstridigt
+`SELECT .. FOR UPDATE` på samma rad(er) som en del av samma transaktion som återkallar
+live-uppdrag. Tar också bort ALL process-lokal kill-switch-state (modul-globaler) — nu helt
+DB-baserad, stänger en durabilitets-lucka som fanns kvar även efter #239s ägar-scoping-fix
+(osynlig över uvicorn/gunicorn-workers).
+
+**Oberoende VERIFIERAD, denna session, mot maximal skepsis:**
+- Låsordningen (GLOBAL alltid före ägar-scopad) strukturellt bekräftad deadlock-fri via
+  kodläsning — bara `assert_grant_allowed()` håller någonsin två lås.
+- PR:ns egna 7 scenarion (två-anslutnings/två-sessions-race, riktig subprocess-omstart för
+  scenario 7) körda OBEROENDE: 7/7 GODKÄNDA.
+- EGEN negativkontroll (inte bara deras): bekräftat via grep att #239s gren har NOLL
+  beviljande-tids-kontroll alls — inte ens racy, helt FRÅNVARANDE. Ett enkelt sekventiellt
+  stopp-sen-beviljande-skript reproducerar buggen rent på pre-fix-kod, avvisas korrekt på
+  fixad kod.
+- EGEN nionde interleaving (inte bland deras 7): lazy row-creation-race — 5 samtidiga
+  första-gången-beviljanden för en helt ny ägare utan existerande epoch-rad — alla lyckades
+  korrekt, exakt EN epoch-rad skapad, ingen bugg funnen.
+- Regression: `110 passed, 593 deselected` — matchar PR:ns påstående exakt.
+- `safe_composed_run.py`-flaggat problem bekräftat FORTFARANDE trasigt (`TypeError`, fel
+  antal argument) och genuint utanför denna PR:s scope (pre-existerande, föregår #243) — egen
+  liten framtida fix.
+**Clear-vs-grant-luckan NU STÄNGD (2026-09-02):** 5 riktiga two-connection-race-tester byggda
+och körda. 4/5 GODKÄNDA (empiriskt bevisad låsblockering via `is_alive()`-liveness-checkar,
+inte antagen; clear återupplivar aldrig ett redan återkallat uppdrag; ägar-scopad och global
+clear strukturellt oberoende, olika DB-rader). **1 BEKRÄFTAD BUGG (fall 3, "ny stopp efter
+förlegad clear"):** `clear_kill_switch_for_recovery()` har NOLL förlegenhets-/
+generations-skydd — grep bekräftar att varken `expected_epoch`/`expected_sequence`/
+`clear_request_id` existerar någonstans i `app/workforce/` på denna gren, bara en ren
+sannhetsvärde-kontroll på `founder_ack`. Reproducerat sekventiellt (inget race behövs): stoppa
+incident-A → stoppa incident-B (orelaterad, epoch avancerar) → en förlegad clear avsedd för
+incident-A häver TYST även incident-B:s stopp, som founder aldrig bekräftade. Detta är en
+saknad-identitets-check-bugg, INTE en concurrency-bugg — själva grant/stop-race-fixen är
+opåverkad. Dormant just nu (inga produktionsanropare).
+
+**Noterbar diskrepans:** denna grens `clear_kill_switch_for_recovery()` är enklare än vad en
+tidigare fork ikväll beskrev (`_validate_founder_ack()` med deny-lista/regex, delvis
+`expected_sequence`-stöd) — INGENDERA finns här. Kräver avstämning: vilken version är avsedd
+att skeppas.
+
+**Rekommendation: REDO ATT LANDAS** (kärn-race-fixen), med clear-identitets-luckan som en egen
+liten uppföljningsfix. Ingen ny bugg som rör själva auktoritets-racet funnen trots adversarial
+ansträngning.
+
+### P1 — Fullständig kill-switch-certifieringsmatris (8 scenarion) — 6/8 GODKÄNT, 2 verkliga dormanta luckor
+
+Testat mot `app/workforce/kill_switch.py` (efter #239:s cross-owner-DoS-fix, se ovan — OBS:
+oklart om detta test kördes mot pre- eller post-#239-kod, kräver avstämning i nästa runda).
+
+**GODKÄNT (1,2,3,4,5,7):** ägar-isolering i båda riktningar, global stop träffar båda ägare,
+boot/restart kan strukturellt INTE häva en stop (noll `clear_*`-anropare någonstans i
+boot-vägen, grep-bekräftat), scoped clear rör bara den avsedda ägaren.
+
+**#6 UNDERKÄNT — HÖG allvarlighetsgrad:** `_validate_founder_ack()` kontrollerar bara en
+deny-lista av kända-dåliga literalsträngar + ett formatregex — INGEN kryptografisk eller
+extern verifiering att en riktig founder faktiskt utfärdade den. Empiriskt bekräftat: en
+självkonstruerad sträng som `"founder_ack:i_generated_this_myself_internally"` häver
+framgångsrikt en stop. **INTE exploaterbart just nu** — noll produktionsanropare av någon
+clear-funktion existerar någonstans i kodbasen ännu.
+
+**#8 DELVIS:** när anropare skickar `expected_sequence` fungerar stale-sequence-avvisning
+korrekt (empiriskt verifierat). Men parametern är valfri — att utelämna den häver vad som än
+är aktivt just nu med noll koppling till VILKEN stop-händelse ack:et var avsett för. Samma
+dormanta-men-verkliga form som #6.
+
+**Bonus-fynd:** de två nya tabellerna bakom detta (`mainai_stop_state`/`mainai_stop_events`)
+har INGEN RLS alls — bryter mot kodbasens egen etablerade mönster för varje annan
+ägar-scopad tabell.
+
+### P0 — Fullskalig multi-omstart-historiekampanj (founder-beordrad, 2026-09-02) — 10/10 GODKÄNT, INGEN DEGRADERING
+
+**Det starkaste positiva beviset hittills för "dö helt, starta om, veta ändå vem hon är."**
+10 GENUINT separata OS-subprocesser (P1→P10), varje en riktig `subprocess.run()`, färsk
+Python-interpreter, färskt SQLAlchemy-engine, ingen delad in-process-state. Byggd mot en
+worktree som kombinerar integrationstippen + alla 4 öppna pre-start-grenar (#237/#238/#239/
+#240) — en riktig mergekonflikt i `memory_work_linkage/service.py` löst (båda grenarna hade
+oberoende konvergerat mot samma fix; behöll den mest fullständiga sidan).
+
+**Sekvens:** frö rik historik + aktivera kill-switch → läs-endast-baslinje → fördjupa en
+2-länks supersession-kedja → skapa en genuin olöst motsägelse → förmåge-regression +
+återupplivnings-försök (korrekt avvisat) → cancel/park-arbetslivscykel → verifiera att
+kill-switch består oförändrad → avbrutet mål → lös uttryckligen den tidigare motsägelsen →
+slutlig färsk-process-assertion.
+
+**ALLA 10 KRÄVDA ASSERTIONS GODKÄNDA:** aktuell sanning är aktuell, superseded förblir bara
+historia, misslyckad förmåga återupplivades inte (reste `CapabilityEvidenceError`), avbrutet
+arbete återupptogs inte, parkerat arbete förblev sökbart, decision debt växte korrekt (2→4,
+inget tappat), auktoritet rekonstruerades inte från minne, kill-switch-state var
+byte-identiskt över 3 oberoende processkontroller (P1/P7/P10), provider förblev noll genom
+hela kampanjen. De fyra kärnkorrekthets-invarianterna omfrågades färskt vid alla 9
+omstarts-punkter och returnerade identiskt `True` varje gång — INGEN flimmer, INGEN drift,
+monotont och korrekt växande resultatmängd. **SVAR PÅ HUVUDFRÅGAN: NEJ, ingen semantisk
+fidelitets-degradering upptäckt när historiken växer.**
+
+**AVSTÄMT (2026-09-02) — INGEN MOTSÄGELSE, VERKLIGT FRAMSTEG.** PR #237s egen gren
+(`cursor/mainai-safe-internal-startup`) har en riktig, substantiell fix: en ny
+`app/evidence_claim.py`-modul med `evidence_supports_claim()`/
+`require_supporting_evidence_for_verified()`, GENUINT INKOPPLAD — `capability_reality/
+service.py` importerar och anropar den direkt, reser `CapabilityEvidenceError` vid avvisning,
+INTE en dormant parallell funktion. Denna sessions "helt öppen"-fynd var korrekt för
+INTEGRATIONSTIPPEN (som genuint aldrig rörts) — motsäger inte alls det nya fyndet på #237s
+gren specifikt.
+
+**Empiriskt omkört 10-scenario-matris mot #237s gren: 6 av 8 direkttestade scenarion GODKÄNDA**
+(misslyckad evidens, avvisad evidens, orelaterad-förmåga-med-explicit-nyckel-mismatch, fel
+ägare, äldre-framgång-sen-nyare-misslyckande, motsägande evidens i samma payload).
+
+**En verklig kvarstående lucka BEKRÄFTAD (scenario 6, fel subjekt):** ett `test_run_result`
+med `passed: True` och INGEN explicit `capability_key` i payloaden accepteras för VILKEN
+capability_key som helst, oavsett vad evidensens `source_ref` faktiskt namnger. Reproducerat
+direkt: evidens om `test_capX_completely_different.py` accepterades som bevis för en
+orelaterad `capY_the_one_we_claim`. Minsta fix: strama åt den bypass:en till att fortfarande
+kräva subjekt-relevans.
+
+**DEFINITIV 6-FALLS-ATTACK KLAR (2026-09-02) — TVÅ SEPARATA ROTORSAKER, 4/6 TRASIGA.**
+
+| Fall | Resultat |
+|---|---|
+| 1. Annan förmåga, ingen nyckel i payload | **BEKRÄFTAD BUGG** (redan känd) |
+| 2. Samma domän, annan skill | **BEKRÄFTAD BUGG** |
+| 3. Liknande formulering (substräng) | **BEKRÄFTAD BUGG (NY)** |
+| 4. Förälder/barn-förmåga | **BEKRÄFTAD BUGG (NY)** |
+| 5. Fel target-id-mekanism | N/A — ingen sådan kolumn finns |
+| 6. Omdöpt förmåga, gammal evidens återanvänd | PASS — korrekt avvisad |
+
+**Bugg A** (fall 1-2, redan känd): när `capability_key` saknas i payloaden accepterar en
+bred `test_run_result` + `passed=True`-reservväg VILKET godkänt test som helst oavsett subjekt.
+**Bugg B** (fall 3-4, NY): även när `capability_key` FINNS använder `subject_ok`
+SUBSTRÄNGS-INNESLUTNING (`subject_key in capability_key`) istället för exakt likhet — så
+`"send_email" in "send_email_v2"` och `"file_operations" in "file_operations.delete"` passerar
+båda felaktigt, kringgår korrekt missmatch-detekteringskod som finns två grenar längre ner och
+aldrig nås. **Samma substräng-istället-för-exakt-matchning-misstag som redan orsakat
+falsk-positiv-buggarna i nyckelords-klassificerarna (#214/#218) tidigare i natt — en TREDJE
+arkitektonisk eko av samma misstagsform, i en helt annan modul.** Minsta fix: (1) byt
+substräng mot exakt likhet — en rad, stänger fall 3/4; (2) strama åt
+`capability_key`-saknas-reservvägen till att kräva att `subject_key` faktiskt förekommer i
+`source_ref` — stänger fall 1/2. Båda är lokala `evidence_claim.py`-ändringar, INGEN
+schema-migration behövs för just denna lucka.
+
+Scenario 7 (superseded) och 9 (äldre-misslyckande-sen-nyare-framgång) inte oberoende
+omtestade denna runda — koden HAR logik för det förra, värt en uppföljningskontroll.
+
+Ärligt bortprioriterat i denna körning: `supersede_work_candidate()`-vägen otestad (bara
+`dismiss` övades), inget positivt "avslutat arbete"-testfall, school/teacher-ledger-state
+inte återsådd (redan bekräftad icke-durabel av en tidigare fork).
+
+### P0 — Genuint fresh-process-omstart-bevis (founder-beordrad, 2026-09-01) — MESTADELS RENT
+
+**Bygger på och stärker #237:s tidigare same-process-anmärkning.** Fem RIKTIGA separata
+OS-subprocesser (A→B→C→D→E, ingen delad Python-process, inget delat minne, endast delad
+databas) verifierade via direkt Postgres-inspektion över processgränser:
+
+- **Continuity-checkpointing: FUNGERAR KORREKT.** Varje färsk boot skapar en ny checkpoint som
+  korrekt `supersedes` föregående process' senaste — genuin append-only durabilitet, inte
+  process-minnesberoende.
+- **Kill-switch överlever korrekt: BEKRÄFTAT.** Ett stopp aktiverat i en subprocess blockerade
+  korrekt en helt orelaterad färsk-process-boot (`BLOCKED_BY_KILL_SWITCH`); att häva det via
+  `clear_owner_stop()` (ack-formatvalidering, replay-skyddad `clear_request_id`) tillät korrekt
+  en efterföljande färsk boot.
+- **Ägaridentitet: stabil** över alla 5 processer.
+- **Eskalerat, redan känt fynd:** `teacher_ledger.py`s `_LEDGER` (redan flaggad ikväll som
+  cross-owner-läckande) bekräftas nu ÄVEN vara icke-durabel av konstruktion — en ren in-memory
+  dict, bevisligen tom vid varje färsk process. Dormant just nu (normal boot når aldrig
+  exam/teacher-outcome-inspelningsvägen).
+- **Multi-omstart-historik (lättare, tidsbudgeterad):** korrigerings-/motsägelse-kedjor
+  verifierade korrekta på lagringsnivå över en färsk-process-fråga — supersession fungerar, och
+  en genuint olöst motsägelse förblir korrekt två oberoende aktiva poster istället för att tyst
+  väljas (samma redan kända #224-lucka, inte ny). Den fullskaliga syntetiska historiken (rik,
+  många-events) byggdes INTE p.g.a. tidsbudget — kandidat för nästa runda.
+
+### Bredare evidens-semantik-revision (founder-beordrad, 2026-09-01) — TVÅ NYA YTOR PÅVERKADE
+
+Systematisk genomgång av VARJE plats evidens kan påverka ett beslut, utöver de redan kända
+#213/#220/#236-fynden:
+
+- **#236 school-routing: BEKRÄFTAD, andra live-konsumenten.** `route_local_first()` litar på
+  `capability_reality`-status utan oberoende kontroll — samma fabricerade
+  `verified_available`-post som redan bevisat kompromettera urvalspoäng (#235) gör NU att
+  routing returnerar `LOCAL_FIRST_PROVEN`/`use_external_teacher=False`. Samma rotorsaksfix
+  (innehålls-check i `record_capability_observation()`) stänger även denna — ingen separat fix
+  behövs i routing.py.
+- **#234 startup readiness: BEKRÄFTAD, allvarlig, bevisad genom konstruktion.**
+  `blocking_migrations` är HÅRDKODAD `CheckStatus.healthy` med en "(verify ops)"-kommentar;
+  `evaluate_startup_readiness()` tar inget `db`-argument alls — kan strukturellt INTE
+  kontrollera verkligt Alembic-läge. Skulle rapportera "healthy" även under EXAKT den typ av
+  migrations-huvudkollision som fixades två gånger tidigare i natt (#209/#210 vs #197). Notera:
+  den angränsande `claude_reviews_satisfied`-kontrollen är däremot korrekt designad (explicit
+  attestering, fail-closed vid okänt) — inte varje kontroll i funktionen har samma hål.
+- **Workforce trust/performance (#230-232): REN.** `record_verified_outcome()` vägrar explicit
+  en self-confidence-parameter; riktig risknivå-policy blockerar självverifiering och kräver en
+  oberoende verifierare på varje nivå.
+- Completion intelligence och verification pipeline: EJ NÅDDA än (tidsbudget), kandidater för
+  nästa runda.
+
+**Systemisk cross-stage-attack (12 interaktionskedjor, founderns egen lista) — 9 av 12
+RENSADE** (mest för att inget är live-kopplat ännu), 1 verklig ej-testad lucka funnen
+(session-omstart/rekonstruktion-fidelitet över FLERA omstarter i en väldigt lång historik —
+enstaka omstart verifierad ren, kumulativ drift över många omstarter inte fullt uttömd), 2 ej
+tillämpliga ännu (circular provenance kräver #213:s evidence-FK som inte är hård än; recap→
+canonical redan täckt av #212:s egen granskning).
+
+**Long-memory-soak (Lane C, 1189 syntetiska events, 20 ämnen, flera omstarts-simuleringar):**
+Invariant 1 (rekonstruerbar) PASS · Invariant 2 (historik oförlorad) PASS · Invariant 3 (inga
+dubbletter) **FAIL, allvarligt** (20/20 ämnen kolliderade inte) · Invariant 4 (inga falska
+self-claims) FAIL (förväntat, bekräftar #213 från ny vinkel) · Invariant 5 (ingen
+auktoritetsutvidgning) PASS. Ingen O(n²)-prestandaproblematik vid denna skala (1.57x
+tidsförhållande tidigt→sent över ~1200 events).
+
+### Systemiskt mönster: semantisk kringgåelse av nyckelordsbaserade grindar (4 oberoende fynd + falska positiva)
+
+Samma svaghetsform hittad OBEROENDE i tre olika moduler ikväll — alla dormanta, ingen live-
+konsument ännu, men samma arkitektoniska hål: en säkerhetsrelevant klassificering görs via en
+FAST NYCKELORDSLISTA/regex, som en trivial omformulering helt kringgår.
+
+1. **#218** (redan fixad för sitt ursprungliga fynd): `classify_ambiguity()` — 13 av 15 verkliga
+   omformuleringar ("ship it", "put this live", "wipe it") missar klassificering helt.
+2. **#214**: `_touches_protected()` — ALLA 6 testade omformuleringar av skyddade koncept
+   (RLS→"row-level scoping", authority→"permission gate", audit→"provenance log", osv.)
+   returnerar `protected=False`. 100% kringgåelse, dormant (`auto_apply_allowed` hårdkodad
+   `False` överallt).
+3. **#221**: attention-ranking har INGEN pinned/undantags-mekanism alls — ett äkta
+   säkerhetsrelevant item med lågt beräknat score faller tyst bort ur topp-50, empiriskt bevisat
+   med ett 66-item-scenario. Dormant (`authority_implied` hårdkodad `False`).
+4. **`app.safe_planner.FORBIDDEN_WORDS`**: en FJÄRDE oberoende förekomst av samma spröda
+   regex-mönster, funnen men INTE ännu empiriskt testad (kandidat för nästa attack-runda).
+
+**FALSKA POSITIVA — motsatt fel, också bekräftat empiriskt ikväll:** samma nyckelordslistor
+triggar även FEL på ofarlig text som råkar innehålla en delsträng.
+- **#214** (`_touches_protected()`): **7 av 8** testade kandidater felutlöser — REN
+  delsträngs-matchning, NOLL ordgränsskydd. "girls"/"curls"/"pearls" triggar via `rls`,
+  "audition" via `audit`, "leaseholder" via `lease`. Allvarligare än #218:s motsvarande fel.
+- **#218** (`classify_ambiguity()`): **5 av 9** kandidater felutlöser, men BARA
+  bindestreck-sammansättningar ("production-notes", "delete-old-branch",
+  "merge-conflict-resolver") — dess befintliga `\b`-ordgräns-regex skyddar korrekt mot
+  suffix-fäste sammansättningar (emergency/workforce/deployment passerar korrekt).
+
+**Billig, omedelbar delfix (verifierad, redo att landas, INGEN AI-kostnad):** att bredda
+ordgränsdefinitionen till att behandla `-` som ett ordtecken stänger 100% av de falska
+positiva i BÅDA modulerna utan att förlora någon sann positiv. Patch postad på både #214 och
+#218 — löser INTE huvudproblemet (falska negativa/omformulerings-kringgåelse, som fortfarande
+kräver arkitekturbeslutet nedan), men är en fristående, riskfri förbättring redo att landas nu.
+
+**Föreslagen lösning på huvudproblemet (flaggad, INTE implementerad, kräver founder-signoff
+eftersom det lägger till ett fakturerat AI-anrop i en säkerhetskritisk väg), design postad på
+#227:** delad `app.action_classification`-modul med en riktig `ActionType`-vokabulär, regex
+som billig fail-closed snabbväg, LLM-klassificerare bara vid gränsfall — samma riktning
+föreslagen tre gånger oberoende nu. Ett arkitekturbeslut, inte en engångsfix per modul.
 
 ---
 
