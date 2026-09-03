@@ -13,6 +13,39 @@ skeleton. Stages V2-B through V2-J are separate documents in this same directory
 
 ---
 
+## Canonical product narrative (founder's own words, 2026-09-03 — quoted, not paraphrased)
+
+This is the reference framing for every V2 stage document. Where a design decision is
+ambiguous, resolve it toward this narrative rather than toward generic "AI assistant"
+conventions:
+
+> LifeAI ska i slutändan nästan inte kännas som ett operativsystem. Du sätter dig vid
+> enheten och pratar med henne. Hon har datorn som kropp, Sentinel som immunförsvar,
+> Guardian som reflexer, agenterna som specialistteam, minnet som kontinuitet, Vault som
+> hennes låsta kassaskåp, och orben som den enda person du egentligen behöver förhålla dig
+> till.
+
+Mapped onto this document's own vocabulary (§1–§2), so the metaphor and the architecture
+stay the same thing, not two parallel descriptions of it:
+
+| Founder's metaphor | This document's primitive |
+|---|---|
+| datorn som kropp (the computer as body) | the device/runtime MainAI operates through — everything below "MainAI" in §2's trust chain |
+| Sentinel som immunförsvar (immune system) | V2-D — detects and responds to threats, does not itself hold root authority |
+| Guardian som reflexer (reflexes) | V2-B — fast, mechanical, pre-authorized-scope-only; a reflex acts before "thinking," which is exactly why Guardian must stay small and judgment-free |
+| agenterna som specialistteam (specialist team) | V2-E — invisible unless asked, bounded, never inheriting broader access from their specialization |
+| minnet som kontinuitet (memory as continuity) | Intent Objects (§1) + the proven same-device restart durability this session built — continuity is a *tested property*, not an aspiration |
+| Vault som hennes låsta kassaskåp (the locked safe) | the existing Vault/egress boundary this project already has, which V2-C's Privacy Boundary Engine extends, not replaces |
+| orben som den enda person (the orb as the one person) | `MAINAI_ORB` (§1) — V2-I's entire premise: `MAINAI IS THE PRIMARY UI. SCREENS ARE TOOLS, NOT THE PRODUCT.` |
+
+The point of this table: a reflex that requires deliberation is not a reflex (Guardian must
+stay small); an immune system that needs to see your diary to fight an infection is a
+surveillance system, not an immune system (`SPECIALIZATION != SURVEILLANCE`, V2-D); a safe
+whose combination the landlord also holds is not a safe (V2-C/V2-G's whole point). The
+metaphor is not decoration — it is a genuine constraint-generating device for every V2 stage.
+
+---
+
 ## 0. What already exists — do not rebuild this (checked before writing anything)
 
 This session spent one entire night building and red-teaming a real safety-invariant
