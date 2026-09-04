@@ -239,7 +239,10 @@ def apply_detection_results(
             incidents,
             owner_id=event.subject.owner_id,
             device_id=event.subject.device_id,
-            source_id=result.rule_id,
+            # Scoped by subject_ref too -- two different subjects triggering the same rule
+            # must never collapse into one incident (that would make a false-positive
+            # closeout on one subject silently affect the other's incident record).
+            source_id=f"{result.rule_id}:{event.subject.subject_ref}",
             threat_class=result.threat_class,
             target_state=incident_state_for_detection_result(result),
             severity=result.severity,
@@ -282,7 +285,7 @@ def apply_correlation_patterns(
             owner_id=event.subject.owner_id,
             device_id=event.subject.device_id,
             since=since,
-            allow_cross_device=allow_cross_device_correlation and pattern.allow_cross_device,
+            allow_cross_device=allow_cross_device_correlation or pattern.allow_cross_device,
         )
         satisfying = pattern_full_match(pattern, candidates)
         if satisfying is None or event not in satisfying:

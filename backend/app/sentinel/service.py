@@ -54,7 +54,6 @@ from app.sentinel.types import (
     SecuritySource,
     SecuritySubject,
     SentinelPrivacyViolation,
-    SentinelRuleError,
     ThreatClass,
 )
 
