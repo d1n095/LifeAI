@@ -6,8 +6,8 @@ from pathlib import Path
 from app.personal_recall.adapters import IterableAdapter
 from app.personal_recall.index import LocalRecallIndex
 from app.personal_recall.query import understand_query
-from app.personal_recall.retrieval import PersonalRecallEngine
-from app.personal_recall.types import DecisionState, IndexState, PersonalKnowledgeItem, Provenance, SourceType, VerificationState
+from app.personal_recall.retrieval import LocalSemanticScorer, PersonalRecallEngine
+from app.personal_recall.types import AliasBinding, AliasVerification, DecisionState, IndexState, PersonalKnowledgeItem, Provenance, SourceType, VerificationState
 
 NOW = datetime(2026, 9, 4, tzinfo=timezone.utc)
 
@@ -17,8 +17,14 @@ def item(i: str, text: str, *, owner: str = "alice", source=SourceType.CONVERSAT
     return PersonalKnowledgeItem(item_id=i, source_type=source, source_id=f"source-{i}", owner_id=owner, content_reference=f"local://{i}", provenance=Provenance(source_type=source, source_id=f"source-{i}", locator=f"local://{i}", occurred_at=at), text=text, subject=subject, created_at=at, decision_state=decision, verification_state=verified, superseded_by=superseded_by, relationship_edges=edges or {}, index_state=state, content_hash=content_hash, file_id=file_id, metadata=metadata or {})
 
 
+class FixedSemantic(LocalSemanticScorer):
+    def __init__(self, value): self.value = value
+    def score(self, query, value): return self.value
+
+
 def engine(*items, aliases=None, semantic=None):
-    return PersonalRecallEngine([IterableAdapter("fixture", items)], aliases=aliases, semantic_scorer=semantic)
+    bindings = tuple(AliasBinding(canonical, alias, "alice", AliasVerification.VERIFIED) for canonical, values in (aliases or {}).items() for alias in values)
+    return PersonalRecallEngine([IterableAdapter("fixture", items)], alias_bindings=bindings, semantic_scorer=FixedSemantic(semantic) if semantic is not None else None)
 
 
 def test_query_intents_are_explicit():
@@ -27,7 +33,7 @@ def test_query_intents_are_explicit():
 
 
 def test_exact_term_and_semantic_paraphrase_have_separate_scores():
-    found = engine(item("a", "nano hydroxyapatit recept"), semantic=lambda q, i: 0.8).recall(owner_id="alice", raw_query="allt om hydroxyapatit", now=NOW).results[0]
+    found = engine(item("a", "nano hydroxyapatit recept"), semantic=0.8).recall(owner_id="alice", raw_query="allt om hydroxyapatit", now=NOW).results[0]
     assert found.exact_score > 0
     assert found.semantic_score == 0.8
     assert found.subject_match
@@ -41,7 +47,7 @@ def test_typo_and_local_alias_are_recoverable():
 
 def test_semantic_score_alone_cannot_collapse_wrong_subject():
     wrong = item("car", "service och recept", subject="bil")
-    assert engine(wrong, semantic=lambda q, i: 1.0).recall(owner_id="alice", raw_query="tandkräm", now=NOW).results == []
+    assert engine(wrong, semantic=1.0).recall(owner_id="alice", raw_query="tandkräm", now=NOW).results == []
 
 
 def test_latest_excludes_superseded_but_history_keeps_it():
@@ -85,8 +91,8 @@ def test_file_lookup_uses_content_not_similar_title_only():
 
 
 def test_renamed_and_duplicate_file_handling_preserves_provenance():
-    original = item("original", "tandkräm pdf", source=SourceType.FILE, file_id="f1", content_hash="abc")
-    renamed = item("renamed", "tandkräm pdf", source=SourceType.FILE, file_id="f1", content_hash="abc")
+    original = item("original", "tandkräm pdf", source=SourceType.FILE, file_id="f1", content_hash="abc", metadata={"content_hash_verified": True})
+    renamed = item("renamed", "tandkräm pdf", source=SourceType.FILE, file_id="f1", content_hash="abc", metadata={"content_hash_verified": True})
     response = engine(original, renamed).recall(owner_id="alice", raw_query="fil tandkräm", now=NOW)
     assert len(response.results) == 1
     assert response.results[0].related_items in (("renamed",), ("original",))
@@ -132,6 +138,6 @@ def test_index_survives_reload_and_query_survives_engine_restart(tmp_path: Path)
     index = LocalRecallIndex()
     index.replace([item("durable", "tandkräm recept", source=SourceType.FILE)])
     index.save(path)
-    loaded = LocalRecallIndex.load(path)
+    loaded = LocalRecallIndex.load(path, owner_id="alice")
     restarted = PersonalRecallEngine([IterableAdapter("snapshot", loaded.items.values())])
     assert restarted.recall(owner_id="alice", raw_query="tandkräm", now=NOW).results[0].item.item_id == "durable"

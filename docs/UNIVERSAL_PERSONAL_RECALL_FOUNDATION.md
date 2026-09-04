@@ -45,3 +45,35 @@ P1: Swedish/English query rules are deterministic but intentionally small; optio
 scoring has no embedding implementation here; version reasoning depends on explicit edges;
 subject clustering is lexical; large-corpus pagination/ranking benchmarks remain; OCR and
 near-duplicate image/PDF detection remain adapter responsibilities.
+
+## Adversarial hardening round (2026-09-04)
+
+The second round reproduced and fixed these bug classes in the isolated kernel:
+
+- substring matches could establish subject identity (`HAp`/`app`, `fluor`/`fluorid`);
+- aliases were global observations with no owner/project/domain/time or verification scope;
+- recency could outrank truth, future dates received maximum recency, and any `valid_until`
+  value was treated as already expired;
+- missing and cyclic supersession targets were silent, as were concurrent current candidates;
+- source authority and epistemic state were preserved but did not influence ranking;
+- contradictions without explicit edges had no bounded candidate representation;
+- stale hashes could collapse provenance without verification;
+- snapshots had no owner, generation, checksum, permission, size, path, symlink or concurrent
+  save guard;
+- broad recall could imply completeness without a coverage contract;
+- locators had no inert validation boundary;
+- personal raw text could appear in default object representations;
+- item count, result count, text, alias registry and contradiction candidate work were unbounded.
+
+The suite now contains 49 tests. `COMPLETE` is only possible when the caller declares expected
+source classes and every one is covered without a failure/truncation; otherwise coverage is
+`KNOWN_PARTIAL` or `UNKNOWN`. Structured polarity/value disagreement produces a contradiction
+*candidate*, never a verified contradiction.
+
+Remaining production P0s are deliberately outside this branch: real RLS-backed adapter attacks;
+encrypted snapshot placement and mandatory trusted `base_dir`; durable generation/locking policy
+with crash recovery; source-registry-backed locator existence/ownership validation; deletion
+tombstone propagation from canonical stores; and authorization-safe API serialization. Remaining
+P1s: morphology/entity resolution beyond bounded deterministic matching, reviewed alias-management
+UI/workflow, scalable FTS/vector candidate generation, near-duplicate document/OCR detection,
+large-corpus benchmarks, and model-assisted query interpretation as non-authoritative proposals.

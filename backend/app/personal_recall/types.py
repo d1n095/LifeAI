@@ -68,7 +68,53 @@ class IndexState(str, Enum):
     SUPERSEDED = "superseded"
 
 
+class CompletenessState(str, Enum):
+    COMPLETE = "complete"
+    KNOWN_PARTIAL = "known_partial"
+    UNKNOWN = "unknown"
+
+
+class AliasVerification(str, Enum):
+    OBSERVED = "observed"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+
+
+class SourceAuthority(str, Enum):
+    PRIMARY = "primary"
+    USER = "user"
+    VERIFIED_DERIVED = "verified_derived"
+    DERIVED = "derived"
+    ASSISTANT = "assistant"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
+class AliasBinding:
+    canonical: str
+    alias: str
+    owner_id: str
+    verification: AliasVerification
+    project_id: str | None = None
+    domain: str | None = None
+    subject: str | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    source_role: str = "unknown"
+
+
+@dataclass(frozen=True)
+class QueryInterpretationProposal:
+    """Future model output: inspectable proposal, never retrieval authority by itself."""
+
+    intents: tuple[QueryIntent, ...]
+    subject: str | None
+    aliases: tuple[str, ...] = ()
+    confidence: float = 0.0
+    rationale: str = ""
+
+
+@dataclass(frozen=True, repr=False)
 class Provenance:
     source_type: SourceType
     source_id: str
@@ -80,7 +126,7 @@ class Provenance:
     occurred_at: datetime | None = None
 
 
-@dataclass
+@dataclass(repr=False)
 class PersonalKnowledgeItem:
     item_id: str
     source_type: SourceType
@@ -88,7 +134,7 @@ class PersonalKnowledgeItem:
     owner_id: str
     content_reference: str
     provenance: Provenance
-    text: str | None = None
+    text: str | None = field(default=None, repr=False)
     conversation_id: str | None = None
     thread_id: str | None = None
     project_id: str | None = None
@@ -101,23 +147,24 @@ class PersonalKnowledgeItem:
     subject: str | None = None
     topic: str | None = None
     entities: tuple[str, ...] = ()
-    claims: tuple[str, ...] = ()
-    aliases: tuple[str, ...] = ()
+    claims: tuple[str, ...] = field(default=(), repr=False)
+    aliases: tuple[str, ...] = field(default=(), repr=False)
     decision_state: DecisionState = DecisionState.UNKNOWN
     verification_state: VerificationState = VerificationState.UNKNOWN
     superseded_by: str | None = None
     source_version: str | None = None
     embedding_reference: str | None = None
     privacy_class: str = "local_personal"
+    source_authority: SourceAuthority = SourceAuthority.UNKNOWN
     confidence: float | None = None
     currentness: float | None = None
     relationship_edges: dict[str, tuple[str, ...]] = field(default_factory=dict)
     index_state: IndexState = IndexState.INDEXED
     content_hash: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class RecallQuery:
     raw: str
     normalized: str
@@ -131,7 +178,7 @@ class RecallQuery:
     current_only: bool = False
 
 
-@dataclass
+@dataclass(repr=False)
 class RetrievalResult:
     item: PersonalKnowledgeItem
     relevance_score: float
@@ -139,6 +186,8 @@ class RetrievalResult:
     semantic_score: float
     entity_score: float
     temporal_score: float
+    authority_score: float
+    truth_score: float
     subject_match: bool
     why_matched: tuple[str, ...]
     contradictions: tuple[str, ...] = ()
@@ -146,7 +195,25 @@ class RetrievalResult:
     related_items: tuple[str, ...] = ()
 
 
-@dataclass
+@dataclass(frozen=True)
+class ContradictionCandidate:
+    left_item_id: str
+    right_item_id: str
+    proposition: str
+    reason: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class CoverageReport:
+    state: CompletenessState
+    searched_source_types: tuple[SourceType, ...]
+    missing_source_types: tuple[SourceType, ...]
+    failed_adapters: tuple[str, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(repr=False)
 class RecallResponse:
     query: RecallQuery
     results: list[RetrievalResult]
@@ -154,6 +221,8 @@ class RecallResponse:
     current_items: list[str]
     historical_items: list[str]
     contradictions: list[tuple[str, str]]
+    contradiction_candidates: list[ContradictionCandidate]
     unresolved: list[str]
     index_warnings: list[str]
+    coverage: CoverageReport
     synthesis: str
