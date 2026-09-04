@@ -229,6 +229,47 @@ immediate value) → (2) real AI-provider call sites, upstream of the existing
 `egress_policy` gate → (3) file-upload-derived-signal paths → (4) full audit of the
 remaining ~35 unaudited logging call sites.
 
+## 6b. Sentinel future event-source map (2026-09-04, read-only, no wiring)
+
+Real code search across the existing certified runtime, to answer "where would each of
+Sentinel's 11 `app.sentinel.adapters` interface stubs eventually plug in." This is a survey
+for a later wiring phase, not a wiring plan — nothing below was changed, and none of it
+implies any of these sources is connected to `app.sentinel` today.
+
+| Event source | Real file/module | Plausible `SecurityEventType`(s) | Plausible Guardian `ContainmentScope` |
+|---|---|---|---|
+| Agent/worker process spawn | `app.agent_coordination.adapters` (`asyncio.subprocess.Process`) | `PROCESS_STARTED`, `SCRIPT_EXECUTION` | `WORKFORCE` |
+| Supervisor git shell-outs | `app.development_supervisor.production_entry` / `production_worktree` | `PROCESS_STARTED`, `SCRIPT_EXECUTION` | `WORKFORCE` |
+| Execution-job worktree git ops | `app.mainai_execution.worktree` (`_run_git`) | `PROCESS_STARTED` | `WORKFORCE` |
+| Test-run/tooling subprocesses | `app.mainai_execution.verify`, `app.project_memory`, `app.development_operator.service` | `SCRIPT_EXECUTION` | `WORKFORCE` |
+| Document upload | `app.routers.documents`, `app.models.document`, `app.storage.references` | `UNTRUSTED_FILE_OPENED`, `MASS_FILE_READ`/`MASS_FILE_WRITE` (bulk) | `OWNER` or `VAULT` depending on destination |
+| RAG ingest/media import | `app.rag.ingest`, `app.rag.media_import` | `UNTRUSTED_FILE_OPENED` | `OWNER` |
+| Egress policy outcome | `app.egress_policy.service` (`enforce_egress_policy`) | `UNEXPECTED_EGRESS`, `NEW_OUTBOUND_DESTINATION` | `PROVIDER` / `NETWORK` |
+| AI provider network calls | `app.providers.{anthropic,openai,gemini,deepseek,ollama,openrouter}_provider`, `registry`, `app.provider_planning.service` | `NEW_OUTBOUND_DESTINATION` (new provider/endpoint) | `PROVIDER` |
+| Vault-adjacent data access | `app.routers.library`/`chat`, `app.rag.retrieve`, `app.workforce.context`/`broker`/`provider_worker` | `VAULT_ACCESS_ATTEMPT`, `CREDENTIAL_READ_ATTEMPT` | `VAULT` |
+| Workforce authority/kill-switch | `app.workforce.kill_switch`, `authority`, `broker`, `activation_gates` | `AGENT_SCOPE_ESCALATION`, `PRIVILEGE_ESCALATION_ATTEMPT` | `WORKFORCE` |
+| Guardian's own policy mutation | `app.guardian.service` (`apply_new_policy`) | `POLICY_CHANGE`, `SECURITY_SETTING_CHANGED` | `GLOBAL` / `OWNER` |
+| Session/token revocation | `app.token_revocation`, `app.routers.auth`, `app.models.refresh_token` | `DEVICE_TRUST_CHANGED`, `RECOVERY_TRIGGER` | `OWNER` |
+
+**Negative-space findings (deliberately NOT future Sentinel adapters):**
+- `app.egress_policy` already does deny/never-egress-marker classification with its own
+  disclosure ledger. A future Sentinel adapter here must *observe* its allow/deny outcome
+  (an already-classified result, not a raw payload) rather than re-implement egress
+  classification a second time — two independent classifiers over the same payload would
+  drift out of sync exactly the way this session's recurring "evidence exists != evidence
+  supports claim" bug class has shown elsewhere.
+- There is no literal `vault` table or model-loading/plugin-loading mechanism in this
+  codebase today — "Vault" is the RLS-protected database itself, and providers are static
+  Python modules, not dynamically loaded. `MODEL_CHANGED`/`PLUGIN_CHANGED` therefore has no
+  real hook to map yet; mapping it further now would be speculative, not evidence-based.
+- RLS (`app.rls`) already enforces per-owner Vault access at the DB layer and fails closed.
+  A `VAULT_ACCESS_ATTEMPT` adapter is still genuinely additive (RLS enforces but does not
+  correlate or alert), not redundant.
+
+The unaudited logging/stack-trace sanitization gap from §6a remains the connective tissue
+for a possible future log-formatter-driven event source, but stays a separate, non-Sentinel
+migration step (§6a's step 1) — not itself a Sentinel adapter.
+
 ## 6. Open design risks (stated honestly, not glossed over)
 
 - **TAKEOVER_STATE's OS-level enforcement** genuinely differs in feasibility across
