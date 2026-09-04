@@ -23,6 +23,7 @@ from app.sovereign_identity import (
     ProofLevel,
     RootAuthorityProof,
     SessionIdentity,
+    decrypt_with_dek,
     encrypt_with_dek,
     enroll_device,
     evaluate_identity_assertion,
@@ -139,6 +140,28 @@ def test_wrong_key_cannot_decrypt_component():
         decrypt_life_image_component(component, dek=wrong_dek)
     # Sanity: the real key works.
     assert decrypt_life_image_component(component, dek=dek) == b"some restored plaintext content"
+
+
+# bonus: wrong owner identity rejected (AAD binds owner_id, not just purpose/version)
+def test_wrong_owner_identity_rejected():
+    owner_id = _owner()
+    other_owner_id = _owner()
+    dek = _dek()
+    component = _build_component(owner_id=owner_id, dek=dek)
+    relabeled = replace(component.envelope, owner_id=other_owner_id)
+    with pytest.raises(KeyMaterialError):
+        decrypt_with_dek(relabeled, dek=dek, expected_key_version=component.key_version)
+
+
+# bonus: an unenrolled (never-registered) device cannot receive a sensitive key grant or
+# take part in recovery -- distinct from the revoked-device case (test 16), which requires
+# a device that DID exist and was later revoked. This one has no DeviceRecord at all.
+def test_unenrolled_device_cannot_receive_key_grant():
+    owner_id, identity_state, _, _ = _owner_identity()
+    from app.sovereign_identity import grant_device_key
+
+    with pytest.raises(KeyError):
+        grant_device_key(identity_state, device_id="never-enrolled-device", grant=None)
 
 
 # 2. tampered ciphertext rejected (integration level)
