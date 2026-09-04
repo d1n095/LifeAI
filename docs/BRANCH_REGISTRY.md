@@ -6,6 +6,16 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Universal Personal Recall — isolated Codex lane (2026-09-04)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `codex/universal-personal-recall` | — | **Isolerad foundation — do not merge/wire yet** | Global local-first personal retrieval contracts: canonical read projection, source adapters, inspectable hybrid scores, query intents, temporal/version/contradiction reconciliation, local snapshot format and adversarial pure tests. Based on certification candidate `818dfb7`; does not modify PR #245 or Claude's Identity/Recovery/Life Image V2 work. No migration, route, worker, chat wiring or provider call. |
+
+**Integration order:** review after PR #245 certification and Claude's V2 interfaces stabilize;
+then add owner-scoped SQLAlchemy adapters as a separate integration change. The current branch
+deliberately does not depend on, rebase onto, or change either active lane.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
