@@ -65,7 +65,7 @@ The second round reproduced and fixed these bug classes in the isolated kernel:
 - personal raw text could appear in default object representations;
 - item count, result count, text, alias registry and contradiction candidate work were unbounded.
 
-The suite now contains 54 tests. `COMPLETE` is only possible when the caller declares expected
+That hardening stage contained 54 tests. `COMPLETE` is only possible when the caller declares expected
 source classes and every one is covered without a failure/truncation; otherwise coverage is
 `KNOWN_PARTIAL` or `UNKNOWN`. Structured polarity/value disagreement produces a contradiction
 *candidate*, never a verified contradiction.
@@ -74,9 +74,39 @@ The follow-up hardening pass made trusted snapshot-root policy mandatory, replac
 locking with kernel advisory locks, bound locator validation to a canonical owner-scoped source
 registry, and added owner-gated local-client serialization that omits raw query/content by default.
 
-Remaining production P0s are deliberately outside this branch: real RLS-backed adapter attacks;
-an authenticated encryption implementation for snapshots; deletion tombstone propagation from
-canonical stores; and integration-level authorization tests for the future API. Remaining P1s:
-morphology/entity resolution beyond bounded deterministic matching, reviewed alias-management
+The real-adapter pass below closes the RLS, canonical tombstone and local serialization items.
+Authenticated snapshot encryption and future route-level authorization remain production P0s.
+Remaining P1s: morphology/entity resolution beyond bounded deterministic matching, reviewed alias-management
 UI/workflow, scalable FTS/vector candidate generation, near-duplicate document/OCR detection,
 large-corpus benchmarks, and model-assisted query interpretation as non-authoritative proposals.
+
+## Real read-only adapters (2026-09-05)
+
+`app.personal_recall.sqlalchemy_adapters` now projects the canonical LifeAI models without a
+new table or write path:
+
+- conversations/messages, preserving user vs assistant authority;
+- documents and document chunks, excluding soft-deleted sources;
+- active `memory_source_units`, excluding revoked/purged lifecycle rows;
+- knowledge versions and source supersession/contradiction relationships;
+- founder-memory, project-entity and life-problem decision records where canonical rows exist.
+
+Every adapter is constructor-bound to one authorized owner and every SQL statement repeats
+that owner predicate even under RLS. Real PostgreSQL tests migrate a fresh database, use the
+restricted `mainai_app` role, seed Alice and Bob data in every covered source class, then bind
+the database session to Alice while deliberately querying Bob. All five adapter families
+return zero rows under that attack. A seeded `allt om tandkrämsrecept` scenario returns all
+five expected source classes while excluding Bob's content, a soft-deleted document and a
+revoked memory source.
+
+`SQLAlchemySourceRegistry` rechecks canonical owner, existence, lifecycle and exact
+chunk/version locator immediately before open. `synchronize_authoritative_sources()` marks
+snapshot entries deleted and scrubs their personal content after a complete canonical refresh;
+it refuses to infer deletion when an adapter fails, truncates or lacks declared coverage.
+Owner-authorized local serialization is exercised against the real adapter response.
+
+The complete Personal Recall suite now contains 62 passing tests: 56 provider/DB-independent
+tests plus 6 tests against real PostgreSQL migrations and RLS. No live chat/API/worker wiring
+was added. Authenticated snapshot encryption remains P0: no suitable reviewed AEAD dependency
+is currently present, so this branch deliberately does not invent cryptography or shell out to
+an unauthenticated cipher.

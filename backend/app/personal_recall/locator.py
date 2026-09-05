@@ -30,7 +30,7 @@ class SourceRegistryRecord:
 
 
 class SourceRegistry(Protocol):
-    def resolve(self, *, source_id: str, owner_id: str) -> SourceRegistryRecord | None: ...
+    def resolve(self, *, source_id: str, owner_id: str, source_type: str, locator: str) -> SourceRegistryRecord | None: ...
 
 
 def validate_open_locator(item: PersonalKnowledgeItem, *, owner_id: str, registry: SourceRegistry) -> ValidatedLocator:
@@ -49,9 +49,9 @@ def validate_open_locator(item: PersonalKnowledgeItem, *, owner_id: str, registr
     if not segments or any(part in (".", "..") for part in segments) or "\x00" in decoded:
         raise LocatorValidationError("malformed or traversing locator")
     source_id = segments[-1]
-    if source_id != item.source_id and source_id != item.item_id and source_id != item.content_reference.rsplit("/", 1)[-1]:
+    if parsed.scheme.casefold() in ("local", "memory") and source_id != item.source_id and source_id != item.item_id and source_id != item.content_reference.rsplit("/", 1)[-1]:
         raise LocatorValidationError("locator does not resolve to the declared source")
-    record = registry.resolve(source_id=item.source_id, owner_id=owner_id)
+    record = registry.resolve(source_id=item.source_id, owner_id=owner_id, source_type=item.source_type.value, locator=item.provenance.locator)
     if record is None or not record.available:
         raise LocatorValidationError("source is missing or unavailable in the canonical registry")
     if record.owner_id != owner_id or record.source_id != item.source_id:

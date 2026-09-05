@@ -8,6 +8,7 @@ from app.personal_recall.query import understand_query
 from app.personal_recall.retrieval import PersonalRecallEngine
 from app.personal_recall.locator import validate_open_locator
 from app.personal_recall.serialization import serialize_for_local_client
+from app.personal_recall.snapshot_sync import synchronize_authoritative_sources
 from app.personal_recall.types import *  # noqa: F401,F403
 
-__all__ = ["PersonalRecallEngine", "serialize_for_local_client", "understand_query", "validate_open_locator"]
+__all__ = ["PersonalRecallEngine", "serialize_for_local_client", "synchronize_authoritative_sources", "understand_query", "validate_open_locator"]

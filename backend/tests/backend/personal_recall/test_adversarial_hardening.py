@@ -14,6 +14,7 @@ from app.personal_recall.locator import LocatorValidationError, SourceRegistryRe
 from app.personal_recall.query import understand_query
 from app.personal_recall.retrieval import LocalSemanticScorer, PersonalRecallEngine
 from app.personal_recall.serialization import RecallSerializationError, serialize_for_local_client
+from app.personal_recall.snapshot_sync import synchronize_authoritative_sources
 from app.personal_recall.types import AliasBinding, AliasVerification, CompletenessState, DecisionState, IndexState, PersonalKnowledgeItem, Provenance, SourceAuthority, SourceType, VerificationState
 
 NOW = datetime(2026, 9, 4, tzinfo=timezone.utc)
@@ -34,7 +35,7 @@ class MaxSemantic(LocalSemanticScorer):
 class Registry:
     def __init__(self, *items, unavailable=False):
         self.items = {item.source_id: SourceRegistryRecord(item.source_id, item.owner_id, item.source_type.value, item.provenance.locator, not unavailable) for item in items}
-    def resolve(self, *, source_id, owner_id):
+    def resolve(self, *, source_id, owner_id, source_type, locator):
         return self.items.get(source_id)
 
 
@@ -319,3 +320,28 @@ def test_alias_registry_has_hard_bound():
     binding = AliasBinding("x", "y", "alice", AliasVerification.OBSERVED)
     with pytest.raises(ValueError, match="bound"):
         PersonalRecallEngine([], alias_bindings=[binding] * 10_001)
+
+
+def test_snapshot_sync_never_turns_adapter_failure_into_deletion():
+    class Failure:
+        name = "files"
+        source_types = {SourceType.FILE}
+        def discover(self, *, owner_id): raise RuntimeError("offline")
+    index = LocalRecallIndex(owner_id="alice")
+    existing = make("file", source=SourceType.FILE)
+    index.replace([existing])
+    with pytest.raises(RecallIndexError, match="incomplete"):
+        synchronize_authoritative_sources(index, [Failure()], owner_id="alice", authoritative_source_types=[SourceType.FILE])
+    assert index.items["file"].index_state == IndexState.INDEXED
+
+
+def test_complete_snapshot_sync_tombstones_missing_source_and_scrubs_content():
+    index = LocalRecallIndex(owner_id="alice")
+    missing = make("gone", "private deleted content", source=SourceType.FILE)
+    kept = make("kept", source=SourceType.FILE)
+    index.replace([missing, kept])
+    adapter = IterableAdapter("files", [kept], source_types=[SourceType.FILE])
+    result = synchronize_authoritative_sources(index, [adapter], owner_id="alice", authoritative_source_types=[SourceType.FILE])
+    assert result.tombstoned == ("gone",)
+    assert index.items["gone"].index_state == IndexState.DELETED
+    assert index.items["gone"].text is None

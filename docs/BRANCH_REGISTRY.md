@@ -10,7 +10,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `codex/universal-personal-recall` | — | **Isolerad + adversarially hardened — do not merge/wire yet** | Global local-first personal retrieval contracts: canonical read projection, scoped/verified aliases, inspectable hybrid + authority/truth scores, temporal/version/contradiction-candidate reconciliation, coverage states, mandatory trusted-root snapshots with kernel locking, source-registry-bound locators, owner-gated local serialization, bounded work, privacy-safe repr, 54 adversarial pure tests. Based on certification candidate `818dfb7`; does not modify PR #245 or Claude's Identity/Recovery/Life Image V2 work. No migration, route, worker, chat wiring or provider call. |
+| `codex/universal-personal-recall` | — | **Real read-only adapters + RLS proof complete — do not merge/wire yet** | Global local-first recall plus owner-bound canonical SQLAlchemy adapters for conversations/messages, documents/chunks, active memory-source units, knowledge versions/source relationships and canonical decisions. Includes canonical open-registry checks, fail-closed snapshot tombstone reconciliation, 56 pure tests + 6 real migrated-PostgreSQL/RLS tests. Alice-session/Bob-query attacks return zero across all five adapter families. Based on `818dfb7`; does not modify #245 or Claude V2. No migration, route, worker, chat wiring or provider call. Authenticated snapshot encryption remains isolated P0. |
 
 **Integration order:** review after PR #245 certification and Claude's V2 interfaces stabilize;
 then add owner-scoped SQLAlchemy adapters as a separate integration change. The current branch
