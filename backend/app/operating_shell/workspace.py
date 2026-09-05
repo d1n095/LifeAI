@@ -31,7 +31,7 @@ _MAX_RECENT_COMMANDS = 50
 # than trying to enumerate every possible secret format.
 _DENYLISTED_FIELD_NAME_FRAGMENTS = ("password", "passwd", "secret", "api_key", "apikey", "token", "credential")
 _MAX_FIELD_LENGTH = 200
-_TOKEN_SHAPE_RE = re.compile(r"^[A-Za-z0-9_\-]{32,}$")
+_TOKEN_SHAPE_RE = re.compile(r"\b[A-Za-z0-9_\-]{32,}\b")
 
 
 def _utcnow() -> datetime:
@@ -39,13 +39,19 @@ def _utcnow() -> datetime:
 
 
 def reject_secret_shaped_content(field_name: str, value: str) -> None:
-    lowered = field_name.lower()
+    """Checks BOTH the field name and the value's own content -- an innocuously-named field
+    (e.g. "current_task") can still have secret-shaped text stuffed into it as content, so
+    the denylist fragments are checked against the value too, not just the field name."""
+    lowered_field = field_name.lower()
+    lowered_value = value.lower()
     for fragment in _DENYLISTED_FIELD_NAME_FRAGMENTS:
-        if fragment in lowered:
+        if fragment in lowered_field:
             raise WorkspaceSecretShapedContentError(f"field name {field_name!r} looks like a secret field, not a workspace reference")
+        if fragment in lowered_value:
+            raise WorkspaceSecretShapedContentError(f"value under {field_name!r} contains {fragment!r} -- looks like secret content, not a workspace reference")
     if len(value) > _MAX_FIELD_LENGTH:
         raise WorkspaceSecretShapedContentError(f"value under {field_name!r} is {len(value)} chars -- too long for a workspace reference/summary")
-    if _TOKEN_SHAPE_RE.match(value):
+    if _TOKEN_SHAPE_RE.search(value):
         raise WorkspaceSecretShapedContentError(f"value under {field_name!r} looks like an opaque secret/token, not a workspace reference")
 
 
@@ -90,6 +96,34 @@ def record_recent_command(state: WorkspaceState, command_id: uuid.UUID) -> Works
     state.recent_commands = updated
     state.updated_at = _utcnow()
     return state
+
+
+def find_window_by_title(windows: tuple[WorkspaceWindow, ...], title: str):
+    """Same-named windows do not collapse: if more than one window shares `title`, returns
+    an AmbiguousResolution listing every match rather than silently picking the first."""
+    from app.operating_shell.types import AmbiguousResolution, ResolvedReference, WorkspaceTarget
+
+    matches = [w for w in windows if w.title == title]
+    if not matches:
+        return AmbiguousResolution(reference_kind="window_title_lookup", candidates=(), reason=f"no window titled {title!r}")
+    if len(matches) > 1:
+        return AmbiguousResolution(
+            reference_kind="window_title_lookup",
+            candidates=tuple(WorkspaceTarget(target_id=w.window_id, kind="window", title=w.title) for w in matches),
+            reason=f"{len(matches)} windows share the title {title!r} -- title alone is not a unique key",
+        )
+    w = matches[0]
+    return ResolvedReference(reference_kind="window_title_lookup", target=WorkspaceTarget(target_id=w.window_id, kind="window", title=w.title))
+
+
+def list_windows_for_owner(states: tuple[WorkspaceState, ...], *, owner_id: uuid.UUID) -> tuple[WorkspaceWindow, ...]:
+    """Cross-owner leakage impossible: strictly filters on owner_id before returning any
+    window from any state in `states`."""
+    windows: list[WorkspaceWindow] = []
+    for state in states:
+        if state.owner_id == owner_id:
+            windows.extend(state.open_windows)
+    return tuple(windows)
 
 
 def restore_workspace_state_does_not_reauthorize(state: WorkspaceState) -> WorkspaceAction | None:
