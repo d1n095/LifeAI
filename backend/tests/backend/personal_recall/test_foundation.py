@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.personal_recall.adapters import IterableAdapter
-from app.personal_recall.index import LocalRecallIndex
+from app.personal_recall.index import LocalRecallIndex, SnapshotStoragePolicy
 from app.personal_recall.query import understand_query
 from app.personal_recall.retrieval import LocalSemanticScorer, PersonalRecallEngine
 from app.personal_recall.types import AliasBinding, AliasVerification, DecisionState, IndexState, PersonalKnowledgeItem, Provenance, SourceType, VerificationState
@@ -137,7 +137,8 @@ def test_index_survives_reload_and_query_survives_engine_restart(tmp_path: Path)
     path = tmp_path / "recall.json"
     index = LocalRecallIndex()
     index.replace([item("durable", "tandkräm recept", source=SourceType.FILE)])
-    index.save(path)
-    loaded = LocalRecallIndex.load(path, owner_id="alice")
+    policy = SnapshotStoragePolicy(tmp_path)
+    index.save(path, policy=policy)
+    loaded = LocalRecallIndex.load(path, owner_id="alice", policy=policy)
     restarted = PersonalRecallEngine([IterableAdapter("snapshot", loaded.items.values())])
     assert restarted.recall(owner_id="alice", raw_query="tandkräm", now=NOW).results[0].item.item_id == "durable"

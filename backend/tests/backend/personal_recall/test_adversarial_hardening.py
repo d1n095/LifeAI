@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import fcntl
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from app.personal_recall.adapters import IterableAdapter
-from app.personal_recall.index import LocalRecallIndex, RecallIndexError
-from app.personal_recall.locator import LocatorValidationError, validate_open_locator
+from app.personal_recall.index import LocalRecallIndex, RecallIndexError, SnapshotStoragePolicy
+from app.personal_recall.locator import LocatorValidationError, SourceRegistryRecord, validate_open_locator
 from app.personal_recall.query import understand_query
 from app.personal_recall.retrieval import LocalSemanticScorer, PersonalRecallEngine
+from app.personal_recall.serialization import RecallSerializationError, serialize_for_local_client
 from app.personal_recall.types import AliasBinding, AliasVerification, CompletenessState, DecisionState, IndexState, PersonalKnowledgeItem, Provenance, SourceAuthority, SourceType, VerificationState
 
 NOW = datetime(2026, 9, 4, tzinfo=timezone.utc)
@@ -26,6 +29,13 @@ def recall(items, query, **kwargs):
 
 class MaxSemantic(LocalSemanticScorer):
     def score(self, query, item): return 1.0
+
+
+class Registry:
+    def __init__(self, *items, unavailable=False):
+        self.items = {item.source_id: SourceRegistryRecord(item.source_id, item.owner_id, item.source_type.value, item.provenance.locator, not unavailable) for item in items}
+    def resolve(self, *, source_id, owner_id):
+        return self.items.get(source_id)
 
 
 @pytest.mark.parametrize("query,wrong", [("hap", "app release"), ("fluor", "fluorid behandling"), ("bil recept", "mat recept"), ("tandkräm", "tandkrämshållare")])
@@ -127,47 +137,93 @@ def test_verified_rename_dedups_but_never_across_owner():
 
 def test_snapshot_rejects_corruption_wrong_owner_version_symlink_and_escape(tmp_path: Path):
     path = tmp_path / "index.json"
+    policy = SnapshotStoragePolicy(tmp_path)
     index = LocalRecallIndex(owner_id="alice")
     index.replace([make("safe")])
-    index.save(path, base_dir=tmp_path)
+    index.save(path, policy=policy)
     assert oct(path.stat().st_mode & 0o777) == "0o600"
     with pytest.raises(RecallIndexError, match="owner"):
-        LocalRecallIndex.load(path, owner_id="bob")
+        LocalRecallIndex.load(path, owner_id="bob", policy=policy)
     payload = json.loads(path.read_text())
     payload["format_version"] = 99
     path.write_text(json.dumps(payload))
     with pytest.raises(RecallIndexError, match="format"):
-        LocalRecallIndex.load(path, owner_id="alice")
+        LocalRecallIndex.load(path, owner_id="alice", policy=policy)
     path.write_text("{")
     with pytest.raises(RecallIndexError, match="corrupt"):
-        LocalRecallIndex.load(path)
+        LocalRecallIndex.load(path, policy=policy)
     target = tmp_path / "target"
     target.write_text("x")
     link = tmp_path / "link"
     link.symlink_to(target)
     with pytest.raises(RecallIndexError, match="symlink"):
-        LocalRecallIndex.load(link)
+        LocalRecallIndex.load(link, policy=policy)
     with pytest.raises(RecallIndexError, match="escapes"):
-        index.save(tmp_path.parent / "escape.json", base_dir=tmp_path)
+        index.save(tmp_path.parent / "escape.json", policy=policy)
 
 
 def test_snapshot_integrity_stale_writer_lock_and_deleted_restart(tmp_path: Path):
     path = tmp_path / "index.json"
+    policy = SnapshotStoragePolicy(tmp_path)
     current = LocalRecallIndex(owner_id="alice")
     current.replace([make("deleted", state=IndexState.DELETED)])
-    current.save(path)
+    current.save(path, policy=policy)
     stale = LocalRecallIndex(owner_id="alice", generation=0)
     stale.replace([make("old")])
-    current.save(path)
+    current.save(path, policy=policy)
     with pytest.raises(RecallIndexError, match="stale"):
-        stale.save(path)
+        stale.save(path, policy=policy)
     lock = path.with_suffix(".json.lock")
-    lock.write_text("")
-    with pytest.raises(RecallIndexError, match="progress"):
-        current.save(path)
-    lock.unlink()
-    loaded = LocalRecallIndex.load(path, owner_id="alice")
+    lock_fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(RecallIndexError, match="progress"):
+            current.save(path, policy=policy)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    loaded = LocalRecallIndex.load(path, owner_id="alice", policy=policy)
     assert recall(list(loaded.items.values()), "tandkräm").results == []
+
+
+def test_snapshot_lock_file_survives_crash_without_permanent_denial(tmp_path: Path):
+    path = tmp_path / "index.json"
+    policy = SnapshotStoragePolicy(tmp_path)
+    index = LocalRecallIndex(owner_id="alice")
+    index.replace([make("safe")])
+    # A leftover inode is harmless; the kernel lock, not file existence, carries authority.
+    path.with_suffix(".json.lock").write_text("orphan")
+    index.save(path, policy=policy)
+    assert LocalRecallIndex.load(path, owner_id="alice", policy=policy).items["safe"].owner_id == "alice"
+
+
+def test_load_during_save_fails_closed_instead_of_observing_partial_state(tmp_path: Path):
+    path = tmp_path / "index.json"
+    policy = SnapshotStoragePolicy(tmp_path)
+    index = LocalRecallIndex(owner_id="alice")
+    index.replace([make("safe")])
+    index.save(path, policy=policy)
+    lock_fd = os.open(path.with_suffix(".json.lock"), os.O_RDWR)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    try:
+        with pytest.raises(RecallIndexError, match="progress"):
+            LocalRecallIndex.load(path, owner_id="alice", policy=policy)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def test_snapshot_policy_is_mandatory_and_rejects_symlink_root(tmp_path: Path):
+    index = LocalRecallIndex(owner_id="alice")
+    index.replace([make("safe")])
+    with pytest.raises(TypeError):
+        index.save(tmp_path / "unsafe.json")
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "root-link"
+    link.symlink_to(real, target_is_directory=True)
+    with pytest.raises(RecallIndexError, match="non-symlink"):
+        SnapshotStoragePolicy(link)
 
 
 @pytest.mark.parametrize("raw,intent", [("vad vare vi kom fram till med tandkrämen nu igen", "decision_history"), ("vilken va senaste", "latest_state"), ("ta fram allt vi haft om hap", "broad_recall"), ("vad ändra vi sist", "change_history"), ("varför tog vi bort den", "why_changed"), ("pdfen jag skicka förut", "file_lookup")])
@@ -203,15 +259,28 @@ def test_adapter_failure_and_partial_index_are_known_partial():
 
 @pytest.mark.parametrize("locator", ["https://evil.test/x", "file://../secret", "local://a/../secret", "ftp://safe", "local://wrong"])
 def test_locator_rejects_network_traversal_unsupported_and_stale_identity(locator):
+    value = make("safe", locator=locator)
     with pytest.raises(LocatorValidationError):
-        validate_open_locator(make("safe", locator=locator), owner_id="alice")
+        validate_open_locator(value, owner_id="alice", registry=Registry(value))
 
 
 def test_locator_rejects_foreign_deleted_stale_but_accepts_inert_local():
-    assert validate_open_locator(make("safe"), owner_id="alice").source_id == "safe"
+    safe = make("safe")
+    assert validate_open_locator(safe, owner_id="alice", registry=Registry(safe)).source_id == "safe"
     for value in (make("foreign", owner="bob"), make("deleted", state=IndexState.DELETED), make("stale", state=IndexState.STALE)):
         with pytest.raises(LocatorValidationError):
-            validate_open_locator(value, owner_id="alice")
+            validate_open_locator(value, owner_id="alice", registry=Registry(value))
+
+
+def test_locator_requires_live_matching_canonical_registry_record():
+    value = make("safe")
+    with pytest.raises(LocatorValidationError, match="missing|unavailable"):
+        validate_open_locator(value, owner_id="alice", registry=Registry())
+    with pytest.raises(LocatorValidationError, match="missing|unavailable"):
+        validate_open_locator(value, owner_id="alice", registry=Registry(value, unavailable=True))
+    changed = make("safe", locator="local://different")
+    with pytest.raises(LocatorValidationError, match="disagrees"):
+        validate_open_locator(value, owner_id="alice", registry=Registry(changed))
 
 
 def test_repr_redacts_personal_content_and_nonlocal_semantic_hook_is_rejected():
@@ -221,6 +290,19 @@ def test_repr_redacts_personal_content_and_nonlocal_semantic_hook_is_rejected():
     assert "medical" not in repr(response)
     with pytest.raises(ValueError, match="local"):
         PersonalRecallEngine([], semantic_scorer=lambda q, i: 1.0)
+
+
+def test_local_serialization_is_owner_gated_and_content_is_opt_in():
+    secret = make("secret", "private text")
+    response = recall([secret], "tandkräm")
+    projected = serialize_for_local_client(response, owner_id="alice")
+    assert projected["audience"] == "local_owner_client"
+    assert "raw" not in projected["query"]
+    assert "text" not in projected["results"][0]
+    assert serialize_for_local_client(response, owner_id="alice", include_content=True)["results"][0]["text"] == "private text"
+    response.results[0].item.owner_id = "bob"
+    with pytest.raises(RecallSerializationError, match="foreign"):
+        serialize_for_local_client(response, owner_id="alice")
 
 
 def test_bounded_items_results_text_aliases_and_duplicate_storm(monkeypatch):

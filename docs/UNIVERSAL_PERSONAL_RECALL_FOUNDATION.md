@@ -65,15 +65,18 @@ The second round reproduced and fixed these bug classes in the isolated kernel:
 - personal raw text could appear in default object representations;
 - item count, result count, text, alias registry and contradiction candidate work were unbounded.
 
-The suite now contains 49 tests. `COMPLETE` is only possible when the caller declares expected
+The suite now contains 54 tests. `COMPLETE` is only possible when the caller declares expected
 source classes and every one is covered without a failure/truncation; otherwise coverage is
 `KNOWN_PARTIAL` or `UNKNOWN`. Structured polarity/value disagreement produces a contradiction
 *candidate*, never a verified contradiction.
 
+The follow-up hardening pass made trusted snapshot-root policy mandatory, replaced stale-file
+locking with kernel advisory locks, bound locator validation to a canonical owner-scoped source
+registry, and added owner-gated local-client serialization that omits raw query/content by default.
+
 Remaining production P0s are deliberately outside this branch: real RLS-backed adapter attacks;
-encrypted snapshot placement and mandatory trusted `base_dir`; durable generation/locking policy
-with crash recovery; source-registry-backed locator existence/ownership validation; deletion
-tombstone propagation from canonical stores; and authorization-safe API serialization. Remaining
-P1s: morphology/entity resolution beyond bounded deterministic matching, reviewed alias-management
+an authenticated encryption implementation for snapshots; deletion tombstone propagation from
+canonical stores; and integration-level authorization tests for the future API. Remaining P1s:
+morphology/entity resolution beyond bounded deterministic matching, reviewed alias-management
 UI/workflow, scalable FTS/vector candidate generation, near-duplicate document/OCR detection,
 large-corpus benchmarks, and model-assisted query interpretation as non-authoritative proposals.

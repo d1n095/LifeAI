@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import os
 import stat
+import fcntl
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,19 @@ MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 class RecallIndexError(ValueError):
     pass
+
+
+class SnapshotStoragePolicy:
+    """Mandatory trusted root for snapshots; callers cannot accidentally omit confinement."""
+
+    def __init__(self, trusted_root: Path):
+        root = Path(trusted_root)
+        if not root.is_absolute() or not root.exists() or root.is_symlink():
+            raise RecallIndexError("trusted snapshot root must be an existing absolute non-symlink directory")
+        self.trusted_root = root.resolve(strict=True)
+
+    def resolve(self, path: Path) -> Path:
+        return _safe_path(path, base_dir=self.trusted_root)
 
 
 class LocalRecallIndex:
@@ -36,21 +51,14 @@ class LocalRecallIndex:
             self.owner_id = next(iter(owners))
         self.items = {item.item_id: item for item in items}
 
-    def save(self, path: Path, *, base_dir: Path | None = None) -> None:
-        path = _safe_path(path, base_dir=base_dir)
+    def save(self, path: Path, *, policy: SnapshotStoragePolicy) -> None:
+        path = policy.resolve(path)
         if self.owner_id is None:
             raise RecallIndexError("snapshot owner is required")
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_suffix(path.suffix + ".lock")
-        try:
-            lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError as exc:
-            raise RecallIndexError("snapshot save already in progress") from exc
-        try:
+        with _snapshot_lock(lock_path, exclusive=True):
             self._save_locked(path)
-        finally:
-            os.close(lock_fd)
-            lock_path.unlink(missing_ok=True)
 
     def _save_locked(self, path: Path) -> None:
         if path.exists() and path.is_symlink():
@@ -90,16 +98,17 @@ class LocalRecallIndex:
         self.generation = next_generation
 
     @classmethod
-    def load(cls, path: Path, *, owner_id: str | None = None, base_dir: Path | None = None) -> "LocalRecallIndex":
-        path = _safe_path(path, base_dir=base_dir)
+    def load(cls, path: Path, *, owner_id: str | None = None, policy: SnapshotStoragePolicy) -> "LocalRecallIndex":
+        path = policy.resolve(path)
         if path.is_symlink():
             raise RecallIndexError("snapshot path cannot be a symlink")
-        if path.stat().st_size > MAX_SNAPSHOT_BYTES:
-            raise RecallIndexError("snapshot exceeds size limit")
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RecallIndexError("snapshot is unreadable or corrupt") from exc
+        with _snapshot_lock(path.with_suffix(path.suffix + ".lock"), exclusive=False):
+            if path.stat().st_size > MAX_SNAPSHOT_BYTES:
+                raise RecallIndexError("snapshot exceeds size limit")
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RecallIndexError("snapshot is unreadable or corrupt") from exc
         if payload.get("format_version") != cls.FORMAT_VERSION:
             raise RecallIndexError("unsupported recall index format")
         actual_owner = payload.get("owner_id")
@@ -165,3 +174,26 @@ def _read_generation(path: Path) -> int:
         return int(payload.get("generation", -1))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         raise RecallIndexError("existing snapshot is corrupt; refusing overwrite")
+
+
+@contextmanager
+def _snapshot_lock(path: Path, *, exclusive: bool):
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise RecallIndexError("cannot establish snapshot lock") from exc
+    try:
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        try:
+            fcntl.flock(fd, operation | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RecallIndexError("snapshot operation already in progress") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)

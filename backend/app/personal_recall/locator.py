@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 from urllib.parse import unquote, urlsplit
 
 from app.personal_recall.types import IndexState, PersonalKnowledgeItem
@@ -19,7 +20,20 @@ class ValidatedLocator:
     locator: str
 
 
-def validate_open_locator(item: PersonalKnowledgeItem, *, owner_id: str) -> ValidatedLocator:
+@dataclass(frozen=True)
+class SourceRegistryRecord:
+    source_id: str
+    owner_id: str
+    source_type: str
+    locator: str
+    available: bool = True
+
+
+class SourceRegistry(Protocol):
+    def resolve(self, *, source_id: str, owner_id: str) -> SourceRegistryRecord | None: ...
+
+
+def validate_open_locator(item: PersonalKnowledgeItem, *, owner_id: str, registry: SourceRegistry) -> ValidatedLocator:
     """Validate an inert locator. Validation never opens or executes the target."""
     if item.owner_id != owner_id:
         raise LocatorValidationError("locator belongs to another owner")
@@ -37,4 +51,11 @@ def validate_open_locator(item: PersonalKnowledgeItem, *, owner_id: str) -> Vali
     source_id = segments[-1]
     if source_id != item.source_id and source_id != item.item_id and source_id != item.content_reference.rsplit("/", 1)[-1]:
         raise LocatorValidationError("locator does not resolve to the declared source")
+    record = registry.resolve(source_id=item.source_id, owner_id=owner_id)
+    if record is None or not record.available:
+        raise LocatorValidationError("source is missing or unavailable in the canonical registry")
+    if record.owner_id != owner_id or record.source_id != item.source_id:
+        raise LocatorValidationError("registry returned a foreign or stale source")
+    if record.source_type != item.source_type.value or record.locator != item.provenance.locator:
+        raise LocatorValidationError("locator disagrees with the canonical registry")
     return ValidatedLocator(parsed.scheme.casefold(), source_id, item.provenance.locator)
