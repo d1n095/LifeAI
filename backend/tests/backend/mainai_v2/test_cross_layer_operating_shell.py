@@ -33,14 +33,15 @@ from app.operating_shell import (
     ALLOWED,
     DENIED,
     ActionRiskLevel,
+    CanonicalKind,
     EvidenceSurfaceKind,
+    IntentState,
     ResourceAvailability,
     RestoreResult,
     WorkspaceAction,
     WorkspaceCommand,
     WorkspaceActionType,
     active_intents_for_owner,
-    advance_to_active,
     advance_to_planned,
     build_evidence_surface,
     create_intent_from_expression,
@@ -234,7 +235,11 @@ def test_active_intents_available_before_full_hydration_and_vault_stays_locked_o
     intent = create_intent_from_expression(owner_id=owner_id, title="fixa skulderna", raw_user_expression="jag måste få ordning på skulderna")
     record_understanding(intent, interpreted_goal="get overdue debts organized and under control")
     advance_to_planned(intent)
-    advance_to_active(intent)
+    # advance_to_active() now always raises (see MAINAI_V2_INTENT_GOAL_RECONCILIATION.md) --
+    # simulate what a real project_from_life_intent() call would produce instead.
+    intent.canonical_kind = CanonicalKind.LIFE_INTENT
+    intent.canonical_ref = uuid.uuid4()
+    intent.state = IntentState.ACTIVE
     assert active_intents_for_owner((intent,), owner_id=owner_id) == (intent,)
 
     # Meanwhile, only PRIORITY_0+1 have actually been hydrated (tiers 2/3 not yet run) --

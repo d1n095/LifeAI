@@ -15,6 +15,7 @@ import pytest
 from app.operating_shell import (
     ActionRiskLevel,
     AmbiguousResolution,
+    CanonicalKind,
     ConsequentialActionRequiresPreviewError,
     ControlState,
     IntentState,
@@ -73,6 +74,19 @@ from app.operating_shell import (
 
 def _owner() -> uuid.UUID:
     return uuid.uuid4()
+
+
+def _link_and_activate(intent) -> None:
+    """Test helper standing in for a real canonical projection (see
+    app.operating_shell.canonical_projection, added in the same reconciliation round):
+    advance_to_active() now always raises (an IntentObject can never assert its own active
+    authority -- see intent.py's module docstring), so tests that need an ACTIVE intent for
+    unrelated purposes (collision/leakage/supersession queries) simulate what a real
+    project_from_life_intent()/project_from_mainai_goal() call would produce -- a canonical
+    link plus a directly-set state, never via the now-permanently-rejecting local mutators."""
+    intent.canonical_kind = CanonicalKind.LIFE_INTENT
+    intent.canonical_ref = uuid.uuid4()
+    intent.state = IntentState.ACTIVE
 
 
 def _action(action_type: WorkspaceActionType, *, target_ref: uuid.UUID | None = None) -> WorkspaceAction:
@@ -274,7 +288,7 @@ def test_same_named_intents_do_not_collapse():
     for intent in (i1, i2):
         record_understanding(intent, interpreted_goal="car-related goal")
         advance_to_planned(intent)
-        advance_to_active(intent)
+        _link_and_activate(intent)
     result = resolve_intent_by_title_fragment((i1, i2), owner_id=owner_id, fragment="bilen")
     assert isinstance(result, AmbiguousResolution)
     assert len(result.candidates) == 2
@@ -348,7 +362,7 @@ def test_intent_supersession_works():
     new = create_intent_from_expression(owner_id=owner_id, title="bilen v2", raw_user_expression="ny bilplan")
     record_understanding(old, interpreted_goal="buy a car")
     advance_to_planned(old)
-    advance_to_active(old)
+    _link_and_activate(old)
 
     supersede_intent(old, new)
     assert old.state == IntentState.SUPERSEDED
@@ -375,6 +389,76 @@ def test_future_plan_does_not_carry_authority():
     # Attempting to actually execute the planned action still requires the real gate.
     with pytest.raises(PolicyNotWiredError):
         evaluate_action_authority(planned_action, policy=None)
+
+
+# 12b. canonical linkage reconciliation (MAINAI_V2_INTENT_GOAL_RECONCILIATION.md): an
+# IntentObject can never assert its own ACTIVE authority, with or without a canonical link.
+
+
+def test_advance_to_active_always_rejects_without_canonical_link():
+    owner_id = _owner()
+    intent = create_intent_from_expression(owner_id=owner_id, title="car", raw_user_expression="jag vill köpa en bil")
+    record_understanding(intent, interpreted_goal="buy a car")
+    advance_to_planned(intent)
+    assert intent.canonical_kind == CanonicalKind.NONE
+    with pytest.raises(Exception):
+        advance_to_active(intent)
+    # Never partially transitioned by the rejected attempt.
+    assert intent.state == IntentState.PLANNED
+
+
+def test_advance_to_active_also_rejects_once_canonically_linked():
+    """Three-check: canonical linkage alone must not be sufficient to make advance_to_active()
+    succeed -- only app.operating_shell.canonical_projection may ever produce ACTIVE state."""
+    owner_id = _owner()
+    intent = create_intent_from_expression(owner_id=owner_id, title="car", raw_user_expression="jag vill köpa en bil")
+    record_understanding(intent, interpreted_goal="buy a car")
+    advance_to_planned(intent)
+    intent.canonical_kind = CanonicalKind.LIFE_INTENT
+    intent.canonical_ref = uuid.uuid4()
+
+    # Three-check: confirm that if the canonical-link guard were removed, this WOULD succeed
+    # (proving the guard, not some unrelated failure, is what's doing the rejecting).
+    import app.operating_shell.intent as intent_module
+
+    original_transition = intent_module._transition
+    try:
+        # Bypass both guards by calling the underlying primitive directly -- this is what
+        # advance_to_active() would reduce to if its guards were deleted.
+        result = original_transition(intent, to_state=IntentState.ACTIVE, note="activated")
+        assert result.state == IntentState.ACTIVE, "sanity: the underlying transition mechanics do work absent the guard"
+    finally:
+        intent.state = IntentState.PLANNED  # restore for the real assertion below
+        intent.history = intent.history[:-1]
+
+    with pytest.raises(Exception):
+        advance_to_active(intent)
+    assert intent.state == IntentState.PLANNED
+
+
+def test_mark_blocked_and_friends_reject_direct_calls_once_canonically_linked():
+    owner_id = _owner()
+    intent = create_intent_from_expression(owner_id=owner_id, title="car", raw_user_expression="jag vill köpa en bil")
+    record_understanding(intent, interpreted_goal="buy a car")
+    advance_to_planned(intent)
+    _link_and_activate(intent)  # simulates a real canonical projection landing at ACTIVE
+
+    from app.operating_shell.intent import abandon, complete, mark_blocked, unblock
+
+    with pytest.raises(Exception):
+        mark_blocked(intent, reason="waiting on paperwork")
+    with pytest.raises(Exception):
+        complete(intent, summary="done")
+    with pytest.raises(Exception):
+        abandon(intent, reason="changed mind")
+    # unblock() is only reachable from BLOCKED in the transition table, but the canonical-link
+    # guard must fire before the transition-table check even runs -- prove it raises here too.
+    intent.state = IntentState.BLOCKED
+    with pytest.raises(Exception):
+        unblock(intent)
+    # Nothing above actually changed the intent's real state -- still ACTIVE/BLOCKED as set,
+    # never COMPLETED/ABANDONED/etc. from a rejected direct call.
+    assert intent.state == IntentState.BLOCKED
 
 
 # 13. action preview required for consequential action --------------------------------------------
@@ -499,10 +583,10 @@ def test_cross_owner_intent_leakage_impossible():
     intent_b = create_intent_from_expression(owner_id=owner_b, title="B's intent", raw_user_expression="y")
     record_understanding(intent_a, interpreted_goal="do x")
     advance_to_planned(intent_a)
-    advance_to_active(intent_a)
+    _link_and_activate(intent_a)
     record_understanding(intent_b, interpreted_goal="do y")
     advance_to_planned(intent_b)
-    advance_to_active(intent_b)
+    _link_and_activate(intent_b)
 
     active_for_a = active_intents_for_owner((intent_a, intent_b), owner_id=owner_a)
     assert active_for_a == (intent_a,)
