@@ -270,6 +270,28 @@ The unaudited logging/stack-trace sanitization gap from §6a remains the connect
 for a possible future log-formatter-driven event source, but stays a separate, non-Sentinel
 migration step (§6a's step 1) — not itself a Sentinel adapter.
 
+## 6c. Sovereign Identity + Life Recovery future integration map (2026-09-05, read-only, no wiring)
+
+Real code search across the existing certified runtime, to answer "where would
+`app.sovereign_identity` and `app.life_recovery` eventually plug in." A survey for a later
+wiring phase, not a wiring plan — nothing below was changed.
+
+| Integration point | Real file/module | What it does today | Future connection |
+|---|---|---|---|
+| Login/session/logout | `app.routers.auth` (`login`, `refresh`, `logout`, `logout_all`), `app.models.refresh_token`, `app.models.revoked_access_token` | Cookie-based JWT sessions, rotation-family refresh tokens, revocation-on-replay | `app.sovereign_identity`: session creation would eventually call `evaluate_identity_assertion()` to establish a `ProofLevel` — today a successful login is binary, not graded; `logout_all` is the closest existing analogue to `revoke_device()`'s durable-revocation discipline, but operates on token rows, not a `DeviceRecord` |
+| Device identity | *(none exists)* | No `device_id` field anywhere on `RefreshToken`, `User`, or any session table | Biggest current gap for `app.sovereign_identity.DeviceRecord`/`enroll_device()` — needs a stable client-generated device identifier that does not exist yet, not just a wiring step |
+| Provider credentials | `app.config` (`openai_api_key`, `anthropic_api_key`, `google_api_key`, `deepseek_api_key`, `openrouter_api_key`) | Plaintext `str \| None` pydantic-settings fields sourced from env vars | **Existing gap, not future-integration**: no `KeyPurpose`-bound wrapping exists; `KeyPurpose` has no `PROVIDER_KEY` member yet — a real omission if this is ever addressed |
+| Account export | `app.routers.account` (`GET /api/account/export`) → `app.account.export.export_account_data()` | Auth-gated plaintext JSON dump of account data | Direct current-state precursor to `app.life_recovery`'s Encrypted Life Image — today's export has no manifest, no component typing, no integrity hash, no encryption |
+| Account erasure | `app.routers.account` (`DELETE /api/account`) → `app.account.erasure.erase_account_data()` | Irreversible data deletion | Today's only "destructive reset" analogue, but it deletes data rather than erasing keys — not the same shape as `SECURE_RESET`'s crypto-erase, since nothing is encrypted today for there to be a key to erase |
+| File storage | `app.storage.local_fs` | Local, private-VPS-volume, SHA-256 content-addressed (`{hash[:2]}/{hash}`), no per-user encryption | Content-addressing means identical plaintext already collides at the storage-key level across owners today (dedup is intentional) — confirms a real design change, not just a wiring step, would be needed before `KeyPurpose.DOCUMENT_KEY` could apply per-owner. No Supabase storage usage anywhere in this codebase. |
+| Vault / encryption at rest | `app.rls` (RLS on `conversations`, `document_chunks`, `documents`, etc.) | Enforces per-owner *access* at query time | **Existing gap, concrete**: zero at-rest encryption exists anywhere in this codebase outside the two new packages (confirmed by search) — RLS does nothing against a raw DB/disk compromise. Exactly the gap `KeyPurpose.VAULT_KEY` is designed for, but nothing currently calls it. RLS itself remains a real, independent, working control — a future Vault integration is additive, not a replacement. |
+| User settings | *(none exists)* | No dedicated settings model (`find app -iname "*settings*"` empty) | `ComponentType.USER_SETTINGS` in Life Image has no current source table to read from yet |
+| Agent/workforce state | `app.models.{workforce,workforce_ops,agent_coordination,agent_task}` | Ordinary RLS-protected Postgres rows, no snapshot/serialization format of their own | Future `ComponentType.AGENT_COMPETENCE_STATE`/`LOCAL_AGENTS` source |
+
+**Negative-space finding**: RLS already does real, independent work at the access-control
+layer — a future Vault encryption-at-rest integration point is additive on top of it, not a
+sign RLS is insufficient for what it actually does.
+
 ## 6. Open design risks (stated honestly, not glossed over)
 
 - **TAKEOVER_STATE's OS-level enforcement** genuinely differs in feasibility across
