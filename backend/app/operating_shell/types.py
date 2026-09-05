@@ -136,6 +136,19 @@ class IntentState(str, Enum):
 NON_TERMINAL_INTENT_STATES = frozenset(
     {IntentState.ACTIVE, IntentState.WAITING, IntentState.BLOCKED, IntentState.PAUSED}
 )
+
+
+class CanonicalKind(str, Enum):
+    """Whether an IntentObject is workspace-local scratch state (NONE) or a strict
+    read-through projection of a real, durable canonical row owned by an already-existing
+    production system. See docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md -- an
+    IntentObject is NEVER a fourth independent source of truth for "what is the user's
+    goal"; NONE means "no canonical backing yet, pure workspace/conversational staging,"
+    matching CandidateLearningSignal's pre-promotion role relative to FounderMemoryNote."""
+
+    NONE = "NONE"
+    LIFE_INTENT = "LIFE_INTENT"
+    MAINAI_GOAL = "MAINAI_GOAL"
 TERMINAL_INTENT_STATES = frozenset({IntentState.COMPLETED, IntentState.ABANDONED, IntentState.SUPERSEDED})
 
 
@@ -376,6 +389,8 @@ class IntentObject:
     assumptions: tuple[str, ...] = ()
     evidence: tuple[uuid.UUID, ...] = ()
     superseded_by: uuid.UUID | None = None
+    canonical_kind: CanonicalKind = CanonicalKind.NONE
+    canonical_ref: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)

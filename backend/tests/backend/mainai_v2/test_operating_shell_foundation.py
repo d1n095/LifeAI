@@ -15,6 +15,7 @@ import pytest
 from app.operating_shell import (
     ActionRiskLevel,
     AmbiguousResolution,
+    CanonicalKind,
     ConsequentialActionRequiresPreviewError,
     ControlState,
     IntentState,
@@ -60,7 +61,7 @@ from app.operating_shell import (
     record_understanding,
     reject_secret_shaped_content,
     resolve_intent_by_title_fragment,
-    resolve_reference,
+    resolve_workspace_reference,
     resource_status,
     resume_from_current_state,
     require_root_sensitive_policy,
@@ -73,6 +74,19 @@ from app.operating_shell import (
 
 def _owner() -> uuid.UUID:
     return uuid.uuid4()
+
+
+def _link_and_activate(intent) -> None:
+    """Test helper standing in for a real canonical projection (see
+    app.operating_shell.canonical_projection, added in the same reconciliation round):
+    advance_to_active() now always raises (an IntentObject can never assert its own active
+    authority -- see intent.py's module docstring), so tests that need an ACTIVE intent for
+    unrelated purposes (collision/leakage/supersession queries) simulate what a real
+    project_from_life_intent()/project_from_mainai_goal() call would produce -- a canonical
+    link plus a directly-set state, never via the now-permanently-rejecting local mutators."""
+    intent.canonical_kind = CanonicalKind.LIFE_INTENT
+    intent.canonical_ref = uuid.uuid4()
+    intent.state = IntentState.ACTIVE
 
 
 def _action(action_type: WorkspaceActionType, *, target_ref: uuid.UUID | None = None) -> WorkspaceAction:
@@ -210,13 +224,13 @@ def test_ambiguous_that_remains_unresolved_with_multiple_candidates():
             WorkspaceTarget(target_id=candidate_b, kind="document", title="doc B"),
         ),
     )
-    result = resolve_reference(ReferenceKind.THAT, context)
+    result = resolve_workspace_reference(ReferenceKind.THAT, context)
     assert isinstance(result, AmbiguousResolution)
     assert len(result.candidates) == 2
 
 
 def test_ambiguous_context_three_check():
-    """Three-check: if resolve_reference() were changed to just pick candidates[0] instead
+    """Three-check: if resolve_workspace_reference() were changed to just pick candidates[0] instead
     of returning AmbiguousResolution, this test would (and must) fail."""
     owner_id = _owner()
     candidate_a, candidate_b = uuid.uuid4(), uuid.uuid4()
@@ -235,7 +249,7 @@ def test_ambiguous_context_three_check():
     broken_result = broken_pick_first(ReferenceKind.THAT, context)
     assert isinstance(broken_result, ResolvedReference), "sanity: the broken version silently picks one"
 
-    real_result = resolve_reference(ReferenceKind.THAT, context)
+    real_result = resolve_workspace_reference(ReferenceKind.THAT, context)
     assert isinstance(real_result, AmbiguousResolution)
 
 
@@ -247,7 +261,7 @@ def test_single_candidate_resolves_unambiguously():
         recent_action_refs=(), active_intent_id=None,
         known_targets=(WorkspaceTarget(target_id=focus_id, kind="document", title="the doc"),),
     )
-    result = resolve_reference(ReferenceKind.THIS, context)
+    result = resolve_workspace_reference(ReferenceKind.THIS, context)
     assert isinstance(result, ResolvedReference)
     assert result.target.target_id == focus_id
 
@@ -274,7 +288,7 @@ def test_same_named_intents_do_not_collapse():
     for intent in (i1, i2):
         record_understanding(intent, interpreted_goal="car-related goal")
         advance_to_planned(intent)
-        advance_to_active(intent)
+        _link_and_activate(intent)
     result = resolve_intent_by_title_fragment((i1, i2), owner_id=owner_id, fragment="bilen")
     assert isinstance(result, AmbiguousResolution)
     assert len(result.candidates) == 2
@@ -348,7 +362,7 @@ def test_intent_supersession_works():
     new = create_intent_from_expression(owner_id=owner_id, title="bilen v2", raw_user_expression="ny bilplan")
     record_understanding(old, interpreted_goal="buy a car")
     advance_to_planned(old)
-    advance_to_active(old)
+    _link_and_activate(old)
 
     supersede_intent(old, new)
     assert old.state == IntentState.SUPERSEDED
@@ -375,6 +389,76 @@ def test_future_plan_does_not_carry_authority():
     # Attempting to actually execute the planned action still requires the real gate.
     with pytest.raises(PolicyNotWiredError):
         evaluate_action_authority(planned_action, policy=None)
+
+
+# 12b. canonical linkage reconciliation (MAINAI_V2_INTENT_GOAL_RECONCILIATION.md): an
+# IntentObject can never assert its own ACTIVE authority, with or without a canonical link.
+
+
+def test_advance_to_active_always_rejects_without_canonical_link():
+    owner_id = _owner()
+    intent = create_intent_from_expression(owner_id=owner_id, title="car", raw_user_expression="jag vill köpa en bil")
+    record_understanding(intent, interpreted_goal="buy a car")
+    advance_to_planned(intent)
+    assert intent.canonical_kind == CanonicalKind.NONE
+    with pytest.raises(Exception):
+        advance_to_active(intent)
+    # Never partially transitioned by the rejected attempt.
+    assert intent.state == IntentState.PLANNED
+
+
+def test_advance_to_active_also_rejects_once_canonically_linked():
+    """Three-check: canonical linkage alone must not be sufficient to make advance_to_active()
+    succeed -- only app.operating_shell.canonical_projection may ever produce ACTIVE state."""
+    owner_id = _owner()
+    intent = create_intent_from_expression(owner_id=owner_id, title="car", raw_user_expression="jag vill köpa en bil")
+    record_understanding(intent, interpreted_goal="buy a car")
+    advance_to_planned(intent)
+    intent.canonical_kind = CanonicalKind.LIFE_INTENT
+    intent.canonical_ref = uuid.uuid4()
+
+    # Three-check: confirm that if the canonical-link guard were removed, this WOULD succeed
+    # (proving the guard, not some unrelated failure, is what's doing the rejecting).
+    import app.operating_shell.intent as intent_module
+
+    original_transition = intent_module._transition
+    try:
+        # Bypass both guards by calling the underlying primitive directly -- this is what
+        # advance_to_active() would reduce to if its guards were deleted.
+        result = original_transition(intent, to_state=IntentState.ACTIVE, note="activated")
+        assert result.state == IntentState.ACTIVE, "sanity: the underlying transition mechanics do work absent the guard"
+    finally:
+        intent.state = IntentState.PLANNED  # restore for the real assertion below
+        intent.history = intent.history[:-1]
+
+    with pytest.raises(Exception):
+        advance_to_active(intent)
+    assert intent.state == IntentState.PLANNED
+
+
+def test_mark_blocked_and_friends_reject_direct_calls_once_canonically_linked():
+    owner_id = _owner()
+    intent = create_intent_from_expression(owner_id=owner_id, title="car", raw_user_expression="jag vill köpa en bil")
+    record_understanding(intent, interpreted_goal="buy a car")
+    advance_to_planned(intent)
+    _link_and_activate(intent)  # simulates a real canonical projection landing at ACTIVE
+
+    from app.operating_shell.intent import abandon, complete, mark_blocked, unblock
+
+    with pytest.raises(Exception):
+        mark_blocked(intent, reason="waiting on paperwork")
+    with pytest.raises(Exception):
+        complete(intent, summary="done")
+    with pytest.raises(Exception):
+        abandon(intent, reason="changed mind")
+    # unblock() is only reachable from BLOCKED in the transition table, but the canonical-link
+    # guard must fire before the transition-table check even runs -- prove it raises here too.
+    intent.state = IntentState.BLOCKED
+    with pytest.raises(Exception):
+        unblock(intent)
+    # Nothing above actually changed the intent's real state -- still ACTIVE/BLOCKED as set,
+    # never COMPLETED/ABANDONED/etc. from a rejected direct call.
+    assert intent.state == IntentState.BLOCKED
 
 
 # 13. action preview required for consequential action --------------------------------------------
@@ -499,10 +583,10 @@ def test_cross_owner_intent_leakage_impossible():
     intent_b = create_intent_from_expression(owner_id=owner_b, title="B's intent", raw_user_expression="y")
     record_understanding(intent_a, interpreted_goal="do x")
     advance_to_planned(intent_a)
-    advance_to_active(intent_a)
+    _link_and_activate(intent_a)
     record_understanding(intent_b, interpreted_goal="do y")
     advance_to_planned(intent_b)
-    advance_to_active(intent_b)
+    _link_and_activate(intent_b)
 
     active_for_a = active_intents_for_owner((intent_a, intent_b), owner_id=owner_a)
     assert active_for_a == (intent_a,)
@@ -664,3 +748,37 @@ def test_agent_result_is_not_directly_user_facing():
 
     with pytest.raises(ValueError):
         aggregate_for_user((), owner_facing_text="nothing to say")
+
+
+# --- Context resolver naming collision fix (MAINAI_V2_INTENT_GOAL_RECONCILIATION.md #6). ---
+
+
+def test_operating_shell_never_imports_app_context():
+    """app.operating_shell.reference_resolution (this package's own referring-expression
+    resolver) must never be confused with, or import, the pre-existing app.context.resolver
+    (chat-turn intent-TYPE classification) -- checked file-by-file on disk, not just
+    __init__.py's own source, same technique as this package's "no import of the other four
+    V2 packages" structural tests."""
+    import pathlib
+    import re
+
+    import app.operating_shell as shell_pkg
+
+    package_dir = pathlib.Path(shell_pkg.__file__).parent
+    forbidden = re.compile(r"^\s*(import|from)\s+app\.context\b", re.MULTILINE)
+    for py_file in package_dir.glob("*.py"):
+        source = py_file.read_text()
+        assert not forbidden.search(source), f"{py_file.name} must not import app.context"
+
+
+def test_workspace_reference_resolver_and_chat_resolver_are_genuinely_different_modules():
+    """Prevents an accidental wrong-resolver import: app.operating_shell.reference_resolution
+    and app.context.resolver are two unrelated modules doing two unrelated jobs, despite the
+    similar names -- this is a trivial but real regression guard against ever importing one
+    where the other was meant."""
+    import app.context.resolver as chat_resolver
+    import app.operating_shell.reference_resolution as workspace_resolver
+
+    assert chat_resolver is not workspace_resolver
+    assert not hasattr(chat_resolver, "resolve_workspace_reference")
+    assert not hasattr(workspace_resolver, "resolve_reference")

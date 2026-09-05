@@ -7,6 +7,20 @@ interpreted_goal having been set.
 
 FUTURE PLAN != FUTURE AUTHORITY: next_actions holds WorkspaceAction references (pure data,
 see types.py) -- nothing here executes them or treats their presence as authorization.
+
+CANONICAL LINKAGE (see docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md): an
+IntentObject is never a fourth independent "goal truth" store. advance_to_active() refuses
+to run without a real canonical_ref already set (an IntentObject cannot itself assert that
+something is actively underway -- it can only ever reflect a canonical LifeIntent/MainAIGoal
+row an already-authorized service call produced). advance_to_planned() and supersede_intent()
+remain callable regardless of canonical linkage -- planning stays local-only (matches
+WorkCandidate's own "record != authorize" split), and superseding a workspace-local
+reference is a workspace-level act, never a claim about the canonical row's own state. Once
+canonical_kind != NONE, advance_to_active()/mark_blocked()/unblock()/complete()/abandon() all
+reject direct calls -- app.operating_shell.canonical_projection.refresh_from_canonical() is
+the ONLY way a canonically-linked intent's state may legitimately change (OLD GOAL != CURRENT
+GOAL: the canonical row always wins, a stale local IntentObject can never resurrect authority
+the canonical row no longer has).
 """
 
 from __future__ import annotations
@@ -16,6 +30,7 @@ from datetime import datetime, timezone
 
 from app.operating_shell.types import (
     AmbiguousResolution,
+    CanonicalKind,
     IntentHistoryEntry,
     IntentObject,
     IntentState,
@@ -97,29 +112,64 @@ def advance_to_planned(intent: IntentObject, *, next_actions: tuple[WorkspaceAct
     return intent
 
 
+def _reject_if_canonically_linked(intent: IntentObject, *, action: str) -> None:
+    """Once a real canonical_ref exists, the canonical row is the only legitimate source for
+    this intent's state -- see app.operating_shell.canonical_projection.refresh_from_canonical().
+    Direct local mutation here would let a stale workspace object silently diverge from (or
+    resurrect authority no longer held by) the real LifeIntent/MainAIGoal it reflects."""
+    if intent.canonical_kind != CanonicalKind.NONE:
+        raise IntentTransitionError(
+            f"intent {intent.intent_id} is canonically linked ({intent.canonical_kind.value}:{intent.canonical_ref}) "
+            f"-- {action} must not be called directly; use "
+            "app.operating_shell.canonical_projection.refresh_from_canonical() instead"
+        )
+
+
 def advance_to_active(intent: IntentObject) -> IntentObject:
-    return _transition(intent, to_state=IntentState.ACTIVE, note="activated")
+    """ACTION REQUEST != AUTHORITY, applied to intents: direct local mutation into ACTIVE is
+    now unreachable by design, in both directions --
+
+      - canonical_kind == NONE: an IntentObject can never assert for itself that something is
+        actively underway; it has no real canonical_ref backing that claim.
+      - canonical_kind != NONE: once a real canonical link exists, the canonical row is the
+        ONLY legitimate source for this intent's state -- see
+        app.operating_shell.canonical_projection.refresh_from_canonical(), the sole path
+        that ever produces an ACTIVE IntentObject (by direct dataclass construction from the
+        canonical row's own current state, never via this function).
+
+    This function is kept (not deleted) so the transition table and its own error messages
+    stay a clear, callable, testable statement of the rule, but there is no legitimate input
+    for which it does not raise -- see docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md."""
+    _reject_if_canonically_linked(intent, action="advance_to_active()")
+    raise IntentTransitionError(
+        f"intent {intent.intent_id} cannot become ACTIVE without a real canonical_ref set first "
+        "(canonical_kind is NONE) -- see MAINAI_V2_INTENT_GOAL_RECONCILIATION.md"
+    )
 
 
 def mark_blocked(intent: IntentObject, *, reason: str) -> IntentObject:
     from app.operating_shell.types import IntentBlocker
 
+    _reject_if_canonically_linked(intent, action="mark_blocked()")
     _transition(intent, to_state=IntentState.BLOCKED, note=f"blocked: {reason}")
     intent.blockers = (*intent.blockers, IntentBlocker(description=reason))
     return intent
 
 
 def unblock(intent: IntentObject) -> IntentObject:
+    _reject_if_canonically_linked(intent, action="unblock()")
     return _transition(intent, to_state=IntentState.ACTIVE, note="unblocked")
 
 
 def complete(intent: IntentObject, *, summary: str) -> IntentObject:
+    _reject_if_canonically_linked(intent, action="complete()")
     _transition(intent, to_state=IntentState.COMPLETED, note="completed")
     intent.current_summary = summary
     return intent
 
 
 def abandon(intent: IntentObject, *, reason: str) -> IntentObject:
+    _reject_if_canonically_linked(intent, action="abandon()")
     _transition(intent, to_state=IntentState.ABANDONED, note=f"abandoned: {reason}")
     return intent
 
@@ -249,6 +299,8 @@ def to_snapshot(intent: IntentObject) -> dict:
         "dependencies": [str(d) for d in intent.dependencies],
         "superseded_by": str(intent.superseded_by) if intent.superseded_by else None,
         "current_summary": intent.current_summary, "confidence": intent.confidence,
+        "canonical_kind": intent.canonical_kind.value,
+        "canonical_ref": str(intent.canonical_ref) if intent.canonical_ref else None,
     }
 
 
@@ -269,6 +321,8 @@ def from_snapshot(snapshot: dict) -> IntentObject:
             dependencies=tuple(uuid.UUID(d) for d in snapshot.get("dependencies", [])),
             superseded_by=uuid.UUID(snapshot["superseded_by"]) if snapshot.get("superseded_by") else None,
             current_summary=snapshot.get("current_summary", ""), confidence=snapshot.get("confidence"),
+            canonical_kind=CanonicalKind(snapshot["canonical_kind"]) if snapshot.get("canonical_kind") else CanonicalKind.NONE,
+            canonical_ref=uuid.UUID(snapshot["canonical_ref"]) if snapshot.get("canonical_ref") else None,
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise MalformedIntentSnapshotError(f"intent snapshot is malformed: {exc}") from exc
