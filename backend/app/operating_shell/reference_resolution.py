@@ -1,8 +1,16 @@
-"""Context resolution for referring expressions (MainAI V2, Stage V2-I4/I6 per the founder's
-body-section numbering).
+"""Referring-expression resolution for the MainAI workspace/orb layer (MainAI V2, Stage
+V2-I4/I6 per the founder's body-section numbering).
 
-DO NOT silently guess if multiple high-confidence targets exist: resolve_reference() returns
-an AmbiguousResolution whenever more than one candidate is plausible, never an arbitrary pick.
+Renamed from `context.py`/`resolve_reference()` during the Intent/Goal architecture
+reconciliation (see docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md #6): this module
+has NOTHING to do with, and must never be confused with, the pre-existing
+`app.context.resolver` (chat-turn intent-TYPE classification -- INTENT_EXPLICIT_MEMORY/
+INTENT_CORRECTION/etc.). That module does a genuinely different job and is untouched by this
+rename; the two were simply confusingly named next to each other.
+
+DO NOT silently guess if multiple high-confidence targets exist:
+resolve_workspace_reference() returns an AmbiguousResolution whenever more than one candidate
+is plausible, never an arbitrary pick.
 """
 
 from __future__ import annotations
@@ -16,7 +24,7 @@ from app.operating_shell.types import (
 )
 
 
-def resolve_reference(
+def resolve_workspace_reference(
     kind: ReferenceKind, context: WorkspaceContext
 ) -> ResolvedReference | AmbiguousResolution:
     """Resolves a closed set of referring-expression categories against current context.

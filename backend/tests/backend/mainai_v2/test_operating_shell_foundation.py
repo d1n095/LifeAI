@@ -61,7 +61,7 @@ from app.operating_shell import (
     record_understanding,
     reject_secret_shaped_content,
     resolve_intent_by_title_fragment,
-    resolve_reference,
+    resolve_workspace_reference,
     resource_status,
     resume_from_current_state,
     require_root_sensitive_policy,
@@ -224,13 +224,13 @@ def test_ambiguous_that_remains_unresolved_with_multiple_candidates():
             WorkspaceTarget(target_id=candidate_b, kind="document", title="doc B"),
         ),
     )
-    result = resolve_reference(ReferenceKind.THAT, context)
+    result = resolve_workspace_reference(ReferenceKind.THAT, context)
     assert isinstance(result, AmbiguousResolution)
     assert len(result.candidates) == 2
 
 
 def test_ambiguous_context_three_check():
-    """Three-check: if resolve_reference() were changed to just pick candidates[0] instead
+    """Three-check: if resolve_workspace_reference() were changed to just pick candidates[0] instead
     of returning AmbiguousResolution, this test would (and must) fail."""
     owner_id = _owner()
     candidate_a, candidate_b = uuid.uuid4(), uuid.uuid4()
@@ -249,7 +249,7 @@ def test_ambiguous_context_three_check():
     broken_result = broken_pick_first(ReferenceKind.THAT, context)
     assert isinstance(broken_result, ResolvedReference), "sanity: the broken version silently picks one"
 
-    real_result = resolve_reference(ReferenceKind.THAT, context)
+    real_result = resolve_workspace_reference(ReferenceKind.THAT, context)
     assert isinstance(real_result, AmbiguousResolution)
 
 
@@ -261,7 +261,7 @@ def test_single_candidate_resolves_unambiguously():
         recent_action_refs=(), active_intent_id=None,
         known_targets=(WorkspaceTarget(target_id=focus_id, kind="document", title="the doc"),),
     )
-    result = resolve_reference(ReferenceKind.THIS, context)
+    result = resolve_workspace_reference(ReferenceKind.THIS, context)
     assert isinstance(result, ResolvedReference)
     assert result.target.target_id == focus_id
 
@@ -748,3 +748,37 @@ def test_agent_result_is_not_directly_user_facing():
 
     with pytest.raises(ValueError):
         aggregate_for_user((), owner_facing_text="nothing to say")
+
+
+# --- Context resolver naming collision fix (MAINAI_V2_INTENT_GOAL_RECONCILIATION.md #6). ---
+
+
+def test_operating_shell_never_imports_app_context():
+    """app.operating_shell.reference_resolution (this package's own referring-expression
+    resolver) must never be confused with, or import, the pre-existing app.context.resolver
+    (chat-turn intent-TYPE classification) -- checked file-by-file on disk, not just
+    __init__.py's own source, same technique as this package's "no import of the other four
+    V2 packages" structural tests."""
+    import pathlib
+    import re
+
+    import app.operating_shell as shell_pkg
+
+    package_dir = pathlib.Path(shell_pkg.__file__).parent
+    forbidden = re.compile(r"^\s*(import|from)\s+app\.context\b", re.MULTILINE)
+    for py_file in package_dir.glob("*.py"):
+        source = py_file.read_text()
+        assert not forbidden.search(source), f"{py_file.name} must not import app.context"
+
+
+def test_workspace_reference_resolver_and_chat_resolver_are_genuinely_different_modules():
+    """Prevents an accidental wrong-resolver import: app.operating_shell.reference_resolution
+    and app.context.resolver are two unrelated modules doing two unrelated jobs, despite the
+    similar names -- this is a trivial but real regression guard against ever importing one
+    where the other was meant."""
+    import app.context.resolver as chat_resolver
+    import app.operating_shell.reference_resolution as workspace_resolver
+
+    assert chat_resolver is not workspace_resolver
+    assert not hasattr(chat_resolver, "resolve_workspace_reference")
+    assert not hasattr(workspace_resolver, "resolve_reference")

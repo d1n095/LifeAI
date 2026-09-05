@@ -15,7 +15,7 @@ from app.operating_shell.canonical_projection import (
     project_from_mainai_goal,
     refresh_from_canonical,
 )
-from app.operating_shell.context import resolve_reference
+from app.operating_shell.reference_resolution import resolve_workspace_reference
 from app.operating_shell.control import (
     ControlArbitrationState,
     ResumeDecision,
@@ -218,7 +218,7 @@ __all__ = [
     "request_incident_evidence",
     "request_memory_evidence",
     "resolve_intent_by_title_fragment",
-    "resolve_reference",
+    "resolve_workspace_reference",
     "resource_status",
     "restore_workspace_state_does_not_reauthorize",
     "resume_from_current_state",
