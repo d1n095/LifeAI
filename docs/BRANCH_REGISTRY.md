@@ -10,7 +10,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `codex/universal-personal-recall` | — | **MainAI integration bridge + auth contracts complete — do not merge/wire yet** | Global local-first recall plus owner-bound canonical SQLAlchemy adapters and an isolated `PersonalRecallService` facade. Fresh canonical session/JTI authority is checked at query start and disclosure/open time; project/conversation/source/history/disclosure scopes fail closed. Structured MainAI handoff, inert source-open contract, per-source coverage and a V2-key-hierarchy-compatible snapshot-protector seam are present. 79 tests pass, including real migrated-PostgreSQL/RLS cross-owner and revocation attacks. Based on `818dfb7`; does not modify #245 or Claude V2. No migration, registered route, worker, chat wiring, provider call or production crypto implementation. |
+| `codex/universal-personal-recall` | — | **Live-wiring prep isolated — production activation blocked; do not merge/wire** | Default-off unregistered HTTP factory, durable test-only source invalidation worker, incremental canonical reads, PostgreSQL chunk FTS candidate helper, and process-crash recovery proof. Session/disclosure races hardened. Based on `0958322`; no #245 changes, Claude branch imports, migrations, chat/UI wiring or production registrations. Reviewed crypto/key hierarchy, canonical outbox and cross-document dependency scheduling remain blocked/pending. See `docs/PERSONAL_RECALL_LIVE_WIRING_PREP.md`. |
 
 **Integration order:** review after PR #245 certification and Claude's V2 interfaces stabilize;
 then bind this bridge to reviewed V2 key-hierarchy and route interfaces as a separate integration change. The current branch

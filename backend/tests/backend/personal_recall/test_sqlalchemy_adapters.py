@@ -237,3 +237,144 @@ def test_real_soft_delete_tombstones_existing_snapshot_after_complete_refresh(su
     finally:
         db.close()
         current_user_id.reset(token)
+
+
+def test_incremental_canonical_worker_edit_delete_and_recovery(superuser_db, tmp_path):
+    from app.personal_recall.sqlalchemy_adapters import CanonicalSourceLoader
+    from app.personal_recall.workers import RecallIndexWorker, SourceChange, ChangeKind
+    from app.personal_recall.index import SnapshotStoragePolicy
+    from app.personal_recall.snapshot_protection import DeterministicTestSnapshotProtector
+    alice, bob, memory_id, _ = _seed(superuser_db)
+    message = superuser_db.execute(select(Message).join(Conversation).where(Conversation.user_id == alice, Message.role == MessageRole.user)).scalars().first()
+    source_id = str(message.id)
+    tmp_path.chmod(0o700)
+    db, token = _restricted_session(alice)
+    try:
+        def make_worker():
+            return RecallIndexWorker(tmp_path / "index.sqlite", policy=SnapshotStoragePolicy(tmp_path), owner_id=str(alice),
+                                     protector=DeterministicTestSnapshotProtector(), authorize=lambda owner: owner == str(alice),
+                                     load_source=CanonicalSourceLoader(db, authorized_owner_id=alice), test_only=True)
+        worker = make_worker()
+        worker.enqueue(SourceChange("new", str(alice), source_id, ChangeKind.NEW_MESSAGE))
+        assert worker.run_once()
+        assert len(worker.read_items()) == 1
+        message.content = "REVISED CANONICAL CONTENT"
+        superuser_db.commit()
+        worker.enqueue(SourceChange("edit", str(alice), source_id, ChangeKind.EDITED_MESSAGE))
+        assert make_worker().run_once()
+        assert worker.read_items()[0].text == "REVISED CANONICAL CONTENT"
+        # A delayed create event must re-read canonical deletion, never resurrect old text.
+        superuser_db.delete(message)
+        superuser_db.commit()
+        worker.enqueue(SourceChange("delayed", str(alice), source_id, ChangeKind.NEW_MESSAGE))
+        assert make_worker().run_once()
+        assert worker.read_items() == []
+        loader = CanonicalSourceLoader(db, authorized_owner_id=alice)
+        with __import__("pytest").raises(AdapterAuthorizationError):
+            loader(owner_id=str(bob), family="message", source_id=source_id)
+    finally:
+        db.close()
+        current_user_id.reset(token)
+
+
+def test_real_postgres_fts_candidates_owner_scope_and_revocation(superuser_db):
+    from dataclasses import replace
+    from app.personal_recall.candidates import document_candidates, document_candidate_statement
+    from app.personal_recall.authorization import RecallAuthorizationError
+    alice, bob, _, _ = _seed(superuser_db)
+    context = replace(_recall_authority(alice), project_scope=IdentifierScope(allow_unscoped=True))
+    class Resolver:
+        calls = 0
+        revoke = False
+        def resolve(self, presented, *, now):
+            self.calls += 1
+            return None if self.revoke and self.calls % 2 == 0 else presented
+    resolver = Resolver()
+    db, token = _restricted_session(alice)
+    try:
+        candidates = document_candidates(db, authorization=context, resolver=resolver, query="tandkrämsrecept")
+        assert candidates
+        for chunk_id, doc_id in candidates:
+            row = superuser_db.get(DocumentChunk, uuid.UUID(chunk_id))
+            assert row.owner_id == alice
+            assert superuser_db.get(Document, uuid.UUID(doc_id)).deleted_at is None
+        victim = replace(context, owner_id=str(bob), session_user_id=str(bob))
+        assert db.execute(document_candidate_statement(victim, "tandkrämsrecept")).all() == []
+        empty_scope = replace(context, project_scope=IdentifierScope())
+        assert document_candidates(db, authorization=empty_scope, resolver=resolver, query="tandkrämsrecept") == ()
+        assert document_candidates(db, authorization=context, resolver=resolver, query="'; DROP TABLE users; --") == ()
+        resolver.calls, resolver.revoke = 0, True
+        with __import__("pytest").raises(RecallAuthorizationError):
+            document_candidates(db, authorization=context, resolver=resolver, query="tandkrämsrecept")
+    finally:
+        db.close()
+        current_user_id.reset(token)
+
+
+def test_canonical_worker_document_versions_delete_and_memory_lifecycle(superuser_db, tmp_path):
+    from app.personal_recall.sqlalchemy_adapters import CanonicalSourceLoader
+    from app.personal_recall.workers import RecallIndexWorker, SourceChange, ChangeKind
+    from app.personal_recall.index import SnapshotStoragePolicy
+    from app.personal_recall.snapshot_protection import DeterministicTestSnapshotProtector
+    alice, _, memory_id, _ = _seed(superuser_db)
+    document = _document(alice, "Independent source")
+    superuser_db.add(document)
+    superuser_db.flush()
+    v1 = KnowledgeVersion(source_id=document.id, owner_id=alice, version_number=1, checksum="a" * 64, extraction_version="v1", raw_metadata={"content_text": "first"})
+    superuser_db.add(v1)
+    superuser_db.commit()
+    tmp_path.chmod(0o700)
+    db, token = _restricted_session(alice)
+    try:
+        w = RecallIndexWorker(tmp_path / "index.sqlite", policy=SnapshotStoragePolicy(tmp_path), owner_id=str(alice),
+                              protector=DeterministicTestSnapshotProtector(), authorize=lambda owner: owner == str(alice),
+                              load_source=CanonicalSourceLoader(db, authorized_owner_id=alice), test_only=True)
+        def process(name, source, kind):
+            w.enqueue(SourceChange(name, str(alice), str(source), kind))
+            assert w.run_once()
+        process("new-doc", document.id, ChangeKind.NEW_DOCUMENT)
+        assert len(w.read_items()) == 2
+        v2 = KnowledgeVersion(source_id=document.id, owner_id=alice, version_number=2, checksum="b" * 64, extraction_version="v1", raw_metadata={"content_text": "second"})
+        superuser_db.add(v2)
+        superuser_db.commit()
+        process("version", document.id, ChangeKind.KNOWLEDGE_SUPERSESSION)
+        versions = {item.item_id: item for item in w.read_items()}
+        assert versions[f"knowledge_version:{v1.id}"].superseded_by == f"knowledge_version:{v2.id}"
+        document.deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        document.deletion_status = DeletionStatus.pending
+        superuser_db.commit()
+        process("delete", document.id, ChangeKind.DELETED_DOCUMENT)
+        assert w.read_items() == []
+        # Events are invalidation hints: load active canonical memory before revoking it.
+        process("memory-refresh", memory_id, ChangeKind.MEMORY_REVOKE)
+        assert len(w.read_items()) == 1
+        superuser_db.execute(text("SELECT transition_memory_source_admin(:id, 'revoked', 'worker proof', 'admin', NULL)"), {"id": memory_id})
+        superuser_db.commit()
+        process("memory-revoke", memory_id, ChangeKind.MEMORY_REVOKE)
+        assert w.read_items() == []
+        superuser_db.execute(text("SELECT transition_memory_source_admin(:id, 'purged', 'worker proof', 'admin', NULL)"), {"id": memory_id})
+        superuser_db.commit()
+        process("memory-purge", memory_id, ChangeKind.MEMORY_PURGE)
+        assert w.read_items() == []
+    finally:
+        db.close()
+        current_user_id.reset(token)
+
+
+def test_cached_user_cannot_hide_session_epoch_revocation(superuser_db):
+    from sqlalchemy import update
+    alice, _, _, _ = _seed(superuser_db)
+    context = _recall_authority(alice)
+    db, token = _restricted_session(alice)
+    try:
+        cached_user = db.get(User, alice)
+        resolver = SQLAlchemyRecallAuthorityResolver(db, authenticated_user_id=alice, grant_loader=lambda presented: presented)
+        assert resolver.resolve(context, now=datetime.now(timezone.utc)) == context
+        epoch = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=10)
+        superuser_db.execute(update(User).where(User.id == alice).values(sessions_valid_after=epoch))
+        superuser_db.commit()
+        assert resolver.resolve(context, now=datetime.now(timezone.utc)) is None
+        assert cached_user.sessions_valid_after == epoch
+    finally:
+        db.close()
+        current_user_id.reset(token)

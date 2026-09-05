@@ -90,7 +90,7 @@ class SQLAlchemyRecallAuthorityResolver:
             return None
         if owner != self.authenticated_user_id:
             return None
-        user = self.db.execute(select(User).where(User.id == owner, User.is_active.is_(True))).scalar_one_or_none()
+        user = self.db.execute(select(User).where(User.id == owner, User.is_active.is_(True)).execution_options(populate_existing=True)).scalar_one_or_none()
         if user is None:
             return None
         if self.db.execute(select(RevokedAccessToken.jti).where(RevokedAccessToken.jti == presented.session_jti)).scalar_one_or_none():

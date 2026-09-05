@@ -34,12 +34,13 @@ class _OwnerBoundAdapter:
     name = "canonical"
     source_types: frozenset[SourceType] = frozenset()
 
-    def __init__(self, db: Session, *, authorized_owner_id: uuid.UUID | str, limit: int = 10_000):
+    def __init__(self, db: Session, *, authorized_owner_id: uuid.UUID | str, limit: int = 10_000, source_id: uuid.UUID | str | None = None):
         if limit < 1 or limit > 10_000:
             raise ValueError("adapter limit must be between 1 and 10000")
         self.db = db
         self.owner_id = uuid.UUID(str(authorized_owner_id))
         self.limit = limit
+        self.source_id = uuid.UUID(str(source_id)) if source_id is not None else None
 
     def _owner(self, requested: str) -> uuid.UUID:
         owner = uuid.UUID(str(requested))
@@ -57,7 +58,7 @@ class ConversationMessageAdapter(_OwnerBoundAdapter):
         rows = self.db.execute(
             select(Message, Conversation)
             .join(Conversation, Conversation.id == Message.conversation_id)
-            .where(Conversation.user_id == owner, Message.status == MessageStatus.succeeded)
+            .where(Conversation.user_id == owner, Message.status == MessageStatus.succeeded, Message.id == self.source_id if self.source_id else True)
             .order_by(Message.created_at, Message.id)
             .limit(self.limit)
         ).all()
@@ -86,7 +87,7 @@ class DocumentChunkAdapter(_OwnerBoundAdapter):
         owner = self._owner(owner_id)
         documents = self.db.execute(
             select(Document)
-            .where(Document.uploaded_by == owner, Document.deleted_at.is_(None))
+            .where(Document.uploaded_by == owner, Document.deleted_at.is_(None), Document.id == self.source_id if self.source_id else True)
             .order_by(Document.created_at, Document.id)
             .limit(self.limit)
         ).scalars().all()
@@ -101,7 +102,7 @@ class DocumentChunkAdapter(_OwnerBoundAdapter):
         chunks = self.db.execute(
             select(DocumentChunk, Document)
             .join(Document, Document.id == DocumentChunk.document_id)
-            .where(DocumentChunk.owner_id == owner, Document.uploaded_by == owner, Document.deleted_at.is_(None))
+            .where(DocumentChunk.owner_id == owner, Document.uploaded_by == owner, Document.deleted_at.is_(None), Document.id == self.source_id if self.source_id else True)
             .order_by(Document.created_at, DocumentChunk.chunk_index, DocumentChunk.id)
             .limit(remaining)
         ).all()
@@ -126,7 +127,7 @@ class DurableMemoryAdapter(_OwnerBoundAdapter):
         owner = self._owner(owner_id)
         rows = self.db.execute(
             select(MemorySourceUnit)
-            .where(MemorySourceUnit.owner_id == owner, MemorySourceUnit.lifecycle_status == LifecycleStatus.active)
+            .where(MemorySourceUnit.owner_id == owner, MemorySourceUnit.lifecycle_status == LifecycleStatus.active, MemorySourceUnit.id == self.source_id if self.source_id else True)
             .order_by(MemorySourceUnit.occurred_at, MemorySourceUnit.created_at, MemorySourceUnit.id)
             .limit(self.limit)
         ).scalars().all()
@@ -151,16 +152,18 @@ class KnowledgeVersionAdapter(_OwnerBoundAdapter):
         rows = self.db.execute(
             select(KnowledgeVersion, Document)
             .join(Document, Document.id == KnowledgeVersion.source_id)
-            .where(KnowledgeVersion.owner_id == owner, Document.uploaded_by == owner, Document.deleted_at.is_(None))
+            .where(KnowledgeVersion.owner_id == owner, Document.uploaded_by == owner, Document.deleted_at.is_(None), Document.id == self.source_id if self.source_id else True)
             .order_by(KnowledgeVersion.source_id, KnowledgeVersion.version_number, KnowledgeVersion.id)
             .limit(self.limit)
         ).all()
         relationships = self.db.execute(
             select(SourceRelationship)
-            .where(SourceRelationship.owner_id == owner)
+            .where(SourceRelationship.owner_id == owner, SourceRelationship.from_source_id == self.source_id if self.source_id else True)
             .order_by(SourceRelationship.created_at, SourceRelationship.id)
             .limit(self.limit)
         ).scalars().all()
+        if self.source_id and relationships:
+            raise ValueError("incremental relationship closure requires canonical dependency scheduling")
         versions_by_source: dict[str, list[KnowledgeVersion]] = {}
         for version, _document in rows:
             versions_by_source.setdefault(str(version.source_id), []).append(version)
@@ -317,3 +320,31 @@ def _locator_uuid(locator: str) -> uuid.UUID | None:
         return uuid.UUID(locator.rstrip("/").rsplit("/", 1)[-1])
     except ValueError:
         return None
+
+
+class CanonicalSourceLoader:
+    """Read just the invalidated source; caller supplies a fresh owner/RLS transaction.
+
+    Relationship closure fails closed until a canonical dependency scheduler is available.
+    A saturated adapter is never allowed to infer deletions from incomplete coverage.
+    """
+
+    def __init__(self, db: Session, *, authorized_owner_id):
+        self.db, self.owner_id = db, str(authorized_owner_id)
+
+    def __call__(self, *, owner_id: str, family: str, source_id: str):
+        if owner_id != self.owner_id:
+            raise AdapterAuthorizationError("canonical loader owner mismatch")
+        classes = {"message": (ConversationMessageAdapter,), "document": (DocumentChunkAdapter, KnowledgeVersionAdapter), "memory": (DurableMemoryAdapter,)}
+        if family not in classes:
+            raise ValueError("unsupported canonical source family")
+        # Avoid stale ORM identities across repeated source reads.
+        self.db.expire_all()
+        result = []
+        for adapter_class in classes[family]:
+            adapter = adapter_class(self.db, authorized_owner_id=owner_id, source_id=source_id)
+            items = list(adapter.discover(owner_id=owner_id))
+            if len(items) >= adapter.limit:
+                raise ValueError("incomplete source projection; refusing replacement")
+            result.extend(items)
+        return result

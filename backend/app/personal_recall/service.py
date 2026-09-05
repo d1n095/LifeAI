@@ -132,7 +132,7 @@ class PersonalRecallService:
         _prune_response_metadata(response)
         # The resolver is deliberately called again after adapters/DB work. A revoke or
         # narrowing during retrieval must govern disclosure, not the grant seen at start.
-        end = require_fresh_authority(request.authorization, resolver=self.authority_resolver, now=checked_at)
+        end = require_fresh_authority(request.authorization, resolver=self.authority_resolver, now=now)
         _require_same_or_narrower_result_authority(start, end, response.results)
         registry: SourceRegistry = self.source_registry_factory(end)
         for result in response.results:
@@ -140,7 +140,10 @@ class PersonalRecallService:
                 validate_open_locator(result.item, owner_id=end.owner_id, registry=registry)
             except ValueError as exc:
                 raise RecallAuthorizationError("canonical source changed before disclosure") from exc
-        handoff = _handoff(response, end)
+        final = require_fresh_authority(request.authorization, resolver=self.authority_resolver, now=now)
+        if final != end:
+            raise RecallAuthorizationError("authority changed during canonical validation")
+        handoff = _handoff(response, final)
         receipt = AuthorizationReceipt(end.authorization_id, end.authorization_version, end.owner_id, end.session_jti, datetime.now(timezone.utc), end.disclosure_level, tuple(r.item.item_id for r in response.results))
         return RecallServiceResponse(response, handoff, receipt)
 
@@ -158,6 +161,9 @@ class PersonalRecallService:
             raise RecallAuthorizationError("requested snippet bound is invalid")
         registry: SourceRegistry = self.source_registry_factory(current)
         locator = validate_open_locator(request.item, owner_id=current.owner_id, registry=registry)
+        final = require_fresh_authority(request.authorization, resolver=self.authority_resolver)
+        if final != current:
+            raise RecallAuthorizationError("authority changed during source-open validation")
         snippet = None
         if current.disclosure_level == DisclosureLevel.SNIPPET:
             snippet = (request.item.text or "")[: request.max_snippet_chars]
@@ -226,7 +232,9 @@ def authorize_status_contract(context: RecallAuthorizationContext, request: Reca
 
 
 def _require_same_or_narrower_result_authority(start: RecallAuthorizationContext, end: RecallAuthorizationContext, results: list[RetrievalResult]) -> None:
-    if start.authorization_version != end.authorization_version:
+    if (start.authorization_version != end.authorization_version
+            or start.allow_current != end.allow_current
+            or start.allow_historical != end.allow_historical):
         raise RecallAuthorizationError("authority changed during recall; retry under the fresh grant")
     for result in results:
         require_item_authority(end, result.item)
