@@ -9,6 +9,12 @@ import from this package). See docs/mainai_v2/MAINAI_V2_ORB_OPERATING_SHELL.md f
 design.
 """
 
+from app.operating_shell.canonical_projection import (
+    CanonicalProjectionError,
+    project_from_life_intent,
+    project_from_mainai_goal,
+    refresh_from_canonical,
+)
 from app.operating_shell.context import resolve_reference
 from app.operating_shell.control import (
     ControlArbitrationState,
@@ -122,6 +128,7 @@ from app.operating_shell.workspace import to_snapshot as workspace_to_snapshot
 
 __all__ = [
     "ACTION_RISK_ORDER",
+    "CanonicalProjectionError",
     "ALLOWED",
     "CONSEQUENTIAL_AND_ABOVE",
     "DEFAULT_ACTION_RISK",
@@ -175,6 +182,9 @@ __all__ = [
     "WorkspaceTarget",
     "WorkspaceWindow",
     "abandon",
+    "project_from_life_intent",
+    "project_from_mainai_goal",
+    "refresh_from_canonical",
     "active_intents_for_owner",
     "advance_to_active",
     "advance_to_planned",
