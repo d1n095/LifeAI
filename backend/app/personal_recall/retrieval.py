@@ -96,7 +96,9 @@ class PersonalRecallEngine:
             completeness = CompletenessState.COMPLETE
         else:
             completeness = CompletenessState.UNKNOWN
-        coverage = CoverageReport(completeness, tuple(sorted(searched_types, key=lambda x: x.value)), tuple(sorted(missing, key=lambda x: x.value)), tuple(failed_adapters), truncated)
+        source_state = CompletenessState.KNOWN_PARTIAL if failed_adapters or truncated else CompletenessState.COMPLETE
+        source_states = tuple((source_type, source_state) for source_type in sorted(searched_types, key=lambda x: x.value))
+        coverage = CoverageReport(completeness, tuple(sorted(searched_types, key=lambda x: x.value)), tuple(sorted(missing, key=lambda x: x.value)), tuple(failed_adapters), truncated, source_states)
         synthesis = self._synthesize(ranked, current, historical, pairs, warnings, coverage)
         return RecallResponse(query=query, results=ranked, clusters=cluster_items([r.item for r in ranked]), current_items=current, historical_items=historical, contradictions=pairs, contradiction_candidates=candidates, unresolved=unresolved, index_warnings=sorted(set(warnings)), coverage=coverage, synthesis=synthesis)
 

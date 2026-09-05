@@ -54,6 +54,7 @@ def serialize_for_local_client(response: RecallResponse, *, owner_id: str, inclu
             "state": response.coverage.state.value,
             "missing_source_types": [value.value for value in response.coverage.missing_source_types],
             "truncated": response.coverage.truncated,
+            "source_states": {source.value: state.value for source, state in response.coverage.source_states},
         },
         "results": results,
     }

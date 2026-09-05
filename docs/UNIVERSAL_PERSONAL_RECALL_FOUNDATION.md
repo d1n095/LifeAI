@@ -105,8 +105,30 @@ snapshot entries deleted and scrubs their personal content after a complete cano
 it refuses to infer deletion when an adapter fails, truncates or lacks declared coverage.
 Owner-authorized local serialization is exercised against the real adapter response.
 
-The complete Personal Recall suite now contains 62 passing tests: 56 provider/DB-independent
+The real-adapter milestone contained 62 passing tests: 56 provider/DB-independent
 tests plus 6 tests against real PostgreSQL migrations and RLS. No live chat/API/worker wiring
 was added. Authenticated snapshot encryption remains P0: no suitable reviewed AEAD dependency
 is currently present, so this branch deliberately does not invent cryptography or shell out to
 an unauthenticated cipher.
+
+## MainAI integration bridge
+
+The isolated bridge exposes `PersonalRecallService` without registering HTTP routes. Its
+authorization contract binds the canonical owner to an already authenticated request identity,
+session JTI/issue time/expiry, allowed source classes, project and conversation scopes,
+current/history grants, disclosure level, and separate locator-open permission. Canonical account
+revocation and JTI state are re-read both before retrieval and immediately before disclosure/open.
+
+MainAI receives a structured evidence handoff retaining provenance, source authority,
+verification, decision/current/history state, contradictions, why-matched explanations, aggregate
+coverage, and per-source coverage. Context hints can narrow retrieval but cannot grant authority.
+Source opening returns only an inert validated locator and a bounded authorized snippet; it never
+executes a source. No HTTP/chat route is wired.
+
+`RecallSnapshotProtector` defines the future V2 key-hierarchy seam. The only implementation in
+this branch is explicitly test-only, deterministic, and labelled as non-encryption; production
+snapshot protection remains blocked on reviewed AEAD/key-hierarchy integration.
+
+The complete suite now contains 79 passing tests, including real migrated-PostgreSQL checks for
+canonical session epochs, JTI revocation, and a foreign-owner authority attempt under the
+restricted runtime role.

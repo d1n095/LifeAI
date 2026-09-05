@@ -211,6 +211,7 @@ class CoverageReport:
     missing_source_types: tuple[SourceType, ...]
     failed_adapters: tuple[str, ...] = ()
     truncated: bool = False
+    source_states: tuple[tuple[SourceType, CompletenessState], ...] = ()
 
 
 @dataclass(repr=False)

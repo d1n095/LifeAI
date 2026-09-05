@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, text
 
@@ -12,6 +12,7 @@ from app.models.document_chunk import DocumentChunk
 from app.models.founder_memory import FounderMemoryNote
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.memory_source_unit import SnapshotStatus
+from app.models.revoked_access_token import RevokedAccessToken
 from app.models.source_relationship import RelationshipType, SourceRelationship
 from app.models.user import User
 from app.personal_recall.retrieval import PersonalRecallEngine
@@ -21,6 +22,7 @@ from app.personal_recall.index import LocalRecallIndex
 from app.personal_recall.snapshot_sync import synchronize_authoritative_sources
 from app.personal_recall.sqlalchemy_adapters import AdapterAuthorizationError, ConversationMessageAdapter, DocumentChunkAdapter, DurableMemoryAdapter, SQLAlchemySourceRegistry, canonical_personal_adapters
 from app.personal_recall.types import SourceType
+from app.personal_recall.authorization import DisclosureLevel, IdentifierScope, RecallAuthorizationContext, SQLAlchemyRecallAuthorityResolver
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
 from app.request_context import current_user_id
 from app.security import utcnow_seconds_baseline
@@ -91,6 +93,16 @@ def _restricted_session(owner_id):
     return SessionLocal(), token
 
 
+def _recall_authority(owner_id, *, jti="recall-real-session"):
+    now = datetime.now(timezone.utc)
+    return RecallAuthorizationContext(
+        authorization_id="real-grant", authorization_version="v1", owner_id=str(owner_id), session_user_id=str(owner_id),
+        session_jti=jti, session_issued_at=now, expires_at=now + timedelta(hours=1),
+        allowed_source_types=frozenset(SourceType), project_scope=IdentifierScope(unrestricted=True), conversation_scope=IdentifierScope(unrestricted=True),
+        allow_current=True, allow_historical=True, disclosure_level=DisclosureLevel.SNIPPET, allow_locator_open=True,
+    )
+
+
 def test_real_seeded_all_about_toothpaste_across_canonical_sources(superuser_db):
     alice_id, _bob_id, _memory_id, _revoked_id = _seed(superuser_db)
     db, token = _restricted_session(alice_id)
@@ -121,6 +133,33 @@ def test_rls_independently_blocks_cross_owner_even_when_adapter_is_bound_to_vict
         for adapter in canonical_personal_adapters(db, owner_id=bob_id):
             assert list(adapter.discover(owner_id=str(bob_id))) == [], adapter.name
         assert db.execute(select(Message).join(Conversation).where(Conversation.user_id == bob_id)).scalars().all() == []
+    finally:
+        db.close()
+        current_user_id.reset(token)
+
+
+def test_sql_authority_resolver_uses_canonical_session_epoch_and_jti_revocation(superuser_db):
+    alice_id, _bob_id, _memory_id, _revoked_id = _seed(superuser_db)
+    context = _recall_authority(alice_id)
+    db, token = _restricted_session(alice_id)
+    try:
+        resolver = SQLAlchemyRecallAuthorityResolver(db, authenticated_user_id=alice_id, grant_loader=lambda presented: presented)
+        assert resolver.resolve(context, now=datetime.now(timezone.utc)) == context
+        superuser_db.add(RevokedAccessToken(jti=context.session_jti, expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)))
+        superuser_db.commit()
+        assert resolver.resolve(context, now=datetime.now(timezone.utc)) is None
+    finally:
+        db.close()
+        current_user_id.reset(token)
+
+
+def test_sql_authority_resolver_cannot_validate_foreign_owner_through_rls(superuser_db):
+    alice_id, bob_id, _memory_id, _revoked_id = _seed(superuser_db)
+    foreign = _recall_authority(bob_id, jti="foreign-session")
+    db, token = _restricted_session(alice_id)
+    try:
+        resolver = SQLAlchemyRecallAuthorityResolver(db, authenticated_user_id=alice_id, grant_loader=lambda presented: presented)
+        assert resolver.resolve(foreign, now=datetime.now(timezone.utc)) is None
     finally:
         db.close()
         current_user_id.reset(token)

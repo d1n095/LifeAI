@@ -10,10 +10,10 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `codex/universal-personal-recall` | — | **Real read-only adapters + RLS proof complete — do not merge/wire yet** | Global local-first recall plus owner-bound canonical SQLAlchemy adapters for conversations/messages, documents/chunks, active memory-source units, knowledge versions/source relationships and canonical decisions. Includes canonical open-registry checks, fail-closed snapshot tombstone reconciliation, 56 pure tests + 6 real migrated-PostgreSQL/RLS tests. Alice-session/Bob-query attacks return zero across all five adapter families. Based on `818dfb7`; does not modify #245 or Claude V2. No migration, route, worker, chat wiring or provider call. Authenticated snapshot encryption remains isolated P0. |
+| `codex/universal-personal-recall` | — | **MainAI integration bridge + auth contracts complete — do not merge/wire yet** | Global local-first recall plus owner-bound canonical SQLAlchemy adapters and an isolated `PersonalRecallService` facade. Fresh canonical session/JTI authority is checked at query start and disclosure/open time; project/conversation/source/history/disclosure scopes fail closed. Structured MainAI handoff, inert source-open contract, per-source coverage and a V2-key-hierarchy-compatible snapshot-protector seam are present. 79 tests pass, including real migrated-PostgreSQL/RLS cross-owner and revocation attacks. Based on `818dfb7`; does not modify #245 or Claude V2. No migration, registered route, worker, chat wiring, provider call or production crypto implementation. |
 
 **Integration order:** review after PR #245 certification and Claude's V2 interfaces stabilize;
-then add owner-scoped SQLAlchemy adapters as a separate integration change. The current branch
+then bind this bridge to reviewed V2 key-hierarchy and route interfaces as a separate integration change. The current branch
 deliberately does not depend on, rebase onto, or change either active lane.
 
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
