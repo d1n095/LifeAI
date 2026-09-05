@@ -292,6 +292,31 @@ wiring phase, not a wiring plan — nothing below was changed.
 layer — a future Vault encryption-at-rest integration point is additive on top of it, not a
 sign RLS is insufficient for what it actually does.
 
+## 6d. Operating Shell future integration map (2026-09-05, read-only, no wiring)
+
+Real code search across the existing certified runtime, to answer "where would
+`app.operating_shell` eventually plug in." A survey for a later wiring phase, not a wiring
+plan — nothing below was changed.
+
+| Integration point | Real file/module | What it does today | Future connection |
+|---|---|---|---|
+| Chat orchestration | `app.routers.chat` → `app.context.resolver` | The closest existing analogue to "MainAI as primary UI"; `app.context.resolver` is a **separate, pre-existing, unrelated** rule-based conversation-turn classifier (continuation/new_topic/correction/pronoun_reference — not an LLM call) | `operating_shell.context`/`delegation` — naming collision risk flagged below, not a functional conflict |
+| Agent delegation | `app.workforce` (assignment/broker/kill-switch — already covered by Sentinel's and Guardian's own hazard searches) | Real specialist-agent assignment and authority control | `operating_shell.delegation` |
+| Document readers | `app.rag.{ingest,extract,media_import}` | Real document parsing pipeline | `operating_shell.workspace`/`restore` (`WorkspaceDocument` references) |
+| Filesystem ops beyond `local_fs` | `app.rag.zip_import`/`library_import`, `app.mainai_execution.worktree`/`verify`, `app.development_supervisor.production_worktree`, `app.project_memory` | Real file I/O, all execution/dev-tooling-scoped | `operating_shell.risk` — these would classify EXTERNAL_EFFECT/DESTRUCTIVE, never OBSERVATIONAL, if ever exposed as a workspace action |
+| Session state | `app.routers.auth`, `app.models.refresh_token` | Unchanged from §6c's findings | `operating_shell.control`/workspace ownership scoping |
+
+**Confirmed absent (no false completeness claimed)**: no browser automation library (Playwright/Selenium/Puppeteer) exists anywhere in this codebase — `WorkspaceDocument`'s browser-tab-reference field has no real backing yet. No window/desktop-automation concept exists at all. No frontend directory in this worktree to check for an existing "orb" concept.
+
+**Naming collision (not a functional conflict, but a real future-reader risk)**: `app.context.resolver` (existing, chat-turn classification) and `app.operating_shell.context` (new, referring-expression resolution for "this"/"that"/"continue") are unrelated modules with confusingly similar names. Worth renaming or cross-referencing explicitly before either package grows further.
+
+**MOST IMPORTANT FINDING — real architectural risk, not hypothetical.** `app.operating_shell.IntentObject` (new, in-memory-only, no DB backing) substantially overlaps an already-existing, DB-backed 3-tier pipeline:
+- `app.models.life_intent.LifeIntent` — durable life intents with `title`/`intent_kind`/`state`/`classification_basis`/`authority`/`provenance`, linked to both `mainai_goal_id` and `memory_thread_id`; `LifeIntentBlocker` is a real blocker model with `category`/`status`/`description`/`basis`/`reference_kind` — a near field-for-field precedent for the new `IntentObject`'s `blockers`/`state`/`linked_*` fields.
+- `app.models.work_candidate.WorkCandidate` — "a claim that structured understanding MIGHT be worth turning into real, governed work — never a claim it is authorized," with the only path to real work being `app.work_candidates.service.authorize_work_candidate()`. This is the EXACT "FUTURE PLAN != FUTURE AUTHORITY" distinction `IntentObject`'s own docstrings independently re-derived from scratch.
+- `app.models.mainai_execution.MainAIGoal`/`MainAIPlan`/`MainAITask` — the actual execution-authority-bearing goal lifecycle.
+
+This means a future wiring phase must make an explicit choice before connecting `IntentObject` to anything real: either (a) `IntentObject` becomes an in-memory/UI-facing *view* composed over `LifeIntent`+`WorkCandidate`+`MainAIGoal`, never a fourth independent source of truth, or (b) `IntentObject` is explicitly re-scoped to cover only what those three don't — e.g. purely conversational/workspace-session intents that never become governed work. Leaving this undecided risks two silently-diverging answers to "what is the user's goal" once both systems are live. Not resolved in this round — flagged here so it cannot be wired past accidentally.
+
 ## 6. Open design risks (stated honestly, not glossed over)
 
 - **TAKEOVER_STATE's OS-level enforcement** genuinely differs in feasibility across
