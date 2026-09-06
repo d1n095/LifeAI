@@ -6,6 +6,8 @@ app.operating_shell import from this package). See docs/mainai_v2/
 MAINAI_V2_FILE_INGEST_ATTACHMENT_CHAMBER.md for the design.
 """
 
+from app.attachment_chamber.active_content import scan_active_content
+from app.attachment_chamber.mime_detection import ATTACHMENT_MAGIC_BYTES, detect_magic_kind, detect_mime, looks_like_text
 from app.attachment_chamber.path_safety import (
     UnsafePathError,
     canonical_case,
@@ -50,6 +52,7 @@ from app.attachment_chamber.types import (
 )
 
 __all__ = [
+    "ATTACHMENT_MAGIC_BYTES",
     "QUARANTINE_TRANSITIONS",
     "TERMINAL_QUARANTINE_STATES",
     "ActiveContentRisk",
@@ -72,17 +75,21 @@ __all__ = [
     "UnsafePathError",
     "canonical_case",
     "detect_double_extension",
+    "detect_magic_kind",
+    "detect_mime",
     "events_for_attachment",
     "identity_from_snapshot",
     "identity_to_snapshot",
     "is_hardlinked_elsewhere",
     "is_regular_file_not_symlink",
     "is_safe_relative_path",
+    "looks_like_text",
     "new_chamber_state",
     "normalize_filename",
     "quarantine_relative_location",
     "receive_attachment",
     "resolve_quarantine_path",
+    "scan_active_content",
     "track_artifact",
     "transition_quarantine_state",
     "verify_receipt_chain_intact",
