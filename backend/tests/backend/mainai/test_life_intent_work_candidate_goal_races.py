@@ -146,24 +146,14 @@ def test_life_intent_and_its_linked_goal_have_no_enforced_state_consistency():
     """
 
 
-def test_transition_intent_has_no_state_machine_KNOWN_GAP(superuser_db):
-    """KNOWN GAP, found during this reconciliation's race/concurrency audit, deliberately NOT
-    fixed here (see docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md and this round's
-    final report): app.life_intents.service.transition_intent() performs NO state-machine
-    validation at all -- `state` is a bare string column (see app/models/life_intent.py), and
-    transition_intent() only checks `if old != state`, never whether the FROM/TO pair is a
-    legitimate transition. This test proves the gap is real: a LifeIntent already superseded
-    can be moved straight back to "active" by a stale/late caller (e.g. a worker that read the
-    intent before it was superseded and is only now getting around to updating it), and
-    nothing rejects this. This directly matters to this reconciliation's own OLD GOAL !=
-    CURRENT GOAL guarantee: app.operating_shell.canonical_projection.project_from_life_intent()
-    will faithfully (and correctly, per its OWN contract) reflect whatever `state` the row
-    currently holds -- if the row itself is wrongly resurrected by this gap, the projection
-    layer has no way to know that and will report ACTIVE again. This is a real, existing
-    production gap in app.life_intents.service, outside this round's assigned package
-    (app.operating_shell) and NOT fixed here -- flagged as an OPEN P0/P1 in the final report
-    for a founder/reviewer decision on the correct transition table, rather than guessed at
-    and silently patched."""
+def test_transition_intent_rejects_terminal_state_resurrection_P0_FIXED(superuser_db):
+    """P0 CLOSED (see docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md and
+    docs/mainai_v2/MAINAI_V2_LIFEINTENT_STATE_MACHINE_P0.md): this test used to be named
+    ...KNOWN_GAP and asserted the bug -- a LifeIntent already superseded could be moved
+    straight back to "active" by a stale/late caller, because transition_intent() performed
+    no state-machine validation at all. Re-confirmed via three-check discipline: this
+    assertion FAILS against the pre-fix code (git stash the fix and re-run to verify) and
+    PASSES now that TERMINAL_LIFE_INTENT_STATES/LIFE_INTENT_TRANSITIONS are enforced."""
     owner = _user(superuser_db)
     superuser_db.commit()
     intent = create_intent(superuser_db, owner_id=owner.id, title="Fixa skulderna", idempotency_key="race-key-gap")
@@ -175,7 +165,15 @@ def test_transition_intent_has_no_state_machine_KNOWN_GAP(superuser_db):
     superuser_db.commit()
 
     # A stale/late caller (simulating a race: it decided to move the intent to "active" based
-    # on state it read BEFORE the supersession above) is NOT rejected by the current code --
-    # this assertion documents the gap, it does not endorse it.
-    resurrected = transition_intent(superuser_db, owner_id=owner.id, intent_id=intent.id, state="active", reason="stale worker retry")
-    assert resurrected.state == "active"  # KNOWN GAP: should have been rejected; see docstring above.
+    # on state it read BEFORE the supersession above) is now rejected outright.
+    from app.life_intents.service import TerminalStateError
+
+    with pytest.raises(TerminalStateError):
+        transition_intent(superuser_db, owner_id=owner.id, intent_id=intent.id, state="active", reason="stale worker retry")
+
+    # And the row itself genuinely was not touched by the rejected attempt.
+    superuser_db.expire_all()
+    from app.life_intents.service import _intent as _life_intent_row
+
+    reloaded = _life_intent_row(superuser_db, owner.id, intent.id)
+    assert reloaded.state == "superseded"
