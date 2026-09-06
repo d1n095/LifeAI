@@ -7,6 +7,18 @@ MAINAI_V2_FILE_INGEST_ATTACHMENT_CHAMBER.md for the design.
 """
 
 from app.attachment_chamber.active_content import scan_active_content
+from app.attachment_chamber.archive_safety import (
+    MAX_COMPRESSION_RATIO,
+    MAX_FILES,
+    MAX_NESTING_DEPTH,
+    MAX_PROCESSING_SECONDS,
+    MAX_SINGLE_FILE_UNCOMPRESSED_BYTES,
+    MAX_TOTAL_UNCOMPRESSED_BYTES,
+    ArchiveEntryResult,
+    ArchiveInspectionResult,
+    ArchiveSecurityError,
+    inspect_zip_archive,
+)
 from app.attachment_chamber.mime_detection import ATTACHMENT_MAGIC_BYTES, detect_magic_kind, detect_mime, looks_like_text
 from app.attachment_chamber.path_safety import (
     UnsafePathError,
@@ -53,10 +65,19 @@ from app.attachment_chamber.types import (
 
 __all__ = [
     "ATTACHMENT_MAGIC_BYTES",
+    "MAX_COMPRESSION_RATIO",
+    "MAX_FILES",
+    "MAX_NESTING_DEPTH",
+    "MAX_PROCESSING_SECONDS",
+    "MAX_SINGLE_FILE_UNCOMPRESSED_BYTES",
+    "MAX_TOTAL_UNCOMPRESSED_BYTES",
     "QUARANTINE_TRANSITIONS",
     "TERMINAL_QUARANTINE_STATES",
     "ActiveContentRisk",
     "ActiveContentSignal",
+    "ArchiveEntryResult",
+    "ArchiveInspectionResult",
+    "ArchiveSecurityError",
     "AttachmentChamberError",
     "AttachmentChamberState",
     "AttachmentEvent",
@@ -80,6 +101,7 @@ __all__ = [
     "events_for_attachment",
     "identity_from_snapshot",
     "identity_to_snapshot",
+    "inspect_zip_archive",
     "is_hardlinked_elsewhere",
     "is_regular_file_not_symlink",
     "is_safe_relative_path",
