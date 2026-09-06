@@ -6,6 +6,17 @@ app.operating_shell import from this package). See docs/mainai_v2/
 MAINAI_V2_FILE_INGEST_ATTACHMENT_CHAMBER.md for the design.
 """
 
+from app.attachment_chamber.path_safety import (
+    UnsafePathError,
+    canonical_case,
+    detect_double_extension,
+    is_hardlinked_elsewhere,
+    is_regular_file_not_symlink,
+    is_safe_relative_path,
+    normalize_filename,
+    quarantine_relative_location,
+    resolve_quarantine_path,
+)
 from app.attachment_chamber.service import (
     AttachmentChamberState,
     events_for_attachment,
@@ -58,11 +69,20 @@ __all__ = [
     "QuarantineState",
     "ScanResult",
     "TerminalQuarantineStateError",
+    "UnsafePathError",
+    "canonical_case",
+    "detect_double_extension",
     "events_for_attachment",
     "identity_from_snapshot",
     "identity_to_snapshot",
+    "is_hardlinked_elsewhere",
+    "is_regular_file_not_symlink",
+    "is_safe_relative_path",
     "new_chamber_state",
+    "normalize_filename",
+    "quarantine_relative_location",
     "receive_attachment",
+    "resolve_quarantine_path",
     "track_artifact",
     "transition_quarantine_state",
     "verify_receipt_chain_intact",
