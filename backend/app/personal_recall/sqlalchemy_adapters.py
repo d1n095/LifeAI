@@ -348,3 +348,20 @@ class CanonicalSourceLoader:
                 raise ValueError("incomplete source projection; refusing replacement")
             result.extend(items)
         return result
+
+    def canonical_generation(self, *, owner_id: str, family: str, source_id: str):
+        if owner_id != self.owner_id:
+            raise AdapterAuthorizationError("canonical loader owner mismatch")
+        try:
+            source_uuid = uuid.UUID(source_id)
+        except ValueError:
+            return None
+        if family == "message":
+            row = self.db.execute(select(Message.recall_generation).join(Conversation, Conversation.id == Message.conversation_id).where(Message.id == source_uuid, Conversation.user_id == uuid.UUID(owner_id))).scalar_one_or_none()
+        elif family == "document":
+            row = self.db.execute(select(Document.recall_generation).where(Document.id == source_uuid, Document.uploaded_by == uuid.UUID(owner_id))).scalar_one_or_none()
+        elif family == "memory":
+            row = self.db.execute(select(MemorySourceUnit.recall_generation).where(MemorySourceUnit.id == source_uuid, MemorySourceUnit.owner_id == uuid.UUID(owner_id))).scalar_one_or_none()
+        else:
+            raise ValueError("unsupported canonical source family")
+        return int(row) if row is not None else None

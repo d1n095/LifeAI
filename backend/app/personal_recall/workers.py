@@ -41,11 +41,14 @@ class SourceChange:
     owner_id: str
     source_id: str
     kind: ChangeKind
+    canonical_version: int = 1
+    event_type: str = "updated"
+    version_fenced: bool = False
 
 
 class RecallIndexWorker:
     def __init__(self, path: Path, *, policy: SnapshotStoragePolicy, owner_id: str,
-                 protector: RecallSnapshotProtector, authorize, load_source, test_only=False):
+                 protector: RecallSnapshotProtector, authorize, load_source, load_generation=None, test_only=False):
         if not owner_id or not callable(authorize) or not callable(load_source):
             raise RecallIndexError("explicit owner, authority gate and canonical loader required")
         if not test_only:
@@ -57,6 +60,7 @@ class RecallIndexWorker:
             raise RecallIndexError("worker directory must already exist")
         self.owner_id, self.protector = owner_id, protector
         self.authorize, self.load_source = authorize, load_source
+        self.load_generation = load_generation or getattr(load_source, "canonical_generation", None)
         # Private directory required: SQLite creates journals alongside the database.
         if self.path.parent.stat().st_mode & 0o077:
             raise RecallIndexError("worker directory must be private (0700)")
@@ -65,11 +69,22 @@ class RecallIndexWorker:
                 CREATE TABLE IF NOT EXISTS identity (owner TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS events (
                     seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL,
-                    source TEXT NOT NULL, kind TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);
+                    source TEXT NOT NULL, kind TEXT NOT NULL, canonical_version INTEGER NOT NULL DEFAULT 1,
+                    event_type TEXT NOT NULL DEFAULT 'updated', version_fenced INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS projections (
-                    family TEXT NOT NULL, source TEXT NOT NULL, seq INTEGER NOT NULL,
+                    family TEXT NOT NULL, source TEXT NOT NULL, seq INTEGER NOT NULL, canonical_version INTEGER NOT NULL DEFAULT 1,
                     payload BLOB NOT NULL, PRIMARY KEY(family, source));
             ''')
+            columns = {row[1] for row in db.execute("PRAGMA table_info(events)")}
+            if "canonical_version" not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1")
+            if "event_type" not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'updated'")
+            if "version_fenced" not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN version_fenced INTEGER NOT NULL DEFAULT 0")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(projections)")}
+            if "canonical_version" not in columns:
+                db.execute("ALTER TABLE projections ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1")
             with self._transaction(db):
                 row = db.execute("SELECT owner FROM identity").fetchone()
                 if row is None:
@@ -108,29 +123,43 @@ class RecallIndexWorker:
         self._gate()
         if change.owner_id != self.owner_id or not isinstance(change.kind, ChangeKind):
             raise RecallIndexError("invalid event owner or kind")
-        if any(not isinstance(v, str) or not v or len(v) > 256 for v in (change.event_id, change.source_id)):
+        if change.canonical_version < 1 or any(not isinstance(v, str) or not v or len(v) > 256 for v in (change.event_id, change.source_id)):
             raise RecallIndexError("invalid event identifier")
         with self._connection() as db, self._transaction(db):
-            prior = db.execute("SELECT source, kind FROM events WHERE event_id=?", (change.event_id,)).fetchone()
-            if prior and prior != (change.source_id, change.kind.value):
+            prior = db.execute("SELECT source, kind, canonical_version, event_type, version_fenced FROM events WHERE event_id=?", (change.event_id,)).fetchone()
+            identity = (change.source_id, change.kind.value, change.canonical_version, change.event_type, int(change.version_fenced))
+            if prior and prior != identity:
                 raise RecallIndexError("event identity collision")
-            db.execute("INSERT OR IGNORE INTO events(event_id, source, kind) VALUES (?, ?, ?)",
-                       (change.event_id, change.source_id, change.kind.value))
+            db.execute("INSERT OR IGNORE INTO events(event_id, source, kind, canonical_version, event_type, version_fenced) VALUES (?, ?, ?, ?, ?, ?)",
+                       (change.event_id, change.source_id, change.kind.value, change.canonical_version, change.event_type, int(change.version_fenced)))
 
-    def _aad(self, family, source, seq):
+    def _aad(self, family, source, seq, canonical_version=1):
         return json.dumps(["recall-worker-v1", self.owner_id, family, source, seq,
-                           self.protector.version(), self.protector.key_reference(owner_id=self.owner_id)],
+                           canonical_version, self.protector.version(), self.protector.key_reference(owner_id=self.owner_id)],
                           separators=(",", ":")).encode()
 
     def run_once(self):
         self._gate()
         with self._connection() as db, self._transaction(db):
-            event = db.execute("SELECT seq, source, kind FROM events WHERE done=0 ORDER BY seq LIMIT 1").fetchone()
+            event = db.execute("SELECT seq, source, kind, canonical_version, event_type, version_fenced FROM events WHERE done=0 ORDER BY seq LIMIT 1").fetchone()
             if event is None:
                 return False
-            seq, source, kind = event
+            seq, source, kind, canonical_version, event_type, version_fenced = event
             family = ChangeKind(kind).family
+            prior = db.execute("SELECT canonical_version FROM projections WHERE family=? AND source=?", (family, source)).fetchone()
+            if prior and canonical_version < prior[0]:
+                db.execute("UPDATE events SET done=1 WHERE seq=?", (seq,))
+                return True
             # Loader must provide complete coverage for this one source or raise.
+            if version_fenced and self.load_generation is not None:
+                actual_generation = self.load_generation(owner_id=self.owner_id, family=family, source_id=source)
+                if actual_generation is not None and actual_generation < canonical_version:
+                    raise RecallIndexError("canonical source is behind the outbox event; retrying")
+                if actual_generation is not None and actual_generation > canonical_version:
+                    # Canonical state already includes this event. Ack the obsolete hint;
+                    # the newer outbox row will carry the current generation.
+                    db.execute("UPDATE events SET done=1 WHERE seq=?", (seq,))
+                    return True
             items = list(self.load_source(owner_id=self.owner_id, family=family, source_id=source))
             if len(items) > 10_000 or len({item.item_id for item in items}) != len(items):
                 raise RecallIndexError("source projection incomplete or ambiguous")
@@ -139,9 +168,13 @@ class RecallIndexWorker:
             encoded = json.dumps([_encode(item) for item in items], sort_keys=True).encode()
             if len(encoded) > MAX_SNAPSHOT_BYTES:
                 raise RecallIndexError("source projection exceeds snapshot bound")
-            sealed = self.protector.seal(encoded, owner_id=self.owner_id, associated_data=self._aad(family, source, seq))
+            sealed = self.protector.seal(encoded, owner_id=self.owner_id, associated_data=self._aad(family, source, seq, canonical_version))
             self._gate()
-            db.execute("INSERT OR REPLACE INTO projections VALUES (?, ?, ?, ?)", (family, source, seq, sealed))
+            db.execute("""INSERT INTO projections(family, source, seq, canonical_version, payload) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(family, source) DO UPDATE SET seq=excluded.seq,
+                canonical_version=excluded.canonical_version, payload=excluded.payload
+                WHERE excluded.canonical_version >= projections.canonical_version""",
+                       (family, source, seq, canonical_version, sealed))
             db.execute("UPDATE events SET done=1 WHERE seq=?", (seq,))
             return True
 
@@ -150,10 +183,10 @@ class RecallIndexWorker:
         items = []
         with self._connection() as db, self._transaction(db):
             pending = {(ChangeKind(kind).family, source) for source, kind in db.execute("SELECT source, kind FROM events WHERE done=0")}
-            for family, source, seq, sealed in db.execute("SELECT family, source, seq, payload FROM projections"):
+            for family, source, seq, canonical_version, sealed in db.execute("SELECT family, source, seq, canonical_version, payload FROM projections"):
                 if (family, source) in pending:
                     continue  # Never expose a projection known to require refresh.
-                decoded = self.protector.open(sealed, owner_id=self.owner_id, associated_data=self._aad(family, source, seq))
+                decoded = self.protector.open(sealed, owner_id=self.owner_id, associated_data=self._aad(family, source, seq, canonical_version))
                 rows = [_decode(row) for row in json.loads(decoded)]
                 if any(row.owner_id != self.owner_id or row.source_id != source for row in rows):
                     raise RecallIndexError("stored projection owner/source mismatch")

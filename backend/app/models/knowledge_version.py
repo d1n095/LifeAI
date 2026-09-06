@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String
+from sqlalchemy import BigInteger, JSON, DateTime, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,3 +31,4 @@ class KnowledgeVersion(Base):
     extraction_version: Mapped[str] = mapped_column(String(32))
     raw_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    recall_generation: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)

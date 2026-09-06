@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String, Text
+from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, ForeignKeyConstraint, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -231,3 +231,4 @@ class Document(Base):
     # Only ever set once, at creation, alongside storage_key/file_path — see that column's own
     # comment for why mainai_app cannot UPDATE either of them afterward.
     source_import_batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    recall_generation: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)

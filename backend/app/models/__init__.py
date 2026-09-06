@@ -56,6 +56,8 @@ from app.models.diagnosis import (
 )
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.models.personal_recall_outbox import PersonalRecallOutbox, RecallOutboxEventType
+from app.models.personal_recall_outbox_delivery import PersonalRecallOutboxDelivery
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope, ExecutionScopeProposal
 from app.models.founder_memory import (
@@ -273,6 +275,9 @@ __all__ = [
     "DiagnosisRecord",
     "Document",
     "DocumentChunk",
+    "PersonalRecallOutbox",
+    "RecallOutboxEventType",
+    "PersonalRecallOutboxDelivery",
     "EmailVerificationToken",
     "ExecutionScopeProposal",
     "ExecutionAuthorizationEnvelope",

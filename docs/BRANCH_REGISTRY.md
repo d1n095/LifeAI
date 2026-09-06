@@ -10,7 +10,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `codex/universal-personal-recall` | — | **Live-wiring prep isolated — production activation blocked; do not merge/wire** | Default-off unregistered HTTP factory, durable test-only source invalidation worker, incremental canonical reads, PostgreSQL chunk FTS candidate helper, and process-crash recovery proof. Session/disclosure races hardened. Based on `0958322`; no #245 changes, Claude branch imports, migrations, chat/UI wiring or production registrations. Reviewed crypto/key hierarchy, canonical outbox and cross-document dependency scheduling remain blocked/pending. See `docs/PERSONAL_RECALL_LIVE_WIRING_PREP.md`. |
+| `codex/universal-personal-recall` | — | **Canonical outbox/version propagation prep isolated — production activation blocked; do not merge/wire** | Default-off unregistered handlers, transactional PostgreSQL outbox triggers, monotonic source generations, owner-bound consumer/version fencing, bounded reconciliation, incremental canonical reads, FTS candidate helper and crash recovery proof. Based on `7015fc0`; no #245 changes, Claude branch imports, chat/UI wiring or production registrations. Reviewed AEAD/key hierarchy, content equality at disclosure, outbox retention/operations and external dependency scheduling remain pending. See `docs/PERSONAL_RECALL_CANONICAL_OUTBOX.md`. |
 
 **Integration order:** review after PR #245 certification and Claude's V2 interfaces stabilize;
 then bind this bridge to reviewed V2 key-hierarchy and route interfaces as a separate integration change. The current branch

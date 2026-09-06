@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,3 +45,4 @@ class SourceRelationship(Base):
     relationship_type: Mapped[RelationshipType] = mapped_column(Enum(RelationshipType))
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    recall_generation: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)

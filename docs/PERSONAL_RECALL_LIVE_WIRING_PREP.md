@@ -57,9 +57,11 @@ revocation before commit, duplicate delivery, competing workers, restart reads a
 SQLite uses `synchronous=FULL`. This proves process-crash recovery on the test filesystem;
 it does not establish power-loss behavior, multi-host operation, or malicious rollback safety.
 
-The queue is a derived local inbox, not an atomic canonical outbox. No change producers or
-scheduler are installed. Purge removes content from the logical projection; forensic erasure
-of journals/backups is not established by these tests.
+The local SQLite queue is a derived inbox, not the canonical feed. Migration 0070 now adds
+the PostgreSQL transactional outbox and durable delivery bookkeeping; this document's local
+worker remains opt-in and has no scheduler. Purge removes content from the logical projection;
+forensic erasure of journals/backups is not established by these tests. See
+`PERSONAL_RECALL_CANONICAL_OUTBOX.md` for the current propagation design.
 
 ## Bugs fixed
 
@@ -78,10 +80,7 @@ of journals/backups is not established by these tests.
 
 1. Reviewed AEAD/key hierarchy integration: key provisioning/rotation/revocation, protected
    durable generations/anti-rollback policy, and encrypted persistence/erasure proof.
-2. Canonical transactional outbox or equivalent lossless producer coupling, including
-   dependent memory invalidation. Current local enqueue cannot close the canonical-commit
-   versus event-delivery crash window.
-3. Trusted production grant/session dependencies and canonical content-version binding at
+2. Trusted production grant/session dependencies and canonical content-version binding at
    disclosure. Registry checks establish existence/ownership, not atomic content equality
    across concurrent edits. The source-open facade accepts internal objects; never expose
    those objects/receipts as client-authoritative request inputs.
@@ -110,8 +109,7 @@ ruff check backend/app/personal_recall backend/tests/backend/personal_recall
 git diff --check
 ```
 
-Validation result: 105 unique tests passed. The full suite passed 103 tests; after adding
-the final two canonical cases, all 12 SQLAlchemy integration tests passed. Ruff and
+Validation result: 110 tests passed against migrated PostgreSQL/RLS. Ruff and
 `git diff --check` passed. The original 79 tests remain covered. New tests exercise gated HTTP projections, all event
 kinds, canonical edit/delete/version/memory transitions, actual PostgreSQL FTS, RLS owner
 attacks, stale session caches, concurrency and forced process-crash recovery. Existing
