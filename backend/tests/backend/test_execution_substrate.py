@@ -11,13 +11,14 @@ from app.mainai_execution.substrate import (
     DeterministicFakeProvider,
     DirectorContract,
     ExecutionSubstrate,
+    inspect_worktree,
     LeaseLostError,
     ProviderState,
     SubstrateEventType,
     SubstrateError,
     completion_evidence,
 )
-from app.mainai_execution.production_adapter import DependencyEngine, ProductionRuntimeError, SafeScheduler, freeze_artifact, offline_policy_allows, provider_can_dispatch, quarantine_provider_output, validate_protected_ref
+from app.mainai_execution.production_adapter import DependencyEngine, ProviderProfile, ProductionRuntimeError, RuntimeOrchestrator, SafeScheduler, freeze_artifact, offline_policy_allows, provider_can_dispatch, quarantine_provider_output, validate_protected_ref
 from app.mainai_execution.execution_events import append_execution_event, deliver_execution_events
 from app.models.mainai_execution_event import MainAIExecutionEvent
 from app.models.mainai_job import MainAIJob
@@ -267,11 +268,11 @@ def test_postgres_two_scheduler_claimers_have_one_winner(superuser_db):
     assert sum(value is not None for value in results) == 1
 
 
-def test_postgres_three_owner_three_hundred_job_event_soak(superuser_db):
+def test_postgres_three_owner_five_hundred_job_event_soak(superuser_db):
     owners = [User(email=f"soak-{i}@example.com", password_hash="unused", email_verified=True) for i in range(3)]
     superuser_db.add_all(owners)
     superuser_db.flush()
-    jobs = [MainAIJob(owner_id=owners[i % 3].id, job_type=f"soak_{i % 5}", created_by="soak") for i in range(300)]
+    jobs = [MainAIJob(owner_id=owners[i % 3].id, job_type=f"soak_{i % 5}", created_by="soak") for i in range(500)]
     superuser_db.add_all(jobs)
     superuser_db.flush()
     for index, job in enumerate(jobs):
@@ -281,7 +282,71 @@ def test_postgres_three_owner_three_hundred_job_event_soak(superuser_db):
         append_execution_event(superuser_db, owner_id=owner, job_id=job.id, event_type="JOB_PROGRESS_STATE", metadata={"scope": "bounded"})
     superuser_db.commit()
     from sqlalchemy import func
-    assert superuser_db.query(func.count(MainAIExecutionEvent.id)).scalar() == 900
+    assert superuser_db.query(func.count(MainAIExecutionEvent.id)).scalar() == 1500
+
+
+def test_integrated_eight_job_runtime_orchestration(tmp_path):
+    repo = tmp_path / "runtime-repo"
+    repo.mkdir()
+    base = _repo(repo)
+    runtime = RuntimeOrchestrator(ExecutionSubstrate(tmp_path / "runtime.sqlite"))
+    code_caps = frozenset({"repo_read", "code_edit", "filesystem_write", "test_run"})
+    runtime.register_provider(ProviderProfile("builder-a", code_caps))
+    runtime.register_provider(ProviderProfile("builder-b", code_caps))
+    runtime.register_provider(ProviderProfile("examiner-a", frozenset({"repo_read", "review", "test_run"})))
+    runtime.register_provider(ProviderProfile("examiner-b", frozenset({"repo_read", "review", "test_run"})))
+
+    job_a = runtime.submit(owner_id="owner", program="A", required=set(), provider="builder-a", base_sha=base, worktree=str(repo))
+    claim_a, _ = runtime.claim(job_a.job_id, owner_id="owner", worker_id="builder-a")
+    (repo / "state.txt").write_text("A")
+    subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "A"], check=True)
+    artifact_a = runtime.freeze(job_id=job_a.job_id, attempt_id=claim_a.attempt_id, builder_id="builder-a", examiner_id="examiner-a", worktree=str(repo), base_sha=base)
+    assert not runtime.examine(job_id=job_a.job_id, examiner_id="examiner-a", sha=artifact_a.sha, passed=False).passed
+    runtime.director.report_completion(claim_a, CompletionEnvelope(completion_evidence(claim_a), "builder-a", artifact_a.sha, ("state.txt",), ("pytest://runtime",)))
+
+    base_b = artifact_a.sha
+    job_b = runtime.submit(owner_id="owner", program="B", required=set(), provider="builder-a", base_sha=base_b, worktree=str(repo))
+    claim_b, _ = runtime.claim(job_b.job_id, owner_id="owner", worker_id="builder-a")
+    (repo / "state.txt").write_text("B")
+    subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "B"], check=True)
+    artifact_b = runtime.freeze(job_id=job_b.job_id, attempt_id=claim_b.attempt_id, builder_id="builder-a", examiner_id="examiner-b", worktree=str(repo), base_sha=base_b)
+    assert runtime.examine(job_id=job_b.job_id, examiner_id="examiner-b", sha=artifact_b.sha, passed=True).passed
+    assert artifact_a.sha != artifact_b.sha and runtime.certified[job_b.job_id] == artifact_b.sha
+    runtime.director.report_completion(claim_b, CompletionEnvelope(completion_evidence(claim_b), "builder-a", artifact_b.sha, ("state.txt",), ("pytest://runtime",)))
+
+    job_c = runtime.submit(owner_id="owner", program="C", provider="builder-a")
+    claim_c, _ = runtime.claim(job_c.job_id, owner_id="owner", worker_id="builder-a")
+    runtime.providers["builder-a"] = ProviderProfile("builder-a", code_caps, state="exhausted")
+    claim_c2, profile_c, old_claim = runtime.failover(job_c.job_id, owner_id="owner", required=set(), worker_id="builder-b")
+    assert profile_c.name == "builder-b" and claim_c2.attempt_id != old_claim.attempt_id
+    with pytest.raises(LeaseLostError):
+        runtime.director.report_progress(claim_c, phase="late", current=1)
+
+    job_d = runtime.submit(owner_id="owner", program="D", provider="builder-b", base_sha=artifact_b.sha, worktree=str(repo))
+    claim_d, _ = runtime.claim(job_d.job_id, owner_id="owner", worker_id="builder-b")
+    (repo / "state.txt").write_text("D")
+    subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "D"], check=True)
+    observed_d = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    assert observed_d != claim_d.base_sha and inspect_worktree(str(repo))["sha"] == observed_d
+
+    job_e = runtime.submit(owner_id="owner", program="E", provider="builder-b")
+    dirty = repo / "dirty.txt"
+    dirty.write_text("uncommitted")
+    assert inspect_worktree(str(repo))["clean"] is False
+    runtime.director.cancel_job(job_e.job_id)
+    dirty.unlink()
+
+    with pytest.raises(ProductionRuntimeError):
+        validate_protected_ref("#245", None)
+
+    job_g = runtime.submit(owner_id="owner", program="G", provider="builder-b")
+    claim_g, _ = runtime.claim(job_g.job_id, owner_id="owner", worker_id="builder-b")
+    runtime.director.cancel_job(job_g.job_id)
+    with pytest.raises(LeaseLostError):
+        runtime.director.report_progress(claim_g, phase="late", current=1)
 
 
 def test_deterministic_crash_matrix_restarts_without_stale_authority(tmp_path):

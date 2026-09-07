@@ -7,7 +7,7 @@ policy. A scheduler may claim work only when explicitly enabled and at autonomy 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import uuid
 
@@ -24,6 +24,98 @@ PROTECTED_REFS = frozenset({"#245", "818dfb732da47901eb5ae06ffdd9c829fe00c4c5", 
 
 class ProductionRuntimeError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ProviderProfile:
+    name: str
+    capabilities: frozenset[str]
+    state: str = "available"
+    authorized: bool = True
+    disclosure_scope: str = "metadata"
+
+
+@dataclass(frozen=True)
+class ReviewRecord:
+    job_id: str
+    sha: str
+    examiner_id: str
+    passed: bool
+    reviewed_at: str
+
+
+class RuntimeOrchestrator:
+    """Deterministic, provider-agnostic runtime path used by the Director seam tests.
+
+    Provider profiles are capability and availability observations only.  The substrate
+    claim/lease remains the authority and every reassignment creates a fresh attempt.
+    """
+
+    def __init__(self, substrate):
+        from app.mainai_execution.substrate import DirectorContract
+        self.substrate = substrate
+        self.director = DirectorContract(substrate)
+        self.providers: dict[str, ProviderProfile] = {}
+        self.attempts: dict[str, tuple[object, str]] = {}
+        self.frozen: dict[str, ArtifactFreeze] = {}
+        self.reviews: dict[str, ReviewRecord] = {}
+        self.certified: dict[str, str] = {}
+
+    def register_provider(self, profile: ProviderProfile) -> None:
+        self.providers[profile.name] = profile
+
+    def submit(self, *, owner_id: str, program: str, required: set[str] | None = None, provider: str | None = None, base_sha: str | None = None, worktree: str | None = None):
+        return self.director.submit_job(owner_id=owner_id, program=program, provider=provider, base_sha=base_sha, worktree=worktree, capabilities=tuple(sorted(required or set())), max_active=100)
+
+    def _provider(self, required: set[str], *, examiner: bool = False, disclosure_scope: str = "metadata") -> ProviderProfile:
+        for profile in self.providers.values():
+            if profile.state != "available" or not profile.authorized:
+                continue
+            if not required.issubset(profile.capabilities):
+                continue
+            if examiner and "review" not in profile.capabilities:
+                continue
+            if disclosure_scope == "full" and profile.disclosure_scope != "full":
+                continue
+            return profile
+        raise ProductionRuntimeError("no compatible authorized provider")
+
+    def claim(self, job_id: str, *, owner_id: str, worker_id: str, required: set[str] | None = None):
+        profile = self._provider(required or set())
+        claim = self.director.claim_job(job_id, owner_id=owner_id, worker_id=worker_id)
+        self.attempts[job_id] = (claim, profile.name)
+        return claim, profile
+
+    def failover(self, job_id: str, *, owner_id: str, required: set[str], worker_id: str):
+        previous = self.attempts.get(job_id)
+        if previous is None:
+            raise ProductionRuntimeError("job has no current attempt")
+        profile = self._provider(required)
+        self.substrate.abandon_stale(now=datetime.now(timezone.utc) + timedelta(seconds=61))
+        self.substrate.retry_or_reassign(job_id, new_provider=profile.name)
+        claim = self.director.claim_job(job_id, owner_id=owner_id, worker_id=worker_id)
+        self.attempts[job_id] = (claim, profile.name)
+        return claim, profile, previous[0]
+
+    def freeze(self, *, job_id: str, attempt_id: str, builder_id: str, examiner_id: str, worktree: str, base_sha: str) -> ArtifactFreeze:
+        artifact = freeze_artifact(job_id=job_id, attempt_id=attempt_id, builder_id=builder_id, examiner_id=examiner_id, worktree=worktree, base_sha=base_sha)
+        self.frozen[job_id] = artifact
+        return artifact
+
+    def examine(self, *, job_id: str, examiner_id: str, sha: str, passed: bool) -> ReviewRecord:
+        artifact = self.frozen.get(job_id)
+        if artifact is None or artifact.sha != sha:
+            raise ProductionRuntimeError("review SHA is not the frozen artifact")
+        if examiner_id == artifact.builder_id:
+            raise ProductionRuntimeError("builder cannot examine its own artifact")
+        profile = self.providers.get(examiner_id)
+        if profile is None or "review" not in profile.capabilities or not profile.authorized or profile.state != "available":
+            raise ProductionRuntimeError("examiner is not authorized")
+        record = ReviewRecord(job_id, sha, examiner_id, passed, datetime.now(timezone.utc).isoformat())
+        self.reviews[job_id] = record
+        if passed:
+            self.certified[job_id] = sha
+        return record
 
 
 @dataclass(frozen=True)
