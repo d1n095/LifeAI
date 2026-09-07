@@ -400,6 +400,8 @@ class ExaminerAssignment:
     scope: str
     known_risks: tuple[str, ...]
     test_expectations: tuple[str, ...]
+    workforce_assignment_ref: uuid.UUID | None = None
+    external_lease_ref: uuid.UUID | None = None
     created_at: datetime = field(default_factory=_utcnow)
 
 
