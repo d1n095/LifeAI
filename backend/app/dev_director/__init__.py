@@ -38,6 +38,12 @@ from app.dev_director.loop import (
     is_blocked_while_offline,
     run_program_tick,
 )
+from app.dev_director.git_pr_broker import (
+    GitWorktreeBrokerContract,
+    PullRequestProposal,
+    PullRequestProposalError,
+    build_pr_proposal,
+)
 from app.dev_director.provider_selection import select_builder_provider
 from app.dev_director.job import (
     detect_job_conflicts,
@@ -126,6 +132,7 @@ __all__ = [
     "ExaminerVerdictError",
     "ExaminerVerdictRecord",
     "ExternalProviderLease",
+    "GitWorktreeBrokerContract",
     "Job",
     "JobEvent",
     "JobHeartbeat",
@@ -136,6 +143,8 @@ __all__ = [
     "NoAvailableProvider",
     "NoReadyJob",
     "Program",
+    "PullRequestProposal",
+    "PullRequestProposalError",
     "ProtectedArtifact",
     "ProtectedArtifactViolationError",
     "ProviderCapabilityProfile",
@@ -144,6 +153,7 @@ __all__ = [
     "ValidationResult",
     "assert_artifact_not_protected",
     "assess_job_liveness",
+    "build_pr_proposal",
     "create_fix_job",
     "detect_job_conflicts",
     "handle_confirmed_abandoned_job",
