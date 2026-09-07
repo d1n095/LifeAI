@@ -599,9 +599,13 @@ def test_no_import_of_sibling_v2_packages_or_codex_branch():
 
 def test_no_direct_production_module_import_beyond_docstring_citation():
     """This package DOES reference real production modules by NAME in docstrings (see the
-    reconciliation doc's own decision) but must not actually IMPORT them -- reading/
-    evaluating real production state is a real production call, out of scope for this
-    isolated, unwired package."""
+    reconciliation doc's own decision) but, with ONE deliberate, documented exception
+    (`budget_integration.py` -- see docs/mainai_v2/MAINAI_V2_SPEND_AUTHORITY_
+    RECONCILIATION.md and that module's own docstring for why), must not actually IMPORT
+    them -- reading/evaluating real production state is a real production call, out of scope
+    for the rest of this isolated, unwired package. This mirrors
+    app.operating_shell.canonical_projection's own identical, earlier-established exception
+    from the Intent/Goal reconciliation round."""
     import app.dev_director as pkg
 
     package_dir = Path(pkg.__file__).parent
@@ -609,9 +613,27 @@ def test_no_direct_production_module_import_beyond_docstring_citation():
         r"^\s*(import|from)\s+app\.(development_supervisor|development_driver|mainai_execution|workforce|execution_envelopes|provider_spend|provider_planning|mainai_startup_readiness|autonomous_gap|capability_reality)\b",
         re.MULTILINE,
     )
+    deliberate_exceptions = {"budget_integration.py"}
     for py_file in package_dir.glob("*.py"):
+        if py_file.name in deliberate_exceptions:
+            continue
         source = py_file.read_text()
         assert not forbidden.search(source), f"{py_file.name} imports a real production module directly"
+
+
+def test_budget_integration_is_the_only_module_with_real_production_imports():
+    """The flip side of the test above: confirms the exception is exactly one file, not a
+    silently-widening set -- a future PR adding a second such module should have to touch
+    this test deliberately, not slip through unnoticed."""
+    import app.dev_director as pkg
+
+    package_dir = Path(pkg.__file__).parent
+    forbidden = re.compile(
+        r"^\s*(import|from)\s+app\.(development_supervisor|development_driver|mainai_execution|workforce|execution_envelopes|provider_spend|provider_planning|mainai_startup_readiness|autonomous_gap|capability_reality)\b",
+        re.MULTILINE,
+    )
+    matches = [py_file.name for py_file in package_dir.glob("*.py") if forbidden.search(py_file.read_text())]
+    assert matches == ["budget_integration.py"]
 
 
 def test_no_free_text_provider_command_ever_reaches_a_state_transition():

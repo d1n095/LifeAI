@@ -11,6 +11,14 @@ is a new coordination tier explicitly designed to compose with real infrastructu
 docs/mainai_v2/MAINAI_V2_AUTONOMOUS_DEVELOPMENT_DIRECTOR_RECONCILIATION.md for the design.
 """
 
+from app.dev_director.budget_integration import (
+    BudgetIntegrationError,
+    can_reserve_budget,
+    release_unused_reservation,
+    remaining_budget,
+    reserve_budget,
+    settle_job_cost,
+)
 from app.dev_director.builder_examiner import (
     new_builder_assignment,
     new_examiner_assignment,
@@ -129,6 +137,7 @@ __all__ = [
     "AutonomyLevelRequiresFounderAuthorizationError",
     "BudgetEnvelope",
     "BudgetExceededError",
+    "BudgetIntegrationError",
     "BuilderAdapter",
     "BuilderAssignment",
     "BuilderExaminerCollusionError",
@@ -171,6 +180,7 @@ __all__ = [
     "assert_artifact_not_protected",
     "assess_job_liveness",
     "build_pr_proposal",
+    "can_reserve_budget",
     "create_fix_job",
     "generate_founder_brief",
     "recover_program_state",
@@ -189,11 +199,15 @@ __all__ = [
     "record_examiner_verdict",
     "record_liveness_strike",
     "release_budget_reservation",
+    "release_unused_reservation",
+    "remaining_budget",
+    "reserve_budget",
     "reserve_from_budget",
     "run_program_tick",
     "select_builder_provider",
     "select_failover_provider",
     "set_autonomy_level",
+    "settle_job_cost",
     "submit_builder_result",
     "TickOutcome",
     "TickResult",
