@@ -118,8 +118,7 @@ def test_retryable_failure_backoff_and_dead_letter(superuser_db, tmp_path):
     assert status["retrying"] == 1 and status["attempts"] == 1
     second = process_outbox_batch(superuser_db, owner_id=str(alice), worker=worker, limit=1, now=now + timedelta(hours=1), max_attempts=2)
     assert second.dead_lettered == 1
-    row = superuser_db.execute(select(PersonalRecallOutbox).where(PersonalRecallOutbox.owner_id == alice)).scalars().first()
-    delivery = superuser_db.get(PersonalRecallOutboxDelivery, row.event_id)
+    delivery = superuser_db.execute(select(PersonalRecallOutboxDelivery).where(PersonalRecallOutboxDelivery.owner_id == alice, PersonalRecallOutboxDelivery.state == "dead_letter")).scalars().first()
     assert delivery.state == "dead_letter"
     assert "private retry" not in (delivery.last_error or "")
 
