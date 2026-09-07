@@ -16,6 +16,7 @@ from app.mainai_execution.substrate import (
     SubstrateError,
     completion_evidence,
 )
+from app.mainai_execution.production_adapter import ProductionRuntimeError, SafeScheduler, validate_protected_ref
 from app.providers.base import Message, ProviderError
 
 
@@ -134,3 +135,15 @@ def test_journal_is_append_only_and_owner_scoped(tmp_path):
     with store._connect() as db:
         with pytest.raises(__import__("sqlite3").IntegrityError, match="append-only"):
             db.execute("DELETE FROM recovery_journal")
+
+
+def test_production_scheduler_is_opt_in_and_protected_refs_are_hard_blocked():
+    class NoopAdapter:
+        def claim_next(self, **kwargs):
+            return None
+    with pytest.raises(ProductionRuntimeError, match="disabled"):
+        SafeScheduler(NoopAdapter()).tick(worker_id="worker")
+    with pytest.raises(ProductionRuntimeError, match="protected"):
+        validate_protected_ref("#245", "deadbeef")
+    with pytest.raises(ProductionRuntimeError, match="protected"):
+        validate_protected_ref("feature", "818dfb732da47901eb5ae06ffdd9c829fe00c4c5")
