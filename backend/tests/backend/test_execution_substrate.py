@@ -17,6 +17,10 @@ from app.mainai_execution.substrate import (
     completion_evidence,
 )
 from app.mainai_execution.production_adapter import DependencyEngine, ProductionRuntimeError, SafeScheduler, freeze_artifact, offline_policy_allows, quarantine_provider_output, validate_protected_ref
+from app.mainai_execution.execution_events import append_execution_event, deliver_execution_events
+from app.models.mainai_execution_event import MainAIExecutionEvent
+from app.models.mainai_job import MainAIJob
+from app.models.user import User
 from app.providers.base import Message, ProviderError
 
 
@@ -199,3 +203,35 @@ def test_deterministic_two_hundred_job_soak_no_double_claims(tmp_path):
     assert len({claim.job_id for claim in claims}) == 200
     assert len({claim.attempt_id for claim in claims}) == 200
     assert len(director.substrate.journal_events()) >= 800
+
+
+def test_postgres_execution_outbox_is_idempotent_owner_scoped_and_dead_letters(superuser_db):
+    alice_user = User(email="exec-outbox-alice@example.com", password_hash="unused", email_verified=True)
+    bob_user = User(email="exec-outbox-bob@example.com", password_hash="unused", email_verified=True)
+    superuser_db.add_all([alice_user, bob_user])
+    superuser_db.flush()
+    alice, bob = alice_user.id, bob_user.id
+    job = MainAIJob(owner_id=alice, job_type="test", created_by="test")
+    superuser_db.add(job)
+    superuser_db.flush()
+    event_id = __import__("uuid").uuid4()
+    append_execution_event(superuser_db, owner_id=alice, job_id=job.id, event_type="JOB_CLAIMED", metadata={"provider": "fake", "secret": "redact"}, event_id=event_id)
+    append_execution_event(superuser_db, owner_id=alice, job_id=job.id, event_type="JOB_CLAIMED", metadata={"provider": "fake"}, event_id=event_id)
+    superuser_db.commit()
+    seen = []
+    assert deliver_execution_events(superuser_db, owner_id=alice, handler=seen.append) == (1, 0, 0)
+    assert seen[0]["metadata"] == {"provider": "fake"}
+    bob_job = MainAIJob(owner_id=bob, job_type="test", created_by="test")
+    superuser_db.add(bob_job)
+    superuser_db.flush()
+    append_execution_event(superuser_db, owner_id=bob, job_id=bob_job.id, event_type="PROVIDER_FAILED")
+    superuser_db.commit()
+    from app.db import SessionLocal
+    from app.request_context import current_user_id
+    token = current_user_id.set(str(alice))
+    scoped = SessionLocal()
+    try:
+        assert scoped.query(MainAIExecutionEvent).filter(MainAIExecutionEvent.owner_id == bob).count() == 0
+    finally:
+        scoped.close()
+        current_user_id.reset(token)
