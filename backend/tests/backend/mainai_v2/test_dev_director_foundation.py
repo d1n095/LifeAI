@@ -372,17 +372,29 @@ def test_completion_evidence_flags_failing_test():
 def test_no_function_in_package_accepts_raw_provider_text_and_changes_state():
     """PROVIDER OUTPUT != MAINAI COMMAND: no public function takes a bare `str` as its ONLY
     non-keyword-only positional argument and is documented/named as recording/applying a
-    state change from it."""
+    state change from it.
+
+    Checks the REAL parameter shape via inspect.signature(), not a name-substring match --
+    an earlier version of this test flagged any function whose NAME merely contained "apply"
+    (e.g. Part 2's apply_pending_builder_result(job: Job, *, result_sha: str), whose actual
+    first positional argument is a typed Job, never a bare str) as a false positive. The
+    exact "structural check inspects names/docstrings instead of real code" bug shape this
+    whole campaign has caught and fixed multiple times elsewhere -- caught again here, on
+    this test itself, and fixed to check the real signature instead."""
     import app.dev_director as pkg
     import inspect
 
-    suspicious_names = {"apply", "execute", "run_command", "command"}
     for name in pkg.__all__:
         obj = getattr(pkg, name)
         if not inspect.isfunction(obj):
             continue
-        lowered = name.lower()
-        assert not any(s in lowered for s in suspicious_names), f"{name} looks like it might execute raw provider text as a command"
+        sig = inspect.signature(obj)
+        positional = [
+            p for p in sig.parameters.values()
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if len(positional) == 1 and positional[0].annotation in (str, "str"):
+            pytest.fail(f"{name} takes a bare str as its ONLY non-keyword-only positional argument -- verify it does not treat it as a command")
 
 
 # --- Package-level structural tests. --------------------------------------------------------
