@@ -126,9 +126,25 @@ def recover_program_state(
     return RecoveryPlan(program_id=program.program_id, decisions=tuple(decisions), generated_at=now)
 
 
+class ConflictingBuilderResultError(ValueError):
+    """Two completion messages with DIFFERENT SHAs arrived for the same job -- the second
+    must never silently overwrite the first (self-caught bug: an earlier version of this
+    function unconditionally assigned result_sha on every call, which would have silently
+    replaced an already-applied SHA with a second, conflicting one if this were ever called
+    twice -- e.g. once from a genuine restart-recovery path and once from a duplicate/
+    replayed message). First-write-wins; a conflicting second write is flagged, not applied."""
+
+
 def apply_pending_builder_result(job: Job, *, result_sha: str) -> Job:
     """Real re-application of a pending builder result found during recovery -- never
-    re-runs the builder, never drops the evidence."""
+    re-runs the builder, never drops the evidence. Idempotent for a REPEATED delivery of the
+    SAME sha (a genuine duplicate message); raises for a CONFLICTING delivery of a DIFFERENT
+    sha to a job that already has one recorded."""
+    if job.result_artifact_sha is not None and job.result_artifact_sha != result_sha:
+        raise ConflictingBuilderResultError(
+            f"job {job.job_id} already has result_artifact_sha={job.result_artifact_sha!r}; "
+            f"refusing to silently overwrite it with a different sha {result_sha!r}"
+        )
     job.result_artifact_sha = result_sha
     if job.state == JobState.RUNNING:
         return transition_job(job, to_state=JobState.VERIFYING, note="recovered: pending builder result re-applied after restart")

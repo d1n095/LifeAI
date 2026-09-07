@@ -47,6 +47,7 @@ from app.dev_director.git_pr_broker import (
 )
 from app.dev_director.provider_selection import select_builder_provider
 from app.dev_director.recovery import (
+    ConflictingBuilderResultError,
     JobRecoveryDecision,
     RecoveryAction,
     RecoveryPlan,
@@ -133,6 +134,7 @@ __all__ = [
     "BuilderExaminerCollusionError",
     "BuilderResult",
     "CompletionEvidence",
+    "ConflictingBuilderResultError",
     "ConflictReport",
     "DevDirectorError",
     "ExaminerAdapter",
