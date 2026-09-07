@@ -73,7 +73,7 @@ from app.dev_director.types import (
     ProtectedArtifactViolationError,
     ProviderCapabilityProfile,
     ProviderUsageState,
-    TestResultRecord,
+    JobTestResult,
     ValidationResult,
 )
 
@@ -111,7 +111,7 @@ __all__ = [
     "ProtectedArtifactViolationError",
     "ProviderCapabilityProfile",
     "ProviderUsageState",
-    "TestResultRecord",
+    "JobTestResult",
     "ValidationResult",
     "assert_artifact_not_protected",
     "detect_job_conflicts",

@@ -435,7 +435,7 @@ class ExaminerVerdictError(DevDirectorError):
 
 
 @dataclass(frozen=True)
-class TestResultRecord:
+class JobTestResult:
     command: str
     passed: bool
     summary: str
@@ -456,7 +456,7 @@ class CompletionEvidence:
     working_tree_state: str  # "clean" | "dirty" | "unknown"
     changed_files: tuple[str, ...]
     test_commands: tuple[str, ...]
-    test_results: tuple[TestResultRecord, ...]
+    test_results: tuple[JobTestResult, ...]
     open_blockers: tuple[str, ...]
     p0_count: int
     p1_count: int

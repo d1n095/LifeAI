@@ -31,7 +31,7 @@ from app.dev_director import (
     ProtectedArtifactViolationError,
     ProviderCapabilityProfile,
     ProviderUsageState,
-    TestResultRecord,
+    JobTestResult,
     assert_artifact_not_protected,
     detect_job_conflicts,
     lease_scoped_to_original_request,
@@ -341,7 +341,7 @@ def _evidence(**overrides) -> CompletionEvidence:
     base = dict(
         branch="feature-x", base_sha="base1", new_sha="new1", working_tree_state="clean",
         changed_files=("app/foo.py",), test_commands=("pytest",),
-        test_results=(TestResultRecord(command="pytest", passed=True, summary="40 passed"),),
+        test_results=(JobTestResult(command="pytest", passed=True, summary="40 passed"),),
         open_blockers=(), p0_count=0, p1_count=0, production_wiring_state="none", merge_state="unmerged",
     )
     base.update(overrides)
@@ -365,7 +365,7 @@ def test_completion_evidence_flags_open_p0():
 
 
 def test_completion_evidence_flags_failing_test():
-    result = validate_completion_evidence(_evidence(test_results=(TestResultRecord(command="pytest", passed=False, summary="1 failed"),)))
+    result = validate_completion_evidence(_evidence(test_results=(JobTestResult(command="pytest", passed=False, summary="1 failed"),)))
     assert not result.valid
 
 
