@@ -300,11 +300,17 @@ def run_scenario_b(*, owner_id: uuid.UUID | None = None) -> SoakResult:
     jobs.append(fix_job)
     transition_job(fix_job, to_state=JobState.READY)
 
-    # First examiner (Claude) already used on job; different examiner (Cursor) must PASS the fix.
+    # A real composed caller dispatching a fix job deliberately excludes identities already
+    # used on this goal -- select_builder_provider()/select_failover_provider() are pure,
+    # criteria-driven functions with no memory of prior ticks (by design, see their own
+    # docstrings), so narrowing the candidate set here is the REAL, correct way a caller
+    # gets "a genuinely different builder/examiner on the fix," not an accident of ordering.
+    fix_builders = tuple(p for p in builders if p.provider_identity != "claude")  # exclude the original builder
+    fix_examiners = tuple(p for p in examiners if p.provider_identity not in ("claude", "codex"))  # exclude both original identities
     b_script2 = {fix_job.job_id: ("SHA-C", "dev-director/job-fix", True)}
     e_script2 = {fix_job.job_id: (ExaminerVerdict.PASS, ("regression test added, verified",), "clean now")}
     tick2 = run_program_tick(
-        program, tuple(jobs), builder_candidates=builders, examiner_candidates=examiners,
+        program, tuple(jobs), builder_candidates=fix_builders, examiner_candidates=fix_examiners,
         builder_adapter=DeterministicBuilderAdapter(b_script2, log=log, clock=clock),
         examiner_adapter=DeterministicExaminerAdapter(e_script2, log=log, clock=clock),
     )
@@ -372,6 +378,7 @@ def run_scenario_c(*, owner_id: uuid.UUID | None = None) -> SoakResult:
 
     codex = _profile("codex")
     claude = _profile("claude")
+    cursor = _profile("cursor")
     builders = (codex, claude)
     examiners = (claude, codex)
 
@@ -390,13 +397,21 @@ def run_scenario_c(*, owner_id: uuid.UUID | None = None) -> SoakResult:
     job2 = new_job(program_id=program.program_id, goal_description="job 2, must failover")
     transition_job(job2, to_state=JobState.READY)
     jobs.append(job2)
+    # examiner_candidates deliberately includes a genuinely-available THIRD identity (cursor):
+    # since codex is exhausted, claude is the only eligible builder, and run_program_tick()
+    # excludes the selected builder's own identity from examiner selection -- an examiner pool
+    # of just (claude, codex_exhausted) would leave ZERO eligible examiners (claude excluded
+    # as builder, codex_exhausted filtered by usage_state), which is a bug in the SCENARIO'S
+    # own candidate-list construction, not in provider_selection.py (same lesson as Scenario B:
+    # select_builder_provider() is a pure, memoryless, criteria-only function -- a caller must
+    # supply a genuinely eligible pool for each role, not assume one emerges from reuse).
     tick2 = run_program_tick(
-        program, tuple(jobs), builder_candidates=(codex_exhausted, claude), examiner_candidates=(claude, codex_exhausted),
+        program, tuple(jobs), builder_candidates=(codex_exhausted, claude), examiner_candidates=(claude, codex_exhausted, cursor),
         builder_adapter=DeterministicBuilderAdapter({job2.job_id: ("SHA-2", "b2", True)}, log=log, clock=clock),
         examiner_adapter=DeterministicExaminerAdapter({job2.job_id: (ExaminerVerdict.PASS, ("ok",), "ok")}, log=log, clock=clock),
     )
     assert tick2.outcome == TickOutcome.JOB_CERTIFIED
-    assert job2.review_evidence.examiner_identity == "claude"
+    assert job2.review_evidence.examiner_identity == "cursor"
     # The builder must have been claude (the only AVAILABLE one), never codex.
     assert job2.result_artifact_sha == "SHA-2"
 
@@ -406,8 +421,9 @@ def run_scenario_c(*, owner_id: uuid.UUID | None = None) -> SoakResult:
     transition_job(job3, to_state=JobState.READY)
     jobs.append(job3)
     claude_exhausted = _profile("claude", usage_state=ProviderUsageState.USAGE_EXHAUSTED)
+    cursor_exhausted = _profile("cursor", usage_state=ProviderUsageState.USAGE_EXHAUSTED)
     tick3 = run_program_tick(
-        program, tuple(jobs), builder_candidates=(codex_exhausted, claude_exhausted), examiner_candidates=(claude_exhausted, codex_exhausted),
+        program, tuple(jobs), builder_candidates=(codex_exhausted, claude_exhausted, cursor_exhausted), examiner_candidates=(claude_exhausted, codex_exhausted, cursor_exhausted),
         builder_adapter=DeterministicBuilderAdapter({}, log=log, clock=clock),
         examiner_adapter=DeterministicExaminerAdapter({}, log=log, clock=clock),
     )
@@ -579,10 +595,15 @@ def run_scenario_g(*, owner_id: uuid.UUID | None = None) -> SoakResult:
         verdict=ExaminerVerdict.PASS, evidence=("looks fine",), reason="ok",
     )
     evidence = _completion_evidence(branch="b", sha=PR_245_PROTECTED_ARTIFACT.ref)
+    # build_pr_proposal()'s own protected-ref check raises ProtectedArtifactViolationError
+    # directly (from assert_artifact_not_protected()) -- NOT wrapped in PullRequestProposalError.
+    # Catching the real, specific exception type actually raised, not a plausible-looking
+    # sibling type, is the point of this proof (same "verify the real thing, don't assume"
+    # discipline as everywhere else in this harness).
     raised = None
     try:
         build_pr_proposal(job, examiner_verdict=fake_verdict, evidence=evidence, protected_artifacts=(PR_245_PROTECTED_ARTIFACT,))
-    except PullRequestProposalError as exc:
+    except (PullRequestProposalError, ProtectedArtifactViolationError) as exc:
         raised = exc
     log.record(at=clock.now(), kind="pr_proposal_protected_ref_rejected", job_id=job.job_id, detail=str(raised))
     assert raised is not None, "scenario G: build_pr_proposal() must independently refuse to propose a PR for a protected ref"
@@ -700,12 +721,26 @@ def run_overnight_soak(*, num_jobs: int = 50, seed: int = 20260101, owner_id: uu
     terminated_cleanly = True
     conflicts_seen = 0
 
+    from app.dev_director.types import TERMINAL_JOB_STATES
+
+    def _resolved_for_soak(j: Job) -> bool:
+        """A job counts as "done, nothing left for this soak loop to drive" once it's in a
+        real terminal state, BLOCKED, OR stuck in NEEDS_FIX after exhausting MAX_FIX_ATTEMPTS.
+        The last case is a deliberate dev_director design choice (fix_loop.py: a job that
+        exhausts fix attempts is left in NEEDS_FIX forever, awaiting a real founder decision --
+        never auto-FAILED, since "a dead job proves nothing about the work itself"). Treating
+        it as anything other than terminal-for-the-soak's-own-purposes was a genuine bug in
+        THIS harness's own loop (not in dev_director): the soak's termination check didn't
+        recognize this state, so it span until the safety cap instead of recognizing the
+        soak had reached its real, intended steady state."""
+        if j.state in TERMINAL_JOB_STATES or j.state == JobState.BLOCKED:
+            return True
+        return j.state == JobState.NEEDS_FIX and j.attempt_number >= MAX_FIX_ATTEMPTS
+
     while ticks_run < _MAX_TICKS_SAFETY_CAP:
         active_jobs = _dedup_jobs(tuple(jobs))
-        # Terminal check: every job in a real terminal state -> done.
-        from app.dev_director.types import TERMINAL_JOB_STATES
-
-        if all(j.state in TERMINAL_JOB_STATES or j.state == JobState.BLOCKED for j in active_jobs):
+        # Terminal check: every job in a real terminal (or soak-resolved) state -> done.
+        if all(_resolved_for_soak(j) for j in active_jobs):
             break
 
         conflicts = detect_job_conflicts(active_jobs)
@@ -735,7 +770,7 @@ def run_overnight_soak(*, num_jobs: int = 50, seed: int = 20260101, owner_id: uu
             # or a real ambiguous tie. Advance clock and continue; if this persists, the
             # terminal check above will eventually stop the loop via the safety cap, reported
             # as a failure if it's a genuine deadlock rather than legitimate blocked jobs.
-            still_pending = any(j.state not in TERMINAL_JOB_STATES and j.state != JobState.BLOCKED for j in active_jobs)
+            still_pending = any(not _resolved_for_soak(j) for j in active_jobs)
             if not still_pending:
                 break
             ticks_run += 1
@@ -766,6 +801,16 @@ def run_overnight_soak(*, num_jobs: int = 50, seed: int = 20260101, owner_id: uu
             jobs.append(result.new_job)
             attempts_by_job[result.new_job.job_id] = attempts_by_job[job_for_tick.job_id]
             fate_by_job[result.new_job.job_id] = fate_by_job[job_for_tick.job_id]
+            # create_fix_job()'s own docstring is explicit that the OLD job is "left for the
+            # caller to transition to NEEDS_FIX/SUPERSEDED" -- run_program_tick() only leaves
+            # it at NEEDS_FIX. A real composed caller dispatching a fix job is responsible for
+            # marking the superseded original SUPERSEDED once the fix is dispatched, exactly
+            # as Scenario B's own directive text describes ("stays NEEDS_FIX/SUPERSEDED").
+            # Self-caught bug: omitting this left 20/50 overnight-soak jobs stuck at NEEDS_FIX
+            # forever even after their fix job certified, since nothing else ever moves a
+            # NEEDS_FIX job out of that state -- the soak loop never terminated, hitting the
+            # safety cap instead of recognizing real completion.
+            transition_job(job_for_tick, to_state=JobState.SUPERSEDED, note="superseded by fix job dispatched for this goal")
 
         ticks_run += 1
         clock.advance(30)
