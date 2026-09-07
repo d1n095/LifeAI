@@ -80,9 +80,8 @@ forensic erasure of journals/backups is not established by these tests. See
 
 1. Reviewed AEAD/key hierarchy integration: key provisioning/rotation/revocation, protected
    durable generations/anti-rollback policy, and encrypted persistence/erasure proof.
-2. Trusted production grant/session dependencies and canonical content-version binding at
-   disclosure. Registry checks establish existence/ownership, not atomic content equality
-   across concurrent edits. The source-open facade accepts internal objects; never expose
+2. Trusted production grant/session dependencies and reviewed activation of the disclosure
+   equality/retry controls. The source-open facade accepts internal objects; never expose
    those objects/receipts as client-authoritative request inputs.
 
 **P1**
@@ -91,8 +90,7 @@ forensic erasure of journals/backups is not established by these tests. See
    refuses sources with outgoing relationships until complete dependency refresh is
    available, leaving events pending and projections hidden rather than dropping edges.
    Within-document version chains are supported and tested.
-2. Production queue retries/backoff, poison-event isolation, compaction, operational
-   metrics, and multi-host coordination. A failing event currently blocks the owner's queue.
+2. Retention/compaction, multi-host coordination, and deployment of operational metrics.
 3. FTS query plans/latency budgets and reviewed GIN migration for scale. LIMIT bounds output,
    not PostgreSQL scan cost. Coverage is document chunks only; no ranking-quality claim.
 4. Reviewed external Shell/Intent schema conformance and a server-owned source-open
@@ -109,7 +107,9 @@ ruff check backend/app/personal_recall backend/tests/backend/personal_recall
 git diff --check
 ```
 
-Validation result: 110 tests passed against migrated PostgreSQL/RLS. Ruff and
+Validation result before this hardening round: 110 tests passed against migrated PostgreSQL/RLS. The
+new disclosure/retry tests are included; the local PostgreSQL rerun was blocked by the environment's
+pre-existing `mainai_app` privilege-policy setup failure. Ruff and
 `git diff --check` passed. The original 79 tests remain covered. New tests exercise gated HTTP projections, all event
 kinds, canonical edit/delete/version/memory transitions, actual PostgreSQL FTS, RLS owner
 attacks, stale session caches, concurrency and forced process-crash recovery. Existing

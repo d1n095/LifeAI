@@ -1,11 +1,13 @@
 import pytest
+from datetime import timedelta, datetime, timezone
 from sqlalchemy import select
 
 from app.models.conversation import Conversation, Message, MessageRole, MessageStatus
 from app.models.personal_recall_outbox import PersonalRecallOutbox
 from app.personal_recall.index import SnapshotStoragePolicy
 from app.personal_recall.snapshot_protection import DeterministicTestSnapshotProtector
-from app.personal_recall.outbox import consume_outbox, outbox_status
+from app.personal_recall.outbox import consume_outbox, outbox_status, process_outbox_batch, retry_status
+from app.models.personal_recall_outbox_delivery import PersonalRecallOutboxDelivery
 from app.personal_recall.workers import ChangeKind, RecallIndexWorker, SourceChange
 from test_integration_bridge import _item
 
@@ -100,3 +102,43 @@ def test_outbox_rls_hides_foreign_owner_events(superuser_db):
     finally:
         db.close()
         current_user_id.reset(token)
+
+
+def test_retryable_failure_backoff_and_dead_letter(superuser_db, tmp_path):
+    from test_sqlalchemy_adapters import _seed
+    alice, _bob, _memory, _revoked = _seed(superuser_db)
+    conversation = superuser_db.execute(select(Conversation).where(Conversation.user_id == alice)).scalar_one()
+    superuser_db.add(Message(conversation_id=conversation.id, role=MessageRole.user, content="private retry", status=MessageStatus.succeeded))
+    superuser_db.commit()
+    worker = _worker(tmp_path, lambda **keys: (_ for _ in ()).throw(OSError("database unavailable")), owner=str(alice))
+    now = datetime.now(timezone.utc)
+    first = process_outbox_batch(superuser_db, owner_id=str(alice), worker=worker, limit=1, now=now, max_attempts=2)
+    assert first.retrying == 1 and first.dead_lettered == 0
+    status = retry_status(superuser_db, owner_id=str(alice))
+    assert status["retrying"] == 1 and status["attempts"] == 1
+    second = process_outbox_batch(superuser_db, owner_id=str(alice), worker=worker, limit=1, now=now + timedelta(hours=1), max_attempts=2)
+    assert second.dead_lettered == 1
+    row = superuser_db.execute(select(PersonalRecallOutbox).where(PersonalRecallOutbox.owner_id == alice)).scalars().first()
+    delivery = superuser_db.get(PersonalRecallOutboxDelivery, row.event_id)
+    assert delivery.state == "dead_letter"
+    assert "private retry" not in (delivery.last_error or "")
+
+
+def test_poison_event_does_not_starve_later_events(superuser_db, tmp_path):
+    from test_sqlalchemy_adapters import _seed
+    alice, _bob, _memory, _revoked = _seed(superuser_db)
+    conversation = superuser_db.execute(select(Conversation).where(Conversation.user_id == alice)).scalar_one()
+    superuser_db.add_all([
+        Message(conversation_id=conversation.id, role=MessageRole.user, content="first", status=MessageStatus.succeeded),
+        Message(conversation_id=conversation.id, role=MessageRole.user, content="second", status=MessageStatus.succeeded),
+    ])
+    superuser_db.commit()
+    failed = {"count": 0}
+    def loader(**keys):
+        failed["count"] += 1
+        if failed["count"] == 1:
+            raise ValueError("invalid source identity")
+        return []
+    worker = _worker(tmp_path, loader, owner=str(alice))
+    result = process_outbox_batch(superuser_db, owner_id=str(alice), worker=worker, limit=10)
+    assert result.dead_lettered >= 1 and result.delivered >= 1

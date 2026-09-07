@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -59,6 +60,15 @@ class MutableRegistry:
         return SourceRegistryRecord(source_id, owner_id, source_type, locator, True)
 
 
+class IdentityRegistry(MutableRegistry):
+    generation = 1
+    identity = hashlib.sha256("tandkrämrecept med nano HAp".encode()).hexdigest()
+    lifecycle = "active"
+
+    def resolve(self, *, source_id, owner_id, source_type, locator):
+        return SourceRegistryRecord(source_id, owner_id, source_type, locator, self.available, self.generation, self.identity, self.lifecycle)
+
+
 def _service(resolver, registry, items=None):
     values = [_item()] if items is None else items
     return PersonalRecallService(
@@ -79,6 +89,23 @@ def test_facade_preserves_structured_truth_and_coverage_without_flattening():
     assert result.handoff.coverage.state.value == "complete"
     assert dict(result.handoff.coverage.source_states)[SourceType.CONVERSATION].value == "complete"
     assert result.authorization_receipt.owner_id == "alice"
+    assert result.authorization_receipt.disclosure_evidence[0].result.value == "VALID"
+
+
+def test_disclosure_rejects_generation_and_content_identity_changes():
+    context, resolver, registry = _context(), MutableResolver(_context()), IdentityRegistry()
+    item = _item()
+    item.content_hash = registry.identity
+    item.metadata["canonical_generation"] = 1
+    service = _service(resolver, registry, [item])
+    result = service.query(RecallQueryRequest("tandkrämsrecept", context), now=NOW)
+    registry.generation = 2
+    with pytest.raises(RecallAuthorizationError, match="STALE"):
+        service.open_source(RecallOpenSourceRequest(item, context, result.authorization_receipt))
+    registry.generation = 1
+    registry.identity = "different-content"
+    with pytest.raises(RecallAuthorizationError, match="CONTENT_MISMATCH"):
+        service.open_source(RecallOpenSourceRequest(item, context, result.authorization_receipt))
 
 
 @pytest.mark.parametrize("bad", [

@@ -26,6 +26,28 @@ class DisclosureLevel(str, Enum):
     SNIPPET = "snippet"
 
 
+class DisclosureCheckResult(str, Enum):
+    VALID = "VALID"
+    STALE = "STALE"
+    REVOKED = "REVOKED"
+    DELETED = "DELETED"
+    SUPERSEDED = "SUPERSEDED"
+    OWNER_MISMATCH = "OWNER_MISMATCH"
+    CONTENT_MISMATCH = "CONTENT_MISMATCH"
+
+
+@dataclass(frozen=True)
+class DisclosureEvidence:
+    source_id: str
+    owner_id: str
+    canonical_generation: int | None
+    retrieved_generation: int | None
+    content_identity: str | None
+    lifecycle_state: str
+    checked_at: datetime
+    result: DisclosureCheckResult
+
+
 @dataclass(frozen=True)
 class IdentifierScope:
     """An explicit scope. Empty and not unrestricted means no authority."""
@@ -67,6 +89,7 @@ class AuthorizationReceipt:
     checked_at: datetime
     disclosure_level: DisclosureLevel
     result_item_ids: tuple[str, ...]
+    disclosure_evidence: tuple[DisclosureEvidence, ...] = ()
 
 
 class RecallAuthorityResolver(Protocol):

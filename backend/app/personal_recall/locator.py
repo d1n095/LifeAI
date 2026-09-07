@@ -27,6 +27,9 @@ class SourceRegistryRecord:
     source_type: str
     locator: str
     available: bool = True
+    canonical_generation: int | None = None
+    content_identity: str | None = None
+    lifecycle_state: str = "active"
 
 
 class SourceRegistry(Protocol):

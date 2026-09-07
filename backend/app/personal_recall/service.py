@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Protocol
 
 from app.personal_recall.adapters import PersonalSourceAdapter
-from app.personal_recall.authorization import AuthorizationReceipt, DisclosureLevel, RecallAuthorizationContext, RecallAuthorizationError, RecallAuthorityResolver, require_fresh_authority, require_item_authority
+from app.personal_recall.authorization import AuthorizationReceipt, DisclosureCheckResult, DisclosureEvidence, DisclosureLevel, RecallAuthorizationContext, RecallAuthorizationError, RecallAuthorityResolver, require_fresh_authority, require_item_authority
 from app.personal_recall.locator import SourceRegistry, ValidatedLocator, validate_open_locator
 from app.personal_recall.retrieval import PersonalRecallEngine
 from app.personal_recall.types import CoverageReport, PersonalKnowledgeItem, RecallResponse, RetrievalResult, SourceType
@@ -135,16 +135,12 @@ class PersonalRecallService:
         end = require_fresh_authority(request.authorization, resolver=self.authority_resolver, now=now)
         _require_same_or_narrower_result_authority(start, end, response.results)
         registry: SourceRegistry = self.source_registry_factory(end)
-        for result in response.results:
-            try:
-                validate_open_locator(result.item, owner_id=end.owner_id, registry=registry)
-            except ValueError as exc:
-                raise RecallAuthorizationError("canonical source changed before disclosure") from exc
+        disclosure_evidence = tuple(_check_canonical_disclosure(result.item, owner_id=end.owner_id, registry=registry, checked_at=checked_at) for result in response.results)
         final = require_fresh_authority(request.authorization, resolver=self.authority_resolver, now=now)
         if final != end:
             raise RecallAuthorizationError("authority changed during canonical validation")
         handoff = _handoff(response, final)
-        receipt = AuthorizationReceipt(end.authorization_id, end.authorization_version, end.owner_id, end.session_jti, datetime.now(timezone.utc), end.disclosure_level, tuple(r.item.item_id for r in response.results))
+        receipt = AuthorizationReceipt(end.authorization_id, end.authorization_version, end.owner_id, end.session_jti, datetime.now(timezone.utc), end.disclosure_level, tuple(r.item.item_id for r in response.results), disclosure_evidence)
         return RecallServiceResponse(response, handoff, receipt)
 
     def open_source(self, request: RecallOpenSourceRequest) -> InertSourceReference:
@@ -160,7 +156,9 @@ class PersonalRecallService:
         if not 0 < request.max_snippet_chars <= self.MAX_OPEN_SNIPPET_CHARS:
             raise RecallAuthorizationError("requested snippet bound is invalid")
         registry: SourceRegistry = self.source_registry_factory(current)
+        checked_at = datetime.now(timezone.utc)
         locator = validate_open_locator(request.item, owner_id=current.owner_id, registry=registry)
+        _check_canonical_disclosure(request.item, owner_id=current.owner_id, registry=registry, checked_at=checked_at)
         final = require_fresh_authority(request.authorization, resolver=self.authority_resolver)
         if final != current:
             raise RecallAuthorizationError("authority changed during source-open validation")
@@ -229,6 +227,33 @@ def authorize_open_contract(context: RecallAuthorizationContext, request: Recall
 def authorize_status_contract(context: RecallAuthorizationContext, request: RecallStatusRequest) -> None:
     if request.authorization.owner_id != context.owner_id or request.authorization.session_jti != context.session_jti:
         raise RecallAuthorizationError("status authorization mismatch")
+
+
+def _check_canonical_disclosure(item: PersonalKnowledgeItem, *, owner_id: str, registry: SourceRegistry, checked_at: datetime) -> DisclosureEvidence:
+    try:
+        validate_open_locator(item, owner_id=owner_id, registry=registry)
+    except ValueError as exc:
+        raise RecallAuthorizationError("canonical source is missing, revoked, or unavailable") from exc
+    record = registry.resolve(source_id=item.source_id, owner_id=owner_id, source_type=item.source_type.value, locator=item.provenance.locator)
+    if record is None:
+        raise RecallAuthorizationError("canonical source disappeared before disclosure")
+    if record.owner_id != owner_id:
+        raise RecallAuthorizationError("canonical owner changed before disclosure")
+    retrieved_generation = item.metadata.get("canonical_generation")
+    result = DisclosureCheckResult.VALID
+    if record.lifecycle_state in ("revoked", "purged"):
+        result = DisclosureCheckResult.REVOKED
+    elif record.lifecycle_state in ("deleted",):
+        result = DisclosureCheckResult.DELETED
+    elif record.lifecycle_state in ("superseded",):
+        result = DisclosureCheckResult.SUPERSEDED
+    elif record.canonical_generation is not None and retrieved_generation is not None and record.canonical_generation != retrieved_generation:
+        result = DisclosureCheckResult.STALE
+    elif record.content_identity is not None and item.content_hash is not None and record.content_identity != item.content_hash:
+        result = DisclosureCheckResult.CONTENT_MISMATCH
+    if result != DisclosureCheckResult.VALID:
+        raise RecallAuthorizationError(f"canonical disclosure check failed: {result.value}")
+    return DisclosureEvidence(item.source_id, owner_id, record.canonical_generation, retrieved_generation, record.content_identity, record.lifecycle_state, checked_at, result)
 
 
 def _require_same_or_narrower_result_authority(start: RecallAuthorizationContext, end: RecallAuthorizationContext, results: list[RetrievalResult]) -> None:

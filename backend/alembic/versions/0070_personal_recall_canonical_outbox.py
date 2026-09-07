@@ -45,7 +45,7 @@ def upgrade() -> None:
         "personal_recall_outbox_delivery",
         sa.Column("event_id", sa.UUID(), sa.ForeignKey("personal_recall_outbox.event_id", ondelete="CASCADE"), primary_key=True),
         sa.Column("owner_id", sa.UUID(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("attempt_count", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("last_error", sa.Text(), nullable=True),
     )

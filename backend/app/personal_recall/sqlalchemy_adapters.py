@@ -8,6 +8,7 @@ by a privileged/test session into a cross-owner read primitive.
 from __future__ import annotations
 
 import uuid
+import hashlib
 from collections.abc import Iterable
 
 from sqlalchemy import select
@@ -74,8 +75,8 @@ class ConversationMessageAdapter(_OwnerBoundAdapter):
                 decision_state=DecisionState.MENTION if is_user else DecisionState.CLAIM,
                 verification_state=VerificationState.UNVERIFIED,
                 source_authority=SourceAuthority.USER if is_user else SourceAuthority.ASSISTANT,
-                index_state=IndexState.INDEXED,
-                metadata={"role": _value(message.role), "sequence_number": message.sequence_number},
+                index_state=IndexState.INDEXED, content_hash=hashlib.sha256((message.content or "").encode("utf-8")).hexdigest(),
+                metadata={"role": _value(message.role), "sequence_number": message.sequence_number, "canonical_generation": message.recall_generation},
             )
 
 
@@ -114,8 +115,8 @@ class DocumentChunkAdapter(_OwnerBoundAdapter):
                 content_reference=f"document:{document.id}:chunk:{chunk.id}",
                 provenance=Provenance(SourceType.FILE, str(document.id), f"document://{document.id}/{chunk.id}", file_id=str(document.id), occurred_at=chunk.created_at),
                 decision_state=_document_decision(document.active_truth_status), verification_state=_document_verification(document.active_truth_status),
-                source_authority=SourceAuthority.PRIMARY, index_state=_document_index(document.status), content_hash=None,
-                metadata={"chunk_index": chunk.chunk_index, "filename": document.original_filename, "media_type": document.media_type},
+                source_authority=SourceAuthority.PRIMARY, index_state=_document_index(document.status), content_hash=hashlib.sha256((chunk.text or "").encode("utf-8")).hexdigest(),
+                metadata={"chunk_index": chunk.chunk_index, "filename": document.original_filename, "media_type": document.media_type, "canonical_generation": max(document.recall_generation, chunk.recall_generation)},
             )
 
 
@@ -139,7 +140,7 @@ class DurableMemoryAdapter(_OwnerBoundAdapter):
                 content_reference=f"memory_source:{row.id}", provenance=Provenance(SourceType.DURABLE_MEMORY, str(row.id), f"memory://{row.id}", occurred_at=row.occurred_at),
                 decision_state=DecisionState.MENTION, verification_state=VerificationState.UNVERIFIED,
                 source_authority=authority, index_state=IndexState.INDEXED, content_hash=row.content_hash,
-                metadata={"source_kind": _value(row.source_kind), "snapshot_status": _value(row.snapshot_status)},
+                metadata={"source_kind": _value(row.source_kind), "snapshot_status": _value(row.snapshot_status), "canonical_generation": row.recall_generation},
             )
 
 
@@ -225,6 +226,7 @@ class SQLAlchemySourceRegistry(_OwnerBoundAdapter):
 
     def resolve(self, *, source_id: str, owner_id: str, source_type: str, locator: str) -> SourceRegistryRecord | None:
         owner = self._owner(owner_id)
+        lifecycle = "active"
         try:
             source_uuid = uuid.UUID(source_id)
         except ValueError:
@@ -236,27 +238,38 @@ class SQLAlchemySourceRegistry(_OwnerBoundAdapter):
             message, conversation = row
             expected_type = SourceType.CONVERSATION.value if message.role == MessageRole.user else SourceType.PREVIOUS_ANSWER.value
             expected = f"conversation://{conversation.id}/{message.id}"
+            identity = hashlib.sha256((message.content or "").encode("utf-8")).hexdigest()
+            generation = message.recall_generation
         elif source_type == SourceType.FILE.value:
-            document = self.db.execute(select(Document).where(Document.id == source_uuid, Document.uploaded_by == owner, Document.deleted_at.is_(None))).scalar_one_or_none()
+            document = self.db.execute(select(Document).where(Document.id == source_uuid, Document.uploaded_by == owner)).scalar_one_or_none()
             if document is None:
                 return None
             expected_type = SourceType.FILE.value
             expected = locator
+            lifecycle = "deleted" if document.deleted_at is not None else "active"
             if locator == f"document://{document.id}":
-                pass
+                identity = document.checksum
+                generation = document.recall_generation
             elif "/version/" in locator:
                 version_id = _locator_uuid(locator)
                 if version_id is None or self.db.execute(select(KnowledgeVersion.id).where(KnowledgeVersion.id == version_id, KnowledgeVersion.source_id == document.id, KnowledgeVersion.owner_id == owner)).scalar_one_or_none() is None:
                     return None
+                version = self.db.execute(select(KnowledgeVersion).where(KnowledgeVersion.id == version_id, KnowledgeVersion.source_id == document.id, KnowledgeVersion.owner_id == owner)).scalar_one()
+                identity = version.checksum
+                generation = max(document.recall_generation, version.recall_generation)
             else:
                 chunk_id = _locator_uuid(locator)
                 if chunk_id is None or self.db.execute(select(DocumentChunk.id).where(DocumentChunk.id == chunk_id, DocumentChunk.document_id == document.id, DocumentChunk.owner_id == owner)).scalar_one_or_none() is None:
                     return None
+                chunk = self.db.execute(select(DocumentChunk).where(DocumentChunk.id == chunk_id, DocumentChunk.document_id == document.id, DocumentChunk.owner_id == owner)).scalar_one()
+                identity = hashlib.sha256((chunk.text or "").encode("utf-8")).hexdigest()
+                generation = max(document.recall_generation, chunk.recall_generation)
         elif source_type == SourceType.DURABLE_MEMORY.value:
-            row = self.db.execute(select(MemorySourceUnit).where(MemorySourceUnit.id == source_uuid, MemorySourceUnit.owner_id == owner, MemorySourceUnit.lifecycle_status == LifecycleStatus.active)).scalar_one_or_none()
+            row = self.db.execute(select(MemorySourceUnit).where(MemorySourceUnit.id == source_uuid, MemorySourceUnit.owner_id == owner)).scalar_one_or_none()
             if row is None:
                 return None
             expected_type, expected = SourceType.DURABLE_MEMORY.value, f"memory://{row.id}"
+            identity, generation, lifecycle = row.content_hash, row.recall_generation, row.lifecycle_status.value
         elif source_type == SourceType.DECISION_RECORD.value:
             exists = any((
                 self.db.execute(select(FounderMemoryNote.id).where(FounderMemoryNote.id == source_uuid, FounderMemoryNote.owner_id == owner)).scalar_one_or_none(),
@@ -266,11 +279,13 @@ class SQLAlchemySourceRegistry(_OwnerBoundAdapter):
             if not exists:
                 return None
             expected_type, expected = SourceType.DECISION_RECORD.value, f"memory://{source_uuid}"
+            identity, generation, lifecycle = None, None, "active"
         else:
             return None
         if expected_type != source_type or expected != locator:
             return None
-        return SourceRegistryRecord(source_id, str(owner), source_type, locator, True)
+        available = lifecycle not in ("deleted", "revoked", "purged")
+        return SourceRegistryRecord(source_id, str(owner), source_type, locator, available, generation, identity, lifecycle)
 
 
 def canonical_personal_adapters(db: Session, *, owner_id: uuid.UUID | str, limit_per_adapter: int = 10_000) -> list[_OwnerBoundAdapter]:
@@ -279,7 +294,7 @@ def canonical_personal_adapters(db: Session, *, owner_id: uuid.UUID | str, limit
 
 def _document_item(document: Document, owner: uuid.UUID) -> PersonalKnowledgeItem:
     text = " ".join(value for value in (document.title, document.original_filename, document.content_preview) if value)
-    return PersonalKnowledgeItem(item_id=f"document:{document.id}", source_type=SourceType.FILE, source_id=str(document.id), owner_id=str(owner), project_id=_str(document.project_id), file_id=str(document.id), created_at=document.created_at, updated_at=document.updated_at, subject=document.title, topic=document.category, text=text, source_version=str(document.version_number), content_hash=document.checksum, content_reference=f"document:{document.id}", provenance=Provenance(SourceType.FILE, str(document.id), f"document://{document.id}", file_id=str(document.id), version=str(document.version_number), occurred_at=document.imported_at or document.created_at), decision_state=_document_decision(document.active_truth_status), verification_state=_document_verification(document.active_truth_status), source_authority=SourceAuthority.PRIMARY, index_state=_document_index(document.status), metadata={"filename": document.original_filename, "media_type": document.media_type, "deletion_status": _value(document.deletion_status)})
+    return PersonalKnowledgeItem(item_id=f"document:{document.id}", source_type=SourceType.FILE, source_id=str(document.id), owner_id=str(owner), project_id=_str(document.project_id), file_id=str(document.id), created_at=document.created_at, updated_at=document.updated_at, subject=document.title, topic=document.category, text=text, source_version=str(document.version_number), content_hash=document.checksum, content_reference=f"document:{document.id}", provenance=Provenance(SourceType.FILE, str(document.id), f"document://{document.id}", file_id=str(document.id), version=str(document.version_number), occurred_at=document.imported_at or document.created_at), decision_state=_document_decision(document.active_truth_status), verification_state=_document_verification(document.active_truth_status), source_authority=SourceAuthority.PRIMARY, index_state=_document_index(document.status), metadata={"filename": document.original_filename, "media_type": document.media_type, "deletion_status": _value(document.deletion_status), "canonical_generation": document.recall_generation})
 
 
 def _decision_item(item_id: str, source_id: str, owner: uuid.UUID, text: str, created_at, status: str, authority: str, superseded_by_id, supersedes_id, provenance: dict, *, subject: str | None = None, project_id=None) -> PersonalKnowledgeItem:
@@ -288,7 +303,7 @@ def _decision_item(item_id: str, source_id: str, owner: uuid.UUID, text: str, cr
     source_authority = SourceAuthority.USER if authority in ("founder", "repeated_founder_preference") else SourceAuthority.VERIFIED_DERIVED if authority == "deterministic_source" else SourceAuthority.DERIVED
     edges = {"supersedes": (f"{item_id.split(':', 1)[0]}:{supersedes_id}",)} if supersedes_id else {}
     replacement = f"{item_id.split(':', 1)[0]}:{superseded_by_id}" if superseded_by_id else None
-    return PersonalKnowledgeItem(item_id=item_id, source_type=SourceType.DECISION_RECORD, source_id=source_id, owner_id=str(owner), project_id=_str(project_id), created_at=created_at, subject=subject or text, text=text, content_reference=item_id, provenance=Provenance(SourceType.DECISION_RECORD, source_id, f"memory://{source_id}", occurred_at=created_at), decision_state=decision_state, verification_state=verification, superseded_by=replacement, source_authority=source_authority, index_state=IndexState.INDEXED, relationship_edges=edges, metadata={"canonical_status": status, "canonical_provenance": dict(provenance or {})})
+    return PersonalKnowledgeItem(item_id=item_id, source_type=SourceType.DECISION_RECORD, source_id=source_id, owner_id=str(owner), project_id=_str(project_id), created_at=created_at, subject=subject or text, text=text, content_hash=hashlib.sha256(text.encode()).hexdigest(), content_reference=item_id, provenance=Provenance(SourceType.DECISION_RECORD, source_id, f"memory://{source_id}", occurred_at=created_at), decision_state=decision_state, verification_state=verification, superseded_by=replacement, source_authority=source_authority, index_state=IndexState.INDEXED, relationship_edges=edges, metadata={"canonical_status": status, "canonical_provenance": dict(provenance or {})})
 
 
 def _document_index(status: IndexStatus) -> IndexState:

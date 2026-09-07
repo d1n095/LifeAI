@@ -26,11 +26,21 @@ The real PostgreSQL tests cover trigger atomicity, owner assignment, outbox RLS,
 deleted-document behavior, memory revoke/purge compatibility, RLS-backed canonical adapters,
 duplicate delivery, restart delivery, late lower versions and routing-only consumer data.
 
+Disclosure now performs a fresh canonical registry check at query/open time and binds each successful
+receipt to owner, lifecycle, canonical generation, and content identity. Generation or hash changes,
+revocation, deletion, supersession, and owner mismatch fail closed; a historical receipt is never reused
+as authority. Decision records also carry a deterministic content hash for this check.
+
+Delivery bookkeeping is persistent and owner-scoped. Claims use short leases, deterministic bounded
+exponential backoff with jitter, conservative failure classification, and an explicit dead-letter state.
+Poison events cannot starve later rows, and `retry_status` exposes counts, attempts, and age without
+personal content. The worker path remains opt-in and unregistered.
+
 Remaining activation blockers:
 
-- **P0:** a production reviewed AEAD/key hierarchy and encrypted durable projection store;
-  canonical content-equality fencing across a long-running source read and disclosure; and
-  production retry/dead-letter policy for events whose canonical source remains unavailable.
+- **P0:** a production reviewed AEAD/key hierarchy and encrypted durable projection store. The
+  disclosure equality and retry/dead-letter controls are implemented here but still require independent
+  attack review before activation.
 - **P1:** retention/compaction policy for the append-only outbox; operational metrics for
   retries, version conflicts and reconciliation repairs; dependency scheduling for external
   attachment/source-unit graphs; and verified Claude Shell/Intent schema conformance.
