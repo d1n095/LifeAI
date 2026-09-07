@@ -112,6 +112,25 @@ def test_examiner_selection_always_excludes_the_builders_own_identity():
     assert result.outcome == TickOutcome.NO_EXAMINER_AVAILABLE
 
 
+def test_certified_job_index_never_double_counts_the_job():
+    """P0 found during the Founder-Offline Autonomy Soak Harness round (three-check
+    verified): next_ready_job() returns the SAME object reference it was passed, never a
+    copy -- run_program_tick() used to call recompute_program_job_index(program, (*jobs,
+    job)), duplicating `job`'s own entry in the recomputed index every time. Fixed by
+    passing `jobs` alone when `job` is already an element of it (only genuinely NEW objects,
+    like a fix_job, need appending)."""
+    program = new_program(owner_id=_owner(), repo_identity="LifeAI", goal="x")
+    job = _ready_job(program.program_id)
+    result = run_program_tick(
+        program, (job,), builder_candidates=BUILDER_CANDIDATES, examiner_candidates=EXAMINER_CANDIDATES,
+        builder_adapter=_FixedBuilder("sha-1"), examiner_adapter=_FixedExaminer(ExaminerVerdict.PASS),
+    )
+    assert result.outcome == TickOutcome.JOB_CERTIFIED
+    assert program.completed_job_ids == (job.job_id,), (
+        f"expected exactly one entry for the certified job, got {program.completed_job_ids}"
+    )
+
+
 def test_pr_proposal_rejects_stale_or_moved_sha():
     job = _ready_job(uuid.uuid4())
     for s in (JobState.ASSIGNED, JobState.RUNNING, JobState.VERIFYING, JobState.CERTIFIED):

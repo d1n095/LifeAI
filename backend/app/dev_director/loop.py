@@ -238,15 +238,18 @@ def run_program_tick(
 
     if verdict_record.verdict == ExaminerVerdict.PASS:
         transition_job(job, to_state=JobState.CERTIFIED)
-        recompute_program_job_index(program, (*jobs, job))
+        # `job` is already an element of `jobs` (next_ready_job() returns the same object
+        # reference it was passed, never a copy) -- `(*jobs, job)` would duplicate it in the
+        # recomputed index. Only genuinely NEW objects (e.g. fix_job below) need appending.
+        recompute_program_job_index(program, jobs)
         return TickResult(outcome=TickOutcome.JOB_CERTIFIED, job_id=job.job_id, builder_assignment=ba, examiner_assignment=ea)
 
     transition_job(job, to_state=JobState.NEEDS_FIX)
     try:
         fix_job = create_fix_job(job, verdict=verdict_record)
     except MaxFixAttemptsExceededError as exc:
-        recompute_program_job_index(program, (*jobs, job))
+        recompute_program_job_index(program, jobs)
         return TickResult(outcome=TickOutcome.JOB_NEEDS_FIX_MAX_ATTEMPTS, job_id=job.job_id, builder_assignment=ba, examiner_assignment=ea, detail=str(exc))
 
-    recompute_program_job_index(program, (*jobs, job, fix_job))
+    recompute_program_job_index(program, (*jobs, fix_job))
     return TickResult(outcome=TickOutcome.JOB_NEEDS_FIX, job_id=job.job_id, new_job=fix_job, builder_assignment=ba, examiner_assignment=ea)
