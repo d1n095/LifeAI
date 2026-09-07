@@ -1,0 +1,136 @@
+"""MainAI V2 Autonomous Development Director (Part 1 of 2): Program, AutonomyLevel, Job/work
+queue, protected artifacts, external provider leases, builder/examiner separation,
+completion evidence.
+
+Standalone, isolated, NOT imported by any production runtime path (no app.main import, no
+app.guardian/app.privacy_boundary/app.sentinel/app.sovereign_identity/app.life_recovery/
+app.operating_shell/app.attachment_chamber import from this package). DOES reference real
+production types by name in docstrings/data (SupervisorScope, TaskScopedAuthority,
+ReadinessLevel, APPROVAL_POLICIES, VerificationPolicy) without importing any of them -- this
+is a new coordination tier explicitly designed to compose with real infrastructure. See
+docs/mainai_v2/MAINAI_V2_AUTONOMOUS_DEVELOPMENT_DIRECTOR_RECONCILIATION.md for the design.
+"""
+
+from app.dev_director.builder_examiner import (
+    new_builder_assignment,
+    new_examiner_assignment,
+    record_examiner_verdict,
+    submit_builder_result,
+)
+from app.dev_director.completion_evidence import validate_completion_evidence
+from app.dev_director.job import (
+    detect_job_conflicts,
+    new_job,
+    next_ready_job,
+    recompute_program_job_index,
+    transition_job,
+    verify_job_event_chain_intact,
+)
+from app.dev_director.program import (
+    new_program,
+    record_budget_consumption,
+    release_budget_reservation,
+    reserve_from_budget,
+    set_autonomy_level,
+)
+from app.dev_director.protected import assert_artifact_not_protected
+from app.dev_director.provider_lease import (
+    lease_scoped_to_original_request,
+    new_external_provider_lease,
+    select_failover_provider,
+)
+from app.dev_director.types import (
+    AUTONOMY_LEVEL_APPROVAL_POLICY_KEY,
+    AUTONOMY_LEVEL_REQUIRED_READINESS,
+    DEFAULT_AUTONOMY_LEVEL,
+    JOB_TRANSITIONS,
+    LEVELS_REQUIRING_EXPLICIT_FOUNDER_AUTHORIZATION,
+    PR_245_PROTECTED_ARTIFACT,
+    TERMINAL_JOB_STATES,
+    AutonomyLevel,
+    AutonomyLevelRequiresFounderAuthorizationError,
+    BudgetEnvelope,
+    BudgetExceededError,
+    BuilderAssignment,
+    BuilderExaminerCollusionError,
+    BuilderResult,
+    CompletionEvidence,
+    ConflictReport,
+    DevDirectorError,
+    ExaminerAssignment,
+    ExaminerVerdict,
+    ExaminerVerdictError,
+    ExaminerVerdictRecord,
+    ExternalProviderLease,
+    Job,
+    JobEvent,
+    JobState,
+    JobTransitionError,
+    NoAvailableProvider,
+    NoReadyJob,
+    Program,
+    ProtectedArtifact,
+    ProtectedArtifactViolationError,
+    ProviderCapabilityProfile,
+    ProviderUsageState,
+    JobTestResult,
+    ValidationResult,
+)
+
+__all__ = [
+    "AUTONOMY_LEVEL_APPROVAL_POLICY_KEY",
+    "AUTONOMY_LEVEL_REQUIRED_READINESS",
+    "DEFAULT_AUTONOMY_LEVEL",
+    "JOB_TRANSITIONS",
+    "LEVELS_REQUIRING_EXPLICIT_FOUNDER_AUTHORIZATION",
+    "PR_245_PROTECTED_ARTIFACT",
+    "TERMINAL_JOB_STATES",
+    "AutonomyLevel",
+    "AutonomyLevelRequiresFounderAuthorizationError",
+    "BudgetEnvelope",
+    "BudgetExceededError",
+    "BuilderAssignment",
+    "BuilderExaminerCollusionError",
+    "BuilderResult",
+    "CompletionEvidence",
+    "ConflictReport",
+    "DevDirectorError",
+    "ExaminerAssignment",
+    "ExaminerVerdict",
+    "ExaminerVerdictError",
+    "ExaminerVerdictRecord",
+    "ExternalProviderLease",
+    "Job",
+    "JobEvent",
+    "JobState",
+    "JobTransitionError",
+    "NoAvailableProvider",
+    "NoReadyJob",
+    "Program",
+    "ProtectedArtifact",
+    "ProtectedArtifactViolationError",
+    "ProviderCapabilityProfile",
+    "ProviderUsageState",
+    "JobTestResult",
+    "ValidationResult",
+    "assert_artifact_not_protected",
+    "detect_job_conflicts",
+    "lease_scoped_to_original_request",
+    "new_builder_assignment",
+    "new_examiner_assignment",
+    "new_external_provider_lease",
+    "new_job",
+    "new_program",
+    "next_ready_job",
+    "recompute_program_job_index",
+    "record_budget_consumption",
+    "record_examiner_verdict",
+    "release_budget_reservation",
+    "reserve_from_budget",
+    "select_failover_provider",
+    "set_autonomy_level",
+    "submit_builder_result",
+    "transition_job",
+    "validate_completion_evidence",
+    "verify_job_event_chain_intact",
+]
