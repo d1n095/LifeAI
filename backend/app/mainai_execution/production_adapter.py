@@ -7,6 +7,7 @@ policy. A scheduler may claim work only when explicitly enabled and at autonomy 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 import uuid
 
@@ -23,6 +24,77 @@ PROTECTED_REFS = frozenset({"#245", "818dfb732da47901eb5ae06ffdd9c829fe00c4c5", 
 
 class ProductionRuntimeError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ArtifactFreeze:
+    job_id: str
+    attempt_id: str
+    repository: str
+    branch: str
+    sha: str
+    base_sha: str
+    builder_id: str
+    examiner_id: str | None
+    frozen_at: str
+
+
+@dataclass(frozen=True)
+class TestEvidence:
+    command_fingerprint: str
+    exit_code: int
+    started_at: str
+    finished_at: str
+    repo_sha: str
+    clean: bool
+    suite: str
+    summary: str
+
+
+def quarantine_provider_output(text: str, *, limit: int = 4000) -> dict[str, object]:
+    """Parse provider prose as bounded evidence only; control instructions are never actions."""
+    safe = (text or "")[:limit]
+    return {"reported_text": safe, "control_actions": (), "authority": "none"}
+
+
+def freeze_artifact(*, job_id: str, attempt_id: str, builder_id: str, examiner_id: str | None, worktree: str, base_sha: str, protected_refs=()) -> ArtifactFreeze:
+    state = inspect_worktree(worktree, expected_sha=None, protected_refs=protected_refs)
+    if state["sha"] == base_sha or not state["clean"]:
+        raise ProductionRuntimeError("artifact is not a clean changed commit")
+    if examiner_id is not None and examiner_id == builder_id:
+        raise ProductionRuntimeError("builder cannot examine its own artifact")
+    return ArtifactFreeze(job_id, attempt_id, str(worktree), str(state["branch"]), str(state["sha"]), base_sha, builder_id, examiner_id, datetime.now(timezone.utc).isoformat())
+
+
+class DependencyEngine:
+    """Small exact-SHA dependency gate; higher-level Director owns policy and priorities."""
+
+    @staticmethod
+    def validate(graph: dict[str, tuple[str, ...]]) -> None:
+        visiting: set[str] = set()
+        visited: set[str] = set()
+        def visit(node: str):
+            if node in visiting:
+                raise ProductionRuntimeError("dependency cycle")
+            if node in visited:
+                return
+            visiting.add(node)
+            for dep in graph.get(node, ()):
+                visit(dep)
+            visiting.remove(node)
+            visited.add(node)
+        for node in graph:
+            visit(node)
+
+    @staticmethod
+    def satisfied(*, required_sha: str, observed_sha: str, certified: bool) -> bool:
+        return certified and required_sha == observed_sha
+
+
+def offline_policy_allows(action: str, *, autonomy_level: int) -> bool:
+    if action in {"merge", "deploy", "secret_change", "authority_expand", "publish"}:
+        return False
+    return 0 <= autonomy_level <= 2
 
 
 class AutonomyLevel(StrEnum):
