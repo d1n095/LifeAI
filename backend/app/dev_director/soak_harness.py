@@ -32,43 +32,31 @@ import random
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable
 
 from app.dev_director.builder_examiner import (
     new_builder_assignment,
     new_examiner_assignment,
 )
 from app.dev_director.fix_loop import (
-    JobHeartbeat,
-    JobLivenessAssessment,
     MAX_FIX_ATTEMPTS,
-    assess_job_liveness,
-    create_fix_job,
-    handle_confirmed_abandoned_job,
-    record_liveness_strike,
 )
 from app.dev_director.git_pr_broker import PullRequestProposalError, build_pr_proposal
 from app.dev_director.job import (
     detect_job_conflicts,
     new_job,
     next_ready_job,
-    recompute_program_job_index,
     transition_job,
 )
 from app.dev_director.loop import TickOutcome, run_program_tick
 from app.dev_director.program import new_program
-from app.dev_director.protected import assert_artifact_not_protected
 from app.dev_director.recovery import (
     ConflictingBuilderResultError,
     RecoveryAction,
     apply_pending_builder_result,
-    apply_pending_examiner_verdict,
     recover_program_state,
 )
-from app.dev_director.founder_brief import generate_founder_brief
 from app.dev_director.types import (
     PR_245_PROTECTED_ARTIFACT,
-    BuilderExaminerCollusionError,
     CompletionEvidence,
     ExaminerVerdict,
     ExaminerVerdictError,
@@ -388,7 +376,6 @@ def run_scenario_c(*, owner_id: uuid.UUID | None = None) -> SoakResult:
         examiner_adapter=DeterministicExaminerAdapter({job1.job_id: (ExaminerVerdict.PASS, ("ok",), "ok")}, log=log, clock=clock),
     )
     assert tick1.outcome == TickOutcome.JOB_CERTIFIED
-    original_builder_identity = job1.review_evidence  # not used further, just documenting who ran
 
     clock.advance(60)
     codex_exhausted = _profile("codex", usage_state=ProviderUsageState.USAGE_EXHAUSTED)

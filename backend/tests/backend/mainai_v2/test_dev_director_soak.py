@@ -29,7 +29,7 @@ from app.dev_director.soak_harness import (
     run_scenario_h,
     run_scenario_i,
 )
-from app.dev_director.types import JobState, TERMINAL_JOB_STATES
+from app.dev_director.types import JobState
 
 
 # --- Structural isolation from the frozen spend/financial-authority round. -----------------
