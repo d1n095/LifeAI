@@ -46,6 +46,45 @@ class ProviderState(StrEnum):
     UNAUTHORIZED = "unauthorized"
 
 
+class SubstrateEventType(StrEnum):
+    JOB_ACCEPTED = "JOB_ACCEPTED"
+    JOB_CLAIMED = "JOB_CLAIMED"
+    JOB_PROGRESS = "JOB_PROGRESS"
+    JOB_COMPLETED = "JOB_COMPLETED"
+    JOB_FAILED = "JOB_FAILED"
+    JOB_ABANDONED = "JOB_ABANDONED"
+    JOB_CANCELLED = "JOB_CANCELLED"
+    JOB_SUPERSEDED = "JOB_SUPERSEDED"
+    PROVIDER_EXHAUSTED = "PROVIDER_EXHAUSTED"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    CLAIM_EXPIRED = "CLAIM_EXPIRED"
+    WORKTREE_CONFLICT = "WORKTREE_CONFLICT"
+    PROTECTED_REF_VIOLATION = "PROTECTED_REF_VIOLATION"
+    COMPLETION_REJECTED = "COMPLETION_REJECTED"
+
+
+class FailureClass(StrEnum):
+    TRANSIENT = "TRANSIENT"
+    PROVIDER_LIMIT = "PROVIDER_LIMIT"
+    WORKTREE_CONFLICT = "WORKTREE_CONFLICT"
+    AUTHORITY_REVOKED = "AUTHORITY_REVOKED"
+    PROTECTED_REF = "PROTECTED_REF"
+    INVALID_COMPLETION = "INVALID_COMPLETION"
+    PROCESS_LOST = "PROCESS_LOST"
+    PERMANENT = "PERMANENT"
+
+
+class Capability(StrEnum):
+    CODE_EDIT = "code_edit"
+    REPO_READ = "repo_read"
+    TEST_RUN = "test_run"
+    BROWSER = "browser"
+    NETWORK = "network"
+    LONG_RUNNING = "long_running"
+    REVIEW = "review"
+    FILESYSTEM_WRITE = "filesystem_write"
+
+
 @dataclass(frozen=True)
 class JobClaim:
     job_id: str
@@ -77,6 +116,33 @@ class ProviderSnapshot:
     authorized: bool
     remaining_units: int | None
     checked_at: str
+
+
+@dataclass(frozen=True)
+class SubstrateEvent:
+    event_id: str
+    event_type: SubstrateEventType
+    job_id: str | None
+    attempt_id: str | None
+    occurred_at: str
+    payload: dict
+
+
+@dataclass(frozen=True)
+class CompletionEnvelope:
+    evidence: CompletionEvidence
+    provider: str
+    reported_sha: str
+    changed_files: tuple[str, ...] = ()
+    test_evidence_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DirectorJob:
+    job_id: str
+    owner_id: str
+    program: str
+    capabilities: tuple[str, ...]
 
 
 def _now() -> datetime:
@@ -148,7 +214,59 @@ class ExecutionSubstrate:
             CREATE TABLE IF NOT EXISTS worktree_claims(
               worktree TEXT PRIMARY KEY, job_id TEXT NOT NULL, attempt_id TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS recovery_journal(
+              event_id TEXT PRIMARY KEY, owner_id TEXT, event_type TEXT NOT NULL, job_id TEXT,
+              attempt_id TEXT, occurred_at TEXT NOT NULL, payload TEXT NOT NULL
+            );
+            CREATE TRIGGER IF NOT EXISTS recovery_journal_no_update BEFORE UPDATE ON recovery_journal BEGIN SELECT RAISE(ABORT, 'recovery journal is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS recovery_journal_no_delete BEFORE DELETE ON recovery_journal BEGIN SELECT RAISE(ABORT, 'recovery journal is append-only'); END;
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            for name, definition in (("owner_id", "TEXT"), ("program", "TEXT"), ("capabilities", "TEXT"), ("failure_class", "TEXT"), ("progress", "TEXT")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+            journal_columns = {row[1] for row in db.execute("PRAGMA table_info(recovery_journal)")}
+            if "owner_id" not in journal_columns:
+                db.execute("ALTER TABLE recovery_journal ADD COLUMN owner_id TEXT")
+
+    def _journal(self, db, event_type: SubstrateEventType, *, job_id: str | None = None, attempt_id: str | None = None, payload: dict | None = None):
+        safe = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))[:4000]
+        owner = db.execute("SELECT owner_id FROM jobs WHERE id=?", (job_id,)).fetchone()[0] if job_id and db.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone() else None
+        db.execute("INSERT INTO recovery_journal(event_id,owner_id,event_type,job_id,attempt_id,occurred_at,payload) VALUES(?,?,?,?,?,?,?)", (str(uuid.uuid4()), owner, event_type, job_id, attempt_id, _iso(_now()), safe))
+
+    def journal_events(self, *, job_id: str | None = None, owner_id: str | None = None) -> list[SubstrateEvent]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM recovery_journal WHERE (job_id=? OR ? IS NULL) AND (owner_id=? OR ? IS NULL) ORDER BY occurred_at,event_id", (job_id, job_id, owner_id, owner_id)).fetchall()
+        return [SubstrateEvent(row["event_id"], SubstrateEventType(row["event_type"]), row["job_id"], row["attempt_id"], row["occurred_at"], json.loads(row["payload"])) for row in rows]
+
+    def submit_job(self, *, owner_id: str, program: str, capabilities: Iterable[str] = (), provider: str | None = None, base_sha: str | None = None, worktree: str | None = None, max_active: int = 1) -> DirectorJob:
+        if not owner_id or not program or max_active < 1:
+            raise SubstrateError("owner, program and active-job bound are required")
+        caps = tuple(sorted({Capability(c).value for c in capabilities}))
+        with self._connect() as db:
+            active = db.execute("SELECT COUNT(*) FROM jobs WHERE program=? AND state IN (?,?)", (program, JobState.QUEUED, JobState.RUNNING)).fetchone()[0]
+            if active >= max_active:
+                raise SubstrateError("program backpressure limit reached")
+            if provider and db.execute("SELECT COUNT(*) FROM jobs WHERE provider=? AND state IN (?,?)", (provider, JobState.QUEUED, JobState.RUNNING)).fetchone()[0] >= max_active:
+                raise SubstrateError("provider backpressure limit reached")
+            if worktree and db.execute("SELECT COUNT(*) FROM jobs WHERE worktree=? AND state IN (?,?)", (worktree, JobState.QUEUED, JobState.RUNNING)).fetchone()[0] >= 1:
+                raise SubstrateError("worktree backpressure limit reached")
+            job_id = str(uuid.uuid4())
+            db.execute("INSERT INTO jobs(id,state,base_sha,worktree,provider,created_at,owner_id,program,capabilities,progress) VALUES(?,?,?,?,?,?,?,?,?,?)", (job_id, JobState.QUEUED, base_sha, worktree, provider, _iso(_now()), owner_id, program, json.dumps(caps), "{}"))
+            self._journal(db, SubstrateEventType.JOB_ACCEPTED, job_id=job_id, payload={"owner_id": owner_id, "program": program, "capabilities": caps})
+        return DirectorJob(job_id, owner_id, program, caps)
+
+    def report_progress(self, claim: JobClaim, *, phase: str, current: int, total: int | None = None) -> SubstrateEvent:
+        if not phase or current < 0:
+            raise SubstrateError("invalid progress")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._fence(db, claim)
+            payload = {"phase": phase, "current": current, "total": total}
+            db.execute("UPDATE jobs SET progress=? WHERE id=?", (json.dumps(payload), claim.job_id))
+            self._journal(db, SubstrateEventType.JOB_PROGRESS, job_id=claim.job_id, attempt_id=claim.attempt_id, payload=payload)
+            db.commit()
+        return self.journal_events(job_id=claim.job_id)[-1]
 
     def create_job(self, *, base_sha: str | None = None, worktree: str | None = None, provider: str | None = None) -> str:
         job_id = str(uuid.uuid4())
@@ -280,3 +398,131 @@ def completion_evidence(claim: JobClaim, *, protected_refs: Iterable[str] = ()) 
         raise SubstrateError("completion requires a worktree and verified base SHA")
     state = inspect_worktree(claim.worktree, protected_refs=protected_refs)
     return CompletionEvidence(claim.job_id, claim.attempt_id, claim.worktree, str(state["branch"]), claim.base_sha, str(state["sha"]), str(state["sha"]) != claim.base_sha, bool(state["clean"]), bool(state["protected"]), _iso(_now()))
+
+
+def classify_failure(error: BaseException) -> FailureClass:
+    if isinstance(error, LeaseLostError):
+        return FailureClass.AUTHORITY_REVOKED
+    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return FailureClass.TRANSIENT
+    if isinstance(error, ProviderError) and error.category in {"rate_limited", "not_configured"}:
+        return FailureClass.PROVIDER_LIMIT
+    if isinstance(error, SubstrateError) and "protected" in str(error).lower():
+        return FailureClass.PROTECTED_REF
+    if isinstance(error, SubstrateError) and "worktree" in str(error).lower():
+        return FailureClass.WORKTREE_CONFLICT
+    return FailureClass.PERMANENT
+
+
+class DirectorContract:
+    """Narrow command/event boundary for a future Director; no orchestration policy lives here."""
+
+    def __init__(self, substrate: ExecutionSubstrate):
+        self.substrate = substrate
+
+    def submit_job(self, **kwargs) -> DirectorJob:
+        return self.substrate.submit_job(**kwargs)
+
+    def claim_job(self, job_id: str, *, owner_id: str, worker_id: str, lease_seconds: int = 60) -> JobClaim:
+        if self._owner(job_id) != owner_id:
+            raise SubstrateError("owner scope mismatch")
+        try:
+            claim = self.substrate.claim(job_id, worker_id=worker_id, lease_seconds=lease_seconds)
+        except SubstrateError as exc:
+            with self.substrate._connect() as db:
+                self.substrate._journal(db, SubstrateEventType.WORKTREE_CONFLICT if "worktree" in str(exc) else SubstrateEventType.CLAIM_EXPIRED, job_id=job_id, payload={"failure_class": classify_failure(exc).value})
+            raise
+        with self.substrate._connect() as db:
+            self.substrate._journal(db, SubstrateEventType.JOB_CLAIMED, job_id=job_id, attempt_id=claim.attempt_id, payload={"worker_id": worker_id, "lease_generation": claim.lease_generation})
+        return claim
+
+    def heartbeat(self, claim: JobClaim, *, process_nonce: str, pid: int | None = None, lease_seconds: int = 60) -> None:
+        self.substrate.heartbeat(claim.worker_id, process_nonce=process_nonce, pid=pid, lease_until=_now() + timedelta(seconds=lease_seconds))
+        self.substrate.renew(claim, lease_seconds=lease_seconds)
+        with self.substrate._connect() as db:
+            self.substrate._journal(db, SubstrateEventType.JOB_PROGRESS, job_id=claim.job_id, attempt_id=claim.attempt_id, payload={"process_alive": True, "provider_responsive": None, "job_progress": None})
+
+    def report_progress(self, claim: JobClaim, **kwargs) -> SubstrateEvent:
+        return self.substrate.report_progress(claim, **kwargs)
+
+    def set_provider_state(self, name: str, *, state: ProviderState, authorized: bool, remaining_units: int | None = None) -> ProviderSnapshot:
+        snapshot = self.substrate.provider_state(name, state=state, authorized=authorized, remaining_units=remaining_units)
+        event_type = SubstrateEventType.PROVIDER_EXHAUSTED if state is ProviderState.EXHAUSTED else SubstrateEventType.PROVIDER_UNAVAILABLE if state is ProviderState.UNAVAILABLE else SubstrateEventType.JOB_PROGRESS
+        with self.substrate._connect() as db:
+            self.substrate._journal(db, event_type, payload={"provider": name, "state": state.value, "authorized": authorized})
+        return snapshot
+
+    def report_completion(self, claim: JobClaim, envelope: CompletionEnvelope, *, protected_refs: Iterable[str] = ()) -> SubstrateEvent:
+        try:
+            if envelope.evidence.observed_sha != envelope.reported_sha or envelope.provider != self._provider(claim.job_id):
+                raise SubstrateError("reported completion does not match observed state")
+            if envelope.changed_files and len(envelope.changed_files) > 1000:
+                raise SubstrateError("changed file summary exceeds bound")
+            self.substrate.complete(claim, evidence=envelope.evidence)
+        except BaseException as exc:
+            with self.substrate._connect() as db:
+                self.substrate._journal(db, SubstrateEventType.COMPLETION_REJECTED, job_id=claim.job_id, attempt_id=claim.attempt_id, payload={"failure_class": classify_failure(exc).value})
+            raise
+        with self.substrate._connect() as db:
+            self.substrate._journal(db, SubstrateEventType.JOB_COMPLETED, job_id=claim.job_id, attempt_id=claim.attempt_id, payload={"provider": envelope.provider, "observed_sha": envelope.evidence.observed_sha, "tests": len(envelope.test_evidence_refs)})
+        return self.substrate.journal_events(job_id=claim.job_id)[-1]
+
+    def report_failure(self, claim: JobClaim, error: BaseException) -> SubstrateEvent:
+        category = classify_failure(error)
+        with self.substrate._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.substrate._fence(db, claim)
+            db.execute("UPDATE jobs SET state=?,failure_class=?,lease_until=NULL WHERE id=?", (JobState.FAILED, category, claim.job_id))
+            self.substrate._journal(db, SubstrateEventType.JOB_FAILED, job_id=claim.job_id, attempt_id=claim.attempt_id, payload={"failure_class": category.value})
+            db.commit()
+        return self.substrate.journal_events(job_id=claim.job_id)[-1]
+
+    def cancel_job(self, job_id: str) -> SubstrateEvent:
+        self.substrate.request_cancel(job_id)
+        with self.substrate._connect() as db:
+            db.execute("UPDATE jobs SET state=? WHERE id=? AND state=?", (JobState.CANCELLED, job_id, JobState.QUEUED))
+            self.substrate._journal(db, SubstrateEventType.JOB_CANCELLED, job_id=job_id)
+        return self.substrate.journal_events(job_id=job_id)[-1]
+
+    def supersede_job(self, claim: JobClaim) -> SubstrateEvent:
+        with self.substrate._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self.substrate._fence(db, claim)
+            db.execute("UPDATE jobs SET superseded=1,state=?,lease_until=NULL WHERE id=?", (JobState.SUPERSEDED, claim.job_id))
+            self.substrate._journal(db, SubstrateEventType.JOB_SUPERSEDED, job_id=claim.job_id, attempt_id=claim.attempt_id)
+            db.commit()
+        return self.substrate.journal_events(job_id=claim.job_id)[-1]
+
+    def release_claim(self, claim: JobClaim) -> None:
+        self.substrate.abandon_stale(now=_now() + timedelta(seconds=1))
+
+    def recover_incomplete_jobs(self) -> list[SubstrateEvent]:
+        self.substrate.abandon_stale()
+        with self.substrate._connect() as db:
+            rows = db.execute("SELECT id,worktree,state,result FROM jobs WHERE state IN (?,?)", (JobState.RUNNING, JobState.COMPLETED)).fetchall()
+            for row in rows:
+                if row["state"] == JobState.COMPLETED and not row["result"]:
+                    self.substrate._journal(db, SubstrateEventType.COMPLETION_REJECTED, job_id=row["id"], payload={"failure_class": FailureClass.INVALID_COMPLETION.value})
+                elif row["worktree"]:
+                    try:
+                        inspect_worktree(row["worktree"])
+                    except SubstrateError:
+                        self.substrate._journal(db, SubstrateEventType.WORKTREE_CONFLICT, job_id=row["id"], payload={"failure_class": FailureClass.WORKTREE_CONFLICT.value})
+        return self.substrate.journal_events()
+
+    def inspect_job(self, job_id: str) -> dict:
+        with self.substrate._connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise SubstrateError("job not found")
+        return dict(row)
+
+    def _owner(self, job_id: str) -> str | None:
+        with self.substrate._connect() as db:
+            row = db.execute("SELECT owner_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return row[0] if row else None
+
+    def _provider(self, job_id: str) -> str | None:
+        with self.substrate._connect() as db:
+            row = db.execute("SELECT provider FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return row[0] if row else None
