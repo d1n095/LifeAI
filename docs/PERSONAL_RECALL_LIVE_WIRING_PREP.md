@@ -107,9 +107,9 @@ ruff check backend/app/personal_recall backend/tests/backend/personal_recall
 git diff --check
 ```
 
-Validation result before this hardening round: 110 tests passed against migrated PostgreSQL/RLS. The
-new disclosure/retry tests are included; the local PostgreSQL rerun was blocked by the environment's
-pre-existing `mainai_app` privilege-policy setup failure. Ruff and
+Validation result: 113 tests passed against a fresh database after the complete Alembic chain (including
+0070 and 0071), with real PostgreSQL/RLS. The fixture now reapplies runtime grants after migrations;
+Ruff and
 `git diff --check` passed. The original 79 tests remain covered. New tests exercise gated HTTP projections, all event
 kinds, canonical edit/delete/version/memory transitions, actual PostgreSQL FTS, RLS owner
 attacks, stale session caches, concurrency and forced process-crash recovery. Existing
