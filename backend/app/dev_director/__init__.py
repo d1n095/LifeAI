@@ -38,6 +38,7 @@ from app.dev_director.loop import (
     is_blocked_while_offline,
     run_program_tick,
 )
+from app.dev_director.founder_brief import FounderBrief, generate_founder_brief
 from app.dev_director.git_pr_broker import (
     GitWorktreeBrokerContract,
     PullRequestProposal,
@@ -140,6 +141,7 @@ __all__ = [
     "ExaminerVerdictError",
     "ExaminerVerdictRecord",
     "ExternalProviderLease",
+    "FounderBrief",
     "GitWorktreeBrokerContract",
     "Job",
     "JobEvent",
@@ -168,6 +170,7 @@ __all__ = [
     "assess_job_liveness",
     "build_pr_proposal",
     "create_fix_job",
+    "generate_founder_brief",
     "recover_program_state",
     "detect_job_conflicts",
     "handle_confirmed_abandoned_job",
