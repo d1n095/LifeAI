@@ -18,7 +18,7 @@ from __future__ import annotations
 import io
 import time
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from app.attachment_chamber.path_safety import is_safe_relative_path
