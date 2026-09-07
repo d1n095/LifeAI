@@ -233,7 +233,7 @@ def _check_canonical_disclosure(item: PersonalKnowledgeItem, *, owner_id: str, r
     try:
         validate_open_locator(item, owner_id=owner_id, registry=registry)
     except ValueError as exc:
-        raise RecallAuthorizationError("canonical source is missing, revoked, or unavailable") from exc
+        raise RecallAuthorizationError("canonical source changed before disclosure or is unavailable") from exc
     record = registry.resolve(source_id=item.source_id, owner_id=owner_id, source_type=item.source_type.value, locator=item.provenance.locator)
     if record is None:
         raise RecallAuthorizationError("canonical source disappeared before disclosure")

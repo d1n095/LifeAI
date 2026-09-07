@@ -150,6 +150,19 @@ def _test_database():
         env={**os.environ},
     )
 
+    # Alembic creates tables after the initial bootstrap grants above. PostgreSQL does not
+    # retroactively apply ordinary table grants to objects created by a different owner, so
+    # re-apply the runtime role's baseline grants after migrations and before the exact
+    # job-table narrowing below. Without this second phase, fresh databases report empty
+    # effective privileges for mainai_job_events/proposals even though the fixture intended
+    # to model the production app role.
+    db_conn = psycopg2.connect(settings.database_url)
+    db_conn.autocommit = True
+    with db_conn.cursor() as cur:
+        cur.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {app_role}")
+        cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {app_role}")
+    db_conn.close()
+
     # Mirrors app/main.py's on_startup() exactly (same three functions, same order, same
     # migration_engine) -- see this fixture's own docstring for the bug this closes.
     from app.db import migration_engine

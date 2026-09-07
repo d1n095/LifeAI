@@ -14,7 +14,8 @@ from app.personal_recall.snapshot_protection import DeterministicTestSnapshotPro
 from app.personal_recall.types import DecisionState, IndexState, PersonalKnowledgeItem, Provenance, SourceAuthority, SourceType, VerificationState
 
 
-NOW = datetime(2026, 9, 5, tzinfo=timezone.utc)
+# Keep the fixture grant comfortably in the future so tests do not expire as calendar time advances.
+NOW = datetime(2035, 9, 5, tzinfo=timezone.utc)
 
 
 def _context(**changes):
