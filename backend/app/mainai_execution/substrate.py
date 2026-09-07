@@ -218,11 +218,16 @@ class ExecutionSubstrate:
               event_id TEXT PRIMARY KEY, owner_id TEXT, event_type TEXT NOT NULL, job_id TEXT,
               attempt_id TEXT, occurred_at TEXT NOT NULL, payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS execution_outbox(
+              event_id TEXT PRIMARY KEY, owner_id TEXT, event_type TEXT NOT NULL,
+              job_id TEXT, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+              attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, blocked_reason TEXT
+            );
             CREATE TRIGGER IF NOT EXISTS recovery_journal_no_update BEFORE UPDATE ON recovery_journal BEGIN SELECT RAISE(ABORT, 'recovery journal is append-only'); END;
             CREATE TRIGGER IF NOT EXISTS recovery_journal_no_delete BEFORE DELETE ON recovery_journal BEGIN SELECT RAISE(ABORT, 'recovery journal is append-only'); END;
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
-            for name, definition in (("owner_id", "TEXT"), ("program", "TEXT"), ("capabilities", "TEXT"), ("failure_class", "TEXT"), ("progress", "TEXT")):
+            for name, definition in (("owner_id", "TEXT"), ("program", "TEXT"), ("capabilities", "TEXT"), ("failure_class", "TEXT"), ("progress", "TEXT"), ("dependencies", "TEXT")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
             journal_columns = {row[1] for row in db.execute("PRAGMA table_info(recovery_journal)")}
@@ -232,14 +237,16 @@ class ExecutionSubstrate:
     def _journal(self, db, event_type: SubstrateEventType, *, job_id: str | None = None, attempt_id: str | None = None, payload: dict | None = None):
         safe = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))[:4000]
         owner = db.execute("SELECT owner_id FROM jobs WHERE id=?", (job_id,)).fetchone()[0] if job_id and db.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone() else None
-        db.execute("INSERT INTO recovery_journal(event_id,owner_id,event_type,job_id,attempt_id,occurred_at,payload) VALUES(?,?,?,?,?,?,?)", (str(uuid.uuid4()), owner, event_type, job_id, attempt_id, _iso(_now()), safe))
+        event_id = str(uuid.uuid4())
+        db.execute("INSERT INTO recovery_journal(event_id,owner_id,event_type,job_id,attempt_id,occurred_at,payload) VALUES(?,?,?,?,?,?,?)", (event_id, owner, event_type, job_id, attempt_id, _iso(_now()), safe))
+        db.execute("INSERT INTO execution_outbox(event_id,owner_id,event_type,job_id,payload) VALUES(?,?,?,?,?)", (event_id, owner, event_type, job_id, safe))
 
     def journal_events(self, *, job_id: str | None = None, owner_id: str | None = None) -> list[SubstrateEvent]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM recovery_journal WHERE (job_id=? OR ? IS NULL) AND (owner_id=? OR ? IS NULL) ORDER BY occurred_at,event_id", (job_id, job_id, owner_id, owner_id)).fetchall()
         return [SubstrateEvent(row["event_id"], SubstrateEventType(row["event_type"]), row["job_id"], row["attempt_id"], row["occurred_at"], json.loads(row["payload"])) for row in rows]
 
-    def submit_job(self, *, owner_id: str, program: str, capabilities: Iterable[str] = (), provider: str | None = None, base_sha: str | None = None, worktree: str | None = None, max_active: int = 1) -> DirectorJob:
+    def submit_job(self, *, owner_id: str, program: str, capabilities: Iterable[str] = (), provider: str | None = None, base_sha: str | None = None, worktree: str | None = None, max_active: int = 1, dependencies: dict[str, str] | None = None) -> DirectorJob:
         if not owner_id or not program or max_active < 1:
             raise SubstrateError("owner, program and active-job bound are required")
         caps = tuple(sorted({Capability(c).value for c in capabilities}))
@@ -252,9 +259,48 @@ class ExecutionSubstrate:
             if worktree and db.execute("SELECT COUNT(*) FROM jobs WHERE worktree=? AND state IN (?,?)", (worktree, JobState.QUEUED, JobState.RUNNING)).fetchone()[0] >= 1:
                 raise SubstrateError("worktree backpressure limit reached")
             job_id = str(uuid.uuid4())
-            db.execute("INSERT INTO jobs(id,state,base_sha,worktree,provider,created_at,owner_id,program,capabilities,progress) VALUES(?,?,?,?,?,?,?,?,?,?)", (job_id, JobState.QUEUED, base_sha, worktree, provider, _iso(_now()), owner_id, program, json.dumps(caps), "{}"))
+            db.execute("INSERT INTO jobs(id,state,base_sha,worktree,provider,created_at,owner_id,program,capabilities,progress,dependencies) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (job_id, JobState.QUEUED, base_sha, worktree, provider, _iso(_now()), owner_id, program, json.dumps(caps), "{}", json.dumps(dependencies or {}, sort_keys=True)))
             self._journal(db, SubstrateEventType.JOB_ACCEPTED, job_id=job_id, payload={"owner_id": owner_id, "program": program, "capabilities": caps})
         return DirectorJob(job_id, owner_id, program, caps)
+
+    def eligible_jobs(self, *, owner_id: str | None = None, limit: int = 100) -> list[str]:
+        """Return only queued jobs whose exact dependency SHAs are completed and certified."""
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM jobs WHERE state=? AND (owner_id=? OR ? IS NULL) ORDER BY created_at,id LIMIT ?", (JobState.QUEUED, owner_id, owner_id, limit)).fetchall()
+            eligible = []
+            for row in rows:
+                dependencies = json.loads(row["dependencies"] or "{}")
+                ok = True
+                for dep_id, required_sha in dependencies.items():
+                    dep = db.execute("SELECT state,result FROM jobs WHERE id=?", (dep_id,)).fetchone()
+                    if dep is None or dep["state"] != JobState.COMPLETED or not dep["result"] or json.loads(dep["result"]).get("observed_sha") != required_sha:
+                        ok = False
+                        break
+                if ok:
+                    eligible.append(row["id"])
+            return eligible
+
+    def deliver_events(self, handler, *, limit: int = 100, max_attempts: int = 5) -> tuple[int, int, int]:
+        """Deliver minimal outbox records with bounded retry and poison-event isolation."""
+        delivered = dead = skipped = 0
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM execution_outbox WHERE state='pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY event_id LIMIT ?", (_iso(_now()), limit)).fetchall()
+            for row in rows:
+                try:
+                    handler({"event_id": row["event_id"], "event_type": row["event_type"], "job_id": row["job_id"], "payload": json.loads(row["payload"])})
+                except Exception:
+                    attempts = int(row["attempts"]) + 1
+                    if attempts >= max_attempts:
+                        db.execute("UPDATE execution_outbox SET state='dead_letter',attempts=?,blocked_reason='bounded delivery failure' WHERE event_id=?", (attempts, row["event_id"]))
+                        dead += 1
+                    else:
+                        db.execute("UPDATE execution_outbox SET attempts=?,next_attempt_at=? WHERE event_id=?", (attempts, _iso(_now() + timedelta(seconds=min(3600, 2 ** attempts))), row["event_id"]))
+                        skipped += 1
+                    continue
+                db.execute("UPDATE execution_outbox SET state='delivered',attempts=attempts+1 WHERE event_id=?", (row["event_id"],))
+                delivered += 1
+            db.commit()
+        return delivered, dead, skipped
 
     def report_progress(self, claim: JobClaim, *, phase: str, current: int, total: int | None = None) -> SubstrateEvent:
         if not phase or current < 0:
@@ -422,6 +468,12 @@ class DirectorContract:
 
     def submit_job(self, **kwargs) -> DirectorJob:
         return self.substrate.submit_job(**kwargs)
+
+    def eligible_jobs(self, *, owner_id: str | None = None, limit: int = 100) -> list[str]:
+        return self.substrate.eligible_jobs(owner_id=owner_id, limit=limit)
+
+    def deliver_events(self, handler, *, limit: int = 100, max_attempts: int = 5) -> tuple[int, int, int]:
+        return self.substrate.deliver_events(handler, limit=limit, max_attempts=max_attempts)
 
     def claim_job(self, job_id: str, *, owner_id: str, worker_id: str, lease_seconds: int = 60) -> JobClaim:
         if self._owner(job_id) != owner_id:
