@@ -97,6 +97,13 @@ def offline_policy_allows(action: str, *, autonomy_level: int) -> bool:
     return 0 <= autonomy_level <= 2
 
 
+def provider_can_dispatch(*, provider_state: str, authorized: bool, capabilities: set[str], required: set[str]) -> bool:
+    """Capability and authorization are independent gates for scheduler decisions."""
+    if provider_state not in {"available"} or not authorized:
+        return False
+    return required.issubset(capabilities)
+
+
 class AutonomyLevel(StrEnum):
     MANUAL = "0"
     ISOLATED = "1"
