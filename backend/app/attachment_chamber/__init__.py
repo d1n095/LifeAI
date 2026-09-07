@@ -70,6 +70,18 @@ from app.attachment_chamber.sanitize import (
     sanitize_pdf_render,
     sanitize_plain_text_extraction,
 )
+from app.attachment_chamber.untrusted_content import UntrustedExtractedContent, wrap_extracted_content
+from app.attachment_chamber.release import (
+    ALLOWED,
+    DENIED,
+    AttachmentReleasePolicy,
+    ReleaseDecision,
+    ReleaseDecisionValue,
+    ReleaseLevel,
+    ReleasePolicyNotWiredError,
+    release_attachment,
+)
+from app.attachment_chamber.deletion import DeletionReceipt, delete_attachment, tracked_artifacts_remaining
 from app.attachment_chamber.types import (
     QUARANTINE_TRANSITIONS,
     TERMINAL_QUARANTINE_STATES,
@@ -92,7 +104,9 @@ from app.attachment_chamber.types import (
 )
 
 __all__ = [
+    "ALLOWED",
     "ATTACHMENT_MAGIC_BYTES",
+    "DENIED",
     "MAX_COMPRESSION_RATIO",
     "MAX_FILES",
     "MAX_NESTING_DEPTH",
@@ -111,8 +125,10 @@ __all__ = [
     "AttachmentChamberState",
     "AttachmentEvent",
     "AttachmentIdentity",
+    "AttachmentReleasePolicy",
     "AttachmentSource",
     "BoundedFileHandle",
+    "DeletionReceipt",
     "DerivativeKind",
     "DetectedType",
     "InvalidQuarantineTransitionError",
@@ -130,13 +146,19 @@ __all__ = [
     "PreviewNotReadyError",
     "PreviewResult",
     "QuarantineState",
+    "ReleaseDecision",
+    "ReleaseDecisionValue",
+    "ReleaseLevel",
+    "ReleasePolicyNotWiredError",
     "SandboxEnforcementStatus",
     "SanitizationNotImplementedError",
     "SanitizedDerivative",
     "ScanResult",
     "TerminalQuarantineStateError",
     "UnsafePathError",
+    "UntrustedExtractedContent",
     "canonical_case",
+    "delete_attachment",
     "detect_double_extension",
     "detect_magic_kind",
     "detect_mime",
@@ -155,6 +177,7 @@ __all__ = [
     "preview_text",
     "quarantine_relative_location",
     "receive_attachment",
+    "release_attachment",
     "resolve_quarantine_path",
     "run_parser_safely",
     "sanitize_image_reencode",
@@ -163,6 +186,8 @@ __all__ = [
     "sanitize_plain_text_extraction",
     "scan_active_content",
     "track_artifact",
+    "tracked_artifacts_remaining",
     "transition_quarantine_state",
     "verify_receipt_chain_intact",
+    "wrap_extracted_content",
 ]
