@@ -205,10 +205,14 @@ class SoakResult:
 
 
 def _dedup_jobs(jobs: tuple[Job, ...]) -> tuple[Job, ...]:
-    """Some existing loop.py calls pass duplicate entries of the just-mutated job into
-    recompute_program_job_index() (a real, prior-round, flagged-not-fixed quirk -- see final
-    report). This harness always maintains and reasons over its OWN de-duplicated job list by
-    identity, never trusting Program.*_job_ids' raw length for counting."""
+    """Defense in depth, not a required workaround: an earlier draft of this harness found
+    loop.py's run_program_tick() passing a duplicate entry of the just-mutated job into
+    recompute_program_job_index() (job.py's next_ready_job() returns the SAME object
+    reference it was passed, never a copy, so `(*jobs, job)` double-counted it) -- fixed
+    directly in loop.py itself (same round, same package, low-risk one-line fix; see the
+    final report's "genuine bugs found and fixed" section). This harness still always
+    maintains and reasons over its OWN de-duplicated job list by identity, rather than
+    trusting Program.*_job_ids' raw length for counting, as a second, independent guard."""
     seen: dict[uuid.UUID, Job] = {}
     for j in jobs:
         seen[j.job_id] = j
