@@ -25,7 +25,7 @@ ej mergad**).
 | LifeIntent state-machine P0 fix | (merged, `f0259cf`) | Klar |
 | File Ingest Quarantine + Attachment Chamber | (merged, `e894042`) | Klar |
 | Autonomous Development Director / continuous work loop (`app/dev_director/`) | (merged, `f2c9b4b` → `a44f514` → `ab1c0ce`) | **FRYST** — kandidat klar för oberoende granskning, SHA `ab1c0ce03a7a0f7b11f2f716304f9e1235a54d3e`. Rör INTE denna SHA. |
-| Founder Reasoning + Judgment + Strategic Initiative layer | `claude/mainai-v2-founder-reasoning` (worktree `.../claude-v2-founder-reasoning`, basen `ab1c0ce`) | **Pågår** — se `docs/mainai_v2/MAINAI_FOUNDER_REASONING_JUDGMENT_RECONCILIATION.md`. Explicit NON-overlapping med dev_director-frysningen (egen branch, rör inte `app/dev_director/`). |
+| Founder Reasoning + Judgment + Strategic Initiative layer | (mergad, `2349c41` → sovereign `4814d78`) | **Klar** — se `docs/mainai_v2/MAINAI_FOUNDER_REASONING_JUDGMENT_RECONCILIATION.md` + [PR #246-kommentar](https://github.com/d1n095/LifeAI/pull/246#issuecomment-5585130276). 140/140 tester (106 bygg + 34 oberoende adversarial), redo för oberoende granskning som `dev_director`. |
 
 **Merge-ordning / beroenden:** Founder Reasoning-lagret bygger ovanpå den frysta
 dev_director-kandidaten som bas men modifierar den inte — kan mergas till sovereign oberoende
