@@ -147,6 +147,7 @@ from app.models.mainai_wait import (
     MainAITaskWaitSourceType,
     MainAITaskWaitStatus,
 )
+from app.models.mainai_supervision import MainAIBudgetReservation, MainAISupervisionAgent, MainAISupervisionMessage
 from app.models.media_url_import import MediaUrlImport
 from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.models.memory_source_unit import (
@@ -454,4 +455,7 @@ __all__ = [
     "StrategySynthesisInput",
     "StrategySynthesisLessonLink",
     "StrategySynthesisMaterialization",
+    "MainAIBudgetReservation",
+    "MainAISupervisionAgent",
+    "MainAISupervisionMessage",
 ]

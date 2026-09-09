@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
 from app.mainai_execution.substrate import ExecutionSubstrate
+from app.mainai_execution.supervision_runtime import CompletionDecision, CompletionFacts, evaluate_completion, classify_liveness, Liveness, BlockerEvidence, validate_blocker
 
 
 class AgentState(StrEnum):
@@ -119,6 +120,19 @@ class ContinuousSupervisor:
         self.substrate = substrate
         self.path = Path(substrate.path).with_name(f"{Path(substrate.path).stem}-supervision.sqlite")
         self._init()
+
+    @staticmethod
+    def evaluate_completion(facts: CompletionFacts) -> CompletionDecision:
+        """Evaluate provider evidence without granting it authority."""
+        return evaluate_completion(facts)
+
+    @staticmethod
+    def validate_blocker(reason: str, evidence: BlockerEvidence) -> tuple[bool, str]:
+        return validate_blocker(reason, evidence)
+
+    @staticmethod
+    def classify_liveness(**kwargs) -> Liveness:
+        return classify_liveness(**kwargs)
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=10, isolation_level=None)
