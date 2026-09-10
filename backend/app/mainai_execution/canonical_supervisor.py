@@ -24,6 +24,7 @@ from app.mainai_execution.execution_events import append_execution_event
 from app.mainai_execution.production_adapter import PROTECTED_REFS
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.workforce import WorkforceAgentProfile, WorkforceAssignment
+from app.models.mainai_supervision import MainAISupervisionTelemetry
 from app.workforce.kill_switch import assert_grant_allowed
 
 
@@ -54,6 +55,41 @@ class CanonicalSupervisor:
 
     def now(self):
         return self.db.scalar(text('SELECT clock_timestamp()'))
+
+    def record_telemetry(self, owner, *, agent_id, state, observed_at=None, **values):
+        """Persist bounded resource observations; never turns telemetry into authority."""
+        self.lock(owner)
+        allowed = {
+            'job_id', 'attempt_id', 'provider', 'model', 'productive_seconds',
+            'idle_seconds', 'blocked_seconds', 'stalled_seconds', 'continuation_count',
+            'premature_return_count', 'restart_count', 'context_input_tokens',
+            'context_output_tokens', 'context_cached_tokens', 'context_limit_tokens',
+            'provider_quota_remaining', 'estimated_cost', 'reported_cost', 'validated_cost',
+            'retries', 'failed_attempts', 'rework_count', 'examiner_outcome',
+            'last_progress_at', 'handoff_ready', 'context_risk',
+        }
+        unknown = set(values) - allowed
+        if unknown or not agent_id or len(agent_id) > 128 or not state or len(state) > 32:
+            raise Rejected('INVALID_TELEMETRY')
+        sample_at = observed_at or self.now()
+        if sample_at > self.now() + timedelta(seconds=1) or sample_at < self.now() - timedelta(hours=24):
+            raise Rejected('STALE_TELEMETRY')
+        for key in ('productive_seconds', 'idle_seconds', 'blocked_seconds', 'stalled_seconds', 'provider_quota_remaining', 'estimated_cost', 'reported_cost', 'validated_cost'):
+            if values.get(key) is not None and values[key] < 0:
+                raise Rejected('INVALID_TELEMETRY')
+        for key in ('continuation_count', 'premature_return_count', 'restart_count', 'context_input_tokens', 'context_output_tokens', 'context_cached_tokens', 'context_limit_tokens', 'retries', 'failed_attempts', 'rework_count'):
+            if values.get(key) is not None and (not isinstance(values[key], int) or values[key] < 0):
+                raise Rejected('INVALID_TELEMETRY')
+        row = MainAISupervisionTelemetry(owner_id=owner, agent_id=agent_id, state=state, observed_at=sample_at, **values)
+        self.db.add(row)
+        self.db.flush()
+        return row.id
+
+    def latest_telemetry(self, owner, *, agent_id, limit=1):
+        self.lock(owner)
+        if not 1 <= limit <= 100:
+            raise Rejected('INVALID_LIMIT')
+        return self.rows('SELECT * FROM mainai_supervision_telemetry WHERE owner_id=:o AND agent_id=:a ORDER BY observed_at DESC LIMIT :n', o=owner, a=agent_id, n=limit)
 
     def lock(self, owner):
         # Owner comes from authenticated runtime context; never from an event payload.
