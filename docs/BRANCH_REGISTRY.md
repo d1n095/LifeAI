@@ -6,6 +6,46 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Codex autonomous execution runtime — INDEPENDENT_ATTACK_FAIL (2026-09-10)
+
+**Owner: Codex (fix). Reviewer of the fix: an independent examiner, not Codex, once ready.**
+
+Codex's frozen "autonomous execution runtime" candidate (`app/mainai_execution/substrate.py` +
+`production_adapter.py`, branches `codex/mainai-continuous-supervision` /
+`codex/universal-personal-recall`) was independently examined by Claude at exact SHA
+`c1883262902622cc72871ab473808ca4969e1a87`. **Verdict: `INDEPENDENT_ATTACK_FAIL`** — two P0
+findings (certification bypass in `ExecutionSubstrate.eligible_jobs()`; protected-ref bypass
+in `freeze_artifact()`/`RuntimeOrchestrator.freeze()`), both independently reproduced by two
+separate attack forks and then confirmed directly by the lead examiner's own hand-written
+tests. Neither is reachable from any live path today (confirmed via repo-wide grep: zero
+non-test callers of `RuntimeOrchestrator`/`ProductionExecutionAdapter`/`SafeScheduler`/
+`ExecutionSubstrate` anywhere in `app/`) — real bugs, not yet exploitable, and per the
+founder's own explicit instruction that does not downgrade them: disabled wiring is grounds to
+say "not exploitable today," never grounds to skip the fix.
+
+Also found: `ProductionExecutionAdapter` (~305 lines, the real production seam) had **zero**
+direct test coverage before this examination; a zombie-job bug (crash during cancellation
+leaves a job permanently un-completable in the SQLite substrate); two owner-scoping gaps; and
+that Codex's own claimed "500-job/1500-event PostgreSQL/RLS soak" is in fact a single-threaded
+bulk event-insert test that never exercises claim/lease concurrency and runs on the superuser
+connection (bypassing RLS).
+
+**Full fix contract, root causes, required test coverage, and the exact report-back shape:**
+`docs/ACTIVE_WORK_CODEX_RUNTIME_P0_FIX.md`. **This is one fix program — do not return partial.**
+Old review result does not carry over to a new SHA; a new independent examination is required
+before any future merge/deploy/wiring, same discipline as Claude's own frozen `dev_director`
+candidate below.
+
+**New standing rule this examination surfaced, applies project-wide going forward:** test
+coverage of a component's lower-level primitives is not the same as test coverage of the
+actual production effect seam that wraps them, and soak *size* is not the same as soak
+*quality* — every claimed proof should state what was actually exercised and what was not, and
+no critical effect seam (a production adapter, a broker, anything that turns a decision into a
+real mutation) may be considered covered merely because the components underneath it pass
+their own tests.
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
