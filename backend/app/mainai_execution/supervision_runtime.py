@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.mainai_supervision import MainAIBudgetReservation, MainAISupervisionAgent, MainAISupervisionMessage
@@ -105,97 +104,143 @@ def validate_blocker(reason: str, evidence: BlockerEvidence) -> tuple[bool, str]
 
 
 class PostgresSupervisionStore:
-    """Durable supervision observations/messages; MainAIJob remains authority."""
+    """Compatibility facade for the pre-canonical supervision API.
 
-    def __init__(self, session: Session):
+    New production code must use :class:`CanonicalSupervisor`; this facade only
+    preserves old callers and writes observations/messages, never job authority
+    or leases.  It is deliberately bounded and owner-scoped.
+    """
+
+    def __init__(self, session):
+        self.db = session
         self.session = session
 
-    def observe(self, *, agent_id: str, owner_id: uuid.UUID, state: str, process_nonce: str, heartbeat_at: datetime, job_id: uuid.UUID | None = None, attempt_id: str | None = None, provider: str | None = None, progress_key: str | None = None, pid: int | None = None) -> None:
-        row = self.session.get(MainAISupervisionAgent, agent_id)
-        if row is None:
-            row = MainAISupervisionAgent(agent_id=agent_id, owner_id=owner_id, state=state, process_nonce=process_nonce, heartbeat_at=heartbeat_at, updated_at=heartbeat_at, job_id=job_id, attempt_id=attempt_id, provider=provider, progress_key=progress_key, pid=pid)
-            self.session.add(row)
-        else:
-            if row.owner_id != owner_id:
-                raise PermissionError("agent owner mismatch")
-            row.state, row.process_nonce, row.heartbeat_at, row.updated_at = state, process_nonce, heartbeat_at, heartbeat_at
-            row.job_id, row.attempt_id, row.provider, row.progress_key, row.pid = job_id, attempt_id, provider, progress_key, pid
-        self.session.flush()
-
-    def _canonical_job(self, owner_id: uuid.UUID, job_id: uuid.UUID) -> MainAIJob:
-        job = self.session.scalar(select(MainAIJob).where(MainAIJob.id == job_id, MainAIJob.owner_id == owner_id).with_for_update())
-        if job is None:
-            raise LookupError("job is not owned by caller")
-        if job.status in {MainAIJobStatus.cancelled, MainAIJobStatus.completed, MainAIJobStatus.failed, MainAIJobStatus.superseded}:
-            raise RuntimeError("job is not current")
+    def _job(self, owner_id, job_id):
+        job = self.db.get(MainAIJob, job_id)
+        if job is None or job.owner_id != owner_id:
+            raise LookupError("job is absent or belongs to another owner")
         return job
 
-    def continuation(self, *, owner_id: uuid.UUID, job_id: uuid.UUID, kind: str, reason: str, sequence: int, attempt_id: str | None = None) -> MainAISupervisionMessage:
+    def continuation(self, *, owner_id, job_id, kind, reason, sequence, attempt_id=None):
         if sequence < 1 or not reason or len(reason) > 1000:
             raise ValueError("bounded continuation metadata required")
-        job = self._canonical_job(owner_id, job_id)
-        key = uuid.uuid5(uuid.NAMESPACE_URL, f"{owner_id}:{job.id}:{kind}:{sequence}")
-        existing = self.session.get(MainAISupervisionMessage, key)
+        job = self._job(owner_id, job_id)
+        if job.status in {MainAIJobStatus.cancelled, MainAIJobStatus.completed, MainAIJobStatus.failed, MainAIJobStatus.superseded}:
+            raise RuntimeError("job is not current")
+        existing = self.db.execute(select(MainAISupervisionMessage).where(
+            MainAISupervisionMessage.owner_id == owner_id,
+            MainAISupervisionMessage.job_id == job_id,
+            MainAISupervisionMessage.kind == kind,
+            MainAISupervisionMessage.sequence == sequence,
+        )).scalar_one_or_none()
         if existing:
             return existing
-        row = MainAISupervisionMessage(id=key, owner_id=owner_id, job_id=job.id, attempt_id=attempt_id, kind=kind, reason=reason, sequence=sequence, created_at=datetime.now(timezone.utc))
-        self.session.add(row)
+        row = MainAISupervisionMessage(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"{owner_id}:{job.id}:{kind}:{sequence}"),
+            owner_id=owner_id, job_id=job.id, attempt_id=attempt_id, kind=kind, reason=reason[:1000], sequence=sequence,
+            state="pending", attempts=0, created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(row)
         try:
-            self.session.flush()
+            self.db.flush()
         except IntegrityError:
-            self.session.rollback()
-            return self.session.scalar(select(MainAISupervisionMessage).where(MainAISupervisionMessage.owner_id == owner_id, MainAISupervisionMessage.job_id == job.id, MainAISupervisionMessage.kind == kind, MainAISupervisionMessage.sequence == sequence))
+            self.db.rollback()
+            return self.db.execute(select(MainAISupervisionMessage).where(
+                MainAISupervisionMessage.owner_id == owner_id,
+                MainAISupervisionMessage.job_id == job_id,
+                MainAISupervisionMessage.kind == kind,
+                MainAISupervisionMessage.sequence == sequence,
+            )).scalar_one()
         return row
 
-    def eligible_jobs(self, owner_id: uuid.UUID, limit: int = 1) -> list[MainAIJob]:
-        return list(self.session.scalars(select(MainAIJob).where(MainAIJob.owner_id == owner_id, MainAIJob.status == MainAIJobStatus.queued).order_by(MainAIJob.created_at, MainAIJob.id).limit(limit)))
+    def eligible_jobs(self, owner_id, limit=1):
+        return list(self.session.scalars(select(MainAIJob).where(
+            MainAIJob.owner_id == owner_id, MainAIJob.status == MainAIJobStatus.queued,
+        ).order_by(MainAIJob.created_at, MainAIJob.id).limit(limit)))
 
-    def expire_reservations(self, now: datetime | None = None) -> int:
+    def expire_reservations(self, now=None):
         now = now or datetime.now(timezone.utc)
-        result = self.session.execute(update(MainAIBudgetReservation).where(MainAIBudgetReservation.state.in_(("reserved", "bound")), MainAIBudgetReservation.expires_at <= now).values(state="expired"))
-        return int(result.rowcount or 0)
+        result = self.db.execute(update(MainAIBudgetReservation).where(
+            MainAIBudgetReservation.state.in_(("reserved", "bound")),
+            MainAIBudgetReservation.expires_at <= now,
+        ).values(state="expired"))
+        self.db.flush()
+        return result.rowcount
 
-    def supervise_idle(self, *, owner_id: uuid.UUID, agent_id: str, reason: str = "continue authorized work") -> list[MainAISupervisionMessage]:
-        """Make one fenced decision from canonical PostgreSQL state."""
-        agent = self.session.scalar(select(MainAISupervisionAgent).where(MainAISupervisionAgent.agent_id == agent_id, MainAISupervisionAgent.owner_id == owner_id).with_for_update())
-        if agent is None or agent.state != "IDLE":
-            return []
-        if agent.job_id is not None:
-            return [self.continuation_for_agent(owner_id=owner_id, agent_id=agent_id, kind="CONTINUE_SAME_JOB", reason=reason, sequence=1)]
-        ready = self.eligible_jobs(owner_id, limit=1)
-        if not ready:
-            return []
-        return [self.continuation(owner_id=owner_id, job_id=ready[0].id, kind="START_NEXT_READY_JOB", reason="idle agent has canonical READY work", sequence=1)]
-
-    def continuation_for_agent(self, *, owner_id: uuid.UUID, agent_id: str, kind: str, reason: str, sequence: int) -> MainAISupervisionMessage:
-        agent = self.session.scalar(select(MainAISupervisionAgent).where(MainAISupervisionAgent.agent_id == agent_id, MainAISupervisionAgent.owner_id == owner_id).with_for_update())
+    def continuation_for_agent(self, *, owner_id, agent_id, kind, reason, sequence):
+        agent = self.session.execute(select(MainAISupervisionAgent).where(
+            MainAISupervisionAgent.owner_id == owner_id,
+            MainAISupervisionAgent.agent_id == agent_id,
+        ).with_for_update()).scalar_one_or_none()
         if agent is None or agent.job_id is None:
             raise LookupError("agent has no current canonical job")
-        return self.continuation(owner_id=owner_id, job_id=agent.job_id, kind=kind, reason=reason, sequence=sequence, attempt_id=agent.attempt_id)
+        return self.continuation(owner_id=owner_id, job_id=agent.job_id, kind=kind, reason=reason,
+            sequence=sequence, attempt_id=agent.attempt_id)
 
-    def deliver(self, sender, *, owner_id: uuid.UUID, limit: int = 100, max_attempts: int = 5) -> tuple[int, int, int]:
+    def deliver(self, sender, *, owner_id, limit=100, max_attempts=5):
         if not 1 <= limit <= 1000 or not 1 <= max_attempts <= 20:
             raise ValueError("invalid delivery bounds")
+        rows = self.db.execute(select(MainAISupervisionMessage).where(
+            MainAISupervisionMessage.owner_id == owner_id,
+            MainAISupervisionMessage.state.in_(("pending", "retrying")),
+        ).order_by(MainAISupervisionMessage.created_at).limit(limit).with_for_update(skip_locked=True)).scalars().all()
         now = datetime.now(timezone.utc)
-        rows = list(self.session.scalars(select(MainAISupervisionMessage).where(MainAISupervisionMessage.owner_id == owner_id, MainAISupervisionMessage.state.in_(("pending", "retrying")), (MainAISupervisionMessage.next_attempt_at.is_(None)) | (MainAISupervisionMessage.next_attempt_at <= now)).order_by(MainAISupervisionMessage.created_at).limit(limit).with_for_update(skip_locked=True)))
         delivered = dead = retrying = 0
         for row in rows:
             row.attempts += 1
             try:
-                sender({"message_id": str(row.id), "owner_id": str(row.owner_id), "job_id": str(row.job_id), "kind": row.kind, "attempt_id": row.attempt_id, "reason": row.reason, "sequence": row.sequence})
+                sender({"message_id": str(row.id), "owner_id": str(row.owner_id), "job_id": str(row.job_id),
+                        "kind": row.kind, "attempt_id": row.attempt_id, "reason": row.reason, "sequence": row.sequence})
             except Exception:
                 if row.attempts >= max_attempts:
-                    row.state, row.blocked_reason = "dead_letter", "delivery retry budget exhausted"
+                    row.state = "dead_letter"
+                    row.blocked_reason = "delivery retry budget exhausted"
                     dead += 1
                 else:
                     row.state = "retrying"
                     row.next_attempt_at = now + timedelta(seconds=min(3600, 2 ** row.attempts))
                     retrying += 1
             else:
-                row.state, row.delivered_at = "delivered", now
+                row.state = "delivered"
+                row.delivered_at = now
                 delivered += 1
-        self.session.flush()
+        self.db.flush()
         return delivered, dead, retrying
+
+    def observe(self, *, agent_id, owner_id, state, process_nonce, heartbeat_at,
+                job_id=None, attempt_id=None, provider=None, progress_key=None, pid=None):
+        row = self.db.execute(select(MainAISupervisionAgent).where(
+            MainAISupervisionAgent.owner_id == owner_id,
+            MainAISupervisionAgent.agent_id == agent_id,
+        )).scalar_one_or_none()
+        if row is None:
+            row = MainAISupervisionAgent(agent_id=agent_id, owner_id=owner_id, state=state,
+                process_nonce=process_nonce, heartbeat_at=heartbeat_at, updated_at=heartbeat_at,
+                job_id=job_id, attempt_id=attempt_id, provider=provider, progress_key=progress_key, pid=pid)
+            self.db.add(row)
+        else:
+            if row.owner_id != owner_id:
+                raise PermissionError("agent owner mismatch")
+            row.state, row.process_nonce, row.heartbeat_at, row.updated_at = state, process_nonce, heartbeat_at, heartbeat_at
+            row.job_id, row.attempt_id, row.provider, row.progress_key, row.pid = job_id, attempt_id, provider, progress_key, pid
+        self.db.flush()
+        return row
+
+    def supervise_idle(self, *, owner_id, agent_id, reason="continue authorized work"):
+        agent = self.db.execute(select(MainAISupervisionAgent).where(
+            MainAISupervisionAgent.owner_id == owner_id,
+            MainAISupervisionAgent.agent_id == agent_id,
+        )).scalar_one_or_none()
+        if agent is None or agent.state != "IDLE":
+            return []
+        if agent.job_id is not None:
+            return [self.continuation_for_agent(owner_id=owner_id, agent_id=agent_id,
+                kind="CONTINUE_SAME_JOB", reason=reason, sequence=1)]
+        ready = self.eligible_jobs(owner_id, limit=1)
+        if not ready:
+            return []
+        return [self.continuation(owner_id=owner_id, job_id=ready[0].id,
+            kind="START_NEXT_READY_JOB", reason="idle agent has canonical READY work", sequence=1)]
 
 
 class CostClassification(StrEnum):

@@ -14,7 +14,7 @@ class MainAISupervisionAgent(Base):
     __tablename__ = "mainai_supervision_agents"
 
     agent_id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
     state: Mapped[str] = mapped_column(String(32), nullable=False)
     process_nonce: Mapped[str] = mapped_column(String(128), nullable=False)
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
