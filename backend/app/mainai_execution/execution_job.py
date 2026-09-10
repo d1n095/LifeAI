@@ -31,6 +31,7 @@ that it defaults to pushing to a live repo."""
 
 import logging
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -366,7 +367,7 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     as an ordinary failed result here too, for the same reason."""
     validate_targeted_tests_target(target)
     try:
-        result = subprocess.run(["python", "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         return {
             "target": target,

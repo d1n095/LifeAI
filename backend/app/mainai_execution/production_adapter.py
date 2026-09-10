@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 import uuid
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job, renew_mainai_job_lease
-from app.jobs.service import mark_completed, mark_failed, record_claimed
+from app.jobs.service import mark_completed, mark_failed, record_claimed, request_cancel
 from app.mainai_execution.substrate import CompletionEnvelope, FailureClass, inspect_worktree
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
 
@@ -106,6 +107,14 @@ class RuntimeOrchestrator:
         artifact = self.frozen.get(job_id)
         if artifact is None or artifact.sha != sha:
             raise ProductionRuntimeError("review SHA is not the frozen artifact")
+        if artifact.examiner_id is not None and examiner_id != artifact.examiner_id:
+            raise ProductionRuntimeError("reviewer is not the examiner bound to this frozen artifact")
+        try:
+            state = inspect_worktree(artifact.repository, expected_sha=artifact.sha, protected_refs=PROTECTED_REFS)
+        except Exception as exc:
+            raise ProductionRuntimeError("reviewed artifact moved after freeze") from exc
+        if state["protected"] or not state["clean"]:
+            raise ProductionRuntimeError("review target is not a clean, unprotected frozen worktree")
         if examiner_id == artifact.builder_id:
             raise ProductionRuntimeError("builder cannot examine its own artifact")
         profile = self.providers.get(examiner_id)
@@ -149,10 +158,15 @@ def quarantine_provider_output(text: str, *, limit: int = 4000) -> dict[str, obj
     return {"reported_text": safe, "control_actions": (), "authority": "none"}
 
 
-def freeze_artifact(*, job_id: str, attempt_id: str, builder_id: str, examiner_id: str | None, worktree: str, base_sha: str, protected_refs=()) -> ArtifactFreeze:
+def freeze_artifact(*, job_id: str, attempt_id: str, builder_id: str, examiner_id: str | None, worktree: str, base_sha: str, protected_refs=PROTECTED_REFS) -> ArtifactFreeze:
     state = inspect_worktree(worktree, expected_sha=None, protected_refs=protected_refs)
     if state["sha"] == base_sha or not state["clean"]:
         raise ProductionRuntimeError("artifact is not a clean changed commit")
+    try:
+        from app.mainai_execution.substrate import _git
+        _git(Path(worktree).resolve(), "merge-base", "--is-ancestor", base_sha, str(state["sha"]))
+    except Exception as exc:
+        raise ProductionRuntimeError("artifact SHA is not based on the declared base SHA") from exc
     if examiner_id is not None and examiner_id == builder_id:
         raise ProductionRuntimeError("builder cannot examine its own artifact")
     return ArtifactFreeze(job_id, attempt_id, str(worktree), str(state["branch"]), str(state["sha"]), base_sha, builder_id, examiner_id, datetime.now(timezone.utc).isoformat())
@@ -239,8 +253,8 @@ class ProductionExecutionAdapter:
     def __init__(self, db: Session):
         self.db = db
 
-    def claim_next(self, *, worker_id: str, lease_seconds: int = 60) -> ProductionClaim | None:
-        claimed = claim_next_mainai_job(self.db, worker_id, lease_seconds)
+    def claim_next(self, *, worker_id: str, owner_id: uuid.UUID | None = None, lease_seconds: int = 60) -> ProductionClaim | None:
+        claimed = claim_next_mainai_job(self.db, worker_id, lease_seconds, owner_id=owner_id)
         if claimed is None:
             return None
         job_id, owner_id, generation = claimed
@@ -252,7 +266,14 @@ class ProductionExecutionAdapter:
         return ProductionClaim(job_id, owner_id, worker_id, generation, attempt_id)
 
     def heartbeat(self, claim: ProductionClaim, *, lease_seconds: int = 60) -> None:
+        self._job(claim)
         renew_mainai_job_lease(self.db, claim.job_id, claim.worker_id, claim.lease_generation, lease_seconds)
+        self.db.commit()
+
+    def cancel(self, claim: ProductionClaim) -> None:
+        """Request cancellation through the canonical job service, fenced to this owner."""
+        self._job(claim)
+        request_cancel(self.db, claim.job_id, requested_by=claim.owner_id)
         self.db.commit()
 
     def complete(self, claim: ProductionClaim, envelope: CompletionEnvelope) -> None:
@@ -260,6 +281,12 @@ class ProductionExecutionAdapter:
             raise ProductionRuntimeError("completion attempt does not match canonical claim")
         if envelope.reported_sha != envelope.evidence.observed_sha or not envelope.evidence.changed or not envelope.evidence.clean:
             raise ProductionRuntimeError("completion evidence is not grounded in repository state")
+        try:
+            state = inspect_worktree(envelope.evidence.worktree, expected_sha=envelope.evidence.observed_sha, protected_refs=PROTECTED_REFS)
+        except Exception as exc:
+            raise ProductionRuntimeError("completion worktree no longer matches the reviewed SHA") from exc
+        if state["branch"] != envelope.evidence.branch or state["protected"] or not state["clean"]:
+            raise ProductionRuntimeError("completion effect-point ref/worktree validation failed")
         job = self._job(claim)
         mark_completed(self.db, job, worker_id=claim.worker_id, lease_generation=claim.lease_generation, public_message="Execution evidence accepted.")
 
@@ -274,7 +301,7 @@ class ProductionExecutionAdapter:
 
     def _job(self, claim: ProductionClaim) -> MainAIJob:
         job = self.db.get(MainAIJob, claim.job_id, populate_existing=True)
-        if job is None or job.owner_id != claim.owner_id or job.locked_by != claim.worker_id or job.lease_generation != claim.lease_generation or job.status is not MainAIJobStatus.running:
+        if job is None or job.owner_id != claim.owner_id or job.locked_by != claim.worker_id or job.lease_generation != claim.lease_generation or job.status is not MainAIJobStatus.running or job.cancel_requested or job.superseded_by_job_id is not None:
             raise JobLeaseLostError(claim.job_id, claim.worker_id, claim.lease_generation)
         return job
 

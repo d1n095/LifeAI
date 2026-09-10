@@ -58,6 +58,7 @@ _CLAIM_SQL = text("""
                 -- Every other job type's blind reclaim-and-resume is unchanged.
                 AND job_type <> 'task_execution'
            )
+           AND (:owner_id IS NULL OR owner_id = :owner_id)
         ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -85,7 +86,7 @@ class JobLeaseLostError(Exception):
         )
 
 
-def claim_next_mainai_job(db: Session, worker_id: str, lease_seconds: int) -> tuple[uuid.UUID, uuid.UUID, int] | None:
+def claim_next_mainai_job(db: Session, worker_id: str, lease_seconds: int, owner_id: uuid.UUID | None = None) -> tuple[uuid.UUID, uuid.UUID, int] | None:
     """Atomically claims the oldest claimable `mainai_jobs` row (queued, or running with an
     expired lease — a crashed/killed worker's abandoned claim) and marks it `running` under
     this worker's lease, bumping `lease_generation` by 1 whether this is a fresh claim or a
@@ -99,6 +100,7 @@ def claim_next_mainai_job(db: Session, worker_id: str, lease_seconds: int) -> tu
             "worker_id": worker_id,
             "lease_seconds": lease_seconds,
             "claimable_statuses": [s.value for s in CLAIMABLE_MAINAI_JOB_STATUSES],
+            "owner_id": str(owner_id) if owner_id else None,
         },
     ).first()
     if row is None:

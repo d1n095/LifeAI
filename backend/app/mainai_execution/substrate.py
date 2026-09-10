@@ -63,6 +63,9 @@ class SubstrateEventType(StrEnum):
     COMPLETION_REJECTED = "COMPLETION_REJECTED"
 
 
+PROTECTED_REFS = frozenset({"#245", "818dfb732da47901eb5ae06ffdd9c829fe00c4c5", "main", "master"})
+
+
 class FailureClass(StrEnum):
     TRANSIENT = "TRANSIENT"
     PROVIDER_LIMIT = "PROVIDER_LIMIT"
@@ -173,7 +176,7 @@ def inspect_worktree(path: str | Path, *, expected_sha: str | None = None, prote
     clean = not bool(_git(root, "status", "--porcelain"))
     protected = branch in set(protected_refs)
     if expected_sha is not None and sha != expected_sha:
-        raise SubstrateError("worktree SHA does not match the expected SHA")
+        raise SubstrateError("stale worktree SHA does not match the expected SHA")
     if protected:
         raise SubstrateError("protected ref cannot be used as an execution worktree")
     return {"branch": branch, "sha": sha, "clean": clean, "protected": protected}
@@ -380,9 +383,22 @@ class ExecutionSubstrate:
             db.commit()
             return len(rows)
 
+    def release_claim(self, claim: JobClaim) -> None:
+        """Release only the currently fenced claim; stale workers cannot release a new one."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._fence(db, claim)
+            db.execute("UPDATE jobs SET state=?,worker_id=NULL,attempt_id=NULL,lease_until=NULL WHERE id=?", (JobState.ABANDONED, claim.job_id))
+            if row["worktree"]:
+                db.execute("DELETE FROM worktree_claims WHERE job_id=? AND attempt_id=?", (claim.job_id, claim.attempt_id))
+            self._journal(db, SubstrateEventType.JOB_ABANDONED, job_id=claim.job_id, attempt_id=claim.attempt_id)
+            db.commit()
+
     def request_cancel(self, job_id: str) -> None:
         with self._connect() as db:
-            db.execute("UPDATE jobs SET cancel_requested=1 WHERE id=? AND state=?", (job_id, JobState.RUNNING))
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE jobs SET cancel_requested=1,state=CASE WHEN state=? THEN ? ELSE state END,lease_until=CASE WHEN state=? THEN NULL ELSE lease_until END WHERE id=? AND state IN (?,?)", (JobState.QUEUED, JobState.CANCELLED, JobState.RUNNING, job_id, JobState.QUEUED, JobState.RUNNING))
+            self._journal(db, SubstrateEventType.JOB_CANCELLED, job_id=job_id)
             db.commit()
 
     def complete(self, claim: JobClaim, *, evidence: CompletionEvidence) -> None:
@@ -391,6 +407,9 @@ class ExecutionSubstrate:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             self._fence(db, claim)
+            current = inspect_worktree(claim.worktree, expected_sha=evidence.observed_sha, protected_refs=PROTECTED_REFS)
+            if current["branch"] != evidence.branch or not current["clean"] or current["sha"] == claim.base_sha or current["protected"]:
+                raise SubstrateError("completion evidence is stale or targets a protected ref")
             db.execute("UPDATE jobs SET state=?,result=?,lease_until=NULL WHERE id=?", (JobState.COMPLETED, json.dumps(evidence.__dict__, sort_keys=True), claim.job_id))
             if claim.worktree:
                 db.execute("DELETE FROM worktree_claims WHERE job_id=?", (claim.job_id,))
@@ -439,7 +458,7 @@ class DeterministicFakeProvider(LLMProvider):
         return True
 
 
-def completion_evidence(claim: JobClaim, *, protected_refs: Iterable[str] = ()) -> CompletionEvidence:
+def completion_evidence(claim: JobClaim, *, protected_refs: Iterable[str] = PROTECTED_REFS) -> CompletionEvidence:
     if not claim.worktree or not claim.base_sha:
         raise SubstrateError("completion requires a worktree and verified base SHA")
     state = inspect_worktree(claim.worktree, protected_refs=protected_refs)
@@ -546,14 +565,18 @@ class DirectorContract:
         return self.substrate.journal_events(job_id=claim.job_id)[-1]
 
     def release_claim(self, claim: JobClaim) -> None:
-        self.substrate.abandon_stale(now=_now() + timedelta(seconds=1))
+        self.substrate.release_claim(claim)
 
     def recover_incomplete_jobs(self) -> list[SubstrateEvent]:
         self.substrate.abandon_stale()
         with self.substrate._connect() as db:
-            rows = db.execute("SELECT id,worktree,state,result FROM jobs WHERE state IN (?,?)", (JobState.RUNNING, JobState.COMPLETED)).fetchall()
+            rows = db.execute("SELECT id,worktree,state,result,cancel_requested FROM jobs WHERE state IN (?,?,?)", (JobState.RUNNING, JobState.COMPLETED, JobState.CANCELLED)).fetchall()
             for row in rows:
-                if row["state"] == JobState.COMPLETED and not row["result"]:
+                if row["state"] == JobState.RUNNING and row["cancel_requested"]:
+                    db.execute("UPDATE jobs SET state=?,lease_until=NULL,worker_id=NULL,attempt_id=NULL WHERE id=?", (JobState.CANCELLED, row["id"]))
+                    self.substrate._journal(db, SubstrateEventType.JOB_CANCELLED, job_id=row["id"], payload={"recovered": True})
+                elif row["state"] == JobState.COMPLETED and not row["result"]:
+                    db.execute("UPDATE jobs SET state=?,failure_class=? WHERE id=?", (JobState.FAILED, FailureClass.INVALID_COMPLETION, row["id"]))
                     self.substrate._journal(db, SubstrateEventType.COMPLETION_REJECTED, job_id=row["id"], payload={"failure_class": FailureClass.INVALID_COMPLETION.value})
                 elif row["worktree"]:
                     try:

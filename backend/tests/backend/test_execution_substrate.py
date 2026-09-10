@@ -30,7 +30,7 @@ from app.providers.base import Message, ProviderError
 
 
 def _repo(path):
-    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "work/runtime-test", str(path)], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
     (path / "state.txt").write_text("base")

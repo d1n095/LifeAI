@@ -7,6 +7,7 @@ and its result is what actually gates whether a task may become `completed`
 (app/mainai_execution/execution_job.py). A handler claiming success never bypasses this."""
 
 import dataclasses
+import sys
 import subprocess
 from pathlib import PurePosixPath
 
@@ -82,7 +83,7 @@ def _run_targeted_tests(step: dict, *, cwd: str) -> VerificationStepResult:
     timeout_seconds = step.get("timeout_seconds", 300)
     try:
         result = subprocess.run(
-            ["python", "-m", "pytest", "-q", target],
+            [sys.executable, "-m", "pytest", "-q", target],
             cwd=cwd,
             capture_output=True,
             text=True,
