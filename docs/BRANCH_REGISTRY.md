@@ -26,6 +26,7 @@ ej mergad**).
 | File Ingest Quarantine + Attachment Chamber | (merged, `e894042`) | Klar |
 | Autonomous Development Director / continuous work loop (`app/dev_director/`) | (merged, `f2c9b4b` → `a44f514` → `ab1c0ce`) | **FRYST** — kandidat klar för oberoende granskning, SHA `ab1c0ce03a7a0f7b11f2f716304f9e1235a54d3e`. Rör INTE denna SHA. |
 | Founder Reasoning + Judgment + Strategic Initiative layer | (mergad, `2349c41` → sovereign `4814d78`) | **Klar** — se `docs/mainai_v2/MAINAI_FOUNDER_REASONING_JUDGMENT_RECONCILIATION.md` + [PR #246-kommentar](https://github.com/d1n095/LifeAI/pull/246#issuecomment-5585130276). 140/140 tester (106 bygg + 34 oberoende adversarial), redo för oberoende granskning som `dev_director`. |
+| Resource Intelligence + Context Lifecycle + Cost/Quota + Agent Efficiency | (mergad, `ff729b2` → sovereign `97a621a`) | **Klar** — se `docs/mainai_v2/MAINAI_RESOURCE_CONTEXT_COST_RECONCILIATION.md`. Nytt `app.resource_intelligence`, komponerat med `app.agent_coordination`/`app.provider_spend`/`app.execution_envelopes`/`app.mainai_executive.judgment` — inget nytt spend-ledger, ingen ny agent-registry, ingen ny checkpoint-tabell (återanvänder `continuity.py`s founder_memory-mekanism). 89/89 tester (58 bygg + 31 oberoende adversarial), redo för oberoende granskning. |
 
 **Merge-ordning / beroenden:** Founder Reasoning-lagret bygger ovanpå den frysta
 dev_director-kandidaten som bas men modifierar den inte — kan mergas till sovereign oberoende
