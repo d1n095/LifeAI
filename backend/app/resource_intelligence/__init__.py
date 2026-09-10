@@ -15,6 +15,13 @@ from app.resource_intelligence.cost_bridge import (
     populate_agent_outcome_cost_fields,
     tokens_for_assignment,
 )
+from app.resource_intelligence.decision import propose_resource_action
+from app.resource_intelligence.efficiency_profile import (
+    MIN_SAMPLE_SIZE_FOR_ESTABLISHED,
+    agent_efficiency_profile,
+    is_provisional,
+)
+from app.resource_intelligence.scheduler import next_best_resource_allocation
 from app.resource_intelligence.session_checkpoint import (
     CHECKPOINT_MARKER,
     CHECKPOINT_NOTE_TYPE,
@@ -42,11 +49,13 @@ from app.resource_intelligence.types import (
 __all__ = [
     "CHECKPOINT_MARKER",
     "CHECKPOINT_NOTE_TYPE",
+    "MIN_SAMPLE_SIZE_FOR_ESTABLISHED",
     "AgentSessionCheckpoint",
     "ContextLifecycleAction",
     "MetricEnvelope",
     "ResourceActionRecommendation",
     "ResourceIntelligenceError",
+    "agent_efficiency_profile",
     "checkpoint_from_dict",
     "checkpoint_to_dict",
     "context_utilization",
@@ -54,9 +63,12 @@ __all__ = [
     "cost_per_accepted_commit",
     "estimated_time_to_context_limit",
     "idle_productive_blocked_time",
+    "is_provisional",
     "list_telemetry_samples",
     "load_agent_session_checkpoint",
+    "next_best_resource_allocation",
     "populate_agent_outcome_cost_fields",
+    "propose_resource_action",
     "record_telemetry_sample",
     "save_agent_session_checkpoint",
     "tokens_for_assignment",
