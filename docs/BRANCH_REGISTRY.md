@@ -6,6 +6,39 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## MainAI V2 Sovereign Architecture Program (2026-09-07)
+
+**Deliberately isolated lane, separate from Stage T / the main swarm above.** Founder
+directive: build V2 fully in isolation, do NOT merge/wire into production, do NOT touch #245
+(`claude/final-blocker-closeout`, frozen SHA `818dfb7`), until Claude's own review track and
+Codex's separate runtime-P0 track are both independently done — then combine ("Claude-hjärnan
++ Codex-motorn"). Integration branch `claude/mainai-v2-sovereign`, worktree
+`.../claude-mainai-v2`, tracked as [#246](https://github.com/d1n095/LifeAI/pull/246) (**öppen,
+ej mergad**).
+
+| Sub-program | Branch (merged into sovereign) | Status |
+|---|---|---|
+| Sentinel Core + Security Event Mesh | (merged, `b740d9e`) | Klar |
+| Sovereign Identity + Recovery + Encrypted Life Image | (merged, `1c3bcec`) | Klar |
+| Operating Shell + Workspace Memory + Intent Objects | (merged, `f3fd0d3`) | Klar |
+| Intent/Goal reconciliation (`docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md`) | (merged, `3faf659`) | Klar |
+| LifeIntent state-machine P0 fix | (merged, `f0259cf`) | Klar |
+| File Ingest Quarantine + Attachment Chamber | (merged, `e894042`) | Klar |
+| Autonomous Development Director / continuous work loop (`app/dev_director/`) | (merged, `f2c9b4b` → `a44f514` → `ab1c0ce`) | **FRYST** — kandidat klar för oberoende granskning, SHA `ab1c0ce03a7a0f7b11f2f716304f9e1235a54d3e`. Rör INTE denna SHA. |
+| Founder Reasoning + Judgment + Strategic Initiative layer | (mergad, `2349c41` → sovereign `4814d78`) | **Klar** — se `docs/mainai_v2/MAINAI_FOUNDER_REASONING_JUDGMENT_RECONCILIATION.md` + [PR #246-kommentar](https://github.com/d1n095/LifeAI/pull/246#issuecomment-5585130276). 140/140 tester (106 bygg + 34 oberoende adversarial), redo för oberoende granskning som `dev_director`. |
+| Resource Intelligence + Context Lifecycle + Cost/Quota + Agent Efficiency | (mergad, `ff729b2` → sovereign `97a621a`) | **Klar** — se `docs/mainai_v2/MAINAI_RESOURCE_CONTEXT_COST_RECONCILIATION.md`. Nytt `app.resource_intelligence`, komponerat med `app.agent_coordination`/`app.provider_spend`/`app.execution_envelopes`/`app.mainai_executive.judgment` — inget nytt spend-ledger, ingen ny agent-registry, ingen ny checkpoint-tabell (återanvänder `continuity.py`s founder_memory-mekanism). 89/89 tester (58 bygg + 31 oberoende adversarial), redo för oberoende granskning. |
+
+**Merge-ordning / beroenden:** Founder Reasoning-lagret bygger ovanpå den frysta
+dev_director-kandidaten som bas men modifierar den inte — kan mergas till sovereign oberoende
+av dev_director-granskningen. Hela V2-sovereign-linjen väntar på oberoende granskning innan
+den vägs samman med Codex-spåret; ingen del av V2 ska mergas till huvudgrenen eller
+produktions-wireas under tiden.
+
+**Reglerna för hela V2-linjen:** BUILDER != FINAL EXAMINER (den som bygger en del cert­ifierar
+den inte själv), three-check-protokoll för varje ny/adversarial test, aldrig röra #245.
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

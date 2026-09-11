@@ -92,6 +92,7 @@ from app.models.provider_spend import (
     ProviderSpendUsageEvent,
     ProviderSpendUsageStatus,
 )
+from app.models.resource_intelligence import AgentResourceTelemetrySample
 from app.models.life_intent import LifeIntent, LifeIntentBlocker, LifeIntentDependency, LifeIntentEvent
 from app.models.mainai_execution import (
     ACTIVE_MAINAI_GOAL_STATUSES,
@@ -449,4 +450,5 @@ __all__ = [
     "StrategySynthesisInput",
     "StrategySynthesisLessonLink",
     "StrategySynthesisMaterialization",
+    "AgentResourceTelemetrySample",
 ]
