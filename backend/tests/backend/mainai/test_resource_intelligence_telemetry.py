@@ -151,6 +151,76 @@ def test_context_utilization_computes_real_percent_from_latest_sample(superuser_
     assert envelope.trend == "increasing"
 
 
+# ============================================================================ staleness / conflicting samples (round 2)
+
+
+def test_context_utilization_stale_sample_is_missing_data(superuser_db, owner_id):
+    from app.resource_intelligence.telemetry import MAX_TELEMETRY_SAMPLE_AGE_SECONDS
+
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    assignment = _assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent)
+    attempt_id = uuid.uuid4()
+    sample = record_telemetry_sample(superuser_db, owner_id=owner_id, assignment_id=assignment.id, attempt_id=attempt_id, context_used_tokens=10000, context_window_tokens=200000)
+    sample.sampled_at = datetime.utcnow() - timedelta(seconds=MAX_TELEMETRY_SAMPLE_AGE_SECONDS + 1)
+    superuser_db.commit()
+
+    envelope = context_utilization(superuser_db, owner_id=owner_id, attempt_id=attempt_id)
+    assert envelope.missing_data is True
+    assert "STALE_TELEMETRY" in envelope.method
+
+
+def test_context_utilization_fresh_sample_just_inside_the_window_is_not_stale(superuser_db, owner_id):
+    from app.resource_intelligence.telemetry import MAX_TELEMETRY_SAMPLE_AGE_SECONDS
+
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    assignment = _assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent)
+    attempt_id = uuid.uuid4()
+    sample = record_telemetry_sample(superuser_db, owner_id=owner_id, assignment_id=assignment.id, attempt_id=attempt_id, context_used_tokens=10000, context_window_tokens=200000)
+    sample.sampled_at = datetime.utcnow() - timedelta(seconds=MAX_TELEMETRY_SAMPLE_AGE_SECONDS - 5)
+    superuser_db.commit()
+
+    envelope = context_utilization(superuser_db, owner_id=owner_id, attempt_id=attempt_id)
+    assert envelope.missing_data is False
+
+
+def test_estimated_time_to_context_limit_stale_latest_sample_is_missing_data(superuser_db, owner_id):
+    from app.resource_intelligence.telemetry import MAX_TELEMETRY_SAMPLE_AGE_SECONDS
+
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    assignment = _assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent)
+    attempt_id = uuid.uuid4()
+    s1 = record_telemetry_sample(superuser_db, owner_id=owner_id, assignment_id=assignment.id, attempt_id=attempt_id, context_used_tokens=10000, context_window_tokens=110000)
+    superuser_db.flush()
+    s2 = record_telemetry_sample(superuser_db, owner_id=owner_id, assignment_id=assignment.id, attempt_id=attempt_id, context_used_tokens=20000, context_window_tokens=110000)
+    s1.sampled_at = datetime.utcnow() - timedelta(seconds=MAX_TELEMETRY_SAMPLE_AGE_SECONDS + 200)
+    s2.sampled_at = datetime.utcnow() - timedelta(seconds=MAX_TELEMETRY_SAMPLE_AGE_SECONDS + 100)
+    superuser_db.commit()
+
+    envelope = estimated_time_to_context_limit(superuser_db, owner_id=owner_id, attempt_id=attempt_id)
+    assert envelope.missing_data is True
+    assert "STALE_TELEMETRY" in envelope.method
+
+
+def test_context_utilization_conflicting_simultaneous_samples_disclosed(superuser_db, owner_id):
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    assignment = _assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent)
+    attempt_id = uuid.uuid4()
+    same_instant = datetime.utcnow()
+    s1 = record_telemetry_sample(superuser_db, owner_id=owner_id, assignment_id=assignment.id, attempt_id=attempt_id, context_used_tokens=10000, context_window_tokens=200000)
+    s2 = record_telemetry_sample(superuser_db, owner_id=owner_id, assignment_id=assignment.id, attempt_id=attempt_id, context_used_tokens=15000, context_window_tokens=200000)
+    s1.sampled_at = same_instant
+    s2.sampled_at = same_instant
+    superuser_db.commit()
+
+    envelope = context_utilization(superuser_db, owner_id=owner_id, attempt_id=attempt_id)
+    assert envelope.missing_data is False
+    assert "CONFLICTING_TELEMETRY" in envelope.uncertainty
+
+
 # ============================================================================ estimated_time_to_context_limit
 
 

@@ -123,6 +123,53 @@ def _recency_weight(completed_at: datetime, *, now: datetime, half_life_days: fl
     return 0.5 ** (age_days / half_life_days)
 
 
+# Minimum terminal-assignment count in EACH half (recent/older) before a trend is reported at
+# all -- below this, splitting an already-small population in two would make each half's own
+# rate swing wildly on a single outcome, producing a "trend" that is really just noise dressed
+# up as a signal. AGENT_EFFICIENCY_TREND != AGENT_EFFICIENCY_TREND_FROM_THREE_DATA_POINTS.
+MIN_HALF_SIZE_FOR_TREND = 3
+# A recent-vs-older rate delta smaller than this is treated as noise, not a real trend --
+# roughly one flipped outcome in a MIN_HALF_SIZE_FOR_TREND-sized half.
+TREND_STABLE_BAND = 0.1
+
+
+def _accepted_trend_from_split(assignments: list[AgentWorkAssignment]) -> str | None:
+    """Splits terminal assignments by their own `completed_at` into an older and a more recent
+    half (by count, not by a fixed calendar window -- robust to bursty or sparse activity) and
+    compares each half's own (unweighted, real, simple) accepted-commit rate. `None` (not a
+    guessed "stable") when either half has fewer than `MIN_HALF_SIZE_FOR_TREND` assignments --
+    ONE_RUN != LONG_TERM_PROFILE's own sibling invariant applied to trend specifically: a trend
+    computed from too few points is not reported as a trend at all."""
+
+    dated = sorted((a for a in assignments if a.completed_at is not None), key=lambda a: a.completed_at)
+    if len(dated) < 2 * MIN_HALF_SIZE_FOR_TREND:
+        return None
+    midpoint = len(dated) // 2
+    older, recent = dated[:midpoint], dated[midpoint:]
+    older_rate = sum(1 for a in older if a.status in _ACCEPTED_STATUSES) / len(older)
+    recent_rate = sum(1 for a in recent if a.status in _ACCEPTED_STATUSES) / len(recent)
+    delta = recent_rate - older_rate
+    if abs(delta) < TREND_STABLE_BAND:
+        return "stable"
+    return "improving" if delta > 0 else "declining"
+
+
+def _rework_trend_from_split(assignments: list[AgentWorkAssignment], reworked_ids: set[uuid.UUID]) -> str | None:
+    dated = sorted((a for a in assignments if a.completed_at is not None), key=lambda a: a.completed_at)
+    if len(dated) < 2 * MIN_HALF_SIZE_FOR_TREND:
+        return None
+    midpoint = len(dated) // 2
+    older, recent = dated[:midpoint], dated[midpoint:]
+    older_rate = sum(1 for a in older if a.id in reworked_ids) / len(older)
+    recent_rate = sum(1 for a in recent if a.id in reworked_ids) / len(recent)
+    delta = recent_rate - older_rate
+    if abs(delta) < TREND_STABLE_BAND:
+        return "stable"
+    # A rework RATE going up is a DECLINING efficiency trend, and vice versa -- inverse of the
+    # accepted-commit-rate sense, disclosed here rather than left for a caller to get backwards.
+    return "declining" if delta > 0 else "improving"
+
+
 def _resolve_role_filter(task_type: str | None) -> WorkAssignmentRole | None:
     if task_type is None:
         return None
@@ -311,7 +358,8 @@ def agent_efficiency_profile(
             value=value, unit="fraction", definition=accepted_def, denominator="recency-weighted total terminal assignments",
             time_window=time_window, population=population, sample_size=sample_size, source=_SOURCE_ASSIGNMENTS,
             method=f"weighted_accepted={accepted_weight:.4f} / weighted_total={total_weight:.4f} over {sample_size} terminal assignment(s), half_life={RECENCY_HALF_LIFE_DAYS:.0f}d",
-            missing_data=False, uncertainty=None, last_updated=last_updated, trend=None,
+            missing_data=False, uncertainty=None, last_updated=last_updated,
+            trend=_accepted_trend_from_split(assignments),
         )
 
     # -- rework_rate --
@@ -328,7 +376,8 @@ def agent_efficiency_profile(
             value=value, unit="fraction", definition=rework_def, denominator="recency-weighted total terminal assignments",
             time_window=time_window, population=population, sample_size=sample_size, source=_SOURCE_EVENTS,
             method=f"weighted_reworked={reworked_weight:.4f} / weighted_total={total_weight:.4f} over {sample_size} terminal assignment(s) ({len(reworked_ids)} reworked), half_life={RECENCY_HALF_LIFE_DAYS:.0f}d",
-            missing_data=False, uncertainty=None, last_updated=last_updated, trend=None,
+            missing_data=False, uncertainty=None, last_updated=last_updated,
+            trend=_rework_trend_from_split(assignments, reworked_ids),
         )
 
     # -- cost_per_accepted_commit -- returned verbatim, never reimplemented.

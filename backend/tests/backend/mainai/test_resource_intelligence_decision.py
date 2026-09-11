@@ -123,13 +123,41 @@ def test_critical_utilization_resets_instead_of_compacting():
     assert decision.action == ContextLifecycleAction.RESET_SESSION
 
 
-def test_elevated_utilization_with_large_remaining_task_splits_proactively():
+def test_elevated_utilization_with_large_remaining_task_splits_proactively_when_sustained():
+    """Round 2: DECISION STABILITY -- a proactive SPLIT_JOB now requires the elevated signal to
+    be sustained over >= MIN_CONSECUTIVE_FOR_ELEVATED_ACTION consecutive observations, not a
+    single reading (see the sibling test below for the single-reading case)."""
+    decision = propose_resource_action(
+        context_utilization=_metric(65.0, unit="percent"),
+        time_to_limit=_metric(50_000.0, unit="seconds"),
+        task_remaining_size="large",
+        consecutive_elevated_observations=2,
+    )
+    assert decision.action == ContextLifecycleAction.SPLIT_JOB
+
+
+def test_elevated_utilization_single_reading_does_not_yet_split():
+    """DECISION STABILITY / hysteresis: the default `consecutive_elevated_observations=1` must
+    NOT trigger a disruptive SPLIT_JOB off one possibly-noisy reading."""
     decision = propose_resource_action(
         context_utilization=_metric(65.0, unit="percent"),
         time_to_limit=_metric(50_000.0, unit="seconds"),
         task_remaining_size="large",
     )
-    assert decision.action == ContextLifecycleAction.SPLIT_JOB
+    assert decision.action == ContextLifecycleAction.CONTINUE_CURRENT_SESSION
+    assert "not yet acting" in decision.reason.lower() or "stability" in decision.reason.lower()
+
+
+def test_elevated_utilization_with_critical_state_checkpoints_immediately_no_hysteresis():
+    """CONTEXT-LOSS RISK: unlike SPLIT_JOB, an elevated+critical_unsummarized_state CHECKPOINT
+    fires on the very first reading -- a checkpoint is cheap/low-attention, so there is no
+    reason to wait for a second confirming observation."""
+    decision = propose_resource_action(
+        context_utilization=_metric(65.0, unit="percent"),
+        time_to_limit=_metric(50_000.0, unit="seconds"),
+        critical_unsummarized_state=True,
+    )
+    assert decision.action == ContextLifecycleAction.CHECKPOINT
 
 
 # ============================================================================ established vs provisional efficiency profile
@@ -162,6 +190,72 @@ def test_provisional_poor_efficiency_profile_never_triggers_handoff_or_change_mo
     }
     decision = propose_resource_action(**_healthy_kwargs(), efficiency_profile=profile)
     assert decision.action not in (ContextLifecycleAction.HANDOFF, ContextLifecycleAction.CHANGE_MODEL)
+    assert decision.action == ContextLifecycleAction.CONTINUE_CURRENT_SESSION
+
+
+# ============================================================================ provider quota critical (round 2)
+
+
+def test_provider_quota_critical_recommends_change_provider():
+    decision = propose_resource_action(**_healthy_kwargs(), provider_quota_critical=True)
+    assert decision.action == ContextLifecycleAction.CHANGE_PROVIDER
+    assert decision.signals["provider_quota_critical"] is True
+
+
+def test_provider_quota_critical_with_critical_state_checkpoints_first():
+    """NEVER LOSE CRITICAL STATE overrides even a quota-exhaustion stop."""
+    decision = propose_resource_action(**_healthy_kwargs(), provider_quota_critical=True, critical_unsummarized_state=True)
+    assert decision.action == ContextLifecycleAction.CHECKPOINT
+
+
+def test_provider_quota_not_critical_has_no_effect():
+    decision = propose_resource_action(**_healthy_kwargs(), provider_quota_critical=False)
+    assert decision.action == ContextLifecycleAction.CONTINUE_CURRENT_SESSION
+
+
+# ============================================================================ cost-to-finish comparison (round 2, CHEAPEST MODEL != CHEAPEST OUTCOME)
+
+
+def test_cheaper_alternative_beyond_margin_recommends_the_alternative_action():
+    decision = propose_resource_action(
+        **_healthy_kwargs(),
+        cost_to_finish_current=_metric(10.0, unit="usd"),
+        cost_to_finish_alternative=_metric(5.0, unit="usd"),
+        alternative_action=ContextLifecycleAction.HANDOFF,
+    )
+    assert decision.action == ContextLifecycleAction.HANDOFF
+
+
+def test_expensive_model_finishing_cheaper_overall_is_still_recommended():
+    """An expensive-per-token but low-rework alternative can have a LOWER cost_to_finish than a
+    cheap-per-token but high-rework current agent -- this branch must prefer the real projected
+    total, never a per-token sticker price it never even sees."""
+    decision = propose_resource_action(
+        **_healthy_kwargs(),
+        cost_to_finish_current=_metric(20.0, unit="usd"),  # cheap model, but many reworked retries
+        cost_to_finish_alternative=_metric(8.0, unit="usd"),  # expensive model, finishes faster overall
+        alternative_action=ContextLifecycleAction.CHANGE_MODEL,
+    )
+    assert decision.action == ContextLifecycleAction.CHANGE_MODEL
+
+
+def test_marginally_cheaper_alternative_within_margin_does_not_switch():
+    decision = propose_resource_action(
+        **_healthy_kwargs(),
+        cost_to_finish_current=_metric(10.0, unit="usd"),
+        cost_to_finish_alternative=_metric(9.0, unit="usd"),  # 10% cheaper, below the 20% margin
+        alternative_action=ContextLifecycleAction.HANDOFF,
+    )
+    assert decision.action == ContextLifecycleAction.CONTINUE_CURRENT_SESSION
+
+
+def test_missing_cost_to_finish_alternative_never_triggers_the_cost_branch():
+    decision = propose_resource_action(
+        **_healthy_kwargs(),
+        cost_to_finish_current=_metric(10.0, unit="usd"),
+        cost_to_finish_alternative=unknown_metric(unit="usd", definition="d", source="s"),
+        alternative_action=ContextLifecycleAction.HANDOFF,
+    )
     assert decision.action == ContextLifecycleAction.CONTINUE_CURRENT_SESSION
 
 

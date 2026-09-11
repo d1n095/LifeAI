@@ -303,3 +303,91 @@ def test_context_efficiency_missing_data_when_no_accepted_assignment_has_telemet
     profile = agent_efficiency_profile(superuser_db, owner_id=owner_id, agent_id=agent.id)
     assert profile["context_efficiency"].missing_data is True
     assert profile["context_efficiency"].value is None
+
+
+# ============================================================================ trend (round 2, agent efficiency trend/history)
+
+
+def _dated_assignment(db, *, owner_id, goal, task, agent, outcome, days_ago):
+    from datetime import datetime, timedelta
+
+    assignment = _new_assignment(db, owner_id=owner_id, goal=goal, task=task, agent=agent)
+    if outcome == "completed":
+        _run_to_completed(db, assignment)
+    else:
+        _run_to_failed(db, assignment)
+    assignment.completed_at = datetime.utcnow() - timedelta(days=days_ago)
+    db.flush()
+    return assignment
+
+
+def test_accepted_commit_rate_trend_is_none_below_min_half_size(superuser_db, owner_id):
+    """AGENT_EFFICIENCY_TREND != AGENT_EFFICIENCY_TREND_FROM_THREE_DATA_POINTS: too few
+    assignments in total to split into two meaningful halves -> trend is None, not guessed."""
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    for days_ago in (10, 5):
+        _dated_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent, outcome="completed", days_ago=days_ago)
+    superuser_db.commit()
+
+    profile = agent_efficiency_profile(superuser_db, owner_id=owner_id, agent_id=agent.id)
+    assert profile["accepted_commit_rate"].trend is None
+
+
+def test_accepted_commit_rate_trend_improving(superuser_db, owner_id):
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    # Older half: all failed. Recent half: all completed. A clear improving trend.
+    for days_ago in (60, 50, 40):
+        _dated_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent, outcome="failed", days_ago=days_ago)
+    for days_ago in (3, 2, 1):
+        _dated_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent, outcome="completed", days_ago=days_ago)
+    superuser_db.commit()
+
+    profile = agent_efficiency_profile(superuser_db, owner_id=owner_id, agent_id=agent.id)
+    assert profile["accepted_commit_rate"].trend == "improving"
+
+
+def test_accepted_commit_rate_trend_declining(superuser_db, owner_id):
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    for days_ago in (60, 50, 40):
+        _dated_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent, outcome="completed", days_ago=days_ago)
+    for days_ago in (3, 2, 1):
+        _dated_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent, outcome="failed", days_ago=days_ago)
+    superuser_db.commit()
+
+    profile = agent_efficiency_profile(superuser_db, owner_id=owner_id, agent_id=agent.id)
+    assert profile["accepted_commit_rate"].trend == "declining"
+
+
+def test_accepted_commit_rate_trend_stable(superuser_db, owner_id):
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    for days_ago in (60, 50, 40, 3, 2, 1):
+        _dated_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent, outcome="completed", days_ago=days_ago)
+    superuser_db.commit()
+
+    profile = agent_efficiency_profile(superuser_db, owner_id=owner_id, agent_id=agent.id)
+    assert profile["accepted_commit_rate"].trend == "stable"
+
+
+def test_rework_rate_trend_is_inverse_of_accepted_trend_sense():
+    """A rework rate going UP is a DECLINING efficiency trend -- confirmed directly against the
+    pure helper rather than re-deriving a whole assignment history for both directions."""
+    from app.resource_intelligence.efficiency_profile import _rework_trend_from_split
+
+    class _Fake:
+        def __init__(self, id, completed_at):
+            self.id = id
+            self.completed_at = completed_at
+
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    older = [_Fake(i, now - timedelta(days=60 - i)) for i in range(3)]
+    recent = [_Fake(10 + i, now - timedelta(days=3 - i)) for i in range(3)]
+    assignments = older + recent
+    # Only the RECENT three were reworked -> rework rate went up -> declining efficiency trend.
+    reworked_ids = {a.id for a in recent}
+    assert _rework_trend_from_split(assignments, reworked_ids) == "declining"

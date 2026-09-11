@@ -31,6 +31,14 @@ from app.resource_intelligence.types import MetricEnvelope, ResourceIntelligence
 
 _SOURCE = "agent_resource_telemetry_samples"
 
+# A telemetry sample this old is no longer a trustworthy read of "current" context state -- the
+# session may have compacted, reset, or simply gone quiet since. Chosen as a small multiple of
+# `decision.TIME_TO_LIMIT_LOW_SECONDS` (300s): stale data must be caught well before it could
+# itself be mistaken for a fresh "5 minutes to limit" reading. STALE_TELEMETRY != CURRENT_TELEMETRY,
+# enforced structurally below (context_utilization()/estimated_time_to_context_limit() both
+# refuse to report a confident value from a sample older than this), not just documented.
+MAX_TELEMETRY_SAMPLE_AGE_SECONDS = 900.0
+
 # Classification of AgentWorkAssignment.status (see app.models.agent_coordination
 # .WorkAssignmentStatus) into the three idle/productive/blocked buckets -- read directly off
 # the real status_changed event history, never guessed. Terminal statuses close the timeline
@@ -99,18 +107,31 @@ def list_telemetry_samples(db: Session, *, owner_id: uuid.UUID, attempt_id: uuid
     )
 
 
-def context_utilization(db: Session, *, owner_id: uuid.UUID, attempt_id: uuid.UUID) -> MetricEnvelope:
+def context_utilization(db: Session, *, owner_id: uuid.UUID, attempt_id: uuid.UUID, now: datetime | None = None) -> MetricEnvelope:
     """The LATEST sample's `context_used_tokens / context_window_tokens` as a percent.
-    `missing_data=True` if no samples exist, or the latest sample is missing either field, or
+    `missing_data=True` if no samples exist, the latest sample is missing either field,
     `context_window_tokens` is `0` (a percentage against a zero-sized window is not a real
-    number, never silently reported as 0% or 100%)."""
+    number, never silently reported as 0% or 100%), or the latest sample is older than
+    `MAX_TELEMETRY_SAMPLE_AGE_SECONDS` (STALE TELEMETRY != CURRENT TELEMETRY -- a caller must
+    never mistake an old reading for the session's current context state; a decision engine
+    fed a stale envelope here treats it exactly like no data at all, never like a confident
+    healthy reading)."""
 
     definition = "latest observed context_used_tokens / context_window_tokens, expressed as a percent"
+    now = now or datetime.utcnow()
     samples = list_telemetry_samples(db, owner_id=owner_id, attempt_id=attempt_id)
     if not samples:
         return unknown_metric(unit="percent", definition=definition, source=_SOURCE, method="no telemetry samples recorded for this attempt_id")
 
     latest = samples[-1]
+    age_seconds = (now - latest.sampled_at).total_seconds()
+    if age_seconds > MAX_TELEMETRY_SAMPLE_AGE_SECONDS:
+        return unknown_metric(
+            unit="percent", definition=definition, source=_SOURCE,
+            method=f"latest sample (sampled_at={latest.sampled_at.isoformat()}) is {age_seconds:.0f}s old, "
+                   f"exceeding MAX_TELEMETRY_SAMPLE_AGE_SECONDS={MAX_TELEMETRY_SAMPLE_AGE_SECONDS:.0f}s -- STALE_TELEMETRY, treated as no observation",
+            uncertainty="a stale reading is discarded entirely rather than reported with a low-confidence value; the session may have compacted, reset, or gone silent since",
+        )
     if latest.context_used_tokens is None or latest.context_window_tokens is None:
         return unknown_metric(
             unit="percent", definition=definition, source=_SOURCE,
@@ -123,6 +144,18 @@ def context_utilization(db: Session, *, owner_id: uuid.UUID, attempt_id: uuid.UU
         )
 
     value = 100.0 * latest.context_used_tokens / latest.context_window_tokens
+
+    # CONFLICTING TELEMETRY: more than one sample sharing the exact same sampled_at with a
+    # different context_used_tokens reading means two observers (or two writes) disagree about
+    # "now" -- disclosed via uncertainty, never silently resolved as if only one sample existed.
+    ties = [s for s in samples if s.sampled_at == latest.sampled_at]
+    conflicting = len(ties) > 1 and len({s.context_used_tokens for s in ties}) > 1
+    uncertainty = "point-in-time snapshot from the latest recorded sample; not an average over the attempt"
+    if conflicting:
+        uncertainty += (
+            f"; CONFLICTING_TELEMETRY: {len(ties)} samples share sampled_at={latest.sampled_at.isoformat()} "
+            "with different context_used_tokens values -- an arbitrary one (last in insertion order) was used"
+        )
 
     trend = None
     if len(samples) >= 2:
@@ -147,20 +180,22 @@ def context_utilization(db: Session, *, owner_id: uuid.UUID, attempt_id: uuid.UU
         source=_SOURCE,
         method=f"value = 100 * {latest.context_used_tokens} / {latest.context_window_tokens} (latest sample only)",
         missing_data=False,
-        uncertainty="point-in-time snapshot from the latest recorded sample; not an average over the attempt",
+        uncertainty=uncertainty,
         last_updated=latest.sampled_at,
         trend=trend,
     )
 
 
-def estimated_time_to_context_limit(db: Session, *, owner_id: uuid.UUID, attempt_id: uuid.UUID) -> MetricEnvelope:
+def estimated_time_to_context_limit(db: Session, *, owner_id: uuid.UUID, attempt_id: uuid.UUID, now: datetime | None = None) -> MetricEnvelope:
     """Linear projection from the most recent two samples' own observed burn rate
     (tokens/elapsed-second) against the remaining headroom to `context_window_tokens`.
-    `missing_data=True` with fewer than 2 usable samples, an unknown window size, or a
+    `missing_data=True` with fewer than 2 usable samples, an unknown window size, a
     non-positive burn rate (context is not growing -- no meaningful "time to limit" to
-    report)."""
+    report), or the latest sample is itself STALE (see `MAX_TELEMETRY_SAMPLE_AGE_SECONDS` --
+    a burn rate projected from an old sample is not a projection from "now")."""
 
     definition = "projected wall-clock seconds until context_used_tokens reaches context_window_tokens, linearly extrapolated from the two most recent telemetry samples"
+    now = now or datetime.utcnow()
     samples = [s for s in list_telemetry_samples(db, owner_id=owner_id, attempt_id=attempt_id) if s.context_used_tokens is not None]
     if len(samples) < 2:
         return unknown_metric(
@@ -169,6 +204,14 @@ def estimated_time_to_context_limit(db: Session, *, owner_id: uuid.UUID, attempt
         )
 
     prior, latest = samples[-2], samples[-1]
+    age_seconds = (now - latest.sampled_at).total_seconds()
+    if age_seconds > MAX_TELEMETRY_SAMPLE_AGE_SECONDS:
+        return unknown_metric(
+            unit="seconds", definition=definition, source=_SOURCE,
+            method=f"latest sample (sampled_at={latest.sampled_at.isoformat()}) is {age_seconds:.0f}s old, "
+                   f"exceeding MAX_TELEMETRY_SAMPLE_AGE_SECONDS={MAX_TELEMETRY_SAMPLE_AGE_SECONDS:.0f}s -- STALE_TELEMETRY, treated as no observation",
+            uncertainty="a stale reading is discarded entirely rather than projected forward as if it were current",
+        )
     if latest.context_window_tokens is None:
         return unknown_metric(
             unit="seconds", definition=definition, source=_SOURCE,

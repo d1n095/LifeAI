@@ -15,12 +15,25 @@ from app.resource_intelligence.cost_bridge import (
     populate_agent_outcome_cost_fields,
     tokens_for_assignment,
 )
+from app.resource_intelligence.cost_projection import (
+    compact_cost_estimate,
+    estimated_cost_to_finish,
+    handoff_cost_estimate,
+    reset_session_cost_estimate,
+)
 from app.resource_intelligence.decision import propose_resource_action
 from app.resource_intelligence.efficiency_profile import (
     MIN_SAMPLE_SIZE_FOR_ESTABLISHED,
     agent_efficiency_profile,
     is_provisional,
 )
+from app.resource_intelligence.founder_attention import (
+    ACTION_FOUNDER_ATTENTION,
+    FounderAttentionLevel,
+    attention_escalation,
+    founder_attention_level,
+)
+from app.resource_intelligence.quota import provider_quota_remaining, quota_critical
 from app.resource_intelligence.scheduler import next_best_resource_allocation
 from app.resource_intelligence.session_checkpoint import (
     CHECKPOINT_MARKER,
@@ -30,6 +43,11 @@ from app.resource_intelligence.session_checkpoint import (
     checkpoint_to_dict,
     load_agent_session_checkpoint,
     save_agent_session_checkpoint,
+)
+from app.resource_intelligence.supervision_compat import (
+    TranslationResult,
+    from_supervision_telemetry_row,
+    supervision_cost_fields,
 )
 from app.resource_intelligence.telemetry import (
     context_utilization,
@@ -47,21 +65,30 @@ from app.resource_intelligence.types import (
 )
 
 __all__ = [
+    "ACTION_FOUNDER_ATTENTION",
     "CHECKPOINT_MARKER",
     "CHECKPOINT_NOTE_TYPE",
     "MIN_SAMPLE_SIZE_FOR_ESTABLISHED",
     "AgentSessionCheckpoint",
     "ContextLifecycleAction",
+    "FounderAttentionLevel",
     "MetricEnvelope",
     "ResourceActionRecommendation",
     "ResourceIntelligenceError",
+    "TranslationResult",
     "agent_efficiency_profile",
+    "attention_escalation",
     "checkpoint_from_dict",
     "checkpoint_to_dict",
+    "compact_cost_estimate",
     "context_utilization",
     "cost_for_assignment",
     "cost_per_accepted_commit",
+    "estimated_cost_to_finish",
     "estimated_time_to_context_limit",
+    "founder_attention_level",
+    "from_supervision_telemetry_row",
+    "handoff_cost_estimate",
     "idle_productive_blocked_time",
     "is_provisional",
     "list_telemetry_samples",
@@ -69,8 +96,12 @@ __all__ = [
     "next_best_resource_allocation",
     "populate_agent_outcome_cost_fields",
     "propose_resource_action",
+    "provider_quota_remaining",
+    "quota_critical",
     "record_telemetry_sample",
+    "reset_session_cost_estimate",
     "save_agent_session_checkpoint",
+    "supervision_cost_fields",
     "tokens_for_assignment",
     "unknown_metric",
 ]

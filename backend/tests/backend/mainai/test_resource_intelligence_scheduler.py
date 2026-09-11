@@ -163,6 +163,81 @@ def test_wip_at_limit_is_reflected_and_biases_toward_defer(superuser_db, owner_i
     assert row["recommendation"]["authorized"] is False
 
 
+def test_wip_at_limit_with_spare_capacity_elsewhere_becomes_move_subtask(superuser_db, owner_id):
+    """Round 2: decision.py stays pure and cannot see across agents, but this composition
+    layer can -- a bare DEFER with nowhere real to go is different from one with a real idle
+    slot on another agent right now."""
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    busy_agent = _agent(superuser_db, concurrency_limit=1)
+    assignment = _new_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=busy_agent)
+    transition_status(superuser_db, assignment=assignment, new_status="ready")
+    transition_status(superuser_db, assignment=assignment, new_status="running")
+    # A second, real, registered agent with real spare WIP capacity (zero current assignments,
+    # concurrency_limit=2) -- not a guess, this composition layer actually queries for it.
+    _agent(superuser_db, key="idle-agent", concurrency_limit=2)
+    superuser_db.commit()
+
+    rows = next_best_resource_allocation(superuser_db, owner_id=owner_id)
+    assert len(rows) == 1
+    assert rows[0]["recommendation"]["action"] == ContextLifecycleAction.MOVE_SUBTASK.value
+    assert "spare WIP capacity" in rows[0]["recommendation"]["reason"]
+
+
+def test_wip_at_limit_with_no_spare_capacity_anywhere_stays_defer(superuser_db, owner_id):
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    busy_agent = _agent(superuser_db, concurrency_limit=1)
+    assignment = _new_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=busy_agent)
+    transition_status(superuser_db, assignment=assignment, new_status="ready")
+    transition_status(superuser_db, assignment=assignment, new_status="running")
+    # A second agent that is ALSO fully at its own limit -- no real spare capacity anywhere.
+    other_agent = _agent(superuser_db, key="also-busy", concurrency_limit=1)
+    other_assignment = _new_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=other_agent)
+    transition_status(superuser_db, assignment=other_assignment, new_status="ready")
+    transition_status(superuser_db, assignment=other_assignment, new_status="running")
+    superuser_db.commit()
+
+    rows = next_best_resource_allocation(superuser_db, owner_id=owner_id)
+    actions = {row["recommendation"]["action"] for row in rows}
+    assert actions == {ContextLifecycleAction.DEFER.value}
+
+
+# ============================================================================ provider quota (round 2)
+
+
+def test_provider_quota_critical_is_reflected_and_recommends_change_provider(superuser_db, owner_id):
+    from decimal import Decimal
+
+    from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
+    from app.provider_spend import authorize_provider_spend
+
+    goal, task = _goal_plan_task(superuser_db, owner_id)
+    agent = _agent(superuser_db)
+    assignment = _new_assignment(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=agent)
+    transition_status(superuser_db, assignment=assignment, new_status="ready")
+    transition_status(superuser_db, assignment=assignment, new_status="running")
+
+    proposal = propose_execution_scope(superuser_db, owner_id=owner_id, goal_id=goal.id, idempotency_key=f"prop-{uuid.uuid4()}")
+    _, envelope = authorize_execution_scope(
+        superuser_db, owner_id=owner_id, proposal_id=proposal.id, authorized_by="founder",
+        authorized_paths=["README.md"], authorized_capabilities=["read_file", "patch_file"],
+        authorized_risk="low", envelope_idempotency_key=f"env-{uuid.uuid4()}",
+    )
+    auth = authorize_provider_spend(
+        superuser_db, owner_id=owner_id, goal_id=goal.id, execution_envelope_id=envelope.id, authorized_by="founder",
+        max_cost_usd=Decimal("10.00"), max_requests=10, idempotency_key=f"spend-{uuid.uuid4()}",
+        allowed_providers=["fake-local"], allowed_models=["planner-v2"],
+    )
+    superuser_db.commit()
+    auth.spent_cost_usd = Decimal("9.90")  # 1% remaining -- critical
+    superuser_db.commit()
+
+    rows = next_best_resource_allocation(superuser_db, owner_id=owner_id)
+    assert len(rows) == 1
+    assert rows[0]["recommendation"]["action"] == ContextLifecycleAction.CHANGE_PROVIDER.value
+    assert rows[0]["recommendation"]["signals"]["provider_quota_critical"] is True
+    assert rows[0]["provider_quota_remaining"]["cost_usd"] == pytest.approx(0.01)
+
+
 # ============================================================================ structural "never mutates" proof
 
 

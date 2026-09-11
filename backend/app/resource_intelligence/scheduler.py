@@ -38,6 +38,7 @@ from app.agent_coordination.runtime_view import RuntimeStatus, all_agents_runtim
 from app.models.agent_coordination import AgentDispatchExecution
 from app.resource_intelligence.decision import propose_resource_action
 from app.resource_intelligence.efficiency_profile import agent_efficiency_profile
+from app.resource_intelligence.quota import provider_quota_remaining, quota_critical
 from app.resource_intelligence.telemetry import (
     context_utilization,
     estimated_time_to_context_limit,
@@ -146,11 +147,26 @@ def next_best_resource_allocation(db: Session, *, owner_id: uuid.UUID) -> list[d
     remaining-work-size signal exists anywhere in this codebase yet) -- both are left at their
     honest defaults (`False`/`None`) rather than guessed from a proxy. A future caller with that
     real information can call `decision.propose_resource_action()` directly with it; this
-    scheduler-level composition is a known, documented limitation, not a silent gap."""
+    scheduler-level composition is a known, documented limitation, not a silent gap.
+
+    `provider_quota_remaining` IS wired in here (Round 2) -- `assignment_view.goal_id` is real,
+    already-carried data, so `quota.provider_quota_remaining()` is called for real per
+    assignment, never guessed. `cost_to_finish`/reset/handoff/compact cost projections
+    (`cost_projection.py`) are deliberately NOT wired in here: they require a real
+    `provider`/`model` pair, and `CoordinationAgent.adapter_kind` is a CLI/API/internal CHANNEL
+    type (see `AgentAdapterKind`), never an LLM provider name -- no real, non-guessed
+    provider/model signal exists on this layer's own data today. Those pure functions remain
+    directly callable by any future caller that DOES have that real signal (e.g. a harness
+    integration); this composition layer does not fabricate one to use them."""
 
     rows: list[dict[str, Any]] = []
-    for agent_view in all_agents_runtime_snapshot(db, owner_id=owner_id):
+    agent_views = all_agents_runtime_snapshot(db, owner_id=owner_id)
+    for agent_view in agent_views:
         wip_at_limit = len(agent_view.current_assignments) >= agent_view.concurrency_limit
+        has_spare_capacity_elsewhere = wip_at_limit and any(
+            other.agent_id != agent_view.agent_id and len(other.current_assignments) < other.concurrency_limit
+            for other in agent_views
+        )
 
         for assignment_view in agent_view.current_assignments:
             if assignment_view.runtime_status not in _IN_FLIGHT_RUNTIME_STATUSES:
@@ -176,6 +192,7 @@ def next_best_resource_allocation(db: Session, *, owner_id: uuid.UUID) -> list[d
             blocked_seconds = time_buckets["blocked_seconds"]
 
             profile = agent_efficiency_profile(db, owner_id=owner_id, agent_id=agent_view.agent_id, task_type=assignment_view.role)
+            quota = provider_quota_remaining(db, owner_id=owner_id, goal_id=assignment_view.goal_id)
 
             recommendation = propose_resource_action(
                 context_utilization=context_util,
@@ -187,10 +204,22 @@ def next_best_resource_allocation(db: Session, *, owner_id: uuid.UUID) -> list[d
                 wip_at_limit=wip_at_limit,
                 task_remaining_size=None,
                 critical_unsummarized_state=False,
+                provider_quota_critical=quota_critical(quota),
             )
 
+            # MOVE_SUBTASK vs DEFER: decision.py cannot see across agents (it stays pure), but
+            # this composition layer can -- a DEFER recommendation caused purely by WIP, with a
+            # real idle slot open on a DIFFERENT agent right now, is better labeled MOVE_SUBTASK
+            # (there IS somewhere real to move it to) than a bare DEFER (implying nowhere to
+            # put it). Never fires for any other reason DEFER was recommended.
+            action = recommendation.action
+            reason = recommendation.reason
+            if action == ContextLifecycleAction.DEFER and has_spare_capacity_elsewhere:
+                action = ContextLifecycleAction.MOVE_SUBTASK
+                reason = f"{reason}; a different agent has spare WIP capacity right now -- recommend moving this subtask rather than deferring it with nowhere to go"
+
             score, score_components = _priority_score(
-                action=recommendation.action,
+                action=action,
                 context_util_value=context_util.value if not context_util.missing_data else None,
                 blocked_value=blocked_seconds.value if not blocked_seconds.missing_data else None,
                 productive_value=productive_seconds.value if not productive_seconds.missing_data else None,
@@ -206,11 +235,12 @@ def next_best_resource_allocation(db: Session, *, owner_id: uuid.UUID) -> list[d
                     "role": assignment_view.role,
                     "wip_at_limit": wip_at_limit,
                     "recommendation": {
-                        "action": recommendation.action.value,
-                        "reason": recommendation.reason,
+                        "action": action.value,
+                        "reason": reason,
                         "signals": recommendation.signals,
                         "authorized": recommendation.authorized,
                     },
+                    "provider_quota_remaining": {k: v.value for k, v in quota.items()},
                     "priority_score": round(score, 4),
                     "priority_components": score_components,
                 }
