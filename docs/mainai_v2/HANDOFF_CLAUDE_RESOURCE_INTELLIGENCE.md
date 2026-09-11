@@ -8,24 +8,34 @@ summary anywhere else — **this document, verified fresh against git at the tim
 wins.** Verify the SHAs yourself before trusting even this file if it is more than a few days
 old.
 
-**Written:** 2026-09-11 (verify current date before trusting timestamps in this doc as fresh)
+**Written:** 2026-09-11. **Revised:** 2026-09-11, same day, after the Round 2
+integration-readiness pass (see `EXACT SHA` below for the updated tip) — verify current date
+before trusting timestamps in this doc as fresh.
 
 ## CURRENT OBJECTIVE
 
 Deliver a MainAI Resource Intelligence + Context Lifecycle + Cost/Quota + Agent Efficiency
 foundation as an isolated, non-wired architecture layer, ready for independent review — same
 BUILDER != FINAL EXAMINER discipline as every other MainAI V2 sub-program this session.
-Objective is COMPLETE as of this handoff. No further Resource Intelligence implementation
-work is queued.
+
+**Round 1 objective (Parts 1-2 + independent adversarial pass) was marked COMPLETE at
+`8af2c892...`.** A subsequent, explicit founder directive requested a Round 2
+integration-readiness pass on top of that candidate before Codex's independent review begins —
+see `docs/mainai_v2/MAINAI_RESOURCE_INTELLIGENCE_ROUND2_ADDENDUM.md` for the full decision and
+scope. **Round 2 is now ALSO complete as of this handoff.** No further Resource Intelligence
+implementation work is queued; the next step is Codex's independent review of the whole
+candidate (Round 1 + Round 2 together), unchanged from the plan below.
 
 ## EXACT SHA
 
-- **Candidate tip (on `claude/mainai-v2-sovereign`):** `8af2c8924ee672a8fc87efbbb01685f48c833ba4`
-- **Merge commit (the actual code):** `97a621a`
-- **Independent adversarial pass:** `ff729b2`
-- **Part 2 (decision/efficiency/scheduler):** `02e57eb`
-- **Part 1 (telemetry/cost_bridge/checkpoint):** `a6ed099`
-- **Architecture decision doc:** `4d49e1f`
+- **Candidate tip (on `claude/mainai-v2-sovereign`), Round 2:** `063c2569a170ccc3eb7887eadd2ed1b7caed73ff`
+- **Round 1 candidate tip (superseded by the above, kept for history):** `8af2c8924ee672a8fc87efbbb01685f48c833ba4`
+- **Round 1 merge commit (the actual code):** `97a621a`
+- **Round 1 independent adversarial pass:** `ff729b2`
+- **Round 1 Part 2 (decision/efficiency/scheduler):** `02e57eb`
+- **Round 1 Part 1 (telemetry/cost_bridge/checkpoint):** `a6ed099`
+- **Round 1 architecture decision doc:** `4d49e1f`
+- **Round 2 architecture decision + implementation (single commit):** `063c256`
 - **Base this program branched from:** `68a063e` (sovereign tip immediately after the Founder
   Reasoning/Judgment merge)
 - **Worktree:** merged and cleaned up — the dedicated worktree/branch
@@ -38,8 +48,8 @@ work is queued.
 
 ## WHAT IS IMPLEMENTED
 
-New package `backend/app/resource_intelligence/` (7 modules + 1 additive migration, no other
-schema changes):
+New package `backend/app/resource_intelligence/`, now 11 modules across two rounds (still only
+1 additive migration total, no other schema changes). Round 1's 7 modules first:
 - `types.py` — `ContextLifecycleAction` enum, `ResourceActionRecommendation`, `MetricEnvelope`
   (structural METRIC != TRUTH contract), `unknown_metric()`.
 - `telemetry.py` — durable per-attempt telemetry samples (migration `0071`,
@@ -72,6 +82,24 @@ schema changes):
   with per-assignment `propose_resource_action()` calls, ranked by weighted-sum + soft-cap
   scoring (matching `app.mainai_executive.priority.score_priority()`'s own discipline).
 
+Round 2 adds 4 new modules and extends `telemetry.py`/`efficiency_profile.py`/`decision.py`/
+`scheduler.py` — full detail in `docs/mainai_v2/MAINAI_RESOURCE_INTELLIGENCE_ROUND2_ADDENDUM.md`,
+summarized here:
+- `quota.py` — read-only `ProviderSpendAuthorization` ceiling-remaining bridge (closes the gap
+  named below), `quota_critical()`.
+- `cost_projection.py` — pure `estimated_cost_to_finish()` + reset/handoff/compact token-reread
+  cost estimates built on `app.providers.pricing.estimate_cost()`.
+- `founder_attention.py` — founder attention as its own, explicitly-modeled, ordinal resource,
+  structurally separate from dollar cost.
+- `supervision_compat.py` — pure field-shape translator from a `mainai_supervision_telemetry`-
+  shaped dict (Codex's unmerged Continuous Supervision candidate) into this package's own
+  telemetry kwargs; never imports that candidate.
+- `decision.py` gained 3 new branches (provider-quota-critical, context-loss-risk CHECKPOINT
+  escalation, quantified cost-to-finish comparison) and hysteresis on the proactive SPLIT_JOB
+  branch (`consecutive_elevated_observations`). `scheduler.py` now wires real
+  `provider_quota_remaining()` per assignment and relabels a WIP-caused DEFER as MOVE_SUBTASK
+  when a different real agent has spare capacity right now.
+
 ## WHAT IS NOT IMPLEMENTED
 
 - No actual execution of any recommended action (COMPACT/RESET/HANDOFF/etc.) — advisory only,
@@ -84,27 +112,36 @@ schema changes):
   defaults (`False`/`None`) rather than guessing from a proxy; documented as a known limitation
   in that module's own docstring, not a silent gap.
 - No historical UI/founder-facing surface for any of this data (read-path functions only).
-- No cross-provider quota-remaining tracking (only cost/token ceilings via the existing
-  `provider_spend`/`workforce.cost` this package bridges to, never modifies).
+- ~~No cross-provider quota-remaining tracking~~ — **closed in Round 2** (`quota.py`).
+- Round 2's `cost_projection.py` reset/handoff/compact estimates are NOT wired into
+  `scheduler.py`'s real composition — they need a real `provider`/`model` pair, and
+  `CoordinationAgent.adapter_kind` is a CLI/API/internal CHANNEL type, never an LLM provider
+  name; no real, non-guessed signal exists on that layer today. Directly callable by any future
+  caller that does have one. New limitation, documented the same way as the pre-existing ones
+  above, not a silent gap.
 
 ## TEST EVIDENCE
 
-**89/89 passing**, independently re-run by me directly against real local Postgres 16 (not
-just trusted from the building forks' self-reports):
-- 30 — Part 1 builder tests (`test_resource_intelligence_{telemetry,cost_bridge,
+**141/141 `resource_intelligence`-scoped tests passing** (Round 1's 89 + ~52 new in Round 2),
+independently re-run directly against real local Postgres 16:
+- 30 — Round 1 Part 1 builder tests (`test_resource_intelligence_{telemetry,cost_bridge,
   session_checkpoint}.py`)
-- 28 — Part 2 builder tests (`test_resource_intelligence_{efficiency_profile,decision,
+- 28 — Round 1 Part 2 builder tests (`test_resource_intelligence_{efficiency_profile,decision,
   scheduler}.py`)
-- 31 — my own independent adversarial pass (`test_resource_intelligence_longitudinal_
+- 31 — Round 1 independent adversarial pass (`test_resource_intelligence_longitudinal_
   scenarios.py`, 8 end-to-end scenarios; `test_resource_intelligence_self_attack.py`,
   full 7-module authority/metric-fabrication/divide-by-zero sweep)
+- ~52 — Round 2: new `test_resource_intelligence_{quota,cost_projection,founder_attention,
+  supervision_compat}.py` (30) + extensions to the existing telemetry/efficiency_profile/
+  decision/scheduler test files (staleness, conflicting samples, trend, quota wiring,
+  MOVE_SUBTASK, cost-to-finish comparison, hysteresis) (~22)
 
 Scoped regression across `agent_coordination`, `provider_spend`, `execution_envelopes`,
-`mainai_executive` (continuity/judgment/priority), `capability_reality`: **all passing, zero
-regressions**, run at two separate checkpoints (after Part 1, after the full merge).
+`mainai_executive` (continuity/judgment/priority), `capability_reality`: **94 passing, zero
+regressions**, re-run after Round 2's changes.
 
-`ruff check`: clean on every new/changed file. `python -c "import app.main"`: clean.
-`alembic heads`: single head (`0071`), verified applying cleanly against real Postgres.
+`ruff check`: clean on every new/changed file. `python -m compileall`: clean. `git diff --check`:
+clean. `alembic heads`: single head (`0071`), verified applying cleanly against real Postgres.
 
 **Bugs found during build (both confirmed fixed, not just claimed):**
 1. **State-machine transition ordering** — my OWN adversarial test helper attempted
@@ -128,11 +165,17 @@ None found.
 
 ## KNOWN P1
 
-None found. (Two DESIGN notes, not defects: `agent_resource_telemetry_samples` deliberately
+None found. (Three DESIGN notes, not defects: `agent_resource_telemetry_samples` deliberately
 has no deny-mutation trigger, unlike sibling append-only tables — Part 1's builder verified a
-trigger would break an existing account-erasure cascade; and `cost_bridge`'s goal/task join is
+trigger would break an existing account-erasure cascade; `cost_bridge`'s goal/task join is
 only as precise as `ProviderSpendUsageEvent.task_id`'s own bare-UUID, unconstrained-FK
-precision, disclosed via `MetricEnvelope.uncertainty` whenever it applies, never silently.)
+precision, disclosed via `MetricEnvelope.uncertainty` whenever it applies, never silently; and
+Round 2's proactive-SPLIT_JOB hysteresis is an intentional, documented BEHAVIOR CHANGE from
+Round 1 — a single elevated+large-remaining-work reading no longer splits immediately, it now
+requires 2 consecutive observations. The one Round 1 test this touched was updated in the same
+commit to assert the new, explicitly-requested contract; a sibling test proves the old
+single-reading behavior is gone on purpose. See the Round 2 addendum §2 for the full
+before/after.)
 
 ## INTEGRATION SEAMS
 
@@ -157,15 +200,18 @@ Supervision**. Neither review has started as of this handoff.
 
 ## DO-NOT-REPEAT
 
-- Do not re-run the Part 1/Part 2 build forks again — the candidate is complete and frozen at
-  the SHA above. Any further Resource Intelligence work is REVIEW, not (re)implementation,
-  until a review returns findings requiring fixes.
+- Do not re-run the Round 1 Part 1/Part 2 build forks, or the Round 2 pass, again — the
+  candidate is complete and frozen at the SHA above. Any further Resource Intelligence work is
+  REVIEW, not (re)implementation, until a review returns findings requiring fixes.
 - Do not assume the Codex runtime is still broken or still being fixed — **it is not.** See
   "Confirmed untouched / current state of sibling programs" below; this exact point was flagged
   as stale-context risk in the directive that produced this handoff.
 - Do not recreate `docs/mainai_v2/MAINAI_RESOURCE_CONTEXT_COST_RECONCILIATION.md` — it already
-  exists and is the binding architecture decision; read it before proposing any change to this
+  exists and is the binding Round 1 architecture decision; read it (and the Round 2 addendum,
+  `MAINAI_RESOURCE_INTELLIGENCE_ROUND2_ADDENDUM.md`) before proposing any change to this
   package's design.
+- Do not re-litigate the Round 2 SPLIT_JOB hysteresis change as a regression — it is
+  intentional, requested, and documented (see KNOWN P1 above).
 
 ## AUTHORITY BOUNDARIES
 
@@ -207,7 +253,18 @@ Supervision**. Neither review has started as of this handoff.
   `a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4`, commit "Add supervision resource telemetry
   seam"): confirmed a separate, unmerged lane (`git merge-base --is-ancestor` false in both
   directions); confirmed it does not touch `backend/app/resource_intelligence/` in either
-  direction. Still under active build by Codex, not yet reviewed by anyone — unchanged status.
+  direction. **UPDATE (this session, before this Round 2 pass): independently examined by
+  Claude. Verdict `INDEPENDENT_SUPERVISION_VERIFICATION_BLOCKED`** — the supervision logic
+  itself passes every checked invariant (canonical-authority, RLS, idempotency, cost-fails-
+  conservative, builder/examiner separation, real 1000-job two-supervisor soak, real SIGKILL
+  crash-boundary tests, 80/80 passing) with real empirical evidence, but the SHA is not yet
+  mergeable as-is: it carries unpatched pre-fix `production_adapter.py` code (currently dead,
+  unreferenced from the supervision path) from before the verified-runtime fix (`1951ccef...`),
+  and bundles several already-separately-tracked prerequisite lanes (#237, #239/#243, Personal
+  Recall) that would merge alongside it if taken wholesale. **Per the role-separation plan
+  below, this does NOT block Codex from reviewing THIS Resource Intelligence candidate next —
+  that review was never conditioned on Continuous Supervision being MERGEABLE, only on it
+  having been independently examined at all, which it now has been.**
 - **Founder Reasoning/Judgment** (merged into this same sovereign branch earlier, commit
   `4814d78`): unchanged since its own prior handoff — still awaiting independent review.
 
