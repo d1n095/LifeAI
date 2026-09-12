@@ -288,3 +288,35 @@ def list_evidence_for_hypothesis(db: Session, *, owner_id: uuid.UUID, hypothesis
         {"o": owner_id, "h": hypothesis_id},
     ).mappings().all()
     return [dict(r) for r in rows]
+
+
+# --- Additive read-only helpers (added for app.mainai_cognitive_ops's cross-investigation
+# reopen trigger; no existing function above was modified). ---
+
+
+def list_investigations(db: Session, *, owner_id: uuid.UUID, status: InvestigationStatus | None = None) -> list[dict]:
+    if status is None:
+        rows = db.execute(
+            text("SELECT * FROM mainai_research_investigations WHERE owner_id=:o ORDER BY created_at"), {"o": owner_id},
+        ).mappings().all()
+    else:
+        rows = db.execute(
+            text("SELECT * FROM mainai_research_investigations WHERE owner_id=:o AND status=:s ORDER BY created_at"),
+            {"o": owner_id, "s": status.value},
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_investigation(db: Session, *, owner_id: uuid.UUID, investigation_id: uuid.UUID) -> dict | None:
+    row = db.execute(
+        text("SELECT * FROM mainai_research_investigations WHERE id=:id AND owner_id=:o"), {"id": investigation_id, "o": owner_id},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+def list_hypotheses_for_investigation(db: Session, *, owner_id: uuid.UUID, investigation_id: uuid.UUID) -> list[dict]:
+    rows = db.execute(
+        text("SELECT * FROM mainai_research_hypotheses WHERE owner_id=:o AND investigation_id=:i ORDER BY created_at"),
+        {"o": owner_id, "i": investigation_id},
+    ).mappings().all()
+    return [dict(r) for r in rows]

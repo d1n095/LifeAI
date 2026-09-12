@@ -14,8 +14,11 @@ import pytest
 from sqlalchemy.exc import InternalError
 
 from app.mainai_research.research_ledger import (
+    get_investigation,
     list_confidence_history,
     list_evidence_for_hypothesis,
+    list_hypotheses_for_investigation,
+    list_investigations,
     list_reopen_events,
     mark_investigation_saturated,
     record_evidence,
@@ -173,3 +176,28 @@ def test_falsification_round_increment(superuser_db, owner_id):
     assert updated["falsification_rounds"] == 1
     updated2 = set_hypothesis_status(superuser_db, owner_id=owner_id, hypothesis_id=hypothesis["id"], status=HypothesisStatus.SURVIVED_FALSIFICATION, increment_falsification_round=True)
     assert updated2["falsification_rounds"] == 2
+
+
+def test_list_and_get_investigation_read_helpers(superuser_db, owner_id):
+    """Additive, read-only helpers added for `app.mainai_cognitive_ops`'s cross-investigation
+    reopen trigger -- no existing function in this module was modified."""
+
+    active_inv = _investigation(superuser_db, owner_id, question="Active one?")
+    saturated_inv = _investigation(superuser_db, owner_id, question="Saturated one?")
+    mark_investigation_saturated(superuser_db, owner_id=owner_id, investigation_id=saturated_inv["id"], reason="no more leads")
+    superuser_db.commit()
+
+    all_investigations = list_investigations(superuser_db, owner_id=owner_id)
+    assert {i["id"] for i in all_investigations} >= {active_inv["id"], saturated_inv["id"]}
+
+    only_active = list_investigations(superuser_db, owner_id=owner_id, status=InvestigationStatus.ACTIVE)
+    assert saturated_inv["id"] not in {i["id"] for i in only_active}
+
+    fetched = get_investigation(superuser_db, owner_id=owner_id, investigation_id=active_inv["id"])
+    assert fetched["id"] == active_inv["id"]
+    assert get_investigation(superuser_db, owner_id=owner_id, investigation_id=uuid.uuid4()) is None
+
+    hypothesis = _hypothesis(superuser_db, owner_id, active_inv["id"])
+    superuser_db.commit()
+    hyps = list_hypotheses_for_investigation(superuser_db, owner_id=owner_id, investigation_id=active_inv["id"])
+    assert [h["id"] for h in hyps] == [hypothesis["id"]]
