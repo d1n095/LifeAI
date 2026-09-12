@@ -77,3 +77,13 @@ class ProductionOrchestration:
             "canonical_jobs": len(snapshot.owner_jobs),
             "source": snapshot.source,
         }
+
+    def unattended_step(self, job, *, agent_id: str, provider_state: str, fallback=None) -> dict[str, object]:
+        """Run one bounded production-path step with provider failure fail-closed semantics."""
+        if provider_state != "available":
+            if fallback is None:
+                return {"state": "BLOCKED", "reason": "provider_unavailable", "authority": "none"}
+            provider_state = fallback
+        claim = self.dispatch_next(job, agent_id=agent_id)
+        return {"state": "CLAIMED", "attempt_id": claim.attempt_id, "provider": provider_state,
+                "authority": "canonical_lease"}

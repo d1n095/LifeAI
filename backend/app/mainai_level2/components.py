@@ -84,6 +84,13 @@ class VerifiedComposition:
         self.adapters[name] = adapter
         return adapter
 
+    def bind_external(self, name: str, implementation: Any, *, required_methods: tuple[str, ...]) -> BoundComponentAdapter:
+        """Bind an external frozen implementation only when its public seam is present."""
+        missing = [method for method in required_methods if not callable(getattr(implementation, method, None))]
+        if missing:
+            raise TypeError(f"component {name!r} seam mismatch: missing {','.join(missing)}")
+        return self.bind(name, implementation, seam_only=False)
+
     def require_bound(self, name: str) -> BoundComponentAdapter:
         adapter = self.adapters.get(name)
         self.registry.require(name)

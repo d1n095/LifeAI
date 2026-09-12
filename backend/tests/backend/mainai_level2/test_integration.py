@@ -22,6 +22,7 @@ from app.mainai_level2 import (
     VerifiedComposition,
     recover_from_canonical,
 )
+from app.mainai_level2.process_harness import run_sigkill_restart_probe
 
 
 @dataclass
@@ -155,6 +156,25 @@ def test_verified_composition_binds_runtime_implementation_without_authority():
     assert adapter.candidate_sha == registry.require("runtime").sha
     assert adapter.health()["authority"] == "none"
     assert composition.require_bound("runtime").implementation is runtime
+
+
+def test_external_component_binding_requires_real_public_seam():
+    class Seam:
+        def observe(self):
+            return None
+
+    composition = VerifiedComposition()
+    adapter = composition.bind_external("supervision", Seam(), required_methods=("observe",))
+    assert adapter.seam_only is False
+    with pytest.raises(TypeError):
+        composition.bind_external("director", object(), required_methods=("submit",))
+
+
+def test_sigkill_restart_requires_fresh_canonical_recovery():
+    result = run_sigkill_restart_probe(lambda: {"state": "RUNNING", "source": "postgresql"})
+    assert result["child_exit"] == -9
+    assert result["canonical"]["source"] == "postgresql"
+    assert result["evidence"]["authority"] == "none"
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():

@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from typing import Callable
 
 
 def run_process_crash_probe() -> dict[str, object]:
@@ -41,3 +42,27 @@ def recover_from_canonical(store, *, owner_id, program_id) -> dict[str, object]:
         "owner_job_count": len(snapshot.owner_jobs),
         "source": snapshot.source,
     }
+
+
+def run_sigkill_restart_probe(recover: Callable[[], dict[str, object]]) -> dict[str, object]:
+    """Exercise a real process boundary, then require a fresh canonical recovery callback.
+
+    The callback is intentionally invoked only in the parent after SIGKILL. Callers pass a
+    callback that opens a new SQLAlchemy session; process-local journal state is never used as
+    authority.
+    """
+    with tempfile.TemporaryDirectory(prefix="mainai-level2-restart-") as directory:
+        marker = Path(directory) / "persisted.json"
+        code = (
+            "import json, os, sys; "
+            "json.dump({'event':'STATE_COMMITTED','authority':'none'}, open(sys.argv[1],'w')); "
+            "os.kill(os.getpid(), 9)"
+        )
+        child = subprocess.Popen([sys.executable, "-c", code, str(marker)])
+        child.wait(timeout=5)
+        if child.returncode != -signal.SIGKILL:
+            raise RuntimeError(f"child did not terminate at restart boundary: {child.returncode}")
+        durable_evidence = json.loads(marker.read_text())
+        canonical = recover()
+        return {"child_exit": child.returncode, "evidence": durable_evidence, "canonical": canonical,
+                "authority_source": "postgresql"}
