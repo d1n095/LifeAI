@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from app.mainai_level2 import (
+    BlockerClass,
+    Job,
+    JobState,
+    Journal,
+    Level2ControlPlane,
+    ProgramContract,
+    Provider,
+    ProviderState,
+    run_unattended_harness,
+    CanonicalProgramStore,
+)
+
+
+@dataclass
+class CanonicalFakeRuntime:
+    claims: dict[str, str]
+
+    def __init__(self):
+        self.claims = {}
+
+    def assign(self, job, agent_id):
+        if job.job_id in self.claims:
+            raise RuntimeError("duplicate canonical claim")
+        token = f"{job.job_id}:{job.attempt}:{agent_id}"
+        self.claims[job.job_id] = token
+        return token
+
+    def cancel(self, job):
+        job.state = JobState.CANCELLED
+
+    def release(self, job):
+        self.claims.pop(job.job_id, None)
+
+
+def make_plane():
+    runtime = CanonicalFakeRuntime()
+    plane = Level2ControlPlane(runtime)
+    plane.add_program(ProgramContract("p", "alice", "ship bounded change", ("all jobs verified",), ("independent review",)))
+    return plane, runtime
+
+
+def test_unattended_builder_examiner_fix_loop_and_brief():
+    plane, _ = make_plane()
+    plane.add_job(Job("a", "p", "alice", "build", base_sha="base", remaining=("implement",)))
+    plane.add_job(Job("b", "p", "alice", "dependent", dependencies=("a",), priority=1))
+    plane.assign("a", agent_id="builder")
+    assert plane.observe("a", state=JobState.PARTIAL, remaining=("finish tests",)) == "continue:a:1"
+    plane.freeze("a", sha="sha-a", examiner_id="examiner")
+    with pytest.raises(ValueError):
+        plane.review("a", examiner_id="builder", sha="sha-a", passed=True)
+    plane.review("a", examiner_id="examiner", sha="sha-a", passed=False)
+    plane.jobs["a"].state = JobState.READY
+    plane.jobs["a"].base_sha = "base"
+    plane.assign("a", agent_id="fixer")
+    plane.freeze("a", sha="sha-b", examiner_id="examiner-2")
+    plane.review("a", examiner_id="examiner-2", sha="sha-b", passed=True)
+    assert plane.next_ready(owner_id="alice", program_id="p").job_id == "b"
+    brief = plane.founder_brief("p")
+    assert brief["verified"] == ["sha-b"]
+    assert brief["continuations"] == 1
+
+
+def test_new_sha_invalidates_old_review_and_wrong_sha_is_rejected():
+    plane, _ = make_plane()
+    plane.add_job(Job("a", "p", "alice", "build", base_sha="base"))
+    plane.freeze("a", sha="sha-a", examiner_id="reviewer")
+    with pytest.raises(ValueError):
+        plane.review("a", examiner_id="reviewer", sha="old", passed=True)
+    plane.review("a", examiner_id="reviewer", sha="sha-a", passed=True)
+    plane.jobs["a"].state = JobState.READY
+    plane.jobs["a"].review_passed = None
+    plane.freeze("a", sha="sha-b", examiner_id="reviewer-2")
+    with pytest.raises(ValueError):
+        plane.review("a", examiner_id="reviewer", sha="sha-b", passed=True)
+
+
+def test_owner_program_boundary_and_dependencies():
+    plane, _ = make_plane()
+    with pytest.raises(ValueError):
+        plane.add_job(Job("x", "p", "bob", "foreign"))
+    plane.add_job(Job("a", "p", "alice", "root"))
+    plane.add_job(Job("b", "p", "alice", "child", dependencies=("a",)))
+    assert plane.next_ready(owner_id="alice", program_id="p").job_id == "a"
+
+
+def test_healthy_running_is_not_interrupted_and_founder_blocker_is_preserved():
+    plane, _ = make_plane()
+    plane.add_job(Job("a", "p", "alice", "long"))
+    plane.assign("a", agent_id="builder")
+    assert plane.observe("a", state=JobState.PROGRESSING) is None
+    assert plane.interruptions == 0
+    plane.observe("a", state=JobState.BLOCKED, blocker=BlockerClass.FOUNDER_REQUIRED)
+    assert plane.founder_required == ["a"]
+
+
+def test_local_blocker_is_continued_without_founder():
+    plane, _ = make_plane()
+    plane.add_job(Job("a", "p", "alice", "repair"))
+    plane.assign("a", agent_id="builder")
+    continuation = plane.observe("a", state=JobState.BLOCKED, blocker=BlockerClass.LOCAL_REPAIR)
+    assert continuation == "continue:a:1"
+    assert not plane.founder_required
+
+
+def test_resource_recommendations_are_advisory_only():
+    plane, _ = make_plane()
+    plane.add_job(Job("a", "p", "alice", "work"))
+    recommendation = plane.resource_recommendation("a", {"context_loss_risk": True})
+    assert recommendation.action == "CHECKPOINT"
+    assert recommendation.authorized is False
+
+
+def test_provider_failure_reduces_function_and_never_authorizes():
+    plane, _ = make_plane()
+    plane.add_provider(Provider("p1", frozenset({"edit"})))
+    plane.provider_failover("p1", Provider("p2", frozenset({"edit"}), ProviderState.AVAILABLE, True))
+    assert plane.providers["p1"].state == ProviderState.EXHAUSTED
+    assert plane.providers["p2"].authorized is True
+    assert not any(r.authorized for r in [])
+
+
+def test_checkpoint_and_restart_journal_do_not_recreate_authority():
+    plane, runtime = make_plane()
+    plane.add_job(Job("a", "p", "alice", "work", base_sha="base"))
+    plane.assign("a", agent_id="builder")
+    checkpoint = plane.checkpoint("a")
+    records = plane.journal.snapshot()
+    recovered = Level2ControlPlane(runtime, journal=Journal.replay(records))
+    recovered.recover(records)
+    assert checkpoint["state"] == "ASSIGNED"
+    assert recovered.jobs["a"].state == JobState.READY
+    assert recovered.jobs["a"].builder_id is None
+    assert recovered.journal.records[-1]["event"] == "recovery_requiring_canonical_reread"
+
+
+def test_duplicate_assignment_is_rejected_by_canonical_runtime():
+    plane, runtime = make_plane()
+    plane.add_job(Job("a", "p", "alice", "work"))
+    plane.assign("a", agent_id="builder")
+    with pytest.raises(ValueError):
+        plane.assign("a", agent_id="builder")
+    assert len(runtime.claims) == 1
+
+
+def test_canonical_store_owner_scope(superuser_db, make_verified_user):
+    owner_a, _ = make_verified_user()
+    owner_b, _ = make_verified_user()
+    store = CanonicalProgramStore(superuser_db)
+    goal = store.create_program(owner_id=owner_a.id, objective="owner A objective")
+    assert store.current_task(owner_id=owner_b.id, task_id=goal.id) is None
+
+
+def test_deterministic_soak_and_digest():
+    plane, _ = make_plane()
+    result = run_unattended_harness(plane, count=1000)
+    assert result["jobs"] == 1000
+    assert result["verified"] == 1000
+    assert result["continuations"] > 0
+    assert len(result["digest"]) == 64
