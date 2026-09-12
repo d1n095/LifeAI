@@ -21,6 +21,7 @@ from app.mainai_level2 import (
     ComponentBinding,
     VerifiedComposition,
     recover_from_canonical,
+    probe_external_component,
 )
 from app.mainai_level2.process_harness import run_sigkill_restart_probe
 
@@ -175,6 +176,18 @@ def test_sigkill_restart_requires_fresh_canonical_recovery():
     assert result["child_exit"] == -9
     assert result["canonical"]["source"] == "postgresql"
     assert result["evidence"]["authority"] == "none"
+
+
+def test_external_frozen_worktree_probe_fails_closed_on_unavailable_seam():
+    probe = probe_external_component(
+        name="supervision",
+        worktree="/private/tmp/mainai-continuous-supervision",
+        expected_sha="a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4",
+        import_module="app.mainai_level2",
+        required_methods=("observe",),
+    )
+    assert probe.observed_sha == probe.expected_sha
+    assert probe.compatible is False
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():
