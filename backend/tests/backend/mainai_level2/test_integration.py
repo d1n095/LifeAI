@@ -22,6 +22,7 @@ from app.mainai_level2 import (
     VerifiedComposition,
     recover_from_canonical,
     probe_external_component,
+    call_frozen_json,
 )
 from app.mainai_level2.process_harness import run_sigkill_restart_probe
 
@@ -188,6 +189,43 @@ def test_external_frozen_worktree_probe_fails_closed_on_unavailable_seam():
     )
     assert probe.observed_sha == probe.expected_sha
     assert probe.compatible is False
+
+
+def test_resource_binding_executes_actual_frozen_implementation():
+    result = call_frozen_json(
+        name="resource_intelligence",
+        worktree="/private/tmp/resource-063c2569",
+        expected_sha="063c2569a170ccc3eb7887eadd2ed1b7caed73ff",
+        module="app.resource_intelligence.types",
+        function="unknown_metric",
+        kwargs={"unit": "tokens", "definition": "not observed", "source": "level2"},
+    )
+    assert result.result["missing_data"] is True
+
+
+def test_director_binding_executes_actual_frozen_provider_lease():
+    result = call_frozen_json(
+        name="director",
+        worktree="/private/tmp/director-ab1c0ce",
+        expected_sha="ab1c0ce03a7a0f7b11f2f716304f9e1235a54d3e",
+        module="app.dev_director.provider_lease",
+        function="new_external_provider_lease",
+        kwargs={"provider_identity": "provider-b", "task_ref": None, "workspace_ref": "job:test",
+                 "branch": "dev/test", "allowed_tools": [], "allowed_files": [], "ttl_seconds": 60},
+    )
+    assert result.result["provider_identity"] == "provider-b"
+
+
+def test_supervision_binding_executes_actual_frozen_identity_seam():
+    result = call_frozen_json(
+        name="supervision",
+        worktree="/private/tmp/mainai-continuous-supervision",
+        expected_sha="a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4",
+        module="app.mainai_execution.canonical_supervisor",
+        function="identity",
+        args=("owner", "job", "attempt"),
+    )
+    assert "value" in result.result
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():
