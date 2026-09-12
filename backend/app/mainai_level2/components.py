@@ -6,6 +6,7 @@ import another branch or grant authority; every effect still goes through the ru
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 
 VERIFIED_SHAS = {
@@ -40,3 +41,55 @@ class VerifiedComponentRegistry:
 
     def snapshot(self) -> dict[str, str]:
         return {name: self.require(name).sha for name in sorted(self.bindings)}
+
+
+class ComponentAdapter(Protocol):
+    """A narrow, evidence-bound adapter; adapters never grant runtime authority."""
+    component: str
+    candidate_sha: str
+
+    def health(self) -> dict[str, object]: ...
+
+
+@dataclass(frozen=True)
+class BoundComponentAdapter:
+    component: str
+    candidate_sha: str
+    implementation: Any
+    seam_only: bool = False
+
+    def health(self) -> dict[str, object]:
+        return {
+            "component": self.component,
+            "candidate_sha": self.candidate_sha,
+            "bound": self.implementation is not None,
+            "seam_only": self.seam_only,
+            "authority": "none",
+        }
+
+
+class VerifiedComposition:
+    """Explicit composition of verified public seams.
+
+    Missing implementation objects are represented as seam-only and fail closed when used;
+    merely recording a SHA never pretends that another branch was imported.
+    """
+    def __init__(self, registry: VerifiedComponentRegistry | None = None):
+        self.registry = registry or VerifiedComponentRegistry()
+        self.adapters: dict[str, BoundComponentAdapter] = {}
+
+    def bind(self, name: str, implementation: Any, *, seam_only: bool = False) -> BoundComponentAdapter:
+        binding = self.registry.require(name)
+        adapter = BoundComponentAdapter(name, binding.sha, implementation, seam_only)
+        self.adapters[name] = adapter
+        return adapter
+
+    def require_bound(self, name: str) -> BoundComponentAdapter:
+        adapter = self.adapters.get(name)
+        self.registry.require(name)
+        if adapter is None or adapter.implementation is None:
+            raise RuntimeError(f"verified component {name!r} has no bound implementation")
+        return adapter
+
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        return {name: adapter.health() for name, adapter in sorted(self.adapters.items())}

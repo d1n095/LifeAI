@@ -28,3 +28,16 @@ def run_process_crash_probe() -> dict[str, object]:
             raise RuntimeError(f"child did not terminate at crash boundary: {child.returncode}")
         records = json.loads(path.read_text())
         return {"child_exit": child.returncode, "records": records, "requires_canonical_reread": True}
+
+
+def recover_from_canonical(store, *, owner_id, program_id) -> dict[str, object]:
+    """Fresh-process recovery entry point; the store must reread PostgreSQL state."""
+    snapshot = store.recover_level2(owner_id=owner_id, program_id=program_id)
+    return {
+        "program_id": str(snapshot.program.id),
+        "state": snapshot.program.state,
+        "current_sha": snapshot.program.current_sha,
+        "event_count": len(snapshot.events),
+        "owner_job_count": len(snapshot.owner_jobs),
+        "source": snapshot.source,
+    }

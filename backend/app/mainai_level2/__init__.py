@@ -12,11 +12,12 @@ from .core import (
     run_multi_provider_harness,
     run_unattended_harness,
 )
-from .canonical import CanonicalProgramStore
-from .process_harness import run_process_crash_probe
-from .components import ComponentBinding, VerifiedComponentRegistry
+from .canonical import CanonicalProgramStore, CanonicalRecoverySnapshot
+from .process_harness import recover_from_canonical, run_process_crash_probe
+from .components import BoundComponentAdapter, ComponentBinding, VerifiedComponentRegistry, VerifiedComposition
+from .production import ProductionOrchestration, ProductionRuntimePort, compose_verified_runtime
 
 __all__ = [
-    "BlockerClass", "CanonicalProgramStore", "ComponentBinding", "Job", "JobState", "Journal", "Level2ControlPlane",
-    "ProgramContract", "Provider", "ProviderState", "run_multi_provider_harness", "run_process_crash_probe", "run_unattended_harness", "VerifiedComponentRegistry",
+    "BlockerClass", "CanonicalProgramStore", "CanonicalRecoverySnapshot", "ComponentBinding", "BoundComponentAdapter", "Job", "JobState", "Journal", "Level2ControlPlane",
+    "ProgramContract", "Provider", "ProviderState", "run_multi_provider_harness", "run_process_crash_probe", "recover_from_canonical", "run_unattended_harness", "VerifiedComponentRegistry", "VerifiedComposition", "ProductionRuntimePort", "ProductionOrchestration", "compose_verified_runtime",
 ]

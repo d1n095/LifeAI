@@ -1,0 +1,79 @@
+"""Production-runtime composition for the Level-2 control plane.
+
+This module delegates effects to the existing ProductionExecutionAdapter.  It does not keep a
+second claim/lease ledger and is disabled unless a caller supplies a real DB session.
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+
+from app.mainai_execution.production_adapter import ProductionExecutionAdapter
+from app.mainai_level2.components import VerifiedComposition
+from app.mainai_level2.canonical import CanonicalProgramStore
+
+
+@dataclass
+class ProductionRuntimePort:
+    adapter: ProductionExecutionAdapter
+    owner_id: uuid.UUID
+
+    def assign(self, job, agent_id):
+        claim = self.adapter.claim_next(worker_id=agent_id, owner_id=self.owner_id)
+        if claim is None or str(claim.job_id) != str(job.job_id):
+            raise RuntimeError("canonical runtime did not claim the requested job")
+        return claim
+
+    def cancel(self, job):
+        claim = getattr(job, "runtime_claim", None)
+        if claim is None:
+            raise RuntimeError("missing canonical claim for cancellation")
+        self.adapter.cancel(claim)
+
+    def release(self, job):
+        claim = getattr(job, "runtime_claim", None)
+        if claim is None:
+            return
+        from app.mainai_execution.substrate import FailureClass
+        self.adapter.fail(claim, failure_class=FailureClass.PROCESS_LOST)
+
+    def heartbeat(self, claim):
+        self.adapter.heartbeat(claim)
+
+
+def compose_verified_runtime(db, owner_id: uuid.UUID) -> tuple[ProductionRuntimePort, VerifiedComposition]:
+    """Bind the verified runtime SHA to the actual canonical production adapter."""
+    runtime = ProductionRuntimePort(ProductionExecutionAdapter(db), owner_id)
+    composition = VerifiedComposition()
+    composition.bind("runtime", runtime)
+    return runtime, composition
+
+
+class ProductionOrchestration:
+    """Small composition facade used by unattended integration runs.
+
+    It deliberately delegates claims and recovery to canonical services; it stores no local
+    lease or job lifecycle state.
+    """
+
+    def __init__(self, db, *, owner_id: uuid.UUID):
+        self.db = db
+        self.owner_id = owner_id
+        self.store = CanonicalProgramStore(db)
+        self.runtime, self.composition = compose_verified_runtime(db, owner_id)
+
+    def dispatch_next(self, job, *, agent_id: str):
+        claim = self.runtime.assign(job, agent_id)
+        job.runtime_claim = claim
+        return claim
+
+    def recover(self, *, program_id: uuid.UUID) -> dict[str, object]:
+        snapshot = self.store.recover_level2(owner_id=self.owner_id, program_id=program_id)
+        return {
+            "program_id": str(snapshot.program.id),
+            "state": snapshot.program.state,
+            "current_sha": snapshot.program.current_sha,
+            "events": len(snapshot.events),
+            "canonical_jobs": len(snapshot.owner_jobs),
+            "source": snapshot.source,
+        }

@@ -19,6 +19,8 @@ from app.mainai_level2 import (
     run_multi_provider_harness,
     VerifiedComponentRegistry,
     ComponentBinding,
+    VerifiedComposition,
+    recover_from_canonical,
 )
 
 
@@ -145,6 +147,16 @@ def test_verified_component_registry_rejects_stale_or_unverified_bindings():
         VerifiedComponentRegistry((ComponentBinding("runtime", "old"),)).require("runtime")
 
 
+def test_verified_composition_binds_runtime_implementation_without_authority():
+    registry = VerifiedComponentRegistry()
+    composition = VerifiedComposition(registry)
+    runtime = object()
+    adapter = composition.bind("runtime", runtime)
+    assert adapter.candidate_sha == registry.require("runtime").sha
+    assert adapter.health()["authority"] == "none"
+    assert composition.require_bound("runtime").implementation is runtime
+
+
 def test_provider_failure_reduces_function_and_never_authorizes():
     plane, _ = make_plane()
     plane.add_provider(Provider("p1", frozenset({"edit"})))
@@ -195,6 +207,20 @@ def test_canonical_level2_program_and_append_only_journal(superuser_db, make_ver
     superuser_db.commit()
     assert [event.sequence for event in store.journal(owner_id=owner_a.id, program_id=program.id)] == [1, 2]
     assert store.level2_program(owner_id=owner_b.id, program_id=program.id) is None
+
+
+def test_canonical_recovery_rereads_program_and_jobs(superuser_db, make_verified_user):
+    owner, _ = make_verified_user()
+    store = CanonicalProgramStore(superuser_db)
+    program = store.create_level2_program(owner_id=owner.id, objective="recover from postgres")
+    program.current_sha = "sha-current"
+    program.state = "RUNNING"
+    store.append_event(program=program, event_type="CHECKPOINT", metadata={"sha": "sha-current"})
+    superuser_db.commit()
+    recovered = recover_from_canonical(store, owner_id=owner.id, program_id=program.id)
+    assert recovered["source"] == "postgresql"
+    assert recovered["current_sha"] == "sha-current"
+    assert recovered["event_count"] == 2
 
 
 def test_deterministic_soak_and_digest():

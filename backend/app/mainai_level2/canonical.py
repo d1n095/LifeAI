@@ -6,11 +6,21 @@ rows and leaves execution claims, leases and effects to ``mainai_execution``.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.mainai_execution import MainAIGoal, MainAIGoalRiskLevel, MainAITask, MainAITaskStatus
+from app.models.mainai_job import MainAIJob
 from app.models.mainai_level2 import MainAILevel2Event, MainAILevel2Program
+
+
+@dataclass(frozen=True)
+class CanonicalRecoverySnapshot:
+    program: MainAILevel2Program
+    events: tuple[MainAILevel2Event, ...]
+    owner_jobs: tuple[MainAIJob, ...]
+    source: str = "postgresql"
 
 
 class CanonicalProgramStore:
@@ -75,3 +85,16 @@ class CanonicalProgramStore:
         return list(self.db.scalars(select(MainAILevel2Event).where(
             MainAILevel2Event.owner_id == owner_id, MainAILevel2Event.program_id == program_id
         ).order_by(MainAILevel2Event.sequence)).all())
+
+    def recover_level2(self, *, owner_id: uuid.UUID, program_id: uuid.UUID) -> CanonicalRecoverySnapshot:
+        """Rebuild a fresh recovery view from canonical PostgreSQL rows.
+
+        Journal rows are included as evidence, but current program/job rows are always read with
+        populate_existing so stale ORM identity-map state cannot revive work or authority.
+        """
+        program = self.db.get(MainAILevel2Program, program_id, populate_existing=True)
+        if program is None or program.owner_id != owner_id:
+            raise LookupError("program is not visible to owner")
+        events = tuple(self.journal(owner_id=owner_id, program_id=program_id))
+        jobs = tuple(self.db.scalars(select(MainAIJob).where(MainAIJob.owner_id == owner_id)).all())
+        return CanonicalRecoverySnapshot(program=program, events=events, owner_jobs=jobs)
