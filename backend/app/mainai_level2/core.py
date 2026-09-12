@@ -324,3 +324,25 @@ def run_unattended_harness(plane: Level2ControlPlane, *, count: int = 1000) -> d
         plane.review(job_id, examiner_id=f"examiner-{i % 2}", sha=f"sha-{i:04d}", passed=True)
     return {"jobs": count, "verified": sum(j.state == JobState.VERIFIED for j in plane.jobs.values()),
             "continuations": plane.continuations, "digest": plane.digest()}
+
+
+def run_multi_provider_harness(plane: Level2ControlPlane) -> dict[str, Any]:
+    """Exercise provider loss, bounded continuation, review failure and re-review."""
+    program_id = next(iter(plane.programs))
+    owner_id = plane.programs[program_id].owner_id
+    plane.add_provider(Provider("provider-a", frozenset({"edit"})))
+    plane.add_provider(Provider("provider-b", frozenset({"edit", "review"})))
+    plane.add_job(Job("provider-job", program_id, owner_id, "provider failover", base_sha="base", remaining=("implement",)))
+    plane.assign("provider-job", agent_id="builder-a")
+    plane.provider_failover("provider-a", Provider("provider-b", frozenset({"edit", "review"})))
+    plane.observe("provider-job", state=JobState.PARTIAL, remaining=("resume after provider loss",))
+    plane.freeze("provider-job", sha="provider-sha-a", examiner_id="examiner")
+    plane.review("provider-job", examiner_id="examiner", sha="provider-sha-a", passed=False)
+    plane.jobs["provider-job"].state = JobState.READY
+    plane.jobs["provider-job"].base_sha = "base"
+    plane.assign("provider-job", agent_id="builder-b")
+    plane.freeze("provider-job", sha="provider-sha-b", examiner_id="examiner-b")
+    plane.review("provider-job", examiner_id="examiner-b", sha="provider-sha-b", passed=True)
+    return {"verified": plane.jobs["provider-job"].state == JobState.VERIFIED,
+            "old_sha_replaced": plane.jobs["provider-job"].sha == "provider-sha-b",
+            "continuations": plane.continuations}

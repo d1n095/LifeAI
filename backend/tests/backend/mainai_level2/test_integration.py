@@ -15,6 +15,10 @@ from app.mainai_level2 import (
     ProviderState,
     run_unattended_harness,
     CanonicalProgramStore,
+    run_process_crash_probe,
+    run_multi_provider_harness,
+    VerifiedComponentRegistry,
+    ComponentBinding,
 )
 
 
@@ -117,6 +121,30 @@ def test_resource_recommendations_are_advisory_only():
     assert recommendation.authorized is False
 
 
+def test_real_process_crash_boundary_recovers_evidence_without_authority():
+    result = run_process_crash_probe()
+    assert result["child_exit"] == -9
+    assert result["records"][0]["event"] == "CHECKPOINT"
+    assert result["requires_canonical_reread"] is True
+
+
+def test_unattended_multi_provider_failover_and_re_review():
+    plane, _ = make_plane()
+    result = run_multi_provider_harness(plane)
+    assert result["verified"] is True
+    assert result["old_sha_replaced"] is True
+    assert result["continuations"] == 1
+
+
+def test_verified_component_registry_rejects_stale_or_unverified_bindings():
+    registry = VerifiedComponentRegistry()
+    assert registry.require("runtime").sha.startswith("1951ccef")
+    with pytest.raises(ValueError):
+        registry.require("runtime", sha="old")
+    with pytest.raises(ValueError):
+        VerifiedComponentRegistry((ComponentBinding("runtime", "old"),)).require("runtime")
+
+
 def test_provider_failure_reduces_function_and_never_authorizes():
     plane, _ = make_plane()
     plane.add_provider(Provider("p1", frozenset({"edit"})))
@@ -155,6 +183,18 @@ def test_canonical_store_owner_scope(superuser_db, make_verified_user):
     store = CanonicalProgramStore(superuser_db)
     goal = store.create_program(owner_id=owner_a.id, objective="owner A objective")
     assert store.current_task(owner_id=owner_b.id, task_id=goal.id) is None
+
+
+def test_canonical_level2_program_and_append_only_journal(superuser_db, make_verified_user):
+    owner_a, _ = make_verified_user()
+    owner_b, _ = make_verified_user()
+    store = CanonicalProgramStore(superuser_db)
+    program = store.create_level2_program(owner_id=owner_a.id, objective="unattended bounded work",
+                                          acceptance=["reviewed"], verification=["tests"], budget={"usd": 2})
+    store.append_event(program=program, event_type="CHECKPOINT", metadata={"sha": "abc"})
+    superuser_db.commit()
+    assert [event.sequence for event in store.journal(owner_id=owner_a.id, program_id=program.id)] == [1, 2]
+    assert store.level2_program(owner_id=owner_b.id, program_id=program.id) is None
 
 
 def test_deterministic_soak_and_digest():

@@ -141,6 +141,7 @@ from app.models.mainai_job import (
     MainAIJobProposalStatus,
     MainAIJobStatus,
 )
+from app.models.mainai_level2 import MainAILevel2Event, MainAILevel2Program
 from app.models.mainai_wait import (
     TERMINAL_MAINAI_TASK_WAIT_STATUSES,
     MainAITaskWait,
