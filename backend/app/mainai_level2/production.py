@@ -6,7 +6,10 @@ second claim/lease ledger and is disabled unless a caller supplies a real DB ses
 from __future__ import annotations
 
 import uuid
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.mainai_execution.production_adapter import ProductionExecutionAdapter
 from app.mainai_level2.components import VerifiedComposition
@@ -87,3 +90,47 @@ class ProductionOrchestration:
         claim = self.dispatch_next(job, agent_id=agent_id)
         return {"state": "CLAIMED", "attempt_id": claim.attempt_id, "provider": provider_state,
                 "authority": "canonical_lease"}
+
+
+def run_unattended_production_flow() -> dict[str, object]:
+    """Exercise the real provider-neutral RuntimeOrchestrator path end to end.
+
+    Providers remain deterministic fakes; claims, failover, artifact freezing and examiner
+    checks are delegated to the production runtime implementation rather than Level-2 helpers.
+    """
+    from app.mainai_execution.production_adapter import ProviderProfile, RuntimeOrchestrator
+    from app.mainai_execution.substrate import ExecutionSubstrate
+
+    with tempfile.TemporaryDirectory(prefix="level2-production-") as directory:
+        repo = Path(directory) / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(repo), "switch", "-c", "dev/level2"], check=True, stdout=subprocess.DEVNULL)
+        (repo / "state.txt").write_text("base")
+        subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+        base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        runtime = RuntimeOrchestrator(ExecutionSubstrate(Path(directory) / "runtime.sqlite"))
+        caps = frozenset({"repo_read", "code_edit", "filesystem_write", "test_run"})
+        runtime.register_provider(ProviderProfile("provider-a", caps))
+        runtime.register_provider(ProviderProfile("provider-b", caps))
+        runtime.register_provider(ProviderProfile("examiner", frozenset({"repo_read", "review", "test_run"})))
+        job = runtime.submit(owner_id="founder", program="offline-program", provider="provider-a", base_sha=base, worktree=str(repo))
+        claim, _ = runtime.claim(job.job_id, owner_id="founder", worker_id="builder-a")
+        runtime.providers["provider-a"] = ProviderProfile("provider-a", caps, state="exhausted")
+        replacement, _, old = runtime.failover(job.job_id, owner_id="founder", required=set(), worker_id="builder-b")
+        (repo / "state.txt").write_text("candidate-a")
+        subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate-a"], check=True)
+        artifact_a = runtime.freeze(job_id=job.job_id, attempt_id=replacement.attempt_id, builder_id="builder-b", examiner_id="examiner", worktree=str(repo), base_sha=base)
+        runtime.examine(job_id=job.job_id, examiner_id="examiner", sha=artifact_a.sha, passed=False)
+        runtime.director.report_failure(replacement, RuntimeError("examiner rejected candidate"))
+        base_b = artifact_a.sha
+        runtime.substrate.retry_or_reassign(job.job_id, new_provider="provider-b")
+        claim_b, _ = runtime.claim(job.job_id, owner_id="founder", worker_id="builder-b")
+        (repo / "state.txt").write_text("candidate-b")
+        subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate-b"], check=True)
+        artifact_b = runtime.freeze(job_id=job.job_id, attempt_id=claim_b.attempt_id, builder_id="builder-b", examiner_id="examiner", worktree=str(repo), base_sha=base_b)
+        runtime.examine(job_id=job.job_id, examiner_id="examiner", sha=artifact_b.sha, passed=True)
+        return {"verified": runtime.certified[job.job_id] == artifact_b.sha, "old_attempt_fenced": old.attempt_id != replacement.attempt_id, "old_sha_invalidated": artifact_a.sha != artifact_b.sha, "provider_failover": True}

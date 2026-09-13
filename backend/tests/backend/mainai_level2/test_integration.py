@@ -23,6 +23,7 @@ from app.mainai_level2 import (
     recover_from_canonical,
     probe_external_component,
     call_frozen_json,
+    run_unattended_production_flow,
 )
 from app.mainai_level2.process_harness import run_sigkill_restart_probe
 
@@ -182,7 +183,7 @@ def test_sigkill_restart_requires_fresh_canonical_recovery():
 def test_external_frozen_worktree_probe_fails_closed_on_unavailable_seam():
     probe = probe_external_component(
         name="supervision",
-        worktree="/private/tmp/mainai-continuous-supervision",
+        worktree="/Users/dennistorildson/Documents/LifeAI-worktrees/examiner-continuous-supervision",
         expected_sha="a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4",
         import_module="app.mainai_level2",
         required_methods=("observe",),
@@ -219,13 +220,21 @@ def test_director_binding_executes_actual_frozen_provider_lease():
 def test_supervision_binding_executes_actual_frozen_identity_seam():
     result = call_frozen_json(
         name="supervision",
-        worktree="/private/tmp/mainai-continuous-supervision",
+        worktree="/Users/dennistorildson/Documents/LifeAI-worktrees/examiner-continuous-supervision",
         expected_sha="a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4",
         module="app.mainai_execution.canonical_supervisor",
         function="identity",
         args=("owner", "job", "attempt"),
     )
     assert "value" in result.result
+
+
+def test_unattended_production_flow_uses_runtime_provider_failover_and_review():
+    result = run_unattended_production_flow()
+    assert result["verified"] is True
+    assert result["provider_failover"] is True
+    assert result["old_attempt_fenced"] is True
+    assert result["old_sha_invalidated"] is True
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():
