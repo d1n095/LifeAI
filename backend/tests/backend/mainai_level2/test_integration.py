@@ -24,6 +24,8 @@ from app.mainai_level2 import (
     probe_external_component,
     call_frozen_json,
     run_unattended_production_flow,
+    run_multi_seed_production_endurance,
+    run_orchestration_crash_matrix,
 )
 from app.mainai_level2.process_harness import run_sigkill_restart_probe
 
@@ -235,6 +237,21 @@ def test_unattended_production_flow_uses_runtime_provider_failover_and_review():
     assert result["provider_failover"] is True
     assert result["old_attempt_fenced"] is True
     assert result["old_sha_invalidated"] is True
+
+
+def test_multi_seed_endurance_preserves_owner_scope():
+    result = run_multi_seed_production_endurance(seeds=(1, 2, 3, 4), owners=("alice", "bob"))
+    assert result["verified"] is True
+    assert result["seeds"] == 4
+    assert result["owners"] == 2
+
+
+def test_full_orchestration_sigkill_matrix_restarts_from_canonical_callback():
+    stages = ("provider", "claim", "partial", "continuation", "freeze", "review_fail", "fix_sha", "review_pass", "completion")
+    result = run_orchestration_crash_matrix(stages, lambda stage: {"stage": stage, "source": "postgresql", "authority": "canonical"})
+    assert result["stages"] == len(stages)
+    assert all(item["exit"] == -9 for item in result["results"])
+    assert all(item["canonical"]["source"] == "postgresql" for item in result["results"])
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():

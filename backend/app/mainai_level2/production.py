@@ -92,7 +92,7 @@ class ProductionOrchestration:
                 "authority": "canonical_lease"}
 
 
-def run_unattended_production_flow() -> dict[str, object]:
+def run_unattended_production_flow(*, owner: str = "founder", seed: int = 0) -> dict[str, object]:
     """Exercise the real provider-neutral RuntimeOrchestrator path end to end.
 
     Providers remain deterministic fakes; claims, failover, artifact freezing and examiner
@@ -115,10 +115,10 @@ def run_unattended_production_flow() -> dict[str, object]:
         runtime.register_provider(ProviderProfile("provider-a", caps))
         runtime.register_provider(ProviderProfile("provider-b", caps))
         runtime.register_provider(ProviderProfile("examiner", frozenset({"repo_read", "review", "test_run"})))
-        job = runtime.submit(owner_id="founder", program="offline-program", provider="provider-a", base_sha=base, worktree=str(repo))
-        claim, _ = runtime.claim(job.job_id, owner_id="founder", worker_id="builder-a")
+        job = runtime.submit(owner_id=owner, program=f"offline-program-{seed}", provider="provider-a", base_sha=base, worktree=str(repo))
+        claim, _ = runtime.claim(job.job_id, owner_id=owner, worker_id="builder-a")
         runtime.providers["provider-a"] = ProviderProfile("provider-a", caps, state="exhausted")
-        replacement, _, old = runtime.failover(job.job_id, owner_id="founder", required=set(), worker_id="builder-b")
+        replacement, _, old = runtime.failover(job.job_id, owner_id=owner, required=set(), worker_id="builder-b")
         (repo / "state.txt").write_text("candidate-a")
         subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate-a"], check=True)
@@ -127,10 +127,16 @@ def run_unattended_production_flow() -> dict[str, object]:
         runtime.director.report_failure(replacement, RuntimeError("examiner rejected candidate"))
         base_b = artifact_a.sha
         runtime.substrate.retry_or_reassign(job.job_id, new_provider="provider-b")
-        claim_b, _ = runtime.claim(job.job_id, owner_id="founder", worker_id="builder-b")
+        claim_b, _ = runtime.claim(job.job_id, owner_id=owner, worker_id="builder-b")
         (repo / "state.txt").write_text("candidate-b")
         subprocess.run(["git", "-C", str(repo), "add", "state.txt"], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "candidate-b"], check=True)
         artifact_b = runtime.freeze(job_id=job.job_id, attempt_id=claim_b.attempt_id, builder_id="builder-b", examiner_id="examiner", worktree=str(repo), base_sha=base_b)
         runtime.examine(job_id=job.job_id, examiner_id="examiner", sha=artifact_b.sha, passed=True)
         return {"verified": runtime.certified[job.job_id] == artifact_b.sha, "old_attempt_fenced": old.attempt_id != replacement.attempt_id, "old_sha_invalidated": artifact_a.sha != artifact_b.sha, "provider_failover": True}
+
+
+def run_multi_seed_production_endurance(*, seeds: tuple[int, ...] = (0, 1, 2, 3), owners: tuple[str, ...] = ("owner-a", "owner-b")) -> dict[str, object]:
+    """Run independent founder-offline programs through the production flow."""
+    results = [run_unattended_production_flow(owner=owners[index % len(owners)], seed=seed) for index, seed in enumerate(seeds)]
+    return {"seeds": len(seeds), "owners": len(set(owners)), "programs": len(results), "verified": all(item["verified"] for item in results), "results": results}

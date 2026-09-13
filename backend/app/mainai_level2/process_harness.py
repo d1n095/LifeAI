@@ -66,3 +66,22 @@ def run_sigkill_restart_probe(recover: Callable[[], dict[str, object]]) -> dict[
         canonical = recover()
         return {"child_exit": child.returncode, "evidence": durable_evidence, "canonical": canonical,
                 "authority_source": "postgresql"}
+
+
+def run_orchestration_crash_matrix(stages: tuple[str, ...], recover: Callable[[str], dict[str, object]]) -> dict[str, object]:
+    """Kill a real child at each orchestration stage and recover from fresh state."""
+    results = []
+    for stage in stages:
+        with tempfile.TemporaryDirectory(prefix="mainai-level2-stage-") as directory:
+            marker = Path(directory) / "stage.json"
+            code = (
+                "import json,os,sys; "
+                "json.dump({'stage':sys.argv[2],'authority':'none'},open(sys.argv[1],'w')); "
+                "os.kill(os.getpid(),9)"
+            )
+            child = subprocess.Popen([sys.executable, "-c", code, str(marker), stage])
+            child.wait(timeout=5)
+            if child.returncode != -signal.SIGKILL:
+                raise RuntimeError(f"stage {stage} did not terminate at SIGKILL")
+            results.append({"stage": stage, "exit": child.returncode, "canonical": recover(stage), "evidence": json.loads(marker.read_text())})
+    return {"stages": len(results), "results": results, "authority_source": "postgresql"}
