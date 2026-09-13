@@ -18,9 +18,18 @@ rewrite the Research ledger's existing functions (only additive read-helpers wer
 
 ## EXACT SHA
 
+- **Frozen candidate SHA:** `43ca3c79a491bc406b44ec90dc88766e754dcb4f`
 - **Branch:** `claude/mainai-v2-sovereign`
 - **Worktree:** `/Users/dennistorildson/Documents/LifeAI-worktrees/claude-mainai-v2`
 - **Base this program branched from:** `b136858` (Research, Truth & Advisory Intelligence tip)
+- **Working tree at freeze time:** clean (only the pre-existing, unrelated nested Codex
+  worktree `codex-runtime-p0-handoff/` shows as untracked -- not part of this program, not
+  touched by it).
+- **Remote status at freeze time:** 6 commits ahead of `origin/claude/mainai-v2-sovereign`
+  (`a942f88`) -- COMMITTED != BACKED UP, per this round's own `repo_backup_intelligence`
+  finding. Not pushed; remote write requires explicit founder authorization.
+- This is the FROZEN candidate, ready for independent review. Any follow-on program continues
+  from this exact SHA on a new branch/worktree, never by further editing this one.
 - See `docs/mainai_v2/MAINAI_COGNITIVE_OPS_RECONCILIATION.md` for the full architecture
   decision and reuse audit.
 
