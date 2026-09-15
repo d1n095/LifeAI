@@ -23,8 +23,7 @@ disclosed P1s as canonical-goal gaps, not cosmetic ones -- this pass closes both
 - **This program's branch:** `claude/mainai-v2-coverage-workforce-capability`
 - **This program's worktree:** `/Users/dennistorildson/Documents/LifeAI-worktrees/claude-mainai-v2-coverage-workforce`
 - **First-pass commit:** `4a57d891eb39e97ba5123ac5790053c9ef6f8819`
-- **This follow-on pass's commit:** see the final report delivered alongside this handoff for
-  the exact SHA (this file is committed together with the code it describes).
+- **This follow-on pass's frozen candidate SHA:** `335181df7e451b9e4b71471380c8c45d515040c1`
 - See `docs/mainai_v2/MAINAI_COVERAGE_WORKFORCE_CAPABILITY_RECONCILIATION.md` for the full
   architecture decision, reuse audit, and the follow-on pass's own §A-§E writeup.
 
