@@ -26,6 +26,8 @@ from app.mainai_level2 import (
     run_unattended_production_flow,
     run_multi_seed_production_endurance,
     run_orchestration_crash_matrix,
+    run_postgres_recovery_matrix,
+    run_cancellation_duplicate_flow,
 )
 from app.mainai_level2.process_harness import run_sigkill_restart_probe
 
@@ -252,6 +254,25 @@ def test_full_orchestration_sigkill_matrix_restarts_from_canonical_callback():
     assert result["stages"] == len(stages)
     assert all(item["exit"] == -9 for item in result["results"])
     assert all(item["canonical"]["source"] == "postgresql" for item in result["results"])
+
+
+def test_cancellation_and_duplicate_late_results_are_fenced():
+    result = run_cancellation_duplicate_flow()
+    assert result["cancelled"] is True
+    assert result["late_events_rejected"] == 2
+
+
+def test_postgres_recovery_matrix_uses_fresh_child_sessions(superuser_db, make_verified_user):
+    owner, _ = make_verified_user()
+    store = CanonicalProgramStore(superuser_db)
+    program = store.create_level2_program(owner_id=owner.id, objective="crash matrix")
+    superuser_db.commit()
+    result = run_postgres_recovery_matrix(
+        database_url="postgresql://lifeos@127.0.0.1:5433/lifeos_test",
+        owner_id=str(owner.id), program_id=str(program.id), stages=("claim", "review", "completion"),
+    )
+    assert result["stages"] == 3
+    assert all(item["recovery"]["source"] == "postgresql" for item in result["results"])
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():

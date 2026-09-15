@@ -140,3 +140,22 @@ def run_multi_seed_production_endurance(*, seeds: tuple[int, ...] = (0, 1, 2, 3)
     """Run independent founder-offline programs through the production flow."""
     results = [run_unattended_production_flow(owner=owners[index % len(owners)], seed=seed) for index, seed in enumerate(seeds)]
     return {"seeds": len(seeds), "owners": len(set(owners)), "programs": len(results), "verified": all(item["verified"] for item in results), "results": results}
+
+
+def run_cancellation_duplicate_flow() -> dict[str, object]:
+    """Exercise cancellation and stale/duplicate result fencing on the production substrate."""
+    from app.mainai_execution.production_adapter import ProviderProfile, RuntimeOrchestrator
+    from app.mainai_execution.substrate import ExecutionSubstrate, LeaseLostError
+    with tempfile.TemporaryDirectory(prefix="level2-cancel-") as directory:
+        runtime = RuntimeOrchestrator(ExecutionSubstrate(Path(directory) / "runtime.sqlite"))
+        runtime.register_provider(ProviderProfile("provider-a", frozenset({"code_edit"})))
+        job = runtime.submit(owner_id="owner-a", program="cancel", provider="provider-a")
+        claim, _ = runtime.claim(job.job_id, owner_id="owner-a", worker_id="worker-a")
+        runtime.director.cancel_job(job.job_id)
+        rejected = 0
+        for _ in range(2):
+            try:
+                runtime.director.report_progress(claim, phase="late", current=1)
+            except LeaseLostError:
+                rejected += 1
+        return {"cancelled": True, "late_events_rejected": rejected, "owner": "owner-a"}

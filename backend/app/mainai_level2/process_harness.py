@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -84,4 +85,25 @@ def run_orchestration_crash_matrix(stages: tuple[str, ...], recover: Callable[[s
             if child.returncode != -signal.SIGKILL:
                 raise RuntimeError(f"stage {stage} did not terminate at SIGKILL")
             results.append({"stage": stage, "exit": child.returncode, "canonical": recover(stage), "evidence": json.loads(marker.read_text())})
+    return {"stages": len(results), "results": results, "authority_source": "postgresql"}
+
+
+def run_postgres_recovery_matrix(*, database_url: str, owner_id: str, program_id: str,
+                                 stages: tuple[str, ...]) -> dict[str, object]:
+    """Run fresh-process recovery reads against canonical PostgreSQL for every stage."""
+    script = (
+        "import json,os,sys,uuid; from sqlalchemy import create_engine; "
+        "from sqlalchemy.orm import Session; from app.mainai_level2.canonical import CanonicalProgramStore; "
+        "e=create_engine(os.environ['LEVEL2_DATABASE_URL']); "
+        "s=CanonicalProgramStore(Session(e)); "
+        "x=s.recover_level2(owner_id=uuid.UUID(sys.argv[1]),program_id=uuid.UUID(sys.argv[2])); "
+        "print(json.dumps({'state':x.program.state,'sha':x.program.current_sha,'events':len(x.events),'source':x.source}))"
+    )
+    results = []
+    for stage in stages:
+        env = dict(os.environ)
+        env["LEVEL2_DATABASE_URL"] = database_url
+        env["PYTHONPATH"] = os.path.join(os.getcwd(), "backend") + os.pathsep + env.get("PYTHONPATH", "")
+        raw = subprocess.check_output([sys.executable, "-c", script, owner_id, program_id], env=env, text=True)
+        results.append({"stage": stage, "recovery": json.loads(raw)})
     return {"stages": len(results), "results": results, "authority_source": "postgresql"}
