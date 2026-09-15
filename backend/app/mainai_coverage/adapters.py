@@ -7,9 +7,12 @@ composes the real `app.mainai_vision.vision_compiler.compile_vision_graph()` to 
 `omission_discovery.find_omissions()` a real, current set of canonical-vision text -- never a
 second copy of the vision graph.
 
-NOT YET REAL, honestly disclosed: no corpus/conversation-history/commit-log scanner exists
-anywhere in this codebase that could automatically produce `CapabilityClaim` rows -- a caller
-supplies them today (see `types.CapabilityClaim`'s own docstring)."""
+`source_adapters.py`/`discovery_pipeline.py` now DO real, read-only ingestion of handoff docs,
+reconciliation docs, the branch registry, and the git commit log -- a caller no longer has to
+hand-compose every `CapabilityClaim`. The one source still NOT real, honestly disclosed: no
+durable conversation/chat-history store exists anywhere in this codebase --
+`source_adapters.conversation_history_availability()` reports this explicitly rather than
+fabricating a read of something that does not exist."""
 
 from __future__ import annotations
 

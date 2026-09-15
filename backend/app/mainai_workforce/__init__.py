@@ -23,26 +23,57 @@ from app.mainai_workforce.mastery_ledger import (
     record_observation,
 )
 from app.mainai_workforce.promotion_policy import PromotionAssessment, assess_promotion_eligibility
+from app.mainai_workforce.real_state_decisions import (
+    ContinuationSignalReport,
+    ContinuationWithProvenance,
+    ResolvedSignal,
+    WaitOrAssignSignalReport,
+    WaitOrAssignWithProvenance,
+    decide_continue_or_handoff_from_real_state,
+    decide_wait_or_assign_from_real_state,
+)
 from app.mainai_workforce.reservation import ReservationAssessment, assess_reservation
+from app.mainai_workforce.signal_derivation import (
+    derive_competency_signal,
+    derive_context_loaded_relevance_signal,
+    derive_quota_uncertainty_signal,
+    derive_rework_rate_signal,
+    resolve_signal,
+)
 from app.mainai_workforce.situational_snapshot import agent_runtime_view_to_agent_state, assignment_to_work_item, real_agent_states_snapshot
 from app.mainai_workforce.teacher_value import TeacherValueAssessment, assess_teacher_value
-from app.mainai_workforce.types import AutonomyStage, ProviderDependenceRecommendation, TeacherObservation, WaitOrAssignDecision, WorkforceError
+from app.mainai_workforce.types import (
+    AutonomyStage,
+    ProviderDependenceRecommendation,
+    SignalEnvelope,
+    SignalOrigin,
+    TeacherObservation,
+    WaitOrAssignDecision,
+    WorkforceError,
+)
 from app.mainai_workforce.wait_or_assign import WaitOrAssignResult, decide_wait_or_assign
 from app.mainai_workforce.workforce_scheduler import WorkforceRecommendation, recommend_for_task
 
 __all__ = [
     "AutonomyStage",
     "ContinuationResult",
+    "ContinuationSignalReport",
+    "ContinuationWithProvenance",
     "DemotionAssessment",
     "DependenceRecommendation",
     "ProviderDependenceRecommendation",
     "PromotionAssessment",
     "ReservationAssessment",
+    "ResolvedSignal",
     "ReusableProcedure",
+    "SignalEnvelope",
+    "SignalOrigin",
     "TeacherObservation",
     "TeacherValueAssessment",
     "WaitOrAssignDecision",
     "WaitOrAssignResult",
+    "WaitOrAssignSignalReport",
+    "WaitOrAssignWithProvenance",
     "WorkforceError",
     "WorkforceRecommendation",
     "agent_runtime_view_to_agent_state",
@@ -56,8 +87,14 @@ __all__ = [
     "build_coverage_delta_message",
     "build_workforce_wait_message",
     "decide_continue_or_handoff",
+    "decide_continue_or_handoff_from_real_state",
     "decide_wait_or_assign",
+    "decide_wait_or_assign_from_real_state",
     "demote",
+    "derive_competency_signal",
+    "derive_context_loaded_relevance_signal",
+    "derive_quota_uncertainty_signal",
+    "derive_rework_rate_signal",
     "evaluate_message_necessity",
     "extract_reusable_procedure",
     "get_mastery_record",
@@ -68,4 +105,5 @@ __all__ = [
     "recommend_dependence_reduction",
     "recommend_for_task",
     "record_observation",
+    "resolve_signal",
 ]

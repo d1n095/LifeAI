@@ -48,6 +48,26 @@ class ProviderDependenceRecommendation(str, enum.Enum):
     DO_NOT_REDUCE_YET = "do_not_reduce_yet"
 
 
+class SignalOrigin(str, enum.Enum):
+    """Every derived workforce signal carries WHERE it came from -- MISSING DATA != ZERO,
+    UNKNOWN COST != FREE: a caller must be able to tell "we really observed this" from "no
+    real signal exists and this is a fallback/override", never silently blur the two."""
+
+    OBSERVED = "observed"  # a direct, real measurement (e.g. resource_intelligence's own recency-weighted rate)
+    DERIVED = "derived"  # computed from real durable records (e.g. mastery ledger examiner pass rate)
+    ESTIMATED = "estimated"  # a documented, hand-picked fallback -- never presented as a real measurement
+    CALLER_SUPPLIED = "caller_supplied"  # an explicit override the caller provided
+    UNKNOWN = "unknown"  # no real signal and no override -- value is always None here
+
+
+@dataclass(frozen=True)
+class SignalEnvelope:
+    value: float | None
+    origin: SignalOrigin
+    source: str
+    note: str | None = None
+
+
 @dataclass(frozen=True)
 class TeacherObservation:
     """Observable METHOD/PROCESS evidence from one external-agent job -- NEVER hidden
