@@ -172,3 +172,30 @@ def run_integrated_endurance(*, seeds: tuple[int, ...] = (10, 11, 12, 13), owner
         "provider_failovers": sum(1 for item in successful if item["provider_failover"]),
         "results": successful,
     }
+
+
+def run_integrated_owner_report(db, *, owner_a: uuid.UUID, owner_b: uuid.UUID,
+                                seeds: tuple[int, ...] = (31, 32)) -> dict[str, object]:
+    """Tie the production endurance run to canonical Level-2 owner state.
+
+    The provider path still uses controlled local providers, but the program contracts and
+    recovery views are persisted through the PostgreSQL Level-2 store so owner scope is checked
+    against the same durable rows used by restart recovery.
+    """
+    store = CanonicalProgramStore(db)
+    program_a = store.create_level2_program(owner_id=owner_a, objective="owner A unattended flow",
+                                            verification=["independent_review"])
+    store.append_event(program=program_a, event_type="ASSIGNED", metadata={"provider": "provider-a"})
+    store.append_event(program=program_a, event_type="REVIEW_PASS", metadata={"sha": "sha-a"})
+    db.commit()
+    owner_summary = store.recover_level2(owner_id=owner_a, program_id=program_a.id)
+    endurance = run_integrated_endurance(seeds=seeds, owners=(str(owner_a), str(owner_b)))
+    return {
+        "program_id": str(program_a.id),
+        "owner_a": str(owner_a),
+        "owner_b": str(owner_b),
+        "canonical_source": owner_summary.source,
+        "canonical_events": len(owner_summary.events),
+        "cross_owner_visible": store.level2_program(owner_id=owner_b, program_id=program_a.id) is not None,
+        "endurance": endurance,
+    }

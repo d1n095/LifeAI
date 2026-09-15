@@ -29,8 +29,10 @@ from app.mainai_level2 import (
     run_postgres_recovery_matrix,
     run_cancellation_duplicate_flow,
     run_integrated_endurance,
+    run_integrated_owner_report,
 )
 from app.mainai_level2.process_harness import run_sigkill_restart_probe
+from app.request_context import current_user_id as current_user_id_var
 
 
 @dataclass
@@ -282,6 +284,34 @@ def test_integrated_endurance_combines_provider_review_cancel_and_late_events():
     assert result["cancelled"] is True
     assert result["late_events_rejected"] == 2
     assert result["provider_failovers"] == 2
+
+
+def test_integrated_endurance_uses_canonical_owner_rls(db_session, make_verified_user):
+    owner_a, _ = make_verified_user()
+    owner_b, _ = make_verified_user()
+    owner_a_id = owner_a.id
+    owner_b_id = owner_b.id
+    token = current_user_id_var.set(str(owner_a_id))
+    try:
+        db_session.rollback()
+        result = run_integrated_owner_report(db_session, owner_a=owner_a_id, owner_b=owner_b_id, seeds=(41, 42))
+        assert result["canonical_source"] == "postgresql"
+        assert result["canonical_events"] == 3
+        assert result["cross_owner_visible"] is False
+        assert result["endurance"]["successful"] is True
+        assert result["endurance"]["cancelled"] is True
+    finally:
+        current_user_id_var.reset(token)
+
+    token = current_user_id_var.set(str(owner_b_id))
+    try:
+        db_session.rollback()
+        db_session.expunge_all()
+        store = CanonicalProgramStore(db_session)
+        with pytest.raises(LookupError):
+            store.recover_level2(owner_id=owner_b_id, program_id=result["program_id"])
+    finally:
+        current_user_id_var.reset(token)
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():
