@@ -159,3 +159,16 @@ def run_cancellation_duplicate_flow() -> dict[str, object]:
             except LeaseLostError:
                 rejected += 1
         return {"cancelled": True, "late_events_rejected": rejected, "owner": "owner-a"}
+
+
+def run_integrated_endurance(*, seeds: tuple[int, ...] = (10, 11, 12, 13), owners: tuple[str, ...] = ("owner-a", "owner-b")) -> dict[str, object]:
+    """Combine successful, failed, cancelled and stale-result paths in one run report."""
+    successful = [run_unattended_production_flow(owner=owners[i % len(owners)], seed=seed) for i, seed in enumerate(seeds)]
+    cancelled = run_cancellation_duplicate_flow()
+    return {
+        "seeds": len(seeds), "programs": len(successful) + 1, "owners": len(set(owners)),
+        "successful": all(item["verified"] for item in successful),
+        "cancelled": cancelled["cancelled"], "late_events_rejected": cancelled["late_events_rejected"],
+        "provider_failovers": sum(1 for item in successful if item["provider_failover"]),
+        "results": successful,
+    }

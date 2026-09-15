@@ -28,6 +28,7 @@ from app.mainai_level2 import (
     run_orchestration_crash_matrix,
     run_postgres_recovery_matrix,
     run_cancellation_duplicate_flow,
+    run_integrated_endurance,
 )
 from app.mainai_level2.process_harness import run_sigkill_restart_probe
 
@@ -273,6 +274,14 @@ def test_postgres_recovery_matrix_uses_fresh_child_sessions(superuser_db, make_v
     )
     assert result["stages"] == 3
     assert all(item["recovery"]["source"] == "postgresql" for item in result["results"])
+
+
+def test_integrated_endurance_combines_provider_review_cancel_and_late_events():
+    result = run_integrated_endurance(seeds=(21, 22), owners=("alice", "bob"))
+    assert result["successful"] is True
+    assert result["cancelled"] is True
+    assert result["late_events_rejected"] == 2
+    assert result["provider_failovers"] == 2
 
 
 def test_provider_failure_reduces_function_and_never_authorizes():
