@@ -57,6 +57,7 @@ from app.models.diagnosis import (
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.personal_recall_outbox import PersonalRecallOutbox, RecallOutboxEventType
+from app.models.resource_intelligence import AgentResourceTelemetrySample
 from app.models.personal_recall_outbox_delivery import PersonalRecallOutboxDelivery
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope, ExecutionScopeProposal
@@ -142,6 +143,12 @@ from app.models.mainai_job import (
     MainAIJobStatus,
 )
 from app.models.mainai_level2 import MainAILevel2Event, MainAILevel2Program
+from app.models.mainai_supervision import (
+    MainAIBudgetReservation,
+    MainAISupervisionAgent,
+    MainAISupervisionMessage,
+    MainAISupervisionTelemetry,
+)
 from app.models.mainai_wait import (
     TERMINAL_MAINAI_TASK_WAIT_STATUSES,
     MainAITaskWait,
@@ -455,4 +462,9 @@ __all__ = [
     "StrategySynthesisInput",
     "StrategySynthesisLessonLink",
     "StrategySynthesisMaterialization",
+    "AgentResourceTelemetrySample",
+    "MainAIBudgetReservation",
+    "MainAISupervisionTelemetry",
+    "MainAISupervisionMessage",
+    "MainAISupervisionAgent",
 ]

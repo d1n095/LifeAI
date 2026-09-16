@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -20,9 +23,9 @@ from app.mainai_level2 import (
     VerifiedComponentRegistry,
     ComponentBinding,
     VerifiedComposition,
+    compose_local_verified_components,
     recover_from_canonical,
     probe_external_component,
-    call_frozen_json,
     run_unattended_production_flow,
     run_multi_seed_production_endurance,
     run_orchestration_crash_matrix,
@@ -187,53 +190,64 @@ def test_sigkill_restart_requires_fresh_canonical_recovery():
     assert result["evidence"]["authority"] == "none"
 
 
-def test_external_frozen_worktree_probe_fails_closed_on_unavailable_seam():
-    probe = probe_external_component(
-        name="supervision",
-        worktree="/Users/dennistorildson/Documents/LifeAI-worktrees/examiner-continuous-supervision",
-        expected_sha="a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4",
-        import_module="app.mainai_level2",
-        required_methods=("observe",),
-    )
+def test_external_frozen_worktree_probe_fails_closed_on_unavailable_seam(tmp_path):
+    repo_root = Path(__file__).resolve().parents[4]
+    frozen_sha = "a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4"
+    worktree = tmp_path / "supervision-frozen"
+    subprocess.run(["git", "-C", str(repo_root), "worktree", "add", "--detach", str(worktree), frozen_sha], check=True, stdout=subprocess.DEVNULL)
+    try:
+        probe = probe_external_component(
+            name="supervision",
+            worktree=str(worktree),
+            expected_sha=frozen_sha,
+            import_module="app.mainai_level2",
+            required_methods=("observe",),
+        )
+    finally:
+        subprocess.run(["git", "-C", str(repo_root), "worktree", "remove", "--force", str(worktree)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     assert probe.observed_sha == probe.expected_sha
     assert probe.compatible is False
 
 
-def test_resource_binding_executes_actual_frozen_implementation():
-    result = call_frozen_json(
-        name="resource_intelligence",
-        worktree="/private/tmp/resource-063c2569",
-        expected_sha="063c2569a170ccc3eb7887eadd2ed1b7caed73ff",
-        module="app.resource_intelligence.types",
-        function="unknown_metric",
-        kwargs={"unit": "tokens", "definition": "not observed", "source": "level2"},
+def test_local_component_composition_binds_real_integrated_implementations():
+    composition = compose_local_verified_components()
+    snapshot = composition.snapshot()
+    assert snapshot["director"]["seam_only"] is False
+    assert snapshot["resource_intelligence"]["seam_only"] is False
+    assert snapshot["supervision"]["seam_only"] is False
+    assert snapshot["founder_reasoning"]["seam_only"] is False
+    assert snapshot["director"]["source_sha"] == "ab1c0ce03a7a0f7b11f2f716304f9e1235a54d3e"
+    assert snapshot["resource_intelligence"]["source_sha"] == "063c2569a170ccc3eb7887eadd2ed1b7caed73ff"
+
+
+def test_resource_binding_executes_actual_integrated_implementation():
+    resource = compose_local_verified_components().require_bound("resource_intelligence")
+    result = resource.invoke(unit="tokens", definition="not observed", source="level2")
+    assert result.missing_data is True
+    assert result.value is None
+
+
+def test_director_binding_executes_actual_integrated_provider_lease():
+    director = compose_local_verified_components().require_bound("director")
+    result = director.invoke(
+        provider_identity="provider-b", task_ref=None, workspace_ref="job:test", branch="dev/test",
+        allowed_tools=(), allowed_files=(), ttl_seconds=60,
     )
-    assert result.result["missing_data"] is True
+    assert result.provider_identity == "provider-b"
+    assert result.authority_scope == ()
 
 
-def test_director_binding_executes_actual_frozen_provider_lease():
-    result = call_frozen_json(
-        name="director",
-        worktree="/private/tmp/director-ab1c0ce",
-        expected_sha="ab1c0ce03a7a0f7b11f2f716304f9e1235a54d3e",
-        module="app.dev_director.provider_lease",
-        function="new_external_provider_lease",
-        kwargs={"provider_identity": "provider-b", "task_ref": None, "workspace_ref": "job:test",
-                 "branch": "dev/test", "allowed_tools": [], "allowed_files": [], "ttl_seconds": 60},
-    )
-    assert result.result["provider_identity"] == "provider-b"
+def test_supervision_binding_executes_actual_integrated_identity_seam():
+    supervision = compose_local_verified_components().require_bound("supervision")
+    result = supervision.invoke("owner", "job", "attempt")
+    assert str(result) == "4dd27a08-af11-5bca-b351-3ced33b42f69"
 
 
-def test_supervision_binding_executes_actual_frozen_identity_seam():
-    result = call_frozen_json(
-        name="supervision",
-        worktree="/Users/dennistorildson/Documents/LifeAI-worktrees/examiner-continuous-supervision",
-        expected_sha="a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4",
-        module="app.mainai_execution.canonical_supervisor",
-        function="identity",
-        args=("owner", "job", "attempt"),
-    )
-    assert "value" in result.result
+def test_founder_reasoning_binding_executes_actual_integrated_judgment():
+    reasoning = compose_local_verified_components().require_bound("founder_reasoning")
+    decision = reasoning.invoke(confidence=0.2, evidence_strength=0.2, founder_originated=True, stakes=0.8)
+    assert decision.action.value == "challenge"
+    assert decision.authorized is False
 
 
 def test_unattended_production_flow_uses_runtime_provider_failover_and_review():
@@ -271,7 +285,7 @@ def test_postgres_recovery_matrix_uses_fresh_child_sessions(superuser_db, make_v
     program = store.create_level2_program(owner_id=owner.id, objective="crash matrix")
     superuser_db.commit()
     result = run_postgres_recovery_matrix(
-        database_url="postgresql://lifeos@127.0.0.1:5433/lifeos_test",
+        database_url=os.environ["DATABASE_URL"],
         owner_id=str(owner.id), program_id=str(program.id), stages=("claim", "review", "completion"),
     )
     assert result["stages"] == 3

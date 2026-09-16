@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.mainai_execution.production_adapter import ProductionExecutionAdapter
-from app.mainai_level2.components import VerifiedComposition
+from app.mainai_level2.components import VerifiedComposition, compose_local_verified_components
 from app.mainai_level2.canonical import CanonicalProgramStore
 
 
@@ -47,7 +47,7 @@ class ProductionRuntimePort:
 def compose_verified_runtime(db, owner_id: uuid.UUID) -> tuple[ProductionRuntimePort, VerifiedComposition]:
     """Bind the verified runtime SHA to the actual canonical production adapter."""
     runtime = ProductionRuntimePort(ProductionExecutionAdapter(db), owner_id)
-    composition = VerifiedComposition()
+    composition = compose_local_verified_components()
     composition.bind("runtime", runtime)
     return runtime, composition
 
