@@ -143,6 +143,12 @@ from app.models.mainai_job import (
     MainAIJobStatus,
 )
 from app.models.mainai_level2 import MainAILevel2Event, MainAILevel2Program
+from app.models.mainai_founder_boot import (
+    MainAIFounderBoot,
+    MainAIFounderBootEvent,
+    MainAIFounderBootStatus,
+    MainAIFounderCovenant,
+)
 from app.models.mainai_supervision import (
     MainAIBudgetReservation,
     MainAISupervisionAgent,
@@ -359,6 +365,8 @@ __all__ = [
     "MainAIJobProposal",
     "MainAIJobProposalStatus",
     "MainAIJobStatus",
+    "MainAILevel2Event",
+    "MainAILevel2Program",
     "TERMINAL_MAINAI_TASK_WAIT_STATUSES",
     "MainAITaskWait",
     "MainAITaskWaitSourceType",
@@ -467,4 +475,8 @@ __all__ = [
     "MainAISupervisionTelemetry",
     "MainAISupervisionMessage",
     "MainAISupervisionAgent",
+    "MainAIFounderBoot",
+    "MainAIFounderBootEvent",
+    "MainAIFounderBootStatus",
+    "MainAIFounderCovenant",
 ]
