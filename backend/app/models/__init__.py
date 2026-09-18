@@ -143,6 +143,7 @@ from app.models.mainai_job import (
     MainAIJobStatus,
 )
 from app.models.mainai_level2 import MainAILevel2Event, MainAILevel2Program
+from app.models.mainai_verification import MainAIVerificationRecord
 from app.models.mainai_founder_boot import (
     MainAIFounderBoot,
     MainAIFounderBootEvent,
@@ -367,6 +368,7 @@ __all__ = [
     "MainAIJobStatus",
     "MainAILevel2Event",
     "MainAILevel2Program",
+    "MainAIVerificationRecord",
     "TERMINAL_MAINAI_TASK_WAIT_STATUSES",
     "MainAITaskWait",
     "MainAITaskWaitSourceType",

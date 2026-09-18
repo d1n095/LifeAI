@@ -7,7 +7,11 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
+from sqlalchemy.orm import Session
+
 from app.mainai_founder_boot.types import ReadinessRecord, RecallBootStatus
+from app.mainai_verification_registry.service import find_independent_pass
+from app.models.mainai_verification import MainAIVerificationRecord
 from app.mainai_level2.components import VERIFIED_SHAS, compose_local_verified_components
 
 LEVEL2_BASE_SHA = "ec611a5d3216f4194793e8db01a2eceb1d0235eb"
@@ -22,7 +26,7 @@ class ComponentSpec:
     name: str
     required: bool
     exact_sha: str | None
-    independently_verified_sha: str | None
+    builder_identity: str
     modules: tuple[str, ...] = ()
     files: tuple[str, ...] = ()
     tests: tuple[str, ...] = ()
@@ -132,11 +136,9 @@ def _runtime_invocation() -> tuple[bool, str]:
     return ok, detail
 
 
-_USE_SPEC_VERIFICATION = object()
 
 
-def _derive_component_evidence(spec: ComponentSpec, *, verification_sha: str | None | object = _USE_SPEC_VERIFICATION) -> ComponentEvidence:
-    verification_sha = spec.independently_verified_sha if verification_sha is _USE_SPEC_VERIFICATION else verification_sha
+def _derive_component_evidence(spec: ComponentSpec, *, verification_record: MainAIVerificationRecord | None = None) -> ComponentEvidence:
     evidence: list[str] = [spec.evidence_label]
     file_results = {rel: _file_present(rel) for rel in spec.files}
     module_results = {name: _module_present(name) for name in spec.modules}
@@ -146,8 +148,26 @@ def _derive_component_evidence(spec: ComponentSpec, *, verification_sha: str | N
     evidence.extend(f"module:{name}={value}" for name, value in module_results.items())
     tested = all(_file_present(rel) for rel in spec.tests)
     evidence.extend(f"test:{rel}={_file_present(rel)}" for rel in spec.tests)
-    independently_verified = bool(spec.exact_sha and verification_sha == spec.exact_sha)
-    evidence.append(f"verification_sha={verification_sha or 'UNKNOWN'}")
+    independently_verified = bool(
+        verification_record is not None
+        and spec.exact_sha
+        and verification_record.candidate_sha == spec.exact_sha
+        and verification_record.builder_identity == spec.builder_identity
+        and verification_record.examiner_identity != spec.builder_identity
+        and verification_record.review_result == "PASS"
+    )
+    if verification_record is None:
+        evidence.append("verification_record=missing")
+    else:
+        evidence.extend((
+            f"verification_id={verification_record.id}",
+            f"verification_sha={verification_record.candidate_sha}",
+            f"review_result={verification_record.review_result}",
+            f"builder={verification_record.builder_identity}",
+            f"examiner={verification_record.examiner_identity}",
+            f"identity_assurance={verification_record.identity_assurance}",
+            f"reviewed_at={verification_record.reviewed_at.date().isoformat()}",
+        ))
     if spec.exact_sha:
         evidence.append(f"expected_sha={spec.exact_sha}")
     if spec.invocation is not None:
@@ -165,7 +185,7 @@ def _derive_component_evidence(spec: ComponentSpec, *, verification_sha: str | N
     elif not implemented:
         blocker = "implementation artifact is present but invocation failed"
     elif not independently_verified:
-        blocker = "independent verification does not bind to this implementation identity"
+        blocker = "independent verification registry has no current PASS for this exact implementation identity"
     elif not integrated:
         blocker = "verified implementation is not composed by this candidate"
     elif not activated:
@@ -177,7 +197,7 @@ def _derive_component_evidence(spec: ComponentSpec, *, verification_sha: str | N
 def component_specs() -> dict[str, ComponentSpec]:
     return {
         "LEVEL2": ComponentSpec(
-            "LEVEL2", True, LEVEL2_BASE_SHA, LEVEL2_BASE_SHA,
+            "LEVEL2", True, LEVEL2_BASE_SHA, "codex",
             modules=("app.mainai_level2.components", "app.mainai_level2.production"),
             files=("app/mainai_level2/components.py", "app/mainai_level2/production.py"),
             tests=("tests/backend/mainai_level2/test_integration.py",),
@@ -185,7 +205,7 @@ def component_specs() -> dict[str, ComponentSpec]:
             evidence_label="independent Level-2 re-review PASS",
         ),
         "RUNTIME": ComponentSpec(
-            "RUNTIME", True, VERIFIED_SHAS["runtime"], VERIFIED_SHAS["runtime"],
+            "RUNTIME", True, VERIFIED_SHAS["runtime"], "codex",
             modules=("app.mainai_execution.production_adapter",),
             files=("app/mainai_execution/production_adapter.py",),
             tests=("tests/backend/test_execution_substrate.py", "tests/backend/test_runtime_review_hardening.py"),
@@ -193,21 +213,21 @@ def component_specs() -> dict[str, ComponentSpec]:
             evidence_label="verified runtime integrated through Level-2 foundation",
         ),
         "DIRECTOR": ComponentSpec(
-            "DIRECTOR", True, VERIFIED_SHAS["director"], VERIFIED_SHAS["director"],
+            "DIRECTOR", True, VERIFIED_SHAS["director"], "claude",
             modules=("app.dev_director.provider_lease",), files=("app/dev_director/provider_lease.py",),
             tests=("tests/backend/mainai/test_dev_director_budget_integration.py",),
             integrated_modules=("app.dev_director.provider_lease",), invocation=_director_invocation,
             evidence_label="Development Director implementation present",
         ),
         "SUPERVISION": ComponentSpec(
-            "SUPERVISION", True, VERIFIED_SHAS["supervision"], VERIFIED_SHAS["supervision"],
+            "SUPERVISION", True, VERIFIED_SHAS["supervision"], "codex",
             modules=("app.mainai_execution.canonical_supervisor",), files=("app/mainai_execution/canonical_supervisor.py",),
             tests=("tests/backend/mainai/test_resource_intelligence_supervision_compat.py",),
             integrated_modules=("app.mainai_execution.canonical_supervisor",), invocation=_supervision_invocation,
             evidence_label="Continuous Supervision implementation present",
         ),
         "RESOURCE_INTELLIGENCE": ComponentSpec(
-            "RESOURCE_INTELLIGENCE", True, VERIFIED_SHAS["resource_intelligence"], VERIFIED_SHAS["resource_intelligence"],
+            "RESOURCE_INTELLIGENCE", True, VERIFIED_SHAS["resource_intelligence"], "claude",
             modules=("app.resource_intelligence.types", "app.resource_intelligence.telemetry"),
             files=("app/resource_intelligence/types.py", "app/resource_intelligence/telemetry.py"),
             tests=("tests/backend/mainai/test_resource_intelligence_decision.py", "tests/backend/mainai/test_resource_intelligence_telemetry.py"),
@@ -215,13 +235,13 @@ def component_specs() -> dict[str, ComponentSpec]:
             evidence_label="Resource Intelligence implementation present",
         ),
         "FOUNDER_REASONING": ComponentSpec(
-            "FOUNDER_REASONING", True, VERIFIED_SHAS["founder_reasoning"], VERIFIED_SHAS["founder_reasoning"],
+            "FOUNDER_REASONING", True, VERIFIED_SHAS["founder_reasoning"], "claude",
             modules=("app.mainai_executive.judgment",), files=("app/mainai_executive/judgment.py",),
             tests=("tests/backend/mainai/test_judgment.py",), integrated_modules=("app.mainai_executive.judgment",),
             invocation=_judgment_invocation, evidence_label="Founder Reasoning/Judgment implementation present",
         ),
         "COVERAGE_WORKFORCE": ComponentSpec(
-            "COVERAGE_WORKFORCE", True, COVERAGE_WORKFORCE_SHA, COVERAGE_WORKFORCE_SHA,
+            "COVERAGE_WORKFORCE", True, COVERAGE_WORKFORCE_SHA, "claude",
             modules=(
                 "app.mainai_coverage.discovery_pipeline",
                 "app.mainai_coverage.omission_discovery",
@@ -267,10 +287,19 @@ def assess_personal_recall() -> tuple[RecallBootStatus, str, dict]:
     return RecallBootStatus.DISABLED_BY_SECURITY_GATE, blocker, evidence
 
 
-def component_manifest() -> dict:
+def _verification_for_spec(db: Session | None, spec: ComponentSpec) -> MainAIVerificationRecord | None:
+    return find_independent_pass(
+        db,
+        component_id=spec.name,
+        candidate_sha=spec.exact_sha,
+        builder_identity=spec.builder_identity,
+    )
+
+
+def component_manifest(db: Session | None = None) -> dict:
     manifest: dict[str, dict] = {}
     for name, spec in component_specs().items():
-        evidence = _derive_component_evidence(spec)
+        evidence = _derive_component_evidence(spec, verification_record=_verification_for_spec(db, spec))
         manifest[name.lower()] = {
             "candidate_sha": spec.exact_sha,
             "present": evidence.present,
@@ -297,11 +326,11 @@ def _record_from_evidence(spec: ComponentSpec, evidence: ComponentEvidence) -> R
         evidence.blocker,
         evidence.evidence,
         spec.exact_sha,
-        LAST_VERIFIED,
+        next((item.split("=", 1)[1] for item in evidence.evidence if item.startswith("reviewed_at=")), LAST_VERIFIED),
     )
 
 
-def build_readiness_matrix(*, covenant_ready: bool, founder_ready: bool, db_ready: bool = True) -> dict[str, dict]:
+def build_readiness_matrix(*, covenant_ready: bool, founder_ready: bool, db_ready: bool = True, db: Session | None = None) -> dict[str, dict]:
     recall_status, recall_blocker, recall_evidence = assess_personal_recall()
     records: dict[str, ReadinessRecord] = {
         "SYSTEM_IDENTITY": ReadinessRecord(True, True, True, True, True, True, True, True, None, ("durable mainai_id/system_instance_id generated",), LEVEL2_BASE_SHA, LAST_VERIFIED),
@@ -310,7 +339,7 @@ def build_readiness_matrix(*, covenant_ready: bool, founder_ready: bool, db_read
         "DATABASE": ReadinessRecord(True, db_ready, db_ready, True, True, True, db_ready, db_ready, None if db_ready else "database unavailable", ("PostgreSQL session and migrations",), None, str(date.today())),
     }
     for name, spec in component_specs().items():
-        records[name] = _record_from_evidence(spec, _derive_component_evidence(spec))
+        records[name] = _record_from_evidence(spec, _derive_component_evidence(spec, verification_record=_verification_for_spec(db, spec)))
     records.update({
         "PERSONAL_RECALL": ReadinessRecord(False, recall_evidence["modules_present"], True, True, True, False, False, False, recall_blocker, tuple(f"{k}={v}" for k, v in recall_evidence.items()), PERSONAL_RECALL_SHA, LAST_VERIFIED),
         "PRESENCE": ReadinessRecord(True, True, True, True, False, True, True, True, None, ("machine-readable boot status stream",), None, str(date.today())),

@@ -105,9 +105,9 @@ def boot_mainai_founder_only(
 ) -> FounderBootResult:
     _require_founder_user(founder)
     covenant = ensure_default_covenant(db, owner_id=founder.id, created_by="system")
-    manifest = component_manifest()
+    manifest = component_manifest(db)
     recall_status, recall_blocker, recall_evidence = assess_personal_recall()
-    readiness = build_readiness_matrix(covenant_ready=True, founder_ready=True, db_ready=True)
+    readiness = build_readiness_matrix(covenant_ready=True, founder_ready=True, db_ready=True, db=db)
     blockers = required_boot_blockers(readiness)
     status = BootStatus.BLOCKED if blockers else (BootStatus.LIMITED if recall_status != RecallBootStatus.READY else BootStatus.READY)
     presence = PresenceState.BLOCKED if status == BootStatus.BLOCKED else PresenceState.READY

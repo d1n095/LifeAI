@@ -1,5 +1,7 @@
 import uuid
 from contextlib import contextmanager
+from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, text
@@ -12,7 +14,7 @@ from app.mainai_founder_boot.covenant import (
     amend_covenant_by_founder,
     ensure_default_covenant,
 )
-from app.mainai_founder_boot.readiness import LEVEL2_BASE_SHA, build_readiness_matrix, required_boot_blockers
+from app.mainai_founder_boot.readiness import LEVEL2_BASE_SHA, build_readiness_matrix, component_specs, required_boot_blockers
 from app.mainai_founder_boot.entrypoint import run_founder_boot_entrypoint
 from app.mainai_founder_boot.service import (
     FounderBootError,
@@ -26,6 +28,7 @@ from app.mainai_founder_boot.service import (
     stop_mainai,
 )
 from app.mainai_founder_boot.types import BootStatus, PresenceState, RecallBootStatus
+from app.mainai_verification_registry.service import record_verification_attestation
 from app.models.mainai_founder_boot import (
     MainAIFounderBoot,
     MainAIFounderBootEvent,
@@ -33,6 +36,7 @@ from app.models.mainai_founder_boot import (
     MainAIFounderCovenant,
 )
 from app.models.mainai_level2 import MainAILevel2Program
+from app.models.mainai_verification import MainAIVerificationRecord
 from app.request_context import current_user_id as current_user_id_var
 
 
@@ -54,7 +58,43 @@ def _founder(make_verified_user, email="founder-boot@example.com"):
     return user
 
 
-def test_founder_boot_limited_when_recall_security_gate_is_closed(db_session, make_verified_user):
+def _examiner_for_builder(builder_identity: str) -> str:
+    return "claude-independent-examiner" if builder_identity == "codex" else "codex-independent-examiner"
+
+
+@pytest.fixture
+def seed_required_verifications(superuser_db):
+    records = []
+    for spec in component_specs().values():
+        records.append(record_verification_attestation(
+            superuser_db,
+            component_id=spec.name,
+            candidate_sha=spec.exact_sha,
+            builder_identity=spec.builder_identity,
+            examiner_identity=_examiner_for_builder(spec.builder_identity),
+            review_result="PASS",
+            evidence_summary=f"durable bootstrap import for {spec.name}; exact SHA independently reviewed before founder boot",
+            verification_scope={"component": spec.name, "exact_sha": spec.exact_sha},
+            test_evidence_refs=[f"{spec.name}:historical-independent-review"],
+            source_provenance={"bootstrap_program": "mainai_verification_registry", "source": "repo-durable-builder-import"},
+        ))
+    superuser_db.commit()
+    return records
+
+
+def _fake_verification(*, sha: str, builder: str = "builder", examiner: str = "examiner", result: str = "PASS"):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        candidate_sha=sha,
+        builder_identity=builder,
+        examiner_identity=examiner,
+        review_result=result,
+        identity_assurance="asserted",
+        reviewed_at=datetime(2026, 9, 18),
+    )
+
+
+def test_founder_boot_limited_when_recall_security_gate_is_closed(seed_required_verifications, db_session, make_verified_user):
     founder = _founder(make_verified_user)
     with rls_as(db_session, founder.id):
         result = boot_mainai_founder_only(
@@ -103,7 +143,7 @@ def test_founder_boot_limited_when_recall_security_gate_is_closed(db_session, ma
         }
 
 
-def test_status_request_and_stop_use_durable_status_stream(db_session, make_verified_user):
+def test_status_request_and_stop_use_durable_status_stream(seed_required_verifications, db_session, make_verified_user):
     founder = _founder(make_verified_user, "founder-status@example.com")
     with rls_as(db_session, founder.id):
         result = boot_mainai_founder_only(db_session, founder=founder)
@@ -178,7 +218,7 @@ def test_covenant_is_versioned_auditable_and_not_runtime_mutable(db_session, mak
             )
 
 
-def test_disagreement_reasoning_and_capabilities_do_not_grant_authority(db_session, make_verified_user):
+def test_disagreement_reasoning_and_capabilities_do_not_grant_authority(seed_required_verifications, db_session, make_verified_user):
     founder = _founder(make_verified_user, "founder-authority@example.com")
     with rls_as(db_session, founder.id):
         result = boot_mainai_founder_only(db_session, founder=founder)
@@ -205,7 +245,7 @@ def test_context_platform_and_life_graph_contracts_preserve_unknowns_and_future_
     assert "UNKNOWN" in LIFE_GRAPH_CONTRACT["classes"]
 
 
-def test_owner_rls_blocks_cross_owner_boot_state(db_session, make_verified_user):
+def test_owner_rls_blocks_cross_owner_boot_state(seed_required_verifications, db_session, make_verified_user):
     alice = _founder(make_verified_user, "alice-founder@example.com")
     bob = _founder(make_verified_user, "bob-founder@example.com")
     with rls_as(db_session, alice.id):
@@ -272,7 +312,7 @@ def test_owner_bound_foreign_keys_reject_cross_owner_boot_covenant(superuser_db,
     superuser_db.rollback()
 
 
-def test_local_founder_boot_entrypoint_commits_a_durable_brief(db_session, make_verified_user):
+def test_local_founder_boot_entrypoint_commits_a_durable_brief(seed_required_verifications, db_session, make_verified_user):
     founder = _founder(make_verified_user, "founder-entrypoint@example.com")
     brief = run_founder_boot_entrypoint(
         db_session,
@@ -289,10 +329,10 @@ def test_local_founder_boot_entrypoint_commits_a_durable_brief(db_session, make_
         assert boot.audit_summary["founder_brief"]["BOOT_ID"] == brief["BOOT_ID"]
 
 
-def test_coverage_workforce_is_present_integrated_and_advisory_after_port():
+def test_coverage_workforce_is_present_integrated_and_advisory_after_port(seed_required_verifications, db_session):
     from app.mainai_founder_boot.readiness import COVERAGE_WORKFORCE_SHA, build_readiness_matrix, component_manifest
 
-    row = build_readiness_matrix(covenant_ready=True, founder_ready=True)["COVERAGE_WORKFORCE"]
+    row = build_readiness_matrix(covenant_ready=True, founder_ready=True, db=db_session)["COVERAGE_WORKFORCE"]
     assert row["PRESENT"] is True
     assert row["IMPLEMENTED"] is True
     assert row["INDEPENDENTLY_VERIFIED"] is True
@@ -301,7 +341,7 @@ def test_coverage_workforce_is_present_integrated_and_advisory_after_port():
     assert row["SAFE_FOR_FOUNDER_BOOT"] is True
     assert row["EXACT_SHA"] == COVERAGE_WORKFORCE_SHA
     assert any("authorized=False" in evidence for evidence in row["EVIDENCE"])
-    manifest = component_manifest()["coverage_workforce"]
+    manifest = component_manifest(db_session)["coverage_workforce"]
     assert manifest["present"] is True
     assert manifest["implemented"] is True
     assert manifest["integrated"] is True
@@ -315,7 +355,7 @@ def test_readiness_adversarial_matrix_derives_each_dimension(monkeypatch):
         "TEST_COMPONENT",
         True,
         "sha-new",
-        "sha-new",
+        "builder",
         modules=("pkg.real",),
         files=("app/pkg/real.py",),
         tests=("tests/test_real.py",),
@@ -325,72 +365,72 @@ def test_readiness_adversarial_matrix_derives_each_dimension(monkeypatch):
 
     monkeypatch.setattr(readiness, "_module_present", lambda name: False)
     monkeypatch.setattr(readiness, "_file_present", lambda rel: False)
-    absent = readiness._derive_component_evidence(spec)
+    absent = readiness._derive_component_evidence(spec, verification_record=_fake_verification(sha="sha-new"))
     assert absent.present is False
     assert absent.integrated is False
     assert absent.safe_for_founder_boot is False
 
     monkeypatch.setattr(readiness, "_module_present", lambda name: True)
     monkeypatch.setattr(readiness, "_file_present", lambda rel: True)
-    no_verification = readiness._derive_component_evidence(spec, verification_sha=None)
+    no_verification = readiness._derive_component_evidence(spec, verification_record=None)
     assert no_verification.present is True
     assert no_verification.independently_verified is False
     assert no_verification.safe_for_founder_boot is False
 
     monkeypatch.setattr(readiness, "_module_present", lambda name: name != "pkg.adapter")
-    missing_adapter = readiness._derive_component_evidence(spec)
+    missing_adapter = readiness._derive_component_evidence(spec, verification_record=_fake_verification(sha="sha-new"))
     assert missing_adapter.independently_verified is True
     assert missing_adapter.integrated is False
     assert missing_adapter.safe_for_founder_boot is False
 
     gated = readiness._derive_component_evidence(
         readiness.ComponentSpec(
-            "GATED", True, "sha", "sha", modules=("pkg.real",), files=("app/pkg/real.py",),
+            "GATED", True, "sha", "builder", modules=("pkg.real",), files=("app/pkg/real.py",),
             integrated_modules=("pkg.real",), invocation=lambda: (True, "invoked"), activation_blocker="security gate",
-        )
+        ), verification_record=_fake_verification(sha="sha")
     )
     assert gated.activated is False
     assert gated.safe_for_founder_boot is False
 
     failing_import = readiness._derive_component_evidence(
         readiness.ComponentSpec(
-            "FAIL", True, "sha", "sha", modules=("pkg.real",), files=("app/pkg/real.py",),
+            "FAIL", True, "sha", "builder", modules=("pkg.real",), files=("app/pkg/real.py",),
             integrated_modules=("pkg.real",), invocation=lambda: (False, "module_import_failed=ImportError"),
-        )
+        ), verification_record=_fake_verification(sha="sha")
     )
     assert failing_import.implemented is False
 
-    mismatch = readiness._derive_component_evidence(spec, verification_sha="old-sha")
+    mismatch = readiness._derive_component_evidence(spec, verification_record=_fake_verification(sha="old-sha"))
     assert mismatch.independently_verified is False
     assert mismatch.safe_for_founder_boot is False
 
     superseded = readiness._derive_component_evidence(
         readiness.ComponentSpec(
-            "SUPERSEDED", True, "sha-new", "sha-old", modules=("pkg.real",), files=("app/pkg/real.py",),
+            "SUPERSEDED", True, "sha-new", "builder", modules=("pkg.real",), files=("app/pkg/real.py",),
             integrated_modules=("pkg.real",), invocation=lambda: (True, "invoked"),
-        )
+        ), verification_record=_fake_verification(sha="sha-old")
     )
     assert superseded.independently_verified is False
 
     monkeypatch.setattr(readiness, "_module_present", lambda name: False)
     monkeypatch.setattr(readiness, "_file_present", lambda rel: False)
-    fabricated_evidence = readiness._derive_component_evidence(spec, verification_sha="sha-new")
+    fabricated_evidence = readiness._derive_component_evidence(spec, verification_record=_fake_verification(sha="sha-new"))
     assert fabricated_evidence.present is False
     assert fabricated_evidence.safe_for_founder_boot is False
 
     state = {"file": True}
     monkeypatch.setattr(readiness, "_module_present", lambda name: True)
     monkeypatch.setattr(readiness, "_file_present", lambda rel: state["file"])
-    before = readiness._derive_component_evidence(spec)
+    before = readiness._derive_component_evidence(spec, verification_record=_fake_verification(sha="sha-new"))
     state["file"] = False
-    after = readiness._derive_component_evidence(spec)
+    after = readiness._derive_component_evidence(spec, verification_record=_fake_verification(sha="sha-new"))
     assert before.safe_for_founder_boot is True
     assert after.present is False
     assert after.safe_for_founder_boot is False
 
 
-def test_all_required_component_readiness_claims_have_candidate_local_evidence():
-    matrix = build_readiness_matrix(covenant_ready=True, founder_ready=True)
+def test_all_required_component_readiness_claims_have_candidate_local_evidence(seed_required_verifications, db_session):
+    matrix = build_readiness_matrix(covenant_ready=True, founder_ready=True, db=db_session)
     required = [name for name, row in matrix.items() if row["REQUIRED"]]
     for name in required:
         row = matrix[name]
@@ -434,7 +474,7 @@ def test_covenant_direct_db_update_is_denied_but_founder_amendment_path_works(db
         assert amended.supersedes_id == covenant_id
 
 
-def test_boot_covenant_binding_is_immutable_at_database_level(db_session, make_verified_user):
+def test_boot_covenant_binding_is_immutable_at_database_level(seed_required_verifications, db_session, make_verified_user):
     founder = _founder(make_verified_user, "founder-boot-rebind@example.com")
     with rls_as(db_session, founder.id):
         result = boot_mainai_founder_only(db_session, founder=founder)
@@ -460,7 +500,7 @@ def test_boot_covenant_binding_is_immutable_at_database_level(db_session, make_v
         assert boot.covenant_id == old_covenant_id
 
 
-def test_founder_boot_process_kill_recovers_from_canonical_postgresql(db_session, make_verified_user):
+def test_founder_boot_process_kill_recovers_from_canonical_postgresql(seed_required_verifications, db_session, make_verified_user):
     import os
     import subprocess
     import sys
@@ -494,3 +534,145 @@ def test_founder_boot_process_kill_recovers_from_canonical_postgresql(db_session
         assert {boot.boot_id for boot in boots} == {old_boot_id, new_boot_id}
         events = db_session.scalars(select(MainAIFounderBootEvent).where(MainAIFounderBootEvent.boot_id == old_boot_id)).all()
         assert {event.event_type for event in events} >= {"PROCESS_START", "FOUNDER_BOUND", "COVENANT_LOADED", "READINESS_DERIVED"}
+
+
+def test_verification_registry_absence_blocks_independent_readiness(db_session):
+    matrix = build_readiness_matrix(covenant_ready=True, founder_ready=True, db=db_session)
+    row = matrix["LEVEL2"]
+    assert row["PRESENT"] is True
+    assert row["IMPLEMENTED"] is True
+    assert row["INDEPENDENTLY_VERIFIED"] is False
+    assert row["SAFE_FOR_FOUNDER_BOOT"] is False
+    assert "verification registry has no current PASS" in row["BLOCKER"]
+    assert any("verification_record=missing" in item for item in row["EVIDENCE"])
+
+
+def test_verification_registry_rejects_builder_self_certification(superuser_db):
+    with pytest.raises(Exception):
+        record_verification_attestation(
+            superuser_db,
+            component_id="SELF",
+            candidate_sha="a" * 40,
+            builder_identity="codex",
+            examiner_identity="codex",
+            review_result="PASS",
+            evidence_summary="self certification must fail",
+        )
+
+
+def test_verification_registry_sha_fencing_and_history(superuser_db):
+    from app.mainai_verification_registry.service import find_independent_pass
+
+    sha_a = "a" * 40
+    sha_b = "b" * 40
+    fail_a = record_verification_attestation(
+        superuser_db,
+        component_id="COMPONENT",
+        candidate_sha=sha_a,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="FAIL",
+        evidence_summary="candidate A failed",
+    )
+    pass_b = record_verification_attestation(
+        superuser_db,
+        component_id="COMPONENT",
+        candidate_sha=sha_b,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="candidate B passed after fix",
+        invalidates_verification_id=fail_a.id,
+    )
+    superuser_db.commit()
+
+    assert find_independent_pass(superuser_db, component_id="COMPONENT", candidate_sha=sha_a, builder_identity="codex") is None
+    found_b = find_independent_pass(superuser_db, component_id="COMPONENT", candidate_sha=sha_b, builder_identity="codex")
+    assert found_b.id == pass_b.id
+    history = superuser_db.scalars(select(MainAIVerificationRecord).where(MainAIVerificationRecord.component_id == "COMPONENT")).all()
+    assert {row.review_result for row in history} == {"FAIL", "PASS"}
+
+
+def test_verification_registry_is_append_only_and_runtime_cannot_create_pass(db_session, superuser_db, make_verified_user):
+    founder = _founder(make_verified_user, "founder-verification-runtime@example.com")
+    record = record_verification_attestation(
+        superuser_db,
+        component_id="IMMUTABLE",
+        candidate_sha="c" * 40,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="FAIL",
+        evidence_summary="failed record must not be rewritten",
+    )
+    superuser_db.commit()
+
+    with rls_as(db_session, founder.id):
+        with pytest.raises(Exception):
+            db_session.execute(text("UPDATE mainai_verification_records SET review_result='PASS' WHERE verification_id=:id"), {"id": record.id})
+            db_session.commit()
+        db_session.rollback()
+        with pytest.raises(Exception):
+            db_session.execute(text("DELETE FROM mainai_verification_records WHERE verification_id=:id"), {"id": record.id})
+            db_session.commit()
+        db_session.rollback()
+        with pytest.raises(Exception):
+            db_session.execute(text("""
+                INSERT INTO mainai_verification_records(
+                    component_id, candidate_id, candidate_sha, builder_identity, examiner_identity,
+                    review_result, evidence_summary
+                ) VALUES ('RUNTIME_INSERT', 'RUNTIME_INSERT:dddddddddddddddddddddddddddddddddddddddd',
+                    'dddddddddddddddddddddddddddddddddddddddd', 'codex', 'claude', 'PASS', 'runtime forged pass')
+            """))
+            db_session.commit()
+        db_session.rollback()
+
+    fresh = superuser_db.get(MainAIVerificationRecord, record.id, populate_existing=True)
+    assert fresh.review_result == "FAIL"
+
+
+def test_verification_registry_owner_scope_and_system_scope_rls(db_session, superuser_db, make_verified_user):
+    alice = _founder(make_verified_user, "alice-verification@example.com")
+    bob = _founder(make_verified_user, "bob-verification@example.com")
+    system_record = record_verification_attestation(
+        superuser_db,
+        component_id="SYSTEM_COMPONENT",
+        candidate_sha="e" * 40,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="system level component verification",
+    )
+    alice_record = record_verification_attestation(
+        superuser_db,
+        owner_id=alice.id,
+        component_id="OWNER_COMPONENT",
+        candidate_sha="f" * 40,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="alice owned verification",
+    )
+    bob_record = record_verification_attestation(
+        superuser_db,
+        owner_id=bob.id,
+        component_id="OWNER_COMPONENT",
+        candidate_sha="1" * 40,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="bob owned verification",
+    )
+    superuser_db.commit()
+
+    with rls_as(db_session, alice.id):
+        visible_ids = {row.id for row in db_session.scalars(select(MainAIVerificationRecord)).all()}
+        assert system_record.id in visible_ids
+        assert alice_record.id in visible_ids
+        assert bob_record.id not in visible_ids
+        hidden_update = db_session.execute(text("UPDATE mainai_verification_records SET review_result='FAIL' WHERE verification_id=:id"), {"id": bob_record.id})
+        assert hidden_update.rowcount == 0
+        db_session.rollback()
+        with pytest.raises(Exception):
+            db_session.execute(text("UPDATE mainai_verification_records SET review_result='FAIL' WHERE verification_id=:id"), {"id": alice_record.id})
+            db_session.commit()
+        db_session.rollback()
