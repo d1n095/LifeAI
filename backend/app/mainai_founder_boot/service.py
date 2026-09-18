@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -95,7 +95,14 @@ def founder_brief_for_boot(boot: MainAIFounderBoot) -> dict[str, Any]:
     }
 
 
-def boot_mainai_founder_only(db: Session, *, founder: User, founder_request: str | None = None, create_safe_program: bool = False) -> FounderBootResult:
+def boot_mainai_founder_only(
+    db: Session,
+    *,
+    founder: User,
+    founder_request: str | None = None,
+    create_safe_program: bool = False,
+    event_hook: Callable[[Session, MainAIFounderBoot, str], None] | None = None,
+) -> FounderBootResult:
     _require_founder_user(founder)
     covenant = ensure_default_covenant(db, owner_id=founder.id, created_by="system")
     manifest = component_manifest()
@@ -117,10 +124,15 @@ def boot_mainai_founder_only(db: Session, *, founder: User, founder_request: str
     )
     db.add(boot)
     db.flush()
-    append_boot_event(db, boot=boot, event_type="PROCESS_START", metadata={"sha": manifest["level2_base"]["candidate_sha"]})
-    append_boot_event(db, boot=boot, event_type="FOUNDER_BOUND", metadata={"founder_id": str(founder.id), "mode": "FOUNDER_ONLY"})
-    append_boot_event(db, boot=boot, event_type="COVENANT_LOADED", metadata={"version": covenant.version, "hash": covenant.covenant_hash})
-    append_boot_event(db, boot=boot, event_type="READINESS_DERIVED", metadata={"status": status.value, "recall": recall_status.value})
+    def _emit(event_type: str, metadata: dict | None = None) -> None:
+        append_boot_event(db, boot=boot, event_type=event_type, metadata=metadata)
+        if event_hook is not None:
+            event_hook(db, boot, event_type)
+
+    _emit("PROCESS_START", {"sha": manifest["level2_base"]["candidate_sha"]})
+    _emit("FOUNDER_BOUND", {"founder_id": str(founder.id), "mode": "FOUNDER_ONLY"})
+    _emit("COVENANT_LOADED", {"version": covenant.version, "hash": covenant.covenant_hash})
+    _emit("READINESS_DERIVED", {"status": status.value, "recall": recall_status.value})
     if create_safe_program and status in {BootStatus.READY, BootStatus.LIMITED}:
         store = CanonicalProgramStore(db)
         program = store.create_level2_program(
@@ -133,7 +145,7 @@ def boot_mainai_founder_only(db: Session, *, founder: User, founder_request: str
             budget={"usd": 0, "provider": "none"},
         )
         boot.active_program_id = program.id
-        append_boot_event(db, boot=boot, event_type="SAFE_PROGRAM_CREATED", metadata={"program_id": str(program.id)})
+        _emit("SAFE_PROGRAM_CREATED", {"program_id": str(program.id)})
     brief = founder_brief_for_boot(boot)
     boot.audit_summary = {**(boot.audit_summary or {}), "founder_brief": brief}
     _write_status(db, boot=boot, state=presence, payload={"status": boot.status, "brief": brief})

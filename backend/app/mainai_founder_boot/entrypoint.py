@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 from typing import Any
 
 from sqlalchemy import select
@@ -40,11 +42,19 @@ def run_founder_boot_entrypoint(
         founder = db.get(User, founder_id, populate_existing=True)
         if founder is None:
             raise FounderBootError("active founder not found")
+        kill_after = os.environ.get("MAINAI_BOOT_KILL_AFTER_EVENT")
+
+        def _kill_hook(hook_db: Session, _boot, event_type: str) -> None:
+            if kill_after and event_type == kill_after:
+                hook_db.commit()
+                os.kill(os.getpid(), signal.SIGKILL)
+
         result = boot_mainai_founder_only(
             db,
             founder=founder,
             founder_request=founder_request,
             create_safe_program=create_safe_program,
+            event_hook=_kill_hook if kill_after else None,
         )
         db.commit()
         return result.founder_brief

@@ -5,7 +5,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.models.mainai_founder_boot import MainAIFounderCovenant
@@ -81,19 +81,27 @@ def ensure_default_covenant(db: Session, *, owner_id: uuid.UUID, created_by: str
 def amend_covenant_by_founder(db: Session, *, owner_id: uuid.UUID, founder_actor_id: uuid.UUID, clauses: tuple[str, ...]) -> MainAIFounderCovenant:
     if founder_actor_id != owner_id:
         raise PermissionError("only the founder-owner may amend the covenant")
-    current = get_active_covenant(db, owner_id=owner_id)
-    if current is not None:
-        current.status = "SUPERSEDED"
     merged_invariants = COVENANT_INVARIANTS
-    row = MainAIFounderCovenant(
-        id=uuid.uuid4(), owner_id=owner_id, version=COVENANT_VERSION,
-        status="ACTIVE", covenant_hash=covenant_hash(clauses, merged_invariants),
-        clauses=list(clauses), invariants=list(merged_invariants),
-        provenance={"source": "founder_amendment", "supersedes": str(current.id) if current else None},
-        created_by="founder", supersedes_id=current.id if current else None,
-    )
-    db.add(row)
+    new_id = db.execute(
+        text(
+            "SELECT mainai_amend_founder_covenant("
+            ":owner_id, :founder_actor_id, :version, :covenant_hash, "
+            "CAST(:clauses AS jsonb), CAST(:invariants AS jsonb), CAST(:provenance AS jsonb))"
+        ),
+        {
+            "owner_id": owner_id,
+            "founder_actor_id": founder_actor_id,
+            "version": COVENANT_VERSION,
+            "covenant_hash": covenant_hash(clauses, merged_invariants),
+            "clauses": json.dumps(list(clauses)),
+            "invariants": json.dumps(list(merged_invariants)),
+            "provenance": json.dumps({"source": "founder_amendment", "created_at": datetime.now(timezone.utc).isoformat()}),
+        },
+    ).scalar_one()
     db.flush()
+    row = db.get(MainAIFounderCovenant, new_id, populate_existing=True)
+    if row is None or row.owner_id != owner_id:
+        raise RuntimeError("founder covenant amendment did not return a visible owner-scoped covenant")
     return row
 
 

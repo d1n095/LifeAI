@@ -162,6 +162,7 @@ def test_covenant_is_versioned_auditable_and_not_runtime_mutable(db_session, mak
             clauses=[*COVENANT_CLAUSES, "Founder may pause MainAI at any time"],
         )
         db_session.flush()
+        db_session.refresh(covenant)
         assert new_covenant.status == "ACTIVE"
         assert new_covenant.supersedes_id == covenant.id
         assert covenant.status == "SUPERSEDED"
@@ -286,3 +287,210 @@ def test_local_founder_boot_entrypoint_commits_a_durable_brief(db_session, make_
         assert boot is not None
         assert boot.active_program_id is not None
         assert boot.audit_summary["founder_brief"]["BOOT_ID"] == brief["BOOT_ID"]
+
+
+def test_coverage_workforce_is_present_integrated_and_advisory_after_port():
+    from app.mainai_founder_boot.readiness import COVERAGE_WORKFORCE_SHA, build_readiness_matrix, component_manifest
+
+    row = build_readiness_matrix(covenant_ready=True, founder_ready=True)["COVERAGE_WORKFORCE"]
+    assert row["PRESENT"] is True
+    assert row["IMPLEMENTED"] is True
+    assert row["INDEPENDENTLY_VERIFIED"] is True
+    assert row["INTEGRATED"] is True
+    assert row["ACTIVATED"] is True
+    assert row["SAFE_FOR_FOUNDER_BOOT"] is True
+    assert row["EXACT_SHA"] == COVERAGE_WORKFORCE_SHA
+    assert any("authorized=False" in evidence for evidence in row["EVIDENCE"])
+    manifest = component_manifest()["coverage_workforce"]
+    assert manifest["present"] is True
+    assert manifest["implemented"] is True
+    assert manifest["integrated"] is True
+    assert manifest["authority"] == "none"
+
+
+def test_readiness_adversarial_matrix_derives_each_dimension(monkeypatch):
+    import app.mainai_founder_boot.readiness as readiness
+
+    spec = readiness.ComponentSpec(
+        "TEST_COMPONENT",
+        True,
+        "sha-new",
+        "sha-new",
+        modules=("pkg.real",),
+        files=("app/pkg/real.py",),
+        tests=("tests/test_real.py",),
+        integrated_modules=("pkg.adapter",),
+        invocation=lambda: (True, "invoked"),
+    )
+
+    monkeypatch.setattr(readiness, "_module_present", lambda name: False)
+    monkeypatch.setattr(readiness, "_file_present", lambda rel: False)
+    absent = readiness._derive_component_evidence(spec)
+    assert absent.present is False
+    assert absent.integrated is False
+    assert absent.safe_for_founder_boot is False
+
+    monkeypatch.setattr(readiness, "_module_present", lambda name: True)
+    monkeypatch.setattr(readiness, "_file_present", lambda rel: True)
+    no_verification = readiness._derive_component_evidence(spec, verification_sha=None)
+    assert no_verification.present is True
+    assert no_verification.independently_verified is False
+    assert no_verification.safe_for_founder_boot is False
+
+    monkeypatch.setattr(readiness, "_module_present", lambda name: name != "pkg.adapter")
+    missing_adapter = readiness._derive_component_evidence(spec)
+    assert missing_adapter.independently_verified is True
+    assert missing_adapter.integrated is False
+    assert missing_adapter.safe_for_founder_boot is False
+
+    gated = readiness._derive_component_evidence(
+        readiness.ComponentSpec(
+            "GATED", True, "sha", "sha", modules=("pkg.real",), files=("app/pkg/real.py",),
+            integrated_modules=("pkg.real",), invocation=lambda: (True, "invoked"), activation_blocker="security gate",
+        )
+    )
+    assert gated.activated is False
+    assert gated.safe_for_founder_boot is False
+
+    failing_import = readiness._derive_component_evidence(
+        readiness.ComponentSpec(
+            "FAIL", True, "sha", "sha", modules=("pkg.real",), files=("app/pkg/real.py",),
+            integrated_modules=("pkg.real",), invocation=lambda: (False, "module_import_failed=ImportError"),
+        )
+    )
+    assert failing_import.implemented is False
+
+    mismatch = readiness._derive_component_evidence(spec, verification_sha="old-sha")
+    assert mismatch.independently_verified is False
+    assert mismatch.safe_for_founder_boot is False
+
+    superseded = readiness._derive_component_evidence(
+        readiness.ComponentSpec(
+            "SUPERSEDED", True, "sha-new", "sha-old", modules=("pkg.real",), files=("app/pkg/real.py",),
+            integrated_modules=("pkg.real",), invocation=lambda: (True, "invoked"),
+        )
+    )
+    assert superseded.independently_verified is False
+
+    monkeypatch.setattr(readiness, "_module_present", lambda name: False)
+    monkeypatch.setattr(readiness, "_file_present", lambda rel: False)
+    fabricated_evidence = readiness._derive_component_evidence(spec, verification_sha="sha-new")
+    assert fabricated_evidence.present is False
+    assert fabricated_evidence.safe_for_founder_boot is False
+
+    state = {"file": True}
+    monkeypatch.setattr(readiness, "_module_present", lambda name: True)
+    monkeypatch.setattr(readiness, "_file_present", lambda rel: state["file"])
+    before = readiness._derive_component_evidence(spec)
+    state["file"] = False
+    after = readiness._derive_component_evidence(spec)
+    assert before.safe_for_founder_boot is True
+    assert after.present is False
+    assert after.safe_for_founder_boot is False
+
+
+def test_all_required_component_readiness_claims_have_candidate_local_evidence():
+    matrix = build_readiness_matrix(covenant_ready=True, founder_ready=True)
+    required = [name for name, row in matrix.items() if row["REQUIRED"]]
+    for name in required:
+        row = matrix[name]
+        assert "PRESENT" in row and "IMPLEMENTED" in row and "INDEPENDENTLY_VERIFIED" in row
+        assert "INTEGRATED" in row and "ACTIVATED" in row
+        if name in {"LEVEL2", "RUNTIME", "DIRECTOR", "SUPERVISION", "RESOURCE_INTELLIGENCE", "FOUNDER_REASONING", "COVERAGE_WORKFORCE"}:
+            assert row["PRESENT"] is True, name
+            assert row["IMPLEMENTED"] is True, name
+            assert row["INTEGRATED"] is True, name
+            assert row["EXACT_SHA"], name
+            assert any(e.startswith("file:") or e.startswith("module:") for e in row["EVIDENCE"]), name
+
+
+def test_covenant_direct_db_update_is_denied_but_founder_amendment_path_works(db_session, make_verified_user):
+    founder = _founder(make_verified_user, "founder-covenant-db@example.com")
+    with rls_as(db_session, founder.id):
+        covenant = ensure_default_covenant(db_session, owner_id=founder.id)
+        db_session.commit()
+        covenant_id = covenant.id
+
+    with rls_as(db_session, founder.id):
+        with pytest.raises(Exception):
+            db_session.execute(
+                text("UPDATE mainai_founder_covenants SET clauses = CAST(:clauses AS jsonb) WHERE id = :id"),
+                {"clauses": '["silently changed"]', "id": covenant_id},
+            )
+            db_session.commit()
+        db_session.rollback()
+
+    with rls_as(db_session, founder.id):
+        current = db_session.get(MainAIFounderCovenant, covenant_id, populate_existing=True)
+        assert current.clauses == list(COVENANT_CLAUSES)
+        amended = amend_covenant_by_founder(
+            db_session,
+            owner_id=founder.id,
+            founder_actor_id=founder.id,
+            clauses=[*COVENANT_CLAUSES, "Founder may explicitly amend by governed path"],
+        )
+        db_session.commit()
+        assert amended.id != covenant_id
+        assert amended.supersedes_id == covenant_id
+
+
+def test_boot_covenant_binding_is_immutable_at_database_level(db_session, make_verified_user):
+    founder = _founder(make_verified_user, "founder-boot-rebind@example.com")
+    with rls_as(db_session, founder.id):
+        result = boot_mainai_founder_only(db_session, founder=founder)
+        old_covenant_id = result.boot.covenant_id
+        boot_id = result.boot.boot_id
+        amended = amend_covenant_by_founder(
+            db_session,
+            owner_id=founder.id,
+            founder_actor_id=founder.id,
+            clauses=[*COVENANT_CLAUSES, "New current covenant"],
+        )
+        db_session.commit()
+
+    with rls_as(db_session, founder.id):
+        with pytest.raises(Exception):
+            db_session.execute(
+                text("UPDATE mainai_founder_boots SET covenant_id=:new_id WHERE boot_id=:boot_id"),
+                {"new_id": amended.id, "boot_id": boot_id},
+            )
+            db_session.commit()
+        db_session.rollback()
+        boot = db_session.scalar(select(MainAIFounderBoot).where(MainAIFounderBoot.boot_id == boot_id))
+        assert boot.covenant_id == old_covenant_id
+
+
+def test_founder_boot_process_kill_recovers_from_canonical_postgresql(db_session, make_verified_user):
+    import os
+    import subprocess
+    import sys
+
+    founder = _founder(make_verified_user, "founder-sigkill@example.com")
+    db_session.commit()
+    env = {**os.environ, "PYTHONPATH": "backend", "MAINAI_BOOT_KILL_AFTER_EVENT": "READINESS_DERIVED"}
+    script = (
+        "from app.db import SessionLocal; "
+        "from app.mainai_founder_boot.entrypoint import run_founder_boot_entrypoint; "
+        "db=SessionLocal(); "
+        "run_founder_boot_entrypoint(db, founder_email='founder-sigkill@example.com', founder_request='crash proof', create_safe_program=True)"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], cwd=os.getcwd(), env=env, check=False)
+    assert proc.returncode == -9
+
+    with rls_as(db_session, founder.id):
+        interrupted = db_session.scalars(select(MainAIFounderBoot).where(MainAIFounderBoot.founder_id == founder.id)).all()
+        assert len(interrupted) == 1
+        old_boot = interrupted[0]
+        recovered = recover_boot(db_session, owner_id=founder.id, boot_id=old_boot.boot_id)
+        assert recovered["source"] == "postgresql"
+        assert recovered["events"] >= 4
+        old_boot_id = old_boot.boot_id
+
+    brief = run_founder_boot_entrypoint(db_session, founder_email=founder.email, founder_request="restart after crash", create_safe_program=True)
+    new_boot_id = uuid.UUID(brief["BOOT_ID"])
+    assert new_boot_id != old_boot_id
+    with rls_as(db_session, founder.id):
+        boots = db_session.scalars(select(MainAIFounderBoot).where(MainAIFounderBoot.founder_id == founder.id)).all()
+        assert {boot.boot_id for boot in boots} == {old_boot_id, new_boot_id}
+        events = db_session.scalars(select(MainAIFounderBootEvent).where(MainAIFounderBootEvent.boot_id == old_boot_id)).all()
+        assert {event.event_type for event in events} >= {"PROCESS_START", "FOUNDER_BOUND", "COVENANT_LOADED", "READINESS_DERIVED"}

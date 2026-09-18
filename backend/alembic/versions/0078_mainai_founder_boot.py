@@ -104,13 +104,89 @@ def upgrade() -> None:
             USING (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
             WITH CHECK (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)""")
         op.execute(f"REVOKE ALL ON {table} FROM PUBLIC")
-    op.execute("GRANT SELECT, INSERT, UPDATE ON mainai_founder_covenants TO mainai_app")
+    op.execute("""CREATE OR REPLACE FUNCTION mainai_founder_boot_prevent_covenant_rebind()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+        IF OLD.covenant_id IS DISTINCT FROM NEW.covenant_id
+           OR OLD.covenant_version IS DISTINCT FROM NEW.covenant_version
+           OR OLD.founder_id IS DISTINCT FROM NEW.founder_id
+           OR OLD.mainai_id IS DISTINCT FROM NEW.mainai_id THEN
+            RAISE EXCEPTION 'founder boot covenant and identity fields are immutable';
+        END IF;
+        RETURN NEW;
+    END;
+    $$""")
+    op.execute("""CREATE TRIGGER trg_founder_boot_prevent_covenant_rebind
+        BEFORE UPDATE ON mainai_founder_boots
+        FOR EACH ROW EXECUTE FUNCTION mainai_founder_boot_prevent_covenant_rebind()""")
+    op.execute("""CREATE OR REPLACE FUNCTION mainai_founder_covenant_prevent_direct_update()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+        IF current_setting('app.founder_covenant_amendment', true) IS DISTINCT FROM 'on' THEN
+            RAISE EXCEPTION 'founder covenant updates must use governed amendment function';
+        END IF;
+        RETURN NEW;
+    END;
+    $$""")
+    op.execute("""CREATE TRIGGER trg_founder_covenant_prevent_direct_update
+        BEFORE UPDATE ON mainai_founder_covenants
+        FOR EACH ROW EXECUTE FUNCTION mainai_founder_covenant_prevent_direct_update()""")
+    op.execute("""CREATE OR REPLACE FUNCTION mainai_amend_founder_covenant(
+        p_owner_id uuid,
+        p_founder_actor_id uuid,
+        p_version text,
+        p_covenant_hash text,
+        p_clauses jsonb,
+        p_invariants jsonb,
+        p_provenance jsonb
+    ) RETURNS uuid
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = public
+    AS $$
+    DECLARE
+        current_owner uuid;
+        old_id uuid;
+        new_id uuid := gen_random_uuid();
+    BEGIN
+        current_owner := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+        IF current_owner IS NULL OR current_owner <> p_owner_id OR p_founder_actor_id <> p_owner_id THEN
+            RAISE EXCEPTION 'founder covenant amendment requires current founder owner';
+        END IF;
+        PERFORM set_config('app.founder_covenant_amendment', 'on', true);
+        SELECT id INTO old_id FROM mainai_founder_covenants
+            WHERE owner_id = p_owner_id AND status = 'ACTIVE'
+            FOR UPDATE;
+        IF old_id IS NOT NULL THEN
+            UPDATE mainai_founder_covenants SET status = 'SUPERSEDED'
+                WHERE id = old_id AND owner_id = p_owner_id;
+        END IF;
+        INSERT INTO mainai_founder_covenants(
+            id, owner_id, version, status, covenant_hash, clauses, invariants, provenance, created_by, supersedes_id
+        ) VALUES (
+            new_id, p_owner_id, p_version, 'ACTIVE', p_covenant_hash, p_clauses, p_invariants, p_provenance, 'founder', old_id
+        );
+        RETURN new_id;
+    END;
+    $$""")
+    op.execute("REVOKE ALL ON FUNCTION mainai_amend_founder_covenant(uuid, uuid, text, text, jsonb, jsonb, jsonb) FROM PUBLIC")
+    op.execute("GRANT EXECUTE ON FUNCTION mainai_amend_founder_covenant(uuid, uuid, text, text, jsonb, jsonb, jsonb) TO mainai_app")
+    op.execute("GRANT SELECT, INSERT ON mainai_founder_covenants TO mainai_app")
     op.execute("GRANT SELECT, INSERT, UPDATE ON mainai_founder_boots TO mainai_app")
     op.execute("GRANT SELECT, INSERT ON mainai_founder_boot_events TO mainai_app")
     op.execute("GRANT SELECT, INSERT, UPDATE ON mainai_founder_boot_status TO mainai_app")
 
 
 def downgrade() -> None:
+    op.execute("DROP FUNCTION IF EXISTS mainai_amend_founder_covenant(uuid, uuid, text, text, jsonb, jsonb, jsonb)")
+    op.execute("DROP TRIGGER IF EXISTS trg_founder_covenant_prevent_direct_update ON mainai_founder_covenants")
+    op.execute("DROP FUNCTION IF EXISTS mainai_founder_covenant_prevent_direct_update()")
+    op.execute("DROP TRIGGER IF EXISTS trg_founder_boot_prevent_covenant_rebind ON mainai_founder_boots")
+    op.execute("DROP FUNCTION IF EXISTS mainai_founder_boot_prevent_covenant_rebind()")
     for table, policy in (
         ("mainai_founder_boot_status", "founder_boot_status_owner"),
         ("mainai_founder_boot_events", "founder_boot_event_owner"),
