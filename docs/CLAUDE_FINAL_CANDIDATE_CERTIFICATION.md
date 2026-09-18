@@ -1,16 +1,25 @@
 # FINAL COMPOSED CERTIFICATION TARGET
 
-**Cursor has stopped.** Do not wait for more builder work on this tip.
+**Cursor resumed only to close Claude's P0 findings from the first composed exam.**
 
 Do not certify #237, #240 or #243 separately anymore.
 
 There is now ONE composed pre-start candidate.
 
-**Exact SHA:** `beae39c78a07e8d78b0a2df3036c872697bf3aab`  
+**Exact SHA:** `f2971a72ce85b75ead1a8ee82702a60f9f97349f`  
 **Branch:** `cursor/mainai-pre-start-reconciliation`  
 **PR:** https://github.com/d1n095/LifeAI/pull/244
 
 This candidate explicitly reconciles the overlapping safety PRs.
+
+This replaces the earlier `beae39c78a07e8d78b0a2df3036c872697bf3aab` code target.
+
+Delta since `beae39c`:
+
+- `evidence_claim.py`: exact subject matching; no substring / parent-child / missing-capability-key bypass.
+- `workforce/verification.py`: high-risk `VERIFIED` requires a real `IntelligenceEvidence.id` that supports the assignment capability, wrong-owner/failed/stale evidence rejected.
+- `mainai_startup_readiness/receipts.py`: `blocking_migrations:unknown` fails closed and appears in blockers.
+- `workforce/kill_switch.py`: clear requires explicit expected epoch sequence; stale/missing sequence rejected.
 
 If HEAD moves past this SHA, record the new SHA and re-run only changed surfaces.
 
@@ -25,7 +34,7 @@ There is now ONE composed pre-start candidate.
 
 Exact SHA:
 
-beae39c78a07e8d78b0a2df3036c872697bf3aab
+f2971a72ce85b75ead1a8ee82702a60f9f97349f
 
 Branch:
 cursor/mainai-pre-start-reconciliation
