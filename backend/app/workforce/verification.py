@@ -7,13 +7,17 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
 from app.models.workforce import WorkforceAssignment
+from app.models.workforce import WorkforceDelegationRequest
 from app.models.workforce_ops import WorkforceVerificationDecision
+from app.evidence_claim import evidence_supports_claim
 from app.workforce.broker import VerificationError
+
+_MAX_HIGH_RISK_EVIDENCE_AGE = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,26 @@ def apply_verification_decision(
                 raise VerificationError("two-agent agreement not confirmed")
         if policy.require_test_evidence and not test_evidence_ref:
             raise VerificationError("test evidence required for this risk")
+        if policy.require_test_evidence:
+            try:
+                evidence_id = uuid.UUID(str(test_evidence_ref))
+            except (TypeError, ValueError):
+                raise VerificationError("test_evidence_ref must be an IntelligenceEvidence id")
+            request = db.get(WorkforceDelegationRequest, assignment.delegation_request_id)
+            if request is None or request.owner_id != owner_id:
+                raise VerificationError("delegation request missing or owner mismatch")
+            support = evidence_supports_claim(
+                db,
+                owner_id=owner_id,
+                subject_key=request.required_capability,
+                proposition="workforce_verification",
+                evidence_id=evidence_id,
+                allowed_kinds={"test_run_result", "verification_result", "deterministic_check", "exam_result"},
+                require_deterministic=policy.require_deterministic_validator,
+                max_age=_MAX_HIGH_RISK_EVIDENCE_AGE if risk == "high" else None,
+            )
+            if not support.supports:
+                raise VerificationError("test evidence does not support assignment: " + ",".join(support.reasons))
         if policy.require_deterministic_validator and not deterministic_validator:
             raise VerificationError("deterministic validator required for this risk")
         if policy.require_founder_approval and not founder_approval_ref:

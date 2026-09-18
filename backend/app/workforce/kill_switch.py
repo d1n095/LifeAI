@@ -433,12 +433,17 @@ def activate_global_kill_switch(db: Session, *, reason: str) -> KillSwitchState:
             )
 
     now = _write_stop_state(db, scope_key=_GLOBAL_SCOPE_KEY, reason=reason, revoked=revoked)
+    epoch_row = db.execute(
+        text("SELECT epoch FROM workforce_authority_epoch WHERE scope_key = :k"),
+        {"k": _GLOBAL_SCOPE_KEY},
+    ).mappings().one()
     return KillSwitchState(
         active=True,
         reason=reason,
         activated_at=now.isoformat() + "Z",
         revoked_assignment_ids=revoked,
         scope="global",
+        sequence=int(epoch_row["epoch"]),
     )
 
 
@@ -452,7 +457,11 @@ def activate_global_emergency_stop(
 
 
 def clear_kill_switch_for_recovery(
-    db: Session, *, founder_ack: str, owner_id: uuid.UUID | None = None
+    db: Session,
+    *,
+    founder_ack: str,
+    owner_id: uuid.UUID | None = None,
+    expected_sequence: int | None = None,
 ) -> KillSwitchState:
     """Founder must explicitly clear — not automatic.
 
@@ -464,7 +473,18 @@ def clear_kill_switch_for_recovery(
     """
     _validate_founder_ack(founder_ack)
     scope_key = _GLOBAL_SCOPE_KEY if owner_id is None else _owner_scope_key(owner_id)
-    _lock_epoch_row_for_update(db, scope_key=scope_key, owner_id=owner_id)
+    row = _lock_epoch_row_for_update(db, scope_key=scope_key, owner_id=owner_id)
+    if expected_sequence is None:
+        raise KillSwitchError(
+            "expected_sequence required to clear stop state",
+            code="EXPECTED_SEQUENCE_REQUIRED",
+        )
+    if int(row.get("epoch") or 0) != int(expected_sequence):
+        raise KillSwitchError(
+            f"stale clear: expected epoch {expected_sequence}, current {row.get('epoch')}",
+            code="STALE_SEQUENCE",
+            details={"expected": expected_sequence, "current": int(row.get("epoch") or 0)},
+        )
     reason = f"cleared:{founder_ack}"
     now = datetime.utcnow()
     db.execute(
@@ -498,13 +518,20 @@ def clear_owner_stop(
     _validate_founder_ack(founder_ack)
     scope_key = _owner_scope_key(owner_id)
     row = _lock_epoch_row_for_update(db, scope_key=scope_key, owner_id=owner_id)
+    if expected_sequence is None:
+        raise KillSwitchError(
+            "expected_sequence required to clear owner stop",
+            code="EXPECTED_SEQUENCE_REQUIRED",
+        )
     if expected_sequence is not None and int(row.get("epoch") or 0) != int(expected_sequence):
         raise KillSwitchError(
             f"stale clear: expected epoch {expected_sequence}, current {row.get('epoch')}",
             code="STALE_SEQUENCE",
             details={"expected": expected_sequence, "current": int(row.get("epoch") or 0)},
         )
-    return clear_kill_switch_for_recovery(db, founder_ack=founder_ack, owner_id=owner_id)
+    return clear_kill_switch_for_recovery(
+        db, founder_ack=founder_ack, owner_id=owner_id, expected_sequence=expected_sequence
+    )
 
 
 def clear_global_emergency_stop(
@@ -517,13 +544,20 @@ def clear_global_emergency_stop(
     _ = clear_request_id
     _validate_founder_ack(founder_ack)
     row = _lock_epoch_row_for_update(db, scope_key=_GLOBAL_SCOPE_KEY, owner_id=None)
+    if expected_sequence is None:
+        raise KillSwitchError(
+            "expected_sequence required to clear global stop",
+            code="EXPECTED_SEQUENCE_REQUIRED",
+        )
     if expected_sequence is not None and int(row.get("epoch") or 0) != int(expected_sequence):
         raise KillSwitchError(
             f"stale clear: expected epoch {expected_sequence}, current {row.get('epoch')}",
             code="STALE_SEQUENCE",
             details={"expected": expected_sequence, "current": int(row.get("epoch") or 0)},
         )
-    return clear_kill_switch_for_recovery(db, founder_ack=founder_ack, owner_id=None)
+    return clear_kill_switch_for_recovery(
+        db, founder_ack=founder_ack, owner_id=None, expected_sequence=expected_sequence
+    )
 
 
 def query_stop_status(db: Session, *, owner_id: uuid.UUID | None = None) -> dict:

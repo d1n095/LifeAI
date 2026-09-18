@@ -290,12 +290,16 @@ def evaluate_startup_readiness(
         if k in by_key and by_key[k].status == CheckStatus.unhealthy:
             if k not in blocking:
                 blocking.append(k)
+    if by_key["blocking_migrations"].status == CheckStatus.unhealthy:
+        blocking.append("blocking_migrations")
 
-    if any(by_key[k].status == CheckStatus.unhealthy for k in core if k in by_key):
+    if any(by_key[k].status == CheckStatus.unhealthy for k in core if k in by_key) or by_key[
+        "blocking_migrations"
+    ].status == CheckStatus.unhealthy:
         return StartupReadinessReport(
             level=ReadinessLevel.BLOCKED,
             checks=tuple(checks),
-            blocking=tuple(blocking),
+            blocking=tuple(dict.fromkeys(blocking)),
             notes="core safety unhealthy",
             receipts=receipts,
         )
@@ -312,13 +316,13 @@ def evaluate_startup_readiness(
         blocking.append("provider_disabled")
     if by_key["kill_switch_health"].status == CheckStatus.unhealthy:
         blocking.append("kill_switch_health")
-    if by_key["blocking_migrations"].status == CheckStatus.unhealthy:
-        blocking.append("blocking_migrations")
+    if by_key["blocking_migrations"].status != CheckStatus.healthy:
+        blocking.append(f"blocking_migrations:{by_key['blocking_migrations'].status.value}")
 
     if (
         by_key["provider_disabled"].status != CheckStatus.healthy
         or by_key["kill_switch_health"].status == CheckStatus.unhealthy
-        or by_key["blocking_migrations"].status == CheckStatus.unhealthy
+        or by_key["blocking_migrations"].status != CheckStatus.healthy
     ):
         return StartupReadinessReport(
             ReadinessLevel.BLOCKED,

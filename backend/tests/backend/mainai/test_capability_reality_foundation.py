@@ -71,7 +71,7 @@ def test_verified_available_requires_an_explicit_status_and_real_evidence(superu
     execution = record_execution(superuser_db, owner_id=owner.id, task_id=task.id, idempotency_key="cap-exec-1", provider="internal")
     evidence = record_evidence(
         superuser_db, owner_id=owner.id, execution_id=execution.id, evidence_kind="test_run_result",
-        payload={"passed": True}, source_type="pytest", source_ref="tests/x.py::test_y",
+        payload={"passed": True, "capability_key": "test_execution.pytest_backend"}, source_type="pytest", source_ref="tests/x.py::test_y",
         idempotency_key="cap-ev-1", deterministic=True,
     )
     superuser_db.commit()
@@ -133,7 +133,7 @@ def _verified(db, owner_id, capability_key, domain):
         owner_id=owner_id,
         execution_id=execution.id,
         evidence_kind="test_run_result",
-        payload={"passed": True},
+        payload={"passed": True, "capability_key": capability_key},
         source_type="pytest",
         source_ref=f"tests::{capability_key}",
         idempotency_key=f"ev-{uuid.uuid4()}",
@@ -267,7 +267,7 @@ def test_event_detail_carries_verification_and_success_facts_not_just_the_winnin
     execution = record_execution(superuser_db, owner_id=owner.id, task_id=task.id, idempotency_key="cap-exec-detail", provider="internal")
     evidence = record_evidence(
         superuser_db, owner_id=owner.id, execution_id=execution.id, evidence_kind="test_run_result",
-        payload={"passed": True}, source_type="pytest", source_ref="tests/x.py::test_z",
+        payload={"passed": True, "capability_key": "test_execution.detail_check"}, source_type="pytest", source_ref="tests/x.py::test_z",
         idempotency_key="cap-ev-detail", deterministic=True,
     )
     superuser_db.commit()

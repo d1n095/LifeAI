@@ -78,7 +78,7 @@ def test_fabricated_ack_rejected(superuser_db):
 def test_owner_stop_isolation_two_owners(superuser_db):
     a = _owner(superuser_db, "iso-a")
     b = _owner(superuser_db, "iso-b")
-    activate_owner_stop(superuser_db, owner_id=a.id, reason="stop_a")
+    a_stop = activate_owner_stop(superuser_db, owner_id=a.id, reason="stop_a")
     assert_not_killed(superuser_db, owner_id=b.id)  # B unaffected
     with pytest.raises(KillSwitchError):
         assert_not_killed(superuser_db, owner_id=a.id)
@@ -91,6 +91,7 @@ def test_owner_stop_isolation_two_owners(superuser_db):
         owner_id=a.id,
         founder_ack="founder_ack:clear-owner-a-explicit",
         clear_request_id=uuid.uuid4(),
+        expected_sequence=a_stop.sequence,
     )
     assert_not_killed(superuser_db, owner_id=a.id)
     with pytest.raises(KillSwitchError):
@@ -100,7 +101,7 @@ def test_owner_stop_isolation_two_owners(superuser_db):
 def test_global_emergency_blocks_all(superuser_db):
     a = _owner(superuser_db, "g-a")
     b = _owner(superuser_db, "g-b")
-    activate_global_emergency_stop(
+    g_stop = activate_global_emergency_stop(
         superuser_db,
         reason="system_emergency",
         founder_authority_ref="founder_ack:declare-global-stop",
@@ -114,6 +115,7 @@ def test_global_emergency_blocks_all(superuser_db):
         superuser_db,
         founder_ack="founder_ack:clear-global-stop",
         clear_request_id=uuid.uuid4(),
+        expected_sequence=g_stop.sequence,
     )
     assert_not_killed(superuser_db, owner_id=a.id)
     assert_not_killed(superuser_db, owner_id=b.id)
@@ -134,6 +136,19 @@ def test_stale_clear_request_rejected(superuser_db):
             expected_sequence=st.sequence,
         )
     assert ei.value.code == "STALE_SEQUENCE"
+
+
+def test_clear_requires_explicit_epoch_sequence(superuser_db):
+    owner = _owner(superuser_db, "seq")
+    activate_owner_stop(superuser_db, owner_id=owner.id, reason="r1")
+    with pytest.raises(KillSwitchError) as ei:
+        clear_owner_stop(
+            superuser_db,
+            owner_id=owner.id,
+            founder_ack="founder_ack:missing-epoch",
+            clear_request_id=uuid.uuid4(),
+        )
+    assert ei.value.code == "EXPECTED_SEQUENCE_REQUIRED"
 
 
 def test_composed_run_surfaces_block_without_clear(superuser_db):

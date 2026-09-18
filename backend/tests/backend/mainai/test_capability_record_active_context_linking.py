@@ -79,12 +79,13 @@ def test_capability_record_edges_expose_its_verification_evidence(superuser_db):
     owner = _owner(superuser_db)
     task = _task(superuser_db, owner.id)
     execution = record_execution(superuser_db, owner_id=owner.id, task_id=task.id, idempotency_key="cap-edge-exec", provider="internal")
+    capability_key = f"probe.{uuid.uuid4()}"
     evidence = record_evidence(
         superuser_db, owner_id=owner.id, execution_id=execution.id, evidence_kind="capability_probe", review_kind="deterministic_tool",
-        deterministic=True, payload={"probed": True}, source_type="ci_log", source_ref="cap-probe", idempotency_key="cap-edge-ev",
+        deterministic=True, payload={"probed": True, "passed": True, "capability_key": capability_key}, source_type="ci_log", source_ref="cap-probe", idempotency_key="cap-edge-ev",
     )
     capability = record_capability_observation(
-        superuser_db, owner_id=owner.id, capability_key=f"probe.{uuid.uuid4()}", domain="test", status="verified_available",
+        superuser_db, owner_id=owner.id, capability_key=capability_key, domain="test", status="verified_available",
         verification_evidence_id=evidence.id, success=True,
     )
     superuser_db.commit()

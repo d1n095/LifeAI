@@ -45,6 +45,32 @@ _FAIL_MARKERS = frozenset(
 )
 
 
+def _payload_values(payload: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(v) for v in value if v is not None)
+    return (str(value),)
+
+
+def _subject_matches(payload: dict[str, Any], *, subject_key: str) -> tuple[bool, str | None]:
+    """Exact subject binding only; substring matches are evidence inflation."""
+    candidates = (
+        _payload_values(payload, "capability_key")
+        + _payload_values(payload, "subject")
+        + _payload_values(payload, "subject_key")
+        + _payload_values(payload, "capability")
+    )
+    if not candidates:
+        return False, "missing_subject_key"
+    if subject_key in candidates:
+        return True, None
+    return False, "subject_key_mismatch"
+
+
 def _payload_positive(payload: dict[str, Any] | None) -> tuple[bool, str | None]:
     if not isinstance(payload, dict):
         return False, "payload_not_object"
@@ -117,30 +143,17 @@ def evidence_supports_claim(
     if require_deterministic and not bool(row.deterministic):
         reasons.append("not_deterministic")
 
-    # Subject/proposition relevance via payload + source_ref (minimal, explicit)
+    # Subject/proposition relevance via explicit payload fields only.
+    # `foo in bar` accepted send_email_v2 as send_email and parent capabilities as
+    # child capabilities; source_ref-only passed=True was also a bare bypass.
     payload = row.payload if isinstance(row.payload, dict) else {}
-    subject_ok = (
-        subject_key in str(payload.get("capability_key") or "")
-        or subject_key in str(payload.get("subject") or "")
-        or subject_key in str(row.source_ref or "")
-        or subject_key in str(payload.get("proposition") or "")
-        or proposition in str(payload.get("proposition") or "")
-        # Allow test_run_result that names the capability in source_ref path
-        or subject_key.split(".")[-1] in str(row.source_ref or "")
-    )
-    if not subject_ok and proposition not in ("verified_available", "local_competence"):
-        reasons.append("subject_or_proposition_not_tied_to_evidence")
-    elif not subject_ok:
-        # For verified_available, require capability key somewhere or explicit subject
-        if "capability_key" in payload and payload.get("capability_key") != subject_key:
-            reasons.append("capability_key_mismatch")
-        elif "capability_key" not in payload and subject_key not in str(row.source_ref or ""):
-            # Still allow deterministic test_run with passed=True if source_ref present
-            # but mark weak unless source_ref contains a fragment
-            if row.evidence_kind == "test_run_result" and payload.get("passed") is True:
-                pass  # accepted as supporting test for the caller's asserted capability
-            else:
-                reasons.append("unrelated_evidence")
+    subject_ok, subject_reason = _subject_matches(payload, subject_key=subject_key)
+    if not subject_ok:
+        reasons.append(subject_reason or "subject_or_proposition_not_tied_to_evidence")
+
+    evidence_prop = payload.get("proposition")
+    if evidence_prop is not None and str(evidence_prop) != proposition:
+        reasons.append("proposition_mismatch")
 
     positive, fail_reason = _payload_positive(payload)
     if not positive:
@@ -180,5 +193,5 @@ def require_supporting_evidence_for_verified(
         subject_key=capability_key,
         proposition="verified_available",
         evidence_id=verification_evidence_id,
-        allowed_kinds={"test_run_result", "verification_result", "deterministic_check", "exam_result"},
+        allowed_kinds={"test_run_result", "verification_result", "deterministic_check", "exam_result", "capability_probe"},
     )

@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.models.user import User
+from app.models.intelligence_governance import IntelligenceEvidence
+from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
+from app.intelligence_governance.service import record_evidence, record_execution
 from app.workforce import (
     CostGovernanceError,
     FailureTakeoverError,
@@ -77,6 +80,71 @@ def _pair(db, owner_id, *, suffix=""):
         cost_class="low",
     )
     return b, v
+
+
+def _test_evidence_id(db, owner_id, *, capability_key: str, passed: bool = True, stale: bool = False) -> str:
+    goal = MainAIGoal(
+        owner_id=owner_id,
+        title=f"verify {capability_key}",
+        original_instruction="verify",
+        created_by="test",
+    )
+    db.add(goal)
+    db.flush()
+    plan = MainAIPlan(
+        owner_id=owner_id,
+        goal_id=goal.id,
+        version=1,
+        rationale="test",
+        created_by="test",
+    )
+    db.add(plan)
+    db.flush()
+    task = MainAITask(
+        owner_id=owner_id,
+        goal_id=goal.id,
+        plan_id=plan.id,
+        task_type="verification",
+        description="verify",
+        status="pending",
+        risk_level="high",
+    )
+    db.add(task)
+    db.flush()
+    execution = record_execution(
+        db,
+        owner_id=owner_id,
+        task_id=task.id,
+        idempotency_key=f"verify-exec-{uuid.uuid4()}",
+        provider="internal",
+    )
+    if stale:
+        evidence = IntelligenceEvidence(
+            owner_id=owner_id,
+            execution_id=execution.id,
+            evidence_kind="test_run_result",
+            payload={"passed": passed, "capability_key": capability_key},
+            source_type="pytest",
+            source_ref=f"tests::{capability_key}",
+            idempotency_key=f"verify-ev-{uuid.uuid4()}",
+            deterministic=True,
+            created_at=datetime.utcnow() - timedelta(days=30),
+        )
+        db.add(evidence)
+        db.flush()
+    else:
+        evidence = record_evidence(
+            db,
+            owner_id=owner_id,
+            execution_id=execution.id,
+            evidence_kind="test_run_result",
+            payload={"passed": passed, "capability_key": capability_key},
+            source_type="pytest",
+            source_ref=f"tests::{capability_key}",
+            idempotency_key=f"verify-ev-{uuid.uuid4()}",
+            deterministic=True,
+        )
+    return str(evidence.id)
 
 
 # --- T13 ---
@@ -233,6 +301,86 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
             risk="high",
             verifier_profile_id=b.id,  # self
         )
+    wrong_evidence_ref = _test_evidence_id(superuser_db, owner.id, capability_key="other.capability")
+    with pytest.raises(VerificationError):
+        apply_verification_decision(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=a,
+            decision="VERIFIED",
+            risk="high",
+            verifier_profile_id=v.id,
+            second_verifier_profile_id=v2.id,
+            agreement=True,
+            test_evidence_ref=wrong_evidence_ref,
+            deterministic_validator="schema_v1",
+            founder_approval_ref="founder:ok:wrong",
+        )
+    failed_evidence_ref = _test_evidence_id(
+        superuser_db,
+        owner.id,
+        capability_key=req.required_capability,
+        passed=False,
+    )
+    with pytest.raises(VerificationError):
+        apply_verification_decision(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=a,
+            decision="VERIFIED",
+            risk="high",
+            verifier_profile_id=v.id,
+            second_verifier_profile_id=v2.id,
+            agreement=True,
+            test_evidence_ref=failed_evidence_ref,
+            deterministic_validator="schema_v1",
+            founder_approval_ref="founder:ok:failed",
+        )
+    other_owner = _owner(superuser_db)
+    wrong_owner_evidence_ref = _test_evidence_id(
+        superuser_db,
+        other_owner.id,
+        capability_key=req.required_capability,
+    )
+    with pytest.raises(VerificationError):
+        apply_verification_decision(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=a,
+            decision="VERIFIED",
+            risk="high",
+            verifier_profile_id=v.id,
+            second_verifier_profile_id=v2.id,
+            agreement=True,
+            test_evidence_ref=wrong_owner_evidence_ref,
+            deterministic_validator="schema_v1",
+            founder_approval_ref="founder:ok:wrong-owner",
+        )
+    stale_evidence_ref = _test_evidence_id(
+        superuser_db,
+        owner.id,
+        capability_key=req.required_capability,
+        stale=True,
+    )
+    with pytest.raises(VerificationError):
+        apply_verification_decision(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=a,
+            decision="VERIFIED",
+            risk="high",
+            verifier_profile_id=v.id,
+            second_verifier_profile_id=v2.id,
+            agreement=True,
+            test_evidence_ref=stale_evidence_ref,
+            deterministic_validator="schema_v1",
+            founder_approval_ref="founder:ok:stale",
+        )
+    evidence_ref = _test_evidence_id(
+        superuser_db,
+        owner.id,
+        capability_key=req.required_capability,
+    )
     apply_verification_decision(
         superuser_db,
         owner_id=owner.id,
@@ -242,7 +390,7 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
         verifier_profile_id=v.id,
         second_verifier_profile_id=v2.id,
         agreement=True,
-        test_evidence_ref="tests/x.py::test_y",
+        test_evidence_ref=evidence_ref,
         deterministic_validator="schema_v1",
         founder_approval_ref="founder:ok:1",
     )

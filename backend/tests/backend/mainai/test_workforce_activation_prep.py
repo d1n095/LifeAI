@@ -206,6 +206,25 @@ def test_blocking_migrations_check_is_real_not_hardcoded(superuser_db):
     assert "head" in check.detail
 
 
+def test_unknown_migration_verification_blocks_safe_internal(monkeypatch):
+    from app.mainai_startup_readiness import receipts as readiness_receipts
+    from app.mainai_startup_readiness.receipts import CheckStatus, ReadinessCheck
+
+    monkeypatch.setattr(
+        readiness_receipts,
+        "verify_migration_head",
+        lambda db=None: ReadinessCheck(
+            "blocking_migrations",
+            CheckStatus.unknown,
+            "forced verification error",
+        ),
+    )
+
+    report = evaluate_startup_readiness()
+    assert report.level == ReadinessLevel.BLOCKED
+    assert "blocking_migrations:unknown" in report.blocking
+
+
 def test_activation_commit_status_wires_claude_reviews_from_gates(superuser_db):
     """#240 fix: do not hardcode claude_reviews_satisfied=None.
 

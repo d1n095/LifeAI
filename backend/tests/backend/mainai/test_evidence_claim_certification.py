@@ -123,7 +123,7 @@ def test_passed_evidence_can_verify(superuser_db):
         owner_id=owner.id,
         execution_id=execution.id,
         evidence_kind="test_run_result",
-        payload={"passed": True},
+        payload={"passed": True, "capability_key": "test_execution.pytest_backend"},
         source_type="pytest",
         source_ref="tests/backend/mainai/test_x.py::test_y",
         idempotency_key=f"ev-ok-{uuid.uuid4()}",
@@ -142,6 +142,41 @@ def test_passed_evidence_can_verify(superuser_db):
     assert record.status == "verified_available"
 
 
+@pytest.mark.parametrize(
+    ("subject_key", "evidence_key"),
+    [
+        ("send_email", "send_email_v2"),
+        ("file_operations.delete", "file_operations"),
+        ("calendar.write", None),
+    ],
+)
+def test_subject_relevance_requires_exact_capability_key(superuser_db, subject_key, evidence_key):
+    owner = _owner(superuser_db)
+    execution = _task_exec(superuser_db, owner.id)
+    payload = {"passed": True}
+    if evidence_key is not None:
+        payload["capability_key"] = evidence_key
+    evidence = record_evidence(
+        superuser_db,
+        owner_id=owner.id,
+        execution_id=execution.id,
+        evidence_kind="test_run_result",
+        payload=payload,
+        source_type="pytest",
+        source_ref=f"tests::{evidence_key or 'no-key'}",
+        idempotency_key=f"ev-subject-{uuid.uuid4()}",
+        deterministic=True,
+    )
+    support = evidence_supports_claim(
+        superuser_db,
+        owner_id=owner.id,
+        subject_key=subject_key,
+        proposition="verified_available",
+        evidence_id=evidence.id,
+    )
+    assert support.supports is False, support.as_dict()
+
+
 def test_old_success_new_failure_cannot_keep_verified(superuser_db):
     owner = _owner(superuser_db)
     execution = _task_exec(superuser_db, owner.id)
@@ -150,7 +185,7 @@ def test_old_success_new_failure_cannot_keep_verified(superuser_db):
         owner_id=owner.id,
         execution_id=execution.id,
         evidence_kind="test_run_result",
-        payload={"passed": True},
+        payload={"passed": True, "capability_key": "cap.keep"},
         source_type="pytest",
         source_ref="tests/ok.py",
         idempotency_key=f"ev-ok2-{uuid.uuid4()}",
