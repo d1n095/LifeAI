@@ -6,6 +6,13 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Aktiva reconciliation/audit-PR:er (2026-09-18)
+
+| Branch | PR | Status | Scope | Bas / beroende |
+|---|---|---|---|---|
+| `cursor/frontend-npm-audit-browserslist-4-28-7` | [#248](https://github.com/d1n095/LifeAI/pull/248) | **Öppen — separat CI-blocker, ej #244-scope** | Frontend `npm audit`: patched high/critical advisories i `browserslist` 4.28.7, `next` 16.3.3, `sharp` 0.35.4 och `js-yaml` 4.3.2. Lokalt `npm audit --json`: 0 high/critical, endast moderate kvar. | Bas `claude/det-kommer-mer-879lcm`. Mergas separat före/oberoende av #244 om CI kräver audit grönt; #244 ska inte bära frontend dependency churn. |
+| `cursor/mainai-pre-start-reconciliation` | [#244](https://github.com/d1n095/LifeAI/pull/244) | **Öppen — väntar på final Claude-certifiering efter P0-fix** | Sammansatt pre-start safety-kandidat. Kod-SHA för ny attack: `f2971a72ce85b75ead1a8ee82702a60f9f97349f`. | Bas `claude/det-kommer-mer-879lcm`; CI kan fortsätta blockeras av #248 tills audit-fixen landar. |
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
