@@ -269,21 +269,29 @@ def component_specs() -> dict[str, ComponentSpec]:
 
 
 def assess_personal_recall() -> tuple[RecallBootStatus, str, dict]:
+    production_modules = (
+        "app.personal_recall.authorization",
+        "app.personal_recall.production_crypto",
+        "app.personal_recall.production_ingestion",
+        "app.personal_recall.routes_prep",
+    )
     evidence = {
-        "modules_present": all(_module_present(m) for m in (
-            "app.personal_recall.authorization", "app.personal_recall.snapshot_protection", "app.personal_recall.routes_prep"
-        )),
+        "modules_present": all(_module_present(m) for m in production_modules),
         "test_only_protector_present": False,
         "router_factory_registered_by_default": False,
-        "production_aead_verified": False,
-        "activation": "disabled_by_boot_gate",
+        "production_aead_implemented": _module_present("app.personal_recall.production_crypto"),
+        "key_hierarchy_implemented": _file_present("app/models/personal_recall_production.py"),
+        "trusted_grants_implemented": _file_present("app/models/personal_recall_production.py"),
+        "file_ingestion_implemented": _module_present("app.personal_recall.production_ingestion"),
+        "independent_verification_required": True,
+        "activation": "disabled_until_independent_verification_and_explicit_router_grant_activation",
     }
     try:
         from app.personal_recall.snapshot_protection import DeterministicTestSnapshotProtector
         evidence["test_only_protector_present"] = bool(getattr(DeterministicTestSnapshotProtector, "is_test_only", False))
     except Exception:
         evidence["test_only_protector_present"] = False
-    blocker = "production AEAD/key hierarchy and trusted grant/router activation are not proven active in this tree"
+    blocker = "production AEAD/key hierarchy is implemented, but Personal Recall remains disabled until exact-SHA independent verification and explicit founder-authorized router/grant activation"
     return RecallBootStatus.DISABLED_BY_SECURITY_GATE, blocker, evidence
 
 

@@ -59,6 +59,13 @@ from app.models.document_chunk import DocumentChunk
 from app.models.personal_recall_outbox import PersonalRecallOutbox, RecallOutboxEventType
 from app.models.resource_intelligence import AgentResourceTelemetrySample
 from app.models.personal_recall_outbox_delivery import PersonalRecallOutboxDelivery
+from app.models.personal_recall_production import (
+    PersonalRecallChunk,
+    PersonalRecallExtraction,
+    PersonalRecallGrant,
+    PersonalRecallOwnerKey,
+    PersonalRecallSource,
+)
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope, ExecutionScopeProposal
 from app.models.founder_memory import (
@@ -293,6 +300,11 @@ __all__ = [
     "PersonalRecallOutbox",
     "RecallOutboxEventType",
     "PersonalRecallOutboxDelivery",
+    "PersonalRecallSource",
+    "PersonalRecallOwnerKey",
+    "PersonalRecallGrant",
+    "PersonalRecallExtraction",
+    "PersonalRecallChunk",
     "EmailVerificationToken",
     "ExecutionScopeProposal",
     "ExecutionAuthorizationEnvelope",

@@ -80,6 +80,16 @@ RLS_STATEMENTS = [
     "ALTER TABLE source_import_batch_failures FORCE ROW LEVEL SECURITY",
     "ALTER TABLE message_source_units ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE message_source_units FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_owner_keys ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_owner_keys FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_sources ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_sources FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_chunks ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_chunks FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_grants ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_grants FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_extractions ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_extractions FORCE ROW LEVEL SECURITY",
     # Life Intelligence Governance & Meta-Learning (migration 0038): immutable observations
     # linked to the existing MainAI execution runtime; never a parallel job system.
     *[
@@ -233,6 +243,31 @@ POLICY_DEFINITIONS = [
     {
         "table": "mainai_job_proposals",
         "name": "mainai_job_proposals_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_owner_keys",
+        "name": "personal_recall_owner_keys_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_sources",
+        "name": "personal_recall_sources_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_chunks",
+        "name": "personal_recall_chunks_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_grants",
+        "name": "personal_recall_grants_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_extractions",
+        "name": "personal_recall_extractions_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
