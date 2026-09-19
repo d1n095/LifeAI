@@ -91,6 +91,44 @@ class WorkforceCostBudget(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+
+class WorkforceVerificationEvidenceBinding(Base):
+    """Durable high-risk assignment evidence consumption fence.
+
+    A supporting IntelligenceEvidence row can prove one concrete high-risk assignment
+    execution. It is not reusable authority for unrelated assignments.
+    """
+
+    __tablename__ = "workforce_verification_evidence_bindings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    assignment_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    evidence_execution_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    capability_key: Mapped[str] = mapped_column(String(128))
+    binding_kind: Mapped[str] = mapped_column(String(64), default="high_risk_assignment_verification")
+    provenance: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["assignment_id", "owner_id"],
+            ["workforce_assignments.id", "workforce_assignments.owner_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["evidence_id", "owner_id"],
+            ["intelligence_evidence.id", "intelligence_evidence.owner_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["evidence_execution_id", "owner_id"],
+            ["intelligence_executions.id", "intelligence_executions.owner_id"],
+            ondelete="CASCADE",
+        ),
+    )
+
 class WorkforceVerificationDecision(Base):
     """Append-ish verification decision history (T14)."""
 

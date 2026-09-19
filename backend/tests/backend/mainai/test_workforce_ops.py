@@ -5,13 +5,18 @@ No live provider dispatch. UNKNOWN EXTERNAL EFFECT != NO EXTERNAL EFFECT.
 
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import text as sa_text
+from sqlalchemy.orm import sessionmaker
 
 from app.models.user import User
 from app.models.intelligence_governance import IntelligenceEvidence
+from app.models.workforce_ops import WorkforceVerificationEvidenceBinding
+from app.db import migration_engine
 from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
 from app.intelligence_governance.service import record_evidence, record_execution
 from app.workforce import (
@@ -24,7 +29,6 @@ from app.workforce import (
     assert_no_automatic_cross_context,
     assert_scopes_allow_spend,
     can_safely_retry,
-    create_context_package,
     form_pattern_team,
     looks_like_prompt_injection,
     mark_failure,
@@ -82,7 +86,15 @@ def _pair(db, owner_id, *, suffix=""):
     return b, v
 
 
-def _test_evidence_id(db, owner_id, *, capability_key: str, passed: bool = True, stale: bool = False) -> str:
+def _test_evidence_id(
+    db,
+    owner_id,
+    *,
+    capability_key: str,
+    passed: bool = True,
+    stale: bool = False,
+    assignment_id: uuid.UUID | None = None,
+) -> str:
     goal = MainAIGoal(
         owner_id=owner_id,
         title=f"verify {capability_key}",
@@ -118,12 +130,15 @@ def _test_evidence_id(db, owner_id, *, capability_key: str, passed: bool = True,
         idempotency_key=f"verify-exec-{uuid.uuid4()}",
         provider="internal",
     )
+    payload = {"passed": passed, "capability_key": capability_key}
+    if assignment_id is not None:
+        payload["assignment_id"] = str(assignment_id)
     if stale:
         evidence = IntelligenceEvidence(
             owner_id=owner_id,
             execution_id=execution.id,
             evidence_kind="test_run_result",
-            payload={"passed": passed, "capability_key": capability_key},
+            payload=payload,
             source_type="pytest",
             source_ref=f"tests::{capability_key}",
             idempotency_key=f"verify-ev-{uuid.uuid4()}",
@@ -138,7 +153,7 @@ def _test_evidence_id(db, owner_id, *, capability_key: str, passed: bool = True,
             owner_id=owner_id,
             execution_id=execution.id,
             evidence_kind="test_run_result",
-            payload={"passed": passed, "capability_key": capability_key},
+            payload=payload,
             source_type="pytest",
             source_ref=f"tests::{capability_key}",
             idempotency_key=f"verify-ev-{uuid.uuid4()}",
@@ -255,6 +270,47 @@ def test_restart_preserves_checkpoint(superuser_db):
     assert cp.partial_result["chunk"] == 1
 
 
+
+def _high_risk_assignment(db, owner_id: uuid.UUID, *, suffix: str):
+    b, v = _pair(db, owner_id, suffix=suffix)
+    v2 = register_workforce_agent(
+        db,
+        owner_id=owner_id,
+        agent_key=f"v2{suffix}",
+        name="Second verifier",
+        role="verifier",
+        agent_type="VERIFIER",
+        trust_zone="LOCAL_INTERNAL",
+        capability_tags=["verification"],
+        status="active",
+    )
+    req = submit_delegation_request(
+        db,
+        owner_id=owner_id,
+        goal_text=f"high risk {suffix}",
+        required_capability="low_risk_classification",
+        risk="high",
+        verification_requirement="independent_verifier",
+    )
+    assignment = resolve_delegation(db, owner_id=owner_id, request=req, verifier_profile_id=v.id)
+    return assignment, req, v, v2
+
+
+def _verify_high_risk(db, owner_id, assignment, req, v, v2, evidence_ref: str, *, approval: str = "founder:ok"):
+    return apply_verification_decision(
+        db,
+        owner_id=owner_id,
+        assignment=assignment,
+        decision="VERIFIED",
+        risk="high",
+        verifier_profile_id=v.id,
+        second_verifier_profile_id=v2.id,
+        agreement=True,
+        test_evidence_ref=evidence_ref,
+        deterministic_validator="schema_v1",
+        founder_approval_ref=approval,
+    )
+
 # --- T14 ---
 
 
@@ -301,7 +357,7 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
             risk="high",
             verifier_profile_id=b.id,  # self
         )
-    wrong_evidence_ref = _test_evidence_id(superuser_db, owner.id, capability_key="other.capability")
+    wrong_evidence_ref = _test_evidence_id(superuser_db, owner.id, capability_key="other.capability", assignment_id=a.id)
     with pytest.raises(VerificationError):
         apply_verification_decision(
             superuser_db,
@@ -321,6 +377,7 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
         owner.id,
         capability_key=req.required_capability,
         passed=False,
+        assignment_id=a.id,
     )
     with pytest.raises(VerificationError):
         apply_verification_decision(
@@ -341,6 +398,7 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
         superuser_db,
         other_owner.id,
         capability_key=req.required_capability,
+        assignment_id=a.id,
     )
     with pytest.raises(VerificationError):
         apply_verification_decision(
@@ -361,6 +419,7 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
         owner.id,
         capability_key=req.required_capability,
         stale=True,
+        assignment_id=a.id,
     )
     with pytest.raises(VerificationError):
         apply_verification_decision(
@@ -380,6 +439,7 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
         superuser_db,
         owner.id,
         capability_key=req.required_capability,
+        assignment_id=a.id,
     )
     apply_verification_decision(
         superuser_db,
@@ -396,6 +456,130 @@ def test_high_risk_verification_requires_full_policy(superuser_db):
     )
     superuser_db.commit()
     assert a.verification_status == "VERIFIED"
+
+
+def test_high_risk_evidence_requires_exact_assignment_binding(superuser_db):
+    owner = _owner(superuser_db)
+    assignment, req, v, v2 = _high_risk_assignment(superuser_db, owner.id, suffix="-bind")
+
+    unbound_evidence_ref = _test_evidence_id(
+        superuser_db,
+        owner.id,
+        capability_key=req.required_capability,
+    )
+
+    with pytest.raises(VerificationError, match="not bound to this assignment"):
+        _verify_high_risk(superuser_db, owner.id, assignment, req, v, v2, unbound_evidence_ref)
+
+
+def test_high_risk_evidence_cannot_be_replayed_to_different_assignment(superuser_db):
+    owner = _owner(superuser_db)
+    assignment_a, req_a, v_a, v2_a = _high_risk_assignment(superuser_db, owner.id, suffix="-replay-a")
+    assignment_b, req_b, v_b, v2_b = _high_risk_assignment(superuser_db, owner.id, suffix="-replay-b")
+    evidence_ref = _test_evidence_id(
+        superuser_db,
+        owner.id,
+        capability_key=req_a.required_capability,
+        assignment_id=assignment_a.id,
+    )
+
+    _verify_high_risk(superuser_db, owner.id, assignment_a, req_a, v_a, v2_a, evidence_ref, approval="founder:ok:a")
+
+    with pytest.raises(VerificationError, match="not bound to this assignment"):
+        _verify_high_risk(superuser_db, owner.id, assignment_b, req_b, v_b, v2_b, evidence_ref, approval="founder:ok:b")
+
+
+def test_high_risk_same_assignment_retry_is_idempotent(superuser_db):
+    owner = _owner(superuser_db)
+    assignment, req, v, v2 = _high_risk_assignment(superuser_db, owner.id, suffix="-idem")
+    evidence_ref = _test_evidence_id(
+        superuser_db,
+        owner.id,
+        capability_key=req.required_capability,
+        assignment_id=assignment.id,
+    )
+
+    _verify_high_risk(superuser_db, owner.id, assignment, req, v, v2, evidence_ref, approval="founder:ok:idem-1")
+    _verify_high_risk(superuser_db, owner.id, assignment, req, v, v2, evidence_ref, approval="founder:ok:idem-2")
+    superuser_db.flush()
+
+    bindings = superuser_db.query(WorkforceVerificationEvidenceBinding).filter_by(
+        owner_id=owner.id,
+        assignment_id=assignment.id,
+        evidence_id=uuid.UUID(evidence_ref),
+    ).all()
+    assert len(bindings) == 1
+
+
+def test_high_risk_evidence_single_use_is_database_enforced_under_concurrency(superuser_db):
+    owner = _owner(superuser_db)
+    assignment_a, req_a, _v_a, _v2_a = _high_risk_assignment(superuser_db, owner.id, suffix="-race-a")
+    assignment_b, _req_b, _v_b, _v2_b = _high_risk_assignment(superuser_db, owner.id, suffix="-race-b")
+    evidence_ref = _test_evidence_id(
+        superuser_db,
+        owner.id,
+        capability_key=req_a.required_capability,
+        assignment_id=assignment_a.id,
+    )
+    evidence = superuser_db.get(IntelligenceEvidence, uuid.UUID(evidence_ref))
+    superuser_db.commit()
+
+    Session = sessionmaker(bind=migration_engine)
+    barrier = threading.Barrier(2, timeout=10)
+    inserted: list[str] = []
+    errors: list[str] = []
+
+    def _consume(assignment_id: uuid.UUID) -> None:
+        db = Session()
+        try:
+            barrier.wait()
+            row = db.execute(
+                sa_text(
+                    """
+                    INSERT INTO workforce_verification_evidence_bindings (
+                        owner_id, assignment_id, evidence_id, evidence_execution_id, capability_key, provenance
+                    ) VALUES (
+                        :owner_id, :assignment_id, :evidence_id, :evidence_execution_id, :capability_key, '{}'::jsonb
+                    )
+                    ON CONFLICT DO NOTHING
+                    RETURNING id
+                    """
+                ),
+                {
+                    "owner_id": str(owner.id),
+                    "assignment_id": str(assignment_id),
+                    "evidence_id": evidence_ref,
+                    "evidence_execution_id": str(evidence.execution_id),
+                    "capability_key": req_a.required_capability,
+                },
+            ).scalar_one_or_none()
+            db.commit()
+            if row is not None:
+                inserted.append(str(row))
+        except Exception as exc:  # noqa: BLE001 - surfaced in assertion below
+            db.rollback()
+            errors.append(repr(exc))
+        finally:
+            db.close()
+
+    threads = [threading.Thread(target=_consume, args=(assignment_a.id,)), threading.Thread(target=_consume, args=(assignment_b.id,))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert errors == []
+    assert len(inserted) == 1
+    count = superuser_db.execute(
+        sa_text(
+            """
+            SELECT count(*) FROM workforce_verification_evidence_bindings
+            WHERE owner_id = :owner_id AND evidence_id = :evidence_id
+            """
+        ),
+        {"owner_id": str(owner.id), "evidence_id": evidence_ref},
+    ).scalar_one()
+    assert count == 1
 
 
 # --- T15 / T20 ---

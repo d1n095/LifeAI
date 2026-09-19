@@ -214,6 +214,7 @@ from app.models.workforce_ops import (
     WorkforceCostBudget,
     WorkforceLifecycleEvent,
     WorkforceVerificationDecision,
+    WorkforceVerificationEvidenceBinding,
 )
 from app.models.work_intelligence import (
     WorkEfficiencyObservation, WorkSpecialistContribution, WorkStoppingDecision,
@@ -385,6 +386,7 @@ __all__ = [
     "WorkforceCostBudget",
     "WorkforceLifecycleEvent",
     "WorkforceVerificationDecision",
+    "WorkforceVerificationEvidenceBinding",
     "ProjectEntityAlias",
     "ProjectEntityRelationship",
     "InterpretationProposal",

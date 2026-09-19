@@ -9,11 +9,14 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.workforce import WorkforceAssignment
 from app.models.workforce import WorkforceDelegationRequest
-from app.models.workforce_ops import WorkforceVerificationDecision
+from app.models.intelligence_governance import IntelligenceEvidence
+from app.models.workforce_ops import WorkforceVerificationDecision, WorkforceVerificationEvidenceBinding
 from app.evidence_claim import evidence_supports_claim
 from app.workforce.broker import VerificationError
 
@@ -71,6 +74,68 @@ def policy_for_risk(risk: str) -> VerificationPolicy:
     )
 
 
+def _evidence_payload_assignment_id(payload: dict) -> str | None:
+    for key in ("assignment_id", "workforce_assignment_id"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _bind_high_risk_evidence_to_assignment(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    assignment: WorkforceAssignment,
+    evidence: IntelligenceEvidence,
+    capability_key: str,
+) -> None:
+    """Durably consume one high-risk evidence row for one exact assignment.
+
+    The INSERT's unique constraints close both sequential and concurrent replay. A retry for
+    the same assignment/evidence is idempotent; a different assignment cannot consume the
+    same evidence row.
+    """
+    payload = evidence.payload if isinstance(evidence.payload, dict) else {}
+    bound_assignment_id = _evidence_payload_assignment_id(payload)
+    if bound_assignment_id != str(assignment.id):
+        raise VerificationError("high-risk evidence is not bound to this assignment")
+
+    stmt = (
+        pg_insert(WorkforceVerificationEvidenceBinding)
+        .values(
+            owner_id=owner_id,
+            assignment_id=assignment.id,
+            evidence_id=evidence.id,
+            evidence_execution_id=evidence.execution_id,
+            capability_key=capability_key,
+            binding_kind="high_risk_assignment_verification",
+            provenance={
+                "evidence_for_execution_ne_evidence_for_another_execution": True,
+                "assignment_bound_in_evidence_payload": True,
+                "verified_ne_authorized": True,
+            },
+        )
+        .on_conflict_do_nothing()
+        .returning(WorkforceVerificationEvidenceBinding.id)
+    )
+    inserted_id = db.execute(stmt).scalar_one_or_none()
+    if inserted_id is not None:
+        return
+
+    existing = db.execute(
+        select(WorkforceVerificationEvidenceBinding).where(
+            WorkforceVerificationEvidenceBinding.owner_id == owner_id,
+            WorkforceVerificationEvidenceBinding.evidence_id == evidence.id,
+        )
+    ).scalar_one_or_none()
+    if existing is not None and existing.assignment_id == assignment.id:
+        return
+    if existing is not None:
+        raise VerificationError("high-risk evidence already consumed by another assignment")
+    raise VerificationError("high-risk evidence consumption failed closed")
+
+
 def apply_verification_decision(
     db: Session,
     *,
@@ -121,6 +186,12 @@ def apply_verification_decision(
             request = db.get(WorkforceDelegationRequest, assignment.delegation_request_id)
             if request is None or request.owner_id != owner_id:
                 raise VerificationError("delegation request missing or owner mismatch")
+            evidence_row = db.execute(
+                select(IntelligenceEvidence).where(
+                    IntelligenceEvidence.id == evidence_id,
+                    IntelligenceEvidence.owner_id == owner_id,
+                )
+            ).scalar_one_or_none()
             support = evidence_supports_claim(
                 db,
                 owner_id=owner_id,
@@ -130,9 +201,20 @@ def apply_verification_decision(
                 allowed_kinds={"test_run_result", "verification_result", "deterministic_check", "exam_result"},
                 require_deterministic=policy.require_deterministic_validator,
                 max_age=_MAX_HIGH_RISK_EVIDENCE_AGE if risk == "high" else None,
+                evidence_row=evidence_row,
             )
             if not support.supports:
                 raise VerificationError("test evidence does not support assignment: " + ",".join(support.reasons))
+            if evidence_row is None:
+                raise VerificationError("test evidence not found")
+            if risk == "high":
+                _bind_high_risk_evidence_to_assignment(
+                    db,
+                    owner_id=owner_id,
+                    assignment=assignment,
+                    evidence=evidence_row,
+                    capability_key=request.required_capability,
+                )
         if policy.require_deterministic_validator and not deterministic_validator:
             raise VerificationError("deterministic validator required for this risk")
         if policy.require_founder_approval and not founder_approval_ref:
