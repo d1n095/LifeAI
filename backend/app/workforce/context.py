@@ -110,12 +110,21 @@ def assert_no_cross_package_leak(
     package_a: WorkforceContextPackage,
     package_b: WorkforceContextPackage,
 ) -> None:
-    """One agent must not automatically see another agent's private package contents."""
+    """One agent must not automatically see another agent's private package contents.
+
+    A shared trace_id across two DIFFERENT packages means an item was carried from one
+    agent's private context package into another's without going through that other
+    package's own minimize_for_trust_zone() call — exactly the leak this function
+    exists to catch. Previously this never raised at all (every code path either fell
+    through with no overlap, or hit an early `return` on overlap that silently treated
+    ANY overlap as fine) -- a genuine no-op that could never signal a leak regardless
+    of input, despite its own name and docstring.
+    """
     ids_a = {item.get("trace_id") for item in (package_a.items or []) if item.get("trace_id")}
     ids_b = {item.get("trace_id") for item in (package_b.items or []) if item.get("trace_id")}
     overlap = ids_a & ids_b
     if overlap and package_a.id != package_b.id:
-        # Shared deliberate refs are ok only if both packages explicitly include them;
-        # this helper is for tests asserting independent packages were built separately.
-        # Real leak = copying private items without independent packaging — callers assert.
-        return
+        raise ContextPackagingError(
+            f"cross-package leak: trace_id(s) {sorted(overlap)} appear in both "
+            f"package {package_a.id} and package {package_b.id}"
+        )

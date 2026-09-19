@@ -173,12 +173,14 @@ def _record_competence(
         CompetenceStatus.LEARNING: "planned",
         CompetenceStatus.SUPERVISED: "planned",
         CompetenceStatus.PROBATION: "planned",
-        CompetenceStatus.LOCALLY_COMPETENT: "verified_available",
-        CompetenceStatus.LOCALLY_VERIFIED: "verified_available",
+        # School competence is NOT capability_reality verified_available without
+        # intelligence evidence that supports the claim (EVIDENCE EXISTS != PROVEN).
+        CompetenceStatus.LOCALLY_COMPETENT: "planned",
+        CompetenceStatus.LOCALLY_VERIFIED: "planned",
         CompetenceStatus.DEGRADED: "configured_unavailable",
         CompetenceStatus.RETRAINING: "planned",
     }
-    # LOCALLY_COMPETENT/VERIFIED only set via run_independent_exam — still explicit caller status.
+    # LOCALLY_* stored in provenance.school_competence — never inflate verified_available.
     record_capability_observation(
         db,
         owner_id=owner_id,
@@ -196,6 +198,7 @@ def _record_competence(
             "weight_training_ran": False,
             "evidence": evidence,
             "recorded_at": datetime.utcnow().isoformat() + "Z",
+            "not_capability_verified_available": True,
         },
     )
 
@@ -211,7 +214,7 @@ def persist_curriculum_note(
         owner_id=owner_id,
         note_type="observation",
         content=f"[school curriculum] {item.domain}:{item.skill}",
-        idempotency_key=f"school-curr:{uuid.uuid4()}",
+        idempotency_key=f"school-curr:{owner_id}:{item.domain}:{item.skill}",
         authority="deterministic_source",
         basis="deterministic",
         provenance={

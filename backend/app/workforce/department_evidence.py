@@ -12,6 +12,15 @@ from app.models.workforce import WorkforceAgentProfile, WorkforcePerformanceRoll
 from app.workforce.first_team import FIRST_TEAM_SPECS, bootstrap_first_team, inspect_first_team
 from app.workforce.performance import verified_success_rate
 
+# A single lucky success must never prove a capability -- this module's own doctrine
+# is "no promotion without durable evidence" (see docstring/comments below), but the
+# previous check (`rate > 0 and verified_success > 0`) was satisfied by exactly ONE
+# verified success regardless of how many verified failures came with it (1 success /
+# 1000 failures still yields rate=0.001 > 0). Durable evidence requires both a real
+# sample size and a strong majority success rate.
+_MIN_VERIFIED_TRIALS = 3
+_MIN_VERIFIED_SUCCESS_RATE = 0.66
+
 
 def department_capability_ledger(db: Session, *, owner_id: uuid.UUID) -> list[dict[str, Any]]:
     """Per-department inspectable status. Does NOT promote candidates automatically."""
@@ -42,7 +51,12 @@ def department_capability_ledger(db: Session, *, owner_id: uuid.UUID) -> list[di
         last_failure = None
         for r in rollups:
             rate = verified_success_rate(r)
-            if rate is not None and rate > 0 and int(r.verified_success) > 0:
+            total_trials = int(r.verified_success) + int(r.verified_failure)
+            if (
+                rate is not None
+                and total_trials >= _MIN_VERIFIED_TRIALS
+                and rate >= _MIN_VERIFIED_SUCCESS_RATE
+            ):
                 verified_caps.append(r.capability_tag)
                 if r.capability_tag in unverified_caps:
                     unverified_caps.remove(r.capability_tag)

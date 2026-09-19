@@ -264,7 +264,10 @@ def reconcile_and_promote_idea(
     except ProjectEntityError as exc:
         raise ConceptReconciliationError(str(exc)) from exc
 
-    created_entity = existing_before is None
+    created_entity = (
+        existing_before is None and entity.idempotency_key == entity_idempotency_key
+    )
+    # Race loser recovers onto winner (different idempotency_key) → reused_same, not created.
     if created_entity:
         for hit in overlaps:
             if hit.entity_id != entity.id:

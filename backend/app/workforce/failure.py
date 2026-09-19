@@ -204,6 +204,10 @@ def alternate_agent_takeover(
     context_items: list[dict] | None = None,
 ) -> WorkforceAssignment:
     """Reassign to another agent. Authority is re-minted minimal — never widened from failed."""
+    from app.workforce.kill_switch import assert_authority_grant_allowed
+
+    grant_fence = assert_authority_grant_allowed(db, owner_id=owner_id)
+
     ok, reason = can_safely_retry(failed_assignment)
     if not ok:
         raise FailureTakeoverError(reason)
@@ -289,6 +293,7 @@ def alternate_agent_takeover(
             "authority_granted_extra": False,
             "authority_widened": False,
             "takeover": True,
+            "authority_fence": grant_fence,
         },
         takeover_of_assignment_id=failed_assignment.id,
         supersedes_assignment_id=failed_assignment.id,
