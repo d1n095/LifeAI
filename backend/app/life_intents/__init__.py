@@ -1,6 +1,11 @@
 from .service import (
+    LIFE_INTENT_TRANSITIONS,
+    TERMINAL_LIFE_INTENT_STATES,
     FeasibilityResult,
     IntentError,
+    InvalidTransitionError,
+    StaleTransitionError,
+    TerminalStateError,
     add_blocker,
     add_dependency,
     create_intent,
@@ -11,8 +16,13 @@ from .service import (
 )
 
 __all__ = [
+    "LIFE_INTENT_TRANSITIONS",
+    "TERMINAL_LIFE_INTENT_STATES",
     "FeasibilityResult",
     "IntentError",
+    "InvalidTransitionError",
+    "StaleTransitionError",
+    "TerminalStateError",
     "add_blocker",
     "add_dependency",
     "create_intent",
