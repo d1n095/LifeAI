@@ -197,6 +197,7 @@ from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
 from app.models.user import User
+from app.personal_recall.production_lifecycle import erase_personal_recall_data
 from app.storage import StorageError, get_storage
 from app.storage.references import acquire_owner_erasure_lock, acquire_storage_key_lock, storage_key_still_referenced
 
@@ -553,6 +554,13 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # moment any memory_source_units row exists for this account (see module docstring).
         db.execute(sa_text("SELECT erase_owner_memory(:owner_id)"), {"owner_id": str(owner_id)})
 
+        # --- Personal Recall production activation data: content/key material must become
+        # unretrievable through the governed account-erasure path before the User row can
+        # cascade. personal_recall_owner_keys/grants deliberately reject ordinary DELETE;
+        # erase_personal_recall_data() sets a narrow erasure GUC after rechecking the current
+        # owner DB session and records only counts below, never raw content or key material.
+        recall_erasure = erase_personal_recall_data(db, owner_id=owner_id)
+
         # --- Personal data: deleted outright, not anonymized. ---
         conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=owner_id).all()]
         if conversation_ids:
@@ -749,6 +757,14 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             action="account_deleted",
             entity_type="account",
             entity_id=str(operation_id),
+            detail=(
+                "personal_recall_erased="
+                f"sources:{recall_erasure.sources_scrubbed},"
+                f"chunks:{recall_erasure.chunks_deleted},"
+                f"extractions:{recall_erasure.extractions_deleted},"
+                f"grants:{recall_erasure.grants_deleted},"
+                f"owner_keys:{recall_erasure.owner_keys_deleted}"
+            ),
             ip_address=client_ip,
             commit=False,
         )

@@ -3,18 +3,19 @@ export_account_data() — Pass 26 (PR #31's account export/erasure S1A integrati
 Real local Postgres (RLS included), same pattern as tests/backend/storage/test_source_purge.py.
 """
 
+import base64
 import importlib.util
+import os
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text as sa_text
+from sqlalchemy import text as sa_text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import sessionmaker
 
-from app.audit import record_audit
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.jobs.lease import claim_next_job
@@ -27,7 +28,6 @@ from app.models.knowledge_version import KnowledgeVersion
 from app.models.mainai_job import MainAIJobProposal
 from app.models.memory_source_unit import (
     DocumentSourceUnit,
-    LifecycleStatus,
     MemorySourceLifecycleEvent,
     MemorySourceUnit,
     SnapshotStatus,
@@ -268,7 +268,7 @@ def test_erase_account_data_works_for_a_legacy_account_with_no_memory_source_uni
     session = SessionLocal()
     try:
         owner = _make_user(session)
-        document = _make_document(session, owner.id)
+        _make_document(session, owner.id)
         owner_id = owner.id
         _set_rls_user(session, owner.id)
 
@@ -534,7 +534,6 @@ def test_erase_account_data_rolls_back_everything_when_a_storage_deletion_task_i
         storage_key = _store_real_blob(b"task insert failure proof")
         document = _make_document(session, owner.id, storage_key=storage_key)
         owner_id = owner.id
-
         _set_rls_user(session, owner.id)
         with pytest.raises(Exception):
             erase_account_data(session, owner)
@@ -565,8 +564,6 @@ def test_erase_account_data_deduplicates_document_and_import_job_keys_into_one_t
         storage_key = _store_real_blob(b"shared between a document and its own import job")
         _make_document(session, owner.id, storage_key=storage_key)
         _make_import_job(session, owner.id, source_storage_key=storage_key)
-        owner_id = owner.id
-
         _set_rls_user(session, owner.id)
         result = erase_account_data(session, owner)
 
@@ -2144,3 +2141,74 @@ def test_storage_deletion_tasks_check_constraint_rejects_an_invalid_status():
     finally:
         admin.rollback()
         admin.close()
+
+
+def test_erase_account_data_governs_personal_recall_content_and_keys():
+    from app.founder import FOUNDER_USER_ID
+    from app.models.personal_recall_production import PersonalRecallChunk, PersonalRecallGrant, PersonalRecallOwnerKey, PersonalRecallSource
+    from app.models.refresh_token import RefreshToken
+    from app.personal_recall.production_crypto import load_system_kek_from_env
+    from app.personal_recall.production_ingestion import create_recall_grant, ingest_file, recall_founder_authority_from_user
+
+    os.environ.setdefault("PERSONAL_RECALL_SYSTEM_KEK_B64", base64.b64encode(b"r" * 32).decode("ascii"))
+    os.environ.setdefault("PERSONAL_RECALL_SYSTEM_KEK_VERSION", "test-v1")
+
+    session = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        owner = User(
+            id=FOUNDER_USER_ID,
+            email=f"erase-recall-{uuid.uuid4().hex[:8]}@example.com",
+            password_hash=hash_password("Sup3rS3cret!"),
+            role=UserRole.founder,
+            email_verified=True,
+            sessions_valid_after=now - timedelta(seconds=2),
+        )
+        session.add(owner)
+        session.flush()
+        access_jti = str(uuid.uuid4())
+        session.add(
+            RefreshToken(
+                user_id=FOUNDER_USER_ID,
+                family_id=uuid.uuid4(),
+                token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+                access_jti=access_jti,
+                csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
+                created_at=now,
+                expires_at=now + timedelta(hours=1),
+            )
+        )
+        session.flush()
+        _set_rls_user(session, FOUNDER_USER_ID)
+        authority = recall_founder_authority_from_user(user=owner, access_jti=access_jti)
+        create_recall_grant(
+            session,
+            owner_id=FOUNDER_USER_ID,
+            session_id="erase-account",
+            purpose="founder_file_ingestion",
+            resource_classes=("file",),
+            authority=authority,
+        )
+        ingest_file(
+            session,
+            owner_id=FOUNDER_USER_ID,
+            filename="account-erasure.md",
+            payload=b"Requirement: account erasure removes Recall content.",
+            system_kek=load_system_kek_from_env(),
+            session_id="erase-account",
+            authority=authority,
+        )
+        session.commit()
+
+        _set_rls_user(session, FOUNDER_USER_ID)
+        result = erase_account_data(session, owner)
+        assert result.operation_id
+
+        assert session.query(PersonalRecallSource).filter_by(owner_id=FOUNDER_USER_ID).count() == 0
+        assert session.query(PersonalRecallChunk).filter_by(owner_id=FOUNDER_USER_ID).count() == 0
+        assert session.query(PersonalRecallGrant).filter_by(owner_id=FOUNDER_USER_ID).count() == 0
+        assert session.query(PersonalRecallOwnerKey).filter_by(owner_id=FOUNDER_USER_ID).count() == 0
+        audit = session.query(AuditLog).filter_by(action="account_deleted", entity_id=str(result.operation_id)).one()
+        assert "personal_recall_erased=sources:1,chunks:1,extractions:1,grants:1,owner_keys:1" in audit.detail
+    finally:
+        session.close()

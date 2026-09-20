@@ -59,8 +59,9 @@ from app.models.mainai_job import MainAIJob, MainAIJobEvent, MainAIJobProposal
 from app.models.memory_source_unit import DocumentSourceUnit, MemorySourceLifecycleEvent, MemorySourceUnit
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
+from app.personal_recall.production_lifecycle import export_personal_recall_data
 
-EXPORT_SCHEMA_VERSION = 3  # 1 = pre-S1A; 2 = + claims/S1A provenance; 3 = + mainai_jobs/events/proposals
+EXPORT_SCHEMA_VERSION = 4  # 1 = pre-S1A; 2 = + claims/S1A provenance; 3 = + mainai_jobs/events/proposals; 4 = + Personal Recall production data
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -380,6 +381,7 @@ def export_account_data(db: Session, user: User, *, client_ip: str | None = None
         "mainai_jobs": mainai_jobs_export,
         "mainai_job_events": mainai_job_events_export,
         "mainai_job_proposals": mainai_job_proposals_export,
+        "personal_recall": export_personal_recall_data(db, owner_id=owner_id),
         "audit_log": [
             {
                 "action": a.action,

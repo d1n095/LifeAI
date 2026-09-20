@@ -12,6 +12,7 @@ os.environ.setdefault("PERSONAL_RECALL_SYSTEM_KEK_B64", base64.b64encode(b"r" * 
 os.environ.setdefault("PERSONAL_RECALL_SYSTEM_KEK_VERSION", "test-v1")
 
 from app.founder import FOUNDER_USER_ID
+from app.account.export import export_account_data
 from app.mainai_founder_boot.readiness import build_readiness_matrix
 from app.models.personal_recall_production import PersonalRecallChunk, PersonalRecallGrant, PersonalRecallOwnerKey, PersonalRecallSource
 from app.models.refresh_token import RefreshToken
@@ -30,6 +31,7 @@ from app.personal_recall.production_ingestion import (
     revoke_source,
     rotate_owner_key,
 )
+from app.personal_recall.production_lifecycle import erase_personal_recall_data, export_personal_recall_data
 from app.security import hash_password
 
 
@@ -292,6 +294,84 @@ def test_restart_new_session_can_retrieve_but_stale_grant_cannot():
             retrieve_chunks(restarted, owner_id=founder.id, query="durable", system_kek=kek, grant=_ctx(founder.id, session_id="first"))
     finally:
         restarted.close()
+
+
+def test_personal_recall_export_separates_content_metadata_and_key_metadata(db_session):
+    founder, authority = _founder_authority(db_session)
+    kek = load_system_kek_from_env()
+    _grant(db_session, founder.id, authority)
+    result = ingest_file(
+        db_session,
+        owner_id=founder.id,
+        filename="export.md",
+        logical_path="docs/export.md",
+        payload=b"Requirement: export Recall content with provenance but no keys.",
+        system_kek=kek,
+        session_id="boot-session",
+        authority=authority,
+    )
+    db_session.commit()
+
+    _set_rls_user(db_session, founder.id)
+    recall_export = export_personal_recall_data(db_session, owner_id=founder.id)
+    assert recall_export["sources"][0]["text"] == "Requirement: export Recall content with provenance but no keys."
+    assert recall_export["sources"][0]["logical_path"] == "docs/export.md"
+    assert recall_export["chunks"][0]["text"].startswith("Requirement: export Recall content")
+    assert recall_export["owner_keys"][0]["key_material_exported"] is False
+    assert "wrapped_owner_key" not in recall_export["owner_keys"][0]
+    assert "wrap_nonce" not in recall_export["owner_keys"][0]
+    assert str(result.source_id) == recall_export["sources"][0]["id"]
+
+    _set_rls_user(db_session, founder.id)
+    full_export = export_account_data(db_session, founder)
+    assert full_export["export_schema_version"] >= 4
+    assert full_export["personal_recall"]["sources"][0]["filename"] == "export.md"
+
+
+def test_personal_recall_governed_erasure_makes_content_non_retrievable_and_is_idempotent(db_session):
+    founder, authority = _founder_authority(db_session)
+    kek = load_system_kek_from_env()
+    _grant(db_session, founder.id, authority)
+    ingest_file(
+        db_session,
+        owner_id=founder.id,
+        filename="erase.md",
+        payload=b"Decision: deleted recall content must not be retrievable.",
+        system_kek=kek,
+        session_id="boot-session",
+        authority=authority,
+    )
+    db_session.commit()
+
+    _set_rls_user(db_session, founder.id)
+    result = erase_personal_recall_data(db_session, owner_id=founder.id)
+    db_session.commit()
+    assert result.sources_scrubbed == 1
+    assert result.chunks_deleted == 1
+    assert result.grants_deleted == 1
+    assert result.owner_keys_deleted == 1
+
+    _set_rls_user(db_session, founder.id)
+    with pytest.raises(RecallProductionError):
+        retrieve_chunks(db_session, owner_id=founder.id, query="deleted", system_kek=kek, grant=_ctx(founder.id))
+    assert db_session.execute(select(PersonalRecallSource).where(PersonalRecallSource.owner_id == founder.id)).scalars().all() == []
+    assert db_session.execute(select(PersonalRecallChunk).where(PersonalRecallChunk.owner_id == founder.id)).scalars().all() == []
+    assert db_session.execute(select(PersonalRecallOwnerKey).where(PersonalRecallOwnerKey.owner_id == founder.id)).scalars().all() == []
+
+    _set_rls_user(db_session, founder.id)
+    second = erase_personal_recall_data(db_session, owner_id=founder.id)
+    db_session.commit()
+    assert second.sources_scrubbed == 0
+    assert second.chunks_deleted == 0
+    assert second.owner_keys_deleted == 0
+
+
+def test_personal_recall_erasure_is_owner_scoped(db_session, make_verified_user):
+    founder, authority = _founder_authority(db_session)
+    other, _ = make_verified_user()
+    _set_rls_user(db_session, other.id)
+    with pytest.raises(ValueError):
+        erase_personal_recall_data(db_session, owner_id=founder.id)
 
 
 def test_founder_boot_remains_honest_until_independent_verification(db_session):
