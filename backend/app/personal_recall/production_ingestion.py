@@ -11,6 +11,7 @@ from typing import Iterable
 from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
+from app.founder import FOUNDER_USER_ID
 from app.models.personal_recall_production import (
     PersonalRecallChunk,
     PersonalRecallExtraction,
@@ -18,6 +19,8 @@ from app.models.personal_recall_production import (
     PersonalRecallOwnerKey,
     PersonalRecallSource,
 )
+from app.models.refresh_token import RefreshToken
+from app.models.user import User, UserRole
 from app.personal_recall.production_crypto import ALGORITHM, RecallCryptoError, SystemKEK, decrypt_aead, encrypt_aead, generate_key
 
 PARSER_VERSION = "personal-recall-file-ingestion-v1"
@@ -29,6 +32,19 @@ CLASSIFICATION_KINDS = ("IDEA", "DREAM", "QUESTION", "PLAN", "DECISION", "REQUIR
 
 class RecallProductionError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class RecallFounderAuthority:
+    owner_id: uuid.UUID
+    access_jti: str
+    actor: str = "founder_session"
+
+
+def recall_founder_authority_from_user(*, user: User, access_jti: str | None) -> RecallFounderAuthority:
+    if not access_jti:
+        raise RecallProductionError("founder Recall authority requires an authenticated session access_jti")
+    return RecallFounderAuthority(owner_id=uuid.UUID(str(user.id)), access_jti=access_jti)
 
 
 @dataclass(frozen=True)
@@ -79,7 +95,75 @@ def _set_guard(db: Session, name: str, value: str) -> None:
     db.execute(sql_text(f"SET LOCAL {name} = :value"), {"value": value})
 
 
-def get_or_create_owner_key(db: Session, *, owner_id: uuid.UUID, system_kek: SystemKEK) -> PersonalRecallOwnerKey:
+def _set_founder_guard(db: Session, name: str, authority: RecallFounderAuthority) -> None:
+    _set_guard(db, name, "founder_authorized")
+    db.execute(
+        sql_text("SET LOCAL app.personal_recall_founder_access_jti = :access_jti"),
+        {"access_jti": authority.access_jti},
+    )
+
+
+def _current_rls_owner(db: Session) -> uuid.UUID | None:
+    raw = db.execute(sql_text("SELECT NULLIF(current_setting('app.current_user_id', true), '')")).scalar_one()
+    if not raw:
+        return None
+    try:
+        return uuid.UUID(str(raw))
+    except ValueError:
+        return None
+
+
+def require_canonical_founder_recall_authority(db: Session, *, owner_id: uuid.UUID, authority: RecallFounderAuthority | None) -> None:
+    """Re-read the canonical founder-only authority before minting Recall grant/key state.
+
+    The DB triggers below are a final mutation fence, but the service must not mint their guard
+    token for itself merely because a caller passed ``created_by="founder"``.  The strongest
+    durable identity already present in Founder Alpha is the same one used by
+    ``require_founder``: the active user row must be the fixed ``FOUNDER_USER_ID`` with
+    ``role=founder`` and the current DB/RLS session must be bound to that same owner.
+    """
+    if authority is None:
+        raise RecallProductionError("canonical founder authority is required for recall grant/key mutation")
+    if authority.actor != "founder_session" or not authority.access_jti:
+        raise RecallProductionError("recall grant/key authority must come from an authenticated founder session")
+    if uuid.UUID(str(owner_id)) != FOUNDER_USER_ID or uuid.UUID(str(authority.owner_id)) != FOUNDER_USER_ID:
+        raise RecallProductionError("recall grant/key authority is founder-only and owner-bound")
+    current_owner = _current_rls_owner(db)
+    if current_owner != FOUNDER_USER_ID:
+        raise RecallProductionError("recall grant/key mutation requires the current founder DB session")
+    row = db.execute(
+        select(User)
+        .where(User.id == FOUNDER_USER_ID, User.is_active.is_(True))
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if row is None or row.role != UserRole.founder:
+        raise RecallProductionError("canonical founder authority is not current")
+    token = db.execute(
+        select(RefreshToken)
+        .where(
+            RefreshToken.user_id == FOUNDER_USER_ID,
+            RefreshToken.access_jti == authority.access_jti,
+            RefreshToken.revoked_at.is_(None),
+            RefreshToken.expires_at > datetime.utcnow(),
+        )
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if token is None or token.created_at <= row.sessions_valid_after:
+        raise RecallProductionError("founder Recall authority is stale or revoked")
+
+
+def _active_owner_key(db: Session, *, owner_id: uuid.UUID) -> PersonalRecallOwnerKey:
+    row = db.execute(
+        select(PersonalRecallOwnerKey)
+        .where(PersonalRecallOwnerKey.owner_id == owner_id, PersonalRecallOwnerKey.status == "active")
+        .order_by(PersonalRecallOwnerKey.key_version.desc())
+    ).scalars().first()
+    if row is None:
+        raise RecallProductionError("active recall owner key is required")
+    return row
+
+
+def get_or_create_owner_key(db: Session, *, owner_id: uuid.UUID, system_kek: SystemKEK, authority: RecallFounderAuthority | None = None) -> PersonalRecallOwnerKey:
     row = db.execute(
         select(PersonalRecallOwnerKey)
         .where(PersonalRecallOwnerKey.owner_id == owner_id, PersonalRecallOwnerKey.status == "active")
@@ -87,9 +171,10 @@ def get_or_create_owner_key(db: Session, *, owner_id: uuid.UUID, system_kek: Sys
     ).scalars().first()
     if row is not None:
         return row
+    require_canonical_founder_recall_authority(db, owner_id=owner_id, authority=authority)
     owner_key = generate_key()
     nonce, wrapped = encrypt_aead(system_kek.key, owner_key, _aad("owner-key", owner_id, 1, system_kek.version))
-    _set_guard(db, "app.personal_recall_key_authority", "founder_authorized")
+    _set_founder_guard(db, "app.personal_recall_key_authority", authority)
     row = PersonalRecallOwnerKey(
         owner_id=owner_id,
         key_version=1,
@@ -112,9 +197,10 @@ def unwrap_owner_key(row: PersonalRecallOwnerKey, *, system_kek: SystemKEK) -> b
     return decrypt_aead(system_kek.key, row.wrap_nonce, row.wrapped_owner_key, _aad("owner-key", row.owner_id, row.key_version, row.system_kek_version))
 
 
-def rotate_owner_key(db: Session, *, owner_id: uuid.UUID, system_kek: SystemKEK) -> PersonalRecallOwnerKey:
-    current = get_or_create_owner_key(db, owner_id=owner_id, system_kek=system_kek)
-    _set_guard(db, "app.personal_recall_key_authority", "founder_authorized")
+def rotate_owner_key(db: Session, *, owner_id: uuid.UUID, system_kek: SystemKEK, authority: RecallFounderAuthority | None = None) -> PersonalRecallOwnerKey:
+    require_canonical_founder_recall_authority(db, owner_id=owner_id, authority=authority)
+    current = get_or_create_owner_key(db, owner_id=owner_id, system_kek=system_kek, authority=authority)
+    _set_founder_guard(db, "app.personal_recall_key_authority", authority)
     current.status = "rotated"
     current.rotated_at = _now()
     new_version = current.key_version + 1
@@ -146,6 +232,7 @@ def create_recall_grant(
     can_disclose: bool = True,
     boot_id: str | None = None,
     created_by: str = "founder",
+    authority: RecallFounderAuthority | None = None,
 ) -> PersonalRecallGrant:
     if ttl_seconds <= 0 or ttl_seconds > 86400:
         raise RecallProductionError("grant ttl must be bounded")
@@ -153,10 +240,11 @@ def create_recall_grant(
         raise RecallProductionError("invalid disclosure level")
     if created_by != "founder":
         raise RecallProductionError("ordinary MainAI runtime cannot self-grant recall access")
+    require_canonical_founder_recall_authority(db, owner_id=owner_id, authority=authority)
     classes = sorted(set(resource_classes))
     if not classes:
         raise RecallProductionError("grant requires at least one resource class")
-    _set_guard(db, "app.personal_recall_grant_authority", "founder_authorized")
+    _set_founder_guard(db, "app.personal_recall_grant_authority", authority)
     row = PersonalRecallGrant(
         owner_id=owner_id,
         session_id=session_id,
@@ -248,6 +336,7 @@ def ingest_file(
     payload: bytes,
     system_kek: SystemKEK,
     session_id: str,
+    authority: RecallFounderAuthority | None = None,
     purpose: str = "founder_file_ingestion",
     logical_path: str | None = None,
     disclosure_class: str = "normal",
@@ -260,7 +349,7 @@ def ingest_file(
     if existing is not None:
         chunks = db.execute(select(PersonalRecallChunk.id).where(PersonalRecallChunk.owner_id == owner_id, PersonalRecallChunk.source_id == existing.id).order_by(PersonalRecallChunk.chunk_index)).scalars().all()
         return IngestedSourceResult(existing.id, source_hash, content_hash, tuple(chunks), True, tuple())
-    key_row = get_or_create_owner_key(db, owner_id=owner_id, system_kek=system_kek)
+    key_row = get_or_create_owner_key(db, owner_id=owner_id, system_kek=system_kek, authority=authority)
     owner_key = unwrap_owner_key(key_row, system_kek=system_kek)
     source_identity = f"file:{source_hash}"
     source_nonce, encrypted_payload = encrypt_aead(owner_key, text.encode("utf-8"), _aad("source", owner_id, source_hash, key_row.key_version))
@@ -329,7 +418,7 @@ def retrieve_chunks(
         disclose_text = row.disclosure_level == "snippet" and grant.disclosure_level == "snippet"
     if row.owner_id != owner_id:
         raise RecallProductionError("grant owner mismatch")
-    key_row = get_or_create_owner_key(db, owner_id=owner_id, system_kek=system_kek)
+    key_row = _active_owner_key(db, owner_id=owner_id)
     owner_key = unwrap_owner_key(key_row, system_kek=system_kek)
     terms = [t for t in re.findall(r"[\wåäöÅÄÖ]+", query.lower()) if len(t) > 1]
     stmt = select(PersonalRecallChunk, PersonalRecallSource).join(PersonalRecallSource, PersonalRecallSource.id == PersonalRecallChunk.source_id).where(PersonalRecallChunk.owner_id == owner_id, PersonalRecallSource.owner_id == owner_id)
