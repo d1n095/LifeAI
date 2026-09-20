@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -16,10 +16,18 @@ class RecallCryptoError(ValueError):
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class SystemKEK:
     version: str
-    key: bytes
+    key: bytes = field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"SystemKEK(version={self.version!r}, key=<redacted:{len(self.key)} bytes>)"
+
+    __str__ = __repr__
+
+    def safe_metadata(self) -> dict[str, int | str]:
+        return {"version": self.version, "key": "<redacted>", "key_bytes": len(self.key)}
 
 
 def load_system_kek_from_env() -> SystemKEK:

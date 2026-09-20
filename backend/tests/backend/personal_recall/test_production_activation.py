@@ -13,7 +13,8 @@ os.environ.setdefault("PERSONAL_RECALL_SYSTEM_KEK_VERSION", "test-v1")
 
 from app.founder import FOUNDER_USER_ID
 from app.account.export import export_account_data
-from app.mainai_founder_boot.readiness import build_readiness_matrix
+from app.mainai_founder_boot.readiness import PERSONAL_RECALL_SHA, build_readiness_matrix, component_manifest
+from app.mainai_verification_registry.service import record_verification_attestation
 from app.models.personal_recall_production import PersonalRecallChunk, PersonalRecallGrant, PersonalRecallOwnerKey, PersonalRecallSource
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
@@ -98,6 +99,28 @@ def _grant(session, owner_id, authority: RecallFounderAuthority, session_id="boo
 
 def _ctx(owner_id, session_id="boot-session", purpose="founder_file_ingestion"):
     return RetrievalGrantContext(owner_id=owner_id, session_id=session_id, purpose=purpose, resource_classes=("file",), disclosure_level="snippet", can_disclose=True)
+
+
+def test_system_kek_repr_and_loggable_containers_redact_secret_material():
+    secret = b"secret-system-kek-material-32b!!!"[:32]
+    encoded_secret = base64.b64encode(secret).decode("ascii")
+    kek = SystemKEK("test-version", secret)
+
+    rendered_values = (
+        repr(kek),
+        str(kek),
+        repr({"system_kek": kek}),
+        f"{kek}",
+        repr(kek.safe_metadata()),
+    )
+
+    for rendered in rendered_values:
+        assert "secret-system" not in rendered
+        assert encoded_secret not in rendered
+        assert secret.hex() not in rendered
+        assert "<redacted" in rendered or "'<redacted>'" in rendered
+    assert kek.key == secret
+    assert kek.version == "test-version"
 
 
 def test_aead_tamper_wrong_key_and_rotation(db_session):
@@ -377,9 +400,83 @@ def test_personal_recall_erasure_is_owner_scoped(db_session, make_verified_user)
 def test_founder_boot_remains_honest_until_independent_verification(db_session):
     matrix = build_readiness_matrix(covenant_ready=True, founder_ready=True, db_ready=True, db=db_session)
     recall = matrix["PERSONAL_RECALL"]
+    assert recall["INDEPENDENTLY_VERIFIED"] is False
     assert recall["SAFE_FOR_FOUNDER_BOOT"] is False
     assert recall["ACTIVATED"] is False
+    assert "verification_record=missing" in recall["EVIDENCE"]
     assert "disabled_until_independent_verification" in " ".join(recall["EVIDENCE"])
+    assert component_manifest(db_session)["personal_recall"]["independently_verified"] is False
+
+
+def test_personal_recall_readiness_rejects_wrong_failed_and_invalidated_registry_records(superuser_db):
+    failed = record_verification_attestation(
+        superuser_db,
+        component_id="PERSONAL_RECALL",
+        candidate_sha=PERSONAL_RECALL_SHA,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="FAIL",
+        evidence_summary="failed candidate must not certify Personal Recall readiness",
+    )
+    record_verification_attestation(
+        superuser_db,
+        component_id="PERSONAL_RECALL",
+        candidate_sha="0" * 40,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="wrong SHA must not certify Personal Recall readiness",
+    )
+    stale_pass = record_verification_attestation(
+        superuser_db,
+        component_id="PERSONAL_RECALL",
+        candidate_sha=PERSONAL_RECALL_SHA,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="this PASS is explicitly invalidated before readiness is checked",
+    )
+    record_verification_attestation(
+        superuser_db,
+        component_id="PERSONAL_RECALL",
+        candidate_sha=PERSONAL_RECALL_SHA,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="FAIL",
+        evidence_summary="invalidates the stale Personal Recall PASS",
+        invalidates_verification_id=stale_pass.id,
+    )
+    superuser_db.commit()
+
+    recall = build_readiness_matrix(covenant_ready=True, founder_ready=True, db_ready=True, db=superuser_db)["PERSONAL_RECALL"]
+    assert recall["INDEPENDENTLY_VERIFIED"] is False
+    assert recall["ACTIVATED"] is False
+    assert recall["SAFE_FOR_FOUNDER_BOOT"] is False
+    assert recall["EXACT_SHA"] == PERSONAL_RECALL_SHA
+    assert failed.review_result == "FAIL"
+
+
+def test_personal_recall_readiness_uses_valid_exact_sha_registry_pass_without_activation(superuser_db):
+    record_verification_attestation(
+        superuser_db,
+        component_id="PERSONAL_RECALL",
+        candidate_sha=PERSONAL_RECALL_SHA,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="independent exact-SHA Personal Recall review PASS",
+    )
+    superuser_db.commit()
+
+    recall = build_readiness_matrix(covenant_ready=True, founder_ready=True, db_ready=True, db=superuser_db)["PERSONAL_RECALL"]
+    assert recall["INDEPENDENTLY_VERIFIED"] is True
+    assert recall["ACTIVATED"] is False
+    assert recall["SAFE_FOR_FOUNDER_BOOT"] is False
+    assert "verification_record=present" in recall["EVIDENCE"]
+    assert "explicit founder-authorized router/grant activation" in recall["BLOCKER"]
+    manifest = component_manifest(superuser_db)["personal_recall"]
+    assert manifest["independently_verified"] is True
+    assert manifest["activated"] is False
 
 
 def test_malformed_json_and_unsupported_files_fail_closed(db_session):

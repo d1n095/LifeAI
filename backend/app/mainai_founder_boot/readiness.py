@@ -17,6 +17,7 @@ from app.mainai_level2.components import VERIFIED_SHAS, compose_local_verified_c
 LEVEL2_BASE_SHA = "ec611a5d3216f4194793e8db01a2eceb1d0235eb"
 COVERAGE_WORKFORCE_SHA = "3dd57d7f180c71d6639b90845b8cd8c492a29fbb"
 PERSONAL_RECALL_SHA = "024835547850035667c3d77383fd75699ceab178"
+PERSONAL_RECALL_BUILDER = "codex"
 LAST_VERIFIED = "2026-09-17"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -268,13 +269,23 @@ def component_specs() -> dict[str, ComponentSpec]:
     }
 
 
-def assess_personal_recall() -> tuple[RecallBootStatus, str, dict]:
+def _personal_recall_verification(db: Session | None) -> MainAIVerificationRecord | None:
+    return find_independent_pass(
+        db,
+        component_id="PERSONAL_RECALL",
+        candidate_sha=PERSONAL_RECALL_SHA,
+        builder_identity=PERSONAL_RECALL_BUILDER,
+    )
+
+
+def assess_personal_recall(db: Session | None = None) -> tuple[RecallBootStatus, str, dict]:
     production_modules = (
         "app.personal_recall.authorization",
         "app.personal_recall.production_crypto",
         "app.personal_recall.production_ingestion",
         "app.personal_recall.routes_prep",
     )
+    verification_record = _personal_recall_verification(db)
     evidence = {
         "modules_present": all(_module_present(m) for m in production_modules),
         "test_only_protector_present": False,
@@ -284,14 +295,29 @@ def assess_personal_recall() -> tuple[RecallBootStatus, str, dict]:
         "trusted_grants_implemented": _file_present("app/models/personal_recall_production.py"),
         "file_ingestion_implemented": _module_present("app.personal_recall.production_ingestion"),
         "independent_verification_required": True,
+        "independent_verification": verification_record is not None,
+        "verification_record": "present" if verification_record is not None else "missing",
+        "expected_sha": PERSONAL_RECALL_SHA,
         "activation": "disabled_until_independent_verification_and_explicit_router_grant_activation",
     }
+    if verification_record is not None:
+        evidence.update({
+            "verification_id": str(verification_record.id),
+            "verification_sha": verification_record.candidate_sha,
+            "review_result": verification_record.review_result,
+            "builder": verification_record.builder_identity,
+            "examiner": verification_record.examiner_identity,
+            "reviewed_at": verification_record.reviewed_at.date().isoformat(),
+        })
     try:
         from app.personal_recall.snapshot_protection import DeterministicTestSnapshotProtector
         evidence["test_only_protector_present"] = bool(getattr(DeterministicTestSnapshotProtector, "is_test_only", False))
     except Exception:
         evidence["test_only_protector_present"] = False
-    blocker = "production AEAD/key hierarchy is implemented, but Personal Recall remains disabled until exact-SHA independent verification and explicit founder-authorized router/grant activation"
+    if verification_record is None:
+        blocker = "production AEAD/key hierarchy is implemented, but Personal Recall remains disabled until exact-SHA independent verification and explicit founder-authorized router/grant activation"
+    else:
+        blocker = "Personal Recall has exact-SHA independent verification evidence, but remains disabled until explicit founder-authorized router/grant activation"
     return RecallBootStatus.DISABLED_BY_SECURITY_GATE, blocker, evidence
 
 
@@ -317,7 +343,13 @@ def component_manifest(db: Session | None = None) -> dict:
             "authority": "none",
         }
     manifest["level2_base"] = {"candidate_sha": LEVEL2_BASE_SHA, "bound": manifest.get("level2", {}).get("integrated", False), "authority": "none"}
-    manifest["personal_recall"] = {"candidate_sha": PERSONAL_RECALL_SHA, "bound": _module_present("app.personal_recall.service"), "authority": "none"}
+    manifest["personal_recall"] = {
+        "candidate_sha": PERSONAL_RECALL_SHA,
+        "bound": _module_present("app.personal_recall.service"),
+        "independently_verified": _personal_recall_verification(db) is not None,
+        "activated": False,
+        "authority": "none",
+    }
     return manifest
 
 
@@ -339,7 +371,7 @@ def _record_from_evidence(spec: ComponentSpec, evidence: ComponentEvidence) -> R
 
 
 def build_readiness_matrix(*, covenant_ready: bool, founder_ready: bool, db_ready: bool = True, db: Session | None = None) -> dict[str, dict]:
-    recall_status, recall_blocker, recall_evidence = assess_personal_recall()
+    recall_status, recall_blocker, recall_evidence = assess_personal_recall(db)
     records: dict[str, ReadinessRecord] = {
         "SYSTEM_IDENTITY": ReadinessRecord(True, True, True, True, True, True, True, True, None, ("durable mainai_id/system_instance_id generated",), LEVEL2_BASE_SHA, LAST_VERIFIED),
         "FOUNDER_IDENTITY": ReadinessRecord(True, founder_ready, founder_ready, True, True, True, founder_ready, founder_ready, None if founder_ready else "authenticated founder owner missing", ("User.role=founder and owner binding",), None, LAST_VERIFIED),
@@ -349,7 +381,20 @@ def build_readiness_matrix(*, covenant_ready: bool, founder_ready: bool, db_read
     for name, spec in component_specs().items():
         records[name] = _record_from_evidence(spec, _derive_component_evidence(spec, verification_record=_verification_for_spec(db, spec)))
     records.update({
-        "PERSONAL_RECALL": ReadinessRecord(False, recall_evidence["modules_present"], True, True, True, False, False, False, recall_blocker, tuple(f"{k}={v}" for k, v in recall_evidence.items()), PERSONAL_RECALL_SHA, LAST_VERIFIED),
+        "PERSONAL_RECALL": ReadinessRecord(
+            False,
+            recall_evidence["modules_present"],
+            True,
+            True,
+            recall_evidence["independent_verification"],
+            False,
+            False,
+            False,
+            recall_blocker,
+            tuple(f"{k}={v}" for k, v in recall_evidence.items()),
+            PERSONAL_RECALL_SHA,
+            str(recall_evidence.get("reviewed_at") or LAST_VERIFIED),
+        ),
         "PRESENCE": ReadinessRecord(True, True, True, True, False, True, True, True, None, ("machine-readable boot status stream",), None, str(date.today())),
         "CONTEXT_CONTRACT": ReadinessRecord(True, True, True, True, False, True, True, True, None, ("context/perception contract registered",), None, str(date.today())),
         "COMPUTER_CONTROL_AUTHORITY": ReadinessRecord(True, True, True, True, False, True, True, True, None, ("capability taxonomy registered; no capabilities granted",), None, str(date.today())),

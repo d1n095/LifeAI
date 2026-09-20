@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import exists, or_, select
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Session
 
 from app.models.mainai_verification import MainAIVerificationRecord
@@ -100,12 +101,14 @@ def find_independent_pass(
     if db is None or candidate_sha is None:
         return None
     _require_sha(candidate_sha)
+    invalidating_record = aliased(MainAIVerificationRecord)
     stmt = select(MainAIVerificationRecord).where(
         MainAIVerificationRecord.component_id == component_id,
         MainAIVerificationRecord.candidate_sha == candidate_sha,
         MainAIVerificationRecord.review_result == PASS,
         MainAIVerificationRecord.builder_identity == builder_identity,
         MainAIVerificationRecord.examiner_identity != builder_identity,
+        ~exists().where(invalidating_record.invalidates_verification_id == MainAIVerificationRecord.id),
     )
     if owner_id is None:
         stmt = stmt.where(MainAIVerificationRecord.owner_id.is_(None))
