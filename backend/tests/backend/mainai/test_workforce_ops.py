@@ -6,21 +6,30 @@ No live provider dispatch. UNKNOWN EXTERNAL EFFECT != NO EXTERNAL EFFECT.
 from __future__ import annotations
 
 import uuid
+import threading
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import text as sa_text
+from sqlalchemy.orm import sessionmaker
 
+from app.models.intelligence_governance import IntelligenceEvidence
+from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
 from app.models.user import User
+from app.models.workforce import WorkforceDelegationRequest
+from app.models.workforce_ops import WorkforceVerificationDecision
 from app.workforce import (
     CostGovernanceError,
     FailureTakeoverError,
     LifecycleError,
     VerificationError,
+    activate_owner_stop,
     alternate_agent_takeover,
     apply_verification_decision,
     assert_no_automatic_cross_context,
     assert_scopes_allow_spend,
     can_safely_retry,
+    clear_owner_stop,
     create_context_package,
     form_pattern_team,
     looks_like_prompt_injection,
@@ -79,40 +88,132 @@ def _pair(db, owner_id, *, suffix=""):
     return b, v
 
 
-def _evidence_for_assignment(db, owner_id, assignment, *, passed=True, subject_override=None):
+def _authority_epochs(db, owner_id):
+    rows = db.execute(
+        sa_text(
+            """
+            SELECT scope_key, epoch
+            FROM workforce_authority_epoch
+            WHERE scope_key IN ('GLOBAL', :owner_scope)
+            """
+        ),
+        {"owner_scope": str(owner_id)},
+    ).mappings().all()
+    by_scope = {row["scope_key"]: int(row["epoch"] or 0) for row in rows}
+    return {
+        "global_authority_epoch": by_scope.get("GLOBAL", 0),
+        "owner_authority_epoch": by_scope.get(str(owner_id), 0),
+    }
+
+
+def _new_session():
+    from app.db import migration_engine
+
+    return sessionmaker(bind=migration_engine)()
+
+
+def _evidence_for_assignment(
+    db,
+    owner_id,
+    assignment=None,
+    *,
+    capability_key: str = "low_risk_classification",
+    passed=True,
+    stale: bool = False,
+    subject_override=None,
+    include_execution_binding: bool = True,
+):
     """Creates a real, genuinely-linked IntelligenceEvidence row (goal/plan/task/execution
-    chain + evidence, payload.subject == this assignment's own id) and returns its UUID
+    chain + evidence, payload-bound to this assignment where provided) and returns its UUID
     string, suitable as a real test_evidence_ref for apply_verification_decision()."""
     from app.intelligence_governance.service import record_evidence, record_execution
-    from app.models.mainai_execution import MainAIGoal, MainAIPlan, MainAITask
 
-    goal = MainAIGoal(owner_id=owner_id, title="wf-verify", original_instruction="verify", created_by="test")
-    db.add(goal)
-    db.flush()
-    plan = MainAIPlan(owner_id=owner_id, goal_id=goal.id, version=1, rationale="test", created_by="test")
-    db.add(plan)
-    db.flush()
-    task = MainAITask(
-        owner_id=owner_id, goal_id=goal.id, plan_id=plan.id, task_type="repo_edit",
-        description="t", status="pending", risk_level="high",
-    )
-    db.add(task)
-    db.flush()
+    task_id = None
+    if assignment is not None:
+        request = db.get(WorkforceDelegationRequest, assignment.delegation_request_id)
+        task_id = request.task_id if request is not None else None
+        if request is not None and capability_key == "low_risk_classification":
+            capability_key = request.required_capability
+    if task_id is None:
+        goal = MainAIGoal(owner_id=owner_id, title="wf-verify", original_instruction="verify", created_by="test")
+        db.add(goal)
+        db.flush()
+        plan = MainAIPlan(owner_id=owner_id, goal_id=goal.id, version=1, rationale="test", created_by="test")
+        db.add(plan)
+        db.flush()
+        task = MainAITask(
+            owner_id=owner_id, goal_id=goal.id, plan_id=plan.id, task_type="repo_edit",
+            description="t", status="pending", risk_level="high",
+        )
+        db.add(task)
+        db.flush()
+        task_id = task.id
     execution = record_execution(
-        db, owner_id=owner_id, task_id=task.id, idempotency_key=f"wfve-{uuid.uuid4()}", provider="internal",
+        db, owner_id=owner_id, task_id=task_id, idempotency_key=f"wfve-{uuid.uuid4()}", provider="internal",
     )
-    evidence = record_evidence(
+    payload = {"passed": passed, "capability_key": subject_override or capability_key}
+    if assignment is not None:
+        payload.update(
+            {
+                "assignment_id": str(assignment.id),
+                "delegation_request_id": str(assignment.delegation_request_id),
+                **_authority_epochs(db, owner_id),
+            }
+        )
+        if include_execution_binding:
+            payload["execution_id"] = str(execution.id)
+    if stale:
+        evidence = IntelligenceEvidence(
+            owner_id=owner_id,
+            execution_id=execution.id,
+            evidence_kind="test_run_result",
+            payload=payload,
+            source_type="pytest",
+            source_ref=f"tests/workforce/test_assignment_{getattr(assignment, 'id', 'capability')}.py",
+            idempotency_key=f"wfev-{uuid.uuid4()}",
+            deterministic=True,
+            created_at=datetime.utcnow() - timedelta(days=30),
+        )
+        db.add(evidence)
+        db.flush()
+    else:
+        evidence = record_evidence(
+            db,
+            owner_id=owner_id,
+            execution_id=execution.id,
+            evidence_kind="test_run_result",
+            payload=payload,
+            source_type="pytest",
+            source_ref=f"tests/workforce/test_assignment_{getattr(assignment, 'id', 'capability')}.py",
+            idempotency_key=f"wfev-{uuid.uuid4()}",
+            deterministic=True,
+        )
+    return str(evidence.id)
+
+
+def _verify_high_risk(
+    db,
+    *,
+    owner_id,
+    assignment,
+    verifier_id,
+    second_verifier_id,
+    evidence_ref,
+    founder_ref="founder:ok:test",
+):
+    return apply_verification_decision(
         db,
         owner_id=owner_id,
-        execution_id=execution.id,
-        evidence_kind="test_run_result",
-        payload={"passed": passed, "subject": subject_override or str(assignment.id)},
-        source_type="pytest",
-        source_ref=f"tests/workforce/test_assignment_{assignment.id}.py",
-        idempotency_key=f"wfev-{uuid.uuid4()}",
-        deterministic=True,
+        assignment=assignment,
+        decision="VERIFIED",
+        risk="high",
+        verifier_profile_id=verifier_id,
+        second_verifier_profile_id=second_verifier_id,
+        agreement=True,
+        test_evidence_ref=evidence_ref,
+        deterministic_validator="schema_v1",
+        founder_approval_ref=founder_ref,
     )
-    return str(evidence.id)
 
 
 # --- T13 ---
@@ -359,6 +460,13 @@ def test_high_risk_wrong_owner_evidence_rejected(superuser_db):
         apply_verification_decision(superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref=ref))
 
 
+def test_high_risk_wrong_capability_evidence_rejected(superuser_db):
+    owner, a, v, v2 = _high_risk_setup(superuser_db, "-wrongcap")
+    ref = _evidence_for_assignment(superuser_db, owner.id, a, passed=True, capability_key="other.capability")
+    with pytest.raises(VerificationError):
+        apply_verification_decision(superuser_db, **_verify_kwargs(owner, a, v, v2, test_evidence_ref=ref))
+
+
 def test_high_risk_real_matching_evidence_accepted(superuser_db):
     owner, a, v, v2 = _high_risk_setup(superuser_db, "-real")
     ref = _evidence_for_assignment(superuser_db, owner.id, a, passed=True)
@@ -366,6 +474,327 @@ def test_high_risk_real_matching_evidence_accepted(superuser_db):
     superuser_db.commit()
     assert a.verification_status == "VERIFIED"
     assert a.status == "completed"
+
+
+def test_high_risk_evidence_cannot_be_replayed_across_assignments(superuser_db):
+    owner, assignment_a, v, v2 = _high_risk_setup(superuser_db, "-replay-a")
+    req_b = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="task B",
+        required_capability="low_risk_classification",
+        risk="high",
+        verification_requirement="independent_verifier",
+    )
+    assignment_b = resolve_delegation(superuser_db, owner_id=owner.id, request=req_b, verifier_profile_id=v.id)
+    evidence_ref = _evidence_for_assignment(superuser_db, owner.id, assignment_a, passed=True)
+
+    _verify_high_risk(
+        superuser_db,
+        owner_id=owner.id,
+        assignment=assignment_a,
+        verifier_id=v.id,
+        second_verifier_id=v2.id,
+        evidence_ref=evidence_ref,
+    )
+
+    with pytest.raises(VerificationError):
+        _verify_high_risk(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment_b,
+            verifier_id=v.id,
+            second_verifier_id=v2.id,
+            evidence_ref=evidence_ref,
+        )
+
+
+def test_high_risk_evidence_same_assignment_retry_is_idempotent(superuser_db):
+    owner, assignment, v, v2 = _high_risk_setup(superuser_db, "-idem")
+    evidence_ref = _evidence_for_assignment(superuser_db, owner.id, assignment, passed=True)
+
+    first = _verify_high_risk(
+        superuser_db,
+        owner_id=owner.id,
+        assignment=assignment,
+        verifier_id=v.id,
+        second_verifier_id=v2.id,
+        evidence_ref=evidence_ref,
+    )
+    second = _verify_high_risk(
+        superuser_db,
+        owner_id=owner.id,
+        assignment=assignment,
+        verifier_id=v.id,
+        second_verifier_id=v2.id,
+        evidence_ref=evidence_ref,
+    )
+
+    assert second.id == first.id
+    assert (
+        superuser_db.query(WorkforceVerificationDecision)
+        .filter_by(owner_id=owner.id, assignment_id=assignment.id, decision="VERIFIED", test_evidence_ref=evidence_ref)
+        .count()
+        == 1
+    )
+
+
+def test_high_risk_rejects_stale_and_unbound_evidence(superuser_db):
+    owner, assignment, v, v2 = _high_risk_setup(superuser_db, "-stale-unbound")
+
+    stale_ref = _evidence_for_assignment(superuser_db, owner.id, assignment, passed=True, stale=True)
+    with pytest.raises(VerificationError):
+        _verify_high_risk(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment,
+            verifier_id=v.id,
+            second_verifier_id=v2.id,
+            evidence_ref=stale_ref,
+        )
+
+    unbound_ref = _evidence_for_assignment(superuser_db, owner.id, None, passed=True)
+    with pytest.raises(VerificationError):
+        _verify_high_risk(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment,
+            verifier_id=v.id,
+            second_verifier_id=v2.id,
+            evidence_ref=unbound_ref,
+        )
+
+    missing_execution_ref = _evidence_for_assignment(
+        superuser_db,
+        owner.id,
+        assignment,
+        passed=True,
+        include_execution_binding=False,
+    )
+    with pytest.raises(VerificationError):
+        _verify_high_risk(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment,
+            verifier_id=v.id,
+            second_verifier_id=v2.id,
+            evidence_ref=missing_execution_ref,
+        )
+
+
+def test_high_risk_evidence_bound_to_task_and_assignment_snapshot(superuser_db):
+    owner = _owner(superuser_db)
+    _, v = _pair(superuser_db, owner.id, suffix="-task")
+    v2 = register_workforce_agent(
+        superuser_db,
+        owner_id=owner.id,
+        agent_key="v2-task",
+        name="V2 Task",
+        role="verifier",
+        agent_type="VERIFIER",
+        trust_zone="LOCAL_INTERNAL",
+        capability_tags=["verification"],
+        status="active",
+    )
+    goal = MainAIGoal(owner_id=owner.id, title="task binding", original_instruction="verify", created_by="test")
+    superuser_db.add(goal)
+    superuser_db.flush()
+    plan = MainAIPlan(owner_id=owner.id, goal_id=goal.id, version=1, rationale="test", created_by="test")
+    superuser_db.add(plan)
+    superuser_db.flush()
+    task_a = MainAITask(
+        owner_id=owner.id,
+        goal_id=goal.id,
+        plan_id=plan.id,
+        task_type="verification",
+        description="A",
+        status="pending",
+        risk_level="high",
+    )
+    task_b = MainAITask(
+        owner_id=owner.id,
+        goal_id=goal.id,
+        plan_id=plan.id,
+        task_type="verification",
+        description="B",
+        status="pending",
+        risk_level="high",
+    )
+    superuser_db.add_all([task_a, task_b])
+    superuser_db.flush()
+    req_a = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="task A",
+        required_capability="low_risk_classification",
+        task_id=task_a.id,
+        risk="high",
+        verification_requirement="independent_verifier",
+    )
+    req_b = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="task B",
+        required_capability="low_risk_classification",
+        task_id=task_b.id,
+        risk="high",
+        verification_requirement="independent_verifier",
+    )
+    assignment_a = resolve_delegation(superuser_db, owner_id=owner.id, request=req_a, verifier_profile_id=v.id)
+    assignment_b = resolve_delegation(superuser_db, owner_id=owner.id, request=req_b, verifier_profile_id=v.id)
+    evidence_ref = _evidence_for_assignment(superuser_db, owner.id, assignment_a, passed=True)
+
+    with pytest.raises(VerificationError):
+        _verify_high_risk(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment_b,
+            verifier_id=v.id,
+            second_verifier_id=v2.id,
+            evidence_ref=evidence_ref,
+        )
+
+    req_a.required_capability = "changed.after.evidence"
+    superuser_db.flush()
+    with pytest.raises(VerificationError):
+        _verify_high_risk(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment_a,
+            verifier_id=v.id,
+            second_verifier_id=v2.id,
+            evidence_ref=evidence_ref,
+        )
+
+
+def test_high_risk_evidence_from_previous_authority_epoch_is_rejected(superuser_db):
+    owner, assignment, v, v2 = _high_risk_setup(superuser_db, "-epoch")
+    evidence_ref = _evidence_for_assignment(superuser_db, owner.id, assignment, passed=True)
+    stopped = activate_owner_stop(superuser_db, owner_id=owner.id, reason="rotate epoch")
+    clear_owner_stop(
+        superuser_db,
+        owner_id=owner.id,
+        founder_ack="founder_ack:clear owner stop after epoch rotation test",
+        expected_sequence=stopped.sequence,
+    )
+    superuser_db.flush()
+
+    with pytest.raises(VerificationError):
+        _verify_high_risk(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment,
+            verifier_id=v.id,
+            second_verifier_id=v2.id,
+            evidence_ref=evidence_ref,
+        )
+
+
+def test_high_risk_evidence_concurrent_replay_two_assignments(superuser_db):
+    owner, assignment_a, v, v2 = _high_risk_setup(superuser_db, "-race-a")
+    req_b = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="task B",
+        required_capability="low_risk_classification",
+        risk="high",
+        verification_requirement="independent_verifier",
+    )
+    assignment_b = resolve_delegation(superuser_db, owner_id=owner.id, request=req_b, verifier_profile_id=v.id)
+    evidence_ref = _evidence_for_assignment(superuser_db, owner.id, assignment_a, passed=True)
+    owner_id, a_id, b_id, v_id, v2_id = owner.id, assignment_a.id, assignment_b.id, v.id, v2.id
+    superuser_db.commit()
+
+    barrier = threading.Barrier(2, timeout=10)
+    lock = threading.Lock()
+    results = []
+
+    def _attempt(assignment_id):
+        session = _new_session()
+        try:
+            assignment = session.get(type(assignment_a), assignment_id)
+            barrier.wait(timeout=10)
+            _verify_high_risk(
+                session,
+                owner_id=owner_id,
+                assignment=assignment,
+                verifier_id=v_id,
+                second_verifier_id=v2_id,
+                evidence_ref=evidence_ref,
+            )
+            session.commit()
+            result = "verified"
+        except Exception as exc:  # noqa: BLE001 - test records accepted/rejected race outcome.
+            session.rollback()
+            result = type(exc).__name__
+        finally:
+            session.close()
+        with lock:
+            results.append((assignment_id, result))
+
+    threads = [threading.Thread(target=_attempt, args=(a_id,)), threading.Thread(target=_attempt, args=(b_id,))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert all(not thread.is_alive() for thread in threads)
+
+    assert (a_id, "verified") in results
+    assert any(item[0] == b_id and item[1] == "VerificationError" for item in results)
+    verify = _new_session()
+    try:
+        assert (
+            verify.query(WorkforceVerificationDecision)
+            .filter_by(owner_id=owner_id, decision="VERIFIED", test_evidence_ref=evidence_ref)
+            .count()
+            == 1
+        )
+    finally:
+        verify.close()
+
+
+def test_reusable_capability_evidence_remains_reusable_for_medium_risk(superuser_db):
+    owner = _owner(superuser_db)
+    _, v = _pair(superuser_db, owner.id, suffix="-medium-reuse")
+    req_a = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="medium task A",
+        required_capability="low_risk_classification",
+        risk="medium",
+        verification_requirement="independent_verifier",
+    )
+    req_b = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="medium task B",
+        required_capability="low_risk_classification",
+        risk="medium",
+        verification_requirement="independent_verifier",
+    )
+    assignment_a = resolve_delegation(superuser_db, owner_id=owner.id, request=req_a, verifier_profile_id=v.id)
+    assignment_b = resolve_delegation(superuser_db, owner_id=owner.id, request=req_b, verifier_profile_id=v.id)
+    evidence_ref = _evidence_for_assignment(
+        superuser_db,
+        owner.id,
+        None,
+        capability_key=req_a.required_capability,
+        passed=True,
+    )
+
+    for assignment in (assignment_a, assignment_b):
+        apply_verification_decision(
+            superuser_db,
+            owner_id=owner.id,
+            assignment=assignment,
+            decision="VERIFIED",
+            risk="medium",
+            verifier_profile_id=v.id,
+            test_evidence_ref=evidence_ref,
+        )
+
+    assert assignment_a.verification_status == "VERIFIED"
+    assert assignment_b.verification_status == "VERIFIED"
 
 
 # --- T15 / T20 ---
