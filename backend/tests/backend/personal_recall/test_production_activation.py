@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import uuid
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,7 +14,7 @@ os.environ.setdefault("PERSONAL_RECALL_SYSTEM_KEK_VERSION", "test-v1")
 
 from app.founder import FOUNDER_USER_ID
 from app.account.export import export_account_data
-from app.mainai_founder_boot.readiness import PERSONAL_RECALL_SHA, build_readiness_matrix, component_manifest
+from app.mainai_founder_boot.readiness import PERSONAL_RECALL_PRODUCTION_COMPONENT_ID, build_readiness_matrix, component_manifest
 from app.mainai_verification_registry.service import record_verification_attestation
 from app.models.personal_recall_production import PersonalRecallChunk, PersonalRecallGrant, PersonalRecallOwnerKey, PersonalRecallSource
 from app.models.refresh_token import RefreshToken
@@ -133,6 +134,11 @@ def test_system_kek_repr_and_loggable_containers_redact_secret_material():
         assert encoded_secret not in rendered
         assert secret.hex() not in rendered
         assert "<redacted" in rendered or "'<redacted>'" in rendered
+    assert is_dataclass(kek) is False
+    with pytest.raises(TypeError):
+        asdict(kek)
+    with pytest.raises(TypeError):
+        vars(kek)
     assert kek.key == secret
     assert kek.version == "test-version"
 
@@ -483,11 +489,15 @@ def test_founder_boot_remains_honest_until_independent_verification(db_session):
     assert component_manifest(db_session)["personal_recall"]["independently_verified"] is False
 
 
-def test_personal_recall_readiness_rejects_wrong_failed_and_invalidated_registry_records(superuser_db):
+def test_personal_recall_readiness_rejects_wrong_failed_and_invalidated_registry_records(monkeypatch, superuser_db):
+    import app.mainai_founder_boot.readiness as readiness
+    current_identity = "4" * 40
+    monkeypatch.setattr(readiness, "personal_recall_production_identity", lambda: current_identity)
+
     failed = record_verification_attestation(
         superuser_db,
-        component_id="PERSONAL_RECALL",
-        candidate_sha=PERSONAL_RECALL_SHA,
+        component_id=PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=current_identity,
         builder_identity="codex",
         examiner_identity="claude",
         review_result="FAIL",
@@ -495,7 +505,7 @@ def test_personal_recall_readiness_rejects_wrong_failed_and_invalidated_registry
     )
     record_verification_attestation(
         superuser_db,
-        component_id="PERSONAL_RECALL",
+        component_id=PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
         candidate_sha="0" * 40,
         builder_identity="codex",
         examiner_identity="claude",
@@ -504,8 +514,8 @@ def test_personal_recall_readiness_rejects_wrong_failed_and_invalidated_registry
     )
     stale_pass = record_verification_attestation(
         superuser_db,
-        component_id="PERSONAL_RECALL",
-        candidate_sha=PERSONAL_RECALL_SHA,
+        component_id=PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=current_identity,
         builder_identity="codex",
         examiner_identity="claude",
         review_result="PASS",
@@ -513,8 +523,8 @@ def test_personal_recall_readiness_rejects_wrong_failed_and_invalidated_registry
     )
     record_verification_attestation(
         superuser_db,
-        component_id="PERSONAL_RECALL",
-        candidate_sha=PERSONAL_RECALL_SHA,
+        component_id=PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=current_identity,
         builder_identity="codex",
         examiner_identity="claude",
         review_result="FAIL",
@@ -527,19 +537,23 @@ def test_personal_recall_readiness_rejects_wrong_failed_and_invalidated_registry
     assert recall["INDEPENDENTLY_VERIFIED"] is False
     assert recall["ACTIVATED"] is False
     assert recall["SAFE_FOR_FOUNDER_BOOT"] is False
-    assert recall["EXACT_SHA"] == PERSONAL_RECALL_SHA
+    assert recall["EXACT_SHA"] == current_identity
     assert failed.review_result == "FAIL"
 
 
-def test_personal_recall_readiness_uses_valid_exact_sha_registry_pass_without_activation(superuser_db):
+def test_personal_recall_readiness_uses_valid_exact_identity_registry_pass_without_activation(monkeypatch, superuser_db):
+    import app.mainai_founder_boot.readiness as readiness
+    current_identity = "5" * 40
+    monkeypatch.setattr(readiness, "personal_recall_production_identity", lambda: current_identity)
+
     record_verification_attestation(
         superuser_db,
-        component_id="PERSONAL_RECALL",
-        candidate_sha=PERSONAL_RECALL_SHA,
+        component_id=PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=current_identity,
         builder_identity="codex",
         examiner_identity="claude",
         review_result="PASS",
-        evidence_summary="independent exact-SHA Personal Recall review PASS",
+        evidence_summary="independent exact production identity Personal Recall review PASS",
     )
     superuser_db.commit()
 

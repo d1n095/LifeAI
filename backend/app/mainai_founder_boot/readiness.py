@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 from dataclasses import dataclass
@@ -16,7 +17,8 @@ from app.mainai_level2.components import VERIFIED_SHAS, compose_local_verified_c
 
 LEVEL2_BASE_SHA = "ec611a5d3216f4194793e8db01a2eceb1d0235eb"
 COVERAGE_WORKFORCE_SHA = "3dd57d7f180c71d6639b90845b8cd8c492a29fbb"
-PERSONAL_RECALL_SHA = "024835547850035667c3d77383fd75699ceab178"
+PERSONAL_RECALL_FOUNDATION_SHA = "024835547850035667c3d77383fd75699ceab178"
+PERSONAL_RECALL_PRODUCTION_COMPONENT_ID = "PERSONAL_RECALL_PRODUCTION"
 PERSONAL_RECALL_BUILDER = "codex"
 LAST_VERIFIED = "2026-09-17"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -68,6 +70,46 @@ def _module_imports(name: str) -> tuple[bool, str]:
 
 def _file_present(rel: str) -> bool:
     return (_REPO_ROOT / rel).exists()
+
+
+PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES = (
+    "app/personal_recall/authorization.py",
+    "app/personal_recall/production_crypto.py",
+    "app/personal_recall/production_ingestion.py",
+    "app/personal_recall/production_lifecycle.py",
+    "app/personal_recall/routes_prep.py",
+    "app/models/personal_recall_production.py",
+    "app/account/erasure.py",
+    "app/rls.py",
+    "scripts/security/s1a_privilege_policy.py",
+    "alembic/versions/0081_personal_recall_production_activation.py",
+    "alembic/versions/0083_personal_recall_authority_boundary.py",
+    "alembic/versions/0084_personal_recall_erasure_lifecycle.py",
+    "alembic/versions/0085_account_erasure_operation_authority.py",
+    "app/mainai_founder_boot/readiness.py",
+)
+
+
+def personal_recall_production_identity() -> str:
+    """Return the current security-relevant Personal Recall production artifact identity.
+
+    This is deliberately derived from candidate-local implementation files and migrations rather
+    than a hard-coded Git commit. An old foundation review can remain historically true, while
+    any material change to production crypto/authorization/lifecycle/readiness code changes the
+    identity that the verification registry must attest. The registry field is still named
+    candidate_sha, so we use a 40-character lowercase hex artifact digest.
+    """
+    digest = hashlib.sha256()
+    for rel in PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES:
+        path = _REPO_ROOT / rel
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        if not path.exists():
+            digest.update(b"<missing>")
+        else:
+            digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:40]
 
 
 def _coverage_workforce_invocation() -> tuple[bool, str]:
@@ -272,8 +314,8 @@ def component_specs() -> dict[str, ComponentSpec]:
 def _personal_recall_verification(db: Session | None) -> MainAIVerificationRecord | None:
     return find_independent_pass(
         db,
-        component_id="PERSONAL_RECALL",
-        candidate_sha=PERSONAL_RECALL_SHA,
+        component_id=PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=personal_recall_production_identity(),
         builder_identity=PERSONAL_RECALL_BUILDER,
     )
 
@@ -297,7 +339,9 @@ def assess_personal_recall(db: Session | None = None) -> tuple[RecallBootStatus,
         "independent_verification_required": True,
         "independent_verification": verification_record is not None,
         "verification_record": "present" if verification_record is not None else "missing",
-        "expected_sha": PERSONAL_RECALL_SHA,
+        "expected_identity": personal_recall_production_identity(),
+        "foundation_sha": PERSONAL_RECALL_FOUNDATION_SHA,
+        "production_component_id": PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
         "activation": "disabled_until_independent_verification_and_explicit_router_grant_activation",
     }
     if verification_record is not None:
@@ -315,9 +359,9 @@ def assess_personal_recall(db: Session | None = None) -> tuple[RecallBootStatus,
     except Exception:
         evidence["test_only_protector_present"] = False
     if verification_record is None:
-        blocker = "production AEAD/key hierarchy is implemented, but Personal Recall remains disabled until exact-SHA independent verification and explicit founder-authorized router/grant activation"
+        blocker = "production AEAD/key hierarchy is implemented, but Personal Recall remains disabled until exact production-identity independent verification and explicit founder-authorized router/grant activation"
     else:
-        blocker = "Personal Recall has exact-SHA independent verification evidence, but remains disabled until explicit founder-authorized router/grant activation"
+        blocker = "Personal Recall has exact production-identity independent verification evidence, but remains disabled until explicit founder-authorized router/grant activation"
     return RecallBootStatus.DISABLED_BY_SECURITY_GATE, blocker, evidence
 
 
@@ -344,8 +388,10 @@ def component_manifest(db: Session | None = None) -> dict:
         }
     manifest["level2_base"] = {"candidate_sha": LEVEL2_BASE_SHA, "bound": manifest.get("level2", {}).get("integrated", False), "authority": "none"}
     manifest["personal_recall"] = {
-        "candidate_sha": PERSONAL_RECALL_SHA,
-        "bound": _module_present("app.personal_recall.service"),
+        "foundation_sha": PERSONAL_RECALL_FOUNDATION_SHA,
+        "production_identity": personal_recall_production_identity(),
+        "candidate_sha": personal_recall_production_identity(),
+        "bound": _module_present("app.personal_recall.production_ingestion"),
         "independently_verified": _personal_recall_verification(db) is not None,
         "activated": False,
         "authority": "none",
@@ -392,7 +438,7 @@ def build_readiness_matrix(*, covenant_ready: bool, founder_ready: bool, db_read
             False,
             recall_blocker,
             tuple(f"{k}={v}" for k, v in recall_evidence.items()),
-            PERSONAL_RECALL_SHA,
+            str(recall_evidence["expected_identity"]),
             str(recall_evidence.get("reviewed_at") or LAST_VERIFIED),
         ),
         "PRESENCE": ReadinessRecord(True, True, True, True, False, True, True, True, None, ("machine-readable boot status stream",), None, str(date.today())),

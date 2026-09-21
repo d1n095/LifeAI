@@ -547,6 +547,138 @@ def test_verification_registry_absence_blocks_independent_readiness(db_session):
     assert any("verification_record=missing" in item for item in row["EVIDENCE"])
 
 
+def test_personal_recall_old_foundation_pass_does_not_verify_current_production(superuser_db):
+    import app.mainai_founder_boot.readiness as readiness
+
+    record_verification_attestation(
+        superuser_db,
+        component_id="PERSONAL_RECALL",
+        candidate_sha=readiness.PERSONAL_RECALL_FOUNDATION_SHA,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="historical foundation review only",
+    )
+    superuser_db.commit()
+
+    _, _, evidence = readiness.assess_personal_recall(superuser_db)
+    matrix = build_readiness_matrix(covenant_ready=True, founder_ready=True, db=superuser_db)
+    row = matrix["PERSONAL_RECALL"]
+
+    assert evidence["foundation_sha"] == readiness.PERSONAL_RECALL_FOUNDATION_SHA
+    assert evidence["production_component_id"] == readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID
+    assert evidence["expected_identity"] == readiness.personal_recall_production_identity()
+    assert evidence["independent_verification"] is False
+    assert row["INDEPENDENTLY_VERIFIED"] is False
+    assert row["EXACT_SHA"] != readiness.PERSONAL_RECALL_FOUNDATION_SHA
+    assert row["ACTIVATED"] is False
+
+
+def test_personal_recall_verification_identity_fencing(monkeypatch, superuser_db):
+    import app.mainai_founder_boot.readiness as readiness
+
+    current_identity = "1" * 40
+    monkeypatch.setattr(readiness, "personal_recall_production_identity", lambda: current_identity)
+
+    # No registry record -> unverified.
+    assert readiness.assess_personal_recall(superuser_db)[2]["independent_verification"] is False
+
+    # Wrong identity -> unverified.
+    record_verification_attestation(
+        superuser_db,
+        component_id=readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha="2" * 40,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="PASS for another production identity must not transfer",
+    )
+    # FAIL for current identity -> unverified.
+    record_verification_attestation(
+        superuser_db,
+        component_id=readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=current_identity,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="FAIL",
+        evidence_summary="current production identity failed review",
+    )
+    superuser_db.commit()
+    assert readiness.assess_personal_recall(superuser_db)[2]["independent_verification"] is False
+
+    # Exact independent PASS verifies the production identity but still does not activate Recall.
+    pass_record = record_verification_attestation(
+        superuser_db,
+        component_id=readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=current_identity,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="current production identity independently passed",
+    )
+    superuser_db.commit()
+    matrix = build_readiness_matrix(covenant_ready=True, founder_ready=True, db=superuser_db)
+    row = matrix["PERSONAL_RECALL"]
+    assert row["INDEPENDENTLY_VERIFIED"] is True
+    assert row["ACTIVATED"] is False
+    assert row["SAFE_FOR_FOUNDER_BOOT"] is False
+    assert row["STATE"] == "DISABLED"
+
+    # An invalidating record removes the PASS from readiness.
+    record_verification_attestation(
+        superuser_db,
+        component_id=readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=current_identity,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="FAIL",
+        evidence_summary="current production identity invalidated after regression",
+        invalidates_verification_id=pass_record.id,
+    )
+    superuser_db.commit()
+    assert readiness.assess_personal_recall(superuser_db)[2]["independent_verification"] is False
+
+
+def test_personal_recall_self_certification_and_code_change_identity(monkeypatch, tmp_path, superuser_db):
+    import app.mainai_founder_boot.readiness as readiness
+
+    with pytest.raises(Exception):
+        record_verification_attestation(
+            superuser_db,
+            component_id=readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+            candidate_sha="3" * 40,
+            builder_identity="codex",
+            examiner_identity="codex",
+            review_result="PASS",
+            evidence_summary="builder self-certification must be rejected",
+        )
+
+    rel = "app/personal_recall/production_crypto.py"
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True)
+    target.write_text("version one", encoding="utf-8")
+    monkeypatch.setattr(readiness, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(readiness, "PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES", (rel,))
+
+    first_identity = readiness.personal_recall_production_identity()
+    record_verification_attestation(
+        superuser_db,
+        component_id=readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=first_identity,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="PASS for first production file digest",
+    )
+    superuser_db.commit()
+    assert readiness.assess_personal_recall(superuser_db)[2]["independent_verification"] is True
+
+    target.write_text("version two", encoding="utf-8")
+    second_identity = readiness.personal_recall_production_identity()
+    assert second_identity != first_identity
+    assert readiness.assess_personal_recall(superuser_db)[2]["independent_verification"] is False
+
+
 def test_verification_registry_rejects_builder_self_certification(superuser_db):
     with pytest.raises(Exception):
         record_verification_attestation(

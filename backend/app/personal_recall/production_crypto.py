@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import os
-from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -16,18 +15,32 @@ class RecallCryptoError(ValueError):
     pass
 
 
-@dataclass(frozen=True, repr=False)
 class SystemKEK:
-    version: str
-    key: bytes = field(repr=False)
+    """In-memory holder for the Recall system key-encryption key.
+
+    This is intentionally not a dataclass and has no instance __dict__. Generic helpers such
+    as dataclasses.asdict() and vars() must fail instead of serializing raw key bytes into
+    logs, traces, or debug payloads. Internal crypto code can still access key material through
+    the explicit .key property.
+    """
+
+    __slots__ = ("version", "_key")
+
+    def __init__(self, version: str, key: bytes) -> None:
+        self.version = version
+        self._key = bytes(key)
+
+    @property
+    def key(self) -> bytes:
+        return self._key
 
     def __repr__(self) -> str:
-        return f"SystemKEK(version={self.version!r}, key=<redacted:{len(self.key)} bytes>)"
+        return f"SystemKEK(version={self.version!r}, key=<redacted:{len(self._key)} bytes>)"
 
     __str__ = __repr__
 
     def safe_metadata(self) -> dict[str, int | str]:
-        return {"version": self.version, "key": "<redacted>", "key_bytes": len(self.key)}
+        return {"version": self.version, "key": "<redacted>", "key_bytes": len(self._key)}
 
 
 def load_system_kek_from_env() -> SystemKEK:
