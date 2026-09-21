@@ -236,19 +236,32 @@ def export_personal_recall_data(db: Session, *, owner_id: uuid.UUID) -> dict:
     }
 
 
-def erase_personal_recall_data(db: Session, *, owner_id: uuid.UUID) -> PersonalRecallErasureResult:
+def erase_personal_recall_data(db: Session, *, owner_id: uuid.UUID, operation_id: uuid.UUID) -> PersonalRecallErasureResult:
     """Governed account-erasure path for Personal Recall production data.
 
     This is intentionally not ordinary table DELETE access. The account-erasure transaction
-    must already be bound to the owner via RLS/session state. Content ciphertext is scrubbed
-    before parent rows are removed, grants are revoked, and owner-key/grant deletes are
-    allowed only under the narrow erasure GUC consumed by the DB triggers.
+    must already be bound to the owner via RLS/session state and a canonical active account
+    erasure operation. Content ciphertext is scrubbed before parent rows are removed, grants
+    are revoked, and owner-key/grant deletes are allowed only when the DB trigger can verify
+    the same owner and operation in durable account-erasure state.
     """
     if _current_rls_owner(db) != owner_id:
         raise ValueError("personal recall erasure requires the current owner DB session")
 
     now = datetime.now(timezone.utc)
-    db.execute(sql_text("SET LOCAL app.personal_recall_erasure_in_progress = 'true'"))
+    db.execute(
+        sql_text(
+            "SELECT set_config('app.personal_recall_erasure_in_progress', 'true', true), "
+            "set_config('app.account_erasure_operation_id', :operation_id, true)"
+        ),
+        {"operation_id": str(operation_id)},
+    )
+    erasure_current = db.execute(
+        sql_text("SELECT personal_recall_erasure_current(:owner_id)"),
+        {"owner_id": str(owner_id)},
+    ).scalar()
+    if not erasure_current:
+        raise ValueError("personal recall erasure requires a current governed account-erasure operation")
     sources = db.execute(select(PersonalRecallSource).where(PersonalRecallSource.owner_id == owner_id)).scalars().all()
     for source in sources:
         source.state = "deleted"

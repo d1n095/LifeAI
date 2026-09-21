@@ -106,6 +106,7 @@ _PROTECTED_TABLES = [
     ("memory_source_units", ["SELECT", "INSERT"]),
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
+    ("account_erasure_operations", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
     ("storage_deletion_tasks", []),
     # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
     # §D/§L) — message_source_units is S1C, the exact same exclusive-arc pattern as

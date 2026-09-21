@@ -101,6 +101,20 @@ def _ctx(owner_id, session_id="boot-session", purpose="founder_file_ingestion"):
     return RetrievalGrantContext(owner_id=owner_id, session_id=session_id, purpose=purpose, resource_classes=("file",), disclosure_level="snippet", can_disclose=True)
 
 
+def _create_erasure_operation(session, owner_id, *, status="active", phase="personal_recall_erasure"):
+    operation_id = uuid.uuid4()
+    _set_rls_user(session, owner_id)
+    session.execute(
+        text(
+            "INSERT INTO account_erasure_operations (operation_id, owner_id, status, phase) "
+            "VALUES (:operation_id, :owner_id, :status, :phase)"
+        ),
+        {"operation_id": str(operation_id), "owner_id": str(owner_id), "status": status, "phase": phase},
+    )
+    session.flush()
+    return operation_id
+
+
 def test_system_kek_repr_and_loggable_containers_redact_secret_material():
     secret = b"secret-system-kek-material-32b!!!"[:32]
     encoded_secret = base64.b64encode(secret).decode("ascii")
@@ -367,7 +381,8 @@ def test_personal_recall_governed_erasure_makes_content_non_retrievable_and_is_i
     db_session.commit()
 
     _set_rls_user(db_session, founder.id)
-    result = erase_personal_recall_data(db_session, owner_id=founder.id)
+    operation_id = _create_erasure_operation(db_session, founder.id)
+    result = erase_personal_recall_data(db_session, owner_id=founder.id, operation_id=operation_id)
     db_session.commit()
     assert result.sources_scrubbed == 1
     assert result.chunks_deleted == 1
@@ -382,7 +397,8 @@ def test_personal_recall_governed_erasure_makes_content_non_retrievable_and_is_i
     assert db_session.execute(select(PersonalRecallOwnerKey).where(PersonalRecallOwnerKey.owner_id == founder.id)).scalars().all() == []
 
     _set_rls_user(db_session, founder.id)
-    second = erase_personal_recall_data(db_session, owner_id=founder.id)
+    second_operation_id = _create_erasure_operation(db_session, founder.id)
+    second = erase_personal_recall_data(db_session, owner_id=founder.id, operation_id=second_operation_id)
     db_session.commit()
     assert second.sources_scrubbed == 0
     assert second.chunks_deleted == 0
@@ -394,7 +410,66 @@ def test_personal_recall_erasure_is_owner_scoped(db_session, make_verified_user)
     other, _ = make_verified_user()
     _set_rls_user(db_session, other.id)
     with pytest.raises(ValueError):
-        erase_personal_recall_data(db_session, owner_id=founder.id)
+        erase_personal_recall_data(db_session, owner_id=founder.id, operation_id=uuid.uuid4())
+
+
+def test_personal_recall_erasure_rejects_forged_context_and_bad_operations(db_session, make_verified_user):
+    founder, authority = _founder_authority(db_session)
+    other, _ = make_verified_user()
+    kek = load_system_kek_from_env()
+    _set_rls_user(db_session, founder.id)
+    _grant(db_session, founder.id, authority)
+    ingest_file(
+        db_session,
+        owner_id=founder.id,
+        filename="forged-erasure.md",
+        payload=b"Requirement: forged erasure context must not delete keys.",
+        system_kek=kek,
+        session_id="boot-session",
+        authority=authority,
+    )
+    db_session.commit()
+
+    def assert_key_survives() -> None:
+        _set_rls_user(db_session, founder.id)
+        assert db_session.execute(select(PersonalRecallOwnerKey).where(PersonalRecallOwnerKey.owner_id == founder.id)).scalars().all()
+
+    def attempt_direct_key_delete(*, owner_id, operation_id=None, set_flag=True) -> None:
+        db_session.rollback()
+        _set_rls_user(db_session, owner_id)
+        if set_flag:
+            db_session.execute(text("SELECT set_config('app.personal_recall_erasure_in_progress', 'true', true)"))
+        if operation_id is not None:
+            db_session.execute(text("SELECT set_config('app.account_erasure_operation_id', :operation_id, true)"), {"operation_id": str(operation_id)})
+        with pytest.raises(Exception):
+            db_session.execute(text("DELETE FROM personal_recall_owner_keys WHERE owner_id = :owner_id"), {"owner_id": str(founder.id)})
+        db_session.rollback()
+        assert_key_survives()
+
+    # 1. manually SET erasure GUC only -> reject
+    attempt_direct_key_delete(owner_id=founder.id)
+
+    # 2. fake operation ID -> reject
+    attempt_direct_key_delete(owner_id=founder.id, operation_id=uuid.uuid4())
+
+    # 3. operation belonging to another owner -> reject
+    wrong_owner_operation = _create_erasure_operation(db_session, other.id)
+    db_session.commit()
+    attempt_direct_key_delete(owner_id=founder.id, operation_id=wrong_owner_operation)
+
+    # 4/5/6. completed/failed/cancelled or stale operation state -> reject
+    for status in ("completed", "failed", "cancelled"):
+        stale_operation = _create_erasure_operation(db_session, founder.id, status=status)
+        db_session.commit()
+        attempt_direct_key_delete(owner_id=founder.id, operation_id=stale_operation)
+
+    # 7/8. ordinary runtime/direct service call outside erase_account_data() -> reject before mutation
+    db_session.rollback()
+    _set_rls_user(db_session, founder.id)
+    with pytest.raises(ValueError):
+        erase_personal_recall_data(db_session, owner_id=founder.id, operation_id=uuid.uuid4())
+    db_session.rollback()
+    assert_key_survives()
 
 
 def test_founder_boot_remains_honest_until_independent_verification(db_session):

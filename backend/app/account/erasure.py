@@ -483,6 +483,13 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         locked_user = db.query(User).filter_by(id=owner_id).with_for_update().first()
         if locked_user is None:
             raise LookupError(f"user {owner_id} not found (already erased?)")
+        db.execute(
+            sa_text(
+                "INSERT INTO account_erasure_operations (operation_id, owner_id, status, phase) "
+                "VALUES (:operation_id, :owner_id, 'active', 'started')"
+            ),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
 
         # Pass 26: the owner-erasure lock acquired above (now BEFORE the User row lock, see
         # Pass 28's comment there) is what closes the erasure/upload race — a concurrent
@@ -557,9 +564,24 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # --- Personal Recall production activation data: content/key material must become
         # unretrievable through the governed account-erasure path before the User row can
         # cascade. personal_recall_owner_keys/grants deliberately reject ordinary DELETE;
-        # erase_personal_recall_data() sets a narrow erasure GUC after rechecking the current
-        # owner DB session and records only counts below, never raw content or key material.
-        recall_erasure = erase_personal_recall_data(db, owner_id=owner_id)
+        # erase_personal_recall_data() binds its narrow erasure GUC to this exact durable
+        # account_erasure_operations row and records only counts below, never raw content or
+        # key material.
+        db.execute(
+            sa_text(
+                "UPDATE account_erasure_operations SET phase = 'personal_recall_erasure', updated_at = now() "
+                "WHERE operation_id = :operation_id AND owner_id = :owner_id AND status = 'active'"
+            ),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
+        recall_erasure = erase_personal_recall_data(db, owner_id=owner_id, operation_id=operation_id)
+        db.execute(
+            sa_text(
+                "UPDATE account_erasure_operations SET phase = 'personal_data_erasure', updated_at = now() "
+                "WHERE operation_id = :operation_id AND owner_id = :owner_id AND status = 'active'"
+            ),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
 
         # --- Personal data: deleted outright, not anonymized. ---
         conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=owner_id).all()]
@@ -767,6 +789,13 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             ),
             ip_address=client_ip,
             commit=False,
+        )
+        db.execute(
+            sa_text(
+                "UPDATE account_erasure_operations SET status = 'completed', phase = 'completed', updated_at = now() "
+                "WHERE operation_id = :operation_id AND owner_id = :owner_id AND status = 'active'"
+            ),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
         )
 
         db.commit()
