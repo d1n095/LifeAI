@@ -29,7 +29,7 @@ EMAIL_LOG_PATH = os.environ.get("E2E_EMAIL_LOG_PATH", os.path.join(BACKEND_ROOT,
 HOST = os.environ.get("E2E_BACKEND_HOST", "127.0.0.1")
 PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
 
-from _e2e_fakes import install_email_fake, install_provider_fakes
+from _e2e_fakes import install_email_fake, install_provider_fakes  # noqa: E402
 
 install_provider_fakes()
 # This web-app process owns the captured-email log; truncate any previous run's emails here.
@@ -37,7 +37,7 @@ install_provider_fakes()
 # still capturing — see _e2e_fakes.install_email_fake).
 install_email_fake(EMAIL_LOG_PATH, truncate=True)
 
-import uvicorn
+import uvicorn  # noqa: E402
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="warning")

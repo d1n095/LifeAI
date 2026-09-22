@@ -22,13 +22,13 @@ BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, BACKEND_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _e2e_fakes import install_provider_fakes
+from _e2e_fakes import install_provider_fakes  # noqa: E402
 
 # Only the provider fakes — the worker never sends account email, and must NEVER truncate the
 # captured-email log the web-app harness owns.
 install_provider_fakes()
 
-from app.worker import _main
+from app.worker import _main  # noqa: E402
 
 if __name__ == "__main__":
     asyncio.run(_main())
