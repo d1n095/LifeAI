@@ -443,18 +443,27 @@ def attempt_pending_storage_deletions_for_operation(operation_id: uuid.UUID) -> 
     return result
 
 
-def erase_account_data(db: Session, user: User, *, client_ip: str | None = None) -> AccountErasureResult:
+def erase_account_data(
+    db: Session,
+    user: User,
+    *,
+    reauth_receipt_id: uuid.UUID,
+    reauth_access_jti: str,
+    client_ip: str | None = None,
+) -> AccountErasureResult:
     """Permanent, irreversible account erasure — one atomic DB transaction (see module
     docstring), followed by a best-effort blob-deletion attempt that never rolls the DB phase
-    back regardless of outcome. Password verification is the ROUTER's responsibility (see
-    app/routers/account.py) — this function assumes the caller has already authenticated the
-    request as genuinely coming from `user` themselves; it never re-checks a password.
+    back regardless of outcome. Password verification and receipt creation are the ROUTER's
+    responsibility (see app/routers/account.py and app/account/reauth.py); this function binds
+    the destructive DB operation to the supplied durable, one-time reauthentication receipt.
 
     `client_ip` is a plain string, not a fastapi.Request — the router extracts it (same
     convention as app/storage/purge.py) so this domain-layer module never imports fastapi.
     """
     owner_id = user.id
-    operation_id = uuid.uuid4()
+    operation_id: uuid.UUID | None = None
+    if not reauth_access_jti:
+        raise PermissionError("account erasure requires a reauthenticated access session")
 
     try:
         # Pass 28: acquires the owner-erasure advisory lock BEFORE taking any row-level lock
@@ -484,12 +493,13 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         if locked_user is None:
             raise LookupError(f"user {owner_id} not found (already erased?)")
         db.execute(
-            sa_text(
-                "INSERT INTO account_erasure_operations (operation_id, owner_id, status, phase) "
-                "VALUES (:operation_id, :owner_id, 'active', 'started')"
-            ),
-            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+            sa_text("SET LOCAL app.current_access_jti = :jti"),
+            {"jti": reauth_access_jti},
         )
+        operation_id = db.execute(
+            sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+            {"owner_id": str(owner_id), "receipt_id": str(reauth_receipt_id)},
+        ).scalar_one()
 
         # Pass 26: the owner-erasure lock acquired above (now BEFORE the User row lock, see
         # Pass 28's comment there) is what closes the erasure/upload race — a concurrent
@@ -568,18 +578,12 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # account_erasure_operations row and records only counts below, never raw content or
         # key material.
         db.execute(
-            sa_text(
-                "UPDATE account_erasure_operations SET phase = 'personal_recall_erasure', updated_at = now() "
-                "WHERE operation_id = :operation_id AND owner_id = :owner_id AND status = 'active'"
-            ),
+            sa_text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_recall_erasure')"),
             {"operation_id": str(operation_id), "owner_id": str(owner_id)},
         )
         recall_erasure = erase_personal_recall_data(db, owner_id=owner_id, operation_id=operation_id)
         db.execute(
-            sa_text(
-                "UPDATE account_erasure_operations SET phase = 'personal_data_erasure', updated_at = now() "
-                "WHERE operation_id = :operation_id AND owner_id = :owner_id AND status = 'active'"
-            ),
+            sa_text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_data_erasure')"),
             {"operation_id": str(operation_id), "owner_id": str(owner_id)},
         )
 
@@ -588,6 +592,12 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         if conversation_ids:
             db.query(Message).filter(Message.conversation_id.in_(conversation_ids)).delete(synchronize_session=False)
             db.query(Conversation).filter_by(user_id=owner_id).delete(synchronize_session=False)
+        # Session rows below are needed to validate the receipt while closing the operation.
+        # Both this transition and the remaining erasure are part of the same transaction.
+        db.execute(
+            sa_text("SELECT account_erasure_complete_operation(:operation_id, :owner_id)"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
         db.query(RefreshToken).filter_by(user_id=owner_id).delete(synchronize_session=False)
         db.query(EmailVerificationToken).filter_by(user_id=owner_id).delete(synchronize_session=False)
         db.query(PasswordResetToken).filter_by(user_id=owner_id).delete(synchronize_session=False)
@@ -790,14 +800,6 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             ip_address=client_ip,
             commit=False,
         )
-        db.execute(
-            sa_text(
-                "UPDATE account_erasure_operations SET status = 'completed', phase = 'completed', updated_at = now() "
-                "WHERE operation_id = :operation_id AND owner_id = :owner_id AND status = 'active'"
-            ),
-            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
-        )
-
         db.commit()
     except AccountErasureBlockedError:
         # Not a failure -- a deliberate refusal, nothing was changed. Rolled back the same as

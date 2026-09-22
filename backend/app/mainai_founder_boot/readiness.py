@@ -79,6 +79,7 @@ PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES = (
     "app/personal_recall/production_lifecycle.py",
     "app/personal_recall/routes_prep.py",
     "app/models/personal_recall_production.py",
+    "app/account/reauth.py",
     "app/account/erasure.py",
     "app/rls.py",
     "scripts/security/s1a_privilege_policy.py",
@@ -86,6 +87,7 @@ PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES = (
     "alembic/versions/0083_personal_recall_authority_boundary.py",
     "alembic/versions/0084_personal_recall_erasure_lifecycle.py",
     "alembic/versions/0085_account_erasure_operation_authority.py",
+    "alembic/versions/0086_account_erasure_reauth_binding.py",
     "app/mainai_founder_boot/readiness.py",
 )
 

@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import get_settings
-from app.request_context import current_user_id
+from app.request_context import current_access_jti, current_user_id
 
 logger = logging.getLogger("mainai.db")
 _T = TypeVar("_T")
@@ -45,6 +45,9 @@ def _bind_rls_user(session, transaction, connection):
     user_id = current_user_id.get()
     if user_id:
         connection.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": user_id})
+    access_jti = current_access_jti.get()
+    if access_jti:
+        connection.execute(text("SET LOCAL app.current_access_jti = :jti"), {"jti": access_jti})
 
 
 class Base(DeclarativeBase):

@@ -33,12 +33,15 @@ from app.personal_recall.production_ingestion import (
     revoke_source,
     rotate_owner_key,
 )
+from app.account.reauth import create_account_erasure_reauth_receipt
 from app.personal_recall.production_lifecycle import erase_personal_recall_data, export_personal_recall_data
 from app.security import hash_password
 
 
-def _set_rls_user(session, user_id) -> None:
+def _set_rls_user(session, user_id, *, access_jti: str | None = None) -> None:
     session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user_id)})
+    if access_jti is not None:
+        session.execute(text("SET LOCAL app.current_access_jti = :jti"), {"jti": access_jti})
 
 
 def _ensure_founder_user(session) -> User:
@@ -81,7 +84,7 @@ def _founder_authority(session) -> tuple[User, RecallFounderAuthority]:
     )
     session.add(token)
     session.flush()
-    _set_rls_user(session, FOUNDER_USER_ID)
+    _set_rls_user(session, FOUNDER_USER_ID, access_jti=access_jti)
     return user, recall_founder_authority_from_user(user=user, access_jti=access_jti)
 
 
@@ -103,15 +106,50 @@ def _ctx(owner_id, session_id="boot-session", purpose="founder_file_ingestion"):
 
 
 def _create_erasure_operation(session, owner_id, *, status="active", phase="personal_recall_erasure"):
-    operation_id = uuid.uuid4()
-    _set_rls_user(session, owner_id)
-    session.execute(
-        text(
-            "INSERT INTO account_erasure_operations (operation_id, owner_id, status, phase) "
-            "VALUES (:operation_id, :owner_id, :status, :phase)"
-        ),
-        {"operation_id": str(operation_id), "owner_id": str(owner_id), "status": status, "phase": phase},
+    user = session.get(User, owner_id)
+    if user is None:
+        raise AssertionError("owner must exist for erasure operation test helper")
+    access_jti = str(uuid.uuid4())
+    issued_at = datetime.utcnow()
+    user.sessions_valid_after = issued_at - timedelta(seconds=2)
+    session.add(
+        RefreshToken(
+            user_id=owner_id,
+            family_id=uuid.uuid4(),
+            token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            access_jti=access_jti,
+            csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
+            created_at=issued_at,
+            expires_at=issued_at + timedelta(hours=1),
+        )
     )
+    session.flush()
+    password = "CorrectHorseBattery9!"
+    receipt = create_account_erasure_reauth_receipt(session, user=user, password=password, access_jti=access_jti)
+    _set_rls_user(session, owner_id, access_jti=access_jti)
+    operation_id = session.execute(
+        text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+        {"owner_id": str(owner_id), "receipt_id": str(receipt.receipt_id)},
+    ).scalar_one()
+    if status != "active":
+        session.execute(
+            text("SELECT account_erasure_complete_operation(:operation_id, :owner_id)"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
+        if status != "completed":
+            # Tests only need a durable non-active operation; completed is sufficient proof
+            # that stale/terminal operations cannot authorize Recall erasure.
+            pass
+    elif phase == "personal_recall_erasure":
+        session.execute(
+            text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_recall_erasure')"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
+    elif phase != "started":
+        session.execute(
+            text("SELECT account_erasure_set_phase(:operation_id, :owner_id, :phase)"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id), "phase": phase},
+        )
     session.flush()
     return operation_id
 

@@ -106,7 +106,8 @@ _PROTECTED_TABLES = [
     ("memory_source_units", ["SELECT", "INSERT"]),
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
-    ("account_erasure_operations", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
+    ("account_erasure_reauth_receipts", ["SELECT"]),
+    ("account_erasure_operations", ["SELECT"]),
     ("storage_deletion_tasks", []),
     # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
     # §D/§L) — message_source_units is S1C, the exact same exclusive-arc pattern as
@@ -233,6 +234,9 @@ _FUNCTIONS = [
     ("erase_owner_memory_admin", False, True, "void", ("uuid",)),
     ("storage_key_still_referenced_global", True, True, "boolean", ("text",)),
     ("enqueue_account_erasure_storage_task", True, False, "void", ("uuid", "text")),
+    ("account_erasure_begin_operation", True, False, "uuid", ("uuid", "uuid")),
+    ("account_erasure_set_phase", True, False, "boolean", ("uuid", "uuid", "text")),
+    ("account_erasure_complete_operation", True, False, "boolean", ("uuid", "uuid")),
 ]
 
 

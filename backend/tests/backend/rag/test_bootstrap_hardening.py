@@ -19,10 +19,12 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
+from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
 from app.rag.corpus_batch import create_batch, record_parse_failed, record_storage_failed, record_stored_original
+from app.request_context import current_access_jti as current_access_jti_var
 from app.request_context import current_user_id as current_user_id_var
-from app.security import hash_password
+from app.security import generate_csrf_token, hash_opaque_token, hash_password
 
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
@@ -47,9 +49,12 @@ def _narrow_privileges_before_this_module():
     apply_mainai_job_runtime_privileges(migration_engine)
 
 
-def _set_rls_user(session, owner_id) -> None:
+def _set_rls_user(session, owner_id, *, access_jti: str | None = None) -> None:
     current_user_id_var.set(str(owner_id))
     session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
+    if access_jti is not None:
+        current_access_jti_var.set(access_jti)
+        session.execute(sa_text("SET LOCAL app.current_access_jti = :jti"), {"jti": access_jti})
 
 
 def _make_user(session, email="hardening-owner@example.com") -> User:
@@ -57,6 +62,33 @@ def _make_user(session, email="hardening-owner@example.com") -> User:
     session.add(user)
     session.commit()
     return user
+
+
+def _issue_erasure_receipt(session, owner: User):
+    from datetime import datetime, timedelta
+
+    from app.account.reauth import create_account_erasure_reauth_receipt
+
+    access_jti = str(__import__("uuid").uuid4())
+    session.add(
+        RefreshToken(
+            user_id=owner.id,
+            family_id=__import__("uuid").uuid4(),
+            token_hash=hash_opaque_token(f"bootstrap-erasure-refresh-{access_jti}"),
+            access_jti=access_jti,
+            csrf_token=generate_csrf_token(),
+            expires_at=datetime.utcnow() + timedelta(minutes=10),
+        )
+    )
+    session.flush()
+    receipt = create_account_erasure_reauth_receipt(
+        session,
+        user=owner,
+        password="Sup3rS3cret!",
+        access_jti=access_jti,
+    )
+    _set_rls_user(session, owner.id, access_jti=receipt.access_jti)
+    return receipt
 
 
 def _make_document(session, owner_id, *, title="Kalla", storage_key=None, file_path=None) -> Document:
@@ -482,7 +514,13 @@ def test_section3_account_erasure_hard_deletes_documents_entirely():
         _set_rls_user(session, owner.id)
         document_id, owner_id = document.id, owner.id
 
-        erase_account_data(session, owner)
+        receipt = _issue_erasure_receipt(session, owner)
+        erase_account_data(
+            session,
+            owner,
+            reauth_receipt_id=receipt.receipt_id,
+            reauth_access_jti=receipt.access_jti,
+        )
         session.commit()
     finally:
         session.rollback()

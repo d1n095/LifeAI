@@ -23,6 +23,8 @@ from app.models.audit import AuditLog
 from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
+from app.models.refresh_token import RefreshToken
+from app.models.revoked_access_token import RevokedAccessToken
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.mainai_job import MainAIJobProposal
@@ -41,12 +43,13 @@ from app.account.erasure import (
     attempt_pending_storage_deletions_for_operation,
     attempt_storage_deletion_task,
     claim_storage_deletion_tasks,
-    erase_account_data,
+    erase_account_data as _erase_account_data_impl,
 )
+from app.account.reauth import create_account_erasure_reauth_receipt
 from app.account.export import EXPORT_SCHEMA_VERSION, export_account_data
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
 from app.request_context import current_user_id as current_user_id_var
-from app.security import hash_password
+from app.security import generate_csrf_token, hash_opaque_token, hash_password
 from app.storage import StorageError, get_storage
 from app.storage.references import acquire_owner_erasure_lock
 
@@ -93,9 +96,11 @@ def _narrow_privileges_before_this_module():
     apply_mainai_execution_privileges(migration_engine)
 
 
-def _set_rls_user(session, owner_id) -> None:
+def _set_rls_user(session, owner_id, *, access_jti: str | None = None) -> None:
     current_user_id_var.set(str(owner_id))
     session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
+    if access_jti is not None:
+        session.execute(sa_text("SET LOCAL app.current_access_jti = :jti"), {"jti": access_jti})
 
 
 def _make_user(session, email=None, *, role=UserRole.founder) -> User:
@@ -104,6 +109,40 @@ def _make_user(session, email=None, *, role=UserRole.founder) -> User:
     session.add(user)
     session.commit()
     return user
+
+
+def _issue_erasure_access_session(session, owner_id) -> str:
+    access_jti = str(uuid.uuid4())
+    session.add(
+        RefreshToken(
+            user_id=owner_id,
+            family_id=uuid.uuid4(),
+            token_hash=hash_opaque_token(f"erasure-refresh-{uuid.uuid4()}"),
+            access_jti=access_jti,
+            csrf_token=generate_csrf_token(),
+            expires_at=datetime.utcnow() + timedelta(minutes=10),
+        )
+    )
+    session.flush()
+    return access_jti
+
+
+def erase_account_data(session, owner, *, client_ip=None):
+    access_jti = _issue_erasure_access_session(session, owner.id)
+    receipt = create_account_erasure_reauth_receipt(
+        session,
+        user=owner,
+        password="Sup3rS3cret!",
+        access_jti=access_jti,
+    )
+    _set_rls_user(session, owner.id, access_jti=receipt.access_jti)
+    return _erase_account_data_impl(
+        session,
+        owner,
+        reauth_receipt_id=receipt.receipt_id,
+        reauth_access_jti=receipt.access_jti,
+        client_ip=client_ip,
+    )
 
 
 def _make_document(session, owner_id, *, title="Källa", storage_key=None) -> Document:
@@ -2143,10 +2182,253 @@ def test_storage_deletion_tasks_check_constraint_rejects_an_invalid_status():
         admin.close()
 
 
+def test_account_erasure_operation_requires_recent_reauth_receipt():
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+
+        with pytest.raises(DBAPIError):
+            session.execute(
+                sa_text(
+                    "INSERT INTO account_erasure_operations (operation_id, owner_id, status, phase) "
+                    "VALUES (:operation_id, :owner_id, 'active', 'personal_recall_erasure')"
+                ),
+                {"operation_id": str(uuid.uuid4()), "owner_id": str(owner.id)},
+            )
+            session.flush()
+        session.rollback()
+        _set_rls_user(session, owner.id)
+
+        with pytest.raises(DBAPIError):
+            session.execute(
+                sa_text(
+                    "UPDATE account_erasure_operations SET phase = 'personal_recall_erasure' "
+                    "WHERE operation_id = :operation_id"
+                ),
+                {"operation_id": str(uuid.uuid4())},
+            )
+            session.flush()
+        session.rollback()
+        _set_rls_user(session, owner.id)
+
+        access_jti = _issue_erasure_access_session(session, owner.id)
+        with pytest.raises(Exception):
+            create_account_erasure_reauth_receipt(
+                session,
+                user=owner,
+                password="wrong password",
+                access_jti=access_jti,
+            )
+        with migration_engine.connect() as conn:
+            assert conn.execute(
+                sa_text("SELECT count(*) FROM account_erasure_reauth_receipts WHERE owner_id = :owner_id"),
+                {"owner_id": str(owner.id)},
+            ).scalar_one() == 0
+        session.rollback()
+        _set_rls_user(session, owner.id)
+
+        with pytest.raises(DBAPIError):
+            _erase_account_data_impl(session, owner, reauth_receipt_id=uuid.uuid4(), reauth_access_jti=str(uuid.uuid4()))
+        session.rollback()
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_account_erasure_reauth_receipt_owner_session_expiry_and_replay_are_fenced():
+    session = SessionLocal()
+    admin = _AdminSession()
+    try:
+        owner = _make_user(session)
+        other = _make_user(session)
+        _set_rls_user(session, owner.id)
+        access_jti = _issue_erasure_access_session(session, owner.id)
+        receipt = create_account_erasure_reauth_receipt(
+            session,
+            user=owner,
+            password="Sup3rS3cret!",
+            access_jti=access_jti,
+        )
+        session.commit()
+        _set_rls_user(session, owner.id)
+
+        with pytest.raises(DBAPIError):
+            session.execute(
+                sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                {"owner_id": str(other.id), "receipt_id": str(receipt.receipt_id)},
+            )
+            session.flush()
+        session.rollback()
+        _set_rls_user(session, owner.id, access_jti=access_jti)
+
+        operation_id = session.execute(
+            sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+            {"owner_id": str(owner.id), "receipt_id": str(receipt.receipt_id)},
+        ).scalar_one()
+        assert operation_id
+        session.commit()
+        _set_rls_user(session, owner.id)
+        with pytest.raises(DBAPIError):
+            session.execute(
+                sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                {"owner_id": str(owner.id), "receipt_id": str(receipt.receipt_id)},
+            )
+            session.flush()
+        session.rollback()
+
+        restarted = SessionLocal()
+        try:
+            _set_rls_user(restarted, owner.id, access_jti=access_jti)
+            with pytest.raises(DBAPIError):
+                restarted.execute(
+                    sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                    {"owner_id": str(owner.id), "receipt_id": str(receipt.receipt_id)},
+                )
+        finally:
+            restarted.rollback()
+            restarted.close()
+
+        stale_receipt_id = uuid.uuid4()
+        admin.execute(
+            sa_text(
+                "INSERT INTO account_erasure_reauth_receipts(receipt_id, owner_id, access_jti, purpose, issued_at, expires_at) "
+                "VALUES (:receipt_id, :owner_id, :access_jti, 'ACCOUNT_ERASURE', now() - interval '10 minutes', now() - interval '1 minute')"
+            ),
+            {"receipt_id": str(stale_receipt_id), "owner_id": str(owner.id), "access_jti": access_jti},
+        )
+        admin.commit()
+        _set_rls_user(session, owner.id, access_jti=access_jti)
+        with pytest.raises(DBAPIError):
+            session.execute(
+                sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                {"owner_id": str(owner.id), "receipt_id": str(stale_receipt_id)},
+            )
+            session.flush()
+        session.rollback()
+
+        expired_restarted = SessionLocal()
+        try:
+            _set_rls_user(expired_restarted, owner.id, access_jti=access_jti)
+            with pytest.raises(DBAPIError):
+                expired_restarted.execute(
+                    sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                    {"owner_id": str(owner.id), "receipt_id": str(stale_receipt_id)},
+                )
+        finally:
+            expired_restarted.rollback()
+            expired_restarted.close()
+
+        revoked_access_jti = _issue_erasure_access_session(session, owner.id)
+        revoked_receipt = create_account_erasure_reauth_receipt(
+            session,
+            user=owner,
+            password="Sup3rS3cret!",
+            access_jti=revoked_access_jti,
+        )
+        session.add(RevokedAccessToken(jti=revoked_access_jti, expires_at=datetime.utcnow() + timedelta(minutes=5)))
+        session.flush()
+        _set_rls_user(session, owner.id, access_jti=revoked_access_jti)
+        with pytest.raises(DBAPIError):
+            session.execute(
+                sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                {"owner_id": str(owner.id), "receipt_id": str(revoked_receipt.receipt_id)},
+            )
+            session.flush()
+        session.rollback()
+
+
+        wrong_session_jti = _issue_erasure_access_session(session, owner.id)
+        wrong_session_receipt = create_account_erasure_reauth_receipt(
+            session,
+            user=owner,
+            password="Sup3rS3cret!",
+            access_jti=access_jti,
+        )
+        _set_rls_user(session, owner.id, access_jti=wrong_session_jti)
+        with pytest.raises(DBAPIError):
+            session.execute(
+                sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                {"owner_id": str(owner.id), "receipt_id": str(wrong_session_receipt.receipt_id)},
+            )
+            session.flush()
+        session.rollback()
+    finally:
+        admin.rollback()
+        admin.close()
+        session.rollback()
+        session.close()
+
+
+
+def test_account_erasure_reauth_receipt_concurrent_double_use_allows_one_operation_only():
+    setup = SessionLocal()
+    try:
+        owner = _make_user(setup)
+        access_jti = _issue_erasure_access_session(setup, owner.id)
+        setup.commit()
+        _set_rls_user(setup, owner.id, access_jti=access_jti)
+        receipt = create_account_erasure_reauth_receipt(
+            setup,
+            user=owner,
+            password="Sup3rS3cret!",
+            access_jti=access_jti,
+        )
+        owner_id = owner.id
+        receipt_id = receipt.receipt_id
+    finally:
+        setup.rollback()
+        setup.close()
+
+    barrier = threading.Barrier(2)
+    outcomes: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def contender(label: str) -> None:
+        session = SessionLocal()
+        try:
+            _set_rls_user(session, owner_id, access_jti=access_jti)
+            barrier.wait(timeout=5)
+            op_id = session.execute(
+                sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+                {"owner_id": str(owner_id), "receipt_id": str(receipt_id)},
+            ).scalar_one()
+            session.commit()
+            with lock:
+                outcomes.append((label, f"ok:{op_id}"))
+        except Exception as exc:  # noqa: BLE001 - test records the database's fail-closed result.
+            session.rollback()
+            with lock:
+                outcomes.append((label, exc.__class__.__name__))
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=contender, args=(f"t{i}",)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(outcomes) == 2
+    assert sum(1 for _, result in outcomes if result.startswith("ok:")) == 1
+    assert sum(1 for _, result in outcomes if not result.startswith("ok:")) == 1
+
+    verify = SessionLocal()
+    try:
+        _set_rls_user(verify, owner_id, access_jti=access_jti)
+        rows = verify.execute(
+            sa_text("SELECT operation_id FROM account_erasure_operations WHERE reauth_receipt_id = :receipt_id"),
+            {"receipt_id": str(receipt_id)},
+        ).all()
+        assert len(rows) == 1
+    finally:
+        verify.rollback()
+        verify.close()
+
+
 def test_erase_account_data_governs_personal_recall_content_and_keys():
     from app.founder import FOUNDER_USER_ID
     from app.models.personal_recall_production import PersonalRecallChunk, PersonalRecallGrant, PersonalRecallOwnerKey, PersonalRecallSource
-    from app.models.refresh_token import RefreshToken
     from app.personal_recall.production_crypto import load_system_kek_from_env
     from app.personal_recall.production_ingestion import create_recall_grant, ingest_file, recall_founder_authority_from_user
 
