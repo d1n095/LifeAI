@@ -78,29 +78,21 @@ if [ "$redis_ready" -ne 1 ]; then
   exit 1
 fi
 
-echo "--> Provisioning roles (lifeos superuser + restricted mainai_app runtime role)"
-# Mirrors backend/db-init/01-app-role.sh: `lifeos` owns the schema and runs migrations; the
-# non-superuser `mainai_app` role is what the app queries through so Row-Level Security is
-# actually enforced (a superuser bypasses RLS). Passwords are psql variables
-# (:'lifeos_pw' from DATABASE_URL, :'app_pw' from MAINAI_APP_PASSWORD) — never interpolated
-# into SQL text and never logged.
-sudo -u postgres psql -v ON_ERROR_STOP=1 \
-  -v lifeos_pw="$LIFEOS_PASSWORD" \
-  -v app_pw="$MAINAI_APP_PASSWORD" <<'SQL'
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='lifeos') THEN
-    CREATE ROLE lifeos LOGIN SUPERUSER PASSWORD :'lifeos_pw';
-  ELSE
-    ALTER ROLE lifeos LOGIN SUPERUSER PASSWORD :'lifeos_pw';
-  END IF;
-END $$;
-DO $$ BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='mainai_app') THEN
-    CREATE ROLE mainai_app LOGIN PASSWORD :'app_pw';
-  ELSE
-    ALTER ROLE mainai_app LOGIN PASSWORD :'app_pw';
-  END IF;
-END $$;
+echo "--> Provisioning the lifeos admin/migration superuser (dev-only admin bootstrap)"
+# The lifeos role is the schema owner / migration role — the local-dev equivalent of
+# docker-compose's POSTGRES_USER and a managed provider's project owner. It is deliberately a
+# SUPERUSER because migrations run CREATE EXTENSION and enable Row-Level Security through it;
+# it is NEVER the role the app serves requests through (that is mainai_app, below, which is a
+# plain non-superuser role). psql only interpolates :'var' in top-level statements, NEVER
+# inside a DO $$...$$ block — the previous version put :'lifeos_pw' inside a DO block, which
+# psql sent literally and Postgres rejected with a syntax error, so a clean install could not
+# self-provision at all. The role is now created with a plain \gexec guard and its password is
+# set by a top-level ALTER ROLE, where :'lifeos_pw' is interpolated correctly. Never logged.
+sudo -u postgres psql -v ON_ERROR_STOP=1 -v lifeos_pw="$LIFEOS_PASSWORD" <<'SQL'
+SELECT 'CREATE ROLE lifeos LOGIN SUPERUSER'
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lifeos')
+\gexec
+ALTER ROLE lifeos WITH LOGIN SUPERUSER PASSWORD :'lifeos_pw';
 SQL
 
 echo "--> Ensuring the configured database exists"
@@ -109,19 +101,22 @@ if ! sudo -u postgres psql -v ON_ERROR_STOP=1 -v db_name="$LIFEOS_DB" \
   sudo -u postgres createdb -O lifeos "$LIFEOS_DB"
 fi
 
-echo "--> Granting the restricted runtime role (SELECT/INSERT/UPDATE/DELETE only — never TRUNCATE)"
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d "$LIFEOS_DB" <<'SQL'
-GRANT USAGE ON SCHEMA public TO mainai_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE lifeos IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE lifeos IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;
-SQL
-
-echo "--> Applying migrations (alembic upgrade head) + runtime privilege policy"
+echo "--> Provisioning the restricted mainai_app runtime role via the documented bootstrap (ensure_app_role.py)"
+# Use the SAME documented production/VPS bootstrap the container entrypoint uses
+# (backend/scripts/security/ensure_app_role.py) instead of ad-hoc GRANT SQL here. It creates
+# mainai_app with least privilege (SELECT/INSERT/UPDATE/DELETE only — never TRUNCATE/REFERENCES/
+# TRIGGER, and NEVER superuser), sets matching default privileges so tables created by the later
+# migration are granted automatically, and re-narrows the S1A objects. This is what makes a
+# clean install need NO manual SQL and guarantees the Cloud Agent dev path cannot silently
+# diverge from production. Runs against the lifeos admin DATABASE_URL, before migrations, in the
+# exact order backend/docker-entrypoint.sh uses (ensure_app_role -> upgrade head ->
+# apply_runtime_privileges). DATABASE_URL + MAINAI_APP_PASSWORD are already exported from .env.
 cd "$REPO/backend"
 # shellcheck disable=SC1091
 . .venv/bin/activate
+python scripts/security/ensure_app_role.py
+
+echo "--> Applying migrations (alembic upgrade head) + runtime privilege policy"
 alembic upgrade head
 python scripts/security/apply_runtime_privileges.py
 
