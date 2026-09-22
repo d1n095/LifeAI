@@ -20,35 +20,24 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
   });
 
-  test("documents: empty state renders, and a failed delete shows a visible error instead of silently doing nothing", async ({
+  test("documents route redirects to the consolidated Life Library, which renders its empty state", async ({
     page,
   }) => {
+    // The Life Library upload-consolidation package made /library the sole upload location;
+    // /documents is now purely a redirect to it (see app/(shell)/documents/page.tsx — both
+    // routers still read the same underlying `documents` table). This test previously drove
+    // the old standalone /documents page (empty-state text "Inga dokument uppladdade ännu." +
+    // its own file input) which no longer exists, so it asserted a removed surface. Updated to
+    // the current contract: /documents must redirect to /library and the Library empty state
+    // must render. The "failed delete surfaces a visible error instead of silently doing
+    // nothing" behavior for library rows is covered end-to-end by
+    // library-upload-queue.spec.ts's unified-delete test against the real /library UI, so it
+    // is not duplicated here.
     await page.goto(`${FRONTEND_URL}/documents`, { waitUntil: "networkidle" });
+    await page.waitForURL(`${FRONTEND_URL}/library`, { timeout: 5000 });
 
     // Empty state (a fresh founder account before any upload) — real backend, no mock.
-    await expect(page.locator("text=Inga dokument uppladdade ännu.")).toBeVisible();
-
-    // Upload one real document so there's a row with a delete button to fail on.
-    await page.setInputFiles('input[type="file"]', {
-      name: "e2e-error-handling-test.txt",
-      mimeType: "text/plain",
-      buffer: Buffer.from("Innehall for PRIO 4-felhanteringstestet."),
-    });
-    await expect(page.locator("text=e2e-error-handling-test.txt")).toBeVisible({ timeout: 8000 });
-
-    // Force the DELETE call to fail server-side (a real HTTP 500 response reaching the
-    // browser) and confirm the UI surfaces it via role="alert" rather than staying silent.
-    await page.route("**/api/documents/**", (route) => {
-      if (route.request().method() === "DELETE") {
-        route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
-      } else {
-        route.continue();
-      }
-    });
-    await page.getByRole("button", { name: /Ta bort dokumentet/ }).first().click();
-    await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
-    // The row must still be there — a failed delete must not have been assumed to succeed.
-    await expect(page.locator("text=e2e-error-handling-test.txt")).toBeVisible();
+    await expect(page.locator("text=Inget material importerat ännu.")).toBeVisible();
   });
 
   test("projects: empty states render, and a failed create shows a visible error instead of silently doing nothing", async ({
