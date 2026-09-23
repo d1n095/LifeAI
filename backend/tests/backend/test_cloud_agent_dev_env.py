@@ -39,14 +39,36 @@ def test_cloud_agent_environment_starts_the_durable_worker():
 
 
 def test_setup_services_uses_env_password_not_a_hardcoded_app_role_secret():
+    """mainai_app must be provisioned through the documented production bootstrap.
+
+    Blocker 1 replaced ad-hoc `CREATE ROLE mainai_app ... PASSWORD :'app_pw'` SQL in
+    setup-services.sh with `backend/scripts/security/ensure_app_role.py`, which is the
+    same path docker-entrypoint.sh uses. The regression contract is therefore the
+    documented bootstrap plus fail-closed env wiring — not the obsolete psql
+    interpolation token.
+    """
     script = (CURSOR_DIR / "setup-services.sh").read_text()
     assert "MAINAI_APP_PASSWORD" in script
     assert ': "${MAINAI_APP_PASSWORD:?MAINAI_APP_PASSWORD must be set in backend/.env}"' in script
+    assert "sync_app_database_url.py" in script
+    assert "APP_DATABASE_URL must be set after sync" in script
+    assert "scripts/security/ensure_app_role.py" in script
     assert not re.search(r"CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app'", script), (
-        "mainai_app password must come from MAINAI_APP_PASSWORD (psql :'app_pw'), not a "
-        "second hardcoded secret that can drift from APP_DATABASE_URL"
+        "mainai_app password must come from MAINAI_APP_PASSWORD via ensure_app_role.py, "
+        "not a second hardcoded secret that can drift from APP_DATABASE_URL"
     )
-    assert "PASSWORD :'app_pw'" in script
+    assert not re.search(r"CREATE ROLE\s+mainai_app\b", script), (
+        "setup-services.sh must not create mainai_app with ad-hoc SQL — "
+        "the documented bootstrap is backend/scripts/security/ensure_app_role.py"
+    )
+
+    # The production bootstrap consumes MAINAI_APP_PASSWORD from the environment and
+    # binds it through psycopg2.sql.Literal — never a second hardcoded role secret.
+    ensure_src = (REPO_ROOT / "backend" / "scripts" / "security" / "ensure_app_role.py").read_text()
+    assert ensure_src.count('os.environ["MAINAI_APP_PASSWORD"]') >= 2
+    assert "CREATE ROLE {role_ident} LOGIN PASSWORD {password}" in ensure_src
+    assert "sql.Literal(app_password)" in ensure_src
+    assert not re.search(r"PASSWORD\s+'mainai_app'", ensure_src)
 
 
 def test_setup_services_uses_database_url_not_a_hardcoded_lifeos_password():
