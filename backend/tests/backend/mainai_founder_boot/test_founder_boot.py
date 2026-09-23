@@ -679,6 +679,52 @@ def test_personal_recall_self_certification_and_code_change_identity(monkeypatch
     assert readiness.assess_personal_recall(superuser_db)[2]["independent_verification"] is False
 
 
+def test_personal_recall_export_is_identity_bound_and_old_pass_does_not_transfer(monkeypatch, tmp_path, superuser_db):
+    import app.mainai_founder_boot.readiness as readiness
+
+    export_rel = "app/account/export.py"
+    assert export_rel in readiness.PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES
+
+    export_path = tmp_path / export_rel
+    export_path.parent.mkdir(parents=True)
+    export_path.write_text("governed recall export version one", encoding="utf-8")
+    unrelated_path = tmp_path / "docs" / "release-notes.md"
+    unrelated_path.parent.mkdir(parents=True)
+    unrelated_path.write_text("documentation version one", encoding="utf-8")
+
+    monkeypatch.setattr(readiness, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(readiness, "PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES", (export_rel,))
+
+    verified_identity = readiness.personal_recall_production_identity()
+    record_verification_attestation(
+        superuser_db,
+        component_id=readiness.PERSONAL_RECALL_PRODUCTION_COMPONENT_ID,
+        candidate_sha=verified_identity,
+        builder_identity="codex",
+        examiner_identity="claude",
+        review_result="PASS",
+        evidence_summary="independent PASS for the pre-change governed export identity",
+    )
+    superuser_db.commit()
+    assert readiness.assess_personal_recall(superuser_db)[2]["independent_verification"] is True
+
+    unrelated_path.write_text("documentation version two", encoding="utf-8")
+    assert readiness.personal_recall_production_identity() == verified_identity
+
+    export_path.write_text("governed recall export version two", encoding="utf-8")
+    changed_identity = readiness.personal_recall_production_identity()
+    assert changed_identity != verified_identity
+
+    _, _, evidence = readiness.assess_personal_recall(superuser_db)
+    recall = build_readiness_matrix(covenant_ready=True, founder_ready=True, db=superuser_db)["PERSONAL_RECALL"]
+    assert evidence["expected_identity"] == changed_identity
+    assert evidence["independent_verification"] is False
+    assert recall["INDEPENDENTLY_VERIFIED"] is False
+    assert recall["ACTIVATED"] is False
+    assert recall["SAFE_FOR_FOUNDER_BOOT"] is False
+    assert recall["STATE"] == "DISABLED"
+
+
 def test_verification_registry_rejects_builder_self_certification(superuser_db):
     with pytest.raises(Exception):
         record_verification_attestation(

@@ -79,6 +79,7 @@ PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES = (
     "app/personal_recall/production_lifecycle.py",
     "app/personal_recall/routes_prep.py",
     "app/models/personal_recall_production.py",
+    "app/account/export.py",
     "app/account/reauth.py",
     "app/account/erasure.py",
     "app/rls.py",
