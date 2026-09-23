@@ -96,8 +96,12 @@ ALTER ROLE lifeos WITH LOGIN SUPERUSER PASSWORD :'lifeos_pw';
 SQL
 
 echo "--> Ensuring the configured database exists"
-if ! sudo -u postgres psql -v ON_ERROR_STOP=1 -v db_name="$LIFEOS_DB" \
-  -tAc "SELECT 1 FROM pg_database WHERE datname = :'db_name'" | grep -q 1; then
+database_exists="$(
+  sudo -u postgres psql -X -v ON_ERROR_STOP=1 -v db_name="$LIFEOS_DB" -tA <<'SQL'
+SELECT 1 FROM pg_database WHERE datname = :'db_name';
+SQL
+)"
+if [ "$database_exists" != "1" ]; then
   sudo -u postgres createdb -O lifeos "$LIFEOS_DB"
 fi
 
