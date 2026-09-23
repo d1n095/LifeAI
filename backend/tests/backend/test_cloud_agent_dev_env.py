@@ -11,8 +11,10 @@ from pathlib import Path
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import textwrap
 
 import pytest
 
@@ -78,6 +80,119 @@ def test_setup_services_uses_database_url_not_a_hardcoded_lifeos_password():
     assert not re.search(r"PASSWORD 'lifeos'", script), (
         "lifeos superuser password must come from DATABASE_URL, not a hardcoded secret"
     )
+
+
+def test_setup_services_is_idempotent_and_does_not_leak_secrets(tmp_path):
+    """Three boots must create the database once and then detect it safely.
+
+    psql does not expand ``:'db_name'`` in a query supplied with ``-c``. The old
+    command therefore treated a syntax error as "database absent" and attempted
+    ``createdb`` on every boot. This harness models psql's command-versus-stdin
+    behavior and makes a duplicate ``createdb`` fail, reproducing that second-run
+    failure without requiring root or a system PostgreSQL cluster.
+    """
+    repo = tmp_path / "repo"
+    cursor_dir = repo / ".cursor"
+    backend_dir = repo / "backend"
+    fake_bin = tmp_path / "bin"
+    state_dir = tmp_path / "state"
+    cursor_dir.mkdir(parents=True)
+    (backend_dir / ".venv" / "bin").mkdir(parents=True)
+    (backend_dir / "scripts" / "security").mkdir(parents=True)
+    fake_bin.mkdir()
+    state_dir.mkdir()
+
+    shutil.copy2(CURSOR_DIR / "setup-services.sh", cursor_dir / "setup-services.sh")
+    for name in ("parse_database_url.py", "sync_app_database_url.py"):
+        (cursor_dir / name).write_text("# handled by the test command shim\n")
+    for name in ("ensure_app_role.py", "apply_runtime_privileges.py"):
+        (backend_dir / "scripts" / "security" / name).write_text("# handled by the test command shim\n")
+    (backend_dir / ".venv" / "bin" / "activate").write_text(":\n")
+
+    admin_secret = "admin-idempotency-secret"
+    app_secret = "app-idempotency-secret"
+    (backend_dir / ".env").write_text(
+        f"DATABASE_URL=postgresql://lifeos:{admin_secret}@localhost:5432/lifeos_idempotency\n"
+        f"MAINAI_APP_PASSWORD={app_secret}\n"
+        f"APP_DATABASE_URL=postgresql://mainai_app:{app_secret}@localhost:5432/lifeos_idempotency\n"
+    )
+
+    commands = {
+        "python3": """
+            case "$1" in
+              */parse_database_url.py)
+                printf '%s\\n' 'LIFEOS_PASSWORD=admin-idempotency-secret' 'LIFEOS_DB=lifeos_idempotency'
+                ;;
+            esac
+        """,
+        "python": ":",
+        "pg_lsclusters": "printf '%s\\n' '16 main 5432 online postgres /tmp /tmp/log'",
+        "redis-cli": "printf '%s\\n' PONG",
+        "pg_isready": ":",
+        "alembic": "printf '%s\\n' upgrade-head >> \"$SETUP_TEST_STATE/alembic.log\"",
+        "createdb": """
+            if [ -e "$SETUP_TEST_STATE/database-created" ]; then
+              echo 'duplicate database creation' >&2
+              exit 1
+            fi
+            : > "$SETUP_TEST_STATE/database-created"
+            printf '%s\\n' created >> "$SETUP_TEST_STATE/createdb.log"
+        """,
+        "psql": """
+            args=" $* "
+            if echo "$args" | grep -q " -c "; then
+              echo 'psql variable references are not expanded in -c commands' >&2
+              exit 1
+            fi
+            sql=$(cat)
+            if echo "$sql" | grep -q 'FROM pg_database'; then
+              if [ -e "$SETUP_TEST_STATE/database-created" ]; then
+                printf '%s\\n' 1
+              fi
+            fi
+        """,
+        "sudo": """
+            if [ "${1:-}" = -u ]; then
+              shift 2
+            fi
+            exec "$@"
+        """,
+    }
+    for name, body in commands.items():
+        executable = fake_bin / name
+        executable.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(body).strip() + "\n")
+        executable.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "SETUP_TEST_STATE": str(state_dir),
+    }
+    outputs = []
+    for _ in range(3):
+        proc = subprocess.run(
+            ["bash", str(cursor_dir / "setup-services.sh")],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        outputs.append(proc.stdout + proc.stderr)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert (state_dir / "createdb.log").read_text().splitlines() == ["created"]
+    assert (state_dir / "alembic.log").read_text().splitlines() == ["upgrade-head"] * 3
+    combined_output = "".join(outputs)
+    assert admin_secret not in combined_output
+    assert app_secret not in combined_output
+    assert "postgresql://" not in combined_output
+
+
+def test_setup_services_database_probe_uses_psql_stdin_binding():
+    script = (CURSOR_DIR / "setup-services.sh").read_text()
+    assert "-v db_name=\"$LIFEOS_DB\" -tA <<'SQL'" in script
+    assert "WHERE datname = :'db_name';" in script
+    assert '-tAc "SELECT 1 FROM pg_database' not in script
 
 
 @pytest.mark.parametrize(
