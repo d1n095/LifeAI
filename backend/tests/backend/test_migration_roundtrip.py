@@ -18,13 +18,19 @@ calling alembic's Python API directly, so it exercises the exact command path
 import os
 import subprocess
 import sys
+import uuid
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 from sqlalchemy import text as sa_text
+from sqlalchemy.orm import sessionmaker
 
 from app.db import migration_engine
+from app.models.document import ActiveTruthStatus, Document, DocumentSource
+from app.models.knowledge_claim import KnowledgeClaim
+from app.models.project_entities import ProjectEntity, ProjectEntityRelationship
+from app.models.user import User
 
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -38,6 +44,65 @@ def _revision_count() -> int:
     config.set_main_option("script_location", os.path.join(BACKEND_ROOT, "alembic"))
     script = ScriptDirectory.from_config(config)
     return len(list(script.walk_revisions()))
+
+
+def _seed_project_relationships(relationship_types: tuple[str, ...]) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    session = sessionmaker(bind=migration_engine)()
+    try:
+        owner = User(email=f"migration-vocabulary-{uuid.uuid4()}@example.com", password_hash="x", email_verified=True)
+        session.add(owner)
+        session.flush()
+        document = Document(
+            title="relationship migration proof",
+            source=DocumentSource.upload,
+            uploaded_by=owner.id,
+            active_truth_status=ActiveTruthStatus.active,
+        )
+        session.add(document)
+        session.flush()
+        claim = KnowledgeClaim(
+            owner_id=owner.id,
+            source_id=document.id,
+            claim_text="relationship migration proof claim",
+            extraction_version="v1",
+        )
+        session.add(claim)
+        session.flush()
+        source = ProjectEntity(
+            owner_id=owner.id,
+            entity_type="idea",
+            title="relationship source",
+            title_normalized="relationship source",
+            derived_from_claim_id=claim.id,
+            authority="founder",
+            basis="manual",
+            idempotency_key=f"source-{uuid.uuid4()}",
+        )
+        target = ProjectEntity(
+            owner_id=owner.id,
+            entity_type="idea",
+            title="relationship target",
+            title_normalized="relationship target",
+            derived_from_claim_id=claim.id,
+            authority="founder",
+            basis="manual",
+            idempotency_key=f"target-{uuid.uuid4()}",
+        )
+        session.add_all((source, target))
+        session.flush()
+        session.add_all(
+            ProjectEntityRelationship(
+                owner_id=owner.id,
+                from_entity_id=source.id,
+                to_entity_id=target.id,
+                relationship_type=relationship_type,
+            )
+            for relationship_type in relationship_types
+        )
+        session.commit()
+        return owner.id, source.id, target.id
+    finally:
+        session.close()
 
 
 def _schema_snapshot() -> dict:
@@ -270,3 +335,78 @@ def test_full_migration_chain_downgrades_to_base_and_back_to_head():
     except Exception:
         _run_alembic("upgrade", "head")
         raise
+
+
+def test_0086_to_head_preserves_existing_restored_concept_relationships():
+    restored_types = ("same", "partial_overlap", "related", "extends", "alternative", "reuses")
+    all_types = restored_types + (
+        "relates_to",
+        "supersedes",
+        "contradicts",
+        "blocks",
+        "answers",
+        "duplicates",
+        "derived_from",
+        "depends_on",
+        "implies",
+        "verifies",
+        "satisfies",
+        "mitigates",
+    )
+    try:
+        _run_alembic("downgrade", "0086_account_erasure_reauth")
+        # Simulate a historically valid database whose Concept rows survived while its
+        # constraint remained the correct union. Migration 0087 must preserve these rows.
+        quoted = ",".join(f"'{value}'" for value in all_types)
+        with migration_engine.begin() as connection:
+            connection.execute(sa_text("ALTER TABLE project_entity_relationships DROP CONSTRAINT ck_project_entity_relationships_type"))
+            connection.execute(
+                sa_text(
+                    "ALTER TABLE project_entity_relationships ADD CONSTRAINT ck_project_entity_relationships_type "
+                    f"CHECK (relationship_type IN ({quoted}))"
+                )
+            )
+        owner_id, _, _ = _seed_project_relationships(restored_types)
+
+        _run_alembic("upgrade", "head")
+        with migration_engine.connect() as connection:
+            revision = connection.execute(sa_text("SELECT version_num FROM alembic_version")).scalar_one()
+            stored = set(
+                connection.execute(
+                    sa_text(
+                        "SELECT relationship_type FROM project_entity_relationships "
+                        "WHERE owner_id = :owner_id"
+                    ),
+                    {"owner_id": owner_id},
+                ).scalars()
+            )
+        assert revision == "0087_relationship_vocabulary"
+        assert stored == set(restored_types)
+    finally:
+        _run_alembic("upgrade", "head")
+
+
+def test_0087_downgrade_refuses_before_corrupting_restored_concept_rows():
+    owner_id, _, _ = _seed_project_relationships(("same",))
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "0086_account_erasure_reauth"],
+        cwd=BACKEND_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ},
+    )
+    assert result.returncode != 0
+    assert "cannot downgrade to 0086" in result.stderr
+
+    with migration_engine.connect() as connection:
+        revision = connection.execute(sa_text("SELECT version_num FROM alembic_version")).scalar_one()
+        stored = connection.execute(
+            sa_text(
+                "SELECT count(*) FROM project_entity_relationships "
+                "WHERE owner_id = :owner_id AND relationship_type = 'same'"
+            ),
+            {"owner_id": owner_id},
+        ).scalar_one()
+    assert revision == "0087_relationship_vocabulary"
+    assert stored == 1
