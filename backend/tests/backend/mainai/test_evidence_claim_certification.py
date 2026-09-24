@@ -101,7 +101,8 @@ def test_unrelated_evidence_rejected(superuser_db):
         evidence_kind="test_run_result",
         payload={"passed": True, "capability_key": "other.thing"},
         source_type="pytest",
-        source_ref="unrelated",
+        # Even an exact source_ref cannot override the structured mismatch.
+        source_ref="wanted.capability",
         idempotency_key=f"ev-unrel-{uuid.uuid4()}",
         deterministic=True,
     )
@@ -146,9 +147,96 @@ def test_passed_evidence_can_verify(superuser_db):
     assert record.status == "verified_available"
 
 
-def test_passed_evidence_via_source_ref_fragment_can_verify(superuser_db):
-    """When the payload has NO structured subject field at all, a source_ref fragment
-    that genuinely names the capability is still an acceptable (weak) signal."""
+def test_exact_structured_subject_can_verify(superuser_db):
+    owner = _owner(superuser_db)
+    execution = _task_exec(superuser_db, owner.id)
+    evidence = record_evidence(
+        superuser_db,
+        owner_id=owner.id,
+        execution_id=execution.id,
+        evidence_kind="test_run_result",
+        payload={"passed": True, "subject": "test_execution.pytest_backend"},
+        source_type="pytest",
+        source_ref="opaque-run-reference",
+        idempotency_key=f"ev-subject-{uuid.uuid4()}",
+        deterministic=True,
+    )
+    support = evidence_supports_claim(
+        superuser_db,
+        owner_id=owner.id,
+        subject_key="test_execution.pytest_backend",
+        proposition="verified_available",
+        evidence_id=evidence.id,
+    )
+    assert support.supports is True
+
+
+def test_generic_proposition_without_subject_identity_rejected(superuser_db):
+    owner = _owner(superuser_db)
+    execution = _task_exec(superuser_db, owner.id)
+    evidence = record_evidence(
+        superuser_db,
+        owner_id=owner.id,
+        execution_id=execution.id,
+        evidence_kind="test_run_result",
+        payload={"passed": True, "proposition": "verified_available"},
+        source_type="pytest",
+        source_ref="test_execution.pytest_backend",
+        idempotency_key=f"ev-proposition-{uuid.uuid4()}",
+        deterministic=True,
+    )
+    support = evidence_supports_claim(
+        superuser_db,
+        owner_id=owner.id,
+        subject_key="test_execution.pytest_backend",
+        proposition="verified_available",
+        evidence_id=evidence.id,
+    )
+    assert support.supports is False
+    assert "proposition_mismatch" in support.reasons
+
+
+def test_evidence_from_wrong_owner_rejected(superuser_db):
+    owner = _owner(superuser_db)
+    other_owner = _owner(superuser_db)
+    execution = _task_exec(superuser_db, other_owner.id)
+    evidence = record_evidence(
+        superuser_db,
+        owner_id=other_owner.id,
+        execution_id=execution.id,
+        evidence_kind="test_run_result",
+        payload={"passed": True, "capability_key": "test_execution.pytest_backend"},
+        source_type="pytest",
+        source_ref="opaque-run-reference",
+        idempotency_key=f"ev-owner-{uuid.uuid4()}",
+        deterministic=True,
+    )
+    support = evidence_supports_claim(
+        superuser_db,
+        owner_id=owner.id,
+        subject_key="test_execution.pytest_backend",
+        proposition="verified_available",
+        evidence_id=evidence.id,
+    )
+    assert support.supports is False
+    assert support.reasons == ("evidence_not_found_or_wrong_owner",)
+
+
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "test_execution.pytest_backend",
+        "pytest_backend",
+        "tests/backend/mainai/test_pytest_backend.py::test_runs",
+        "not_pytest_backend",
+        "pytest_backend_old",
+        "other/test_pytest_backend_copy.py",
+        "prefix_test_execution.pytest_backend",
+        "test_execution.pytest_backend_suffix",
+    ],
+)
+def test_source_ref_without_structured_subject_cannot_verify(superuser_db, source_ref):
+    """Opaque provenance cannot establish capability identity, even on an exact string."""
     owner = _owner(superuser_db)
     execution = _task_exec(superuser_db, owner.id)
     evidence = record_evidence(
@@ -158,21 +246,21 @@ def test_passed_evidence_via_source_ref_fragment_can_verify(superuser_db):
         evidence_kind="test_run_result",
         payload={"passed": True},
         source_type="pytest",
-        source_ref="tests/backend/mainai/test_pytest_backend.py::test_runs",
+        source_ref=source_ref,
         idempotency_key=f"ev-frag-{uuid.uuid4()}",
         deterministic=True,
     )
-    record = record_capability_observation(
-        superuser_db,
-        owner_id=owner.id,
-        capability_key="test_execution.pytest_backend",
-        domain="test_execution",
-        status="verified_available",
-        authority="deterministic_source",
-        success=True,
-        verification_evidence_id=evidence.id,
-    )
-    assert record.status == "verified_available"
+    with pytest.raises(CapabilityEvidenceError):
+        record_capability_observation(
+            superuser_db,
+            owner_id=owner.id,
+            capability_key="test_execution.pytest_backend",
+            domain="test_execution",
+            status="verified_available",
+            authority="deterministic_source",
+            success=True,
+            verification_evidence_id=evidence.id,
+        )
 
 
 def test_old_success_new_failure_cannot_keep_verified(superuser_db):

@@ -133,7 +133,7 @@ def _verified(db, owner_id, capability_key, domain):
         owner_id=owner_id,
         execution_id=execution.id,
         evidence_kind="test_run_result",
-        payload={"passed": True},
+        payload={"passed": True, "capability_key": capability_key},
         source_type="pytest",
         source_ref=f"tests::{capability_key}",
         idempotency_key=f"ev-{uuid.uuid4()}",

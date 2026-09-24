@@ -117,12 +117,10 @@ def evidence_supports_claim(
     if require_deterministic and not bool(row.deterministic):
         reasons.append("not_deterministic")
 
-    # Subject/proposition relevance: structured identity fields (exact match) take priority
-    # over source_ref (a path/filename, where a substring relationship is legitimate) --
-    # OWNER MATCH != SUBJECT MATCH, STRING SIMILARITY != SUBJECT IDENTITY. A structured field
-    # that's present and doesn't match exactly must never be overridden by a looser signal
-    # (this is the bug: a bare "test_run_result"+passed=True previously bypassed subject
-    # checking entirely whenever capability_key was merely absent from the payload).
+    # Subject/proposition relevance comes only from structured identity fields. source_ref is
+    # opaque provenance (paths, UUIDs, run labels, and provider references in production), not
+    # a subject namespace: neither substring nor filename-segment similarity can establish
+    # claim identity. OWNER MATCH != SUBJECT MATCH, STRING SIMILARITY != SUBJECT IDENTITY.
     payload = row.payload if isinstance(row.payload, dict) else {}
     payload_capability_key = payload.get("capability_key")
     payload_subject = payload.get("subject")
@@ -139,17 +137,14 @@ def evidence_supports_claim(
         if not subject_ok:
             mismatch_reason = "subject_mismatch"
     elif payload_proposition is not None:
-        subject_ok = str(payload_proposition) == proposition or str(payload_proposition) == subject_key
+        # A proposition can serve as the structured subject only when it names this exact
+        # subject. A generic claim label such as "verified_available" says what was asserted,
+        # but does not identify which capability it was asserted about.
+        subject_ok = str(payload_proposition) == subject_key
         if not subject_ok:
             mismatch_reason = "proposition_mismatch"
     else:
-        # No structured subject field at all on this evidence row -- the ONLY remaining
-        # signal is a source_ref (path/filename) fragment match, deliberately the weakest
-        # tier and never allowed to override an explicit-but-mismatched field above.
-        last_segment = subject_key.split(".")[-1]
-        subject_ok = subject_key in str(row.source_ref or "") or last_segment in str(row.source_ref or "")
-        if not subject_ok:
-            mismatch_reason = "unrelated_evidence"
+        mismatch_reason = "missing_structured_subject_binding"
 
     if not subject_ok and proposition not in ("verified_available", "local_competence"):
         reasons.append("subject_or_proposition_not_tied_to_evidence")
