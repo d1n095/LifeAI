@@ -88,6 +88,7 @@ PERSONAL_RECALL_PRODUCTION_IDENTITY_FILES = (
     "alembic/versions/0084_personal_recall_erasure_lifecycle.py",
     "alembic/versions/0085_account_erasure_operation_authority.py",
     "alembic/versions/0086_account_erasure_reauth_binding.py",
+    "alembic/versions/0088_account_erasure_completion_phase.py",
     "app/mainai_founder_boot/readiness.py",
 )
 

@@ -380,7 +380,7 @@ def test_0086_to_head_preserves_existing_restored_concept_relationships():
                     {"owner_id": owner_id},
                 ).scalars()
             )
-        assert revision == "0087_relationship_vocabulary"
+        assert revision == "0088_erasure_completion_phase"
         assert stored == set(restored_types)
     finally:
         _run_alembic("upgrade", "head")
