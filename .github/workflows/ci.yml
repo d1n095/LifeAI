@@ -234,8 +234,13 @@ jobs:
         working-directory: backend
 
   # ---------------------------------------------------------------------------------------
-  # Migration check: fresh install to head, then a simulated upgrade from the previous
-  # schema with data preserved — see docs/OPERATIONS.md.
+  # Migration check: documented boot order on a fresh cluster DB, then a simulated upgrade
+  # from the previous schema with data preserved — see docs/OPERATIONS.md and
+  # backend/docker-entrypoint.sh (ensure_app_role -> alembic upgrade head ->
+  # apply_runtime_privileges). CREATE ROLE is cluster-global, so the first
+  # ensure_app_role.py call creates mainai_app; later calls on other DBs in this job are
+  # idempotent and must NOT rotate the password. Historical migrations (e.g. 0070) GRANT
+  # to mainai_app and therefore require the role to exist before alembic runs.
   # ---------------------------------------------------------------------------------------
   migration-check:
     name: Backend — Alembic migration check
@@ -253,6 +258,10 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       SECRET_KEY: ci-test-secret-key
+      # CI-only runtime-role password. Not a production secret. Shared across this job's
+      # databases so ensure_app_role.py does not rotate the cluster-global role between
+      # the fresh-install DB and the data-preserving upgrade DB.
+      MAINAI_APP_PASSWORD: ci_migration_check_app_pw
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -266,27 +275,41 @@ jobs:
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_migration_check
-          APP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_migration_check
+          APP_DATABASE_URL: postgresql://mainai_app:ci_migration_check_app_pw@localhost:5432/lifeos_migration_check
         run: |
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_migration_check;"
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_migration_check;"
+          python scripts/security/ensure_app_role.py
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -tAc "
+            SELECT COUNT(*) FROM pg_roles
+             WHERE rolname = 'mainai_app'
+               AND rolsuper IS FALSE
+               AND rolcreatedb IS FALSE
+               AND rolcreaterole IS FALSE
+               AND rolbypassrls IS FALSE
+          " | grep -qx 1 || (echo "::error::mainai_app missing or not least-privilege before alembic" && exit 1)
           alembic upgrade head
+          python scripts/security/apply_runtime_privileges.py
       - name: Downgrade to base and back up (round-trip check)
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_migration_check
-          APP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_migration_check
+          APP_DATABASE_URL: postgresql://mainai_app:ci_migration_check_app_pw@localhost:5432/lifeos_migration_check
         run: |
           alembic downgrade base
           alembic upgrade head
+          python scripts/security/apply_runtime_privileges.py
       - name: Upgrade from the previous schema with data preserved
         working-directory: backend
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_upgrade_check
-          APP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_upgrade_check
+          APP_DATABASE_URL: postgresql://mainai_app:ci_migration_check_app_pw@localhost:5432/lifeos_upgrade_check
         run: |
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_upgrade_check;"
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_upgrade_check;"
+          # Role is cluster-global (already created above). Re-run the documented bootstrap
+          # so this database gets per-DB default privileges; password is not rotated.
+          python scripts/security/ensure_app_role.py
           alembic upgrade 0002
           PGPASSWORD=postgres psql -h localhost -U postgres -d lifeos_upgrade_check -c "
             INSERT INTO users (id, email, password_hash, role, is_active, created_at)
@@ -295,6 +318,7 @@ jobs:
             VALUES ('22222222-2222-2222-2222-222222222222', '11111111-1111-1111-1111-111111111111', 'Gammal konversation', now(), now());
           "
           alembic upgrade head
+          python scripts/security/apply_runtime_privileges.py
           PGPASSWORD=postgres psql -h localhost -U postgres -d lifeos_upgrade_check -c "
             SELECT email, email_verified, sessions_valid_after IS NOT NULL AS has_baseline FROM users WHERE id = '11111111-1111-1111-1111-111111111111';
           " | grep -q "legacy@lifeos.local" || (echo "::error::pre-existing user row did not survive the upgrade" && exit 1)
