@@ -403,10 +403,13 @@ jobs:
       - run: npx next build
         working-directory: frontend
 
-      # First pass: functional suites (auth, session-security, account lifecycle) run with
-      # a generous login/register rate limit — they are not what's exercising that control
-      # (rate-limit.spec.ts is, below) and must not be flaky because of it purely as a side
-      # effect of how many /api/auth/login calls the suite happens to make in one window.
+      # First pass: canonical Group A (auth, session-security, account lifecycle, shell
+      # empty-states, jobs pagination) with generous auth rate limits. These specs share one
+      # founder account and do not import Library material, so they can share this job's
+      # fresh DB. They are not what exercises the real limiter (rate-limit.spec.ts is,
+      # below) and must not be flaky because of how many /api/auth/login calls Group A
+      # happens to make in one window. Library/Studio (Group B) is a separate job: those
+      # specs leave the founder Library non-empty and require the durable worker.
       - name: Start backend (functional test mode — generous rate limits)
         working-directory: backend
         env:
@@ -422,7 +425,7 @@ jobs:
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
             sleep 1
           done
-      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/shell-pages.spec.ts e2e/mainai-jobs-pagination.spec.ts --project=chromium
         working-directory: frontend
       - name: Stop backend
         if: always()
@@ -460,6 +463,145 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backend-logs
+          path: backend/*.log
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------------------
+  # Canonical Group B — Life Library / Founder Knowledge Studio. Isolated from e2e-tests
+  # because these specs import real files into the founder Library (which would break
+  # Group A's shell-pages empty-state) and because imports are processed by the durable
+  # worker, not the web app. Both processes use scripts/ci/run_e2e_{backend,worker}.py so
+  # outbound AI/email stay faked; nothing here calls a live provider. Own database +
+  # STORAGE_ROOT so Group A / rate-limit / same-origin never see this job's blobs or rows.
+  # ---------------------------------------------------------------------------------------
+  e2e-library-studio-tests:
+    name: E2E — Library / Founder Knowledge Studio
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TZ: UTC
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_library_e2e
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_e2e_pw@localhost:5432/lifeos_library_e2e
+      REDIS_URL: redis://localhost:6379/0
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      SECRET_KEY: ci-e2e-secret-key
+      OPENAI_API_KEY: fake-key-for-e2e
+      ENABLE_SCHEDULED_CLEANUP: "false"
+      E2E_FOUNDER_PASSWORD: TestFounderPassword123!
+      E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_library_e2e
+      E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/backend/e2e_test_emails.jsonl
+      STORAGE_ROOT: ${{ github.workspace }}/e2e-library-uploads
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: pip install -r requirements.txt
+        working-directory: backend
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      - name: Create restricted database role and isolated Library E2E database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mainai_app') THEN
+                CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app_e2e_pw';
+              END IF;
+            END
+            \$\$;
+          "
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_library_e2e;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_library_e2e;"
+          psql -h localhost -U postgres -d lifeos_library_e2e -c "
+            GRANT USAGE ON SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;
+          "
+      - run: alembic upgrade head
+        working-directory: backend
+      - name: Apply S1A runtime privilege policy
+        working-directory: backend
+        run: python scripts/security/apply_runtime_privileges.py
+
+      - run: npx next build
+        working-directory: frontend
+
+      - name: Start backend + durable worker (shared provider/email fakes)
+        working-directory: backend
+        env:
+          RATE_LIMIT_LOGIN_PER_MINUTE: "1000"
+          RATE_LIMIT_REGISTER_PER_MINUTE: "1000"
+          RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE: "1000"
+          RATE_LIMIT_RESET_PASSWORD_PER_MINUTE: "1000"
+          RATE_LIMIT_VERIFY_EMAIL_PER_MINUTE: "1000"
+        run: |
+          mkdir -p "$STORAGE_ROOT"
+          nohup python scripts/ci/run_e2e_backend.py > backend-library.log 2>&1 &
+          echo $! > backend.pid
+          nohup python scripts/ci/run_e2e_worker.py > worker-library.log 2>&1 &
+          echo $! > worker.pid
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
+            sleep 1
+          done
+          # Worker has no HTTP health endpoint; fail closed if the process exited immediately.
+          kill -0 "$(cat worker.pid)" || (echo "::error::e2e worker exited before tests started" && cat worker-library.log && exit 1)
+      - run: npx playwright test e2e/founder-knowledge-studio.spec.ts e2e/founder-knowledge-studio-media.spec.ts e2e/library-upload-queue.spec.ts e2e/library-workbench-mobile.spec.ts --project=chromium
+        working-directory: frontend
+      - name: Stop backend and worker
+        if: always()
+        working-directory: backend
+        run: |
+          kill "$(cat worker.pid)" 2>/dev/null || true
+          kill "$(cat backend.pid)" 2>/dev/null || true
+
+      - name: Upload Playwright report (library/studio)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-library
+          path: frontend/playwright-report/
+          retention-days: 14
+      - name: Upload backend/worker logs (library/studio)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-logs-library
           path: backend/*.log
           retention-days: 14
 
@@ -2599,6 +2741,7 @@ jobs:
       - account-rate-limit-tests
       - migration-check
       - e2e-tests
+      - e2e-library-studio-tests
       - same-origin-proxy-test
       - combined-container-verify
       - vps-scripts-check
