@@ -133,6 +133,14 @@ def _create_erasure_operation(session, owner_id, *, status="active", phase="pers
     ).scalar_one()
     if status != "active":
         session.execute(
+            text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_recall_erasure')"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
+        session.execute(
+            text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_data_erasure')"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
+        session.execute(
             text("SELECT account_erasure_complete_operation(:operation_id, :owner_id)"),
             {"operation_id": str(operation_id), "owner_id": str(owner_id)},
         )
@@ -145,11 +153,17 @@ def _create_erasure_operation(session, owner_id, *, status="active", phase="pers
             text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_recall_erasure')"),
             {"operation_id": str(operation_id), "owner_id": str(owner_id)},
         )
-    elif phase != "started":
+    elif phase == "personal_data_erasure":
+        session.execute(
+            text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_recall_erasure')"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
         session.execute(
             text("SELECT account_erasure_set_phase(:operation_id, :owner_id, :phase)"),
             {"operation_id": str(operation_id), "owner_id": str(owner_id), "phase": phase},
         )
+    elif phase != "started":
+        raise AssertionError(f"unsupported erasure phase in test helper: {phase}")
     session.flush()
     return operation_id
 
