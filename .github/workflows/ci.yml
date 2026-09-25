@@ -130,6 +130,12 @@ jobs:
       ENABLE_SCHEDULED_CLEANUP: "false"
     steps:
       - uses: actions/checkout@v4
+      # test_external_frozen_worktree_probe_fails_closed_on_unavailable_seam needs this
+      # immutable SHA. It is NOT an ancestor of this branch (tip of
+      # origin/codex/mainai-continuous-supervision), so fetch-depth: 0 on HEAD is not
+      # enough. Deterministic one-commit fetch; do not substitute HEAD and do not skip.
+      - name: Fetch frozen Level-2 supervision commit
+        run: git fetch --no-tags --depth=1 origin a7df7f90dba9f8bc993005b2cce1d4c8cb7dcec4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
