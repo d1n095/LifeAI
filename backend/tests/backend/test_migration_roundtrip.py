@@ -408,5 +408,5 @@ def test_0087_downgrade_refuses_before_corrupting_restored_concept_rows():
             ),
             {"owner_id": owner_id},
         ).scalar_one()
-    assert revision == "0087_relationship_vocabulary"
+    assert revision == "0088_erasure_completion_phase"
     assert stored == 1
