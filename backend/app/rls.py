@@ -120,6 +120,18 @@ RLS_STATEMENTS = [
                       "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
+    *[
+        statement
+        for table in (
+            "orchestration_agents",
+            "orchestration_slots",
+            "orchestration_tasks",
+            "orchestration_task_dependencies",
+            "orchestration_claims",
+            "orchestration_github_snapshots",
+        )
+        for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    ],
 ]
 
 # `messages` is the one table here whose owner is not a column on the row itself: a message
@@ -324,6 +336,21 @@ POLICY_DEFINITIONS = [
                       "strategy_synthesis_cases", "strategy_synthesis_inputs", "strategy_synthesis_components",
                       "strategy_synthesis_conflicts", "strategy_synthesis_materializations",
                       "strategy_synthesis_evaluation_links", "strategy_synthesis_lesson_links", "strategy_synthesis_events")
+    ],
+    *[
+        {
+            "table": table,
+            "name": f"{table}_isolation",
+            "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+        }
+        for table in (
+            "orchestration_agents",
+            "orchestration_slots",
+            "orchestration_tasks",
+            "orchestration_task_dependencies",
+            "orchestration_claims",
+            "orchestration_github_snapshots",
+        )
     ],
 ]
 
@@ -613,6 +640,15 @@ _MAINAI_EXECUTION_TABLES = (
     "workforce_cost_budgets",
     "workforce_verification_decisions",
     "workforce_authority_epoch",
+    # Migration 0089 (orchestration truth ledger): owner-scoped occupancy + GitHub snapshots.
+    # Advisory project-manager state — never a permission grant. Claims/snapshots are
+    # append-only at the privilege layer; agents/slots/tasks stay mutable for occupancy.
+    "orchestration_agents",
+    "orchestration_slots",
+    "orchestration_tasks",
+    "orchestration_task_dependencies",
+    "orchestration_claims",
+    "orchestration_github_snapshots",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -1041,6 +1077,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_disclosure_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
+        for table in ("orchestration_agents", "orchestration_slots", "orchestration_tasks"):
+            conn.execute(text(f"REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        for table in ("orchestration_task_dependencies", "orchestration_claims", "orchestration_github_snapshots"):
+            conn.execute(text(f"REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1111,6 +1151,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
+            *((table, frozenset({"SELECT", "INSERT", "UPDATE"})) for table in (
+                "orchestration_agents", "orchestration_slots", "orchestration_tasks")),
+            *((table, frozenset({"SELECT", "INSERT"})) for table in (
+                "orchestration_task_dependencies", "orchestration_claims", "orchestration_github_snapshots")),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

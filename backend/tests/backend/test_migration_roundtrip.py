@@ -380,7 +380,7 @@ def test_0086_to_head_preserves_existing_restored_concept_relationships():
                     {"owner_id": owner_id},
                 ).scalars()
             )
-        assert revision == "0088_erasure_completion_phase"
+        assert revision == "0089_orchestration_truth_ledger"
         assert stored == set(restored_types)
     finally:
         _run_alembic("upgrade", "head")
@@ -408,5 +408,5 @@ def test_0087_downgrade_refuses_before_corrupting_restored_concept_rows():
             ),
             {"owner_id": owner_id},
         ).scalar_one()
-    assert revision == "0088_erasure_completion_phase"
+    assert revision == "0089_orchestration_truth_ledger"
     assert stored == 1

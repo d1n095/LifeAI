@@ -39,7 +39,9 @@ API_BASE = "https://api.github.com"
 
 
 class GitHubClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class GitHubClient:
@@ -67,7 +69,10 @@ class GitHubClient:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(method, f"{API_BASE}{path}", headers=self._headers(), json=json)
             if resp.status_code >= 400:
-                raise GitHubClientError(f"GitHub {method} {path} misslyckades ({resp.status_code}): {resp.text[:500]}")
+                raise GitHubClientError(
+                    f"GitHub {method} {path} misslyckades ({resp.status_code}): {resp.text[:500]}",
+                    status_code=resp.status_code,
+                )
             return resp.json() if resp.content else {}
 
     # --- Read ---------------------------------------------------------------------------
@@ -77,6 +82,32 @@ class GitHubClient:
         repo = self._require_configured()
         data = await self._request("GET", f"/repos/{repo}/git/ref/heads/{branch}")
         return data["object"]["sha"]
+
+    async def get_ref_or_none(self, branch: str) -> str | None:
+        """404-safe branch existence: a missing branch is not-exists, not a crash."""
+        try:
+            return await self.get_ref(branch)
+        except GitHubClientError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
+    async def get_repository(self) -> dict:
+        """Repository metadata, including `default_branch`."""
+        repo = self._require_configured()
+        return await self._request("GET", f"/repos/{repo}")
+
+    async def list_deployments(self, *, sha: str | None = None, environment: str | None = None) -> list[dict]:
+        """Deployments for the repo, optionally filtered to an exact SHA."""
+        repo = self._require_configured()
+        params: list[str] = []
+        if sha:
+            params.append(f"sha={sha}")
+        if environment:
+            params.append(f"environment={environment}")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        data = await self._request("GET", f"/repos/{repo}/deployments{suffix}")
+        return data if isinstance(data, list) else []
 
     async def get_pull_request(self, number: int) -> dict:
         repo = self._require_configured()
