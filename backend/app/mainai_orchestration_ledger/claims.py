@@ -18,7 +18,7 @@ from app.mainai_orchestration_ledger.types import (
     ClaimKind,
     GitHubTruthSnapshot,
     TaskRecord,
-    TestRunEvidence,
+    PytestRunEvidence,
 )
 
 
@@ -67,7 +67,7 @@ def apply_github_snapshot(task: TaskRecord, snapshot: GitHubTruthSnapshot) -> Ta
     )
 
 
-def bind_test_run(task: TaskRecord, evidence: TestRunEvidence) -> TaskRecord:
+def bind_test_run(task: TaskRecord, evidence: PytestRunEvidence) -> TaskRecord:
     payload: dict[str, Any] = {
         "sha": evidence.sha,
         "tree_sha": evidence.tree_sha,

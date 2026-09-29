@@ -51,7 +51,7 @@ from app.mainai_orchestration_ledger.types import (
     ProposedAssignment,
     TaskRecord,
     TaskStatus,
-    TestRunEvidence,
+    PytestRunEvidence,
 )
 from app.models.orchestration_ledger import OrchestrationAgent, OrchestrationClaim, OrchestrationTask
 from app.models.user import User
@@ -117,12 +117,12 @@ def _codex_lane() -> ProposedAssignment:
     )
 
 
-def _claude_duplicate() -> ProposedAssignment:
+def _claude_second_job() -> ProposedAssignment:
     return ProposedAssignment(
         agent_key="claude",
-        title="Founder Alpha independent examination",
-        role=AgentRole.EXAMINER,
-        working_branch=FOUNDER_ALPHA_FINAL_BRANCH,
+        title="A second Founder Alpha job while examiner is still running",
+        role=AgentRole.RESEARCHER,
+        working_branch="claude/do-not-double-job",
         exact_input_sha=FROZEN,
     )
 
@@ -204,7 +204,7 @@ def test_cursor_test_claim_is_not_a_bound_test_run():
     )
     result = ingest_agent_claim(task, claim)
     assert result.task.test_runs == []
-    evidence = TestRunEvidence(
+    evidence = PytestRunEvidence(
         sha=FROZEN,
         tree_sha=FROZEN_TREE,
         passed=2883,
@@ -221,7 +221,7 @@ def test_cursor_test_claim_is_not_a_bound_test_run():
 
 def test_test_run_evidence_rejects_agent_text_source():
     with pytest.raises(ValueError, match="pytest_execution"):
-        TestRunEvidence(
+        PytestRunEvidence(
             sha=FROZEN,
             passed=2883,
             failed=0,
@@ -233,7 +233,7 @@ def test_test_run_evidence_rejects_agent_text_source():
 
 def test_running_agent_rejects_second_assignment():
     claude = AgentOccupancy("claude", OccupancyStatus.RUNNING, AgentRole.EXAMINER)
-    decision = decide_assignment(claude, _claude_duplicate())
+    decision = decide_assignment(claude, _claude_second_job())
     assert decision.allowed is False
     assert decision.refusal is AssignmentRefusal.AGENT_RUNNING
 
@@ -285,7 +285,7 @@ async def test_founder_alpha_regression_does_not_reassign_claude():
         cursor_proposal=_cursor_lane(),
         codex_proposal=_codex_lane(),
     )
-    world.queued_assignments.append(_claude_duplicate())
+    world.queued_assignments.append(_claude_second_job())
     plan = plan_orchestration(world)
 
     wait_claude = [action for action in plan.actions if action.kind is NextActionKind.WAIT_FOR_RUNNING_AGENT and action.agent_key == "claude"]

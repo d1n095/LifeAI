@@ -118,7 +118,7 @@ class ClaimKind(str, enum.Enum):
 
 
 @dataclass(frozen=True)
-class TestRunEvidence:
+class PytestRunEvidence:
     sha: str
     passed: int
     failed: int
