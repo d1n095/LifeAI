@@ -233,6 +233,14 @@ from app.models.workforce import (
     WorkforcePerformanceRollup,
     WorkforceTeam,
 )
+from app.models.orchestration_ledger import (
+    OrchestrationAgent,
+    OrchestrationClaim,
+    OrchestrationGitHubSnapshot,
+    OrchestrationSlot,
+    OrchestrationTask,
+    OrchestrationTaskDependency,
+)
 from app.models.workforce_ops import (
     WorkforceAssignmentCheckpoint,
     WorkforceCostBudget,
@@ -416,6 +424,12 @@ __all__ = [
     "WorkforceDelegationRequest",
     "WorkforcePerformanceRollup",
     "WorkforceTeam",
+    "OrchestrationAgent",
+    "OrchestrationClaim",
+    "OrchestrationGitHubSnapshot",
+    "OrchestrationSlot",
+    "OrchestrationTask",
+    "OrchestrationTaskDependency",
     "WorkforceAssignmentCheckpoint",
     "WorkforceCostBudget",
     "WorkforceLifecycleEvent",

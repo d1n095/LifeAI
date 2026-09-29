@@ -6,6 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — MainAI orchestration truth ledger (2026-09-29)
+
+Separate Cursor builder lane. Does **not** modify the frozen Founder Alpha candidate
+`2fbe20aacf1203fc0e16d216ef55b666b2181619` (`codex/founder-alpha-final-composed-candidate`).
+Claude's examiner lane on that candidate is independent — do not duplicate or reassign it.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-orchestration-truth-ledger` | [#253](https://github.com/d1n095/LifeAI/pull/253) | **Open builder lane, based on frozen SHA `2fbe20a`** | Canonical orchestration state ledger: agent occupancy + slots, task/owner/role/status, SHA/branch/artifact/test/blocker/dependency/next-action/authority fields, GitHub as software truth, agent claims as non-authoritative evidence, AGENT_RUNNING → NO_NEW_ASSIGNMENT unless a parallel slot is explicitly created, founder-interruption policy, Founder Alpha regression scenarios. Migration 0089. Does not merge, deploy, activate Recall, or grant security permissions. |
+
+**Frozen base:** `codex/founder-alpha-final-composed-candidate` @ `2fbe20aacf1203fc0e16d216ef55b666b2181619`.
+**Must not:** rebase onto or rewrite that branch; assign a second job to Claude while she is examining; treat agent text as GitHub/CI/certification truth.
+
+**Merge-ordning:** independent of Claude's examiner and of any Founder Alpha merge. Do not merge this lane into the frozen candidate. Do not update this branch "för säkerhets skull" against other in-flight lanes.
+
 ## Universal Personal Recall — isolated Codex lane (2026-09-04)
 
 | Branch | PR | Status | Scope |
