@@ -17,6 +17,7 @@ from app.claim_action_integrity import (
 )
 from app.models.claim_action_integrity import ClaimActionEvidence
 from app.models.user import User
+from app.mainai_runtime_contract import sanitize_unverified_execution_claims
 
 
 SHA = "1" * 40
@@ -331,3 +332,21 @@ def test_runtime_role_has_read_only_no_fabrication_privilege():
             ORDER BY privilege_type
         """)).scalars().all()
     assert privileges == ["SELECT", "SELECT"]
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "The branch is on GitHub.",
+        "All tests passed.",
+        "The deployment succeeded.",
+        "The release has been certified.",
+        "The pull request was merged.",
+        "Recall has been activated.",
+        "The agent finished.",
+    ],
+)
+def test_plain_chat_cannot_emit_external_fact_without_receipt_context(claim):
+    sanitized = sanitize_unverified_execution_claims(claim)
+    assert claim not in sanitized
+    assert "no background job is running or has been completed" in sanitized

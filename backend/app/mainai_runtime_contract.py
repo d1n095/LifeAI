@@ -112,6 +112,19 @@ def build_answer_response(message: str) -> "MainAIExecutionResponse":
 #   6. has started the job
 #   7. will notify you when done
 _EXECUTION_CLAIM_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Evidence-bound release claims. Plain chat has no receipt/evidence context, so it may
+    # report an attempt or request but may never assert these external facts as completed.
+    (re.compile(r"\b(the\s+)?branch\s+(has\s+been\s+|was\s+|is\s+)?pushed(\s+to\s+github)?\b", re.I), "en"),
+    (re.compile(r"\b(the\s+)?branch\s+is\s+on\s+github\b", re.I), "en"),
+    (re.compile(r"\b(grenen|branchen)\s+(är\s+)?pushad(\s+till\s+github)?\b", re.I), "sv"),
+    (re.compile(r"\ball\s+tests\s+(have\s+)?passed\b", re.I), "en"),
+    (re.compile(r"\b(all|samtliga)\s+tester\s+(har\s+)?(passerat|gått\s+igenom)\b", re.I), "sv"),
+    (re.compile(r"\b(the\s+)?deployment\s+(has\s+)?(succeeded|completed)\b", re.I), "en"),
+    (re.compile(r"\b(deployen|driftsättningen)\s+(har\s+)?(lyckats|slutförts)\b", re.I), "sv"),
+    (re.compile(r"\b(the\s+)?(candidate|build|release)\s+(is|was|has\s+been)\s+certified\b", re.I), "en"),
+    (re.compile(r"\b(the\s+)?(pull\s+request|pr|branch)\s+(was|is|has\s+been)\s+merged\b", re.I), "en"),
+    (re.compile(r"\b(the\s+)?(release|recall|feature)\s+(is|was|has\s+been)\s+activated\b", re.I), "en"),
+    (re.compile(r"\b(the\s+)?agent\s+(has\s+)?(finished|completed)\b", re.I), "en"),
     # 1. working/laboring in the background
     (re.compile(r"\b(jag\s+)?(arbetar|jobbar|kör|bearbetar|processar)\s+(med\s+|på\s+)?(det|detta|frågan|dokumenten)?\s*i\s+bakgrunden\b", re.I), "sv"),
     (re.compile(r"\b(i'?m|i\s+am)\s+working\s+on\s+(it|this|that)\s+in\s+the\s+background\b", re.I), "en"),
