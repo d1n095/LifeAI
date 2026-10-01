@@ -89,6 +89,7 @@ class SessionOut(UserOut):
 class ChatMessageIn(BaseModel):
     conversation_id: uuid.UUID | None = None
     message: str
+    continuous: bool = False
 
     @field_validator("message")
     @classmethod
