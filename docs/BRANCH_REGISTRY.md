@@ -15,9 +15,9 @@ orchestration-truth-ledger examiner branch (`cursor/mainai-orchestration-truth-l
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-continuous-conversation-foundation` | — | **Open builder lane, based on frozen SHA `2fbe20a`** | Canonical founder↔MainAI conversation + append-only turn events (migration `0089_continuous_conversation_foundation`). Inbound classification, outbound no-relay filter, busy-agent hold, idle-agent independent lanes, founder interrupt only for real authority. Chat wires outbound filter + optional `continuous=true` canonical thread. Does not merge, deploy, activate Recall, or grant security permissions. |
+| `cursor/mainai-continuous-conversation-foundation` | — | **Open builder lane, based on frozen SHA `2fbe20a`** | Canonical founder↔MainAI conversation + append-only turn events (migration `0089_continuous_conversation`). Inbound classification, outbound no-relay filter, busy-agent hold, idle-agent independent lanes, founder interrupt only for real authority. Chat wires outbound filter + optional `continuous=true` canonical thread. Does not merge, deploy, activate Recall, or grant security permissions. |
 
-**Alembic:** this lane's 0089 is `0089_continuous_conversation_foundation`. The parallel ledger lane has a different 0089 (`0089_orchestration_truth_ledger`). Do not rebase either onto the other. A later merge revision must join both heads after each has landed independently.
+**Alembic:** this lane's 0089 is `0089_continuous_conversation`. The parallel ledger lane has a different 0089 (`0089_orchestration_truth_ledger`). Do not rebase either onto the other. A later merge revision must join both heads after each has landed independently.
 
 **Must not:** use the examiner worktree; modify `3244275`; assign Claude a second job while she examines the ledger.
 

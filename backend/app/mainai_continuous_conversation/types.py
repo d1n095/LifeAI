@@ -7,7 +7,7 @@ merge, deploy, Recall, provider, or RLS authority.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 class TurnDirection(str, enum.Enum):

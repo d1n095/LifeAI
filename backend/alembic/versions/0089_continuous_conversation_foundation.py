@@ -3,19 +3,20 @@
 One canonical founder↔MainAI thread plus an append-only turn log. Conversation
 state does not grant merge, deploy, Recall, or RLS authority.
 
-Revision ID: 0089_continuous_conversation_foundation
+Revision ID: 0089_continuous_conversation
 Revises: 0088_erasure_completion_phase
 Create Date: 2026-10-01
 
 Alembic note: the in-flight orchestration-truth-ledger lane also parents 0088 as
 `0089_orchestration_truth_ledger`. Those two 0089 revisions must not be merged
 onto each other until a later merge revision joins both heads. This branch keeps
-a single head.
+a single head. `alembic_version.version_num` is varchar(32), so this id is the
+short form of "continuous conversation foundation".
 """
 
 from alembic import op
 
-revision = "0089_continuous_conversation_foundation"
+revision = "0089_continuous_conversation"
 down_revision = "0088_erasure_completion_phase"
 branch_labels = None
 depends_on = None
