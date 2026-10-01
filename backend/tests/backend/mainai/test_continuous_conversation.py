@@ -30,6 +30,9 @@ from app.mainai_continuous_conversation.types import (
 from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationEvent
 from app.models.conversation import Conversation
 from app.models.user import User
+from app.providers.base import ChatResult
+from app.providers.openai_provider import OpenAIProvider
+from app.config import get_settings
 
 FORBIDDEN_CALLS = frozenset(
     {
@@ -194,3 +197,46 @@ def test_rls_hides_other_owners_canonical_rows(db_session, superuser_db, make_ve
     db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user_a.id)})
     visible = db_session.query(FounderCanonicalConversation).all()
     assert [row.owner_id for row in visible] == [user_a.id]
+
+
+FOUNDER_EMAIL = "founder@lifeos.local"
+FOUNDER_PASSWORD = "TestFounderPassword123!"
+DIM = get_settings().embedding_dim
+
+
+def test_live_chat_continuous_thread_discovers_sha_internally_and_blocks_relay(client, superuser_db, monkeypatch):
+    async def _embed(self, texts, model, **kwargs):
+        return [[0.1] * DIM for _ in texts]
+
+    async def _chat(self, messages, model, **kwargs):
+        return ChatResult(
+            content="Please paste the exact SHA so I can give it to Codex.",
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 5, "completion_tokens": 3},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat)
+    csrf = client.post("/api/auth/login", json={"email": FOUNDER_EMAIL, "password": FOUNDER_PASSWORD}).json()["csrf_token"]
+    first = client.post(
+        "/api/chat",
+        json={"message": "What SHA is the frozen Founder Alpha branch at?", "continuous": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["assistant_status"] == "succeeded"
+    assert "paste" not in body["reply"].lower()
+    assert "GitHub" in body["reply"]
+    conversation_id = body["conversation_id"]
+    second = client.post(
+        "/api/chat",
+        json={"message": "Keep going.", "continuous": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["conversation_id"] == conversation_id
+    events = superuser_db.query(FounderConversationEvent).filter_by(conversation_id=conversation_id).all()
+    assert any(event.direction == "inbound" and event.kind == "relay_request" for event in events)
+    assert any(event.kind == "discover_from_github" for event in events)
