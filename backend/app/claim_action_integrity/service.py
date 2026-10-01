@@ -171,6 +171,7 @@ def _validate_evidence(
     subject_key: str,
     action_key: str,
     artifact_sha: str | None,
+    required_bindings: dict[str, str] | None,
     now: datetime,
 ) -> tuple[str, str, tuple[str, ...]]:
     reasons: list[str] = []
@@ -182,6 +183,16 @@ def _validate_evidence(
         reasons.append("subject_or_action_mismatch")
     if artifact_sha is not None and evidence.artifact_sha != artifact_sha:
         reasons.append("artifact_sha_mismatch")
+    bindings = evidence.payload.get("bindings")
+    if evidence.payload.get("adapter_contract") == "claim-action-evidence/v1" and not required_bindings:
+        reasons.append("claim_binding_requirements_missing")
+    if required_bindings:
+        if not isinstance(bindings, dict):
+            reasons.append("evidence_bindings_missing")
+        else:
+            for key, expected in required_bindings.items():
+                if bindings.get(key) != expected:
+                    reasons.append(f"binding_mismatch:{key}")
     if evidence.source_type in _SELF_SOURCES or not evidence.authoritative:
         reasons.append("self_report_or_non_authoritative_source")
     if evidence.expires_at is not None and _as_aware(evidence.expires_at) <= _as_aware(now):
@@ -263,6 +274,15 @@ def _validate_evidence(
             reasons.append("completed_task_ledger_record_required")
         if not p.get("job_id") or not p.get("result_artifact_id"):
             reasons.append("job_and_result_artifact_required")
+    elif action_key in {"github_branch", "github_commit", "github_pull_request", "github_repository"}:
+        if source != EvidenceSourceType.github.value or not isinstance(p.get("bindings"), dict):
+            reasons.append("bound_github_observation_required")
+    elif action_key == "artifact_observation":
+        if source != EvidenceSourceType.filesystem.value or p.get("valid_artifact") is not True:
+            reasons.append("matching_filesystem_content_hash_required")
+    elif action_key == "database_observation":
+        if source != EvidenceSourceType.database.value:
+            reasons.append("database_observation_required")
     else:
         if source not in {EvidenceSourceType.database.value, EvidenceSourceType.external_service.value, EvidenceSourceType.task_execution_ledger.value}:
             reasons.append("authoritative_observation_required")
@@ -294,6 +314,7 @@ def assess_claim(
     requested_state: str,
     artifact_sha: str | None = None,
     evidence_id: UUID | None = None,
+    required_bindings: dict[str, str] | None = None,
     now: datetime | None = None,
 ) -> ClaimAssessment:
     if requested_state not in _CLAIM_RANK:
@@ -310,9 +331,12 @@ def assess_claim(
             proven, verification, reasons = _validate_evidence(
                 db, evidence=evidence, owner_id=owner_id, execution_id=execution_id,
                 subject_key=subject_key, action_key=action_key, artifact_sha=artifact_sha,
+                required_bindings=required_bindings,
                 now=now or _utc_now(),
             )
-            if requested_state == ClaimState.failed.value:
+            if proven == ClaimState.failed.value and requested_state != ClaimState.failed.value:
+                baseline = ClaimState.failed.value
+            elif requested_state == ClaimState.failed.value:
                 baseline = proven if proven == ClaimState.failed.value else ClaimState.requested.value
             elif _CLAIM_RANK[requested_state] <= _CLAIM_RANK[proven]:
                 baseline = requested_state
@@ -359,6 +383,7 @@ def record_receipt(
     artifact_sha: str | None = None,
     evidence_id: UUID | None = None,
     predecessor_receipt_id: UUID | None = None,
+    required_bindings: dict[str, str] | None = None,
     now: datetime | None = None,
 ) -> ClaimActionReceipt:
     if action_state not in {item.value for item in ActionState}:
@@ -389,7 +414,7 @@ def record_receipt(
     assessment = assess_claim(
         db, owner_id=owner_id, execution_id=execution_id, subject_key=subject_key,
         action_key=action_key, requested_state=declared_state, artifact_sha=artifact_sha,
-        evidence_id=evidence_id, now=now,
+        evidence_id=evidence_id, required_bindings=required_bindings, now=now,
     )
     receipt = ClaimActionReceipt(
         owner_id=owner_id, execution_id=execution_id, subject_key=subject_key,
