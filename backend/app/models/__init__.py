@@ -233,6 +233,7 @@ from app.models.workforce import (
     WorkforcePerformanceRollup,
     WorkforceTeam,
 )
+from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationEvent
 from app.models.workforce_ops import (
     WorkforceAssignmentCheckpoint,
     WorkforceCostBudget,
@@ -416,6 +417,8 @@ __all__ = [
     "WorkforceDelegationRequest",
     "WorkforcePerformanceRollup",
     "WorkforceTeam",
+    "FounderCanonicalConversation",
+    "FounderConversationEvent",
     "WorkforceAssignmentCheckpoint",
     "WorkforceCostBudget",
     "WorkforceLifecycleEvent",

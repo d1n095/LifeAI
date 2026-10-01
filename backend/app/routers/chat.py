@@ -29,6 +29,7 @@ from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
+from app.mainai_continuous_conversation.service import apply_outbound_filter, get_or_create_canonical_conversation, persist_turn
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
 from app.models.usage import UsageLog
@@ -65,7 +66,10 @@ SYSTEM_PROMPT = (
     "har startat', att du 'kommer återkomma' eller liknande — det skulle vara osant. Om något du "
     "beskriver kräver en riktig, varaktig körning (t.ex. en granskning av flera dokument) ska du "
     "säga att grundaren själv kan starta ett sådant jobb via Jobb & Aktivitet — aldrig låtsas att "
-    "du redan gör det."
+    "du redan gör det.\n\n"
+    "Du får ALDRIG be grundaren reläa agentmeddelanden, SHA:n, branchnamn, testresultat, "
+    "CI-status, blockeringar eller vem som ska jobba härnäst. GitHub är sanningen för git/"
+    "CI/PR. Agentkoordinering sköter du internt."
 )
 
 settings = get_settings()
@@ -284,7 +288,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # Pydantic validation is the structural guarantee that this reply is shaped as a plain
     # `answer` with `job_id=None` -- this endpoint has no background-job concept at all, so
     # that is the only mode a chat reply could ever truthfully be.
-    safe_content = sanitize_unverified_execution_claims(result.content)
+    safe_content = apply_outbound_filter(sanitize_unverified_execution_claims(result.content))
     build_answer_response(safe_content)  # raises on a contract violation; never actually can for mode=answer/job_id=None, but every call site goes through this the same way
 
     if assistant_row is None:
@@ -344,7 +348,10 @@ async def chat(
     user: User = Depends(require_founder),
 ):
     conversation = None
-    if payload.conversation_id:
+    if payload.continuous and not payload.conversation_id:
+        conversation = get_or_create_canonical_conversation(db, owner_id=user.id)
+        db.commit()
+    elif payload.conversation_id:
         # RLS on `conversations` already prevents cross-user reads, but we check
         # explicitly too so a mismatched id gives a clean 404 instead of silently
         # falling through to "create a new conversation".
@@ -366,6 +373,14 @@ async def chat(
     db.add(user_message)
     db.commit()
     db.refresh(user_message)
+
+    if payload.continuous:
+        try:
+            persist_turn(db, owner_id=user.id, text=payload.message, message_id=user_message.id)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.warning("failed to record continuous-conversation turn for message %s (non-fatal)", user_message.id, exc_info=True)
 
     return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
 

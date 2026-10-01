@@ -6,6 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — MainAI continuous conversation foundation (2026-10-01)
+
+Separate Cursor builder lane in its **own worktree**. Does **not** modify frozen Founder
+Alpha `2fbe20aacf1203fc0e16d216ef55b666b2181619`. Does **not** touch the in-flight
+orchestration-truth-ledger examiner branch (`cursor/mainai-orchestration-truth-ledger` @
+`32442758a4a575931c684e959f368e649fb8314b`).
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-continuous-conversation-foundation` | [#254](https://github.com/d1n095/LifeAI/pull/254) | **Open builder lane, based on frozen SHA `2fbe20a`** | Canonical founder↔MainAI conversation + append-only turn events (migration `0089_continuous_conversation`). Inbound classification, outbound no-relay filter, busy-agent hold, idle-agent independent lanes, founder interrupt only for real authority. Chat wires outbound filter + optional `continuous=true` canonical thread. Does not merge, deploy, activate Recall, or grant security permissions. Isolated worktree: examiner ledger branch `cursor/mainai-orchestration-truth-ledger` @ `3244275` was not modified. |
+
+**Alembic:** this lane's 0089 is `0089_continuous_conversation`. The parallel ledger lane has a different 0089 (`0089_orchestration_truth_ledger`). Do not rebase either onto the other. A later merge revision must join both heads after each has landed independently.
+
+**Must not:** use the examiner worktree; modify `3244275`; assign Claude a second job while she examines the ledger.
+
 ## Universal Personal Recall — isolated Codex lane (2026-09-04)
 
 | Branch | PR | Status | Scope |
