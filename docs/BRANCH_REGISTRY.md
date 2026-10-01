@@ -15,7 +15,7 @@ orchestration-truth-ledger examiner branch (`cursor/mainai-orchestration-truth-l
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-continuous-conversation-foundation` | — | **Open builder lane, based on frozen SHA `2fbe20a`** | Canonical founder↔MainAI conversation + append-only turn events (migration `0089_continuous_conversation`). Inbound classification, outbound no-relay filter, busy-agent hold, idle-agent independent lanes, founder interrupt only for real authority. Chat wires outbound filter + optional `continuous=true` canonical thread. Does not merge, deploy, activate Recall, or grant security permissions. |
+| `cursor/mainai-continuous-conversation-foundation` | [#254](https://github.com/d1n095/LifeAI/pull/254) | **Open builder lane, based on frozen SHA `2fbe20a`** | Canonical founder↔MainAI conversation + append-only turn events (migration `0089_continuous_conversation`). Inbound classification, outbound no-relay filter, busy-agent hold, idle-agent independent lanes, founder interrupt only for real authority. Chat wires outbound filter + optional `continuous=true` canonical thread. Does not merge, deploy, activate Recall, or grant security permissions. Isolated worktree: examiner ledger branch `cursor/mainai-orchestration-truth-ledger` @ `3244275` was not modified. |
 
 **Alembic:** this lane's 0089 is `0089_continuous_conversation`. The parallel ledger lane has a different 0089 (`0089_orchestration_truth_ledger`). Do not rebase either onto the other. A later merge revision must join both heads after each has landed independently.
 
