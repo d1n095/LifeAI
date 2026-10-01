@@ -44,6 +44,14 @@ from app.models.memory_truth_claim import (
     MemoryTruthClaim,
 )
 from app.models.claim_relationship import ClaimRelationship
+from app.models.claim_action_integrity import (
+    ActionState,
+    ClaimActionEvidence,
+    ClaimActionReceipt,
+    ClaimState,
+    EvidenceSourceType,
+    VerificationState,
+)
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
 from app.models.corpus_trial_run import CorpusTrialRun
@@ -246,6 +254,12 @@ from app.models.work_intelligence import (
 )
 
 __all__ = [
+    "ActionState",
+    "ClaimActionEvidence",
+    "ClaimActionReceipt",
+    "ClaimState",
+    "EvidenceSourceType",
+    "VerificationState",
     "AgentRole",
     "AgentAdapterKind",
     "AgentScopeLease",

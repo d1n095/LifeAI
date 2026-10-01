@@ -448,6 +448,8 @@ _MAINAI_EXECUTION_TABLES = (
     "mainai_recovery_records",
     "mainai_recovery_events",
     "mainai_task_waits",
+    "claim_action_evidence",
+    "claim_action_receipts",
     "intelligence_executions",
     "intelligence_evidence",
     "intelligence_interpretations",
@@ -621,6 +623,7 @@ _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_claim_action_integrity_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "erase_own_provider_spend_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {
         "name": "settle_provider_spend_usage",
@@ -1041,6 +1044,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_disclosure_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
+        for table in ("claim_action_evidence", "claim_action_receipts"):
+            conn.execute(text(f"REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON {table} FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_claim_action_integrity_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1111,6 +1117,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
+            ("claim_action_evidence", frozenset({"SELECT"})),
+            ("claim_action_receipts", frozenset({"SELECT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

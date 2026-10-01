@@ -587,6 +587,11 @@ def erase_account_data(
             {"operation_id": str(operation_id), "owner_id": str(owner_id)},
         )
 
+        # Claim/action integrity evidence and receipts are append-only during ordinary
+        # operation.  Their narrow SECURITY DEFINER erasure path accepts no owner parameter
+        # and only opens while this exact governed operation is in personal_data_erasure.
+        db.execute(sa_text("SELECT erase_own_claim_action_integrity_children()"))
+
         # --- Personal data: deleted outright, not anonymized. ---
         conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=owner_id).all()]
         if conversation_ids:
