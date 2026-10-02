@@ -382,7 +382,6 @@ def decide_approval(
     if mode in {ApprovalMode.DENY, ApprovalMode.REVIEW_EXACT_ACTION}:
         db.flush()
         return receipt
-    blocked = mode is ApprovalMode.DENY_AND_BLOCK
     remaining = 1 if mode is ApprovalMode.ALLOW_ONCE else None
     expires = None
     if mode is ApprovalMode.ALLOW_FOR_DURATION:

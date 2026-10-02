@@ -14,7 +14,7 @@ modify the parent under Claude examination.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-founder-sovereignty-family-delegation` | — | **Open child lane, based on `691490e`** | One-Founder binding, policy classes (KERNEL / FOUNDER_POLICY / RUNTIME_PREFERENCE), immutable policy versions + Founder-only recovery/unlock, family scoped delegation + remote approval control plane, UserAI tenant boundary interface. Migration `0090_founder_sovereignty` (child of `0089_continuous_conversation`, not another 0089). Does not merge, deploy, activate Recall, or grant merge/deploy/superuser authority. |
+| `cursor/mainai-founder-sovereignty-family-delegation` | [#255](https://github.com/d1n095/LifeAI/pull/255) | **Open child lane, based on `691490e`** | One-Founder binding, policy classes (KERNEL / FOUNDER_POLICY / RUNTIME_PREFERENCE), immutable policy versions + Founder-only recovery/unlock, family scoped delegation + remote approval control plane, UserAI tenant boundary interface. Migration `0090_founder_sovereignty` (child of `0089_continuous_conversation`, not another 0089). Does not merge, deploy, activate Recall, or grant merge/deploy/superuser authority. |
 
 **Must not:** modify parent SHA `691490e` or its examiner worktree; create a sibling 0089; activate Recall.
 

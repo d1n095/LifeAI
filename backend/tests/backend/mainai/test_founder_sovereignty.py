@@ -42,7 +42,6 @@ from app.mainai_founder_sovereignty.types import (
     FamilyRelationship,
     PolicyClass,
     PolicySource,
-    RiskTier,
     SovereigntyError,
     TenantKind,
 )
@@ -135,6 +134,7 @@ def test_instance_binds_only_to_founder_user_id(superuser_db):
     with pytest.raises(IntegrityError):
         superuser_db.flush()
     superuser_db.rollback()
+    _ensure_founder(superuser_db)
     first = bind_founder_instance(superuser_db, actor_id=FOUNDER_USER_ID)
     second = bind_founder_instance(superuser_db, actor_id=FOUNDER_USER_ID)
     assert first.id == second.id
