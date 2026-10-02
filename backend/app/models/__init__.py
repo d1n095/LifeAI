@@ -234,6 +234,17 @@ from app.models.workforce import (
     WorkforceTeam,
 )
 from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationEvent
+from app.models.founder_sovereignty import (
+    FamilyApprovalReceipt,
+    FamilyApprovalRequest,
+    FamilyCapabilityGrant,
+    FamilyMember,
+    FounderInstanceBinding,
+    FounderPolicyHead,
+    FounderPolicyProposal,
+    FounderPolicyVersion,
+    UserAITenantBoundary,
+)
 from app.models.workforce_ops import (
     WorkforceAssignmentCheckpoint,
     WorkforceCostBudget,
@@ -419,6 +430,15 @@ __all__ = [
     "WorkforceTeam",
     "FounderCanonicalConversation",
     "FounderConversationEvent",
+    "FounderInstanceBinding",
+    "FounderPolicyVersion",
+    "FounderPolicyHead",
+    "FounderPolicyProposal",
+    "FamilyMember",
+    "FamilyApprovalRequest",
+    "FamilyApprovalReceipt",
+    "FamilyCapabilityGrant",
+    "UserAITenantBoundary",
     "WorkforceAssignmentCheckpoint",
     "WorkforceCostBudget",
     "WorkforceLifecycleEvent",
