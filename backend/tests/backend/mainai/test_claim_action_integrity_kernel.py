@@ -65,15 +65,36 @@ def test_requested_cannot_be_upgraded_to_completed_without_evidence(superuser_db
     owner = _owner(superuser_db)
     result = _assess(superuser_db, owner, "generic", "completed")
     assert result.claimable is False
-    assert result.effective_state == "requested"
-    assert "completion is not verified" in result.allowed_language
+    assert result.effective_state == "unknown"
+    assert "state of release:alpha is unknown" in result.allowed_language
+
+
+def test_unknown_remains_unknown_and_requested_requires_a_request_receipt(superuser_db):
+    owner = _owner(superuser_db)
+    unknown = _assess(superuser_db, owner, "generic", "unknown", sha=None)
+    assert unknown.claimable is True
+    assert unknown.effective_state == "unknown"
+
+    unproved_request = _assess(superuser_db, owner, "generic", "requested", sha=None)
+    assert unproved_request.claimable is False
+    assert unproved_request.effective_state == "unknown"
+    receipt = record_receipt(
+        superuser_db, owner_id=owner.id, execution_id="exec-1", subject_key="release:alpha",
+        action_key="generic", declared_state="requested", action_state="requested",
+        declared_action={"request": "generic"}, permitted_action={}, executed_action={},
+        observed_result={}, authority_snapshot={}, created_by="request-ledger",
+    )
+    assert receipt.effective_state == "requested"
+    proved_request = _assess(superuser_db, owner, "generic", "requested", sha=None)
+    assert proved_request.claimable is True
+    assert proved_request.effective_state == "requested"
 
 
 def test_failure_also_requires_bound_authoritative_evidence(superuser_db):
     owner = _owner(superuser_db)
     unproved = _assess(superuser_db, owner, "test_run", "failed")
     assert unproved.claimable is False
-    assert unproved.effective_state == "requested"
+    assert unproved.effective_state == "unknown"
 
     evidence = _evidence(
         superuser_db,
@@ -104,7 +125,7 @@ def test_mainai_text_and_agent_self_report_can_never_prove_completion(superuser_
         )
         result = _assess(superuser_db, owner, "agent_completion", "completed", evidence)
         assert result.claimable is False
-        assert result.effective_state == "requested"
+        assert result.effective_state == "unknown"
         assert "self_report_or_non_authoritative_source" in result.reasons
 
 
@@ -114,14 +135,14 @@ def test_local_commit_is_not_remote_push_and_sha_must_match(superuser_db):
         superuser_db, owner, action="branch_push", source="filesystem",
         payload={"pushed": True, "branch": "x", "local_sha": SHA, "remote_sha": SHA},
     )
-    assert _assess(superuser_db, owner, "branch_push", "externally_observed", local).effective_state == "requested"
+    assert _assess(superuser_db, owner, "branch_push", "externally_observed", local).effective_state == "unknown"
 
     mismatch = _evidence(
         superuser_db, owner, action="branch_push", source="github",
         payload={"pushed": True, "branch": "x", "local_sha": SHA, "remote_sha": OTHER_SHA},
     )
     result = _assess(superuser_db, owner, "branch_push", "externally_observed", mismatch)
-    assert result.effective_state == "requested"
+    assert result.effective_state == "unknown"
     assert "local_remote_sha_mismatch" in result.reasons
 
 
@@ -143,7 +164,7 @@ def test_test_invoked_is_not_test_passed(superuser_db):
         payload={"status": "running", "execution_id": "exec-1", "artifact_sha": SHA, "command": "pytest", "environment": {}},
     )
     result = _assess(superuser_db, owner, "test_run", "completed", invoked)
-    assert result.effective_state == "requested"
+    assert result.effective_state == "unknown"
     assert "passing_test_counts_required" in result.reasons
 
 
@@ -157,7 +178,7 @@ def test_passing_test_requires_counts_sha_execution_and_environment(superuser_db
     assert result.claimable is True
 
     wrong_execution = _assess(superuser_db, owner, "test_run", "externally_observed", passed, execution="exec-2")
-    assert wrong_execution.effective_state == "requested"
+    assert wrong_execution.effective_state == "unknown"
     assert "execution_id_mismatch" in wrong_execution.reasons
 
 
@@ -165,10 +186,10 @@ def test_builder_pass_is_not_independent_certification(superuser_db):
     owner = _owner(superuser_db)
     self_review = _evidence(
         superuser_db, owner, action="certification", source="verification_registry",
-        payload={"review_result": "PASS", "candidate_sha": SHA, "builder_identity": "codex", "examiner_identity": "codex"},
+        payload={"review_result": "PASS", "candidate_sha": SHA, "builder_actor_id": "agent:codex", "examiner_actor_id": "agent:codex"},
     )
     result = _assess(superuser_db, owner, "certification", "certified", self_review)
-    assert result.effective_state == "requested"
+    assert result.effective_state == "unknown"
     assert "exact_sha_independent_examiner_required" in result.reasons
 
 
@@ -176,7 +197,7 @@ def test_independent_exact_sha_registry_pass_can_certify_but_grants_no_action(su
     owner = _owner(superuser_db)
     evidence = _evidence(
         superuser_db, owner, action="certification", source="verification_registry",
-        payload={"review_result": "PASS", "candidate_sha": SHA, "builder_identity": "codex", "examiner_identity": "claude"},
+        payload={"review_result": "PASS", "candidate_sha": SHA, "builder_actor_id": "agent:codex", "examiner_actor_id": "agent:claude"},
     )
     assert _assess(superuser_db, owner, "certification", "certified", evidence).claimable is True
     with pytest.raises(ClaimActionIntegrityError, match="permission"):
@@ -263,7 +284,70 @@ def test_stale_and_newer_conflicting_evidence_cannot_upgrade(superuser_db):
     )
     conflict = _assess(superuser_db, owner, "test_run", "externally_observed", fresh)
     assert conflict.verification_state == "conflicting"
-    assert "newer_conflicting_evidence" in conflict.reasons
+    assert "superseded_by_newer_authoritative_evidence" in conflict.reasons
+
+
+def test_mutable_snapshot_gets_governed_expiry_without_caller_help(superuser_db):
+    owner = _owner(superuser_db)
+    observed = datetime.now(timezone.utc) - timedelta(days=30)
+    evidence = _evidence(
+        superuser_db, owner, action="branch_push", source="github", observed_at=observed,
+        payload={"pushed": True, "branch": "x", "local_sha": SHA, "remote_sha": SHA},
+    )
+    assert evidence.payload["fact_mutability"] == "mutable_snapshot"
+    assert evidence.expires_at is not None
+    result = _assess(superuser_db, owner, "branch_push", "externally_observed", evidence)
+    assert result.claimable is False
+    assert result.verification_state == "stale"
+
+
+def test_older_failure_cannot_override_newer_pass_and_self_report_cannot_veto(superuser_db):
+    owner = _owner(superuser_db)
+    old = datetime.now(timezone.utc) - timedelta(minutes=2)
+    failed = _evidence(
+        superuser_db, owner, action="test_run", source="test_runner", observed_at=old,
+        payload={"status": "failed", "passed": 0, "failed": 1, "execution_id": "exec-1", "artifact_sha": SHA, "command": "pytest", "environment": {}},
+    )
+    passed = _evidence(
+        superuser_db, owner, action="test_run", source="test_runner",
+        payload={"status": "passed", "passed": 9, "failed": 0, "execution_id": "exec-1", "artifact_sha": SHA, "command": "pytest", "environment": {}},
+    )
+    old_failure = _assess(superuser_db, owner, "test_run", "failed", failed)
+    assert old_failure.claimable is False
+    assert "superseded_by_newer_authoritative_evidence" in old_failure.reasons
+
+    _evidence(
+        superuser_db, owner, action="test_run", source="agent_self_report",
+        payload={"status": "failed", "passed": 0, "failed": 1},
+    )
+    current_pass = _assess(superuser_db, owner, "test_run", "externally_observed", passed)
+    assert current_pass.claimable is True
+
+
+def test_certification_requires_caller_sha_and_canonical_independent_actor_ids(superuser_db):
+    owner = _owner(superuser_db)
+    evidence = _evidence(
+        superuser_db, owner, action="certification", source="verification_registry",
+        payload={"review_result": "PASS", "candidate_sha": SHA, "builder_actor_id": "actor:codex", "examiner_actor_id": " Actor:Codex "},
+    )
+    without_sha = assess_claim(
+        superuser_db, owner_id=owner.id, execution_id="exec-1", subject_key="release:alpha",
+        action_key="certification", requested_state="certified", evidence_id=evidence.id,
+    )
+    assert without_sha.claimable is False
+    assert "caller_candidate_sha_required" in without_sha.reasons
+    normalized_same_actor = _assess(superuser_db, owner, "certification", "certified", evidence)
+    assert normalized_same_actor.claimable is False
+    assert "exact_sha_independent_examiner_required" in normalized_same_actor.reasons
+
+
+def test_empty_generic_database_payload_cannot_prove_completion(superuser_db):
+    owner = _owner(superuser_db)
+    evidence = _evidence(superuser_db, owner, action="generic", source="database", payload={}, sha=None)
+    result = _assess(superuser_db, owner, "generic", "completed", evidence, sha=None)
+    assert result.claimable is False
+    assert result.effective_state == "unknown"
+    assert "specific_database_state_proof_required" in result.reasons
 
 
 def test_receipt_chain_rejects_old_predecessor_and_preserves_declared_vs_effective(superuser_db):
@@ -275,7 +359,7 @@ def test_receipt_chain_rejects_old_predecessor_and_preserves_declared_vs_effecti
         executed_action={}, observed_result={}, authority_snapshot={}, created_by="agent",
     )
     assert first.declared_state == "completed"
-    assert first.effective_state == "requested"
+    assert first.effective_state == "unknown"
     second = record_receipt(
         superuser_db, owner_id=owner.id, execution_id="exec-1", subject_key="release:alpha",
         action_key="branch_push", declared_state="requested", action_state="requested",
@@ -313,6 +397,44 @@ def test_database_rejects_self_report_marked_authoritative_and_mutation(superuse
     superuser_db.rollback()
 
 
+def test_delete_guard_requires_real_active_erasure_operation_not_spoofed_gucs(superuser_db):
+    owner = _owner(superuser_db)
+    evidence = _evidence(
+        superuser_db, owner, action="branch_push", source="github",
+        payload={"pushed": True, "branch": "x", "local_sha": SHA, "remote_sha": SHA},
+    )
+    superuser_db.execute(text("SET LOCAL app.current_user_id = :owner"), {"owner": str(owner.id)})
+    superuser_db.execute(text("SET LOCAL app.claim_action_erasure_in_progress = 'true'"))
+    superuser_db.execute(
+        text("SET LOCAL app.account_erasure_operation_id = :operation"),
+        {"operation": str(uuid.uuid4())},
+    )
+    with pytest.raises(Exception):
+        superuser_db.execute(
+            text("DELETE FROM claim_action_evidence WHERE evidence_id=:evidence"),
+            {"evidence": evidence.id},
+        )
+    superuser_db.rollback()
+
+
+def test_guard_function_has_hardened_search_path(superuser_db):
+    config = superuser_db.execute(
+        text("SELECT proconfig FROM pg_proc WHERE proname='claim_action_integrity_guard'")
+    ).scalar_one()
+    assert "search_path=pg_catalog" in config
+
+
+def test_caller_asserted_permission_without_grant_evidence_is_rejected(superuser_db):
+    owner = _owner(superuser_db)
+    with pytest.raises(ClaimActionIntegrityError, match="genuine grant evidence"):
+        record_receipt(
+            superuser_db, owner_id=owner.id, execution_id="exec-1", subject_key="release:alpha",
+            action_key="merge", declared_state="requested", action_state="dispatched",
+            declared_action={"action": "merge"},
+            permitted_action={"granted": True, "authority_ref": "caller-says-so", "scopes": ["merge"]},
+            executed_action={}, observed_result={}, authority_snapshot={}, created_by="mainai",
+        )
+
 def test_require_claimable_raises_instead_of_upgrading_language(superuser_db):
     owner = _owner(superuser_db)
     with pytest.raises(ClaimActionIntegrityError, match="cannot be upgraded"):
@@ -337,6 +459,79 @@ def test_runtime_role_has_read_only_no_fabrication_privilege():
 @pytest.mark.parametrize(
     "claim",
     [
+        "I've pushed the branch.",
+        "Tests are green.",
+        "CI passed.",
+        "All 2883 tests passed.",
+        "It's merged into main.",
+        "Deployed to production.",
+        "Recall is live.",
+        "Codex finished the task.",
+        "Det är mergat.",
+        "Recall är aktiverad.",
+    ],
+)
+def test_natural_unsupported_external_claims_are_removed(claim):
+    sanitized = sanitize_unverified_execution_claims(claim)
+    assert sanitized != claim
+    assert "binding evidence" in sanitized or "bindande evidens" in sanitized
+
+
+@pytest.mark.parametrize(
+    "honest",
+    [
+        "I have not verified that the branch was pushed.",
+        "The branch was not pushed.",
+        "Was the branch pushed?",
+        "I cannot verify whether CI passed.",
+        "Jag har inte verifierat att det är mergat.",
+        "Är Recall aktiverad?",
+    ],
+)
+def test_uncertainty_negation_and_questions_preserve_epistemic_meaning(honest):
+    assert sanitize_unverified_execution_claims(honest) == honest
+
+
+def test_negated_clause_cannot_mask_a_separate_unsupported_assertion():
+    text = "I have not verified that the branch was pushed, but CI passed."
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert "I have not verified that the branch was pushed" in sanitized
+    assert "CI passed" not in sanitized
+    assert "binding evidence" in sanitized
+
+
+@pytest.mark.parametrize(
+    "paraphrase",
+    [
+        "The branch is synced with origin.",
+        "GitHub has the commit available.",
+        "The test suite is clean.",
+        "Pytest is passing.",
+        "The pipeline is green.",
+        "The workflow succeeded.",
+        "The build was successful.",
+        "The change landed on main.",
+        "PR 42 is integrated.",
+        "Production is live.",
+        "The release is deployed.",
+        "Recall is enabled.",
+        "Recall is running.",
+        "The agent is done.",
+        "Claude completed the task.",
+        "Grenen är synkad.",
+        "Testsviten är godkända.",
+        "CI är grön.",
+        "Ändringen är mergad.",
+        "Agenten är färdig.",
+    ],
+)
+def test_compositional_boundary_catches_natural_paraphrases(paraphrase):
+    assert sanitize_unverified_execution_claims(paraphrase) != paraphrase
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
         "The branch is on GitHub.",
         "All tests passed.",
         "The deployment succeeded.",
@@ -349,4 +544,4 @@ def test_runtime_role_has_read_only_no_fabrication_privilege():
 def test_plain_chat_cannot_emit_external_fact_without_receipt_context(claim):
     sanitized = sanitize_unverified_execution_claims(claim)
     assert claim not in sanitized
-    assert "no background job is running or has been completed" in sanitized
+    assert "cannot present that external state as verified" in sanitized

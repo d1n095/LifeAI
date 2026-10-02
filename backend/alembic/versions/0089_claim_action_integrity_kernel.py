@@ -91,15 +91,24 @@ def upgrade() -> None:
 
     op.execute("""
     CREATE FUNCTION claim_action_integrity_guard() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-    DECLARE v_e claim_action_evidence%ROWTYPE;
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+    DECLARE
+      v_e public.claim_action_evidence%ROWTYPE;
+      v_owner uuid := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+      v_operation uuid := NULLIF(current_setting('app.account_erasure_operation_id', true), '')::uuid;
     BEGIN
       IF TG_OP = 'UPDATE' THEN
         RAISE EXCEPTION '% is append-only: UPDATE is forbidden', TG_TABLE_NAME;
       END IF;
       IF TG_OP = 'DELETE' THEN
         IF current_setting('app.claim_action_erasure_in_progress', true) <> 'true'
-           OR OLD.owner_id IS DISTINCT FROM NULLIF(current_setting('app.current_user_id', true), '')::uuid THEN
+           OR OLD.owner_id IS DISTINCT FROM v_owner
+           OR v_operation IS NULL
+           OR NOT EXISTS (
+             SELECT 1 FROM public.account_erasure_operations op
+             WHERE op.operation_id=v_operation AND op.owner_id=v_owner
+               AND op.status='active' AND op.phase='personal_data_erasure'
+           ) THEN
           RAISE EXCEPTION '% is append-only: DELETE requires governed owner erasure', TG_TABLE_NAME;
         END IF;
         RETURN OLD;
@@ -111,11 +120,22 @@ def upgrade() -> None:
         IF NEW.source_type IN ('agent_self_report','mainai_generated_text','user_attestation','unknown') AND NEW.authoritative THEN
           RAISE EXCEPTION 'self-report, generated text, and attestation cannot be authoritative';
         END IF;
+        IF NEW.payload->>'fact_mutability' IS NULL
+           OR NEW.payload->>'fact_mutability' NOT IN ('immutable_fact','mutable_snapshot') THEN
+          RAISE EXCEPTION 'evidence fact mutability classification is required';
+        END IF;
+        IF NEW.payload->>'fact_mutability'='mutable_snapshot'
+           AND (NEW.expires_at IS NULL OR NEW.expires_at > NEW.observed_at + interval '5 minutes') THEN
+          RAISE EXCEPTION 'mutable evidence requires governed freshness';
+        END IF;
+        IF NEW.payload->>'fact_mutability'='immutable_fact' AND NEW.expires_at IS NOT NULL THEN
+          RAISE EXCEPTION 'immutable evidence cannot carry mutable-state expiry';
+        END IF;
         RETURN NEW;
       END IF;
       IF NEW.effective_state NOT IN ('intended','requested','unknown') THEN
         IF NEW.evidence_id IS NULL THEN RAISE EXCEPTION 'upgraded claim requires evidence'; END IF;
-        SELECT * INTO v_e FROM claim_action_evidence WHERE evidence_id=NEW.evidence_id;
+        SELECT * INTO v_e FROM public.claim_action_evidence WHERE evidence_id=NEW.evidence_id;
         IF NOT FOUND OR v_e.owner_id<>NEW.owner_id OR v_e.execution_id<>NEW.execution_id
            OR v_e.subject_key<>NEW.subject_key OR v_e.action_key<>NEW.action_key OR NOT v_e.authoritative THEN
           RAISE EXCEPTION 'claim receipt evidence binding is invalid';

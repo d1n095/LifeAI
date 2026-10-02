@@ -50,7 +50,6 @@ from app.models.mainai_job import (
     RETRYABLE_MAINAI_JOB_STATUSES,
     MainAIJob,
     MainAIJobErrorCategory,
-    MainAIJobEvent,
     MainAIJobProposal,
     MainAIJobStatus,
 )
@@ -199,7 +198,7 @@ def test_sanitize_unverified_execution_claims_flags_english_job_started_claim():
     text = "The job has started and I'll let you know when it's done."
     sanitized = sanitize_unverified_execution_claims(text)
     assert "the job has started" not in sanitized.lower()
-    assert "no background job is running" in sanitized.lower()
+    assert "cannot present that external state as verified" in sanitized.lower()
 
 
 def test_sanitize_unverified_execution_claims_is_case_insensitive_and_idempotent():
@@ -711,7 +710,7 @@ def test_claim_next_mainai_job_reclaims_an_expired_lease(db_session, superuser_d
 def test_claim_next_mainai_job_does_not_reclaim_a_still_valid_lease(db_session, superuser_db, make_verified_user):
     user, _ = make_verified_user()
     doc = _make_indexed_document(db_session, user.id)
-    job = service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
+    service.create_job(db_session, owner_id=user.id, job_type="corpus_review", input_refs=[{"type": "document", "id": str(doc.id)}], created_by="founder")
     claim_next_mainai_job(superuser_db, "worker-1", 120)
     assert claim_next_mainai_job(superuser_db, "worker-2", 120) is None
 
@@ -2277,7 +2276,7 @@ async def test_run_corpus_review_job_rolls_back_the_proposal_when_lease_dies_bet
         assert claimed_b is not None
         _, _, generation_b = claimed_b
         monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_ok("Ser bra ut igen."))
-        fresh_job = service.get_job(db_session, job_id)
+        service.get_job(db_session, job_id)
         db_session.commit()
         await run_corpus_review_job(db_session, job_id, user.id, worker_id="worker-b", lease_generation=generation_b, lease_seconds=120)
 

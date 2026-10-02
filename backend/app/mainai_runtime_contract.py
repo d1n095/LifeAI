@@ -116,15 +116,37 @@ _EXECUTION_CLAIM_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     # report an attempt or request but may never assert these external facts as completed.
     (re.compile(r"\b(the\s+)?branch\s+(has\s+been\s+|was\s+|is\s+)?pushed(\s+to\s+github)?\b", re.I), "en"),
     (re.compile(r"\b(the\s+)?branch\s+is\s+on\s+github\b", re.I), "en"),
+    (re.compile(r"\bi('?ve|\s+have)\s+pushed\s+(the\s+|this\s+)?branch\b", re.I), "en"),
+    (re.compile(r"\b(?:i\s+)?pushed\s+(?:the\s+)?branch(?:\s+to\s+(?:origin|github))?\b", re.I), "en"),
+    (re.compile(r"\b(?:the\s+)?push\s+(?:has\s+)?succeeded\b", re.I), "en"),
     (re.compile(r"\b(grenen|branchen)\s+(är\s+)?pushad(\s+till\s+github)?\b", re.I), "sv"),
     (re.compile(r"\ball\s+tests\s+(have\s+)?passed\b", re.I), "en"),
+    (re.compile(r"\b(?:all\s+)?\d+\s+tests\s+(?:have\s+)?passed\b", re.I), "en"),
+    (re.compile(r"\b(?:the\s+)?tests?\s+(?:are|is|went)\s+green\b", re.I), "en"),
+    (re.compile(r"\b(?:the\s+)?(?:tests?|test\s+suite|test\s+run|pytest)\s+(?:has\s+|have\s+)?passed\b", re.I), "en"),
+    (re.compile(r"\bci\s+(?:has\s+)?(?:passed|succeeded|is\s+green)\b", re.I), "en"),
     (re.compile(r"\b(all|samtliga)\s+tester\s+(har\s+)?(passerat|gått\s+igenom)\b", re.I), "sv"),
     (re.compile(r"\b(the\s+)?deployment\s+(has\s+)?(succeeded|completed)\b", re.I), "en"),
     (re.compile(r"\b(deployen|driftsättningen)\s+(har\s+)?(lyckats|slutförts)\b", re.I), "sv"),
+    (re.compile(r"\b(?:testerna|testsviten)\s+(?:är\s+gröna|har\s+passerat|är\s+godkända)\b", re.I), "sv"),
+    (re.compile(r"\bci\s+(?:är\s+grön|har\s+passerat|gick\s+igenom)\b", re.I), "sv"),
     (re.compile(r"\b(the\s+)?(candidate|build|release)\s+(is|was|has\s+been)\s+certified\b", re.I), "en"),
     (re.compile(r"\b(the\s+)?(pull\s+request|pr|branch)\s+(was|is|has\s+been)\s+merged\b", re.I), "en"),
+    (re.compile(r"\bit('?s|\s+is)\s+merged(?:\s+into\s+\w+)?\b", re.I), "en"),
+    (re.compile(r"\b(?:it|the\s+(?:release|build|app))\s+(?:was|is|has\s+been)\s+deployed(?:\s+to\s+production)?\b", re.I), "en"),
+    (re.compile(r"\bdeployed\s+to\s+production\b", re.I), "en"),
+    (re.compile(r"\b(?:the\s+)?deploy(?:ment)?\s+(?:is|was|has\s+been)\s+(?:done|complete|successful)\b", re.I), "en"),
+    (re.compile(r"\b(?:the\s+)?(?:change|pr|branch)\s+(?:has\s+)?landed(?:\s+on\s+main)?\b", re.I), "en"),
     (re.compile(r"\b(the\s+)?(release|recall|feature)\s+(is|was|has\s+been)\s+activated\b", re.I), "en"),
     (re.compile(r"\b(the\s+)?agent\s+(has\s+)?(finished|completed)\b", re.I), "en"),
+    (re.compile(r"\b(?:codex|claude|cursor|the\s+agent)\s+(?:has\s+)?(?:finished|completed)(?:\s+the\s+task)?\b", re.I), "en"),
+    (re.compile(r"\brecall\s+is\s+live\b", re.I), "en"),
+    (re.compile(r"\b(?:recall|production|the\s+release)\s+is\s+(?:live|active|enabled)\b", re.I), "en"),
+    (re.compile(r"\bdet\s+är\s+mergat\b", re.I), "sv"),
+    (re.compile(r"\brecall\s+är\s+aktiverad\b", re.I), "sv"),
+    (re.compile(r"\b(?:grenen|branchen)\s+är\s+(?:pushad|mergad)\b", re.I), "sv"),
+    (re.compile(r"\b(?:codex|claude|cursor|agenten)\s+är\s+klar(?:\s+med\s+uppgiften)?\b", re.I), "sv"),
+    (re.compile(r"\brecall\s+är\s+(?:live|aktiv|påslagen)\b", re.I), "sv"),
     # 1. working/laboring in the background
     (re.compile(r"\b(jag\s+)?(arbetar|jobbar|kör|bearbetar|processar)\s+(med\s+|på\s+)?(det|detta|frågan|dokumenten)?\s*i\s+bakgrunden\b", re.I), "sv"),
     (re.compile(r"\b(i'?m|i\s+am)\s+working\s+on\s+(it|this|that)\s+in\s+the\s+background\b", re.I), "en"),
@@ -173,8 +195,8 @@ _EXECUTION_CLAIM_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 _TRUTHFUL_REPLACEMENT: dict[str, str] = {
-    "sv": "[MainAI: det här svaret är hela mitt arbete med frågan — inget bakgrundsjobb pågår eller är avslutat.]",
-    "en": "[MainAI: this reply is the entire work on your question — no background job is running or has been completed.]",
+    "sv": "[MainAI: jag kan inte presentera det externa tillståndet som verifierat utan bindande evidens.]",
+    "en": "[MainAI: I cannot present that external state as verified without binding evidence.]",
 }
 
 # Sentence boundary: end-of-sentence punctuation followed by whitespace, or a newline. A
@@ -182,6 +204,58 @@ _TRUTHFUL_REPLACEMENT: dict[str, str] = {
 # choices) — good enough to isolate a single offending sentence from the rest of an otherwise
 # legitimate answer without needing a real NLP sentence tokenizer for this narrow purpose.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_CLAUSE_SPLIT_RE = re.compile(r",?\s+(?=(?:but|however|and|men|dock|och)\b)", re.I)
+_NON_ASSERTIVE_RE = re.compile(
+    r"\b(?:not|never|no\s+evidence|unverified|not\s+verified|haven't|hasn't|hadn't|didn't|doesn't|"
+    r"cannot\s+verify|can't\s+verify|if|whether|maybe|perhaps|might|may|could|reportedly|reports?\s+that|"
+    r"inte|ej|aldrig|overifierad|inte\s+verifierat|kan\s+inte\s+verifiera|om|kanske|uppges)\b",
+    re.I,
+)
+
+
+def _is_non_assertive(sentence: str) -> bool:
+    stripped = sentence.strip()
+    return stripped.endswith("?") or bool(_NON_ASSERTIVE_RE.search(stripped))
+
+
+def _contains_external_state_assertion(sentence: str) -> bool:
+    """Compositional fallback: match a governed subject plus a factual state predicate.
+
+    This catches natural paraphrases without pretending every sentence containing "done" or
+    "green" is an execution claim. Epistemic polarity is handled separately above.
+    """
+    words = set(re.findall(r"[^\W_]+", sentence.casefold(), re.UNICODE))
+    subject_predicates = (
+        (
+            {"branch", "commit", "github", "origin", "remote", "grenen", "branchen"},
+            {"pushed", "uploaded", "synced", "present", "available", "pushad", "uppladdad", "synkad"},
+        ),
+        (
+            {"test", "tests", "pytest", "suite", "testerna", "testsviten"},
+            {"passed", "passing", "green", "succeeded", "successful", "clean", "passerat", "gröna", "godkända"},
+        ),
+        (
+            {"ci", "pipeline", "workflow", "actions", "build", "bygget"},
+            {"passed", "passing", "green", "succeeded", "successful", "passerat", "grön", "lyckades"},
+        ),
+        (
+            {"pr", "branch", "change", "main", "grenen", "ändringen"},
+            {"merged", "landed", "integrated", "mergat", "mergad", "infogad"},
+        ),
+        (
+            {"deploy", "deployment", "production", "release", "deployen", "driftsättningen", "produktionen"},
+            {"deployed", "released", "live", "complete", "completed", "successful", "klar", "driftsatt", "lyckats"},
+        ),
+        (
+            {"recall"},
+            {"live", "active", "activated", "enabled", "running", "aktiv", "aktiverad", "påslagen"},
+        ),
+        (
+            {"agent", "codex", "claude", "cursor", "agenten"},
+            {"done", "finished", "completed", "complete", "klar", "färdig", "slutfört"},
+        ),
+    )
+    return any(words & subjects and words & predicates for subjects, predicates in subject_predicates)
 
 
 def sanitize_unverified_execution_claims(message: str) -> str:
@@ -201,12 +275,16 @@ def sanitize_unverified_execution_claims(message: str) -> str:
     output: list[str] = []
     last_was_replacement = False
     changed = False
-    for sentence in sentences:
+    clauses = [clause for sentence in sentences for clause in _CLAUSE_SPLIT_RE.split(sentence)]
+    for sentence in clauses:
         matched_lang: str | None = None
-        for pattern, lang in _EXECUTION_CLAIM_RULES:
-            if pattern.search(sentence):
-                matched_lang = lang
-                break
+        if not _is_non_assertive(sentence):
+            for pattern, lang in _EXECUTION_CLAIM_RULES:
+                if pattern.search(sentence):
+                    matched_lang = lang
+                    break
+            if matched_lang is None and _contains_external_state_assertion(sentence):
+                matched_lang = "sv" if re.search(r"[åäö]|\b(?:är|har|och|grenen|agenten)\b", sentence, re.I) else "en"
         if matched_lang is not None:
             changed = True
             if not last_was_replacement:

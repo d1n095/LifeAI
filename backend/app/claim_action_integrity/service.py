@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -33,6 +33,8 @@ class ClaimActionIntegrityError(ValueError):
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_ACTOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._:@/-]{2,127}$")
+_MUTABLE_EVIDENCE_MAX_AGE = timedelta(minutes=5)
 _TRUSTED_SOURCES = {
     EvidenceSourceType.github.value,
     EvidenceSourceType.database.value,
@@ -127,6 +129,13 @@ def record_evidence(
     if artifact_sha is not None and not _SHA_RE.fullmatch(artifact_sha):
         raise ClaimActionIntegrityError("artifact_sha must be an exact lowercase 40-character git SHA")
     observed = observed_at or _utc_now()
+    fact_mutability = _evidence_mutability(action_key, payload)
+    payload = {**payload, "fact_mutability": fact_mutability}
+    if fact_mutability == "mutable_snapshot":
+        governed_expiry = _as_aware(observed) + _MUTABLE_EVIDENCE_MAX_AGE
+        expires_at = min(_as_aware(expires_at), governed_expiry) if expires_at else governed_expiry
+    elif expires_at is not None:
+        raise ClaimActionIntegrityError("immutable evidence must not carry mutable-state expiry")
     if expires_at is not None and _as_aware(expires_at) <= _as_aware(observed):
         raise ClaimActionIntegrityError("evidence expiry must be later than observation")
     digest = _digest_evidence(
@@ -151,6 +160,15 @@ def record_evidence(
     db.add(row)
     db.flush()
     return row
+
+
+def _evidence_mutability(action_key: str, payload: dict[str, Any]) -> str:
+    """Classify centrally; callers cannot make mutable state immortal by omission."""
+    if action_key in {"branch_push", "activation", "database_observation", "generic"}:
+        return "mutable_snapshot"
+    if action_key == "test_run" and payload.get("status") not in {"passed", "failed"}:
+        return "mutable_snapshot"
+    return "immutable_fact"
 
 
 def _negative(payload: dict[str, Any]) -> bool:
@@ -184,25 +202,31 @@ def _validate_evidence(
         reasons.append("artifact_sha_mismatch")
     if evidence.source_type in _SELF_SOURCES or not evidence.authoritative:
         reasons.append("self_report_or_non_authoritative_source")
+    mutability = evidence.payload.get("fact_mutability")
+    if mutability not in {"immutable_fact", "mutable_snapshot"}:
+        reasons.append("evidence_mutability_missing_or_invalid")
+    if mutability == "mutable_snapshot" and evidence.expires_at is None:
+        reasons.append("mutable_snapshot_expiry_missing")
     if evidence.expires_at is not None and _as_aware(evidence.expires_at) <= _as_aware(now):
         reasons.append("stale_evidence")
     later = db.execute(
         select(ClaimActionEvidence).where(
             ClaimActionEvidence.owner_id == owner_id,
+            ClaimActionEvidence.execution_id == execution_id,
             ClaimActionEvidence.subject_key == subject_key,
             ClaimActionEvidence.action_key == action_key,
             ClaimActionEvidence.artifact_sha == evidence.artifact_sha,
             ClaimActionEvidence.observed_at > evidence.observed_at,
         )
     ).scalars().all()
-    if any(_negative(row.payload) for row in later):
-        reasons.append("newer_conflicting_evidence")
+    if any(row.authoritative and row.source_type not in _SELF_SOURCES for row in later):
+        reasons.append("superseded_by_newer_authoritative_evidence")
 
     if reasons:
         verification = VerificationState.stale.value if "stale_evidence" in reasons else (
-            VerificationState.conflicting.value if "newer_conflicting_evidence" in reasons else VerificationState.invalid.value
+            VerificationState.conflicting.value if "superseded_by_newer_authoritative_evidence" in reasons else VerificationState.invalid.value
         )
-        return ClaimState.requested.value, verification, tuple(reasons)
+        return ClaimState.unknown.value, verification, tuple(reasons)
 
     if _negative(evidence.payload):
         return (
@@ -234,9 +258,15 @@ def _validate_evidence(
             target = ClaimState.independently_verified.value
             verification = VerificationState.independently_verified.value
     elif action_key == "certification":
+        if artifact_sha is None:
+            reasons.append("caller_candidate_sha_required")
         if source != EvidenceSourceType.verification_registry.value or p.get("review_result") != "PASS":
             reasons.append("independent_registry_pass_required")
-        if p.get("candidate_sha") != evidence.artifact_sha or p.get("builder_identity") == p.get("examiner_identity"):
+        builder_actor = _canonical_actor_id(p.get("builder_actor_id"))
+        examiner_actor = _canonical_actor_id(p.get("examiner_actor_id"))
+        if p.get("candidate_sha") != artifact_sha or evidence.artifact_sha != artifact_sha:
+            reasons.append("exact_candidate_sha_required")
+        if builder_actor is None or examiner_actor is None or builder_actor == examiner_actor:
             reasons.append("exact_sha_independent_examiner_required")
         target = ClaimState.certified.value
         verification = VerificationState.certified.value
@@ -266,10 +296,38 @@ def _validate_evidence(
     else:
         if source not in {EvidenceSourceType.database.value, EvidenceSourceType.external_service.value, EvidenceSourceType.task_execution_ledger.value}:
             reasons.append("authoritative_observation_required")
+        if source == EvidenceSourceType.database.value and (
+            p.get("subject_key") != subject_key
+            or p.get("action_key") != action_key
+            or p.get("observed_state") not in {"completed", "failed"}
+        ):
+            reasons.append("specific_database_state_proof_required")
 
     if reasons:
-        return ClaimState.requested.value, VerificationState.invalid.value, tuple(reasons)
+        return ClaimState.unknown.value, VerificationState.invalid.value, tuple(reasons)
     return target, verification, ("evidence_bound",)
+
+
+def _canonical_actor_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    canonical = value.strip().casefold()
+    return canonical if _ACTOR_ID_RE.fullmatch(canonical) else None
+
+
+def _has_request_receipt(
+    db: Session, *, owner_id: UUID, execution_id: str, subject_key: str, action_key: str,
+) -> bool:
+    return db.execute(
+        select(ClaimActionReceipt.id).where(
+            ClaimActionReceipt.owner_id == owner_id,
+            ClaimActionReceipt.execution_id == execution_id,
+            ClaimActionReceipt.subject_key == subject_key,
+            ClaimActionReceipt.action_key == action_key,
+            ClaimActionReceipt.declared_state == ClaimState.requested.value,
+            ClaimActionReceipt.action_state == ActionState.requested.value,
+        ).limit(1)
+    ).scalar_one_or_none() is not None
 
 
 def _allowed_language(state: str, subject_key: str) -> str:
@@ -298,7 +356,7 @@ def assess_claim(
 ) -> ClaimAssessment:
     if requested_state not in _CLAIM_RANK:
         raise ClaimActionIntegrityError("unknown claim state")
-    baseline = requested_state if requested_state in {ClaimState.intended.value, ClaimState.requested.value} else ClaimState.requested.value
+    baseline = requested_state if requested_state in {ClaimState.intended.value, ClaimState.unknown.value} else ClaimState.unknown.value
     verification = VerificationState.unverified.value
     reasons: tuple[str, ...] = ("proof_absent",)
     evidence = None
@@ -321,7 +379,14 @@ def assess_claim(
     claimable = requested_state == baseline and not any(
         r for r in reasons if r not in {"evidence_bound", "negative_evidence_bound"}
     )
-    if requested_state in {ClaimState.intended.value, ClaimState.requested.value} and evidence_id is None:
+    if requested_state == ClaimState.requested.value and evidence_id is None and _has_request_receipt(
+        db, owner_id=owner_id, execution_id=execution_id,
+        subject_key=subject_key, action_key=action_key,
+    ):
+        baseline = ClaimState.requested.value
+        reasons = ("request_receipt_bound",)
+        claimable = True
+    if requested_state in {ClaimState.intended.value, ClaimState.unknown.value} and evidence_id is None:
         claimable = True
     return ClaimAssessment(
         claimable=claimable, requested_state=requested_state, effective_state=baseline,
@@ -385,12 +450,35 @@ def record_receipt(
         scopes = permitted_action.get("scopes")
         if not isinstance(scopes, list) or action_key not in scopes:
             raise ClaimActionIntegrityError("permission does not cover this action")
+        try:
+            grant_evidence_id = UUID(str(permitted_action.get("grant_evidence_id")))
+        except (TypeError, ValueError):
+            raise ClaimActionIntegrityError("permission requires genuine grant evidence") from None
+        grant = db.get(ClaimActionEvidence, grant_evidence_id)
+        if (
+            grant is None
+            or not grant.authoritative
+            or grant.owner_id != owner_id
+            or grant.execution_id != execution_id
+            or grant.action_key != "permission_grant"
+            or grant.payload.get("granted") is not True
+            or action_key not in grant.payload.get("scopes", [])
+        ):
+            raise ClaimActionIntegrityError("permission grant evidence is invalid or out of scope")
 
-    assessment = assess_claim(
-        db, owner_id=owner_id, execution_id=execution_id, subject_key=subject_key,
-        action_key=action_key, requested_state=declared_state, artifact_sha=artifact_sha,
-        evidence_id=evidence_id, now=now,
-    )
+    if declared_state == ClaimState.requested.value and action_state == ActionState.requested.value and evidence_id is None:
+        assessment = ClaimAssessment(
+            claimable=True, requested_state=declared_state, effective_state=ClaimState.requested.value,
+            verification_state=VerificationState.unverified.value,
+            reasons=("request_receipt_recorded",), evidence_id=None,
+            allowed_language=_allowed_language(ClaimState.requested.value, subject_key),
+        )
+    else:
+        assessment = assess_claim(
+            db, owner_id=owner_id, execution_id=execution_id, subject_key=subject_key,
+            action_key=action_key, requested_state=declared_state, artifact_sha=artifact_sha,
+            evidence_id=evidence_id, now=now,
+        )
     receipt = ClaimActionReceipt(
         owner_id=owner_id, execution_id=execution_id, subject_key=subject_key,
         action_key=action_key, declared_action=declared_action,

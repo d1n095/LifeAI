@@ -624,6 +624,7 @@ _CORPUS_TRIAL_RUNS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
 _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_mainai_execution_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "erase_own_claim_action_integrity_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "claim_action_integrity_guard", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "erase_own_provider_spend_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {
         "name": "settle_provider_spend_usage",
