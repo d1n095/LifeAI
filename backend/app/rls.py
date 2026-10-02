@@ -122,7 +122,19 @@ RLS_STATEMENTS = [
     ],
     *[
         statement
-        for table in ("founder_canonical_conversations", "founder_conversation_events")
+        for table in (
+            "founder_canonical_conversations",
+            "founder_conversation_events",
+            "founder_instance_bindings",
+            "founder_policy_versions",
+            "founder_policy_heads",
+            "founder_policy_proposals",
+            "family_members",
+            "family_approval_requests",
+            "family_approval_receipts",
+            "family_capability_grants",
+            "userai_tenant_boundaries",
+        )
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
 ]
@@ -336,7 +348,19 @@ POLICY_DEFINITIONS = [
             "name": f"{table}_isolation",
             "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
         }
-        for table in ("founder_canonical_conversations", "founder_conversation_events")
+        for table in (
+            "founder_canonical_conversations",
+            "founder_conversation_events",
+            "founder_instance_bindings",
+            "founder_policy_versions",
+            "founder_policy_heads",
+            "founder_policy_proposals",
+            "family_members",
+            "family_approval_requests",
+            "family_approval_receipts",
+            "family_capability_grants",
+            "userai_tenant_boundaries",
+        )
     ],
 ]
 
@@ -631,6 +655,17 @@ _MAINAI_EXECUTION_TABLES = (
     # permission grant.
     "founder_canonical_conversations",
     "founder_conversation_events",
+    # Migration 0090 (founder sovereignty + family delegation): Founder-bound
+    # policy/delegation tables. Scoped capabilities only — never merge/deploy/Recall.
+    "founder_instance_bindings",
+    "founder_policy_versions",
+    "founder_policy_heads",
+    "founder_policy_proposals",
+    "family_members",
+    "family_approval_requests",
+    "family_approval_receipts",
+    "family_capability_grants",
+    "userai_tenant_boundaries",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -1061,6 +1096,15 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_canonical_conversations FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_events FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_instance_bindings FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_policy_versions FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_policy_heads FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_policy_proposals FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_members FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_approval_requests FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_approval_receipts FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_capability_grants FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON userai_tenant_boundaries FROM mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1133,6 +1177,15 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
             ("founder_canonical_conversations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("founder_conversation_events", frozenset({"SELECT", "INSERT"})),
+            ("founder_instance_bindings", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("founder_policy_versions", frozenset({"SELECT", "INSERT"})),
+            ("founder_policy_heads", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("founder_policy_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("family_members", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("family_approval_requests", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("family_approval_receipts", frozenset({"SELECT", "INSERT"})),
+            ("family_capability_grants", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("userai_tenant_boundaries", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

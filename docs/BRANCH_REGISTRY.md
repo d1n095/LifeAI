@@ -6,6 +6,18 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — Founder sovereignty + family delegation (2026-10-02)
+
+Child of `cursor/mainai-continuous-conversation-foundation` @ exact
+`691490edd82fa4bff6188f4f038f7579ee4f3df5`. Built in a **separate worktree**. Does **not**
+modify the parent under Claude examination.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-founder-sovereignty-family-delegation` | — | **Open child lane, based on `691490e`** | One-Founder binding, policy classes (KERNEL / FOUNDER_POLICY / RUNTIME_PREFERENCE), immutable policy versions + Founder-only recovery/unlock, family scoped delegation + remote approval control plane, UserAI tenant boundary interface. Migration `0090_founder_sovereignty` (child of `0089_continuous_conversation`, not another 0089). Does not merge, deploy, activate Recall, or grant merge/deploy/superuser authority. |
+
+**Must not:** modify parent SHA `691490e` or its examiner worktree; create a sibling 0089; activate Recall.
+
 ## Post-Founder-Alpha — MainAI continuous conversation foundation (2026-10-01)
 
 Separate Cursor builder lane in its **own worktree**. Does **not** modify frozen Founder

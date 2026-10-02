@@ -21,6 +21,7 @@ from app.routers import (
     conversations,
     documents,
     execution_envelopes,
+    founder_sovereignty,
     health,
     inspectable_memory,
     knowledge,
@@ -80,6 +81,7 @@ app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
+app.include_router(founder_sovereignty.router)
 app.include_router(provider_spend.router)
 
 
