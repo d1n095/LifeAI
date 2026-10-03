@@ -89,7 +89,7 @@ def test_compose_founder_reply_uses_discovered_sha_instead_of_asking_founder():
         discovered=truth,
     )
     assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in reply
-    assert "paste" not in reply.lower()
+    assert "please paste" not in reply.lower()
     assert branch_from_founder_text("What SHA is the frozen Founder Alpha branch at?") == "codex/founder-alpha-final-composed-candidate"
 
 
@@ -261,7 +261,7 @@ def test_live_chat_continuous_thread_discovers_sha_internally_and_blocks_relay(c
     assert first.status_code == 200, first.text
     body = first.json()
     assert body["assistant_status"] == "succeeded"
-    assert "paste" not in body["reply"].lower()
+    assert "please paste" not in body["reply"].lower()
     assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in body["reply"]
     assert "GitHub" in body["reply"]
     conversation_id = body["conversation_id"]

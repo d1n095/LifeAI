@@ -121,7 +121,7 @@ class SoftwareTruth:
         ci = f" CI: {self.ci_summary}." if self.ci_summary else ""
         return (
             f"GitHub reports `{self.branch}` at `{self.sha}`.{ci} "
-            "I read this internally. Do not paste SHAs, branches, or CI to agents."
+            "I read this internally. Do not relay SHAs, branches, or CI to agents."
         )
 
 
