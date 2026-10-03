@@ -13,7 +13,7 @@ Does **not** reuse Claude's examiner checkout of that SHA.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-continuous-conversation-p1-fix` | — | **Open child lane** | P1: live continuous chat actually discovers SHA/CI from GitHub (injectable read hook), injects those facts into the founder reply, and records live occupancy (busy hold / idle independent lane). No new 0089. No founder-sovereignty or orchestration-ledger imports. Does not merge, deploy, or activate Recall. |
+| `cursor/mainai-continuous-conversation-p1-fix` | [#256](https://github.com/d1n095/LifeAI/pull/256) | **Open child lane** | P1: live continuous chat actually discovers SHA/CI from GitHub (injectable read hook), injects those facts into the founder reply, and records live occupancy (busy hold / idle independent lane). No new 0089. No founder-sovereignty or orchestration-ledger imports. Does not merge, deploy, or activate Recall. |
 
 **Must not:** modify examiner worktree at `691490e`; modify sovereignty SHA `ffbdb63`.
 
