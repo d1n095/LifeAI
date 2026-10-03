@@ -107,6 +107,25 @@ class InternalAction:
 
 
 @dataclass(frozen=True)
+class SoftwareTruth:
+    branch: str
+    sha: str | None = None
+    ci_summary: str | None = None
+    source: str = "unavailable"
+    detail: str = ""
+
+    @property
+    def founder_answer(self) -> str | None:
+        if not self.sha:
+            return None
+        ci = f" CI: {self.ci_summary}." if self.ci_summary else ""
+        return (
+            f"GitHub reports `{self.branch}` at `{self.sha}`.{ci} "
+            "I read this internally. Do not paste SHAs, branches, or CI to agents."
+        )
+
+
+@dataclass(frozen=True)
 class ConversationTurnResult:
     inbound: InboundClassification
     outbound: OutboundDecision | None
@@ -114,3 +133,4 @@ class ConversationTurnResult:
     interrupt_founder: bool
     founder_message: str | None
     notes: tuple[str, ...] = ()
+    software_truth: SoftwareTruth | None = None

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 from app.mainai_cognitive_ops.founder_anti_repetition import assess_communication_necessity
-from app.mainai_continuous_conversation.types import OutboundDecision, OutboundDisposition, RelayCategory
+from app.mainai_continuous_conversation.types import OutboundDecision, OutboundDisposition, RelayCategory, SoftwareTruth
 
 _SAFE_REWRITE = (
     "MainAI handles machine coordination internally. GitHub is the software-truth source "
@@ -36,13 +36,14 @@ def detect_relay_categories(text: str) -> tuple[RelayCategory, ...]:
     return tuple(found)
 
 
-def filter_outbound(text: str) -> OutboundDecision:
+def filter_outbound(text: str, *, discovered: SoftwareTruth | None = None) -> OutboundDecision:
     blocked = detect_relay_categories(text)
     if blocked:
+        content = (discovered.founder_answer if discovered is not None else None) or _SAFE_REWRITE
         return OutboundDecision(
             disposition=OutboundDisposition.REWRITE,
             original=text,
-            content=_SAFE_REWRITE,
+            content=content,
             blocked_categories=blocked,
             reason="outbound text asked the founder to relay machine-discoverable facts",
         )

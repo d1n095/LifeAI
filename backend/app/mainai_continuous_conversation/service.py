@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.mainai_continuous_conversation.orchestrate import handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
-from app.mainai_continuous_conversation.types import ConversationTurnResult
+from app.mainai_continuous_conversation.types import ConversationTurnResult, SoftwareTruth
 from app.models.conversation import Conversation
 from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationEvent
 
@@ -87,10 +87,15 @@ def persist_turn(
     idle_agents: tuple[str, ...] = (),
     draft_outbound: str | None = None,
     message_id: UUID | None = None,
+    software_truth: SoftwareTruth | None = None,
 ) -> ConversationTurnResult:
     conversation = get_or_create_canonical_conversation(db, owner_id=owner_id)
     result = handle_founder_message(
-        text, busy_agents=busy_agents, idle_agents=idle_agents, draft_outbound=draft_outbound
+        text,
+        busy_agents=busy_agents,
+        idle_agents=idle_agents,
+        draft_outbound=draft_outbound,
+        software_truth=software_truth,
     )
     record_event(
         db,
@@ -103,6 +108,13 @@ def persist_turn(
         payload={
             "relay_categories": [item.value for item in result.inbound.relay_categories],
             "internal_actions": [action.kind.value for action in result.internal_actions],
+            "software_truth": {
+                "branch": software_truth.branch,
+                "sha": software_truth.sha,
+                "source": software_truth.source,
+            }
+            if software_truth is not None
+            else None,
         },
         excerpt=text,
     )
@@ -129,5 +141,22 @@ def persist_turn(
     return result
 
 
-def apply_outbound_filter(content: str) -> str:
-    return filter_outbound(content).content
+def apply_outbound_filter(content: str, *, discovered: SoftwareTruth | None = None) -> str:
+    return filter_outbound(content, discovered=discovered).content
+
+
+def compose_founder_reply(*, draft: str, discovered: SoftwareTruth | None) -> str:
+    if discovered is not None and discovered.founder_answer:
+        filtered = filter_outbound(draft, discovered=discovered)
+        if filtered.asks_founder_to_relay or discovered.sha not in draft:
+            return discovered.founder_answer
+    return apply_outbound_filter(draft, discovered=discovered)
+
+
+def is_canonical_conversation(db: Session, *, owner_id: UUID, conversation_id: UUID) -> bool:
+    binding = (
+        db.query(FounderCanonicalConversation)
+        .filter(FounderCanonicalConversation.owner_id == owner_id, FounderCanonicalConversation.conversation_id == conversation_id)
+        .one_or_none()
+    )
+    return binding is not None

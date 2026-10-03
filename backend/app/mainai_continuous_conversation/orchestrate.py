@@ -14,6 +14,7 @@ from app.mainai_continuous_conversation.types import (
     InternalAction,
     InternalActionKind,
     RelayCategory,
+    SoftwareTruth,
 )
 
 
@@ -23,6 +24,7 @@ def handle_founder_message(
     busy_agents: tuple[str, ...] = (),
     idle_agents: tuple[str, ...] = (),
     draft_outbound: str | None = None,
+    software_truth: SoftwareTruth | None = None,
 ) -> ConversationTurnResult:
     inbound = classify_inbound(text)
     actions: list[InternalAction] = []
@@ -65,11 +67,13 @@ def handle_founder_message(
                 )
             )
 
-    outbound = filter_outbound(draft_outbound) if draft_outbound else None
+    outbound = filter_outbound(draft_outbound, discovered=software_truth) if draft_outbound else None
     interrupt = inbound.interrupt_founder
     founder_message = None
     if interrupt:
         founder_message = inbound.reason
+    elif software_truth is not None and software_truth.sha:
+        notes.append(f"discovered {software_truth.branch}@{software_truth.sha} from {software_truth.source}")
     elif outbound is not None and outbound.asks_founder_to_relay:
         notes.append(outbound.reason)
 
@@ -80,6 +84,7 @@ def handle_founder_message(
         interrupt_founder=interrupt,
         founder_message=founder_message if interrupt else None,
         notes=tuple(notes),
+        software_truth=software_truth,
     )
 
 

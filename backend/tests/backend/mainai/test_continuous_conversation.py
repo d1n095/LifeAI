@@ -17,9 +17,12 @@ from sqlalchemy.exc import IntegrityError
 
 import app.mainai_continuous_conversation as pkg
 from app.mainai_continuous_conversation.classify import classify_inbound
+from app.mainai_continuous_conversation.discover import branch_from_founder_text
+from app.mainai_continuous_conversation.occupancy import founder_alpha_occupancy
 from app.mainai_continuous_conversation.orchestrate import founder_alpha_continuous_turn, handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
-from app.mainai_continuous_conversation.service import get_or_create_canonical_conversation, persist_turn
+from app.mainai_continuous_conversation.service import compose_founder_reply, get_or_create_canonical_conversation, persist_turn
+from app.mainai_continuous_conversation.types import SoftwareTruth
 from app.mainai_continuous_conversation.types import (
     InboundKind,
     InternalActionKind,
@@ -73,6 +76,28 @@ def test_outbound_rewrite_blocks_asking_founder_for_sha():
     assert RelayCategory.SHA in decision.blocked_categories
     assert "paste" not in decision.content.lower() or "sha" not in decision.content.lower()
     assert decision.asks_founder_to_relay is True
+
+
+def test_compose_founder_reply_uses_discovered_sha_instead_of_asking_founder():
+    truth = SoftwareTruth(
+        branch="codex/founder-alpha-final-composed-candidate",
+        sha="691490edd82fa4bff6188f4f038f7579ee4f3df5",
+        source="github",
+    )
+    reply = compose_founder_reply(
+        draft="Please paste the exact SHA so I can give it to Codex.",
+        discovered=truth,
+    )
+    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in reply
+    assert "paste" not in reply.lower()
+    assert branch_from_founder_text("What SHA is the frozen Founder Alpha branch at?") == "codex/founder-alpha-final-composed-candidate"
+
+
+def test_occupancy_fallback_holds_claude_and_keeps_cursor_idle():
+    busy, idle = founder_alpha_occupancy()
+    assert "claude" in busy
+    assert "cursor" in idle
+    assert "codex" in idle
 
 
 def test_outbound_allows_ordinary_answer():
@@ -216,8 +241,17 @@ def test_live_chat_continuous_thread_discovers_sha_internally_and_blocks_relay(c
             raw_usage={"prompt_tokens": 5, "completion_tokens": 3},
         )
 
+    async def _discover(text, *, client=None):
+        return SoftwareTruth(
+            branch="codex/founder-alpha-final-composed-candidate",
+            sha="691490edd82fa4bff6188f4f038f7579ee4f3df5",
+            source="github",
+            detail="read from GitHub ref",
+        )
+
     monkeypatch.setattr(OpenAIProvider, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
+    monkeypatch.setattr("app.routers.chat.discover_software_truth", _discover)
     csrf = client.post("/api/auth/login", json={"email": FOUNDER_EMAIL, "password": FOUNDER_PASSWORD}).json()["csrf_token"]
     first = client.post(
         "/api/chat",
@@ -228,6 +262,7 @@ def test_live_chat_continuous_thread_discovers_sha_internally_and_blocks_relay(c
     body = first.json()
     assert body["assistant_status"] == "succeeded"
     assert "paste" not in body["reply"].lower()
+    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in body["reply"]
     assert "GitHub" in body["reply"]
     conversation_id = body["conversation_id"]
     second = client.post(
@@ -240,3 +275,5 @@ def test_live_chat_continuous_thread_discovers_sha_internally_and_blocks_relay(c
     events = superuser_db.query(FounderConversationEvent).filter_by(conversation_id=conversation_id).all()
     assert any(event.direction == "inbound" and event.kind == "relay_request" for event in events)
     assert any(event.kind == "discover_from_github" for event in events)
+    assert any(event.kind == "hold_busy_agent" and (event.payload or {}).get("agent_key") == "claude" for event in events)
+    assert any(event.kind == "assign_idle_agent" and (event.payload or {}).get("agent_key") == "cursor" for event in events)
