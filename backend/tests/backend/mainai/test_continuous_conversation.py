@@ -17,9 +17,12 @@ from sqlalchemy.exc import IntegrityError
 
 import app.mainai_continuous_conversation as pkg
 from app.mainai_continuous_conversation.classify import classify_inbound
+from app.mainai_continuous_conversation.discover import branch_from_founder_text
+from app.mainai_continuous_conversation.occupancy import founder_alpha_occupancy
 from app.mainai_continuous_conversation.orchestrate import founder_alpha_continuous_turn, handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
-from app.mainai_continuous_conversation.service import get_or_create_canonical_conversation, persist_turn
+from app.mainai_continuous_conversation.service import compose_founder_reply, get_or_create_canonical_conversation, persist_turn
+from app.mainai_continuous_conversation.types import SoftwareTruth
 from app.mainai_continuous_conversation.types import (
     InboundKind,
     InternalActionKind,
@@ -75,6 +78,28 @@ def test_outbound_rewrite_blocks_asking_founder_for_sha():
     assert decision.asks_founder_to_relay is True
 
 
+def test_compose_founder_reply_uses_discovered_sha_instead_of_asking_founder():
+    truth = SoftwareTruth(
+        branch="codex/founder-alpha-final-composed-candidate",
+        sha="691490edd82fa4bff6188f4f038f7579ee4f3df5",
+        source="github",
+    )
+    reply = compose_founder_reply(
+        draft="Please paste the exact SHA so I can give it to Codex.",
+        discovered=truth,
+    )
+    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in reply
+    assert "please paste" not in reply.lower()
+    assert branch_from_founder_text("What SHA is the frozen Founder Alpha branch at?") == "codex/founder-alpha-final-composed-candidate"
+
+
+def test_occupancy_fallback_holds_claude_and_keeps_cursor_idle():
+    busy, idle = founder_alpha_occupancy()
+    assert "claude" in busy
+    assert "cursor" in idle
+    assert "codex" in idle
+
+
 def test_outbound_allows_ordinary_answer():
     decision = filter_outbound("I will read GitHub and keep coordinating Cursor on a separate lane.")
     assert decision.disposition is OutboundDisposition.SEND
@@ -98,7 +123,20 @@ def test_status_question_does_not_interrupt():
     result = handle_founder_message("What is Claude doing?", busy_agents=("claude",))
     assert result.inbound.kind is InboundKind.STATUS_QUESTION
     assert result.interrupt_founder is False
-    assert any(action.kind is InternalActionKind.HOLD_BUSY_AGENT for action in result.internal_actions)
+    assert not any(action.kind is InternalActionKind.HOLD_BUSY_AGENT for action in result.internal_actions)
+
+
+def test_caller_supplied_occupancy_is_not_authority():
+    result = handle_founder_message(
+        "Assign Cursor a second lane.",
+        busy_agents=("claude",),
+        idle_agents=("cursor", "codex"),
+    )
+    assert result.occupancy is not None
+    assert result.occupancy.authoritative is False
+    assert result.occupancy.source == "caller_supplied"
+    assert not any(action.kind is InternalActionKind.ASSIGN_IDLE_AGENT for action in result.internal_actions)
+    assert not any(action.kind is InternalActionKind.HOLD_BUSY_AGENT for action in result.internal_actions)
 
 
 def test_founder_alpha_draft_outbound_is_rewritten_not_sent():
@@ -163,13 +201,17 @@ def test_persist_turn_records_internal_actions_not_founder_interrupt(superuser_d
     )
     superuser_db.flush()
     assert result.interrupt_founder is False
+    assert result.occupancy is not None
     events = superuser_db.query(FounderConversationEvent).filter_by(owner_id=owner.id).all()
     directions = {event.direction for event in events}
     assert "inbound" in directions
     assert "internal" in directions
     assert "outbound" in directions
     assert any(event.kind == "discover_from_github" for event in events)
-    assert any(event.kind == "hold_busy_agent" for event in events)
+    assert not any(event.kind == "hold_busy_agent" for event in events)
+    inbound = next(event for event in events if event.direction == "inbound")
+    assert inbound.payload["caller_supplied_occupancy_ignored"] is True
+    assert inbound.payload["occupancy"]["authoritative"] in {True, False}
     assert any(event.suppressed for event in events if event.direction == "outbound")
 
 
@@ -221,22 +263,26 @@ def test_live_chat_continuous_thread_discovers_sha_internally_and_blocks_relay(c
     csrf = client.post("/api/auth/login", json={"email": FOUNDER_EMAIL, "password": FOUNDER_PASSWORD}).json()["csrf_token"]
     first = client.post(
         "/api/chat",
-        json={"message": "What SHA is the frozen Founder Alpha branch at?", "continuous": True},
+        json={"message": "What is the frozen Founder Alpha SHA?", "continuous": True},
         headers={"X-CSRF-Token": csrf},
     )
     assert first.status_code == 200, first.text
     body = first.json()
     assert body["assistant_status"] == "succeeded"
-    assert "paste" not in body["reply"].lower()
-    assert "GitHub" in body["reply"]
+    assert "please paste" not in body["reply"].lower()
+    assert "2fbe20aacf1203fc0e16d216ef55b666b2181619" in body["reply"]
+    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" not in body["reply"]
     conversation_id = body["conversation_id"]
     second = client.post(
         "/api/chat",
-        json={"message": "Keep going.", "continuous": True},
+        json={"message": "What SHA is the Continuous Conversation parent?", "continuous": True},
         headers={"X-CSRF-Token": csrf},
     )
     assert second.status_code == 200, second.text
     assert second.json()["conversation_id"] == conversation_id
+    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in second.json()["reply"]
+    assert "2fbe20aacf1203fc0e16d216ef55b666b2181619" not in second.json()["reply"]
     events = superuser_db.query(FounderConversationEvent).filter_by(conversation_id=conversation_id).all()
     assert any(event.direction == "inbound" and event.kind == "relay_request" for event in events)
     assert any(event.kind == "discover_from_github" for event in events)
+    assert not any(event.kind == "hold_busy_agent" for event in events)

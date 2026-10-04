@@ -6,6 +6,19 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — Continuous conversation P1 fix (2026-10-03)
+
+Child of `691490edd82fa4bff6188f4f038f7579ee4f3df5` in a **Cursor-owned builder worktree**.
+Does **not** reuse Claude's examiner checkout of that SHA.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-continuous-conversation-p1-fix` | [#256](https://github.com/d1n095/LifeAI/pull/256) | **Open child lane — P1 completion** | Entity/subject binding (Founder Alpha frozen SHA `2fbe20a` != CC parent `691490e` != current P1 tip). Migration `0090_cc_thread_memory`: owner-scoped conversation FKs, governed canonical-conversation erase (`erase_own_continuous_conversation_children`), compaction/provenance/supersession, workspace leases (SHA share allowed, workspace share forbidden). Latest-20 live context, EN/SV no-relay, interrupt gating, occupancy RUNNING/IDLE/STALE/UNKNOWN bound to assignment identity, truthful capability (assignment execution not wired). Does not merge, deploy, or activate Recall. |
+
+**Alembic:** child of `0089_continuous_conversation` is `0090_cc_thread_memory` (not another 0089; cousin sovereignty used `0090_founder_sovereignty` on a different head).
+
+**Must not:** modify examiner worktree at `691490e`; modify sovereignty SHA `ffbdb63`.
+
 ## Post-Founder-Alpha — MainAI continuous conversation foundation (2026-10-01)
 
 Separate Cursor builder lane in its **own worktree**. Does **not** modify frozen Founder

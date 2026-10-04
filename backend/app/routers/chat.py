@@ -29,7 +29,18 @@ from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
-from app.mainai_continuous_conversation.service import apply_outbound_filter, get_or_create_canonical_conversation, persist_turn
+from app.mainai_continuous_conversation.classify import classify_inbound
+from app.mainai_continuous_conversation.context import assemble_live_context
+from app.mainai_continuous_conversation.discover import discover_software_truth
+from app.mainai_continuous_conversation.occupancy import occupancy_for_turn
+from app.mainai_continuous_conversation.service import (
+    compose_founder_reply,
+    get_or_create_canonical_conversation,
+    is_canonical_conversation,
+    persist_turn,
+    record_event,
+)
+from app.mainai_continuous_conversation.types import InboundKind, SoftwareTruth
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
 from app.models.usage import UsageLog
@@ -68,8 +79,10 @@ SYSTEM_PROMPT = (
     "säga att grundaren själv kan starta ett sådant jobb via Jobb & Aktivitet — aldrig låtsas att "
     "du redan gör det.\n\n"
     "Du får ALDRIG be grundaren reläa agentmeddelanden, SHA:n, branchnamn, testresultat, "
-    "CI-status, blockeringar eller vem som ska jobba härnäst. GitHub är sanningen för git/"
-    "CI/PR. Agentkoordinering sköter du internt."
+    "CI-status, blockeringar eller vem som ska jobba härnäst. GitHub eller registret är "
+    "sanningen för git/CI/PR när entiteten är bunden. Occupancy observeras; "
+    "agent-tilldelning är inte kopplad på den här ytan. Påstå ALDRIG att MainAI "
+    "'hanterar maskinkoordinering internt' om tilldelningen inte faktiskt är kopplad."
 )
 
 settings = get_settings()
@@ -109,7 +122,15 @@ def _record_candidate_signal_if_worth_noticing(
         logger.warning("failed to record candidate learning signal for message %s (non-fatal)", user_message.id, exc_info=True)
 
 
-async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> ChatMessageOut:
+async def _attempt_assistant_reply(
+    db: Session,
+    *,
+    conversation: Conversation,
+    user_message: MessageModel,
+    user: User,
+    software_truth: SoftwareTruth | None = None,
+    record_continuous_outbound: bool = False,
+) -> ChatMessageOut:
     """Generates the assistant's reply for `user_message` (already committed). Used by both
     the initial send and the retry endpoint — a retry runs this exact same path, not a
     parallel one, so its behavior can never drift from the first attempt's."""
@@ -182,23 +203,34 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         else None
     )
 
-    history = (
+    # Latest relevant turns, not the oldest 20. A lifelong thread must send the newest
+    # window to the model. LIMIT is unchanged; compaction (below) covers older turns
+    # without deleting them.
+    history_rows = (
         db.query(MessageModel)
         .filter(
             MessageModel.conversation_id == conversation.id,
             MessageModel.id != user_message.id,
             MessageModel.status == MessageStatus.succeeded,
         )
-        # S1B (migration 0030, §4.9): `id` as a tiebreaker makes this a total order. It matters
-        # more here than anywhere else — this window is both the provider prompt's conversation
-        # history AND app/context/resolver.py's input, so a same-timestamp pair rendering in a
-        # different order between two calls could change the model's answer and the resolver's
-        # classification for reasons nothing could reproduce. Same tiebreaker the S1B backfill
-        # numbers by; still not `ORDER BY sequence_number` (EXPAND phase — see conversations.py).
-        .order_by(MessageModel.created_at.asc(), MessageModel.id.asc())
+        .order_by(MessageModel.created_at.desc(), MessageModel.id.desc())
         .limit(20)
         .all()
     )
+    history = list(reversed(history_rows))
+    compaction_block = ""
+    if record_continuous_outbound:
+        try:
+            live_context = assemble_live_context(
+                db,
+                owner_id=user.id,
+                conversation_id=conversation.id,
+                exclude_message_id=user_message.id,
+            )
+            history = list(live_context.active_messages)
+            compaction_block = live_context.prompt_blocks()
+        except Exception:
+            logger.warning("continuous-conversation live context assembly failed (non-fatal)", exc_info=True)
 
     # Conversation Context Resolver v1 (see app/context/resolver.py, docs/CONTEXT_RESOLVER_V1.md)
     # — a rule-based classification of what kind of turn this message is (continuation, new
@@ -210,10 +242,19 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     )
     _record_candidate_signal_if_worth_noticing(db, owner_id=user.id, user_message=user_message, context_resolution=context_resolution)
 
+    discovered_block = ""
+    if software_truth is not None and software_truth.founder_answer:
+        discovered_block = (
+            "\n\nINTERN PROGRAMVARUSANNING (läst av MainAI från GitHub, inte från grundaren):\n"
+            f"{software_truth.founder_answer}\n"
+            "Använd dessa fakta. Be ALDRIG grundaren klistra in SHA/branch/CI."
+        )
+    memory_block = f"\n\n{compaction_block}" if compaction_block else ""
     system_content = (
         f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
         f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
         f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
+        f"{discovered_block}{memory_block}"
     )
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
@@ -288,8 +329,24 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # Pydantic validation is the structural guarantee that this reply is shaped as a plain
     # `answer` with `job_id=None` -- this endpoint has no background-job concept at all, so
     # that is the only mode a chat reply could ever truthfully be.
-    safe_content = apply_outbound_filter(sanitize_unverified_execution_claims(result.content))
+    safe_content = compose_founder_reply(
+        draft=sanitize_unverified_execution_claims(result.content),
+        discovered=software_truth,
+    )
     build_answer_response(safe_content)  # raises on a contract violation; never actually can for mode=answer/job_id=None, but every call site goes through this the same way
+    if record_continuous_outbound:
+        try:
+            record_event(
+                db,
+                owner_id=user.id,
+                conversation_id=conversation.id,
+                direction="outbound",
+                kind="rewrite" if software_truth is not None and software_truth.sha and software_truth.sha in safe_content else "send",
+                suppressed="paste" in result.content.lower() and "sha" in result.content.lower(),
+                excerpt=safe_content,
+            )
+        except Exception:
+            logger.warning("failed to record continuous outbound event (non-fatal)", exc_info=True)
 
     if assistant_row is None:
         assistant_row = MessageModel(conversation_id=conversation.id, role=MessageRole.assistant, in_reply_to_id=user_message.id)
@@ -374,15 +431,58 @@ async def chat(
     db.commit()
     db.refresh(user_message)
 
-    if payload.continuous:
+    software_truth: SoftwareTruth | None = None
+    continuous = payload.continuous or is_canonical_conversation(db, owner_id=user.id, conversation_id=conversation.id)
+    inbound = classify_inbound(payload.message)
+    if continuous:
+        if inbound.kind is InboundKind.RELAY_REQUEST and not inbound.interrupt_founder:
+            try:
+                software_truth = await discover_software_truth(payload.message)
+            except Exception:
+                logger.warning("software-truth discovery failed (non-fatal)", exc_info=True)
         try:
-            persist_turn(db, owner_id=user.id, text=payload.message, message_id=user_message.id)
+            persist_turn(
+                db,
+                owner_id=user.id,
+                text=payload.message,
+                message_id=user_message.id,
+                occupancy=occupancy_for_turn(db, owner_id=user.id),
+                software_truth=software_truth,
+            )
             db.commit()
         except Exception:
             db.rollback()
             logger.warning("failed to record continuous-conversation turn for message %s (non-fatal)", user_message.id, exc_info=True)
+        if inbound.interrupt_founder:
+            refusal = inbound.reason
+            assistant_row = MessageModel(
+                conversation_id=conversation.id,
+                role=MessageRole.assistant,
+                content=refusal,
+                in_reply_to_id=user_message.id,
+                status=MessageStatus.succeeded,
+            )
+            db.add(assistant_row)
+            conversation.updated_at = datetime.utcnow()
+            db.add(conversation)
+            db.commit()
+            db.refresh(assistant_row)
+            return ChatMessageOut(
+                conversation_id=conversation.id,
+                user_message_id=user_message.id,
+                assistant_status="succeeded",
+                assistant_message_id=assistant_row.id,
+                reply=refusal,
+            )
 
-    return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+    return await _attempt_assistant_reply(
+        db,
+        conversation=conversation,
+        user_message=user_message,
+        user=user,
+        software_truth=software_truth,
+        record_continuous_outbound=continuous,
+    )
 
 
 @router.post("/messages/{message_id}/retry", response_model=ChatMessageOut)
