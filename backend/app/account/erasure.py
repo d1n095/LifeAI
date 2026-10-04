@@ -587,6 +587,13 @@ def erase_account_data(
             {"operation_id": str(operation_id), "owner_id": str(owner_id)},
         )
 
+        # --- Continuous conversation foundation (migrations 0089/0090): canonical
+        # bindings are ON DELETE RESTRICT and DELETE-revoked from mainai_app.
+        # Deleting a canonical conversation is governed. This SECURITY DEFINER
+        # function is the only path that may drop the binding, so account erasure
+        # can then delete conversations without IntegrityError/500 or a dangling bind.
+        db.execute(sa_text("SELECT erase_own_continuous_conversation_children()"))
+
         # --- Personal data: deleted outright, not anonymized. ---
         conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=owner_id).all()]
         if conversation_ids:

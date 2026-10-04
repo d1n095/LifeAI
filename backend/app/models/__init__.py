@@ -46,6 +46,14 @@ from app.models.memory_truth_claim import (
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
+from app.models.continuous_conversation import (
+    FounderCanonicalConversation,
+    FounderConversationCompaction,
+    FounderConversationDecision,
+    FounderConversationEvent,
+    FounderConversationProvenance,
+    FounderWorkspaceLease,
+)
 from app.models.corpus_trial_run import CorpusTrialRun
 from app.models.diagnosis import (
     DIAGNOSIS_AUTHORITIES,
@@ -418,7 +426,11 @@ __all__ = [
     "WorkforcePerformanceRollup",
     "WorkforceTeam",
     "FounderCanonicalConversation",
+    "FounderConversationCompaction",
+    "FounderConversationDecision",
     "FounderConversationEvent",
+    "FounderConversationProvenance",
+    "FounderWorkspaceLease",
     "WorkforceAssignmentCheckpoint",
     "WorkforceCostBudget",
     "WorkforceLifecycleEvent",

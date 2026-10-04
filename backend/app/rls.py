@@ -122,7 +122,14 @@ RLS_STATEMENTS = [
     ],
     *[
         statement
-        for table in ("founder_canonical_conversations", "founder_conversation_events")
+        for table in (
+            "founder_canonical_conversations",
+            "founder_conversation_events",
+            "founder_conversation_compactions",
+            "founder_conversation_decisions",
+            "founder_conversation_provenance",
+            "founder_workspace_leases",
+        )
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
 ]
@@ -336,7 +343,14 @@ POLICY_DEFINITIONS = [
             "name": f"{table}_isolation",
             "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
         }
-        for table in ("founder_canonical_conversations", "founder_conversation_events")
+        for table in (
+            "founder_canonical_conversations",
+            "founder_conversation_events",
+            "founder_conversation_compactions",
+            "founder_conversation_decisions",
+            "founder_conversation_provenance",
+            "founder_workspace_leases",
+        )
     ],
 ]
 
@@ -631,6 +645,10 @@ _MAINAI_EXECUTION_TABLES = (
     # permission grant.
     "founder_canonical_conversations",
     "founder_conversation_events",
+    "founder_conversation_compactions",
+    "founder_conversation_decisions",
+    "founder_conversation_provenance",
+    "founder_workspace_leases",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -737,6 +755,19 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "mainai_app_execute": False, "security_definer": False,
     },
     {"name": "erase_own_candidate_learning_signal_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_continuous_conversation_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "founder_canonical_conversations_guard_delete", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "conversations_guard_canonical_delete", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
+    {
+        "name": "founder_workspace_leases_guard", "identity_args": "", "return_type": "trigger",
+        "mainai_app_execute": False, "security_definer": False,
+    },
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -1061,6 +1092,15 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_canonical_conversations FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_events FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_compactions FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_decisions FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_provenance FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_workspace_leases FROM mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT ON founder_conversation_compactions TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON founder_conversation_decisions TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT ON founder_conversation_provenance TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON founder_workspace_leases TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_continuous_conversation_children() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1133,6 +1173,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
             ("founder_canonical_conversations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("founder_conversation_events", frozenset({"SELECT", "INSERT"})),
+            ("founder_conversation_compactions", frozenset({"SELECT", "INSERT"})),
+            ("founder_conversation_decisions", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("founder_conversation_provenance", frozenset({"SELECT", "INSERT"})),
+            ("founder_workspace_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

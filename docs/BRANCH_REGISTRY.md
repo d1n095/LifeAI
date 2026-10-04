@@ -13,7 +13,9 @@ Does **not** reuse Claude's examiner checkout of that SHA.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-continuous-conversation-p1-fix` | [#256](https://github.com/d1n095/LifeAI/pull/256) | **Open child lane** | P1: live continuous chat actually discovers SHA/CI from GitHub (injectable read hook), injects those facts into the founder reply, and records live occupancy (busy hold / idle independent lane). No new 0089. No founder-sovereignty or orchestration-ledger imports. Does not merge, deploy, or activate Recall. |
+| `cursor/mainai-continuous-conversation-p1-fix` | [#256](https://github.com/d1n095/LifeAI/pull/256) | **Open child lane — P1 completion** | Entity/subject binding (Founder Alpha frozen SHA `2fbe20a` != CC parent `691490e` != current P1 tip). Migration `0090_cc_thread_memory`: owner-scoped conversation FKs, governed canonical-conversation erase (`erase_own_continuous_conversation_children`), compaction/provenance/supersession, workspace leases (SHA share allowed, workspace share forbidden). Latest-20 live context, EN/SV no-relay, interrupt gating, occupancy RUNNING/IDLE/STALE/UNKNOWN bound to assignment identity, truthful capability (assignment execution not wired). Does not merge, deploy, or activate Recall. |
+
+**Alembic:** child of `0089_continuous_conversation` is `0090_cc_thread_memory` (not another 0089; cousin sovereignty used `0090_founder_sovereignty` on a different head).
 
 **Must not:** modify examiner worktree at `691490e`; modify sovereignty SHA `ffbdb63`.
 

@@ -123,7 +123,20 @@ def test_status_question_does_not_interrupt():
     result = handle_founder_message("What is Claude doing?", busy_agents=("claude",))
     assert result.inbound.kind is InboundKind.STATUS_QUESTION
     assert result.interrupt_founder is False
-    assert any(action.kind is InternalActionKind.HOLD_BUSY_AGENT for action in result.internal_actions)
+    assert not any(action.kind is InternalActionKind.HOLD_BUSY_AGENT for action in result.internal_actions)
+
+
+def test_caller_supplied_occupancy_is_not_authority():
+    result = handle_founder_message(
+        "Assign Cursor a second lane.",
+        busy_agents=("claude",),
+        idle_agents=("cursor", "codex"),
+    )
+    assert result.occupancy is not None
+    assert result.occupancy.authoritative is False
+    assert result.occupancy.source == "caller_supplied"
+    assert not any(action.kind is InternalActionKind.ASSIGN_IDLE_AGENT for action in result.internal_actions)
+    assert not any(action.kind is InternalActionKind.HOLD_BUSY_AGENT for action in result.internal_actions)
 
 
 def test_founder_alpha_draft_outbound_is_rewritten_not_sent():
@@ -188,13 +201,17 @@ def test_persist_turn_records_internal_actions_not_founder_interrupt(superuser_d
     )
     superuser_db.flush()
     assert result.interrupt_founder is False
+    assert result.occupancy is not None
     events = superuser_db.query(FounderConversationEvent).filter_by(owner_id=owner.id).all()
     directions = {event.direction for event in events}
     assert "inbound" in directions
     assert "internal" in directions
     assert "outbound" in directions
     assert any(event.kind == "discover_from_github" for event in events)
-    assert any(event.kind == "hold_busy_agent" for event in events)
+    assert not any(event.kind == "hold_busy_agent" for event in events)
+    inbound = next(event for event in events if event.direction == "inbound")
+    assert inbound.payload["caller_supplied_occupancy_ignored"] is True
+    assert inbound.payload["occupancy"]["authoritative"] in {True, False}
     assert any(event.suppressed for event in events if event.direction == "outbound")
 
 
@@ -241,39 +258,31 @@ def test_live_chat_continuous_thread_discovers_sha_internally_and_blocks_relay(c
             raw_usage={"prompt_tokens": 5, "completion_tokens": 3},
         )
 
-    async def _discover(text, *, client=None):
-        return SoftwareTruth(
-            branch="codex/founder-alpha-final-composed-candidate",
-            sha="691490edd82fa4bff6188f4f038f7579ee4f3df5",
-            source="github",
-            detail="read from GitHub ref",
-        )
-
     monkeypatch.setattr(OpenAIProvider, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
-    monkeypatch.setattr("app.routers.chat.discover_software_truth", _discover)
     csrf = client.post("/api/auth/login", json={"email": FOUNDER_EMAIL, "password": FOUNDER_PASSWORD}).json()["csrf_token"]
     first = client.post(
         "/api/chat",
-        json={"message": "What SHA is the frozen Founder Alpha branch at?", "continuous": True},
+        json={"message": "What is the frozen Founder Alpha SHA?", "continuous": True},
         headers={"X-CSRF-Token": csrf},
     )
     assert first.status_code == 200, first.text
     body = first.json()
     assert body["assistant_status"] == "succeeded"
     assert "please paste" not in body["reply"].lower()
-    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in body["reply"]
-    assert "GitHub" in body["reply"]
+    assert "2fbe20aacf1203fc0e16d216ef55b666b2181619" in body["reply"]
+    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" not in body["reply"]
     conversation_id = body["conversation_id"]
     second = client.post(
         "/api/chat",
-        json={"message": "Keep going.", "continuous": True},
+        json={"message": "What SHA is the Continuous Conversation parent?", "continuous": True},
         headers={"X-CSRF-Token": csrf},
     )
     assert second.status_code == 200, second.text
     assert second.json()["conversation_id"] == conversation_id
+    assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in second.json()["reply"]
+    assert "2fbe20aacf1203fc0e16d216ef55b666b2181619" not in second.json()["reply"]
     events = superuser_db.query(FounderConversationEvent).filter_by(conversation_id=conversation_id).all()
     assert any(event.direction == "inbound" and event.kind == "relay_request" for event in events)
     assert any(event.kind == "discover_from_github" for event in events)
-    assert any(event.kind == "hold_busy_agent" and (event.payload or {}).get("agent_key") == "claude" for event in events)
-    assert any(event.kind == "assign_idle_agent" and (event.payload or {}).get("agent_key") == "cursor" for event in events)
+    assert not any(event.kind == "hold_busy_agent" for event in events)

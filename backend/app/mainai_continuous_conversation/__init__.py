@@ -1,11 +1,13 @@
 """MainAI continuous conversation foundation.
 
-The founder talks to MainAI. MainAI manages the machines. Agent chat is not a
-founder-relay bus. Conversation state does not grant security permissions.
+The founder talks to MainAI. MainAI looks up machine-discoverable facts. Agent
+assignment execution is not wired on this chat surface. Conversation state does
+not grant security permissions. Subject binding is required for every SHA answer.
 """
 
 from app.mainai_continuous_conversation.classify import classify_inbound
 from app.mainai_continuous_conversation.discover import discover_software_truth
+from app.mainai_continuous_conversation.entities import bind_subject
 from app.mainai_continuous_conversation.occupancy import occupancy_for_turn
 from app.mainai_continuous_conversation.orchestrate import founder_alpha_continuous_turn, handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
@@ -18,6 +20,7 @@ from app.mainai_continuous_conversation.service import (
 
 __all__ = [
     "apply_outbound_filter",
+    "bind_subject",
     "classify_inbound",
     "compose_founder_reply",
     "discover_software_truth",

@@ -30,6 +30,7 @@ from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
 from app.mainai_continuous_conversation.classify import classify_inbound
+from app.mainai_continuous_conversation.context import assemble_live_context
 from app.mainai_continuous_conversation.discover import discover_software_truth
 from app.mainai_continuous_conversation.occupancy import occupancy_for_turn
 from app.mainai_continuous_conversation.service import (
@@ -78,8 +79,10 @@ SYSTEM_PROMPT = (
     "säga att grundaren själv kan starta ett sådant jobb via Jobb & Aktivitet — aldrig låtsas att "
     "du redan gör det.\n\n"
     "Du får ALDRIG be grundaren reläa agentmeddelanden, SHA:n, branchnamn, testresultat, "
-    "CI-status, blockeringar eller vem som ska jobba härnäst. GitHub är sanningen för git/"
-    "CI/PR. Agentkoordinering sköter du internt."
+    "CI-status, blockeringar eller vem som ska jobba härnäst. GitHub eller registret är "
+    "sanningen för git/CI/PR när entiteten är bunden. Occupancy observeras; "
+    "agent-tilldelning är inte kopplad på den här ytan. Påstå ALDRIG att MainAI "
+    "'hanterar maskinkoordinering internt' om tilldelningen inte faktiskt är kopplad."
 )
 
 settings = get_settings()
@@ -200,23 +203,34 @@ async def _attempt_assistant_reply(
         else None
     )
 
-    history = (
+    # Latest relevant turns, not the oldest 20. A lifelong thread must send the newest
+    # window to the model. LIMIT is unchanged; compaction (below) covers older turns
+    # without deleting them.
+    history_rows = (
         db.query(MessageModel)
         .filter(
             MessageModel.conversation_id == conversation.id,
             MessageModel.id != user_message.id,
             MessageModel.status == MessageStatus.succeeded,
         )
-        # S1B (migration 0030, §4.9): `id` as a tiebreaker makes this a total order. It matters
-        # more here than anywhere else — this window is both the provider prompt's conversation
-        # history AND app/context/resolver.py's input, so a same-timestamp pair rendering in a
-        # different order between two calls could change the model's answer and the resolver's
-        # classification for reasons nothing could reproduce. Same tiebreaker the S1B backfill
-        # numbers by; still not `ORDER BY sequence_number` (EXPAND phase — see conversations.py).
-        .order_by(MessageModel.created_at.asc(), MessageModel.id.asc())
+        .order_by(MessageModel.created_at.desc(), MessageModel.id.desc())
         .limit(20)
         .all()
     )
+    history = list(reversed(history_rows))
+    compaction_block = ""
+    if record_continuous_outbound:
+        try:
+            live_context = assemble_live_context(
+                db,
+                owner_id=user.id,
+                conversation_id=conversation.id,
+                exclude_message_id=user_message.id,
+            )
+            history = list(live_context.active_messages)
+            compaction_block = live_context.prompt_blocks()
+        except Exception:
+            logger.warning("continuous-conversation live context assembly failed (non-fatal)", exc_info=True)
 
     # Conversation Context Resolver v1 (see app/context/resolver.py, docs/CONTEXT_RESOLVER_V1.md)
     # — a rule-based classification of what kind of turn this message is (continuation, new
@@ -235,11 +249,12 @@ async def _attempt_assistant_reply(
             f"{software_truth.founder_answer}\n"
             "Använd dessa fakta. Be ALDRIG grundaren klistra in SHA/branch/CI."
         )
+    memory_block = f"\n\n{compaction_block}" if compaction_block else ""
     system_content = (
         f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
         f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
         f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
-        f"{discovered_block}"
+        f"{discovered_block}{memory_block}"
     )
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
@@ -418,28 +433,47 @@ async def chat(
 
     software_truth: SoftwareTruth | None = None
     continuous = payload.continuous or is_canonical_conversation(db, owner_id=user.id, conversation_id=conversation.id)
+    inbound = classify_inbound(payload.message)
     if continuous:
-        inbound = classify_inbound(payload.message)
-        if inbound.kind is InboundKind.RELAY_REQUEST:
+        if inbound.kind is InboundKind.RELAY_REQUEST and not inbound.interrupt_founder:
             try:
                 software_truth = await discover_software_truth(payload.message)
             except Exception:
                 logger.warning("software-truth discovery failed (non-fatal)", exc_info=True)
         try:
-            busy_agents, idle_agents = occupancy_for_turn(db, owner_id=user.id)
             persist_turn(
                 db,
                 owner_id=user.id,
                 text=payload.message,
                 message_id=user_message.id,
-                busy_agents=busy_agents,
-                idle_agents=idle_agents,
+                occupancy=occupancy_for_turn(db, owner_id=user.id),
                 software_truth=software_truth,
             )
             db.commit()
         except Exception:
             db.rollback()
             logger.warning("failed to record continuous-conversation turn for message %s (non-fatal)", user_message.id, exc_info=True)
+        if inbound.interrupt_founder:
+            refusal = inbound.reason
+            assistant_row = MessageModel(
+                conversation_id=conversation.id,
+                role=MessageRole.assistant,
+                content=refusal,
+                in_reply_to_id=user_message.id,
+                status=MessageStatus.succeeded,
+            )
+            db.add(assistant_row)
+            conversation.updated_at = datetime.utcnow()
+            db.add(conversation)
+            db.commit()
+            db.refresh(assistant_row)
+            return ChatMessageOut(
+                conversation_id=conversation.id,
+                user_message_id=user_message.id,
+                assistant_status="succeeded",
+                assistant_message_id=assistant_row.id,
+                reply=refusal,
+            )
 
     return await _attempt_assistant_reply(
         db,

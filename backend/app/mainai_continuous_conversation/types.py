@@ -1,13 +1,16 @@
 """Continuous founder↔MainAI conversation vocabulary.
 
 The founder talks to MainAI. MainAI manages machines. Conversation text never grants
-merge, deploy, Recall, provider, or RLS authority.
+merge, deploy, Recall, provider, or RLS authority. Subject binding is required: discovering
+"a SHA" is not the same as answering the requested entity.
 """
 
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
+from uuid import UUID
 
 
 class TurnDirection(str, enum.Enum):
@@ -59,6 +62,29 @@ class InternalActionKind(str, enum.Enum):
     COORDINATE_INTERNALLY = "coordinate_internally"
     REQUEST_INDEPENDENT_EXAMINATION = "request_independent_examination"
     RETURN_DEFECT_TO_BUILDER = "return_defect_to_builder"
+    OBSERVE_OCCUPANCY = "observe_occupancy"
+    REFUSE_AUTHORITY = "refuse_authority"
+    LOOKUP_UNKNOWN = "lookup_unknown"
+
+
+class OccupancyState(str, enum.Enum):
+    RUNNING = "RUNNING"
+    IDLE = "IDLE"
+    STALE = "STALE"
+    UNKNOWN = "UNKNOWN"
+
+
+class WorkspaceMutability(str, enum.Enum):
+    MUTABLE_BUILDER = "mutable_builder"
+    READ_ONLY_EXAMINER = "read_only_examiner"
+
+
+class ArtifactRole(str, enum.Enum):
+    FROZEN_CANDIDATE = "frozen_candidate"
+    PARENT_SHA = "parent_sha"
+    CURRENT_BRANCH_TIP = "current_branch_tip"
+    EXAMINED_LANE_SHA = "examined_lane_sha"
+    UNSPECIFIED = "unspecified"
 
 
 INTERRUPT_KINDS = frozenset(
@@ -80,6 +106,7 @@ class InboundClassification:
     relay_categories: tuple[RelayCategory, ...] = ()
     interrupt: InterruptKind = InterruptKind.NONE
     reason: str = ""
+    language: str = "en"
 
     @property
     def interrupt_founder(self) -> bool:
@@ -107,21 +134,92 @@ class InternalAction:
 
 
 @dataclass(frozen=True)
+class OccupancyObservation:
+    agent_key: str
+    state: OccupancyState
+    assignment_id: UUID | None = None
+    task_id: UUID | None = None
+    execution_id: UUID | None = None
+    observed_at: datetime | None = None
+    source: str = "unavailable"
+    authoritative: bool = False
+
+
+@dataclass(frozen=True)
+class OccupancySnapshot:
+    observations: tuple[OccupancyObservation, ...] = ()
+    source: str = "unavailable"
+    authoritative: bool = False
+
+    @property
+    def running_agents(self) -> tuple[str, ...]:
+        return tuple(
+            item.agent_key
+            for item in self.observations
+            if item.state is OccupancyState.RUNNING and item.authoritative
+        )
+
+    @property
+    def idle_agents(self) -> tuple[str, ...]:
+        return tuple(
+            item.agent_key
+            for item in self.observations
+            if item.state is OccupancyState.IDLE and item.authoritative
+        )
+
+
+@dataclass(frozen=True)
 class SoftwareTruth:
     branch: str
     sha: str | None = None
     ci_summary: str | None = None
     source: str = "unavailable"
     detail: str = ""
+    entity_key: str = "unspecified"
+    repository: str = "d1n095/LifeAI"
+    artifact_role: str = ArtifactRole.UNSPECIFIED.value
+    state: str = "unspecified"
 
     @property
     def founder_answer(self) -> str | None:
         if not self.sha:
+            if self.source == "unavailable" or self.entity_key != "unspecified":
+                return (
+                    f"UNKNOWN: I could not resolve {self.entity_key} from an authoritative "
+                    f"source ({self.source}). I will not ask you to relay it."
+                )
             return None
         ci = f" CI: {self.ci_summary}." if self.ci_summary else ""
         return (
-            f"GitHub reports `{self.branch}` at `{self.sha}`.{ci} "
+            f"{self.entity_key} is `{self.sha}` "
+            f"(repository={self.repository}; branch={self.branch}; "
+            f"role={self.artifact_role}; state={self.state}; source={self.source}).{ci} "
             "I read this internally. Do not relay SHAs, branches, or CI to agents."
+        )
+
+
+@dataclass(frozen=True)
+class BoundSubject:
+    entity_key: str
+    repository: str
+    branch: str
+    artifact_role: ArtifactRole
+    state: str
+    authoritative_source: str
+    sha: str | None = None
+    detail: str = ""
+
+    def as_software_truth(self, *, ci_summary: str | None = None) -> SoftwareTruth:
+        return SoftwareTruth(
+            branch=self.branch,
+            sha=self.sha,
+            ci_summary=ci_summary,
+            source=self.authoritative_source,
+            detail=self.detail,
+            entity_key=self.entity_key,
+            repository=self.repository,
+            artifact_role=self.artifact_role.value,
+            state=self.state,
         )
 
 
@@ -134,3 +232,23 @@ class ConversationTurnResult:
     founder_message: str | None
     notes: tuple[str, ...] = ()
     software_truth: SoftwareTruth | None = None
+    occupancy: OccupancySnapshot | None = None
+    gated: bool = False
+
+
+@dataclass(frozen=True)
+class ProvenancePointer:
+    kind: str
+    value: str
+    message_id: UUID | None = None
+    conversation_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class ActiveDecision:
+    topic: str
+    statement: str
+    decision_id: UUID
+    message_id: UUID | None
+    identifiers: dict[str, str] = field(default_factory=dict)
+    superseded: bool = False

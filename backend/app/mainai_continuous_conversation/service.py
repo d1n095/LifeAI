@@ -1,6 +1,8 @@
 """Persistence for the continuous founder↔MainAI conversation.
 
-Canonical thread binding + append-only turn events. Never grants security permissions.
+Canonical thread binding + append-only turn events. Bindings and events are
+owner-scoped: conversation + owner are bound together. Occupancy is taken from
+authoritative task/session state, never from caller-supplied busy/idle lists.
 """
 
 from __future__ import annotations
@@ -10,9 +12,11 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.mainai_continuous_conversation.capability import unknown_lookup_reply
+from app.mainai_continuous_conversation.occupancy import occupancy_snapshot
 from app.mainai_continuous_conversation.orchestrate import handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
-from app.mainai_continuous_conversation.types import ConversationTurnResult, SoftwareTruth
+from app.mainai_continuous_conversation.types import ConversationTurnResult, OccupancySnapshot, SoftwareTruth
 from app.models.conversation import Conversation
 from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationEvent
 
@@ -33,6 +37,8 @@ def get_or_create_canonical_conversation(db: Session, *, owner_id: UUID) -> Conv
         conversation = db.get(Conversation, binding.conversation_id)
         if conversation is None or conversation.user_id != owner_id:
             raise ContinuousConversationError("canonical conversation binding is broken")
+        if binding.owner_id != conversation.user_id:
+            raise ContinuousConversationError("canonical conversation owner does not match conversation owner")
         return conversation
     conversation = Conversation(title=CANONICAL_TITLE, user_id=owner_id)
     db.add(conversation)
@@ -61,6 +67,10 @@ def record_event(
     payload: dict | None = None,
     excerpt: str = "",
 ) -> FounderConversationEvent:
+    if conversation_id is not None:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None or conversation.user_id != owner_id:
+            raise ContinuousConversationError("event conversation is not owned by this owner")
     event = FounderConversationEvent(
         owner_id=owner_id,
         conversation_id=conversation_id,
@@ -88,12 +98,13 @@ def persist_turn(
     draft_outbound: str | None = None,
     message_id: UUID | None = None,
     software_truth: SoftwareTruth | None = None,
+    occupancy: OccupancySnapshot | None = None,
 ) -> ConversationTurnResult:
     conversation = get_or_create_canonical_conversation(db, owner_id=owner_id)
+    snapshot = occupancy if occupancy is not None else occupancy_snapshot(db, owner_id=owner_id)
     result = handle_founder_message(
         text,
-        busy_agents=busy_agents,
-        idle_agents=idle_agents,
+        occupancy=snapshot,
         draft_outbound=draft_outbound,
         software_truth=software_truth,
     )
@@ -108,13 +119,30 @@ def persist_turn(
         payload={
             "relay_categories": [item.value for item in result.inbound.relay_categories],
             "internal_actions": [action.kind.value for action in result.internal_actions],
+            "occupancy": {
+                "source": snapshot.source,
+                "authoritative": snapshot.authoritative,
+                "agents": [
+                    {
+                        "agent_key": item.agent_key,
+                        "state": item.state.value,
+                        "assignment_id": str(item.assignment_id) if item.assignment_id else None,
+                        "task_id": str(item.task_id) if item.task_id else None,
+                        "execution_id": str(item.execution_id) if item.execution_id else None,
+                    }
+                    for item in snapshot.observations
+                ],
+            },
             "software_truth": {
+                "entity_key": software_truth.entity_key,
                 "branch": software_truth.branch,
                 "sha": software_truth.sha,
                 "source": software_truth.source,
+                "state": software_truth.state,
             }
             if software_truth is not None
             else None,
+            "caller_supplied_occupancy_ignored": bool(busy_agents or idle_agents),
         },
         excerpt=text,
     )
@@ -146,10 +174,15 @@ def apply_outbound_filter(content: str, *, discovered: SoftwareTruth | None = No
 
 
 def compose_founder_reply(*, draft: str, discovered: SoftwareTruth | None) -> str:
-    if discovered is not None and discovered.founder_answer:
+    if discovered is not None and discovered.sha:
         filtered = filter_outbound(draft, discovered=discovered)
         if filtered.asks_founder_to_relay or discovered.sha not in draft:
-            return discovered.founder_answer
+            return discovered.founder_answer or draft
+        return filtered.content
+    if discovered is not None and discovered.entity_key != "unspecified" and not discovered.sha:
+        filtered = filter_outbound(draft, discovered=discovered)
+        if filtered.asks_founder_to_relay:
+            return unknown_lookup_reply(discovered.entity_key)
     return apply_outbound_filter(draft, discovered=discovered)
 
 
