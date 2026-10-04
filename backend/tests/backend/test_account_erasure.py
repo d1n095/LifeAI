@@ -320,6 +320,40 @@ def test_erase_account_data_works_for_a_legacy_account_with_no_memory_source_uni
         session.close()
 
 
+def test_erase_account_data_succeeds_with_canonical_conversation():
+    """founder_canonical_conversations.conversation_id is ON DELETE RESTRICT and DELETE is
+    revoked from mainai_app. Account erasure must clear the governed binding first or
+    DELETE /api/account fails with IntegrityError/500 for any founder who used continuous
+    conversation. Deleting the canonical conversation itself remains governed."""
+    from app.mainai_continuous_conversation.service import get_or_create_canonical_conversation, persist_turn
+    from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationEvent
+    from app.models.conversation import Conversation
+
+    session = SessionLocal()
+    try:
+        owner = _make_user(session)
+        _set_rls_user(session, owner.id)
+        conversation = get_or_create_canonical_conversation(session, owner_id=owner.id)
+        persist_turn(session, owner_id=owner.id, text="hello lifelong thread")
+        session.commit()
+        owner_id = owner.id
+        conversation_id = conversation.id
+        assert session.get(FounderCanonicalConversation, owner_id) is not None
+        with pytest.raises(Exception):
+            session.delete(conversation)
+            session.flush()
+        session.rollback()
+        _set_rls_user(session, owner.id)
+        erase_account_data(session, owner)
+        assert session.get(User, owner_id) is None
+        assert session.get(Conversation, conversation_id) is None
+        assert session.get(FounderCanonicalConversation, owner_id) is None
+        assert session.query(FounderConversationEvent).filter_by(owner_id=owner_id).count() == 0
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_erase_account_data_succeeds_for_an_owner_who_has_run_a_mainai_goal():
     """Class-A regression: DELETE /api/account used to fail outright for any owner who had
     ever run a MainAI goal. mainai_task_events (and the other 0032/0033 append-only children)

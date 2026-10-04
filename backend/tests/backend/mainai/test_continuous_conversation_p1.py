@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.db import SessionLocal
 from app.mainai_continuous_conversation.capability import IMPLEMENTED, assert_not_claiming_unimplemented, capability_disclaimer
 from app.mainai_continuous_conversation.classify import classify_inbound
 from app.mainai_continuous_conversation.context import (
@@ -24,7 +23,7 @@ from app.mainai_continuous_conversation.entities import (
 from app.mainai_continuous_conversation.occupancy import occupancy_snapshot
 from app.mainai_continuous_conversation.orchestrate import handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
-from app.mainai_continuous_conversation.service import get_or_create_canonical_conversation, persist_turn, record_event
+from app.mainai_continuous_conversation.service import get_or_create_canonical_conversation, record_event
 from app.mainai_continuous_conversation.types import (
     InboundKind,
     InterruptKind,
@@ -32,7 +31,6 @@ from app.mainai_continuous_conversation.types import (
     OccupancySnapshot,
     OccupancyState,
     OutboundDisposition,
-    SoftwareTruth,
     WorkspaceMutability,
 )
 from app.mainai_continuous_conversation.workspace import (
@@ -44,19 +42,12 @@ from app.mainai_continuous_conversation.workspace import (
     sha_sharing_allowed,
     workspaces_are_isolated,
 )
-from app.models.continuous_conversation import (
-    FounderCanonicalConversation,
-    FounderConversationCompaction,
-    FounderConversationDecision,
-    FounderConversationEvent,
-    FounderConversationProvenance,
-)
-from app.models.conversation import Conversation, Message, MessageRole, MessageStatus
+from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationDecision
+from app.models.conversation import Message, MessageRole, MessageStatus
 from app.models.user import User
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
 from app.config import get_settings
-from tests.backend.test_account_erasure import erase_account_data
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
@@ -188,28 +179,6 @@ def test_canonical_conversation_delete_is_governed(superuser_db):
         superuser_db.delete(conversation)
         superuser_db.flush()
     superuser_db.rollback()
-
-
-def test_erase_account_data_succeeds_with_canonical_conversation():
-    from tests.backend.test_account_erasure import _make_user
-
-    session = SessionLocal()
-    try:
-        owner = _make_user(session)
-        conversation = get_or_create_canonical_conversation(session, owner_id=owner.id)
-        persist_turn(session, owner_id=owner.id, text="hello lifelong thread")
-        session.commit()
-        owner_id = owner.id
-        conversation_id = conversation.id
-        assert session.get(FounderCanonicalConversation, owner_id) is not None
-        erase_account_data(session, owner)
-        assert session.get(User, owner_id) is None
-        assert session.get(Conversation, conversation_id) is None
-        assert session.get(FounderCanonicalConversation, owner_id) is None
-        assert session.query(FounderConversationEvent).filter_by(owner_id=owner_id).count() == 0
-    finally:
-        session.rollback()
-        session.close()
 
 
 def test_occupancy_snapshot_is_unknown_without_runtime_identity(superuser_db):
