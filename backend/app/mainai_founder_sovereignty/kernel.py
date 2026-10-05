@@ -21,6 +21,7 @@ KERNEL_INVARIANTS: dict[str, str] = {
 
 
 def assert_founder_identity(user_id) -> None:
+    """Public sentinel comparison only — never treat this as authentication."""
     if user_id != FOUNDER_USER_ID:
         raise SovereigntyError("not_founder", "FAMILY MEMBER != FOUNDER; ADMIN != FOUNDER; AI != FOUNDER")
 
@@ -31,3 +32,7 @@ def refuse_kernel_mutation(policy_class: PolicyClass, policy_key: str) -> None:
             "kernel_immutable",
             "KERNEL_SECURITY_INVARIANT cannot be changed, unlocked, or rolled back by founder policy",
         )
+
+
+def is_kernel_invariant_key(policy_key: str) -> bool:
+    return policy_key in KERNEL_INVARIANTS

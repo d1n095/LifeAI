@@ -18,16 +18,18 @@ from app.mainai_founder_sovereignty.service import (
     define_userai_boundary,
     disable_founder_policy,
     inspect_active_policies,
+    issue_founder_step_up,
     list_pending_approvals,
     propose_policy,
     refuse_non_founder_policy_source,
     refuse_self_unlock,
     request_family_capability,
+    restore_founder_policy_to_version,
     revoke_grant,
     rollback_founder_policy,
     set_workflow_lock,
 )
-from app.mainai_founder_sovereignty.types import ActorKind, ApprovalMode, PolicyClass, PolicySource, RiskTier
+from app.mainai_founder_sovereignty.types import ActorKind, ApprovalMode, PolicyClass, PolicySource, RiskTier, StepUpPurpose
 
 __all__ = [
     "KERNEL_INVARIANTS",
@@ -47,12 +49,15 @@ __all__ = [
     "define_userai_boundary",
     "disable_founder_policy",
     "inspect_active_policies",
+    "issue_founder_step_up",
     "list_pending_approvals",
     "propose_policy",
     "refuse_non_founder_policy_source",
     "refuse_self_unlock",
     "request_family_capability",
+    "restore_founder_policy_to_version",
     "revoke_grant",
     "rollback_founder_policy",
     "set_workflow_lock",
+    "StepUpPurpose",
 ]
