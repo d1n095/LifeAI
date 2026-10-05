@@ -6,6 +6,20 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — Founder sovereignty P1 authority fix (2026-10-05)
+
+Child of `cursor/mainai-founder-sovereignty-family-delegation` @ exact
+`ffbdb6328b8ff594caf2eea71c77c32ef96e516b`. Built in a **separate Cursor-owned builder
+worktree**. Does **not** modify the examined parent SHA. Does **not** touch Continuous
+Conversation P1 `e21ad76bce0ed18c7f69f31939de5b57c84c046f` while Claude examines it.
+Does **not** rebase onto the CC P1 fix; composition waits until both lanes are frozen.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-founder-sovereignty-family-delegation-p1-fix` | open | **Open child lane, based on `ffbdb632`** | Session-bound Founder identity (caller-supplied `actor_id` is not authentication), singleton Founder binding that non-Founders cannot squat, DB-enforced workflow lock / policy-head / kernel-invariant / approval-snapshot / ALLOW_ONCE / revocation / restore_to_version / step-up / governed erasure. Migration `0091_fs_p1_authority`. Recall stays disabled. |
+
+**Must not:** modify examined SHA `ffbdb632`; touch `e21ad76`; rebase onto CC P1 while under examination; merge; deploy; activate Recall.
+
 ## Post-Founder-Alpha — Founder sovereignty + family delegation (2026-10-02)
 
 Child of `cursor/mainai-continuous-conversation-foundation` @ exact

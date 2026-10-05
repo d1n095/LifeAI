@@ -88,10 +88,14 @@ class FamilyApprovalRequest(Base):
     scope: Mapped[str] = mapped_column(String(64), default="family")
     requested_duration: Mapped[str] = mapped_column(String(64), default="once")
     requested_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    requested_limits: Mapped[dict] = mapped_column(JSON, default=dict)
     consequences: Mapped[str] = mapped_column(Text, default="")
     risk_tier: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), default="pending")
     request_token_hash: Mapped[str] = mapped_column(String(128))
+    snapshot_hash: Mapped[str] = mapped_column(String(64), default="")
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    device_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -103,6 +107,7 @@ class FamilyApprovalReceipt(Base):
     request_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("family_approval_requests.id", ondelete="CASCADE"))
     decision: Mapped[str] = mapped_column(String(32))
     receipt_token_hash: Mapped[str] = mapped_column(String(128))
+    snapshot_hash: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -120,6 +125,7 @@ class FamilyCapabilityGrant(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     remaining_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
     limits: Mapped[dict] = mapped_column(JSON, default=dict)
+    requested_data: Mapped[dict] = mapped_column(JSON, default=dict)
     issuer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     approval_receipt_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("family_approval_receipts.id"), nullable=True)
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -137,4 +143,44 @@ class UserAITenantBoundary(Base):
     memory_root: Mapped[str] = mapped_column(String(128))
     policy_root: Mapped[str] = mapped_column(String(128))
     notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class KernelSecurityInvariant(Base):
+    __tablename__ = "kernel_security_invariants"
+
+    invariant_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    statement: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class FounderStepUpReceipt(Base):
+    __tablename__ = "founder_step_up_receipts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    purpose: Mapped[str] = mapped_column(String(64))
+    session_jti: Mapped[str] = mapped_column(String(128), default="")
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class FamilyCapabilityCatalog(Base):
+    __tablename__ = "family_capability_catalog"
+
+    capability_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    resource: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(64))
+    risk_tier: Mapped[str] = mapped_column(String(16))
+
+
+class FamilyGrantConsumptionReceipt(Base):
+    __tablename__ = "family_grant_consumption_receipts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    grant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("family_capability_grants.id"))
+    principal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

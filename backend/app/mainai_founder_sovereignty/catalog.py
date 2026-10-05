@@ -44,6 +44,7 @@ def _seed() -> None:
         return
     for spec in (
         CapabilitySpec("lights.control", "home_lights", "control", RiskTier.LOW, "harmless home lighting"),
+        CapabilitySpec("calendar.create", "family", "create", RiskTier.MEDIUM, "family calendar create with scoped resource/limits"),
         CapabilitySpec("tv.control", "home_tv", "control", RiskTier.LOW, "harmless TV control"),
         CapabilitySpec("family_calendar.read", "family_calendar", "read", RiskTier.MEDIUM),
         CapabilitySpec("family_calendar.create", "family_calendar", "create", RiskTier.MEDIUM),

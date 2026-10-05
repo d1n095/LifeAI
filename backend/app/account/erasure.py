@@ -771,6 +771,11 @@ def erase_account_data(
         # about the DELETE-revoked/SECURITY DEFINER discipline, not an ordering requirement.
         db.execute(sa_text("SELECT erase_own_supervisor_goal_leases()"))
 
+        # --- Founder sovereignty / family delegation (migration 0090+0091): append-only
+        # history and singleton Founder binding would otherwise block users ON DELETE CASCADE.
+        # Governed erasure is the only deletion path; ordinary runtime remains append-only.
+        db.execute(sa_text("SELECT erase_own_founder_sovereignty_children()"))
+
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
         # request, actor identity scrubbed rather than the events themselves being deleted.

@@ -134,6 +134,8 @@ RLS_STATEMENTS = [
             "family_approval_receipts",
             "family_capability_grants",
             "userai_tenant_boundaries",
+            "founder_step_up_receipts",
+            "family_grant_consumption_receipts",
         )
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
@@ -360,6 +362,8 @@ POLICY_DEFINITIONS = [
             "family_approval_receipts",
             "family_capability_grants",
             "userai_tenant_boundaries",
+            "founder_step_up_receipts",
+            "family_grant_consumption_receipts",
         )
     ],
 ]
@@ -666,6 +670,10 @@ _MAINAI_EXECUTION_TABLES = (
     "family_approval_receipts",
     "family_capability_grants",
     "userai_tenant_boundaries",
+    "founder_step_up_receipts",
+    "family_grant_consumption_receipts",
+    "kernel_security_invariants",
+    "family_capability_catalog",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -772,6 +780,13 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "mainai_app_execute": False, "security_definer": False,
     },
     {"name": "erase_own_candidate_learning_signal_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {"name": "erase_own_founder_sovereignty_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "consume_family_capability_grant_once",
+        "identity_args": "p_grant_id uuid",
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -1105,6 +1120,12 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_approval_receipts FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_capability_grants FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON userai_tenant_boundaries FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_step_up_receipts FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_grant_consumption_receipts FROM mainai_app"))
+        conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON kernel_security_invariants FROM mainai_app"))
+        conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_capability_catalog FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_founder_sovereignty_children() TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION consume_family_capability_grant_once(uuid) TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1186,6 +1207,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("family_approval_receipts", frozenset({"SELECT", "INSERT"})),
             ("family_capability_grants", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("userai_tenant_boundaries", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("founder_step_up_receipts", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("family_grant_consumption_receipts", frozenset({"SELECT", "INSERT"})),
+            ("kernel_security_invariants", frozenset({"SELECT"})),
+            ("family_capability_catalog", frozenset({"SELECT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

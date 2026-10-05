@@ -86,6 +86,18 @@ class AuthorizationVerdict(str, enum.Enum):
     DENIED_KERNEL = "denied_kernel"
     DENIED_SELF_UNLOCK = "denied_self_unlock"
     DENIED_NON_POLICY_SOURCE = "denied_non_policy_source"
+    DENIED_RESOURCE = "denied_resource"
+    DENIED_SCOPE = "denied_scope"
+    DENIED_LIMITS = "denied_limits"
+    DENIED_DATA = "denied_data"
+    DENIED_STEP_UP = "denied_step_up"
+
+
+class StepUpPurpose(str, enum.Enum):
+    POLICY_ROLLBACK = "policy_rollback"
+    WORKFLOW_UNLOCK = "workflow_unlock"
+    PERMANENT_HIGH_RISK_DELEGATION = "permanent_high_risk_delegation"
+    FOUNDER_ONLY_CAPABILITY_CHANGE = "founder_only_capability_change"
 
 
 class SovereigntyError(Exception):
@@ -113,9 +125,13 @@ class ApprovalContext:
     action: str
     scope: str
     requested_data: dict
+    requested_limits: dict
     requested_duration: str
     consequences: str
     risk_tier: RiskTier
+    snapshot_hash: str
+    session_id: str | None = None
+    device_id: str | None = None
 
 
 @dataclass(frozen=True)
