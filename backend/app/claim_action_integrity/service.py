@@ -35,6 +35,7 @@ class ClaimActionIntegrityError(ValueError):
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _ACTOR_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._:@/-]{2,127}$")
 _MUTABLE_EVIDENCE_MAX_AGE = timedelta(minutes=5)
+_PERMISSION_AUTHORITY_ISSUERS = frozenset({"founder-capability-authority"})
 _TRUSTED_SOURCES = {
     EvidenceSourceType.github.value,
     EvidenceSourceType.database.value,
@@ -45,6 +46,7 @@ _TRUSTED_SOURCES = {
     EvidenceSourceType.task_execution_ledger.value,
     EvidenceSourceType.verification_registry.value,
     EvidenceSourceType.external_service.value,
+    EvidenceSourceType.permission_authority.value,
 }
 _SELF_SOURCES = {
     EvidenceSourceType.agent_self_report.value,
@@ -164,7 +166,11 @@ def record_evidence(
 
 def _evidence_mutability(action_key: str, payload: dict[str, Any]) -> str:
     """Classify centrally; callers cannot make mutable state immortal by omission."""
-    if action_key in {"branch_push", "activation", "database_observation", "generic"}:
+    if action_key in {"branch_push", "activation", "database_observation", "generic", "permission_grant"}:
+        return "mutable_snapshot"
+    if action_key == "deployment":
+        return "mutable_snapshot" if payload.get("evidence_semantics") == "current_state" else "immutable_fact"
+    if payload.get("evidence_semantics") == "current_state":
         return "mutable_snapshot"
     if action_key == "test_run" and payload.get("status") not in {"passed", "failed"}:
         return "mutable_snapshot"
@@ -275,11 +281,21 @@ def _validate_evidence(
             reasons.append("github_merge_proof_required")
         target = ClaimState.merged.value
     elif action_key == "deployment":
-        if source != EvidenceSourceType.deployment_provider.value or p.get("status") != "succeeded" or not p.get("deployment_id"):
+        semantics = p.get("evidence_semantics")
+        if source != EvidenceSourceType.deployment_provider.value or not p.get("deployment_id"):
             reasons.append("deployment_provider_success_required")
+        if semantics == "historical_event":
+            if p.get("status") != "succeeded" or not p.get("completed_at"):
+                reasons.append("historical_deployment_event_fields_required")
+            target = ClaimState.completed.value
+        elif semantics == "current_state":
+            if p.get("status") != "deployed" or not p.get("provider_observation_id") or not p.get("observed_at"):
+                reasons.append("current_deployment_snapshot_fields_required")
+            target = ClaimState.deployed.value
+        else:
+            reasons.append("deployment_evidence_semantics_required")
         if p.get("artifact_sha") != evidence.artifact_sha:
             reasons.append("deployment_artifact_mismatch")
-        target = ClaimState.deployed.value
     elif action_key == "activation":
         if source not in {EvidenceSourceType.deployment_provider.value, EvidenceSourceType.database.value, EvidenceSourceType.external_service.value}:
             reasons.append("activation_authority_source_required")
@@ -291,21 +307,123 @@ def _validate_evidence(
     elif action_key == "agent_completion":
         if source != EvidenceSourceType.task_execution_ledger.value or p.get("status") != "completed":
             reasons.append("completed_task_ledger_record_required")
-        if not p.get("job_id") or not p.get("result_artifact_id"):
-            reasons.append("job_and_result_artifact_required")
+        if (
+            str(p.get("owner_id")) != str(owner_id)
+            or p.get("execution_id") != execution_id
+            or p.get("subject_key") != subject_key
+            or p.get("action_key") != action_key
+            or not p.get("job_id")
+            or not p.get("result_artifact_id")
+            or not p.get("observed_at")
+        ):
+            reasons.append("bound_task_ledger_terminal_record_required")
     else:
         if source not in {EvidenceSourceType.database.value, EvidenceSourceType.external_service.value, EvidenceSourceType.task_execution_ledger.value}:
             reasons.append("authoritative_observation_required")
         if source == EvidenceSourceType.database.value and (
-            p.get("subject_key") != subject_key
+            str(p.get("owner_id")) != str(owner_id)
+            or p.get("execution_id") != execution_id
+            or p.get("subject_key") != subject_key
             or p.get("action_key") != action_key
             or p.get("observed_state") not in {"completed", "failed"}
+            or not p.get("observation_id")
+            or not p.get("observed_at")
         ):
             reasons.append("specific_database_state_proof_required")
+        if source == EvidenceSourceType.external_service.value and (
+            str(p.get("owner_id")) != str(owner_id)
+            or p.get("execution_id") != execution_id
+            or p.get("subject_key") != subject_key
+            or p.get("action_key") != action_key
+            or p.get("observed_state") not in {"completed", "failed"}
+            or not p.get("provider_id")
+            or not p.get("provider_observation_id")
+            or not p.get("observed_at")
+            or p.get("evidence_semantics") not in {"historical_event", "current_state"}
+            or (p.get("evidence_semantics") == "historical_event" and not p.get("completed_at"))
+        ):
+            reasons.append("specific_external_service_state_proof_required")
+        if source == EvidenceSourceType.task_execution_ledger.value and (
+            str(p.get("owner_id")) != str(owner_id)
+            or p.get("execution_id") != execution_id
+            or p.get("subject_key") != subject_key
+            or p.get("action_key") != action_key
+            or p.get("observed_state") not in {"completed", "failed"}
+            or not p.get("job_id")
+            or not p.get("result_artifact_id")
+            or not p.get("observed_at")
+        ):
+            reasons.append("specific_task_ledger_state_proof_required")
 
     if reasons:
         return ClaimState.unknown.value, VerificationState.invalid.value, tuple(reasons)
     return target, verification, ("evidence_bound",)
+
+
+def _parse_evidence_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return _as_aware(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _validate_permission_grant(
+    db: Session,
+    *,
+    grant: ClaimActionEvidence | None,
+    owner_id: UUID,
+    execution_id: str,
+    subject_key: str,
+    action_key: str,
+    permitted_action: dict[str, Any],
+    now: datetime,
+) -> None:
+    if grant is None or grant.source_type != EvidenceSourceType.permission_authority.value or not grant.authoritative:
+        raise ClaimActionIntegrityError("permission grant must come from the configured permission authority")
+    p = grant.payload
+    issued_at = _parse_evidence_time(p.get("issued_at"))
+    expires_at = _parse_evidence_time(p.get("expires_at"))
+    required = (
+        grant.owner_id == owner_id
+        and grant.execution_id == execution_id
+        and grant.subject_key == subject_key
+        and grant.action_key == "permission_grant"
+        and str(p.get("owner_id")) == str(owner_id)
+        and p.get("principal") == permitted_action.get("principal")
+        and p.get("execution_id") == execution_id
+        and p.get("resource") == subject_key
+        and p.get("action") == action_key
+        and p.get("issuer_authority") == permitted_action.get("authority_ref")
+        and p.get("granted") is True
+        and p.get("revoked") is False
+        and isinstance(p.get("grant_id"), str) and bool(p["grant_id"].strip())
+        and p.get("issuer_authority") in _PERMISSION_AUTHORITY_ISSUERS
+        and isinstance(p.get("limits"), dict)
+        and isinstance(p.get("scopes"), list) and action_key in p["scopes"]
+        and issued_at is not None and expires_at is not None
+        and issued_at <= now < expires_at
+        and grant.expires_at is not None and now < _as_aware(grant.expires_at)
+    )
+    if not required:
+        raise ClaimActionIntegrityError("permission grant evidence is invalid, expired, or out of scope")
+    revocations = db.execute(
+        select(ClaimActionEvidence).where(
+            ClaimActionEvidence.owner_id == owner_id,
+            ClaimActionEvidence.execution_id == execution_id,
+            ClaimActionEvidence.action_key == "permission_grant",
+            ClaimActionEvidence.source_type == EvidenceSourceType.permission_authority.value,
+            ClaimActionEvidence.observed_at >= grant.observed_at,
+        )
+    ).scalars().all()
+    if any(
+        row.authoritative
+        and row.payload.get("grant_id") == p["grant_id"]
+        and row.payload.get("revoked") is True
+        for row in revocations
+    ):
+        raise ClaimActionIntegrityError("permission grant has been revoked")
 
 
 def _canonical_actor_id(value: Any) -> str | None:
@@ -371,7 +489,7 @@ def assess_claim(
                 now=now or _utc_now(),
             )
             if requested_state == ClaimState.failed.value:
-                baseline = proven if proven == ClaimState.failed.value else ClaimState.requested.value
+                baseline = proven if proven == ClaimState.failed.value else ClaimState.unknown.value
             elif _CLAIM_RANK[requested_state] <= _CLAIM_RANK[proven]:
                 baseline = requested_state
             else:
@@ -455,16 +573,16 @@ def record_receipt(
         except (TypeError, ValueError):
             raise ClaimActionIntegrityError("permission requires genuine grant evidence") from None
         grant = db.get(ClaimActionEvidence, grant_evidence_id)
-        if (
-            grant is None
-            or not grant.authoritative
-            or grant.owner_id != owner_id
-            or grant.execution_id != execution_id
-            or grant.action_key != "permission_grant"
-            or grant.payload.get("granted") is not True
-            or action_key not in grant.payload.get("scopes", [])
-        ):
-            raise ClaimActionIntegrityError("permission grant evidence is invalid or out of scope")
+        _validate_permission_grant(
+            db,
+            grant=grant,
+            owner_id=owner_id,
+            execution_id=execution_id,
+            subject_key=subject_key,
+            action_key=action_key,
+            permitted_action=permitted_action,
+            now=_as_aware(now or _utc_now()),
+        )
 
     if declared_state == ClaimState.requested.value and action_state == ActionState.requested.value and evidence_id is None:
         assessment = ClaimAssessment(

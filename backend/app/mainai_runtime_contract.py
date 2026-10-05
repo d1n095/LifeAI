@@ -120,21 +120,29 @@ _EXECUTION_CLAIM_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(?:i\s+)?pushed\s+(?:the\s+)?branch(?:\s+to\s+(?:origin|github))?\b", re.I), "en"),
     (re.compile(r"\b(?:the\s+)?push\s+(?:has\s+)?succeeded\b", re.I), "en"),
     (re.compile(r"\b(grenen|branchen)\s+(är\s+)?pushad(\s+till\s+github)?\b", re.I), "sv"),
+    (re.compile(r"\bdet\s+är\s+pushat\b", re.I), "sv"),
+    (re.compile(r"\bjag\s+har\s+pushat\s+grenen\b", re.I), "sv"),
     (re.compile(r"\ball\s+tests\s+(have\s+)?passed\b", re.I), "en"),
     (re.compile(r"\b(?:all\s+)?\d+\s+tests\s+(?:have\s+)?passed\b", re.I), "en"),
     (re.compile(r"\b(?:the\s+)?tests?\s+(?:are|is|went)\s+green\b", re.I), "en"),
     (re.compile(r"\b(?:the\s+)?(?:tests?|test\s+suite|test\s+run|pytest)\s+(?:has\s+|have\s+)?passed\b", re.I), "en"),
     (re.compile(r"\bci\s+(?:has\s+)?(?:passed|succeeded|is\s+green)\b", re.I), "en"),
     (re.compile(r"\b(all|samtliga)\s+tester\s+(har\s+)?(passerat|gått\s+igenom)\b", re.I), "sv"),
+    (re.compile(r"\btester\s+är\s+gröna\b", re.I), "sv"),
+    (re.compile(r"\balla\s+tester\s+(?:(?:har\s+)?gått|gick)\s+igenom\b", re.I), "sv"),
     (re.compile(r"\b(the\s+)?deployment\s+(has\s+)?(succeeded|completed)\b", re.I), "en"),
     (re.compile(r"\b(deployen|driftsättningen)\s+(har\s+)?(lyckats|slutförts)\b", re.I), "sv"),
     (re.compile(r"\b(?:testerna|testsviten)\s+(?:är\s+gröna|har\s+passerat|är\s+godkända)\b", re.I), "sv"),
     (re.compile(r"\bci\s+(?:är\s+grön|har\s+passerat|gick\s+igenom)\b", re.I), "sv"),
     (re.compile(r"\b(the\s+)?(candidate|build|release)\s+(is|was|has\s+been)\s+certified\b", re.I), "en"),
+    (re.compile(r"\bit\s+is\s+certified\b", re.I), "en"),
+    (re.compile(r"^\s*certification\s+complete\s*[.!]?\s*$", re.I), "en"),
     (re.compile(r"\b(the\s+)?(pull\s+request|pr|branch)\s+(was|is|has\s+been)\s+merged\b", re.I), "en"),
     (re.compile(r"\bit('?s|\s+is)\s+merged(?:\s+into\s+\w+)?\b", re.I), "en"),
+    (re.compile(r"^\s*merged\s*[.!]?\s*$", re.I), "en"),
     (re.compile(r"\b(?:it|the\s+(?:release|build|app))\s+(?:was|is|has\s+been)\s+deployed(?:\s+to\s+production)?\b", re.I), "en"),
     (re.compile(r"\bdeployed\s+to\s+production\b", re.I), "en"),
+    (re.compile(r"\bit('?s|\s+is)\s+deployed\b", re.I), "en"),
     (re.compile(r"\b(?:the\s+)?deploy(?:ment)?\s+(?:is|was|has\s+been)\s+(?:done|complete|successful)\b", re.I), "en"),
     (re.compile(r"\b(?:the\s+)?(?:change|pr|branch)\s+(?:has\s+)?landed(?:\s+on\s+main)?\b", re.I), "en"),
     (re.compile(r"\b(the\s+)?(release|recall|feature)\s+(is|was|has\s+been)\s+activated\b", re.I), "en"),
@@ -143,6 +151,7 @@ _EXECUTION_CLAIM_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\brecall\s+is\s+live\b", re.I), "en"),
     (re.compile(r"\b(?:recall|production|the\s+release)\s+is\s+(?:live|active|enabled)\b", re.I), "en"),
     (re.compile(r"\bdet\s+är\s+mergat\b", re.I), "sv"),
+    (re.compile(r"\bdet\s+är\s+deployat\b", re.I), "sv"),
     (re.compile(r"\brecall\s+är\s+aktiverad\b", re.I), "sv"),
     (re.compile(r"\b(?:grenen|branchen)\s+är\s+(?:pushad|mergad)\b", re.I), "sv"),
     (re.compile(r"\b(?:codex|claude|cursor|agenten)\s+är\s+klar(?:\s+med\s+uppgiften)?\b", re.I), "sv"),
@@ -205,17 +214,41 @@ _TRUTHFUL_REPLACEMENT: dict[str, str] = {
 # legitimate answer without needing a real NLP sentence tokenizer for this narrow purpose.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _CLAUSE_SPLIT_RE = re.compile(r",?\s+(?=(?:but|however|and|men|dock|och)\b)", re.I)
-_NON_ASSERTIVE_RE = re.compile(
-    r"\b(?:not|never|no\s+evidence|unverified|not\s+verified|haven't|hasn't|hadn't|didn't|doesn't|"
-    r"cannot\s+verify|can't\s+verify|if|whether|maybe|perhaps|might|may|could|reportedly|reports?\s+that|"
-    r"inte|ej|aldrig|overifierad|inte\s+verifierat|kan\s+inte\s+verifiera|om|kanske|uppges)\b",
+_LEADING_NON_ASSERTIVE_RE = re.compile(
+    r"^\s*(?:if|whether|maybe|perhaps|reportedly|om|kanske|uppges)\b",
+    re.I,
+)
+_UNCERTAINTY_BEFORE_CLAIM_RE = re.compile(
+    r"^\s*(?:i\s+)?(?:have\s+not|haven't|cannot|can't|do\s+not|don't)\s+(?:independently\s+)?"
+    r"(?:verify|verified|confirm|confirmed)(?:\s+whether|\s+that)?\b|"
+    r"^\s*jag\s+(?:har\s+inte|kan\s+inte)\s+(?:verifiera|verifierat|bekräfta|bekräftat)\b",
+    re.I,
+)
+_DIRECT_NEGATION_RE = re.compile(
+    r"\b(?:was|were|is|are|has|have|did)\s+not\s+(?:pushed|passed|merged|deployed|certified|activated|completed)\b|"
+    r"\b(?:är|har|blev)\s+inte\s+(?:pushad|mergad|deployad|certifierad|aktiverad|klar)\b",
+    re.I,
+)
+_ATTRIBUTED_CLAIM_RE = re.compile(
+    r"^\s*(?:codex|claude|cursor|the\s+agent|agenten)\s+(?:says?|reports?|claims?|uppger|säger)\b",
+    re.I,
+)
+_ATTRIBUTED_WITH_UNCERTAINTY_RE = re.compile(
+    r"^\s*(?:codex|claude|cursor|the\s+agent|agenten)\s+(?:says?|reports?|claims?|uppger|säger)\b.*"
+    r"\b(?:but|men)\b.*(?:haven't|have\s+not|cannot|can't|inte)\b.*(?:verified|verify|confirm|verifierat|verifiera|bekräfta)",
     re.I,
 )
 
 
 def _is_non_assertive(sentence: str) -> bool:
     stripped = sentence.strip()
-    return stripped.endswith("?") or bool(_NON_ASSERTIVE_RE.search(stripped))
+    return (
+        stripped.endswith("?")
+        or bool(_LEADING_NON_ASSERTIVE_RE.search(stripped))
+        or bool(_UNCERTAINTY_BEFORE_CLAIM_RE.search(stripped))
+        or bool(_DIRECT_NEGATION_RE.search(stripped))
+        or bool(_ATTRIBUTED_CLAIM_RE.search(stripped))
+    )
 
 
 def _contains_external_state_assertion(sentence: str) -> bool:
@@ -275,7 +308,12 @@ def sanitize_unverified_execution_claims(message: str) -> str:
     output: list[str] = []
     last_was_replacement = False
     changed = False
-    clauses = [clause for sentence in sentences for clause in _CLAUSE_SPLIT_RE.split(sentence)]
+    clauses = []
+    for sentence in sentences:
+        if _ATTRIBUTED_WITH_UNCERTAINTY_RE.search(sentence):
+            clauses.append(sentence)
+        else:
+            clauses.extend(_CLAUSE_SPLIT_RE.split(sentence))
     for sentence in clauses:
         matched_lang: str | None = None
         if not _is_non_assertive(sentence):

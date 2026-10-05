@@ -63,6 +63,7 @@ class EvidenceSourceType(str, enum.Enum):
     task_execution_ledger = "task_execution_ledger"
     verification_registry = "verification_registry"
     external_service = "external_service"
+    permission_authority = "permission_authority"
     agent_self_report = "agent_self_report"
     mainai_generated_text = "mainai_generated_text"
     user_attestation = "user_attestation"

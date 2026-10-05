@@ -225,10 +225,10 @@ def test_deployment_does_not_prove_activation(superuser_db):
     owner = _owner(superuser_db)
     evidence = _evidence(
         superuser_db, owner, action="deployment", source="deployment_provider",
-        payload={"status": "succeeded", "deployment_id": "dep-1", "artifact_sha": SHA},
+        payload={"evidence_semantics": "historical_event", "status": "succeeded", "deployment_id": "dep-1", "artifact_sha": SHA, "completed_at": datetime.now(timezone.utc).isoformat()},
     )
     result = _assess(superuser_db, owner, "deployment", "activated", evidence)
-    assert result.effective_state == "deployed"
+    assert result.effective_state == "completed"
     assert result.claimable is False
 
 
@@ -245,7 +245,11 @@ def test_agent_completion_requires_task_ledger_and_result_artifact(superuser_db)
     owner = _owner(superuser_db)
     evidence = _evidence(
         superuser_db, owner, action="agent_completion", source="task_execution_ledger",
-        payload={"status": "completed", "job_id": "job-1", "result_artifact_id": "artifact-1"},
+        payload={
+            "status": "completed", "job_id": "job-1", "result_artifact_id": "artifact-1",
+            "owner_id": str(owner.id), "execution_id": "exec-1", "subject_key": "release:alpha",
+            "action_key": "agent_completion", "observed_at": datetime.now(timezone.utc).isoformat(),
+        },
     )
     assert _assess(superuser_db, owner, "agent_completion", "externally_observed", evidence).claimable is True
 
@@ -350,6 +354,70 @@ def test_empty_generic_database_payload_cannot_prove_completion(superuser_db):
     assert "specific_database_state_proof_required" in result.reasons
 
 
+@pytest.mark.parametrize("source,reason", [
+    ("external_service", "specific_external_service_state_proof_required"),
+    ("task_execution_ledger", "specific_task_ledger_state_proof_required"),
+])
+def test_empty_generic_provider_payload_cannot_prove_completion(superuser_db, source, reason):
+    owner = _owner(superuser_db)
+    evidence = _evidence(superuser_db, owner, action="generic", source=source, payload={}, sha=None)
+    result = _assess(superuser_db, owner, "generic", "completed", evidence, sha=None)
+    assert result.effective_state == "unknown"
+    assert reason in result.reasons
+
+
+def test_failed_path_cannot_invent_requested_without_request_receipt(superuser_db):
+    owner = _owner(superuser_db)
+    evidence = _evidence(
+        superuser_db, owner, action="generic", source="external_service",
+        payload={"status": "running", "evidence_semantics": "current_state"}, sha=None,
+    )
+    result = _assess(superuser_db, owner, "generic", "failed", evidence, sha=None)
+    assert result.effective_state == "unknown"
+    assert result.claimable is False
+
+
+def test_deployment_current_state_expires_but_historical_event_remains_historical(superuser_db):
+    owner = _owner(superuser_db)
+    old = datetime.now(timezone.utc) - timedelta(days=30)
+    current = _evidence(
+        superuser_db, owner, action="deployment", source="deployment_provider", observed_at=old,
+        payload={
+            "evidence_semantics": "current_state", "status": "deployed", "deployment_id": "dep-current",
+            "provider_observation_id": "obs-current", "observed_at": old.isoformat(), "artifact_sha": SHA,
+        },
+    )
+    stale = _assess(superuser_db, owner, "deployment", "deployed", current)
+    assert current.payload["fact_mutability"] == "mutable_snapshot"
+    assert stale.verification_state == "stale"
+    historical = _evidence(
+        superuser_db, owner, action="deployment", source="deployment_provider", observed_at=old,
+        payload={
+            "evidence_semantics": "historical_event", "status": "succeeded", "deployment_id": "dep-history",
+            "completed_at": old.isoformat(), "artifact_sha": SHA,
+        },
+    )
+    history = _assess(superuser_db, owner, "deployment", "completed", historical)
+    assert historical.payload["fact_mutability"] == "immutable_fact"
+    assert history.claimable is True
+    assert history.effective_state == "completed"
+
+
+def test_external_service_current_state_expires(superuser_db):
+    owner = _owner(superuser_db)
+    old = datetime.now(timezone.utc) - timedelta(days=30)
+    evidence = _evidence(
+        superuser_db, owner, action="generic", source="external_service", observed_at=old, sha=None,
+        payload={
+            "evidence_semantics": "current_state", "owner_id": str(owner.id), "execution_id": "exec-1",
+            "subject_key": "release:alpha", "action_key": "generic", "observed_state": "completed",
+            "provider_id": "provider-1", "provider_observation_id": "obs-1", "observed_at": old.isoformat(),
+        },
+    )
+    result = _assess(superuser_db, owner, "generic", "completed", evidence, sha=None)
+    assert result.verification_state == "stale"
+
+
 def test_receipt_chain_rejects_old_predecessor_and_preserves_declared_vs_effective(superuser_db):
     owner = _owner(superuser_db)
     first = record_receipt(
@@ -435,6 +503,65 @@ def test_caller_asserted_permission_without_grant_evidence_is_rejected(superuser
             executed_action={}, observed_result={}, authority_snapshot={}, created_by="mainai",
         )
 
+
+def _permission_grant(db, owner, *, source="permission_authority", expires_delta=timedelta(minutes=4), revoked=False, grant_id="grant-1", observed_at=None):
+    observed = observed_at or datetime.now(timezone.utc)
+    expires = observed + expires_delta
+    return _evidence(
+        db, owner, action="permission_grant", source=source, observed_at=observed, expires_at=expires,
+        payload={
+            "grant_id": grant_id, "granted": not revoked, "revoked": revoked,
+            "owner_id": str(owner.id), "principal": "mainai:exec-1", "execution_id": "exec-1",
+            "scopes": ["merge"], "resource": "release:alpha", "action": "merge", "limits": {"count": 1},
+            "issuer_authority": "founder-capability-authority", "issued_at": observed.isoformat(),
+            "expires_at": expires.isoformat(),
+        },
+    )
+
+
+def _record_dispatched_merge(db, owner, grant, *, now=None):
+    return record_receipt(
+        db, owner_id=owner.id, execution_id="exec-1", subject_key="release:alpha",
+        action_key="merge", declared_state="requested", action_state="dispatched",
+        declared_action={"action": "merge"},
+        permitted_action={
+            "granted": True, "authority_ref": "founder-capability-authority", "scopes": ["merge"],
+            "principal": "mainai:exec-1", "grant_evidence_id": str(grant.id),
+        },
+        executed_action={}, observed_result={}, authority_snapshot={}, created_by="mainai", now=now,
+    )
+
+
+@pytest.mark.parametrize("source", ["github", "filesystem"])
+def test_github_and_filesystem_cannot_act_as_permission_authority(superuser_db, source):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner, source=source)
+    with pytest.raises(ClaimActionIntegrityError, match="configured permission authority"):
+        _record_dispatched_merge(superuser_db, owner, grant)
+
+
+def test_expired_permission_grant_is_rejected(superuser_db):
+    owner = _owner(superuser_db)
+    old = datetime.now(timezone.utc) - timedelta(minutes=10)
+    grant = _permission_grant(superuser_db, owner, observed_at=old, expires_delta=timedelta(minutes=4))
+    with pytest.raises(ClaimActionIntegrityError, match="expired"):
+        _record_dispatched_merge(superuser_db, owner, grant)
+
+
+def test_revoked_permission_grant_is_rejected_immediately(superuser_db):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner)
+    _permission_grant(superuser_db, owner, revoked=True, grant_id="grant-1")
+    with pytest.raises(ClaimActionIntegrityError, match="revoked"):
+        _record_dispatched_merge(superuser_db, owner, grant)
+
+
+def test_correct_scoped_permission_authority_grant_is_accepted(superuser_db):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner)
+    receipt = _record_dispatched_merge(superuser_db, owner, grant)
+    assert receipt.action_state == "dispatched"
+
 def test_require_claimable_raises_instead_of_upgrading_language(superuser_db):
     owner = _owner(superuser_db)
     with pytest.raises(ClaimActionIntegrityError, match="cannot be upgraded"):
@@ -468,6 +595,15 @@ def test_runtime_role_has_read_only_no_fabrication_privilege():
         "Recall is live.",
         "Codex finished the task.",
         "Det är mergat.",
+        "Det är pushat.",
+        "Tester är gröna.",
+        "Det är deployat.",
+        "It is certified.",
+        "Certification complete.",
+        "Merged.",
+        "It's deployed.",
+        "Jag har pushat grenen.",
+        "Alla tester gick igenom.",
         "Recall är aktiverad.",
     ],
 )
@@ -486,6 +622,11 @@ def test_natural_unsupported_external_claims_are_removed(claim):
         "I cannot verify whether CI passed.",
         "Jag har inte verifierat att det är mergat.",
         "Är Recall aktiverad?",
+        "Codex says the task is done, but I haven't verified it.",
+        "I cannot confirm the deployment has succeeded.",
+        "I have not verified that tests passed.",
+        "Was it merged?",
+        "If it was deployed, then...",
     ],
 )
 def test_uncertainty_negation_and_questions_preserve_epistemic_meaning(honest):
@@ -498,6 +639,17 @@ def test_negated_clause_cannot_mask_a_separate_unsupported_assertion():
     assert "I have not verified that the branch was pushed" in sanitized
     assert "CI passed" not in sanitized
     assert "binding evidence" in sanitized
+
+
+@pytest.mark.parametrize("claim", [
+    "CI passed, if you want the log I can share it.",
+    "All tests passed — not a single failure.",
+    "Det är mergat, om du undrar.",
+])
+def test_hedge_or_negation_words_elsewhere_cannot_mask_assertion(claim):
+    sanitized = sanitize_unverified_execution_claims(claim)
+    assert sanitized != claim
+    assert "evidence" in sanitized or "evidens" in sanitized
 
 
 @pytest.mark.parametrize(
