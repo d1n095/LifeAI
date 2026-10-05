@@ -1126,6 +1126,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_capability_catalog FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_founder_sovereignty_children() TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION consume_family_capability_grant_once(uuid) TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION family_capability_risk(varchar) TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(

@@ -16,7 +16,7 @@ Does **not** rebase onto the CC P1 fix; composition waits until both lanes are f
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-founder-sovereignty-family-delegation-p1-fix` | open | **Open child lane, based on `ffbdb632`** | Session-bound Founder identity (caller-supplied `actor_id` is not authentication), singleton Founder binding that non-Founders cannot squat, DB-enforced workflow lock / policy-head / kernel-invariant / approval-snapshot / ALLOW_ONCE / revocation / restore_to_version / step-up / governed erasure. Migration `0091_fs_p1_authority`. Recall stays disabled. |
+| `cursor/mainai-founder-sovereignty-family-delegation-p1-fix` | [#257](https://github.com/d1n095/LifeAI/pull/257) | **Open child lane, based on `ffbdb632`** | Session-bound Founder identity (caller-supplied `actor_id` is not authentication), singleton Founder binding that non-Founders cannot squat, DB-enforced workflow lock / policy-head / kernel-invariant / approval-snapshot / ALLOW_ONCE / revocation / restore_to_version / step-up / governed erasure. Migration `0091_fs_p1_authority`. Recall stays disabled. |
 
 **Must not:** modify examined SHA `ffbdb632`; touch `e21ad76`; rebase onto CC P1 while under examination; merge; deploy; activate Recall.
 

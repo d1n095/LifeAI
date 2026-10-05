@@ -152,6 +152,14 @@ def test_calendar_create_does_not_imply_delete_or_policy_change():
     assert implies("lights.control", "purchases.create") is False
 
 
+def test_family_capability_catalog_is_seeded(superuser_db):
+    count = superuser_db.execute(text("SELECT count(*) FROM family_capability_catalog")).scalar()
+    assert count >= 20
+    assert superuser_db.execute(
+        text("SELECT public.family_capability_risk('family_calendar.read')")
+    ).scalar() == "medium"
+
+
 def test_bind_founder_rejects_non_founder(superuser_db):
     other = _family_user(superuser_db, "admin-shaped")
     _bind_session(superuser_db, other.id)
@@ -200,19 +208,15 @@ def test_non_founder_cannot_squat_founder_binding(superuser_db):
     _ensure_founder(superuser_db)
     other = _family_user(superuser_db, "squatter")
     _bind_session(superuser_db, other.id)
-    superuser_db.execute(
-        text(
-            """
-            INSERT INTO founder_instance_bindings (owner_id, founder_user_id, tenant_kind)
-            VALUES (:fid, :fid, 'founder_mainai')
-            """
-        ),
+    _attack(
+        superuser_db,
+        """
+        INSERT INTO founder_instance_bindings (owner_id, founder_user_id, tenant_kind)
+        VALUES (:fid, :fid, 'founder_mainai')
+        """,
         {"fid": str(FOUNDER_USER_ID)},
     )
-    with pytest.raises(Exception):
-        superuser_db.flush()
-    superuser_db.rollback()
-    _ensure_founder(superuser_db)
+    _bind_session(superuser_db, FOUNDER_USER_ID)
     bind_founder_instance(superuser_db)
     assert superuser_db.query(FounderInstanceBinding).count() == 1
 
@@ -426,19 +430,15 @@ def test_policy_head_cannot_repoint_cross_policy(superuser_db):
 def test_forged_founder_version_rejected(superuser_db):
     other = _family_user(superuser_db, "forger")
     _bind_session(superuser_db, other.id)
-    superuser_db.execute(
-        text(
-            """
-            INSERT INTO founder_policy_versions
-                (owner_id, policy_key, policy_class, version_number, payload, reason, actor_kind)
-            VALUES (:fid, 'forged', 'founder_policy', 1, '{}'::jsonb, 'forged', 'founder')
-            """
-        ),
+    _attack(
+        superuser_db,
+        """
+        INSERT INTO founder_policy_versions
+            (owner_id, policy_key, policy_class, version_number, payload, reason, actor_kind)
+        VALUES (:fid, 'forged', 'founder_policy', 1, '{}'::jsonb, 'forged', 'founder')
+        """,
         {"fid": str(FOUNDER_USER_ID)},
     )
-    with pytest.raises(Exception):
-        superuser_db.flush()
-    superuser_db.rollback()
 
 
 def test_kernel_policy_cannot_be_applied_or_rolled_back(superuser_db):
@@ -457,26 +457,19 @@ def test_kernel_policy_cannot_be_applied_or_rolled_back(superuser_db):
 
 def test_kernel_invariant_insertion_denied(superuser_db):
     _ensure_founder(superuser_db)
-    superuser_db.execute(
-        text("INSERT INTO kernel_security_invariants (invariant_key, statement) VALUES ('runtime_takeover', 'no')")
+    _attack(
+        superuser_db,
+        "INSERT INTO kernel_security_invariants (invariant_key, statement) VALUES ('runtime_takeover', 'no')",
     )
-    with pytest.raises(Exception):
-        superuser_db.flush()
-    superuser_db.rollback()
-    _ensure_founder(superuser_db)
-    superuser_db.execute(
-        text(
-            """
-            INSERT INTO founder_policy_versions
-                (owner_id, policy_key, policy_class, version_number, payload, reason, actor_kind)
-            VALUES (:fid, 'owner_isolation', 'kernel_security_invariant', 1, '{}'::jsonb, 'no', 'founder')
-            """
-        ),
+    _attack(
+        superuser_db,
+        """
+        INSERT INTO founder_policy_versions
+            (owner_id, policy_key, policy_class, version_number, payload, reason, actor_kind)
+        VALUES (:fid, 'owner_isolation', 'kernel_security_invariant', 1, '{}'::jsonb, 'no', 'founder')
+        """,
         {"fid": str(FOUNDER_USER_ID)},
     )
-    with pytest.raises(Exception):
-        superuser_db.flush()
-    superuser_db.rollback()
 
 
 def test_partner_calendar_grant_excludes_private_and_policy(superuser_db):
@@ -749,19 +742,15 @@ def test_family_capability_cannot_become_founder_capability(superuser_db):
     )
     with pytest.raises(SovereigntyError):
         request_family_capability(superuser_db, principal_id=child.id, capability_key="mainai.policy.change")
-    superuser_db.execute(
-        text(
-            """
-            INSERT INTO family_capability_grants
-                (owner_id, principal_id, capability_key, resource, action, scope, duration_mode, issuer_id)
-            VALUES (:fid, :pid, 'mainai.policy.change', 'mainai_policy', 'change', 'family', 'always_allow', :fid)
-            """
-        ),
+    _attack(
+        superuser_db,
+        """
+        INSERT INTO family_capability_grants
+            (owner_id, principal_id, capability_key, resource, action, scope, duration_mode, issuer_id)
+        VALUES (:fid, :pid, 'mainai.policy.change', 'mainai_policy', 'change', 'family', 'always_allow', :fid)
+        """,
         {"fid": str(FOUNDER_USER_ID), "pid": str(child.id)},
     )
-    with pytest.raises(Exception):
-        superuser_db.flush()
-    superuser_db.rollback()
 
 
 def test_remote_approval_list_is_founder_only(superuser_db):

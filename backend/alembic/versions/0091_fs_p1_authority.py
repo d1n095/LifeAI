@@ -167,6 +167,13 @@ def upgrade() -> None:
 
     op.execute(
         f"""
+        CREATE OR REPLACE FUNCTION family_capability_risk(p_key varchar) RETURNS text
+        LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog STABLE AS $$
+            SELECT c.risk_tier FROM public.family_capability_catalog c WHERE c.capability_key = p_key
+        $$;
+        REVOKE ALL ON FUNCTION family_capability_risk(varchar) FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION family_capability_risk(varchar) TO mainai_app;
+
         CREATE OR REPLACE FUNCTION founder_sovereignty_erasure_on() RETURNS boolean
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
@@ -330,9 +337,9 @@ def upgrade() -> None:
                 IF NEW.snapshot_hash IS NULL OR length(NEW.snapshot_hash) < 32 THEN
                     RAISE EXCEPTION 'approval request requires an immutable snapshot hash';
                 END IF;
-                SELECT risk_tier INTO v_tier FROM public.family_capability_catalog WHERE capability_key = NEW.capability_key;
+                v_tier := public.family_capability_risk(NEW.capability_key);
                 IF v_tier IS NULL THEN
-                    RAISE EXCEPTION 'unknown family capability';
+                    RAISE EXCEPTION 'unknown family capability: %', NEW.capability_key;
                 END IF;
                 IF v_tier = 'founder_only' THEN
                     RAISE EXCEPTION 'FAMILY MEMBER != CAPABILITY; FOUNDER_ONLY cannot be requested';
@@ -376,7 +383,7 @@ def upgrade() -> None:
             END IF;
             IF TG_OP = 'INSERT' THEN
                 PERFORM public.founder_authenticated_session_uid();
-                SELECT risk_tier INTO v_tier FROM public.family_capability_catalog WHERE capability_key = NEW.capability_key;
+                v_tier := public.family_capability_risk(NEW.capability_key);
                 IF v_tier IS NULL OR v_tier = 'founder_only' THEN
                     RAISE EXCEPTION 'family capability cannot become Founder capability';
                 END IF;
@@ -611,8 +618,11 @@ def upgrade() -> None:
 
         REVOKE ALL ON FUNCTION consume_family_capability_grant_once(uuid) FROM PUBLIC;
         REVOKE ALL ON FUNCTION erase_own_founder_sovereignty_children() FROM PUBLIC;
+        GRANT EXECUTE ON FUNCTION family_capability_risk(varchar) TO mainai_app;
         GRANT EXECUTE ON FUNCTION consume_family_capability_grant_once(uuid) TO mainai_app;
         GRANT EXECUTE ON FUNCTION erase_own_founder_sovereignty_children() TO mainai_app;
+        ALTER TABLE kernel_security_invariants DISABLE ROW LEVEL SECURITY;
+        ALTER TABLE family_capability_catalog DISABLE ROW LEVEL SECURITY;
         """
     )
 

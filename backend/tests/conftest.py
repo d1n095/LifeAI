@@ -193,7 +193,14 @@ def _clean_tables(_test_database):
     engine = create_engine(settings.database_url)
     with engine.begin() as conn:
         tables = conn.execute(
-            text("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename != 'alembic_version'")
+            text(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+                "AND tablename NOT IN ("
+                "'alembic_version',"
+                "'family_capability_catalog',"
+                "'kernel_security_invariants'"
+                ")"
+            )
         ).scalars().all()
         if tables:
             conn.execute(text(f"TRUNCATE TABLE {', '.join(tables)} RESTART IDENTITY CASCADE"))
