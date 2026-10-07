@@ -14,12 +14,10 @@ from app.mainai_continuous_conversation.context import (
     assemble_live_context,
     retrieve_original_turn,
 )
-from app.mainai_continuous_conversation.entities import (
-    CONTINUOUS_CONVERSATION_PARENT_SHA,
-    FROZEN_FOUNDER_ALPHA_SHA,
-    bind_subject,
-    read_remote_branch_sha,
-)
+from sqlalchemy import text
+
+from app.mainai_continuous_conversation.entities import bind_subject_from_db
+from app.mainai_continuous_conversation.provider import ObservedRepositoryState
 from app.mainai_continuous_conversation.occupancy import occupancy_snapshot
 from app.mainai_continuous_conversation.orchestrate import handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
@@ -34,13 +32,13 @@ from app.mainai_continuous_conversation.types import (
     WorkspaceMutability,
 )
 from app.mainai_continuous_conversation.workspace import (
-    CLAUDE_EXAMINER_WORKTREE,
-    CURSOR_BUILDER_WORKTREE,
     WorkspaceClaim,
     WorkspaceOwnershipError,
     claim_workspace,
+    mutable_builder_lease,
     sha_sharing_allowed,
     workspaces_are_isolated,
+    workspace_for_agent,
 )
 from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationDecision
 from app.models.conversation import Message, MessageRole, MessageStatus
@@ -56,6 +54,14 @@ OLD_MARKER_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 P1_BRANCH = "cursor/mainai-continuous-conversation-p1-fix"
 
 
+def _cert_sha(db, entity_key: str) -> str:
+    sha = db.execute(
+        text("SELECT sha FROM governed_artifact_certifications WHERE entity_key = :key"),
+        {"key": entity_key},
+    ).scalar_one()
+    return sha
+
+
 def _owner(db):
     user = User(email=f"cc-p1-{uuid.uuid4()}@example.com", password_hash="x", email_verified=True)
     db.add(user)
@@ -63,18 +69,29 @@ def _owner(db):
     return user
 
 
-def test_subject_binding_does_not_conflate_adjacent_entities():
-    founder_alpha = bind_subject("What is the frozen Founder Alpha SHA?")
-    parent = bind_subject("What SHA is the Continuous Conversation parent?")
-    current = bind_subject("What is this P1 fix branch currently at?")
-    sovereignty = bind_subject("What is the Founder Sovereignty SHA?")
-    assert founder_alpha is not None and founder_alpha.sha == FROZEN_FOUNDER_ALPHA_SHA
-    assert parent is not None and parent.sha == CONTINUOUS_CONVERSATION_PARENT_SHA
-    assert sovereignty is not None and sovereignty.sha == "ffbdb6328b8ff594caf2eea71c77c32ef96e516b"
+def test_subject_binding_does_not_conflate_adjacent_entities(superuser_db):
+    founder_alpha_sha = _cert_sha(superuser_db, "founder_alpha_frozen")
+    parent_sha = _cert_sha(superuser_db, "continuous_conversation_parent")
+    sovereignty_sha = _cert_sha(superuser_db, "founder_sovereignty")
+    observed = ObservedRepositoryState(
+        repository="d1n095/LifeAI",
+        branch=P1_BRANCH,
+        sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        source="github_ref",
+        observed_at=datetime.utcnow(),
+    )
+    founder_alpha = bind_subject_from_db(superuser_db, "What is the frozen Founder Alpha SHA?")
+    parent = bind_subject_from_db(superuser_db, "What SHA is the Continuous Conversation parent?")
+    current = bind_subject_from_db(superuser_db, "What is this P1 fix branch currently at?", observed=observed)
+    sovereignty = bind_subject_from_db(superuser_db, "What is the Founder Sovereignty SHA?")
+    assert founder_alpha is not None and founder_alpha.sha == founder_alpha_sha
+    assert parent is not None and parent.sha == parent_sha
+    assert sovereignty is not None and sovereignty.sha == sovereignty_sha
     assert current is not None
     assert current.branch == P1_BRANCH
-    assert current.sha != FROZEN_FOUNDER_ALPHA_SHA
-    assert current.sha != CONTINUOUS_CONVERSATION_PARENT_SHA
+    assert current.sha == observed.sha
+    assert current.sha != founder_alpha_sha
+    assert current.sha != parent_sha
     assert {founder_alpha.entity_key, parent.entity_key, current.entity_key, sovereignty.entity_key} == {
         "founder_alpha_frozen",
         "continuous_conversation_parent",
@@ -83,13 +100,18 @@ def test_subject_binding_does_not_conflate_adjacent_entities():
     }
 
 
-def test_current_p1_tip_uses_remote_ref_not_checkout():
-    bound = bind_subject("What is this P1 fix branch currently at?")
-    remote = read_remote_branch_sha(P1_BRANCH)
+def test_current_p1_tip_uses_remote_ref_not_checkout(superuser_db):
+    observed = ObservedRepositoryState(
+        repository="d1n095/LifeAI",
+        branch=P1_BRANCH,
+        sha="cccccccccccccccccccccccccccccccccccccccc",
+        source="github_ref",
+        observed_at=datetime.utcnow(),
+    )
+    bound = bind_subject_from_db(superuser_db, "What is this P1 fix branch currently at?", observed=observed)
     assert bound is not None
-    assert remote is not None
-    assert bound.sha == remote
-    assert bound.authoritative_source == "remote_branch_tip"
+    assert bound.sha == observed.sha
+    assert bound.authoritative_source == "github_ref"
 
 
 def test_swedish_and_english_relay_requests_are_looked_up_or_unknown():
@@ -218,16 +240,18 @@ def test_authoritative_occupancy_binds_assignment_identity():
 
 
 def test_workspace_ownership_allows_sha_share_forbids_workspace_share(superuser_db):
-    assert workspaces_are_isolated(CURSOR_BUILDER_WORKTREE, CLAUDE_EXAMINER_WORKTREE)
+    builder_path = f"/tmp/cc-p1-builder-{uuid.uuid4()}"
+    examiner_path = f"/tmp/cc-p1-examiner-{uuid.uuid4()}"
+    assert workspaces_are_isolated(builder_path, examiner_path)
     owner = _owner(superuser_db)
-    sha = FROZEN_FOUNDER_ALPHA_SHA
+    sha = _cert_sha(superuser_db, "founder_alpha_frozen")
     builder = claim_workspace(
         superuser_db,
         WorkspaceClaim(
             owner_id=owner.id,
             agent_key="cursor",
             branch="cursor/mainai-continuous-conversation-p1-fix",
-            worktree_path=f"{CURSOR_BUILDER_WORKTREE}-{owner.id}",
+            worktree_path=builder_path,
             mutability=WorkspaceMutability.MUTABLE_BUILDER,
             task_id=uuid.uuid4(),
             execution_id=uuid.uuid4(),
@@ -240,11 +264,13 @@ def test_workspace_ownership_allows_sha_share_forbids_workspace_share(superuser_
             owner_id=owner.id,
             agent_key="claude",
             branch="cursor/mainai-continuous-conversation-foundation",
-            worktree_path=f"{CLAUDE_EXAMINER_WORKTREE}-{owner.id}",
+            worktree_path=examiner_path,
             mutability=WorkspaceMutability.READ_ONLY_EXAMINER,
             shared_sha=sha,
         ),
     )
+    assert workspace_for_agent(superuser_db, owner_id=owner.id, agent_key="cursor").worktree_path == builder_path
+    assert mutable_builder_lease(superuser_db, owner_id=owner.id).worktree_path == builder_path
     assert sha_sharing_allowed(builder.shared_sha, examiner.shared_sha)
     with pytest.raises(WorkspaceOwnershipError):
         claim_workspace(
@@ -308,6 +334,20 @@ def test_long_thread_keeps_latest_active_and_oldest_retrievable(superuser_db):
 
 
 def test_hello_world_three_sha_questions_are_not_conflated(client, superuser_db, monkeypatch):
+    from app.mainai_continuous_conversation.provider import GitHubAuthoritativeStateProvider
+
+    p1_sha = "dddddddddddddddddddddddddddddddddddddddd"
+
+    async def _observe(self, repository: str, branch: str):
+        return ObservedRepositoryState(
+            repository=repository,
+            branch=branch,
+            sha=p1_sha,
+            source="github_ref",
+            observed_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr(GitHubAuthoritativeStateProvider, "observe_branch_tip", _observe)
     async def _embed(self, texts, model, **kwargs):
         return [[0.1] * DIM for _ in texts]
 
@@ -327,9 +367,11 @@ def test_hello_world_three_sha_questions_are_not_conflated(client, superuser_db,
         json={"message": "What is the frozen Founder Alpha SHA?", "continuous": True},
         headers={"X-CSRF-Token": csrf},
     )
+    founder_alpha_sha = _cert_sha(superuser_db, "founder_alpha_frozen")
+    parent_sha = _cert_sha(superuser_db, "continuous_conversation_parent")
     assert first.status_code == 200, first.text
-    assert FROZEN_FOUNDER_ALPHA_SHA in first.json()["reply"]
-    assert CONTINUOUS_CONVERSATION_PARENT_SHA not in first.json()["reply"]
+    assert founder_alpha_sha in first.json()["reply"]
+    assert parent_sha not in first.json()["reply"]
     conversation_id = first.json()["conversation_id"]
     second = client.post(
         "/api/chat",
@@ -338,8 +380,8 @@ def test_hello_world_three_sha_questions_are_not_conflated(client, superuser_db,
     )
     assert second.status_code == 200, second.text
     assert second.json()["conversation_id"] == conversation_id
-    assert CONTINUOUS_CONVERSATION_PARENT_SHA in second.json()["reply"]
-    assert FROZEN_FOUNDER_ALPHA_SHA not in second.json()["reply"]
+    assert parent_sha in second.json()["reply"]
+    assert founder_alpha_sha not in second.json()["reply"]
     third = client.post(
         "/api/chat",
         json={"message": "What is this P1 fix branch currently at?", "continuous": True},
@@ -347,11 +389,9 @@ def test_hello_world_three_sha_questions_are_not_conflated(client, superuser_db,
     )
     assert third.status_code == 200, third.text
     assert third.json()["conversation_id"] == conversation_id
-    remote = read_remote_branch_sha(P1_BRANCH)
-    assert remote
-    assert remote in third.json()["reply"]
-    assert FROZEN_FOUNDER_ALPHA_SHA not in third.json()["reply"]
-    assert CONTINUOUS_CONVERSATION_PARENT_SHA not in third.json()["reply"]
+    assert p1_sha in third.json()["reply"]
+    assert founder_alpha_sha not in third.json()["reply"]
+    assert parent_sha not in third.json()["reply"]
     swedish = client.post(
         "/api/chat",
         json={"message": "Radera grenen codex/x", "continuous": True},

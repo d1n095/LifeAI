@@ -1,39 +1,36 @@
 """Resolve software truth by binding the requested subject, then reading that source.
 
-Never answers with whichever branch happens to be current. Never uses checkout SHA
-unless that is the requested entity. If the subject cannot be bound or the source is
-unavailable: UNKNOWN. Never fabricate. Never ask the founder to relay.
+Never answers with whichever branch happens to be current. Never uses checkout SHA.
+Never runs blocking git. If the subject cannot be bound or the source is unavailable:
+UNKNOWN. Never fabricate. Never ask the founder to relay.
 """
 
 from __future__ import annotations
 
 import logging
 
-from app.integrations.github_client import GitHubClient, GitHubClientError
+from sqlalchemy.orm import Session
+
+from app.integrations.github_client import GitHubClient
 from app.mainai_continuous_conversation.entities import (
-    FROZEN_FOUNDER_ALPHA_BRANCH,
-    bind_subject,
+    bind_subject_from_db,
     classify_requested_entity,
-    read_remote_branch_sha,
+    record_observation,
+)
+from app.mainai_continuous_conversation.provider import (
+    AuthoritativeStateProvider,
+    GitHubAuthoritativeStateProvider,
+    ObservedRepositoryState,
 )
 from app.mainai_continuous_conversation.types import ArtifactRole, SoftwareTruth
 
 logger = logging.getLogger(__name__)
 
-FROZEN_FOUNDER_ALPHA_BRANCH = FROZEN_FOUNDER_ALPHA_BRANCH
-
-
-def branch_from_founder_text(text: str) -> str:
-    subject = bind_subject(text)
-    if subject is not None:
-        return subject.branch
-    return FROZEN_FOUNDER_ALPHA_BRANCH
-
 
 async def _ci_summary(github: GitHubClient, sha: str) -> str | None:
     try:
         runs = await github.list_check_runs(sha)
-    except (GitHubClientError, Exception) as exc:
+    except Exception as exc:
         logger.info("CI discovery failed for %s: %s", sha, exc)
         return None
     if not runs:
@@ -45,52 +42,75 @@ async def _ci_summary(github: GitHubClient, sha: str) -> str | None:
     return ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
 
 
-async def discover_software_truth(text: str, *, client: GitHubClient | None = None) -> SoftwareTruth:
-    subject = bind_subject(text)
+def _unknown(*, entity_key: str = "unspecified", branch: str = "unspecified", detail: str) -> SoftwareTruth:
+    return SoftwareTruth(
+        branch=branch,
+        entity_key=entity_key,
+        source="unavailable",
+        detail=detail,
+    )
+
+
+async def discover_software_truth(
+    text: str,
+    *,
+    db: Session | None = None,
+    client: GitHubClient | None = None,
+    provider: AuthoritativeStateProvider | None = None,
+) -> SoftwareTruth:
+    if db is None:
+        return _unknown(detail="No governed registry session. UNKNOWN — will not invent state.")
+
+    github = client or GitHubClient()
+    adapter = provider or GitHubAuthoritativeStateProvider(github)
+    key = classify_requested_entity(text)
+    observed: ObservedRepositoryState | None = None
+
+    from app.mainai_continuous_conversation.entities import load_entity_record
+
+    record = load_entity_record(db, key) if key else None
+    needs_live_tip = record is not None and record.artifact_role == ArtifactRole.CURRENT_BRANCH_TIP.value
+    named_needs_tip = key is None and any(prefix in text for prefix in ("cursor/", "codex/", "claude/"))
+    if needs_live_tip or named_needs_tip:
+        repository = record.repository if record is not None else "d1n095/LifeAI"
+        branch = record.branch if record is not None else ""
+        if not branch:
+            from app.mainai_continuous_conversation.entities import NAMED_BRANCH
+
+            match = NAMED_BRANCH.search(text)
+            branch = match.group(1) if match else ""
+        if branch:
+            observed = await adapter.observe_branch_tip(repository, branch)
+            if observed.sha:
+                record_observation(db, observed)
+
+    subject = bind_subject_from_db(db, text, observed=observed)
     if subject is None:
-        return SoftwareTruth(
-            branch="unspecified",
-            entity_key="unspecified",
-            source="unavailable",
-            detail="No requested entity could be bound. UNKNOWN — will not default to the current branch.",
-        )
+        return _unknown(detail="No requested entity could be bound. UNKNOWN — will not default to the current branch.")
+
     if subject.artifact_role is not ArtifactRole.CURRENT_BRANCH_TIP and subject.sha:
         ci_summary = None
-        github = client or GitHubClient()
         if github.is_configured():
             ci_summary = await _ci_summary(github, subject.sha)
         return subject.as_software_truth(ci_summary=ci_summary)
 
-    github = client or GitHubClient()
-    sha = subject.sha
-    source = subject.authoritative_source
-    if sha is None and github.is_configured():
-        try:
-            sha = await github.get_ref(subject.branch)
-            source = "github_ref"
-        except (GitHubClientError, Exception) as exc:
-            logger.info("software-truth discovery failed for bound branch %s: %s", subject.branch, exc)
-            sha = read_remote_branch_sha(subject.branch)
-            source = "remote_branch_tip" if sha else "unavailable"
-    elif sha is None:
-        sha = read_remote_branch_sha(subject.branch)
-        source = "remote_branch_tip" if sha else "unavailable"
+    if subject.sha:
+        ci_summary = None
+        if github.is_configured():
+            ci_summary = await _ci_summary(github, subject.sha)
+        return subject.as_software_truth(ci_summary=ci_summary)
 
-    ci_summary = None
-    if sha and github.is_configured():
-        ci_summary = await _ci_summary(github, sha)
-    return SoftwareTruth(
-        branch=subject.branch,
-        sha=sha,
-        ci_summary=ci_summary,
-        source=source if sha else "unavailable",
-        detail=subject.detail if sha else "Authoritative tip unavailable. UNKNOWN — checkout is not used.",
-        entity_key=subject.entity_key,
-        repository=subject.repository,
-        artifact_role=subject.artifact_role.value,
-        state=subject.state,
-    )
+    return subject.as_software_truth()
 
 
 def requested_entity_key(text: str) -> str | None:
     return classify_requested_entity(text)
+
+
+def branch_from_founder_text(text: str, *, db: Session | None = None) -> str:
+    if db is None:
+        return "unspecified"
+    subject = bind_subject_from_db(db, text)
+    if subject is None:
+        return "unspecified"
+    return subject.branch
