@@ -1,8 +1,8 @@
 """Asynchronous authoritative repository-state adapter.
 
-Production must not require a local git checkout. Blocking `git ls-remote` is forbidden
-on the request path. Frozen SHAs come from governed certification records; current tips
-come from GitHub or a pre-fetched observation row.
+Production must not require a local git checkout. Blocking local git remote listing is
+forbidden on the request path. Frozen SHAs come from governed certification records;
+current tips come from GitHub or a pre-fetched observation row.
 """
 
 from __future__ import annotations

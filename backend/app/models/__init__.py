@@ -245,14 +245,6 @@ from app.models.workforce import (
     WorkforcePerformanceRollup,
     WorkforceTeam,
 )
-from app.models.continuous_conversation import (
-    FounderCanonicalConversation,
-    FounderConversationCheckpoint,
-    FounderConversationEvent,
-    GovernedArtifactCertification,
-    GovernedEntityRecord,
-    GovernedRepositoryObservation,
-)
 from app.models.workforce_ops import (
     WorkforceAssignmentCheckpoint,
     WorkforceCostBudget,

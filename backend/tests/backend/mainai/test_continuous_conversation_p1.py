@@ -115,30 +115,30 @@ def test_current_p1_tip_uses_remote_ref_not_checkout(superuser_db):
 
 
 def test_swedish_and_english_relay_requests_are_looked_up_or_unknown():
-    for text in (
+    for phrase in (
         "Kan du klistra in SHA:n?",
         "Är CI grönt?",
         "Vad sa Cursor?",
         "Could you share the commit id?",
         "What did Claude report?",
     ):
-        inbound = classify_inbound(text)
+        inbound = classify_inbound(phrase)
         assert inbound.kind is InboundKind.RELAY_REQUEST
-        result = handle_founder_message(text)
+        result = handle_founder_message(phrase)
         assert result.interrupt_founder is False
         assert any(action.kind.value in {"discover_from_github", "lookup_unknown", "coordinate_internally"} for action in result.internal_actions)
 
 
 def test_legitimate_replies_survive_words_like_branch_github_test_ci_commit():
-    for text in (
+    for phrase in (
         "I will read GitHub and keep coordinating Cursor on a separate lane.",
         "The test plan covers CI later this week.",
         "This commit message mentions the branch name only as documentation.",
         "CI is a word in this ordinary status sentence.",
     ):
-        decision = filter_outbound(text)
+        decision = filter_outbound(phrase)
         assert decision.disposition is OutboundDisposition.SEND
-        assert decision.content == text
+        assert decision.content == phrase
     assert_not_claiming_unimplemented(capability_disclaimer())
     with pytest.raises(AssertionError):
         assert_not_claiming_unimplemented("MainAI handles machine coordination internally")
@@ -151,8 +151,8 @@ def test_swedish_founder_interrupts_gate_behavior():
         "Ändra säkerhetspolicyn": InterruptKind.SECURITY_POLICY,
         "Godkänn köpet": InterruptKind.MONEY_BUDGET,
     }
-    for text, kind in cases.items():
-        result = handle_founder_message(text, busy_agents=("cursor",), idle_agents=("codex",))
+    for phrase, kind in cases.items():
+        result = handle_founder_message(phrase, busy_agents=("cursor",), idle_agents=("codex",))
         assert result.inbound.interrupt is kind
         assert result.interrupt_founder is True
         assert result.gated is True

@@ -169,6 +169,12 @@ def test_forged_erasure_guc_denied(superuser_db):
     superuser_db.execute(text("SET LOCAL app.account_erasure_operation_id = :oid"), {"oid": str(uuid.uuid4())})
     with pytest.raises(Exception, match="governed account-erasure"):
         superuser_db.execute(text("SELECT erase_own_continuous_conversation_children()"))
+    superuser_db.rollback()
+    owner = _owner(superuser_db)
+    conversation = get_or_create_canonical_conversation(superuser_db, owner_id=owner.id)
+    superuser_db.flush()
+    superuser_db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner.id)})
+    superuser_db.execute(text("SET LOCAL app.continuous_conversation_erasure_in_progress = 'true'"))
     with pytest.raises(Exception, match="governed"):
         superuser_db.delete(conversation)
         superuser_db.flush()
