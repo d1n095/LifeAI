@@ -90,7 +90,14 @@ def test_compose_founder_reply_uses_discovered_sha_instead_of_asking_founder():
     )
     assert "691490edd82fa4bff6188f4f038f7579ee4f3df5" in reply
     assert "please paste" not in reply.lower()
-    assert branch_from_founder_text("What SHA is the frozen Founder Alpha branch at?") == "codex/founder-alpha-final-composed-candidate"
+    assert branch_from_founder_text("What SHA is the frozen Founder Alpha branch at?") == "unspecified"
+
+
+def test_branch_from_founder_text_uses_governed_registry(superuser_db):
+    assert (
+        branch_from_founder_text("What SHA is the frozen Founder Alpha branch at?", db=superuser_db)
+        == "codex/founder-alpha-final-composed-candidate"
+    )
 
 
 def test_occupancy_fallback_holds_claude_and_keeps_cursor_idle():

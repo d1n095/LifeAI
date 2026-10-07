@@ -197,6 +197,11 @@ def _clean_tables(_test_database):
         ).scalars().all()
         if tables:
             conn.execute(text(f"TRUNCATE TABLE {', '.join(tables)} RESTART IDENTITY CASCADE"))
+        has_seed = conn.execute(
+            text("SELECT 1 FROM pg_proc WHERE proname = 'restore_governed_entity_registry_seed'")
+        ).scalar()
+        if has_seed:
+            conn.execute(text("SELECT restore_governed_entity_registry_seed()"))
     engine.dispose()
     yield
 

@@ -437,7 +437,7 @@ async def chat(
     if continuous:
         if inbound.kind is InboundKind.RELAY_REQUEST and not inbound.interrupt_founder:
             try:
-                software_truth = await discover_software_truth(payload.message)
+                software_truth = await discover_software_truth(payload.message, db=db)
             except Exception:
                 logger.warning("software-truth discovery failed (non-fatal)", exc_info=True)
         try:

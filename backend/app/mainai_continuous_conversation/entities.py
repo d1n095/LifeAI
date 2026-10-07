@@ -1,76 +1,30 @@
 """Entity / subject binding for software-truth lookups.
 
-INTERNAL LOOKUP != CORRECT SUBJECT BINDING. A request must bind the requested entity,
-repository, branch/artifact role, state, and authoritative source. Returning whichever
-branch happens to be current, or the current checkout SHA, is a correctness failure.
+MEMORY != AUTHORITY. HARDCODED CURRENT STATE != AUTHORITY.
+A request must bind entity, repository, branch/artifact role, state, source, and
+observed_at from the governed registry plus an authoritative observation. Python
+literals of this week's SHAs are not an authority source.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
-from dataclasses import replace
-from pathlib import Path
+from dataclasses import dataclass, replace
+from datetime import datetime
 
+from sqlalchemy.orm import Session
+
+from app.mainai_continuous_conversation.provider import ObservedRepositoryState
 from app.mainai_continuous_conversation.types import ArtifactRole, BoundSubject
+from app.models.continuous_conversation import (
+    GovernedArtifactCertification,
+    GovernedEntityRecord,
+    GovernedRepositoryObservation,
+)
 
 DEFAULT_REPOSITORY = "d1n095/LifeAI"
 
-FROZEN_FOUNDER_ALPHA_SHA = "2fbe20aacf1203fc0e16d216ef55b666b2181619"
-FROZEN_FOUNDER_ALPHA_BRANCH = "codex/founder-alpha-final-composed-candidate"
-CONTINUOUS_CONVERSATION_PARENT_SHA = "691490edd82fa4bff6188f4f038f7579ee4f3df5"
-CONTINUOUS_CONVERSATION_PARENT_BRANCH = "cursor/mainai-continuous-conversation-foundation"
-CONTINUOUS_CONVERSATION_P1_BRANCH = "cursor/mainai-continuous-conversation-p1-fix"
-FOUNDER_SOVEREIGNTY_SHA = "ffbdb6328b8ff594caf2eea71c77c32ef96e516b"
-FOUNDER_SOVEREIGNTY_BRANCH = "cursor/mainai-founder-sovereignty-family-delegation"
-
-_REGISTRY: dict[str, BoundSubject] = {
-    "founder_alpha_frozen": BoundSubject(
-        entity_key="founder_alpha_frozen",
-        repository=DEFAULT_REPOSITORY,
-        branch=FROZEN_FOUNDER_ALPHA_BRANCH,
-        artifact_role=ArtifactRole.FROZEN_CANDIDATE,
-        state="frozen",
-        authoritative_source="founder_alpha_registry",
-        sha=FROZEN_FOUNDER_ALPHA_SHA,
-        detail="Frozen Founder Alpha candidate. Not the current checkout and not a later child tip.",
-    ),
-    "continuous_conversation_parent": BoundSubject(
-        entity_key="continuous_conversation_parent",
-        repository=DEFAULT_REPOSITORY,
-        branch=CONTINUOUS_CONVERSATION_PARENT_BRANCH,
-        artifact_role=ArtifactRole.PARENT_SHA,
-        state="parent",
-        authoritative_source="continuous_conversation_registry",
-        sha=CONTINUOUS_CONVERSATION_PARENT_SHA,
-        detail="Continuous Conversation foundation parent. Not Founder Alpha and not the P1 child.",
-    ),
-    "founder_sovereignty": BoundSubject(
-        entity_key="founder_sovereignty",
-        repository=DEFAULT_REPOSITORY,
-        branch=FOUNDER_SOVEREIGNTY_BRANCH,
-        artifact_role=ArtifactRole.EXAMINED_LANE_SHA,
-        state="frozen_lane",
-        authoritative_source="founder_sovereignty_registry",
-        sha=FOUNDER_SOVEREIGNTY_SHA,
-        detail="Founder Sovereignty examined SHA. Workspace sharing with this lane is forbidden.",
-    ),
-    "continuous_conversation_p1": BoundSubject(
-        entity_key="continuous_conversation_p1",
-        repository=DEFAULT_REPOSITORY,
-        branch=CONTINUOUS_CONVERSATION_P1_BRANCH,
-        artifact_role=ArtifactRole.CURRENT_BRANCH_TIP,
-        state="current_child",
-        authoritative_source="remote_branch_tip",
-        sha=None,
-        detail="Current Continuous Conversation P1 fix branch tip. Resolved from the remote ref, never from checkout.",
-    ),
-}
-
-_SOVEREIGNTY = re.compile(
-    r"\b(founder sovereignty|suver[äa]nitet)\b",
-    re.IGNORECASE,
-)
+_SOVEREIGNTY = re.compile(r"\b(founder sovereignty|suver[äa]nitet)\b", re.IGNORECASE)
 _CC_PARENT = re.compile(
     r"\b(continuous conversation parent|cc parent|parent sha of (the )?continuous)\b",
     re.IGNORECASE,
@@ -83,7 +37,21 @@ _FOUNDER_ALPHA = re.compile(
     r"\b(frozen founder alpha|founder alpha frozen|founder alpha( branch| sha| candidate)?)\b",
     re.IGNORECASE,
 )
-_NAMED_BRANCH = re.compile(r"\b((?:cursor|codex|claude)/[\w./-]+)\b")
+NAMED_BRANCH = re.compile(r"\b((?:cursor|codex|claude)/[\w./-]+)\b")
+_NAMED_BRANCH = NAMED_BRANCH
+
+
+@dataclass(frozen=True)
+class RegistrySubject:
+    entity_key: str
+    repository: str
+    branch: str
+    artifact_role: ArtifactRole
+    state: str
+    source: str
+    detail: str = ""
+    observed_at: datetime | None = None
+    sha: str | None = None
 
 
 def classify_requested_entity(text: str) -> str | None:
@@ -103,61 +71,200 @@ def classify_requested_entity(text: str) -> str | None:
     return None
 
 
-def registry_subject(entity_key: str) -> BoundSubject | None:
-    return _REGISTRY.get(entity_key)
+def load_entity_record(db: Session, entity_key: str) -> GovernedEntityRecord | None:
+    return db.get(GovernedEntityRecord, entity_key)
 
 
-def read_remote_branch_sha(branch: str, *, repo_dir: str | Path | None = None) -> str | None:
-    """Authoritative remote tip. Never uses `git rev-parse HEAD` / current checkout."""
+def load_certification(db: Session, entity_key: str) -> GovernedArtifactCertification | None:
+    return db.get(GovernedArtifactCertification, entity_key)
 
-    cwd = str(repo_dir or Path.cwd())
-    try:
-        completed = subprocess.run(
-            ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
-            cwd=cwd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
+
+def load_observation(db: Session, repository: str, branch: str) -> GovernedRepositoryObservation | None:
+    return db.get(GovernedRepositoryObservation, (repository, branch))
+
+
+def record_observation(db: Session, observed: ObservedRepositoryState) -> GovernedRepositoryObservation | None:
+    if not observed.sha or observed.source == "unavailable":
+        return None
+    row = load_observation(db, observed.repository, observed.branch)
+    if row is None:
+        row = GovernedRepositoryObservation(
+            repository=observed.repository,
+            branch=observed.branch,
+            sha=observed.sha,
+            source=observed.source,
+            observed_at=observed.observed_at or datetime.utcnow(),
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    line = (completed.stdout or "").strip().splitlines()
-    if not line:
-        return None
-    sha = line[0].split()[0].strip().lower()
-    if re.fullmatch(r"[0-9a-f]{40}", sha):
-        return sha
-    return None
+        db.add(row)
+    else:
+        row.sha = observed.sha
+        row.source = observed.source
+        row.observed_at = observed.observed_at or datetime.utcnow()
+    db.flush()
+    return row
 
 
-def bind_subject(text: str, *, remote_sha: str | None = None) -> BoundSubject | None:
-    """Bind the requested entity. Does not invent a subject from the current checkout."""
+def bind_subject(
+    text: str,
+    *,
+    record: RegistrySubject | None = None,
+    sha: str | None = None,
+    source: str = "unavailable",
+    observed_at: datetime | None = None,
+) -> BoundSubject | None:
+    """Bind a previously loaded registry subject. Does not invent SHA or git state."""
 
-    key = classify_requested_entity(text)
-    if key is None:
+    if record is None:
         named = _NAMED_BRANCH.search(text)
         if named:
             branch = named.group(1)
-            sha = remote_sha if remote_sha is not None else read_remote_branch_sha(branch)
             return BoundSubject(
                 entity_key="named_branch",
                 repository=DEFAULT_REPOSITORY,
                 branch=branch,
                 artifact_role=ArtifactRole.CURRENT_BRANCH_TIP,
                 state="named_ref",
-                authoritative_source="remote_branch_tip" if sha else "unavailable",
+                authoritative_source=source if sha else "unavailable",
                 sha=sha,
-                detail=f"Named branch {branch} — resolved from the remote ref, not checkout.",
+                detail=f"Named branch {branch} — resolved from an authoritative source, not checkout.",
+                observed_at=observed_at,
             )
         return None
-    subject = _REGISTRY[key]
-    if subject.artifact_role is ArtifactRole.CURRENT_BRANCH_TIP:
-        sha = remote_sha if remote_sha is not None else read_remote_branch_sha(subject.branch)
+    return BoundSubject(
+        entity_key=record.entity_key,
+        repository=record.repository,
+        branch=record.branch,
+        artifact_role=record.artifact_role,
+        state=record.state,
+        authoritative_source=source,
+        sha=sha,
+        detail=record.detail,
+        observed_at=observed_at,
+    )
+
+
+def registry_subject_from_row(
+    row: GovernedEntityRecord,
+    *,
+    sha: str | None = None,
+    source: str | None = None,
+    observed_at: datetime | None = None,
+) -> RegistrySubject:
+    return RegistrySubject(
+        entity_key=row.entity_key,
+        repository=row.repository,
+        branch=row.branch,
+        artifact_role=ArtifactRole(row.artifact_role),
+        state=row.state,
+        source=source or row.source,
+        detail=row.detail,
+        observed_at=observed_at if observed_at is not None else row.observed_at,
+        sha=sha,
+    )
+
+
+def bind_subject_from_db(
+    db: Session,
+    text: str,
+    *,
+    observed: ObservedRepositoryState | None = None,
+) -> BoundSubject | None:
+    """Resolve entity metadata from the governed registry. SHA only from cert or observation."""
+
+    key = classify_requested_entity(text)
+    if key is None:
+        named = _NAMED_BRANCH.search(text)
+        if named is None:
+            return None
+        branch = named.group(1)
+        sha = observed.sha if observed is not None else None
+        source = observed.source if observed is not None and sha else "unavailable"
+        observed_at = observed.observed_at if observed is not None else None
+        if sha is None:
+            prefetch = load_observation(db, DEFAULT_REPOSITORY, branch)
+            if prefetch is not None:
+                sha = prefetch.sha
+                source = prefetch.source
+                observed_at = prefetch.observed_at
+        return BoundSubject(
+            entity_key="named_branch",
+            repository=DEFAULT_REPOSITORY,
+            branch=branch,
+            artifact_role=ArtifactRole.CURRENT_BRANCH_TIP,
+            state="named_ref",
+            authoritative_source=source if sha else "unavailable",
+            sha=sha,
+            detail=f"Named branch {branch} — resolved from an authoritative source, not checkout.",
+            observed_at=observed_at,
+        )
+
+    row = load_entity_record(db, key)
+    if row is None:
+        return None
+    role = ArtifactRole(row.artifact_role)
+    if role is ArtifactRole.CURRENT_BRANCH_TIP:
+        sha = observed.sha if observed is not None else None
+        source = observed.source if observed is not None and sha else "unavailable"
+        observed_at = observed.observed_at if observed is not None else None
+        if sha is None:
+            prefetch = load_observation(db, row.repository, row.branch)
+            if prefetch is not None:
+                sha = prefetch.sha
+                source = prefetch.source
+                observed_at = prefetch.observed_at
+        return BoundSubject(
+            entity_key=row.entity_key,
+            repository=row.repository,
+            branch=row.branch,
+            artifact_role=role,
+            state=row.state,
+            authoritative_source=source if sha else "unavailable",
+            sha=sha,
+            detail=row.detail if sha else "Authoritative tip unavailable. UNKNOWN — checkout is not used.",
+            observed_at=observed_at,
+        )
+
+    cert = load_certification(db, key)
+    if cert is None:
+        return BoundSubject(
+            entity_key=row.entity_key,
+            repository=row.repository,
+            branch=row.branch,
+            artifact_role=role,
+            state=row.state,
+            authoritative_source="unavailable",
+            sha=None,
+            detail="No governed certification for this entity. UNKNOWN — will not invent a SHA.",
+            observed_at=None,
+        )
+    return BoundSubject(
+        entity_key=row.entity_key,
+        repository=row.repository,
+        branch=row.branch,
+        artifact_role=role,
+        state=row.state,
+        authoritative_source=cert.source,
+        sha=cert.sha,
+        detail=row.detail,
+        observed_at=cert.certified_at,
+    )
+
+
+def apply_observed_tip(subject: BoundSubject, observed: ObservedRepositoryState) -> BoundSubject:
+    if subject.artifact_role is not ArtifactRole.CURRENT_BRANCH_TIP:
+        return subject
+    if not observed.sha:
         return replace(
             subject,
-            sha=sha,
-            authoritative_source="remote_branch_tip" if sha else "unavailable",
-            detail=subject.detail if sha else "Remote tip is unavailable. UNKNOWN — will not fabricate or use checkout.",
+            sha=None,
+            authoritative_source="unavailable",
+            detail="Authoritative tip unavailable. UNKNOWN — checkout is not used.",
+            observed_at=observed.observed_at,
         )
-    return subject
+    return replace(
+        subject,
+        sha=observed.sha,
+        authoritative_source=observed.source,
+        observed_at=observed.observed_at,
+        detail=subject.detail,
+    )

@@ -129,6 +129,7 @@ RLS_STATEMENTS = [
             "founder_conversation_decisions",
             "founder_conversation_provenance",
             "founder_workspace_leases",
+            "founder_conversation_checkpoints",
         )
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
     ],
@@ -350,6 +351,7 @@ POLICY_DEFINITIONS = [
             "founder_conversation_decisions",
             "founder_conversation_provenance",
             "founder_workspace_leases",
+            "founder_conversation_checkpoints",
         )
     ],
 ]
@@ -649,6 +651,7 @@ _MAINAI_EXECUTION_TABLES = (
     "founder_conversation_decisions",
     "founder_conversation_provenance",
     "founder_workspace_leases",
+    "founder_conversation_checkpoints",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -756,6 +759,10 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {"name": "erase_own_candidate_learning_signal_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "erase_own_continuous_conversation_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "continuous_conversation_erasure_authorized", "identity_args": "", "return_type": "boolean",
+        "mainai_app_execute": True, "security_definer": False,
+    },
     {
         "name": "founder_canonical_conversations_guard_delete", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
@@ -1096,11 +1103,20 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_decisions FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_provenance FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_workspace_leases FROM mainai_app"))
-        conn.execute(text("GRANT SELECT, INSERT ON founder_conversation_compactions TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_conversation_checkpoints FROM mainai_app"))
+        conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON governed_artifact_certifications FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON governed_entity_records FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON governed_repository_observations FROM mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON founder_conversation_compactions TO mainai_app"))
         conn.execute(text("GRANT SELECT, INSERT, UPDATE ON founder_conversation_decisions TO mainai_app"))
         conn.execute(text("GRANT SELECT, INSERT ON founder_conversation_provenance TO mainai_app"))
         conn.execute(text("GRANT SELECT, INSERT, UPDATE ON founder_workspace_leases TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON founder_conversation_checkpoints TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON governed_entity_records TO mainai_app"))
+        conn.execute(text("GRANT SELECT ON governed_artifact_certifications TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON governed_repository_observations TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_continuous_conversation_children() TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION continuous_conversation_erasure_authorized() TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1173,10 +1189,14 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
             ("founder_canonical_conversations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("founder_conversation_events", frozenset({"SELECT", "INSERT"})),
-            ("founder_conversation_compactions", frozenset({"SELECT", "INSERT"})),
+            ("founder_conversation_compactions", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("founder_conversation_decisions", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("founder_conversation_provenance", frozenset({"SELECT", "INSERT"})),
             ("founder_workspace_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("founder_conversation_checkpoints", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("governed_entity_records", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("governed_artifact_certifications", frozenset({"SELECT"})),
+            ("governed_repository_observations", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

@@ -1,7 +1,7 @@
 """Workspace ownership: SHA sharing allowed, workspace sharing forbidden.
 
-CURSOR builder worktree != CLAUDE examiner worktree. A branch under examination
-must not be a mutable builder workspace. Occupancy of a worktree is exclusive.
+Workspace paths come from coordination/lease state, never from hard-coded builder or
+examiner worktree literals. One mutable worktree = one agent owner.
 """
 
 from __future__ import annotations
@@ -14,9 +14,6 @@ from sqlalchemy.orm import Session
 
 from app.mainai_continuous_conversation.types import WorkspaceMutability
 from app.models.continuous_conversation import FounderWorkspaceLease
-
-CURSOR_BUILDER_WORKTREE = "/home/ubuntu/cursor-builder-worktrees/mainai-continuous-conversation-p1-fix"
-CLAUDE_EXAMINER_WORKTREE = "/home/ubuntu/worktrees/mainai-continuous-conversation-foundation"
 
 
 class WorkspaceOwnershipError(ValueError):
@@ -43,7 +40,32 @@ def workspaces_are_isolated(builder_path: str, examiner_path: str) -> bool:
     return builder_path.rstrip("/") != examiner_path.rstrip("/")
 
 
+def leases_for_owner(db: Session, *, owner_id: UUID) -> list[FounderWorkspaceLease]:
+    return db.query(FounderWorkspaceLease).filter(FounderWorkspaceLease.owner_id == owner_id).all()
+
+
+def workspace_for_agent(db: Session, *, owner_id: UUID, agent_key: str) -> FounderWorkspaceLease | None:
+    return (
+        db.query(FounderWorkspaceLease)
+        .filter(FounderWorkspaceLease.owner_id == owner_id, FounderWorkspaceLease.agent_key == agent_key)
+        .order_by(FounderWorkspaceLease.created_at.desc())
+        .first()
+    )
+
+
+def mutable_builder_lease(db: Session, *, owner_id: UUID, branch: str | None = None) -> FounderWorkspaceLease | None:
+    query = db.query(FounderWorkspaceLease).filter(
+        FounderWorkspaceLease.owner_id == owner_id,
+        FounderWorkspaceLease.mutability == WorkspaceMutability.MUTABLE_BUILDER.value,
+    )
+    if branch is not None:
+        query = query.filter(FounderWorkspaceLease.branch == branch)
+    return query.order_by(FounderWorkspaceLease.created_at.desc()).first()
+
+
 def validate_claim(existing: list[FounderWorkspaceLease], claim: WorkspaceClaim) -> None:
+    if not claim.worktree_path:
+        raise WorkspaceOwnershipError("workspace path must come from coordination state")
     for row in existing:
         if row.worktree_path == claim.worktree_path and (
             row.agent_key != claim.agent_key or row.mutability != claim.mutability.value
@@ -69,11 +91,7 @@ def validate_claim(existing: list[FounderWorkspaceLease], claim: WorkspaceClaim)
 
 
 def claim_workspace(db: Session, claim: WorkspaceClaim) -> FounderWorkspaceLease:
-    existing = (
-        db.query(FounderWorkspaceLease)
-        .filter(FounderWorkspaceLease.owner_id == claim.owner_id)
-        .all()
-    )
+    existing = leases_for_owner(db, owner_id=claim.owner_id)
     validate_claim(existing, claim)
     row = FounderWorkspaceLease(
         id=uuid4(),

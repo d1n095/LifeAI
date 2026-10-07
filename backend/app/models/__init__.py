@@ -48,11 +48,15 @@ from app.models.company import CompanyInfo
 from app.models.conversation import Conversation, Message
 from app.models.continuous_conversation import (
     FounderCanonicalConversation,
+    FounderConversationCheckpoint,
     FounderConversationCompaction,
     FounderConversationDecision,
     FounderConversationEvent,
     FounderConversationProvenance,
     FounderWorkspaceLease,
+    GovernedArtifactCertification,
+    GovernedEntityRecord,
+    GovernedRepositoryObservation,
 )
 from app.models.corpus_trial_run import CorpusTrialRun
 from app.models.diagnosis import (
@@ -241,7 +245,6 @@ from app.models.workforce import (
     WorkforcePerformanceRollup,
     WorkforceTeam,
 )
-from app.models.continuous_conversation import FounderCanonicalConversation, FounderConversationEvent
 from app.models.workforce_ops import (
     WorkforceAssignmentCheckpoint,
     WorkforceCostBudget,
@@ -427,10 +430,14 @@ __all__ = [
     "WorkforceTeam",
     "FounderCanonicalConversation",
     "FounderConversationCompaction",
+    "FounderConversationCheckpoint",
     "FounderConversationDecision",
     "FounderConversationEvent",
     "FounderConversationProvenance",
     "FounderWorkspaceLease",
+    "GovernedArtifactCertification",
+    "GovernedEntityRecord",
+    "GovernedRepositoryObservation",
     "WorkforceAssignmentCheckpoint",
     "WorkforceCostBudget",
     "WorkforceLifecycleEvent",

@@ -2,7 +2,8 @@
 
 COMPACTION != DELETION. SUMMARY != SOURCE. MEMORY != AUTHORITY.
 Old exact messages remain retrievable. An old compacted summary must not override
-newer source truth.
+newer source-backed decisions. Prompt size stays bounded. New turns do not rescan
+the full history.
 """
 
 from __future__ import annotations
@@ -12,10 +13,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
 from app.mainai_continuous_conversation.types import ActiveDecision, ProvenancePointer
 from app.models.continuous_conversation import (
+    FounderConversationCheckpoint,
     FounderConversationCompaction,
     FounderConversationDecision,
     FounderConversationProvenance,
@@ -23,15 +26,30 @@ from app.models.continuous_conversation import (
 from app.models.conversation import Message, MessageStatus
 
 ACTIVE_TURN_LIMIT = 20
+L0_BATCH = 20
+L0_PROMPT_LIMIT = 2
+L1_PROMPT_LIMIT = 1
+PROMPT_COMPACTION_CHAR_BUDGET = 4000
 
 _SHA = re.compile(r"\b([0-9a-f]{40})\b", re.IGNORECASE)
 _BRANCH = re.compile(r"\b((?:cursor|codex|claude)/[\w./-]+)\b")
 _FILE_ID = re.compile(r"\bfile[_ -]?id[:\s]+([0-9a-f-]{36})\b", re.IGNORECASE)
 _DECISION_ID = re.compile(r"\bdecision[_ -]?id[:\s]+([0-9a-f-]{36})\b", re.IGNORECASE)
-_PROVIDER_DECISION = re.compile(
-    r"\b(?:use|switch to|byt till|anv[aä]nd)\s+provider\s+([A-Za-z0-9_-]+)\b",
-    re.IGNORECASE,
+
+_PROVIDER_EXTRACTORS = (
+    re.compile(
+        r"\b(?:use|switch\s+to|go\s+with|let'?s\s+go\s+with|going\s+with)\s+provider\s+([A-Za-z0-9_-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bbyt\s+(?:till|leverant[öo]r(?:en)?\s+till)\s+(?:provider\s+)?([A-Za-z0-9_-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\banv[aä]nd\s+provider\s+([A-Za-z0-9_-]+)", re.IGNORECASE),
+    re.compile(r"\bprovider\s+([A-Za-z0-9_-]+)\s+instead\b", re.IGNORECASE),
 )
+
+LAST_INCREMENTAL_SCAN = 0
 
 
 @dataclass(frozen=True)
@@ -43,6 +61,8 @@ class LiveThreadContext:
     active_decisions: tuple[ActiveDecision, ...]
     provenance: tuple[ProvenancePointer, ...]
     original_count: int
+    messages_scanned: int = 0
+    prompt_char_count: int = 0
 
     @property
     def prompt_history(self) -> list[Message]:
@@ -50,15 +70,29 @@ class LiveThreadContext:
 
     def prompt_blocks(self) -> str:
         parts: list[str] = []
-        if self.compacted:
-            summaries = "\n".join(item.summary_text for item in self.compacted)
+        prompt_summaries = [item for item in self.compacted if not item.superseded]
+        l1 = [item for item in prompt_summaries if item.layer == "l1"][-L1_PROMPT_LIMIT:]
+        l0 = [item for item in prompt_summaries if item.layer == "l0"][-L0_PROMPT_LIMIT:]
+        selected = l1 + l0
+        if selected:
+            text = "\n".join(item.summary_text for item in selected)
+            if len(text) > PROMPT_COMPACTION_CHAR_BUDGET:
+                text = text[:PROMPT_COMPACTION_CHAR_BUDGET] + "…"
             parts.append(
-                "COMPACTED MEMORY (not source, not authority — original turns remain retrievable):\n"
-                f"{summaries}"
+                "COMPACTED MEMORY (not source, not authority — original turns remain retrievable; "
+                "active decisions override stale summaries):\n"
+                f"{text}"
             )
         if self.active_decisions:
-            lines = [f"- {item.topic}: {item.statement}" for item in self.active_decisions]
-            parts.append("ACTIVE DECISIONS (current source truth; superseded history is preserved):\n" + "\n".join(lines))
+            lines = [
+                f"- {item.decision_key or item.topic}: {item.value or item.statement} "
+                f"(status={item.status}; effective_at={item.effective_at})"
+                for item in self.active_decisions
+            ]
+            parts.append(
+                "ACTIVE DECISIONS (current source truth; superseded history is preserved; "
+                "summaries cannot override these):\n" + "\n".join(lines)
+            )
         return "\n\n".join(parts)
 
 
@@ -104,6 +138,16 @@ def extract_identifiers(text: str) -> list[tuple[str, str]]:
     return found
 
 
+def extract_provider_decision(text: str) -> tuple[str, str] | None:
+    """Structured provider decision. Newer source-backed value wins; phrase regex is not truth."""
+
+    for pattern in _PROVIDER_EXTRACTORS:
+        match = pattern.search(text or "")
+        if match:
+            return match.group(0), match.group(1)
+    return None
+
+
 def _record_provenance(
     db: Session,
     *,
@@ -142,36 +186,54 @@ def record_decision_from_text(
     conversation_id: UUID,
     message: Message,
 ) -> FounderConversationDecision | None:
-    match = _PROVIDER_DECISION.search(message.content or "")
-    if not match:
+    extracted = extract_provider_decision(message.content or "")
+    if not extracted:
         return None
-    statement = match.group(0)
-    topic = "provider"
+    statement, value = extracted
+    decision_key = "provider"
     already = (
         db.query(FounderConversationDecision)
-        .filter_by(owner_id=owner_id, conversation_id=conversation_id, message_id=message.id, topic=topic)
+        .filter_by(owner_id=owner_id, conversation_id=conversation_id, message_id=message.id, decision_key=decision_key)
         .one_or_none()
     )
+    if already is None:
+        already = (
+            db.query(FounderConversationDecision)
+            .filter_by(owner_id=owner_id, conversation_id=conversation_id, message_id=message.id, topic=decision_key)
+            .one_or_none()
+        )
     if already is not None:
         return already
-    identifiers = {kind: value for kind, value in extract_identifiers(message.content or "")}
-    identifiers["provider"] = match.group(1)
+    identifiers = {kind: ident for kind, ident in extract_identifiers(message.content or "")}
+    identifiers["provider"] = value
     previous = (
         db.query(FounderConversationDecision)
-        .filter_by(owner_id=owner_id, conversation_id=conversation_id, topic=topic, superseded=False)
-        .order_by(FounderConversationDecision.created_at.desc())
+        .filter_by(owner_id=owner_id, conversation_id=conversation_id, decision_key=decision_key, status="active")
+        .order_by(FounderConversationDecision.effective_at.desc(), FounderConversationDecision.created_at.desc())
         .all()
     )
+    if not previous:
+        previous = (
+            db.query(FounderConversationDecision)
+            .filter_by(owner_id=owner_id, conversation_id=conversation_id, topic=decision_key, superseded=False)
+            .order_by(FounderConversationDecision.created_at.desc())
+            .all()
+        )
     decision = FounderConversationDecision(
         id=uuid4(),
         owner_id=owner_id,
         conversation_id=conversation_id,
         message_id=message.id,
-        topic=topic,
+        topic=decision_key,
+        decision_key=decision_key,
         statement=statement,
+        value=value,
         identifiers=identifiers,
         superseded=False,
         superseded_by=None,
+        status="active",
+        effective_at=message.created_at or datetime.now(timezone.utc),
+        source_turn_id=message.id,
         created_at=datetime.now(timezone.utc),
     )
     db.add(decision)
@@ -181,6 +243,7 @@ def record_decision_from_text(
             continue
         old.superseded = True
         old.superseded_by = decision.id
+        old.status = "historical"
     db.flush()
     return decision
 
@@ -193,6 +256,124 @@ def _summarize(messages: list[Message]) -> str:
     return "Compacted earlier turns (sources remain). " + " | ".join(excerpts)[:1800]
 
 
+def _load_checkpoint(
+    db: Session, *, owner_id: UUID, conversation_id: UUID
+) -> FounderConversationCheckpoint | None:
+    return db.get(FounderConversationCheckpoint, (owner_id, conversation_id))
+
+
+def _save_checkpoint(
+    db: Session,
+    *,
+    owner_id: UUID,
+    conversation_id: UUID,
+    last_message: Message | None,
+    processed_count: int,
+    scanned: int,
+) -> FounderConversationCheckpoint:
+    row = _load_checkpoint(db, owner_id=owner_id, conversation_id=conversation_id)
+    if row is None:
+        row = FounderConversationCheckpoint(
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+        )
+        db.add(row)
+    if last_message is not None:
+        row.last_processed_message_id = last_message.id
+        row.last_processed_created_at = last_message.created_at
+    row.last_processed_count = processed_count
+    row.messages_scanned = scanned
+    row.updated_at = datetime.now(timezone.utc)
+    db.flush()
+    return row
+
+
+def _unprocessed_messages(
+    db: Session,
+    *,
+    conversation_id: UUID,
+    exclude_message_id: UUID | None,
+    checkpoint: FounderConversationCheckpoint | None,
+) -> list[Message]:
+    query = db.query(Message).filter(
+        Message.conversation_id == conversation_id,
+        Message.status == MessageStatus.succeeded,
+    )
+    if exclude_message_id is not None:
+        query = query.filter(Message.id != exclude_message_id)
+    if checkpoint is not None and checkpoint.last_processed_created_at is not None and checkpoint.last_processed_message_id is not None:
+        watermark = checkpoint.last_processed_created_at
+        if getattr(watermark, "tzinfo", None) is not None:
+            watermark = watermark.replace(tzinfo=None)
+        query = query.filter(
+            tuple_(Message.created_at, Message.id) > tuple_(watermark, checkpoint.last_processed_message_id)
+        )
+    return query.order_by(Message.created_at.asc(), Message.id.asc()).all()
+
+
+def _latest_active(
+    db: Session,
+    *,
+    conversation_id: UUID,
+    exclude_message_id: UUID | None,
+    active_limit: int,
+) -> list[Message]:
+    query = db.query(Message).filter(
+        Message.conversation_id == conversation_id,
+        Message.status == MessageStatus.succeeded,
+    )
+    if exclude_message_id is not None:
+        query = query.filter(Message.id != exclude_message_id)
+    rows = query.order_by(Message.created_at.desc(), Message.id.desc()).limit(active_limit).all()
+    return list(reversed(rows))
+
+
+def _rollup_l0(db: Session, *, owner_id: UUID, conversation_id: UUID) -> None:
+    active_l0 = (
+        db.query(FounderConversationCompaction)
+        .filter_by(owner_id=owner_id, conversation_id=conversation_id, layer="l0", superseded=False)
+        .order_by(FounderConversationCompaction.created_at.asc())
+        .all()
+    )
+    if len(active_l0) <= L0_PROMPT_LIMIT + 1:
+        return
+    to_roll = active_l0[: len(active_l0) - L0_PROMPT_LIMIT]
+    source_ids = [item for row in to_roll for item in (row.source_message_ids or [])]
+    pointers = [item for row in to_roll for item in (row.source_provenance or [])]
+    summary = "Rolled-up compacted memory (not source). " + " || ".join(row.summary_text[:400] for row in to_roll)[:1800]
+    rollup = FounderConversationCompaction(
+        id=uuid4(),
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        summary_text=summary,
+        source_message_ids=source_ids,
+        source_provenance=pointers,
+        layer="l1",
+        superseded=False,
+        covering_through_message_id=to_roll[-1].covering_through_message_id,
+        covering_through_created_at=to_roll[-1].covering_through_created_at,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(rollup)
+    db.flush()
+    for row in to_roll:
+        row.superseded = True
+        row.superseded_by = rollup.id
+    older_l1 = (
+        db.query(FounderConversationCompaction)
+        .filter_by(owner_id=owner_id, conversation_id=conversation_id, layer="l1", superseded=False)
+        .order_by(FounderConversationCompaction.created_at.asc())
+        .all()
+    )
+    if len(older_l1) > L1_PROMPT_LIMIT:
+        keep = older_l1[-L1_PROMPT_LIMIT:]
+        for row in older_l1:
+            if row.id not in {item.id for item in keep}:
+                row.superseded = True
+                row.superseded_by = keep[-1].id
+    db.flush()
+
+
 def ensure_compaction(
     db: Session,
     *,
@@ -201,7 +382,12 @@ def ensure_compaction(
     older: list[Message],
 ) -> list[FounderConversationCompaction]:
     if not older:
-        return []
+        return (
+            db.query(FounderConversationCompaction)
+            .filter_by(owner_id=owner_id, conversation_id=conversation_id)
+            .order_by(FounderConversationCompaction.created_at.asc())
+            .all()
+        )
     existing = (
         db.query(FounderConversationCompaction)
         .filter_by(owner_id=owner_id, conversation_id=conversation_id)
@@ -212,33 +398,52 @@ def ensure_compaction(
     pending = [message for message in older if str(message.id) not in already]
     if not pending:
         return existing
-    source_ids = [str(message.id) for message in pending]
-    pointers = []
-    for message in pending:
-        for kind, value in extract_identifiers(message.content or ""):
-            pointers.append({"kind": kind, "value": value, "message_id": str(message.id)})
-        _record_provenance(db, owner_id=owner_id, conversation_id=conversation_id, message=message)
-    row = FounderConversationCompaction(
-        id=uuid4(),
-        owner_id=owner_id,
-        conversation_id=conversation_id,
-        summary_text=_summarize(pending),
-        source_message_ids=source_ids,
-        source_provenance=pointers,
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(row)
+    for start in range(0, len(pending), L0_BATCH):
+        batch = pending[start : start + L0_BATCH]
+        source_ids = [str(message.id) for message in batch]
+        pointers = []
+        for message in batch:
+            for kind, value in extract_identifiers(message.content or ""):
+                pointers.append({"kind": kind, "value": value, "message_id": str(message.id)})
+        row = FounderConversationCompaction(
+            id=uuid4(),
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            summary_text=_summarize(batch),
+            source_message_ids=source_ids,
+            source_provenance=pointers,
+            layer="l0",
+            superseded=False,
+            covering_through_message_id=batch[-1].id,
+            covering_through_created_at=batch[-1].created_at,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(row)
+        existing.append(row)
     db.flush()
-    return existing + [row]
+    _rollup_l0(db, owner_id=owner_id, conversation_id=conversation_id)
+    return (
+        db.query(FounderConversationCompaction)
+        .filter_by(owner_id=owner_id, conversation_id=conversation_id)
+        .order_by(FounderConversationCompaction.created_at.asc())
+        .all()
+    )
 
 
 def active_decisions(db: Session, *, owner_id: UUID, conversation_id: UUID) -> list[ActiveDecision]:
     rows = (
         db.query(FounderConversationDecision)
-        .filter_by(owner_id=owner_id, conversation_id=conversation_id, superseded=False)
-        .order_by(FounderConversationDecision.created_at.asc())
+        .filter_by(owner_id=owner_id, conversation_id=conversation_id, status="active")
+        .order_by(FounderConversationDecision.effective_at.asc(), FounderConversationDecision.created_at.asc())
         .all()
     )
+    if not rows:
+        rows = (
+            db.query(FounderConversationDecision)
+            .filter_by(owner_id=owner_id, conversation_id=conversation_id, superseded=False)
+            .order_by(FounderConversationDecision.created_at.asc())
+            .all()
+        )
     return [
         ActiveDecision(
             topic=row.topic,
@@ -247,6 +452,12 @@ def active_decisions(db: Session, *, owner_id: UUID, conversation_id: UUID) -> l
             message_id=row.message_id,
             identifiers=dict(row.identifiers or {}),
             superseded=False,
+            decision_key=row.decision_key or row.topic,
+            value=row.value or row.statement,
+            status=row.status or "active",
+            effective_at=row.effective_at or row.created_at,
+            source_turn_id=row.source_turn_id or row.message_id,
+            supersedes=row.superseded_by,
         )
         for row in rows
     ]
@@ -260,35 +471,74 @@ def assemble_live_context(
     exclude_message_id: UUID | None = None,
     active_limit: int = ACTIVE_TURN_LIMIT,
 ) -> LiveThreadContext:
-    history = load_original_history(db, conversation_id=conversation_id, exclude_message_id=exclude_message_id)
-    for message in history:
+    global LAST_INCREMENTAL_SCAN
+    checkpoint = _load_checkpoint(db, owner_id=owner_id, conversation_id=conversation_id)
+    pending = _unprocessed_messages(
+        db,
+        conversation_id=conversation_id,
+        exclude_message_id=exclude_message_id,
+        checkpoint=checkpoint,
+    )
+    LAST_INCREMENTAL_SCAN = len(pending)
+    for message in pending:
         _record_provenance(db, owner_id=owner_id, conversation_id=conversation_id, message=message)
         record_decision_from_text(db, owner_id=owner_id, conversation_id=conversation_id, message=message)
-    if len(history) > active_limit:
-        older, latest = history[:-active_limit], history[-active_limit:]
-        compacted = ensure_compaction(db, owner_id=owner_id, conversation_id=conversation_id, older=older)
-    else:
-        latest = history
-        compacted = (
-            db.query(FounderConversationCompaction)
-            .filter_by(owner_id=owner_id, conversation_id=conversation_id)
-            .order_by(FounderConversationCompaction.created_at.asc())
-            .all()
+    latest = _latest_active(
+        db,
+        conversation_id=conversation_id,
+        exclude_message_id=exclude_message_id,
+        active_limit=active_limit,
+    )
+    latest_ids = {message.id for message in latest}
+    older = [message for message in pending if message.id not in latest_ids]
+    compacted = ensure_compaction(db, owner_id=owner_id, conversation_id=conversation_id, older=older)
+    original_count = (
+        db.query(Message)
+        .filter(
+            Message.conversation_id == conversation_id,
+            Message.status == MessageStatus.succeeded,
         )
+        .count()
+    )
+    if exclude_message_id is not None:
+        original_count = max(0, original_count - 1)
+    last_seen = pending[-1] if pending else None
+    processed_count = (checkpoint.last_processed_count if checkpoint is not None else 0) + len(pending)
+    _save_checkpoint(
+        db,
+        owner_id=owner_id,
+        conversation_id=conversation_id,
+        last_message=last_seen,
+        processed_count=processed_count,
+        scanned=len(pending),
+    )
     pointers = (
         db.query(FounderConversationProvenance)
         .filter_by(owner_id=owner_id, conversation_id=conversation_id)
         .all()
     )
-    return LiveThreadContext(
+    decisions = tuple(active_decisions(db, owner_id=owner_id, conversation_id=conversation_id))
+    ctx = LiveThreadContext(
         conversation_id=conversation_id,
         owner_id=owner_id,
         active_messages=tuple(latest),
         compacted=tuple(compacted),
-        active_decisions=tuple(active_decisions(db, owner_id=owner_id, conversation_id=conversation_id)),
+        active_decisions=decisions,
         provenance=tuple(
             ProvenancePointer(kind=row.kind, value=row.value, message_id=row.message_id, conversation_id=row.conversation_id)
             for row in pointers
         ),
-        original_count=len(history),
+        original_count=original_count,
+        messages_scanned=len(pending),
+    )
+    return LiveThreadContext(
+        conversation_id=ctx.conversation_id,
+        owner_id=ctx.owner_id,
+        active_messages=ctx.active_messages,
+        compacted=ctx.compacted,
+        active_decisions=ctx.active_decisions,
+        provenance=ctx.provenance,
+        original_count=ctx.original_count,
+        messages_scanned=ctx.messages_scanned,
+        prompt_char_count=len(ctx.prompt_blocks()),
     )

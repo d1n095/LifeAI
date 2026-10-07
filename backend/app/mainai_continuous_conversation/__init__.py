@@ -7,7 +7,7 @@ not grant security permissions. Subject binding is required for every SHA answer
 
 from app.mainai_continuous_conversation.classify import classify_inbound
 from app.mainai_continuous_conversation.discover import discover_software_truth
-from app.mainai_continuous_conversation.entities import bind_subject
+from app.mainai_continuous_conversation.entities import bind_subject, bind_subject_from_db
 from app.mainai_continuous_conversation.occupancy import occupancy_for_turn
 from app.mainai_continuous_conversation.orchestrate import founder_alpha_continuous_turn, handle_founder_message
 from app.mainai_continuous_conversation.outbound import filter_outbound
@@ -21,6 +21,7 @@ from app.mainai_continuous_conversation.service import (
 __all__ = [
     "apply_outbound_filter",
     "bind_subject",
+    "bind_subject_from_db",
     "classify_inbound",
     "compose_founder_reply",
     "discover_software_truth",

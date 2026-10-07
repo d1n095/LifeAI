@@ -179,6 +179,7 @@ class SoftwareTruth:
     repository: str = "d1n095/LifeAI"
     artifact_role: str = ArtifactRole.UNSPECIFIED.value
     state: str = "unspecified"
+    observed_at: datetime | None = None
 
     @property
     def founder_answer(self) -> str | None:
@@ -208,6 +209,7 @@ class BoundSubject:
     authoritative_source: str
     sha: str | None = None
     detail: str = ""
+    observed_at: datetime | None = None
 
     def as_software_truth(self, *, ci_summary: str | None = None) -> SoftwareTruth:
         return SoftwareTruth(
@@ -220,6 +222,7 @@ class BoundSubject:
             repository=self.repository,
             artifact_role=self.artifact_role.value,
             state=self.state,
+            observed_at=self.observed_at,
         )
 
 
@@ -252,3 +255,9 @@ class ActiveDecision:
     message_id: UUID | None
     identifiers: dict[str, str] = field(default_factory=dict)
     superseded: bool = False
+    decision_key: str = ""
+    value: str = ""
+    status: str = "active"
+    effective_at: datetime | None = None
+    source_turn_id: UUID | None = None
+    supersedes: UUID | None = None
