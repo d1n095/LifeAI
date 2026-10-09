@@ -369,6 +369,68 @@ def _parse_evidence_time(value: Any) -> datetime | None:
         return None
 
 
+def _limits_do_not_widen(requested: dict[str, Any], granted: dict[str, Any]) -> bool:
+    """A grant may narrow requested caps, never silently broaden or omit them."""
+    for key, requested_value in requested.items():
+        if key not in granted:
+            return False
+        granted_value = granted[key]
+        if isinstance(requested_value, dict):
+            if not isinstance(granted_value, dict) or not _limits_do_not_widen(requested_value, granted_value):
+                return False
+        elif (
+            isinstance(requested_value, (int, float))
+            and not isinstance(requested_value, bool)
+            and isinstance(granted_value, (int, float))
+            and not isinstance(granted_value, bool)
+        ):
+            if granted_value > requested_value:
+                return False
+        elif granted_value != requested_value:
+            return False
+    return True
+
+
+def _permission_request_matches_grant(
+    permitted_action: dict[str, Any], payload: dict[str, Any], *, issued_at: datetime, expires_at: datetime
+) -> bool:
+    required_strings = ("principal", "resource", "action", "risk", "session_id", "device_id", "authority_ref")
+    if any(not isinstance(permitted_action.get(key), str) or not permitted_action[key].strip() for key in required_strings):
+        return False
+    requested_scopes = permitted_action.get("scopes")
+    granted_scopes = payload.get("scopes")
+    requested_limits = permitted_action.get("limits")
+    granted_limits = payload.get("limits")
+    requested_duration = permitted_action.get("duration_seconds")
+    if (
+        not isinstance(requested_scopes, list)
+        or not requested_scopes
+        or not all(isinstance(scope, str) and scope for scope in requested_scopes)
+        or not isinstance(granted_scopes, list)
+        or not all(isinstance(scope, str) and scope for scope in granted_scopes)
+        or not isinstance(requested_limits, dict)
+        or not isinstance(granted_limits, dict)
+        or not isinstance(requested_duration, int)
+        or isinstance(requested_duration, bool)
+        or requested_duration <= 0
+    ):
+        return False
+    grant_duration = (expires_at - issued_at).total_seconds()
+    return (
+        payload.get("principal") == permitted_action["principal"]
+        and payload.get("resource") == permitted_action["resource"]
+        and payload.get("action") == permitted_action["action"]
+        and payload.get("risk") == permitted_action["risk"]
+        and payload.get("session_id") == permitted_action["session_id"]
+        and payload.get("device_id") == permitted_action["device_id"]
+        and payload.get("issuer_authority") == permitted_action["authority_ref"]
+        and set(granted_scopes).issubset(set(requested_scopes))
+        and permitted_action["action"] in granted_scopes
+        and grant_duration <= requested_duration
+        and _limits_do_not_widen(requested_limits, granted_limits)
+    )
+
+
 def _validate_permission_grant(
     db: Session,
     *,
@@ -391,20 +453,20 @@ def _validate_permission_grant(
         and grant.subject_key == subject_key
         and grant.action_key == "permission_grant"
         and str(p.get("owner_id")) == str(owner_id)
-        and p.get("principal") == permitted_action.get("principal")
         and p.get("execution_id") == execution_id
         and p.get("resource") == subject_key
         and p.get("action") == action_key
-        and p.get("issuer_authority") == permitted_action.get("authority_ref")
         and p.get("granted") is True
         and p.get("revoked") is False
         and isinstance(p.get("grant_id"), str) and bool(p["grant_id"].strip())
         and p.get("issuer_authority") in _PERMISSION_AUTHORITY_ISSUERS
-        and isinstance(p.get("limits"), dict)
         and isinstance(p.get("scopes"), list) and action_key in p["scopes"]
         and issued_at is not None and expires_at is not None
         and issued_at <= now < expires_at
         and grant.expires_at is not None and now < _as_aware(grant.expires_at)
+        and _permission_request_matches_grant(
+            permitted_action, p, issued_at=issued_at, expires_at=expires_at
+        )
     )
     if not required:
         raise ClaimActionIntegrityError("permission grant evidence is invalid, expired, or out of scope")
@@ -412,14 +474,15 @@ def _validate_permission_grant(
         select(ClaimActionEvidence).where(
             ClaimActionEvidence.owner_id == owner_id,
             ClaimActionEvidence.execution_id == execution_id,
+            ClaimActionEvidence.subject_key == subject_key,
             ClaimActionEvidence.action_key == "permission_grant",
             ClaimActionEvidence.source_type == EvidenceSourceType.permission_authority.value,
-            ClaimActionEvidence.observed_at >= grant.observed_at,
         )
     ).scalars().all()
     if any(
         row.authoritative
         and row.payload.get("grant_id") == p["grant_id"]
+        and row.payload.get("issuer_authority") == p.get("issuer_authority")
         and row.payload.get("revoked") is True
         for row in revocations
     ):

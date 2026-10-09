@@ -504,30 +504,41 @@ def test_caller_asserted_permission_without_grant_evidence_is_rejected(superuser
         )
 
 
-def _permission_grant(db, owner, *, source="permission_authority", expires_delta=timedelta(minutes=4), revoked=False, grant_id="grant-1", observed_at=None):
+def _permission_grant(
+    db, owner, *, source="permission_authority", expires_delta=timedelta(minutes=4),
+    revoked=False, grant_id="grant-1", observed_at=None, issued_at=None, **overrides,
+):
     observed = observed_at or datetime.now(timezone.utc)
-    expires = observed + expires_delta
+    issued = issued_at or observed
+    expires = issued + expires_delta
+    payload = {
+        "grant_id": grant_id, "granted": not revoked, "revoked": revoked,
+        "owner_id": str(owner.id), "principal": "mainai:exec-1", "execution_id": "exec-1",
+        "scopes": ["merge"], "resource": "release:alpha", "action": "merge",
+        "limits": {"max_runs": 1}, "risk": "high", "session_id": "session-1",
+        "device_id": "device-1", "issuer_authority": "founder-capability-authority",
+        "issued_at": issued.isoformat(), "expires_at": expires.isoformat(),
+    }
+    payload.update(overrides)
     return _evidence(
-        db, owner, action="permission_grant", source=source, observed_at=observed, expires_at=expires,
-        payload={
-            "grant_id": grant_id, "granted": not revoked, "revoked": revoked,
-            "owner_id": str(owner.id), "principal": "mainai:exec-1", "execution_id": "exec-1",
-            "scopes": ["merge"], "resource": "release:alpha", "action": "merge", "limits": {"count": 1},
-            "issuer_authority": "founder-capability-authority", "issued_at": observed.isoformat(),
-            "expires_at": expires.isoformat(),
-        },
+        db, owner, action="permission_grant", source=source, observed_at=observed,
+        expires_at=max(expires, observed + timedelta(seconds=1)), payload=payload,
     )
 
 
-def _record_dispatched_merge(db, owner, grant, *, now=None):
+def _record_dispatched_merge(db, owner, grant, *, now=None, **overrides):
+    request = {
+        "granted": True, "authority_ref": "founder-capability-authority", "scopes": ["merge"],
+        "principal": "mainai:exec-1", "resource": "release:alpha", "action": "merge",
+        "duration_seconds": 240, "limits": {"max_runs": 1}, "risk": "high",
+        "session_id": "session-1", "device_id": "device-1", "grant_evidence_id": str(grant.id),
+    }
+    request.update(overrides)
     return record_receipt(
         db, owner_id=owner.id, execution_id="exec-1", subject_key="release:alpha",
         action_key="merge", declared_state="requested", action_state="dispatched",
         declared_action={"action": "merge"},
-        permitted_action={
-            "granted": True, "authority_ref": "founder-capability-authority", "scopes": ["merge"],
-            "principal": "mainai:exec-1", "grant_evidence_id": str(grant.id),
-        },
+        permitted_action=request,
         executed_action={}, observed_result={}, authority_snapshot={}, created_by="mainai", now=now,
     )
 
@@ -553,6 +564,60 @@ def test_revoked_permission_grant_is_rejected_immediately(superuser_db):
     grant = _permission_grant(superuser_db, owner)
     _permission_grant(superuser_db, owner, revoked=True, grant_id="grant-1")
     with pytest.raises(ClaimActionIntegrityError, match="revoked"):
+        _record_dispatched_merge(superuser_db, owner, grant)
+
+
+def test_revoked_grant_cannot_be_resurrected_by_replaying_old_grant(superuser_db):
+    owner = _owner(superuser_db)
+    issued = datetime.now(timezone.utc)
+    original = _permission_grant(superuser_db, owner, observed_at=issued, issued_at=issued)
+    _permission_grant(
+        superuser_db, owner, revoked=True, grant_id="grant-1",
+        observed_at=issued + timedelta(seconds=1), issued_at=issued,
+    )
+    replay = _permission_grant(
+        superuser_db, owner, grant_id="grant-1",
+        observed_at=issued + timedelta(seconds=2), issued_at=issued,
+    )
+    assert replay.id != original.id
+    with pytest.raises(ClaimActionIntegrityError, match="revoked"):
+        _record_dispatched_merge(superuser_db, owner, replay, now=issued + timedelta(seconds=3))
+
+
+def test_missing_principal_on_both_request_and_grant_is_rejected(superuser_db):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner, principal=None)
+    with pytest.raises(ClaimActionIntegrityError, match="invalid"):
+        _record_dispatched_merge(superuser_db, owner, grant, principal=None)
+
+
+@pytest.mark.parametrize(
+    ("grant_overrides", "request_overrides"),
+    [
+        ({"principal": "mainai:other"}, {}),
+        ({"resource": "release:all"}, {}),
+        ({"action": "deploy"}, {}),
+        ({"scopes": ["merge", "deploy"]}, {}),
+        ({"limits": {"max_runs": 1000}}, {}),
+        ({"risk": "critical"}, {}),
+        ({"session_id": "session-other"}, {}),
+        ({"device_id": "device-other"}, {}),
+        ({"issuer_authority": "other-authority"}, {}),
+    ],
+)
+def test_grant_cannot_widen_or_change_requested_authority(
+    superuser_db, grant_overrides, request_overrides,
+):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner, **grant_overrides)
+    with pytest.raises(ClaimActionIntegrityError, match="invalid|out of scope"):
+        _record_dispatched_merge(superuser_db, owner, grant, **request_overrides)
+
+
+def test_grant_duration_cannot_exceed_requested_duration(superuser_db):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner, expires_delta=timedelta(minutes=5))
+    with pytest.raises(ClaimActionIntegrityError, match="invalid"):
         _record_dispatched_merge(superuser_db, owner, grant)
 
 
@@ -605,6 +670,12 @@ def test_runtime_role_has_read_only_no_fabrication_privilege():
         "Jag har pushat grenen.",
         "Alla tester gick igenom.",
         "Recall är aktiverad.",
+        "The certification went through.",
+        "Allt är mergat.",
+        "Bygget gick igenom.",
+        "Recall är igång nu.",
+        "All checks are green.",
+        "Everything is deployed and working.",
     ],
 )
 def test_natural_unsupported_external_claims_are_removed(claim):
@@ -627,6 +698,10 @@ def test_natural_unsupported_external_claims_are_removed(claim):
         "I have not verified that tests passed.",
         "Was it merged?",
         "If it was deployed, then...",
+        "I don't know whether CI passed.",
+        "Codex reports that the task is done, but I have not verified it.",
+        "For example, the phrase 'All tests passed' is an unsupported factual claim.",
+        "Hypothetically, if everything is deployed and working, the next gate is activation.",
     ],
 )
 def test_uncertainty_negation_and_questions_preserve_epistemic_meaning(honest):
@@ -639,6 +714,19 @@ def test_negated_clause_cannot_mask_a_separate_unsupported_assertion():
     assert "I have not verified that the branch was pushed" in sanitized
     assert "CI passed" not in sanitized
     assert "binding evidence" in sanitized
+
+
+@pytest.mark.parametrize("claim", [
+    "Codex reports that the task is done.",
+    "Reportedly, all checks are green.",
+    "According to Cursor, everything is deployed and working.",
+    "Enligt Claude är allt mergat.",
+])
+def test_unqualified_attribution_is_preserved_but_explicitly_not_verified(claim):
+    sanitized = sanitize_unverified_execution_claims(claim)
+    assert claim in sanitized
+    assert "attributed report" in sanitized or "attribuerad rapport" in sanitized
+    assert "not independently verified evidence" in sanitized or "inte självständigt verifierad evidens" in sanitized
 
 
 @pytest.mark.parametrize("claim", [
