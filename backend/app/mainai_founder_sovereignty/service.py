@@ -550,6 +550,12 @@ def decide_approval(
         raise SovereigntyError("snapshot_mismatch", "approval request was rewritten after presentation; create a NEW request")
     if expected_snapshot_hash != request.snapshot_hash:
         raise SovereigntyError("snapshot_mismatch", "decision receipt must bind to the exact snapshot hash the Founder saw")
+    requested_limits = dict(request.requested_limits or {})
+    if limits is not None and dict(limits) != requested_limits:
+        raise SovereigntyError(
+            "limit_substitution",
+            "decision cannot widen or substitute requested limits; create a NEW request",
+        )
     if mode in {ApprovalMode.ALWAYS_ALLOW, ApprovalMode.ALLOW_UNTIL_DATE} and request.risk_tier in {RiskTier.HIGH.value, RiskTier.FOUNDER_ONLY.value}:
         require_recent_step_up(db, StepUpPurpose.PERMANENT_HIGH_RISK_DELEGATION)
     request.status = "decided"
@@ -578,13 +584,7 @@ def decide_approval(
         if until > _now() + _MAX_UNTIL:
             raise SovereigntyError("until_exceeds_maximum", "ALLOW_UNTIL_DATE exceeds Founder maximum duration")
         expires = until
-    requested_limits = dict(request.requested_limits or {})
-    if limits is not None and dict(limits) != requested_limits:
-        raise SovereigntyError(
-            "limit_substitution",
-            "decision cannot widen or substitute requested limits; create a NEW request",
-        )
-    grant_limits = requested_limits
+    grant_limits = dict(request.requested_limits or {})
     if mode is not ApprovalMode.DENY_AND_BLOCK:
         db.add(
             FamilyCapabilityGrant(

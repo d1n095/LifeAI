@@ -143,6 +143,10 @@ def _decide(db, request, mode, **kwargs):
 
 def _authorize_account_erasure(db, user: User, *, password: str = FOUNDER_PASSWORD):
     jti = _current_jti(db) or _bind_founder_jti(db, user)
+    db.flush()
+    db.commit()
+    user = db.get(User, user.id)
+    assert user is not None
     receipt = create_account_erasure_reauth_receipt(db, user=user, password=password, access_jti=jti)
     _bind_session(db, user.id, jti)
     operation_id = db.execute(

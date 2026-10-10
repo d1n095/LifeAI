@@ -59,23 +59,28 @@ def create_founder_step_up_reauth_receipt(
 
     receipt_id = uuid.uuid4()
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
-    with migration_engine.begin() as conn:
-        conn.execute(
-            sa_text(
-                """
-                INSERT INTO founder_step_up_reauth_receipts(
-                    receipt_id, owner_id, access_jti, purpose, issued_at, expires_at
-                ) VALUES (:receipt_id, :owner_id, :access_jti, :purpose, now(), :expires_at)
-                """
-            ),
-            {
-                "receipt_id": str(receipt_id),
-                "owner_id": str(user.id),
-                "access_jti": access_jti,
-                "purpose": purpose.value,
-                "expires_at": expires_at,
-            },
-        )
+    params = {
+        "receipt_id": str(receipt_id),
+        "owner_id": str(user.id),
+        "access_jti": access_jti,
+        "purpose": purpose.value,
+        "expires_at": expires_at,
+    }
+    insert = sa_text(
+        """
+        INSERT INTO founder_step_up_reauth_receipts(
+            receipt_id, owner_id, access_jti, purpose, issued_at, expires_at
+        ) VALUES (:receipt_id, :owner_id, :access_jti, :purpose, now(), :expires_at)
+        """
+    )
+    bind = db.get_bind()
+    username = getattr(getattr(bind, "url", None), "username", None)
+    if username == "mainai_app":
+        with migration_engine.begin() as conn:
+            conn.execute(insert, params)
+    else:
+        db.execute(insert, params)
+        db.flush()
     return FounderStepUpReauthReceipt(
         receipt_id=receipt_id,
         owner_id=user.id,

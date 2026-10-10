@@ -20,7 +20,7 @@ migration lineage before any merge revision.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-founder-sovereignty-p1-fix-2-91c1` | — | **Open isolated builder child of `80ecfc7`** | Remove self-settable GUC erasure bypass; genuine Founder password re-auth for step-up bound to current session JTI; `mainai_app` cannot mint step-up receipts or unlock without a definer-issued JTI-bound receipt; mandatory approval snapshot-hash matching and no limit/action substitution; sovereignty erasure bound to an independently authorized active account-erasure operation; complete 0091 downgrade restoring 0090 guards/schema; stale head assertions → `0091_fs_p1_authority`. Recall stays disabled. |
+| `cursor/mainai-founder-sovereignty-p1-fix-2-91c1` | [#259](https://github.com/d1n095/LifeAI/pull/259) | **Open isolated builder child of `80ecfc7`** | Remove self-settable GUC erasure bypass; genuine Founder password re-auth for step-up bound to current session JTI; `mainai_app` cannot mint step-up receipts or unlock without a definer-issued JTI-bound receipt; mandatory approval snapshot-hash matching and no limit/action substitution; sovereignty erasure bound to an independently authorized active account-erasure operation; complete 0091 downgrade restoring 0090 guards/schema; stale head assertions → `0091_fs_p1_authority`. Recall stays disabled. |
 
 **Must not:** modify examined SHA `80ecfc7`; touch CC P1 `e21ad76` or CC P1-fix-3 `bc7bef6`; compose/renumber the 0091 sibling collision; merge; deploy; activate Recall; alter Founder authority.
 
