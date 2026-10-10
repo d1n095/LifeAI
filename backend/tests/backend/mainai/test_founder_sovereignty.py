@@ -179,9 +179,16 @@ def _authorize_as(db, principal: User, **kwargs):
 
 
 def _attack(db, sql: str, params: dict | None = None) -> None:
+    """Runtime-role attack must raise. A zero-row UPDATE/DELETE is not a pass:
+    CI RLS can hide the target and pytest.raises would otherwise DID NOT RAISE
+    while the guard never ran. Treat 'no visible row' as a denied attack too.
+    """
     with pytest.raises(Exception):
         with db.begin_nested():
-            db.execute(text(sql), params or {})
+            result = db.execute(text(sql), params or {})
+            kind = sql.lstrip().split(None, 1)[0].upper()
+            if kind in {"INSERT", "UPDATE", "DELETE"} and result.rowcount == 0:
+                raise RuntimeError("attack matched zero rows under the runtime role")
             db.flush()
 
 
@@ -931,6 +938,27 @@ def test_founder_erasure_clears_policy_history_and_grants(superuser_db):
     assert kernel >= 1
 
 
+def test_sovereignty_erase_denied_after_account_erasure_completes(superuser_db):
+    """Guard stays tight: completing the account-erasure op must not still allow
+    erase_own_founder_sovereignty_children(). The Python path now erases sovereignty
+    BEFORE complete; this keeps the DB predicate honest."""
+    founder = _ensure_founder(superuser_db)
+    apply_founder_policy(
+        superuser_db, actor_kind=ActorKind.FOUNDER, policy_key="complete_guard", payload={"v": 1}, reason="keep"
+    )
+    operation_id = _authorize_account_erasure(superuser_db, founder)
+    completed = superuser_db.execute(
+        text("SELECT account_erasure_complete_operation(:operation_id, :owner_id)"),
+        {"operation_id": str(operation_id), "owner_id": str(founder.id)},
+    ).scalar()
+    assert completed is True
+    _attack(superuser_db, "SELECT erase_own_founder_sovereignty_children()")
+    remaining = superuser_db.execute(
+        text("SELECT count(*) FROM founder_policy_versions WHERE policy_key = 'complete_guard'")
+    ).scalar()
+    assert remaining == 1
+
+
 def test_cross_owner_family_rows_are_isolated(superuser_db, db_session):
     _ensure_founder(superuser_db)
     child = _family_user(superuser_db, "iso-child")
@@ -978,6 +1006,8 @@ def test_runtime_role_cannot_mint_step_up_or_unlock(db_session, superuser_db):
     )
     set_workflow_lock(superuser_db, policy_key="runtime_lock", locked=True)
     superuser_db.commit()
+    role = db_session.execute(text("SELECT current_user")).scalar()
+    assert role == "mainai_app"
     db_session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(founder.id)})
     db_session.execute(text("SELECT set_config('app.current_access_jti', 'forged-jti-value', true)"))
     db_session.execute(text("SELECT set_config('app.founder_step_up_issue', 'on', true)"))
@@ -991,7 +1021,19 @@ def test_runtime_role_cannot_mint_step_up_or_unlock(db_session, superuser_db):
     )
     _attack(
         db_session,
-        "UPDATE founder_policy_heads SET workflow_locked = false WHERE policy_key = 'runtime_lock'",
+        """
+        DO $attack$
+        BEGIN
+            UPDATE public.founder_policy_heads
+               SET workflow_locked = false
+             WHERE policy_key = 'runtime_lock'
+               AND owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'runtime unlock attack did not reach a visible policy head';
+            END IF;
+        END
+        $attack$;
+        """,
     )
     head = superuser_db.get(FounderPolicyHead, {"owner_id": FOUNDER_USER_ID, "policy_key": "runtime_lock"})
     assert head is not None and head.workflow_locked is True
@@ -1060,10 +1102,19 @@ def test_runtime_role_cannot_substitute_approval_action(db_session, superuser_db
         superuser_db, principal_id=child.id, capability_key="lights.control", consequences="kitchen only"
     )
     superuser_db.commit()
+    role = db_session.execute(text("SELECT current_user")).scalar()
+    assert role == "mainai_app"
     db_session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(founder.id)})
     _attack(
         db_session,
-        "UPDATE family_approval_requests SET capability_key = 'purchases.create', action = 'create', resource = 'purchases' WHERE id = :id",
+        """
+        UPDATE family_approval_requests
+           SET capability_key = 'purchases.create',
+               action = 'create',
+               resource = 'purchases'
+         WHERE id = :id
+           AND owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid
+        """,
         {"id": str(req.id)},
     )
     _attack(
@@ -1074,6 +1125,11 @@ def test_runtime_role_cannot_substitute_approval_action(db_session, superuser_db
         """,
         {"fid": str(FOUNDER_USER_ID), "rid": str(req.id), "hash": "a" * 64},
     )
+    fresh = superuser_db.execute(
+        text("SELECT capability_key, action, resource FROM family_approval_requests WHERE id = :id"),
+        {"id": str(req.id)},
+    ).one()
+    assert fresh == ("lights.control", "control", "home_lights")
 
 
 def test_genuine_step_up_unlocks_and_wrong_jti_does_not(superuser_db):

@@ -6,6 +6,26 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — Founder sovereignty P1-fix-3 (2026-10-10)
+
+Child of `cursor/mainai-founder-sovereignty-p1-fix-2-91c1` @ exact
+`4ccf1ed0aeb0ea35301a38437b57e097c16f435d` (frozen builder SHA; GitHub CI on that SHA
+failed branch-specifically on account deletion + two runtime-role attack tests). Built in a
+**new isolated Cursor builder worktree**. Does **not** modify the frozen P1-fix-2 worktree
+or SHA.
+
+Does **not** independently resolve or compose the sibling Alembic collision with Continuous
+Conversation (`0090_cc_thread_memory` → `0091_cc_p1_authority`, and CC P1-fix-4's
+`0092_cc_one_active_decision`). This lane stays `0090_founder_sovereignty` →
+`0091_fs_p1_authority` and adds no new revision. Wait for CC's final accepted lineage
+before any merge revision.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-founder-sovereignty-p1-fix-3-91c1` | [#261](https://github.com/d1n095/LifeAI/pull/261) | **Open isolated builder child of `4ccf1ed`** | Call `erase_own_founder_sovereignty_children()` while the account-erasure operation is still `active` in `personal_data_erasure` (before `account_erasure_complete_operation`) so DELETE `/api/account`, account-lifecycle, Playwright deletion, and `erase_account_data` succeed without loosening `founder_sovereignty_erasure_authorized()`. Make runtime-role unlock/substitution attacks raise under CI `mainai_app` (zero-row UPDATE is not a pass). Recall stays disabled. |
+
+**Must not:** modify frozen SHA `4ccf1ed` or its worktree; touch CC P1-fix-4 `2d9f62e` / PR #260; compose/renumber the 0091 (or 0092) sibling collision; merge; deploy; activate Recall; alter Founder authority.
+
 ## Post-Founder-Alpha — Founder sovereignty P1-fix-2 (2026-10-10)
 
 Child of `cursor/mainai-founder-sovereignty-family-delegation-p1-fix` @ exact
@@ -20,7 +40,7 @@ migration lineage before any merge revision.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-founder-sovereignty-p1-fix-2-91c1` | [#259](https://github.com/d1n095/LifeAI/pull/259) | **Open isolated builder child of `80ecfc7`** | Remove self-settable GUC erasure bypass; genuine Founder password re-auth for step-up bound to current session JTI; `mainai_app` cannot mint step-up receipts or unlock without a definer-issued JTI-bound receipt; mandatory approval snapshot-hash matching and no limit/action substitution; sovereignty erasure bound to an independently authorized active account-erasure operation; complete 0091 downgrade restoring 0090 guards/schema; stale head assertions → `0091_fs_p1_authority`. Recall stays disabled. |
+| `cursor/mainai-founder-sovereignty-p1-fix-2-91c1` | [#259](https://github.com/d1n095/LifeAI/pull/259) | **Frozen isolated builder child of `80ecfc7` @ `4ccf1ed` — terminal CI failed branch-specifically (account deletion + two runtime-role attacks); successor is P1-fix-3** | Remove self-settable GUC erasure bypass; genuine Founder password re-auth for step-up bound to current session JTI; `mainai_app` cannot mint step-up receipts or unlock without a definer-issued JTI-bound receipt; mandatory approval snapshot-hash matching and no limit/action substitution; sovereignty erasure bound to an independently authorized active account-erasure operation; complete 0091 downgrade restoring 0090 guards/schema; stale head assertions → `0091_fs_p1_authority`. Recall stays disabled. |
 
 **Must not:** modify examined SHA `80ecfc7`; touch CC P1 `e21ad76` or CC P1-fix-3 `bc7bef6`; compose/renumber the 0091 sibling collision; merge; deploy; activate Recall; alter Founder authority.
 
