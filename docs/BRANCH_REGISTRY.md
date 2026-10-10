@@ -6,6 +6,26 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — Continuous conversation P1 fix-4 (2026-10-10)
+
+Isolated Cursor builder child of examined SHA `bc7bef61b6996b399e998d971a63e17a42ac8cb8`
+(`cursor/mainai-continuous-conversation-p1-fix-3`, RETURN_TO_BUILDER). New worktree; does
+**not** modify the examined `p1-fix-3` checkout, any examiner workspace, or frozen Founder
+Sovereignty `4ccf1ed0aeb0ea35301a38437b57e097c16f435d`.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-continuous-conversation-p1-fix-4-91c1` | pending | **Open isolated builder — five P1 remediations** | Freshness + `github_ref` source binding for current-branch observations (stale/checkout rows are UNKNOWN, not current truth). Stronger Founder-only/high-risk paraphrase gates (Recall activation, production release, destructive DB). EN/SV inbound+outbound relay without rewriting educational replies. DB-level one-active decision per `(owner_id, conversation_id, decision_key)` including concurrent writes (`0092_cc_one_active_decision`). Documents the 0091 ancestry collision. Does not merge, deploy, activate Recall, or expand authority. |
+
+**Alembic collision (do not compose):** this lane is `0089_continuous_conversation` →
+`0090_cc_thread_memory` → `0091_cc_p1_authority` → `0092_cc_one_active_decision`. Founder
+Sovereignty is the sibling head `0090_founder_sovereignty` → `0091_fs_p1_authority`. Both
+`0091_*` IDs fit `alembic_version.version_num varchar(32)` and must not be rebased, renumbered,
+or merged until an integration order is approved.
+
+**Must not:** modify examiner worktrees; modify frozen sovereignty `4ccf1ed`; rebase/renumber
+migrations "for safety".
+
 ## Post-Founder-Alpha — Continuous conversation P1 fix (2026-10-03)
 
 Child of `691490edd82fa4bff6188f4f038f7579ee4f3df5` in a **Cursor-owned builder worktree**.
@@ -13,11 +33,12 @@ Does **not** reuse Claude's examiner checkout of that SHA.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-continuous-conversation-p1-fix` | [#256](https://github.com/d1n095/LifeAI/pull/256) | **Open child lane — P1 completion** | Entity/subject binding (Founder Alpha frozen SHA `2fbe20a` != CC parent `691490e` != current P1 tip). Migration `0090_cc_thread_memory`: owner-scoped conversation FKs, governed canonical-conversation erase (`erase_own_continuous_conversation_children`), compaction/provenance/supersession, workspace leases (SHA share allowed, workspace share forbidden). Latest-20 live context, EN/SV no-relay, interrupt gating, occupancy RUNNING/IDLE/STALE/UNKNOWN bound to assignment identity, truthful capability (assignment execution not wired). Does not merge, deploy, or activate Recall. |
+| `cursor/mainai-continuous-conversation-p1-fix` | [#256](https://github.com/d1n095/LifeAI/pull/256) | **Open parent lane** | Entity/subject binding (Founder Alpha frozen SHA `2fbe20a` != CC parent `691490e` != current P1 tip). Migration `0090_cc_thread_memory`. |
+| `cursor/mainai-continuous-conversation-p1-fix-3` | — | **Examined frozen @ `bc7bef61` — RETURN_TO_BUILDER** | Prior P1-fix-3 candidate. Do not modify this worktree. Successor is `p1-fix-4-91c1`. |
 
-**Alembic:** child of `0089_continuous_conversation` is `0090_cc_thread_memory` (not another 0089; cousin sovereignty used `0090_founder_sovereignty` on a different head).
+**Alembic:** child of `0089_continuous_conversation` is `0090_cc_thread_memory` (not another 0089; cousin sovereignty used `0090_founder_sovereignty` on a different head). `0091_cc_p1_authority` vs `0091_fs_p1_authority` remains an uncomposed sibling-head collision.
 
-**Must not:** modify examiner worktree at `691490e`; modify sovereignty SHA `ffbdb63`.
+**Must not:** modify examiner worktree at `691490e`; modify sovereignty SHA `ffbdb63` or frozen `4ccf1ed`.
 
 ## Post-Founder-Alpha — MainAI continuous conversation foundation (2026-10-01)
 

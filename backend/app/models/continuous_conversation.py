@@ -1,11 +1,12 @@
-"""Continuous founder↔MainAI conversation tables (migrations 0089 + 0090 + 0091)."""
+"""Continuous founder↔MainAI conversation tables (migrations 0089 + 0090 + 0091 + 0092)."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -118,6 +119,14 @@ class FounderConversationDecision(Base):
             ["messages.id", "messages.conversation_id"],
             name="founder_conversation_decisions_message_conversation_fkey",
             ondelete="RESTRICT",
+        ),
+        Index(
+            "uq_founder_conversation_one_active_decision",
+            "owner_id",
+            "conversation_id",
+            "decision_key",
+            unique=True,
+            postgresql_where=sa_text("status = 'active' AND decision_key <> ''"),
         ),
     )
 
