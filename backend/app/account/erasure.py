@@ -592,6 +592,18 @@ def erase_account_data(
         if conversation_ids:
             db.query(Message).filter(Message.conversation_id.in_(conversation_ids)).delete(synchronize_session=False)
             db.query(Conversation).filter_by(user_id=owner_id).delete(synchronize_session=False)
+
+        # --- Founder sovereignty / family delegation (migration 0090+0091): append-only
+        # history and singleton Founder binding would otherwise block users ON DELETE CASCADE.
+        # founder_sovereignty_erasure_authorized() requires the account-erasure operation to
+        # still be active in personal_recall_erasure|personal_data_erasure with a current
+        # reauth receipt. Completing the operation first made DELETE /api/account, account
+        # lifecycle, Playwright deletion, and erase_account_data fail with
+        # "requires a governed account-erasure operation with current reauth receipt".
+        # Must run BEFORE account_erasure_complete_operation, while sessions that bind the
+        # receipt are still present. Does not loosen the authorized-op guard.
+        db.execute(sa_text("SELECT erase_own_founder_sovereignty_children()"))
+
         # Session rows below are needed to validate the receipt while closing the operation.
         # Both this transition and the remaining erasure are part of the same transaction.
         db.execute(
@@ -770,11 +782,6 @@ def erase_account_data(
         # goal_id already cascades from mainai_goals' own ON DELETE CASCADE, so this call is
         # about the DELETE-revoked/SECURITY DEFINER discipline, not an ordering requirement.
         db.execute(sa_text("SELECT erase_own_supervisor_goal_leases()"))
-
-        # --- Founder sovereignty / family delegation (migration 0090+0091): append-only
-        # history and singleton Founder binding would otherwise block users ON DELETE CASCADE.
-        # Governed erasure is the only deletion path; ordinary runtime remains append-only.
-        db.execute(sa_text("SELECT erase_own_founder_sovereignty_children()"))
 
         db.query(UsageLog).filter_by(user_id=owner_id).update({"user_id": None}, synchronize_session=False)
         # Audit trail: kept for security/compliance purposes independent of the erasure
