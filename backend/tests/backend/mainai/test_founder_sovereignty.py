@@ -12,10 +12,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 import app.mainai_founder_sovereignty as pkg
+from app.account.reauth import create_account_erasure_reauth_receipt
 from app.db import migration_engine
 from app.founder import FOUNDER_USER_ID
 from app.mainai_founder_boot.readiness import personal_recall_production_identity
@@ -60,7 +60,9 @@ from app.models.founder_sovereignty import (
     FounderPolicyHead,
     FounderPolicyVersion,
 )
+from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
+from app.security import hash_password, verify_password
 
 FORBIDDEN_CALLS = frozenset(
     {
@@ -74,8 +76,13 @@ FORBIDDEN_CALLS = frozenset(
 )
 
 
-def _bind_session(db, user_id) -> None:
+FOUNDER_PASSWORD = "TestFounderPassword123!"
+
+
+def _bind_session(db, user_id, access_jti: str | None = None) -> None:
     db.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(user_id)})
+    if access_jti is not None:
+        db.execute(text("SELECT set_config('app.current_access_jti', :jti, true)"), {"jti": access_jti})
 
 
 def _ensure_founder(db) -> User:
@@ -84,14 +91,73 @@ def _ensure_founder(db) -> User:
         user = User(
             id=FOUNDER_USER_ID,
             email="founder-sovereignty@lifeos.local",
-            password_hash="x",
+            password_hash=hash_password(FOUNDER_PASSWORD),
             role=UserRole.founder,
             email_verified=True,
         )
         db.add(user)
         db.flush()
+    elif not verify_password(FOUNDER_PASSWORD, user.password_hash):
+        user.password_hash = hash_password(FOUNDER_PASSWORD)
+        db.flush()
     _bind_session(db, FOUNDER_USER_ID)
     return user
+
+
+def _bind_founder_jti(db, user: User | None = None) -> str:
+    user = user or _ensure_founder(db)
+    jti = str(uuid.uuid4())
+    issued_at = datetime.now(timezone.utc)
+    user.sessions_valid_after = issued_at - timedelta(seconds=2)
+    db.add(
+        RefreshToken(
+            user_id=user.id,
+            family_id=uuid.uuid4(),
+            token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            access_jti=jti,
+            csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
+            created_at=issued_at,
+            expires_at=issued_at + timedelta(hours=1),
+        )
+    )
+    db.flush()
+    _bind_session(db, user.id, jti)
+    return jti
+
+
+def _current_jti(db) -> str | None:
+    return db.execute(text("SELECT NULLIF(current_setting('app.current_access_jti', true), '')")).scalar()
+
+
+def _issue_step_up(db, purpose: StepUpPurpose, *, password: str = FOUNDER_PASSWORD):
+    user = _ensure_founder(db)
+    if not _current_jti(db):
+        _bind_founder_jti(db, user)
+    return issue_founder_step_up(db, purpose=purpose, password=password)
+
+
+def _decide(db, request, mode, **kwargs):
+    kwargs.setdefault("expected_snapshot_hash", request.snapshot_hash)
+    return decide_approval(db, request_id=request.id, mode=mode, **kwargs)
+
+
+def _authorize_account_erasure(db, user: User, *, password: str = FOUNDER_PASSWORD):
+    jti = _current_jti(db) or _bind_founder_jti(db, user)
+    receipt = create_account_erasure_reauth_receipt(db, user=user, password=password, access_jti=jti)
+    _bind_session(db, user.id, jti)
+    operation_id = db.execute(
+        text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+        {"owner_id": str(user.id), "receipt_id": str(receipt.receipt_id)},
+    ).scalar_one()
+    db.execute(
+        text("SELECT account_erasure_set_phase(:operation_id, :owner_id, :phase)"),
+        {"operation_id": str(operation_id), "owner_id": str(user.id), "phase": "personal_recall_erasure"},
+    )
+    db.execute(
+        text("SELECT account_erasure_set_phase(:operation_id, :owner_id, :phase)"),
+        {"operation_id": str(operation_id), "owner_id": str(user.id), "phase": "personal_data_erasure"},
+    )
+    return operation_id
 
 
 def _family_user(db, label: str) -> User:
@@ -296,7 +362,7 @@ def test_founder_policy_versions_and_rollback(superuser_db):
         reason="bad imported rule",
     )
     set_workflow_lock(superuser_db, actor_id=FOUNDER_USER_ID, policy_key="workflow_rules", locked=True)
-    issue_founder_step_up(superuser_db, purpose=StepUpPurpose.POLICY_ROLLBACK)
+    _issue_step_up(superuser_db, StepUpPurpose.POLICY_ROLLBACK)
     restored = rollback_founder_policy(
         superuser_db,
         actor_id=FOUNDER_USER_ID,
@@ -327,7 +393,7 @@ def test_restore_to_known_good_version_not_adjacent_oscillation(superuser_db):
         superuser_db, actor_id=FOUNDER_USER_ID, actor_kind=ActorKind.FOUNDER,
         policy_key="recovery_rules", payload={"state": "worse-v3"}, reason="v3",
     )
-    issue_founder_step_up(superuser_db, purpose=StepUpPurpose.POLICY_ROLLBACK)
+    _issue_step_up(superuser_db, StepUpPurpose.POLICY_ROLLBACK)
     restored = restore_founder_policy_to_version(
         superuser_db,
         actor_kind=ActorKind.FOUNDER,
@@ -485,7 +551,7 @@ def test_partner_calendar_grant_excludes_private_and_policy(superuser_db):
     assert _authorize_as(superuser_db, partner, capability_key="family_calendar.read").allowed is False
     for key in ("family_calendar.read", "family_calendar.create", "family_calendar.update"):
         req = request_family_capability(superuser_db, principal_id=partner.id, capability_key=key, consequences="family schedule changes")
-        decide_approval(superuser_db, actor_id=FOUNDER_USER_ID, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW)
+        _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW, actor_id=FOUNDER_USER_ID)
         assert _authorize_as(superuser_db, partner, capability_key=key).allowed is True
     assert _authorize_as(superuser_db, partner, capability_key="founder_private_calendar.read").verdict is AuthorizationVerdict.DENIED_FOUNDER_ONLY
     assert _authorize_as(superuser_db, partner, capability_key="mainai.policy.change").verdict is AuthorizationVerdict.DENIED_FOUNDER_ONLY
@@ -513,7 +579,7 @@ def test_child_once_then_again_requires_approval(superuser_db):
     assert ctx.resource == "family_calendar"
     assert "Football" in ctx.requested_data["title"]
     assert ctx.snapshot_hash == req.snapshot_hash
-    decide_approval(superuser_db, actor_id=FOUNDER_USER_ID, request_id=req.id, mode=ApprovalMode.ALLOW_ONCE)
+    _decide(superuser_db, req, ApprovalMode.ALLOW_ONCE, actor_id=FOUNDER_USER_ID)
     first = _authorize_as(superuser_db, child, capability_key="family_calendar.create_event")
     assert first.allowed is True
     second = _authorize_as(superuser_db, child, capability_key="family_calendar.create_event")
@@ -529,7 +595,7 @@ def test_allow_once_two_thread_race(superuser_db):
         relationship=FamilyRelationship.CHILD, display_name="R",
     )
     req = request_family_capability(superuser_db, principal_id=child.id, capability_key="tv.control")
-    decide_approval(superuser_db, actor_id=FOUNDER_USER_ID, request_id=req.id, mode=ApprovalMode.ALLOW_ONCE)
+    _decide(superuser_db, req, ApprovalMode.ALLOW_ONCE, actor_id=FOUNDER_USER_ID)
     superuser_db.commit()
     allowed = []
     lock = threading.Lock()
@@ -565,7 +631,7 @@ def test_child_lights_do_not_imply_purchases(superuser_db):
         superuser_db, actor_id=FOUNDER_USER_ID, principal_id=child.id, relationship=FamilyRelationship.CHILD, display_name="Kid"
     )
     req = request_family_capability(superuser_db, principal_id=child.id, capability_key="lights.control")
-    decide_approval(superuser_db, actor_id=FOUNDER_USER_ID, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW)
+    _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW, actor_id=FOUNDER_USER_ID)
     assert _authorize_as(superuser_db, child, capability_key="lights.control").allowed is True
     assert _authorize_as(superuser_db, child, capability_key="purchases.create").allowed is False
 
@@ -601,9 +667,7 @@ def test_approval_action_and_data_and_limits_swap_denied(superuser_db):
         "UPDATE family_approval_requests SET requested_limits = :data::jsonb WHERE id = :id",
         {"id": str(req.id), "data": '{"max_amount": 99999}'},
     )
-    receipt = decide_approval(
-        superuser_db, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW, expected_snapshot_hash=seen,
-    )
+    receipt = _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW, expected_snapshot_hash=seen)
     assert receipt.snapshot_hash == seen
     cal = request_family_capability(
         superuser_db,
@@ -612,7 +676,7 @@ def test_approval_action_and_data_and_limits_swap_denied(superuser_db):
         requested_limits={"no_external_invites": True},
         consequences="family calendar only",
     )
-    decide_approval(superuser_db, request_id=cal.id, mode=ApprovalMode.ALWAYS_ALLOW)
+    _decide(superuser_db, cal, ApprovalMode.ALWAYS_ALLOW)
     assert _authorize_as(
         superuser_db, child, capability_key="calendar.create", resource="family",
         data={"title": "dinner"}, limits={"no_external_invites": True},
@@ -634,16 +698,16 @@ def test_revoke_and_expire_and_wrong_person(superuser_db):
         superuser_db, actor_id=FOUNDER_USER_ID, principal_id=partner.id, relationship=FamilyRelationship.PARTNER, display_name="P"
     )
     req = request_family_capability(superuser_db, principal_id=partner.id, capability_key="shopping_list.update")
-    decide_approval(superuser_db, actor_id=FOUNDER_USER_ID, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW)
+    _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW, actor_id=FOUNDER_USER_ID)
     grant = superuser_db.query(FamilyCapabilityGrant).filter_by(principal_id=partner.id, capability_key="shopping_list.update").one()
     revoke_grant(superuser_db, actor_id=FOUNDER_USER_ID, grant_id=grant.id)
     assert _authorize_as(superuser_db, partner, capability_key="shopping_list.update").verdict is AuthorizationVerdict.DENIED_REVOKED
     req2 = request_family_capability(superuser_db, principal_id=partner.id, capability_key="family_calendar.read")
-    decide_approval(
+    _decide(
         superuser_db,
+        req2,
+        ApprovalMode.ALLOW_FOR_DURATION,
         actor_id=FOUNDER_USER_ID,
-        request_id=req2.id,
-        mode=ApprovalMode.ALLOW_FOR_DURATION,
         duration=timedelta(minutes=5),
     )
     past = datetime.now(timezone.utc) + timedelta(minutes=6)
@@ -661,7 +725,7 @@ def test_revoked_grant_cannot_be_reactivated_or_widened(superuser_db):
         relationship=FamilyRelationship.CHILD, display_name="X",
     )
     req = request_family_capability(superuser_db, principal_id=child.id, capability_key="lights.control")
-    decide_approval(superuser_db, request_id=req.id, mode=ApprovalMode.ALLOW_ONCE)
+    _decide(superuser_db, req, ApprovalMode.ALLOW_ONCE)
     grant = superuser_db.query(FamilyCapabilityGrant).filter_by(principal_id=child.id, capability_key="lights.control").one()
     revoke_grant(superuser_db, grant_id=grant.id)
     _attack(
@@ -682,7 +746,7 @@ def test_copied_token_and_old_receipt_fail(superuser_db):
         superuser_db, actor_id=FOUNDER_USER_ID, principal_id=child.id, relationship=FamilyRelationship.CHILD, display_name="X"
     )
     req = request_family_capability(superuser_db, principal_id=child.id, capability_key="tv.control")
-    receipt = decide_approval(superuser_db, actor_id=FOUNDER_USER_ID, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW)
+    receipt = _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW, actor_id=FOUNDER_USER_ID)
     assert authorize_with_copied_token(token="copied-from-notification").verdict is AuthorizationVerdict.DENIED_COPIED_TOKEN
     assert authorize_with_receipt(
         superuser_db, receipt_id=receipt.id, principal_id=child.id, capability_key="tv.control"
@@ -696,7 +760,7 @@ def test_deny_and_block_future_requests(superuser_db):
         superuser_db, actor_id=FOUNDER_USER_ID, principal_id=child.id, relationship=FamilyRelationship.CHILD, display_name="X"
     )
     req = request_family_capability(superuser_db, principal_id=child.id, capability_key="purchases.create")
-    decide_approval(superuser_db, actor_id=FOUNDER_USER_ID, request_id=req.id, mode=ApprovalMode.DENY_AND_BLOCK)
+    _decide(superuser_db, req, ApprovalMode.DENY_AND_BLOCK, actor_id=FOUNDER_USER_ID)
     with pytest.raises(SovereigntyError, match="blocked"):
         request_family_capability(superuser_db, principal_id=child.id, capability_key="purchases.create")
 
@@ -802,6 +866,25 @@ def test_live_founder_remote_approval_endpoint(client, superuser_db):
     )
     assert decided.status_code == 200, decided.text
     assert decided.json()["decision"] == "allow_once"
+    missing = client.post(
+        "/api/founder-sovereignty/step-up",
+        json={"purpose": "workflow_unlock"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert missing.status_code == 422, missing.text
+    wrong = client.post(
+        "/api/founder-sovereignty/step-up",
+        json={"purpose": "workflow_unlock", "password": "wrong-password"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert wrong.status_code == 400, wrong.text
+    stepped = client.post(
+        "/api/founder-sovereignty/step-up",
+        json={"purpose": "workflow_unlock", "password": "TestFounderPassword123!"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert stepped.status_code == 200, stepped.text
+    assert stepped.json()["purpose"] == "workflow_unlock"
 
 
 def test_history_cannot_be_rewritten(superuser_db):
@@ -830,9 +913,11 @@ def test_founder_erasure_clears_policy_history_and_grants(superuser_db):
         superuser_db, principal_id=child.id, relationship=FamilyRelationship.CHILD, display_name="E",
     )
     req = request_family_capability(superuser_db, principal_id=child.id, capability_key="tv.control")
-    decide_approval(superuser_db, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW)
+    _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW)
     assert superuser_db.query(FounderPolicyVersion).filter_by(policy_key="erase_rules").count() == 1
     assert superuser_db.query(FamilyCapabilityGrant).count() >= 1
+    founder = _ensure_founder(superuser_db)
+    _authorize_account_erasure(superuser_db, founder)
     superuser_db.execute(text("SELECT erase_own_founder_sovereignty_children()"))
     superuser_db.expire_all()
     assert superuser_db.query(FounderPolicyVersion).filter_by(owner_id=FOUNDER_USER_ID).count() == 0
@@ -849,7 +934,7 @@ def test_cross_owner_family_rows_are_isolated(superuser_db, db_session):
         superuser_db, principal_id=child.id, relationship=FamilyRelationship.CHILD, display_name="I",
     )
     req = request_family_capability(superuser_db, principal_id=child.id, capability_key="tv.control")
-    decide_approval(superuser_db, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW)
+    _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW)
     superuser_db.commit()
     db_session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(child.id)})
     visible = db_session.execute(text("SELECT count(*) FROM family_capability_grants")).scalar()
@@ -864,3 +949,141 @@ def test_personal_recall_stays_disabled_and_identity_is_recomputed():
 
     assert inspect.signature(build_recall_router).parameters["enabled"].default is False
     print(f"PERSONAL_RECALL_IDENTITY={identity}")
+
+
+def test_self_set_erasure_guc_is_not_authority(db_session, superuser_db):
+    founder = _ensure_founder(superuser_db)
+    apply_founder_policy(
+        superuser_db, actor_kind=ActorKind.FOUNDER, policy_key="guc_guard", payload={"v": 1}, reason="keep"
+    )
+    superuser_db.commit()
+    db_session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(founder.id)})
+    db_session.execute(text("SELECT set_config('app.founder_sovereignty_erasure', 'on', true)"))
+    _attack(db_session, "DELETE FROM founder_policy_versions WHERE policy_key = 'guc_guard'")
+    _attack(db_session, "SELECT erase_own_founder_sovereignty_children()")
+    remaining = superuser_db.execute(
+        text("SELECT count(*) FROM founder_policy_versions WHERE policy_key = 'guc_guard'")
+    ).scalar()
+    assert remaining == 1
+
+
+def test_runtime_role_cannot_mint_step_up_or_unlock(db_session, superuser_db):
+    founder = _ensure_founder(superuser_db)
+    apply_founder_policy(
+        superuser_db, actor_kind=ActorKind.FOUNDER, policy_key="runtime_lock", payload={"v": 1}, reason="v1"
+    )
+    set_workflow_lock(superuser_db, policy_key="runtime_lock", locked=True)
+    superuser_db.commit()
+    db_session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(founder.id)})
+    db_session.execute(text("SELECT set_config('app.current_access_jti', 'forged-jti-value', true)"))
+    db_session.execute(text("SELECT set_config('app.founder_step_up_issue', 'on', true)"))
+    _attack(
+        db_session,
+        """
+        INSERT INTO founder_step_up_receipts (owner_id, purpose, session_jti, expires_at)
+        VALUES (:fid, 'workflow_unlock', 'forged-jti-value', now() + interval '15 minutes')
+        """,
+        {"fid": str(FOUNDER_USER_ID)},
+    )
+    _attack(
+        db_session,
+        "UPDATE founder_policy_heads SET workflow_locked = false WHERE policy_key = 'runtime_lock'",
+    )
+    head = superuser_db.get(FounderPolicyHead, {"owner_id": FOUNDER_USER_ID, "policy_key": "runtime_lock"})
+    assert head is not None and head.workflow_locked is True
+
+
+def test_step_up_requires_password_and_current_jti(superuser_db):
+    founder = _ensure_founder(superuser_db)
+    with pytest.raises(SovereigntyError, match="session JTI"):
+        issue_founder_step_up(superuser_db, purpose=StepUpPurpose.WORKFLOW_UNLOCK, password=FOUNDER_PASSWORD)
+    _bind_founder_jti(superuser_db, founder)
+    with pytest.raises(SovereigntyError, match="re-authentication"):
+        issue_founder_step_up(superuser_db, purpose=StepUpPurpose.WORKFLOW_UNLOCK, password="wrong-password")
+    receipt = issue_founder_step_up(superuser_db, purpose=StepUpPurpose.WORKFLOW_UNLOCK, password=FOUNDER_PASSWORD)
+    assert receipt.session_jti == _current_jti(superuser_db)
+    assert receipt.consumed_at is None
+
+
+def test_decision_requires_snapshot_hash_and_rejects_limit_swap(superuser_db):
+    _ensure_founder(superuser_db)
+    child = _family_user(superuser_db, "snap-mandatory")
+    add_family_member(
+        superuser_db, principal_id=child.id, relationship=FamilyRelationship.CHILD, display_name="S"
+    )
+    req = request_family_capability(
+        superuser_db,
+        principal_id=child.id,
+        capability_key="lights.control",
+        requested_limits={"room": "kitchen"},
+    )
+    with pytest.raises(SovereigntyError, match="snapshot"):
+        decide_approval(superuser_db, request_id=req.id, mode=ApprovalMode.ALWAYS_ALLOW, expected_snapshot_hash="")
+    with pytest.raises(SovereigntyError, match="snapshot"):
+        decide_approval(
+            superuser_db,
+            request_id=req.id,
+            mode=ApprovalMode.ALWAYS_ALLOW,
+            expected_snapshot_hash="0" * 64,
+        )
+    with pytest.raises(SovereigntyError, match="substitute"):
+        decide_approval(
+            superuser_db,
+            request_id=req.id,
+            mode=ApprovalMode.ALWAYS_ALLOW,
+            expected_snapshot_hash=req.snapshot_hash,
+            limits={"room": "whole-house", "admin": True},
+        )
+    _attack(
+        superuser_db,
+        """
+        INSERT INTO family_approval_receipts (owner_id, request_id, decision, receipt_token_hash, snapshot_hash)
+        VALUES (:fid, :rid, 'always_allow', 'deadbeef', :hash)
+        """,
+        {"fid": str(FOUNDER_USER_ID), "rid": str(req.id), "hash": "1" * 64},
+    )
+    receipt = _decide(superuser_db, req, ApprovalMode.ALWAYS_ALLOW)
+    assert receipt.snapshot_hash == req.snapshot_hash
+
+
+def test_runtime_role_cannot_substitute_approval_action(db_session, superuser_db):
+    founder = _ensure_founder(superuser_db)
+    child = _family_user(superuser_db, "runtime-swap")
+    add_family_member(
+        superuser_db, principal_id=child.id, relationship=FamilyRelationship.CHILD, display_name="R"
+    )
+    req = request_family_capability(
+        superuser_db, principal_id=child.id, capability_key="lights.control", consequences="kitchen only"
+    )
+    superuser_db.commit()
+    db_session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(founder.id)})
+    _attack(
+        db_session,
+        "UPDATE family_approval_requests SET capability_key = 'purchases.create', action = 'create', resource = 'purchases' WHERE id = :id",
+        {"id": str(req.id)},
+    )
+    _attack(
+        db_session,
+        """
+        INSERT INTO family_approval_receipts (owner_id, request_id, decision, receipt_token_hash, snapshot_hash)
+        VALUES (:fid, :rid, 'always_allow', 'forged', :hash)
+        """,
+        {"fid": str(FOUNDER_USER_ID), "rid": str(req.id), "hash": "a" * 64},
+    )
+
+
+def test_genuine_step_up_unlocks_and_wrong_jti_does_not(superuser_db):
+    founder = _ensure_founder(superuser_db)
+    apply_founder_policy(
+        superuser_db, actor_kind=ActorKind.FOUNDER, policy_key="jti_lock", payload={"v": 1}, reason="v1"
+    )
+    set_workflow_lock(superuser_db, policy_key="jti_lock", locked=True)
+    receipt = _issue_step_up(superuser_db, StepUpPurpose.WORKFLOW_UNLOCK)
+    other_jti = str(uuid.uuid4())
+    superuser_db.execute(text("SELECT set_config('app.current_access_jti', :jti, true)"), {"jti": other_jti})
+    with pytest.raises(SovereigntyError, match="step-up"):
+        set_workflow_lock(superuser_db, policy_key="jti_lock", locked=False)
+    _bind_session(superuser_db, founder.id, receipt.session_jti)
+    set_workflow_lock(superuser_db, policy_key="jti_lock", locked=False)
+    head = superuser_db.get(FounderPolicyHead, {"owner_id": FOUNDER_USER_ID, "policy_key": "jti_lock"})
+    assert head is not None and head.workflow_locked is False
