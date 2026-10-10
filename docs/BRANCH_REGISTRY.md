@@ -22,7 +22,7 @@ before any merge revision.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-founder-sovereignty-p1-fix-3-91c1` | (opening) | **Open isolated builder child of `4ccf1ed`** | Call `erase_own_founder_sovereignty_children()` while the account-erasure operation is still `active` in `personal_data_erasure` (before `account_erasure_complete_operation`) so DELETE `/api/account`, account-lifecycle, Playwright deletion, and `erase_account_data` succeed without loosening `founder_sovereignty_erasure_authorized()`. Make runtime-role unlock/substitution attacks raise under CI `mainai_app` (zero-row UPDATE is not a pass). Recall stays disabled. |
+| `cursor/mainai-founder-sovereignty-p1-fix-3-91c1` | [#261](https://github.com/d1n095/LifeAI/pull/261) | **Open isolated builder child of `4ccf1ed`** | Call `erase_own_founder_sovereignty_children()` while the account-erasure operation is still `active` in `personal_data_erasure` (before `account_erasure_complete_operation`) so DELETE `/api/account`, account-lifecycle, Playwright deletion, and `erase_account_data` succeed without loosening `founder_sovereignty_erasure_authorized()`. Make runtime-role unlock/substitution attacks raise under CI `mainai_app` (zero-row UPDATE is not a pass). Recall stays disabled. |
 
 **Must not:** modify frozen SHA `4ccf1ed` or its worktree; touch CC P1-fix-4 `2d9f62e` / PR #260; compose/renumber the 0091 (or 0092) sibling collision; merge; deploy; activate Recall; alter Founder authority.
 
