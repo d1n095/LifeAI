@@ -32,10 +32,10 @@ router = APIRouter(prefix="/api/founder-sovereignty", tags=["founder-sovereignty
 
 class DecideIn(BaseModel):
     mode: ApprovalMode
+    expected_snapshot_hash: str
     duration_seconds: int | None = None
     until: datetime | None = None
     limits: dict | None = None
-    expected_snapshot_hash: str | None = None
 
 
 class RollbackIn(BaseModel):
@@ -51,6 +51,7 @@ class RestoreIn(BaseModel):
 
 class StepUpIn(BaseModel):
     purpose: StepUpPurpose
+    password: str
 
 
 @router.get("/approvals")
@@ -144,7 +145,7 @@ def restore(payload: RestoreIn, db: Session = Depends(get_db), user: User = Depe
 @router.post("/step-up")
 def step_up(payload: StepUpIn, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     try:
-        receipt = issue_founder_step_up(db, purpose=payload.purpose)
+        receipt = issue_founder_step_up(db, purpose=payload.purpose, password=payload.password)
         db.commit()
     except SovereigntyError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc

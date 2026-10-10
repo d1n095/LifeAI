@@ -135,6 +135,7 @@ RLS_STATEMENTS = [
             "family_capability_grants",
             "userai_tenant_boundaries",
             "founder_step_up_receipts",
+            "founder_step_up_reauth_receipts",
             "family_grant_consumption_receipts",
         )
         for statement in (f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY", f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
@@ -363,6 +364,7 @@ POLICY_DEFINITIONS = [
             "family_capability_grants",
             "userai_tenant_boundaries",
             "founder_step_up_receipts",
+            "founder_step_up_reauth_receipts",
             "family_grant_consumption_receipts",
         )
     ],
@@ -671,6 +673,7 @@ _MAINAI_EXECUTION_TABLES = (
     "family_capability_grants",
     "userai_tenant_boundaries",
     "founder_step_up_receipts",
+    "founder_step_up_reauth_receipts",
     "family_grant_consumption_receipts",
     "kernel_security_invariants",
     "family_capability_catalog",
@@ -781,6 +784,31 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     },
     {"name": "erase_own_candidate_learning_signal_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "erase_own_founder_sovereignty_children", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
+    {
+        "name": "founder_sovereignty_erasure_authorized",
+        "identity_args": "",
+        "return_type": "boolean",
+        "mainai_app_execute": True,
+        "security_definer": False,
+    },
+    {
+        "name": "issue_founder_step_up_from_reauth",
+        "identity_args": "p_purpose character varying, p_receipt_id uuid",
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
+    {
+        "name": "consume_founder_step_up",
+        "identity_args": "p_purpose character varying",
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
+    {
+        "name": "consume_founder_unlock_step_up",
+        "identity_args": "",
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
     {
         "name": "consume_family_capability_grant_once",
         "identity_args": "p_grant_id uuid",
@@ -1120,11 +1148,18 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_approval_receipts FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_capability_grants FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON userai_tenant_boundaries FROM mainai_app"))
-        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_step_up_receipts FROM mainai_app"))
+        conn.execute(text("GRANT SELECT ON founder_step_up_receipts TO mainai_app"))
+        conn.execute(text("GRANT SELECT ON founder_step_up_reauth_receipts TO mainai_app"))
+        conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_step_up_receipts FROM mainai_app"))
+        conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_step_up_reauth_receipts FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_grant_consumption_receipts FROM mainai_app"))
         conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON kernel_security_invariants FROM mainai_app"))
         conn.execute(text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON family_capability_catalog FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_founder_sovereignty_children() TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION founder_sovereignty_erasure_authorized() TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION issue_founder_step_up_from_reauth(varchar, uuid) TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION consume_founder_step_up(varchar) TO mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION consume_founder_unlock_step_up() TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION consume_family_capability_grant_once(uuid) TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION family_capability_risk(varchar) TO mainai_app"))
 
@@ -1208,7 +1243,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("family_approval_receipts", frozenset({"SELECT", "INSERT"})),
             ("family_capability_grants", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("userai_tenant_boundaries", frozenset({"SELECT", "INSERT", "UPDATE"})),
-            ("founder_step_up_receipts", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("founder_step_up_receipts", frozenset({"SELECT"})),
+            ("founder_step_up_reauth_receipts", frozenset({"SELECT"})),
             ("family_grant_consumption_receipts", frozenset({"SELECT", "INSERT"})),
             ("kernel_security_invariants", frozenset({"SELECT"})),
             ("family_capability_catalog", frozenset({"SELECT"})),

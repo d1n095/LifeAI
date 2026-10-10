@@ -27,6 +27,8 @@ from app.mainai_founder_sovereignty.identity import (
     session_user_id,
 )
 from app.mainai_founder_sovereignty.kernel import refuse_kernel_mutation
+from app.mainai_founder_sovereignty.reauth import create_founder_step_up_reauth_receipt
+from app.models.user import User
 from app.mainai_founder_sovereignty.types import (
     ActorKind,
     ApprovalContext,
@@ -83,7 +85,7 @@ def _hash_token(token: str) -> str:
 
 
 def bind_founder_instance(db: Session, *, actor_id: UUID | None = None) -> FounderInstanceBinding:
-    uid = require_authenticated_founder(db, claimed_actor_id=actor_id)
+    require_authenticated_founder(db, claimed_actor_id=actor_id)
     db.execute(text("SELECT pg_advisory_xact_lock(hashtext('founder_instance_bind'))"))
     existing = db.query(FounderInstanceBinding).one_or_none()
     if existing is not None:
@@ -297,7 +299,7 @@ def set_workflow_lock(
     if head is None:
         raise SovereigntyError("no_policy", "no policy head to lock or unlock")
     if head.workflow_locked and not locked:
-        require_recent_step_up(db, StepUpPurpose.WORKFLOW_UNLOCK)
+        require_recent_step_up(db, StepUpPurpose.WORKFLOW_UNLOCK, consume=False)
     head.workflow_locked = locked
     head.updated_at = _now()
     db.flush()
@@ -335,34 +337,54 @@ def refuse_non_founder_policy_source(source: PolicySource) -> None:
         )
 
 
+def _current_access_jti(db: Session) -> str:
+    jti = db.execute(text("SELECT NULLIF(current_setting('app.current_access_jti', true), '')")).scalar()
+    if not jti:
+        raise SovereigntyError("step_up_jti_required", "step-up requires the verified current session JTI")
+    return str(jti)
+
+
 def issue_founder_step_up(
     db: Session,
     *,
     purpose: StepUpPurpose,
+    password: str,
     ttl: timedelta | None = None,
 ) -> FounderStepUpReceipt:
+    del ttl  # TTL is enforced by issue_founder_step_up_from_reauth
     require_authenticated_founder(db)
-    jti = db.execute(text("SELECT COALESCE(NULLIF(current_setting('app.current_access_jti', true), ''), 'session')")).scalar()
-    row = FounderStepUpReceipt(
-        owner_id=FOUNDER_USER_ID,
-        purpose=purpose.value,
-        session_jti=str(jti or "session"),
-        verified_at=_now(),
-        expires_at=_now() + (ttl or _STEP_UP_TTL),
-        created_at=_now(),
+    user = db.get(User, FOUNDER_USER_ID)
+    if user is None:
+        raise SovereigntyError("not_founder", "governed Founder binding requires the authenticated Founder row")
+    jti = _current_access_jti(db)
+    reauth = create_founder_step_up_reauth_receipt(
+        db,
+        user=user,
+        password=password,
+        access_jti=jti,
+        purpose=purpose,
     )
-    db.add(row)
-    db.flush()
+    row_id = db.execute(
+        text("SELECT issue_founder_step_up_from_reauth(:purpose, :receipt_id)"),
+        {"purpose": purpose.value, "receipt_id": str(reauth.receipt_id)},
+    ).scalar()
+    if row_id is None:
+        raise SovereigntyError("step_up_required", "Founder step-up could not be issued after re-authentication")
+    row = db.get(FounderStepUpReceipt, row_id)
+    if row is None:
+        raise SovereigntyError("step_up_required", "Founder step-up receipt was not visible after issue")
     return row
 
 
-def require_recent_step_up(db: Session, purpose: StepUpPurpose) -> FounderStepUpReceipt:
+def require_recent_step_up(db: Session, purpose: StepUpPurpose, *, consume: bool = True) -> FounderStepUpReceipt:
     require_authenticated_founder(db)
+    jti = _current_access_jti(db)
     row = (
         db.query(FounderStepUpReceipt)
         .filter(
             FounderStepUpReceipt.owner_id == FOUNDER_USER_ID,
             FounderStepUpReceipt.purpose == purpose.value,
+            FounderStepUpReceipt.session_jti == jti,
             FounderStepUpReceipt.consumed_at.is_(None),
             FounderStepUpReceipt.expires_at > _now(),
         )
@@ -371,6 +393,9 @@ def require_recent_step_up(db: Session, purpose: StepUpPurpose) -> FounderStepUp
     )
     if row is None:
         raise SovereigntyError("step_up_required", f"high-risk Founder action {purpose.value} requires a recent verified step-up receipt")
+    if consume:
+        db.execute(text("SELECT consume_founder_step_up(:purpose)"), {"purpose": purpose.value})
+        db.refresh(row)
     return row
 
 
@@ -512,17 +537,25 @@ def decide_approval(
     until: datetime | None = None,
     limits: dict | None = None,
     session_id: str | None = None,
-    expected_snapshot_hash: str | None = None,
+    expected_snapshot_hash: str,
 ) -> FamilyApprovalReceipt:
     require_authenticated_founder(db, claimed_actor_id=actor_id)
     request = db.get(FamilyApprovalRequest, request_id)
     if request is None or request.status != "pending":
         raise SovereigntyError("no_pending_request", "approval request is not pending")
+    if not expected_snapshot_hash:
+        raise SovereigntyError("snapshot_required", "decision requires the exact snapshot hash the Founder saw")
     live_hash = _recompute_request_hash(request)
     if live_hash != request.snapshot_hash:
         raise SovereigntyError("snapshot_mismatch", "approval request was rewritten after presentation; create a NEW request")
-    if expected_snapshot_hash is not None and expected_snapshot_hash != request.snapshot_hash:
+    if expected_snapshot_hash != request.snapshot_hash:
         raise SovereigntyError("snapshot_mismatch", "decision receipt must bind to the exact snapshot hash the Founder saw")
+    requested_limits = dict(request.requested_limits or {})
+    if limits is not None and dict(limits) != requested_limits:
+        raise SovereigntyError(
+            "limit_substitution",
+            "decision cannot widen or substitute requested limits; create a NEW request",
+        )
     if mode in {ApprovalMode.ALWAYS_ALLOW, ApprovalMode.ALLOW_UNTIL_DATE} and request.risk_tier in {RiskTier.HIGH.value, RiskTier.FOUNDER_ONLY.value}:
         require_recent_step_up(db, StepUpPurpose.PERMANENT_HIGH_RISK_DELEGATION)
     request.status = "decided"
@@ -552,8 +585,6 @@ def decide_approval(
             raise SovereigntyError("until_exceeds_maximum", "ALLOW_UNTIL_DATE exceeds Founder maximum duration")
         expires = until
     grant_limits = dict(request.requested_limits or {})
-    if limits:
-        grant_limits.update(limits)
     if mode is not ApprovalMode.DENY_AND_BLOCK:
         db.add(
             FamilyCapabilityGrant(

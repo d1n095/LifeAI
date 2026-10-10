@@ -6,6 +6,24 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — Founder sovereignty P1-fix-2 (2026-10-10)
+
+Child of `cursor/mainai-founder-sovereignty-family-delegation-p1-fix` @ exact
+`80ecfc73270fd10b7409dd3c36af9c8a6fbd07ff` (examined SHA, RETURN_TO_BUILDER). Built in a
+**new isolated Cursor builder worktree**. Does **not** modify the examined parent SHA or
+reuse the frozen examiner/builder worktree that holds `80ecfc7`.
+
+Does **not** independently resolve or compose the sibling Alembic collision with Continuous
+Conversation (`0090_cc_thread_memory` → `0091_cc_p1_authority`). This lane stays
+`0090_founder_sovereignty` → `0091_fs_p1_authority` and waits for CC's final accepted
+migration lineage before any merge revision.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-founder-sovereignty-p1-fix-2-91c1` | [#259](https://github.com/d1n095/LifeAI/pull/259) | **Open isolated builder child of `80ecfc7`** | Remove self-settable GUC erasure bypass; genuine Founder password re-auth for step-up bound to current session JTI; `mainai_app` cannot mint step-up receipts or unlock without a definer-issued JTI-bound receipt; mandatory approval snapshot-hash matching and no limit/action substitution; sovereignty erasure bound to an independently authorized active account-erasure operation; complete 0091 downgrade restoring 0090 guards/schema; stale head assertions → `0091_fs_p1_authority`. Recall stays disabled. |
+
+**Must not:** modify examined SHA `80ecfc7`; touch CC P1 `e21ad76` or CC P1-fix-3 `bc7bef6`; compose/renumber the 0091 sibling collision; merge; deploy; activate Recall; alter Founder authority.
+
 ## Post-Founder-Alpha — Founder sovereignty P1 authority fix (2026-10-05)
 
 Child of `cursor/mainai-founder-sovereignty-family-delegation` @ exact

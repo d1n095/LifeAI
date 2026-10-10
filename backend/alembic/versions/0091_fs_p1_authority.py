@@ -6,7 +6,14 @@ Revision ID: 0091_fs_p1_authority
 Revises: 0090_founder_sovereignty
 Create Date: 2026-10-05
 
+Sibling collision (do not compose here): Continuous Conversation's accepted lineage
+is `0090_cc_thread_memory` → `0091_cc_p1_authority`. This lane stays
+`0090_founder_sovereignty` → `0091_fs_p1_authority`. Alembic `version_num` is
+varchar(32). Wait for CC's final accepted head before any merge revision. Do not
+renumber, rebase, or independently resolve that collision in this file.
+
 Does not grant merge, deploy, Recall, or database-superuser authority.
+SELF-SET GUC != AUTHORITY. PUBLIC FOUNDER UUID != AUTHORITY.
 """
 
 from alembic import op
@@ -55,6 +62,7 @@ CATALOG_ROWS = (
 
 OWNER_SCOPED_NEW = (
     "founder_step_up_receipts",
+    "founder_step_up_reauth_receipts",
     "family_grant_consumption_receipts",
 )
 
@@ -120,14 +128,30 @@ def upgrade() -> None:
             id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
             owner_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             purpose varchar(64) NOT NULL,
-            session_jti varchar(128) NOT NULL DEFAULT '',
+            session_jti varchar(128) NOT NULL,
             verified_at timestamptz NOT NULL DEFAULT now(),
             expires_at timestamptz NOT NULL,
             consumed_at timestamptz,
             created_at timestamptz NOT NULL DEFAULT now(),
             CONSTRAINT ck_founder_step_up_purpose CHECK (purpose IN (
                 'policy_rollback','workflow_unlock','permanent_high_risk_delegation','founder_only_capability_change'
-            ))
+            )),
+            CONSTRAINT ck_founder_step_up_jti CHECK (length(session_jti) >= 8)
+        );
+
+        CREATE TABLE IF NOT EXISTS founder_step_up_reauth_receipts (
+            receipt_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            owner_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            access_jti varchar(128) NOT NULL,
+            purpose varchar(64) NOT NULL,
+            issued_at timestamptz NOT NULL DEFAULT now(),
+            expires_at timestamptz NOT NULL,
+            consumed_at timestamptz,
+            consumed_by_step_up_id uuid,
+            CONSTRAINT ck_founder_step_up_reauth_purpose CHECK (purpose IN (
+                'policy_rollback','workflow_unlock','permanent_high_risk_delegation','founder_only_capability_change'
+            )),
+            CONSTRAINT ck_founder_step_up_reauth_jti CHECK (length(access_jti) >= 8)
         );
 
         CREATE TABLE IF NOT EXISTS family_capability_catalog (
@@ -174,10 +198,29 @@ def upgrade() -> None:
         REVOKE ALL ON FUNCTION family_capability_risk(varchar) FROM PUBLIC;
         GRANT EXECUTE ON FUNCTION family_capability_risk(varchar) TO mainai_app;
 
-        CREATE OR REPLACE FUNCTION founder_sovereignty_erasure_on() RETURNS boolean
-        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        DROP FUNCTION IF EXISTS founder_sovereignty_erasure_on();
+
+        CREATE OR REPLACE FUNCTION founder_sovereignty_erasure_authorized() RETURNS boolean
+        LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+        DECLARE
+            v_owner_id uuid := NULLIF(current_setting('app.current_user_id', true), '')::uuid;
         BEGIN
-            RETURN current_setting('app.founder_sovereignty_erasure', true) = 'on';
+            IF v_owner_id IS NULL THEN
+                RETURN false;
+            END IF;
+            RETURN EXISTS (
+                SELECT 1
+                FROM public.account_erasure_operations op
+                JOIN public.account_erasure_reauth_receipts rr
+                    ON rr.receipt_id = op.reauth_receipt_id
+                WHERE op.owner_id = v_owner_id
+                  AND op.status = 'active'
+                  AND op.phase IN ('personal_recall_erasure', 'personal_data_erasure')
+                  AND rr.owner_id = v_owner_id
+                  AND rr.consumed_by_operation_id = op.operation_id
+                  AND rr.consumed_at IS NOT NULL
+                  AND public.account_erasure_receipt_session_current(v_owner_id, rr.access_jti)
+            );
         END $$;
 
         CREATE OR REPLACE FUNCTION founder_authenticated_session_uid() RETURNS uuid
@@ -203,7 +246,7 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION founder_sovereignty_deny_mutation() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -213,7 +256,7 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION founder_instance_bindings_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -232,7 +275,7 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION founder_policy_versions_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -253,11 +296,127 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION kernel_security_invariants_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
             RAISE EXCEPTION 'kernel security invariants cannot be inserted or altered at runtime';
+        END $$;
+
+        CREATE OR REPLACE FUNCTION consume_founder_step_up(p_purpose varchar) RETURNS uuid
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        DECLARE
+            v_uid uuid;
+            v_jti text;
+            v_id uuid;
+        BEGIN
+            v_uid := public.founder_authenticated_session_uid();
+            v_jti := NULLIF(current_setting('app.current_access_jti', true), '');
+            IF v_jti IS NULL OR length(v_jti) < 8 THEN
+                RAISE EXCEPTION 'step-up consume requires a verified current session JTI';
+            END IF;
+            UPDATE public.founder_step_up_receipts r
+               SET consumed_at = now()
+             WHERE r.id = (
+                SELECT r2.id
+                  FROM public.founder_step_up_receipts r2
+                 WHERE r2.owner_id = v_uid
+                   AND r2.purpose = p_purpose
+                   AND r2.session_jti = v_jti
+                   AND r2.consumed_at IS NULL
+                   AND r2.expires_at > now()
+                 ORDER BY r2.verified_at DESC
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+               AND r.consumed_at IS NULL
+            RETURNING r.id INTO v_id;
+            IF v_id IS NULL THEN
+                RAISE EXCEPTION 'high-risk Founder action requires a verified step-up receipt bound to the current session';
+            END IF;
+            RETURN v_id;
+        END $$;
+
+        CREATE OR REPLACE FUNCTION consume_founder_unlock_step_up() RETURNS uuid
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        DECLARE
+            v_uid uuid;
+            v_jti text;
+            v_id uuid;
+        BEGIN
+            v_uid := public.founder_authenticated_session_uid();
+            v_jti := NULLIF(current_setting('app.current_access_jti', true), '');
+            IF v_jti IS NULL OR length(v_jti) < 8 THEN
+                RAISE EXCEPTION 'workflow unlock requires a verified current session JTI';
+            END IF;
+            UPDATE public.founder_step_up_receipts r
+               SET consumed_at = now()
+             WHERE r.id = (
+                SELECT r2.id
+                  FROM public.founder_step_up_receipts r2
+                 WHERE r2.owner_id = v_uid
+                   AND r2.purpose IN ('workflow_unlock','policy_rollback')
+                   AND r2.session_jti = v_jti
+                   AND r2.consumed_at IS NULL
+                   AND r2.expires_at > now()
+                 ORDER BY r2.verified_at DESC
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+               AND r.consumed_at IS NULL
+            RETURNING r.id INTO v_id;
+            IF v_id IS NULL THEN
+                RAISE EXCEPTION 'workflow unlock requires a verified Founder step-up receipt bound to the current session';
+            END IF;
+            RETURN v_id;
+        END $$;
+
+        CREATE OR REPLACE FUNCTION issue_founder_step_up_from_reauth(p_purpose varchar, p_receipt_id uuid) RETURNS uuid
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+        DECLARE
+            v_uid uuid;
+            v_jti text;
+            v_reauth uuid;
+            v_id uuid;
+        BEGIN
+            v_uid := public.founder_authenticated_session_uid();
+            v_jti := NULLIF(current_setting('app.current_access_jti', true), '');
+            IF v_jti IS NULL OR length(v_jti) < 8 THEN
+                RAISE EXCEPTION 'step-up requires the verified current session JTI';
+            END IF;
+            IF p_purpose NOT IN (
+                'policy_rollback','workflow_unlock','permanent_high_risk_delegation','founder_only_capability_change'
+            ) THEN
+                RAISE EXCEPTION 'unknown Founder step-up purpose';
+            END IF;
+            SELECT rr.receipt_id INTO v_reauth
+              FROM public.founder_step_up_reauth_receipts rr
+             WHERE rr.receipt_id = p_receipt_id
+               AND rr.owner_id = v_uid
+               AND rr.purpose = p_purpose
+               AND rr.access_jti = v_jti
+               AND rr.consumed_at IS NULL
+               AND rr.expires_at > now()
+             FOR UPDATE;
+            IF v_reauth IS NULL THEN
+                RAISE EXCEPTION 'step-up requires a current Founder re-authentication receipt bound to this session';
+            END IF;
+            IF NOT public.account_erasure_receipt_session_current(v_uid, v_jti) THEN
+                RAISE EXCEPTION 'step-up re-authentication is not bound to a current Founder session';
+            END IF;
+            PERFORM set_config('app.founder_step_up_issue', 'on', true);
+            INSERT INTO public.founder_step_up_receipts (
+                owner_id, purpose, session_jti, verified_at, expires_at, created_at
+            ) VALUES (
+                v_uid, p_purpose, v_jti, now(), now() + interval '15 minutes', now()
+            ) RETURNING id INTO v_id;
+            UPDATE public.founder_step_up_reauth_receipts
+               SET consumed_at = now(), consumed_by_step_up_id = v_id
+             WHERE receipt_id = v_reauth AND consumed_at IS NULL;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'step-up re-authentication receipt was already consumed';
+            END IF;
+            RETURN v_id;
         END $$;
 
         CREATE OR REPLACE FUNCTION founder_policy_heads_guard() RETURNS trigger
@@ -266,9 +425,8 @@ def upgrade() -> None:
             v_key text;
             v_owner uuid;
             v_class text;
-            v_step uuid;
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -289,25 +447,7 @@ def upgrade() -> None:
                     RAISE EXCEPTION 'policy head identity is immutable';
                 END IF;
                 IF OLD.workflow_locked IS TRUE AND NEW.workflow_locked IS FALSE THEN
-                    SELECT r.id INTO v_step
-                      FROM public.founder_step_up_receipts r
-                     WHERE r.owner_id = NEW.owner_id
-                       AND r.purpose IN ('workflow_unlock','policy_rollback')
-                       AND r.consumed_at IS NULL
-                       AND r.expires_at > now()
-                       AND r.verified_at IS NOT NULL
-                     ORDER BY r.verified_at DESC
-                     LIMIT 1
-                     FOR UPDATE SKIP LOCKED;
-                    IF v_step IS NULL THEN
-                        RAISE EXCEPTION 'workflow unlock requires a verified Founder step-up receipt';
-                    END IF;
-                    UPDATE public.founder_step_up_receipts
-                       SET consumed_at = now()
-                     WHERE id = v_step AND consumed_at IS NULL;
-                    IF NOT FOUND THEN
-                        RAISE EXCEPTION 'workflow unlock requires a verified Founder step-up receipt';
-                    END IF;
+                    PERFORM public.consume_founder_unlock_step_up();
                 END IF;
             END IF;
             RETURN NEW;
@@ -319,7 +459,7 @@ def upgrade() -> None:
             v_session uuid;
             v_tier text;
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -369,12 +509,38 @@ def upgrade() -> None:
             RETURN NEW;
         END $$;
 
+        CREATE OR REPLACE FUNCTION family_approval_receipts_guard() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        BEGIN
+            IF public.founder_sovereignty_erasure_authorized() THEN
+                IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+                RETURN NEW;
+            END IF;
+            IF TG_OP IN ('UPDATE','DELETE') THEN
+                RAISE EXCEPTION 'append-only founder sovereignty history cannot be rewritten';
+            END IF;
+            PERFORM public.founder_authenticated_session_uid();
+            IF NEW.snapshot_hash IS NULL OR length(NEW.snapshot_hash) < 32 THEN
+                RAISE EXCEPTION 'approval receipt requires the exact request snapshot hash';
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1
+                  FROM public.family_approval_requests r
+                 WHERE r.id = NEW.request_id
+                   AND r.owner_id = NEW.owner_id
+                   AND r.snapshot_hash = NEW.snapshot_hash
+            ) THEN
+                RAISE EXCEPTION 'approval receipt snapshot_hash must match the request snapshot; action substitution is forbidden';
+            END IF;
+            RETURN NEW;
+        END $$;
+
         CREATE OR REPLACE FUNCTION family_capability_grants_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         DECLARE
             v_tier text;
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -431,7 +597,7 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION userai_tenant_boundaries_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -450,7 +616,7 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION founder_step_up_receipts_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -458,9 +624,20 @@ def upgrade() -> None:
                 RAISE EXCEPTION 'step-up receipts cannot be deleted outside governed erasure';
             END IF;
             IF TG_OP = 'INSERT' THEN
+                IF current_user = 'mainai_app' THEN
+                    RAISE EXCEPTION 'mainai_app cannot mint step-up receipts';
+                END IF;
+                IF current_setting('app.founder_step_up_issue', true) IS DISTINCT FROM 'on' THEN
+                    RAISE EXCEPTION 'step-up receipts can only be minted by issue_founder_step_up_from_reauth after Founder re-authentication';
+                END IF;
                 PERFORM public.founder_authenticated_session_uid();
                 IF NEW.owner_id <> '{FOUNDER_USER_ID}'::uuid THEN
                     RAISE EXCEPTION 'step-up receipts belong to the Founder';
+                END IF;
+                IF NEW.session_jti IS NULL
+                   OR length(NEW.session_jti) < 8
+                   OR NEW.session_jti IS DISTINCT FROM NULLIF(current_setting('app.current_access_jti', true), '') THEN
+                    RAISE EXCEPTION 'step-up receipt must bind to the verified current session JTI';
                 END IF;
                 RETURN NEW;
             END IF;
@@ -477,10 +654,42 @@ def upgrade() -> None:
             RETURN NEW;
         END $$;
 
+        CREATE OR REPLACE FUNCTION founder_step_up_reauth_receipts_guard() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        BEGIN
+            IF public.founder_sovereignty_erasure_authorized() THEN
+                IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+                RETURN NEW;
+            END IF;
+            IF TG_OP = 'DELETE' THEN
+                RAISE EXCEPTION 'step-up reauth receipts cannot be deleted outside governed erasure';
+            END IF;
+            IF TG_OP = 'INSERT' THEN
+                IF current_user = 'mainai_app' THEN
+                    RAISE EXCEPTION 'mainai_app cannot mint Founder step-up re-authentication receipts';
+                END IF;
+                IF NEW.owner_id <> '{FOUNDER_USER_ID}'::uuid THEN
+                    RAISE EXCEPTION 'step-up reauth receipts belong to the Founder';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF NEW.owner_id IS DISTINCT FROM OLD.owner_id
+               OR NEW.access_jti IS DISTINCT FROM OLD.access_jti
+               OR NEW.purpose IS DISTINCT FROM OLD.purpose
+               OR NEW.issued_at IS DISTINCT FROM OLD.issued_at
+               OR NEW.expires_at IS DISTINCT FROM OLD.expires_at THEN
+                RAISE EXCEPTION 'step-up reauth receipt identity is immutable';
+            END IF;
+            IF OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS DISTINCT FROM OLD.consumed_at THEN
+                RAISE EXCEPTION 'consumed step-up reauth receipts cannot be rewritten';
+            END IF;
+            RETURN NEW;
+        END $$;
+
         CREATE OR REPLACE FUNCTION family_members_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -497,7 +706,7 @@ def upgrade() -> None:
         CREATE OR REPLACE FUNCTION family_grant_consumption_receipts_guard() RETURNS trigger
         LANGUAGE plpgsql SET search_path = pg_catalog AS $$
         BEGIN
-            IF public.founder_sovereignty_erasure_on() THEN
+            IF public.founder_sovereignty_erasure_authorized() THEN
                 IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
                 RETURN NEW;
             END IF;
@@ -533,6 +742,12 @@ def upgrade() -> None:
             BEFORE INSERT OR UPDATE OR DELETE ON family_approval_requests
             FOR EACH ROW EXECUTE FUNCTION family_approval_requests_guard();
 
+        DROP TRIGGER IF EXISTS family_approval_receipts_deny_mutation ON family_approval_receipts;
+        DROP TRIGGER IF EXISTS family_approval_receipts_guard ON family_approval_receipts;
+        CREATE TRIGGER family_approval_receipts_guard
+            BEFORE INSERT OR UPDATE OR DELETE ON family_approval_receipts
+            FOR EACH ROW EXECUTE FUNCTION family_approval_receipts_guard();
+
         DROP TRIGGER IF EXISTS family_capability_grants_guard ON family_capability_grants;
         CREATE TRIGGER family_capability_grants_guard
             BEFORE INSERT OR UPDATE OR DELETE ON family_capability_grants
@@ -552,6 +767,11 @@ def upgrade() -> None:
         CREATE TRIGGER founder_step_up_receipts_guard
             BEFORE INSERT OR UPDATE OR DELETE ON founder_step_up_receipts
             FOR EACH ROW EXECUTE FUNCTION founder_step_up_receipts_guard();
+
+        DROP TRIGGER IF EXISTS founder_step_up_reauth_receipts_guard ON founder_step_up_reauth_receipts;
+        CREATE TRIGGER founder_step_up_reauth_receipts_guard
+            BEFORE INSERT OR UPDATE OR DELETE ON founder_step_up_reauth_receipts
+            FOR EACH ROW EXECUTE FUNCTION founder_step_up_reauth_receipts_guard();
 
         DROP TRIGGER IF EXISTS family_members_guard ON family_members;
         CREATE TRIGGER family_members_guard
@@ -601,7 +821,9 @@ def upgrade() -> None:
             IF v_owner IS NULL THEN
                 RAISE EXCEPTION 'erase_own_founder_sovereignty_children requires an authenticated app.current_user_id session context.';
             END IF;
-            PERFORM set_config('app.founder_sovereignty_erasure', 'on', true);
+            IF NOT public.founder_sovereignty_erasure_authorized() THEN
+                RAISE EXCEPTION 'erase_own_founder_sovereignty_children requires a governed account-erasure operation with current reauth receipt';
+            END IF;
             DELETE FROM public.family_grant_consumption_receipts WHERE owner_id = v_owner;
             DELETE FROM public.family_capability_grants WHERE owner_id = v_owner;
             DELETE FROM public.family_approval_receipts WHERE owner_id = v_owner;
@@ -611,16 +833,28 @@ def upgrade() -> None:
             DELETE FROM public.founder_policy_proposals WHERE owner_id = v_owner;
             DELETE FROM public.founder_policy_versions WHERE owner_id = v_owner;
             DELETE FROM public.founder_step_up_receipts WHERE owner_id = v_owner;
+            DELETE FROM public.founder_step_up_reauth_receipts WHERE owner_id = v_owner;
             DELETE FROM public.userai_tenant_boundaries WHERE owner_id = v_owner;
             DELETE FROM public.founder_instance_bindings WHERE owner_id = v_owner;
-            PERFORM set_config('app.founder_sovereignty_erasure', 'off', true);
         END $$;
 
         REVOKE ALL ON FUNCTION consume_family_capability_grant_once(uuid) FROM PUBLIC;
         REVOKE ALL ON FUNCTION erase_own_founder_sovereignty_children() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION founder_sovereignty_erasure_authorized() FROM PUBLIC;
+        REVOKE ALL ON FUNCTION issue_founder_step_up_from_reauth(varchar, uuid) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION consume_founder_step_up(varchar) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION consume_founder_unlock_step_up() FROM PUBLIC;
         GRANT EXECUTE ON FUNCTION family_capability_risk(varchar) TO mainai_app;
         GRANT EXECUTE ON FUNCTION consume_family_capability_grant_once(uuid) TO mainai_app;
         GRANT EXECUTE ON FUNCTION erase_own_founder_sovereignty_children() TO mainai_app;
+        GRANT EXECUTE ON FUNCTION founder_sovereignty_erasure_authorized() TO mainai_app;
+        GRANT EXECUTE ON FUNCTION issue_founder_step_up_from_reauth(varchar, uuid) TO mainai_app;
+        GRANT EXECUTE ON FUNCTION consume_founder_step_up(varchar) TO mainai_app;
+        GRANT EXECUTE ON FUNCTION consume_founder_unlock_step_up() TO mainai_app;
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_step_up_receipts FROM mainai_app;
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_step_up_reauth_receipts FROM mainai_app;
+        GRANT SELECT ON founder_step_up_receipts TO mainai_app;
+        GRANT SELECT ON founder_step_up_reauth_receipts TO mainai_app;
         ALTER TABLE kernel_security_invariants DISABLE ROW LEVEL SECURITY;
         ALTER TABLE family_capability_catalog DISABLE ROW LEVEL SECURITY;
         """
@@ -631,6 +865,7 @@ def upgrade() -> None:
             f"""
             ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
             ALTER TABLE {table} FORCE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS {table}_isolation ON {table};
             CREATE POLICY {table}_isolation ON {table}
                 USING (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
                 WITH CHECK (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
@@ -639,9 +874,87 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP FUNCTION IF EXISTS erase_own_founder_sovereignty_children()")
-    op.execute("DROP FUNCTION IF EXISTS consume_family_capability_grant_once(uuid)")
-    op.execute("DROP TABLE IF EXISTS family_grant_consumption_receipts CASCADE")
-    op.execute("DROP TABLE IF EXISTS founder_step_up_receipts CASCADE")
-    op.execute("DROP TABLE IF EXISTS family_capability_catalog CASCADE")
-    op.execute("DROP TABLE IF EXISTS kernel_security_invariants CASCADE")
+    op.execute(
+        f"""
+        DROP TRIGGER IF EXISTS founder_instance_bindings_guard ON founder_instance_bindings;
+        DROP TRIGGER IF EXISTS founder_policy_versions_guard ON founder_policy_versions;
+        DROP TRIGGER IF EXISTS kernel_security_invariants_guard ON kernel_security_invariants;
+        DROP TRIGGER IF EXISTS founder_policy_heads_guard ON founder_policy_heads;
+        DROP TRIGGER IF EXISTS family_approval_requests_guard ON family_approval_requests;
+        DROP TRIGGER IF EXISTS family_approval_receipts_guard ON family_approval_receipts;
+        DROP TRIGGER IF EXISTS family_capability_grants_guard ON family_capability_grants;
+        DROP TRIGGER IF EXISTS family_capability_catalog_guard ON family_capability_catalog;
+        DROP TRIGGER IF EXISTS userai_tenant_boundaries_guard ON userai_tenant_boundaries;
+        DROP TRIGGER IF EXISTS founder_step_up_receipts_guard ON founder_step_up_receipts;
+        DROP TRIGGER IF EXISTS founder_step_up_reauth_receipts_guard ON founder_step_up_reauth_receipts;
+        DROP TRIGGER IF EXISTS family_members_guard ON family_members;
+        DROP TRIGGER IF EXISTS family_grant_consumption_receipts_guard ON family_grant_consumption_receipts;
+
+        DROP FUNCTION IF EXISTS erase_own_founder_sovereignty_children();
+        DROP FUNCTION IF EXISTS consume_family_capability_grant_once(uuid);
+        DROP FUNCTION IF EXISTS consume_founder_unlock_step_up();
+        DROP FUNCTION IF EXISTS consume_founder_step_up(varchar);
+        DROP FUNCTION IF EXISTS issue_founder_step_up_from_reauth(varchar, uuid);
+        DROP FUNCTION IF EXISTS founder_sovereignty_erasure_authorized();
+        DROP FUNCTION IF EXISTS founder_sovereignty_erasure_on();
+        DROP FUNCTION IF EXISTS founder_authenticated_session_uid();
+        DROP FUNCTION IF EXISTS family_capability_risk(varchar);
+        DROP FUNCTION IF EXISTS founder_instance_bindings_guard();
+        DROP FUNCTION IF EXISTS founder_policy_versions_guard();
+        DROP FUNCTION IF EXISTS kernel_security_invariants_guard();
+        DROP FUNCTION IF EXISTS founder_policy_heads_guard();
+        DROP FUNCTION IF EXISTS family_approval_requests_guard();
+        DROP FUNCTION IF EXISTS family_approval_receipts_guard();
+        DROP FUNCTION IF EXISTS family_capability_grants_guard();
+        DROP FUNCTION IF EXISTS family_capability_catalog_guard();
+        DROP FUNCTION IF EXISTS userai_tenant_boundaries_guard();
+        DROP FUNCTION IF EXISTS founder_step_up_receipts_guard();
+        DROP FUNCTION IF EXISTS founder_step_up_reauth_receipts_guard();
+        DROP FUNCTION IF EXISTS family_members_guard();
+        DROP FUNCTION IF EXISTS family_grant_consumption_receipts_guard();
+
+        DROP TABLE IF EXISTS family_grant_consumption_receipts CASCADE;
+        DROP TABLE IF EXISTS founder_step_up_receipts CASCADE;
+        DROP TABLE IF EXISTS founder_step_up_reauth_receipts CASCADE;
+        DROP TABLE IF EXISTS family_capability_catalog CASCADE;
+        DROP TABLE IF EXISTS kernel_security_invariants CASCADE;
+
+        ALTER TABLE family_approval_requests
+            DROP CONSTRAINT IF EXISTS ck_family_approval_requests_limits;
+        ALTER TABLE family_approval_requests
+            DROP COLUMN IF EXISTS requested_limits,
+            DROP COLUMN IF EXISTS snapshot_hash,
+            DROP COLUMN IF EXISTS session_id,
+            DROP COLUMN IF EXISTS device_id;
+        ALTER TABLE family_approval_receipts
+            DROP COLUMN IF EXISTS snapshot_hash;
+        ALTER TABLE family_capability_grants
+            DROP CONSTRAINT IF EXISTS ck_family_capability_grants_until;
+        ALTER TABLE family_capability_grants
+            DROP COLUMN IF EXISTS requested_data;
+
+        ALTER TABLE founder_instance_bindings
+            DROP CONSTRAINT IF EXISTS ck_founder_instance_bindings_founder;
+        ALTER TABLE founder_instance_bindings
+            ADD CONSTRAINT ck_founder_instance_bindings_founder
+            CHECK (founder_user_id = '{FOUNDER_USER_ID}'::uuid);
+
+        ALTER TABLE userai_tenant_boundaries
+            DROP CONSTRAINT IF EXISTS ck_userai_tenant_boundaries_roots;
+
+        CREATE OR REPLACE FUNCTION founder_sovereignty_deny_mutation() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+        BEGIN
+            RAISE EXCEPTION 'append-only founder sovereignty history cannot be rewritten';
+        END $$;
+
+        DROP TRIGGER IF EXISTS founder_policy_versions_deny_mutation ON founder_policy_versions;
+        CREATE TRIGGER founder_policy_versions_deny_mutation
+            BEFORE UPDATE OR DELETE ON founder_policy_versions
+            FOR EACH ROW EXECUTE FUNCTION founder_sovereignty_deny_mutation();
+        DROP TRIGGER IF EXISTS family_approval_receipts_deny_mutation ON family_approval_receipts;
+        CREATE TRIGGER family_approval_receipts_deny_mutation
+            BEFORE UPDATE OR DELETE ON family_approval_receipts
+            FOR EACH ROW EXECUTE FUNCTION founder_sovereignty_deny_mutation();
+        """
+    )
