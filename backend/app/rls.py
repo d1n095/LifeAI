@@ -764,6 +764,16 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "mainai_app_execute": True, "security_definer": False,
     },
     {
+        "name": "record_founder_conversation_decision",
+        "identity_args": (
+            "p_owner_id uuid, p_conversation_id uuid, p_message_id uuid, "
+            "p_decision_key character varying, p_statement text, p_value text, "
+            "p_identifiers jsonb, p_effective_at timestamp with time zone"
+        ),
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
+    {
         "name": "founder_canonical_conversations_guard_delete", "identity_args": "", "return_type": "trigger",
         "mainai_app_execute": False, "security_definer": False,
     },
@@ -1117,6 +1127,12 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT SELECT, INSERT, UPDATE ON governed_repository_observations TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_continuous_conversation_children() TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION continuous_conversation_erasure_authorized() TO mainai_app"))
+        conn.execute(
+            text(
+                "GRANT EXECUTE ON FUNCTION record_founder_conversation_decision("
+                "uuid, uuid, uuid, varchar, text, text, jsonb, timestamptz) TO mainai_app"
+            )
+        )
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(

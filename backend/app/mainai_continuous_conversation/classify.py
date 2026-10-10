@@ -20,13 +20,26 @@ _HOW_TO = re.compile(
     r"\b(how (do i|can i|to)|hur (g[öo]r|kan) (jag|man)|you can configure|your ci status page)\b",
     re.IGNORECASE,
 )
+_IMMEDIATE_ACTION = re.compile(
+    r"("
+    r"\b(now|right now|please (do|activate|enable|delete|drop|release|deploy)|go ahead|do it)\b"
+    r"|just nu|\bnu\b|\bk[öo]r\b|\baktivera\b|\bsl[åa] p[åa]\b"
+    r")",
+    re.IGNORECASE,
+)
 
 _DESTRUCTIVE_VERB = re.compile(
-    r"\b(delete|drop|wipe|destroy|remove|erase|radera|avveckla)\b|ta bort|rm\s+-rf",
+    r"("
+    r"\b(delete|drop|wipe|destroy|remove|erase|truncate|purge|radera|avveckla|t[öo]m(?:ma)?|rensa)\b"
+    r"|ta bort|rm\s+-rf"
+    r")",
     re.IGNORECASE,
 )
 _DESTRUCTIVE_OBJECT = re.compile(
-    r"\b(database|databas(?:en)?|db|branch|gren(?:en)?|production|prod data|volume|disk)\b",
+    r"("
+    r"\b(database|databas(?:en)?|db|postgres|postgresql|table|tabellen|schema|"
+    r"branch|gren(?:en)?|production|prod(?:uktion)?|prod data|volume|disk)\b"
+    r")",
     re.IGNORECASE,
 )
 _SPEND_VERB = re.compile(
@@ -38,7 +51,21 @@ _SPEND_OBJECT = re.compile(
     re.IGNORECASE,
 )
 _DEPLOY = re.compile(
-    r"\b(deploy(?:ing)? to prod(?:uction)?|production deploy|deploya till prod|sl[äa]pp till prod)\b",
+    r"("
+    r"\b(deploy(?:ing)? to prod(?:uction)?|production deploy|deploya till prod|"
+    r"sl[äa]pp till prod(?:uktion)?|release to production|ship to prod(?:uction)?|"
+    r"go live|push (this |it )?live|cut over to prod|publicera till produktion|g[åa] live)\b"
+    r")",
+    re.IGNORECASE,
+)
+_RECALL_ACTIVATION = re.compile(
+    r"("
+    r"\b((activate|enable|turn on|switch on|start) (personal )?recall|"
+    r"(activate|enable|turn on) (the )?personal (recall|memory)|"
+    r"production recall|recall in production)\b"
+    r"|aktivera (personal )?recall|aktivera minnet|sl[åa] p[åa] (personal )?recall|"
+    r"aktivera personligt minne"
+    r")",
     re.IGNORECASE,
 )
 _POLICY = re.compile(
@@ -58,11 +85,12 @@ _PRODUCT = re.compile(
 
 _SHA_LOOKUP = re.compile(
     r"("
-    r"\b(sha|commit hash|tree hash|tree id|git rev-parse|commit id|commit-id|latest commit)\b"
+    r"\b(sha|commit hash|tree hash|tree id|git rev-parse|commit id|commit-id|latest commit|"
+    r"what hash|hash (is )?(on|of) the remote|remote (tip|sha|hash)|latest commit on the remote)\b"
     r"|sha:n|klistra in sha|drop the latest commit|commit hash in chat"
     r"|could you share the commit"
     r"|vad [äa]r .*sha"
-    r"|senaste (commit|ändringen|sha)"
+    r"|senaste (commit(?:ten)?|ändringen|sha)"
     r")",
     re.IGNORECASE,
 )
@@ -72,8 +100,16 @@ _BRANCH_LOOKUP = re.compile(
 )
 _TEST_LOOKUP = re.compile(
     r"("
-    r"\b(test results?|pytest|ci (status|state|green|red|pass|passed)|github actions?|ci gick igenom)\b"
+    r"\b(test results?|pytest|ci (status|state|green|red|pass|passed)|github actions?|"
+    r"ci gick igenom|did (the )?tests pass|gick testerna igenom)\b"
     r"|[äa]r ci gr[öo]nt|ci gr[öo]nt|testresultaten|kolla om ci"
+    r")",
+    re.IGNORECASE,
+)
+_FACT_ASK = re.compile(
+    r"("
+    r"\b(what (is|hash|sha)|what's|whats)\b"
+    r"|vad [äa]r"
     r")",
     re.IGNORECASE,
 )
@@ -108,8 +144,11 @@ def _language(text: str) -> str:
 def classify_capability_risk(text: str) -> InterruptKind:
     """Classify authority-bearing capability/risk. Phrase lists are not the authority model."""
 
-    if _HOW_TO.search(text):
+    educational_only = bool(_HOW_TO.search(text)) and not _IMMEDIATE_ACTION.search(text)
+    if educational_only:
         return InterruptKind.NONE
+    if _RECALL_ACTIVATION.search(text):
+        return InterruptKind.FOUNDER_ONLY_AUTHORITY
     if _DESTRUCTIVE_VERB.search(text) and _DESTRUCTIVE_OBJECT.search(text):
         return InterruptKind.DESTRUCTIVE_ACTION
     if _DESTRUCTIVE_VERB.search(text) and re.search(r"\b(branch|gren)\b", text, re.IGNORECASE):
@@ -157,6 +196,11 @@ def classify_inbound(text: str) -> InboundClassification:
                 if language == "sv"
                 else "Founder authority required: launch/ship will not be decided on this surface."
             ),
+            InterruptKind.FOUNDER_ONLY_AUTHORITY: (
+                "Grundarauktoritet krävs: Recall-aktivering utförs inte av den här ytan."
+                if language == "sv"
+                else "Founder authority required: Recall activation will not be executed on this surface."
+            ),
         }[interrupt]
         return InboundClassification(
             InboundKind.AUTHORITY_REQUEST,
@@ -168,16 +212,21 @@ def classify_inbound(text: str) -> InboundClassification:
     categories: list[RelayCategory] = []
     if classify_requested_entity(lowered) is not None:
         categories.append(RelayCategory.SHA)
-    if _SHA_LOOKUP.search(lowered) and (_FETCH_ASK.search(lowered) or classify_requested_entity(lowered) or "sha" in lowered.lower()):
+    if _SHA_LOOKUP.search(lowered) and (
+        _FETCH_ASK.search(lowered)
+        or _FACT_ASK.search(lowered)
+        or classify_requested_entity(lowered)
+        or "sha" in lowered.lower()
+    ):
         categories.append(RelayCategory.SHA)
     if _BRANCH_LOOKUP.search(lowered):
         categories.append(RelayCategory.BRANCH_NAME)
     _ci_status_question = re.search(
-        r"([äa]r ci gr[öo]nt|ci gr[öo]nt|\bis ci green\b|\bci status\b|ci gick igenom|testresultaten)",
+        r"([äa]r ci gr[öo]nt|ci gr[öo]nt|\bis ci green\b|\bci status\b|ci gick igenom|testresultaten|did (the )?tests pass)",
         lowered,
         re.IGNORECASE,
     )
-    if _TEST_LOOKUP.search(lowered) and (_FETCH_ASK.search(lowered) or _ci_status_question):
+    if _TEST_LOOKUP.search(lowered) and (_FETCH_ASK.search(lowered) or _FACT_ASK.search(lowered) or _ci_status_question):
         categories.append(RelayCategory.TEST_RESULT)
         categories.append(RelayCategory.CI_STATE)
     if _AGENT_LOOKUP.search(lowered):
@@ -186,7 +235,7 @@ def classify_inbound(text: str) -> InboundClassification:
     if _WAIT_GRAPH.search(lowered):
         categories.append(RelayCategory.WAIT_GRAPH)
         categories.append(RelayCategory.NEXT_AGENT)
-    if _FETCH_ASK.search(lowered) and (
+    if (_FETCH_ASK.search(lowered) or _FACT_ASK.search(lowered)) and (
         _SHA_LOOKUP.search(lowered) or _TEST_LOOKUP.search(lowered) or _AGENT_LOOKUP.search(lowered)
     ):
         if RelayCategory.SHA not in categories and _SHA_LOOKUP.search(lowered):

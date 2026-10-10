@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,69 @@ from app.models.continuous_conversation import (
 )
 
 DEFAULT_REPOSITORY = "d1n095/LifeAI"
+AUTHORITATIVE_TIP_SOURCES = frozenset({"github_ref"})
+MAX_TIP_OBSERVATION_AGE = timedelta(minutes=5)
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def observation_is_authoritative_current(
+    *,
+    sha: str | None,
+    source: str | None,
+    observed_at: datetime | None,
+    now: datetime | None = None,
+) -> bool:
+    """True only for a fresh GitHub-ref tip. Stale or non-authoritative rows are not current."""
+
+    if not sha or source not in AUTHORITATIVE_TIP_SOURCES:
+        return False
+    stamped = _aware(observed_at)
+    if stamped is None:
+        return False
+    clock = _aware(now) or datetime.now(timezone.utc)
+    return clock - stamped <= MAX_TIP_OBSERVATION_AGE
+
+
+def _current_tip_or_unknown(
+    *,
+    prefetch: GovernedRepositoryObservation | None,
+    observed: ObservedRepositoryState | None,
+) -> tuple[str | None, str, datetime | None, str]:
+    live_attempted = observed is not None
+    if observation_is_authoritative_current(
+        sha=observed.sha if observed is not None else None,
+        source=observed.source if observed is not None else None,
+        observed_at=observed.observed_at if observed is not None else None,
+    ):
+        assert observed is not None and observed.sha
+        return observed.sha, observed.source, observed.observed_at, ""
+    if live_attempted:
+        source = observed.source if observed is not None else "unavailable"
+        return (
+            None,
+            source if source else "unavailable",
+            observed.observed_at if observed is not None else None,
+            "Live authoritative tip unavailable or unbound. UNKNOWN — stale observations are not current truth.",
+        )
+    if prefetch is not None and observation_is_authoritative_current(
+        sha=prefetch.sha, source=prefetch.source, observed_at=prefetch.observed_at
+    ):
+        return prefetch.sha, prefetch.source, prefetch.observed_at, ""
+    if prefetch is not None:
+        return (
+            None,
+            prefetch.source or "unavailable",
+            prefetch.observed_at,
+            "Stored observation is stale or not bound to github_ref. UNKNOWN — not current truth.",
+        )
+    return None, "unavailable", None, "Authoritative tip unavailable. UNKNOWN — checkout is not used."
 
 _SOVEREIGNTY = re.compile(r"\b(founder sovereignty|suver[äa]nitet)\b", re.IGNORECASE)
 _CC_PARENT = re.compile(
@@ -84,7 +147,9 @@ def load_observation(db: Session, repository: str, branch: str) -> GovernedRepos
 
 
 def record_observation(db: Session, observed: ObservedRepositoryState) -> GovernedRepositoryObservation | None:
-    if not observed.sha or observed.source == "unavailable":
+    if not observation_is_authoritative_current(
+        sha=observed.sha, source=observed.source, observed_at=observed.observed_at
+    ):
         return None
     row = load_observation(db, observed.repository, observed.branch)
     if row is None:
@@ -177,15 +242,10 @@ def bind_subject_from_db(
         if named is None:
             return None
         branch = named.group(1)
-        sha = observed.sha if observed is not None else None
-        source = observed.source if observed is not None and sha else "unavailable"
-        observed_at = observed.observed_at if observed is not None else None
-        if sha is None:
-            prefetch = load_observation(db, DEFAULT_REPOSITORY, branch)
-            if prefetch is not None:
-                sha = prefetch.sha
-                source = prefetch.source
-                observed_at = prefetch.observed_at
+        sha, source, observed_at, unknown_detail = _current_tip_or_unknown(
+            prefetch=load_observation(db, DEFAULT_REPOSITORY, branch),
+            observed=observed,
+        )
         return BoundSubject(
             entity_key="named_branch",
             repository=DEFAULT_REPOSITORY,
@@ -194,7 +254,7 @@ def bind_subject_from_db(
             state="named_ref",
             authoritative_source=source if sha else "unavailable",
             sha=sha,
-            detail=f"Named branch {branch} — resolved from an authoritative source, not checkout.",
+            detail=unknown_detail or f"Named branch {branch} — resolved from an authoritative source, not checkout.",
             observed_at=observed_at,
         )
 
@@ -203,15 +263,10 @@ def bind_subject_from_db(
         return None
     role = ArtifactRole(row.artifact_role)
     if role is ArtifactRole.CURRENT_BRANCH_TIP:
-        sha = observed.sha if observed is not None else None
-        source = observed.source if observed is not None and sha else "unavailable"
-        observed_at = observed.observed_at if observed is not None else None
-        if sha is None:
-            prefetch = load_observation(db, row.repository, row.branch)
-            if prefetch is not None:
-                sha = prefetch.sha
-                source = prefetch.source
-                observed_at = prefetch.observed_at
+        sha, source, observed_at, unknown_detail = _current_tip_or_unknown(
+            prefetch=load_observation(db, row.repository, row.branch),
+            observed=observed,
+        )
         return BoundSubject(
             entity_key=row.entity_key,
             repository=row.repository,
@@ -220,7 +275,7 @@ def bind_subject_from_db(
             state=row.state,
             authoritative_source=source if sha else "unavailable",
             sha=sha,
-            detail=row.detail if sha else "Authoritative tip unavailable. UNKNOWN — checkout is not used.",
+            detail=row.detail if sha else (unknown_detail or "Authoritative tip unavailable. UNKNOWN — checkout is not used."),
             observed_at=observed_at,
         )
 
@@ -253,12 +308,14 @@ def bind_subject_from_db(
 def apply_observed_tip(subject: BoundSubject, observed: ObservedRepositoryState) -> BoundSubject:
     if subject.artifact_role is not ArtifactRole.CURRENT_BRANCH_TIP:
         return subject
-    if not observed.sha:
+    if not observation_is_authoritative_current(
+        sha=observed.sha, source=observed.source, observed_at=observed.observed_at
+    ):
         return replace(
             subject,
             sha=None,
             authoritative_source="unavailable",
-            detail="Authoritative tip unavailable. UNKNOWN — checkout is not used.",
+            detail="Live authoritative tip unavailable or stale. UNKNOWN — stale observations are not current truth.",
             observed_at=observed.observed_at,
         )
     return replace(

@@ -8,12 +8,13 @@ the full history.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import tuple_
+from sqlalchemy import text, tuple_
 from sqlalchemy.orm import Session
 
 from app.mainai_continuous_conversation.types import ActiveDecision, ProvenancePointer
@@ -206,46 +207,26 @@ def record_decision_from_text(
         return already
     identifiers = {kind: ident for kind, ident in extract_identifiers(message.content or "")}
     identifiers["provider"] = value
-    previous = (
-        db.query(FounderConversationDecision)
-        .filter_by(owner_id=owner_id, conversation_id=conversation_id, decision_key=decision_key, status="active")
-        .order_by(FounderConversationDecision.effective_at.desc(), FounderConversationDecision.created_at.desc())
-        .all()
-    )
-    if not previous:
-        previous = (
-            db.query(FounderConversationDecision)
-            .filter_by(owner_id=owner_id, conversation_id=conversation_id, topic=decision_key, superseded=False)
-            .order_by(FounderConversationDecision.created_at.desc())
-            .all()
-        )
-    decision = FounderConversationDecision(
-        id=uuid4(),
-        owner_id=owner_id,
-        conversation_id=conversation_id,
-        message_id=message.id,
-        topic=decision_key,
-        decision_key=decision_key,
-        statement=statement,
-        value=value,
-        identifiers=identifiers,
-        superseded=False,
-        superseded_by=None,
-        status="active",
-        effective_at=message.created_at or datetime.now(timezone.utc),
-        source_turn_id=message.id,
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(decision)
+    effective_at = message.created_at or datetime.now(timezone.utc)
+    decision_id = db.execute(
+        text(
+            "SELECT record_founder_conversation_decision("
+            ":owner_id, :conversation_id, :message_id, :decision_key, "
+            ":statement, :value, CAST(:identifiers AS jsonb), :effective_at)"
+        ),
+        {
+            "owner_id": owner_id,
+            "conversation_id": conversation_id,
+            "message_id": message.id,
+            "decision_key": decision_key,
+            "statement": statement,
+            "value": value,
+            "identifiers": json.dumps(identifiers),
+            "effective_at": effective_at,
+        },
+    ).scalar_one()
     db.flush()
-    for old in previous:
-        if old.id == decision.id:
-            continue
-        old.superseded = True
-        old.superseded_by = decision.id
-        old.status = "historical"
-    db.flush()
-    return decision
+    return db.get(FounderConversationDecision, decision_id)
 
 
 def _summarize(messages: list[Message]) -> str:

@@ -380,7 +380,7 @@ def test_0086_to_head_preserves_existing_restored_concept_relationships():
                     {"owner_id": owner_id},
                 ).scalars()
             )
-        assert revision == "0091_cc_p1_authority"
+        assert revision == "0092_cc_one_active_decision"
         assert stored == set(restored_types)
     finally:
         _run_alembic("upgrade", "head")
@@ -408,5 +408,5 @@ def test_0087_downgrade_refuses_before_corrupting_restored_concept_rows():
             ),
             {"owner_id": owner_id},
         ).scalar_one()
-    assert revision == "0091_cc_p1_authority"
+    assert revision == "0092_cc_one_active_decision"
     assert stored == 1

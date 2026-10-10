@@ -17,10 +17,10 @@ _SAFE_REWRITE = capability_disclaimer()
 
 _EDUCATIONAL = re.compile(
     r"("
-    r"\b(you can configure|how to (configure|set up|run)|status page lists|"
-    r"documentation|for example|e\.g\.|example:|typically|in general|"
+    r"\b(you can configure|how to (configure|set up|run|check)|status page lists|"
+    r"documentation|dokumentationen|for example|e\.g\.|example:|typically|in general|"
     r"github actions to run pytest|ci status page)\b"
-    r"|du kan konfigurera|till exempel"
+    r"|du kan konfigurera|till exempel|f[öo]rklarar hur"
     r")",
     re.IGNORECASE,
 )
@@ -29,23 +29,25 @@ _ASK_FOUNDER_RELAY = re.compile(
     r"("
     r"\b(please |could you |can you )?(paste|send|forward|share|tell me|give me|drop)\b.{0,80}\b"
     r"(sha|commit( hash| id)?|branch|test results?|pytest|ci|github actions?|agent (report|message))\b"
-    r"|\b(kan du (klistra in|skicka|ber[äa]tta)|klistra in).{0,80}\b(sha|sha:n|commit|testresultat|ci)\b"
+    r"|\b(kan du (klistra in|skicka|ber[äa]tta|kolla)|klistra in).{0,80}\b"
+    r"(sha|sha:n|commit|testresultat|ci|gren)\b"
     r"|\b(please (tell|ask|forward|relay) (this to )?(claude|cursor|codex))\b"
+    r"|\b(send|forward|paste) (the )?(sha|commit) (to|into) (claude|cursor|codex)\b"
     r"|\b(vad sa (cursor|claude|codex)|what did (cursor|claude|codex) (report|say))\b"
     r"|\b(who should work next|which agent next|who is waiting for whom)\b"
-    r"|\b[äa]r ci gr[öo]nt\b"
+    r"|\b(kan du (s[äa]ga|ber[äa]tta)).{0,40}([äa]r ci gr[öo]nt|ci[- ]status)\b"
     r")",
     re.IGNORECASE,
 )
 
 _CATEGORY_HINTS: tuple[tuple[RelayCategory, re.Pattern[str]], ...] = (
-    (RelayCategory.SHA, re.compile(r"\b(sha|commit( hash| id)?)\b", re.I)),
-    (RelayCategory.BRANCH_NAME, re.compile(r"\bbranch\b", re.I)),
-    (RelayCategory.TEST_RESULT, re.compile(r"\b(test results?|pytest)\b", re.I)),
+    (RelayCategory.SHA, re.compile(r"\b(sha|sha:n|commit( hash| id|ten)?)\b", re.I)),
+    (RelayCategory.BRANCH_NAME, re.compile(r"\b(branch|gren)\b", re.I)),
+    (RelayCategory.TEST_RESULT, re.compile(r"\b(test results?|pytest|testresultat)\b", re.I)),
     (RelayCategory.CI_STATE, re.compile(r"\b(ci|github actions?)\b", re.I)),
     (RelayCategory.AGENT_MESSAGE, re.compile(r"\b(claude|cursor|codex)\b", re.I)),
-    (RelayCategory.WAIT_GRAPH, re.compile(r"\bwaiting for whom\b", re.I)),
-    (RelayCategory.NEXT_AGENT, re.compile(r"\bwho should work next\b", re.I)),
+    (RelayCategory.WAIT_GRAPH, re.compile(r"\b(waiting for whom|vem v[äa]ntar)\b", re.I)),
+    (RelayCategory.NEXT_AGENT, re.compile(r"\b(who should work next|n[äa]sta agent)\b", re.I)),
 )
 
 
