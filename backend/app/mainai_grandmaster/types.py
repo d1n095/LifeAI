@@ -5,11 +5,29 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class Clock(Protocol):
+    def now(self) -> datetime: ...
+
+
+@dataclass(frozen=True)
+class SystemClock:
+    def now(self) -> datetime:
+        return utc_now()
+
+
+@dataclass(frozen=True)
+class FixedClock:
+    current: datetime
+
+    def now(self) -> datetime:
+        return self.current
 
 
 class BoardStatus(StrEnum):
@@ -48,7 +66,9 @@ class EvidencePointer:
     payload: dict[str, Any] = field(default_factory=dict)
 
     def fresh(self, now: datetime) -> bool:
-        return self.authoritative and (not self.mutable or (self.expires_at is not None and self.expires_at > now))
+        return self.authoritative and (
+            not self.mutable or (self.expires_at is not None and self.expires_at > now)
+        )
 
 
 @dataclass(frozen=True)
@@ -155,6 +175,8 @@ class Blocker:
 @dataclass(frozen=True)
 class ResourceLease:
     workspace_key: str
+    workspace_path: str
+    task_key: str
     owner_agent: str
     execution_id: str
     branch: str
@@ -162,6 +184,7 @@ class ResourceLease:
     acquired_at: datetime
     heartbeat_at: datetime
     expires_at: datetime
+    fencing_token: int
     released_at: datetime | None = None
 
     def active(self, now: datetime) -> bool:
@@ -236,9 +259,16 @@ class Board:
     def copy(self) -> "Board":
         return replace(
             self,
-            agents=dict(self.agents), sessions=dict(self.sessions), tasks=dict(self.tasks),
-            executions=dict(self.executions), workspaces=dict(self.workspaces),
-            branches=dict(self.branches), candidates=dict(self.candidates),
-            examinations=dict(self.examinations), dependencies=list(self.dependencies),
-            blockers=list(self.blockers), leases=dict(self.leases), reports=list(self.reports),
+            agents=dict(self.agents),
+            sessions=dict(self.sessions),
+            tasks=dict(self.tasks),
+            executions=dict(self.executions),
+            workspaces=dict(self.workspaces),
+            branches=dict(self.branches),
+            candidates=dict(self.candidates),
+            examinations=dict(self.examinations),
+            dependencies=list(self.dependencies),
+            blockers=list(self.blockers),
+            leases=dict(self.leases),
+            reports=list(self.reports),
         )
