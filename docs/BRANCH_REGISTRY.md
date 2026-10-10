@@ -15,7 +15,7 @@ Sovereignty `4ccf1ed0aeb0ea35301a38437b57e097c16f435d`.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-continuous-conversation-p1-fix-4-91c1` | pending | **Open isolated builder — five P1 remediations** | Freshness + `github_ref` source binding for current-branch observations (stale/checkout rows are UNKNOWN, not current truth). Stronger Founder-only/high-risk paraphrase gates (Recall activation, production release, destructive DB). EN/SV inbound+outbound relay without rewriting educational replies. DB-level one-active decision per `(owner_id, conversation_id, decision_key)` including concurrent writes (`0092_cc_one_active_decision`). Documents the 0091 ancestry collision. Does not merge, deploy, activate Recall, or expand authority. |
+| `cursor/mainai-continuous-conversation-p1-fix-4-91c1` | [#260](https://github.com/d1n095/LifeAI/pull/260) | **Open isolated builder — five P1 remediations** | Freshness + `github_ref` source binding for current-branch observations (stale/checkout rows are UNKNOWN, not current truth). Stronger Founder-only/high-risk paraphrase gates (Recall activation, production release, destructive DB). EN/SV inbound+outbound relay without rewriting educational replies. DB-level one-active decision per `(owner_id, conversation_id, decision_key)` including concurrent writes (`0092_cc_one_active_decision`). Documents the 0091 ancestry collision. Does not merge, deploy, activate Recall, or expand authority. |
 
 **Alembic collision (do not compose):** this lane is `0089_continuous_conversation` →
 `0090_cc_thread_memory` → `0091_cc_p1_authority` → `0092_cc_one_active_decision`. Founder

@@ -82,8 +82,7 @@ def upgrade() -> None:
                 IF v_old IS NOT NULL THEN
                     UPDATE public.founder_conversation_decisions
                     SET status = 'historical',
-                        superseded = true,
-                        superseded_by = v_id
+                        superseded = true
                     WHERE id = v_old;
                 END IF;
 
@@ -97,6 +96,11 @@ def upgrade() -> None:
                         p_decision_key, p_statement, p_value, COALESCE(p_identifiers, '{}'::jsonb),
                         false, NULL, 'active', COALESCE(p_effective_at, now()), p_message_id, now()
                     );
+                    IF v_old IS NOT NULL THEN
+                        UPDATE public.founder_conversation_decisions
+                        SET superseded_by = v_id
+                        WHERE id = v_old;
+                    END IF;
                     RETURN v_id;
                 EXCEPTION WHEN unique_violation THEN
                     v_id := NULL;

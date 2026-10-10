@@ -86,7 +86,7 @@ _PRODUCT = re.compile(
 _SHA_LOOKUP = re.compile(
     r"("
     r"\b(sha|commit hash|tree hash|tree id|git rev-parse|commit id|commit-id|latest commit|"
-    r"hash (on|of) the remote|remote (tip|sha|hash)|latest commit on the remote)\b"
+    r"what hash|hash (is )?(on|of) the remote|remote (tip|sha|hash)|latest commit on the remote)\b"
     r"|sha:n|klistra in sha|drop the latest commit|commit hash in chat"
     r"|could you share the commit"
     r"|vad [äa]r .*sha"
