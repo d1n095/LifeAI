@@ -57,6 +57,23 @@ COMMIT_AUTHOR = ("MainAI Executor", "mainai-executor@lifeai.local")
 _GIT_TIMEOUT_SECONDS = 60
 
 
+def execution_worktree_base_branch() -> str:
+    """Configured worktree fetch base. Falls back to the historical default so existing
+    tests that seed `BASE_BRANCH` keep matching production-default settings."""
+    configured = (get_settings().github_worktree_base_branch or "").strip()
+    return configured or BASE_BRANCH
+
+
+def execution_pr_base_branch() -> str:
+    """Configured PR target. Empty setting means the worktree base."""
+    configured = (get_settings().github_pr_base_branch or "").strip()
+    return configured or execution_worktree_base_branch()
+
+
+def protected_execution_branches() -> frozenset[str]:
+    return frozenset({*PROTECTED_BRANCHES, BASE_BRANCH, execution_worktree_base_branch(), execution_pr_base_branch()})
+
+
 class WorktreeError(RuntimeError):
     """Base for all worktree-layer failures. Callers must treat any of these as "recovery
     cannot proceed automatically" — never as "treat it as if nothing happened"."""
@@ -160,7 +177,7 @@ def create_task_worktree_sync(
         )
 
     branch = task_branch_name(task.id)
-    if branch in PROTECTED_BRANCHES or branch == BASE_BRANCH:
+    if branch in protected_execution_branches():
         # Structurally unreachable given task_branch_name()'s fixed prefix, but checked
         # explicitly anyway -- the DB CHECK constraint is the real backstop, this is defense
         # in depth before any filesystem or network side effect happens at all.
@@ -231,7 +248,7 @@ async def create_task_worktree(
             "GITHUB_WRITE_ENABLED är av eller GITHUB_TOKEN/GITHUB_REPO saknas — kan inte skapa en verklig, "
             "push-bar worktree. MainAI stannar i förslagsläge (se app/mainai_execution/execution_job.py)."
         )
-    base_sha = await client.get_ref(BASE_BRANCH)
+    base_sha = await client.get_ref(execution_worktree_base_branch())
     return create_task_worktree_sync(
         db, task=task, job=job, lease_generation=lease_generation, executor_id=executor_id, base_sha=base_sha
     )

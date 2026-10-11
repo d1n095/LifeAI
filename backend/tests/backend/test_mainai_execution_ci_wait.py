@@ -338,8 +338,8 @@ async def _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner
     monkeypatch.setattr(settings, "github_token", "fake-token-never-real")
     monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
 
-    async def _fake_create_pull_request(self, *, title, body, head, base):
-        return {"number": 7, "html_url": "https://github.com/d1n095/LifeAI/pull/7", "head": f"d1n095:{head}", "base": base, "state": "open"}
+    async def _fake_create_pull_request(self, *, title, body, head, base, draft=False):
+        return {"number": 7, "html_url": "https://github.com/d1n095/LifeAI/pull/7", "head": f"d1n095:{head}", "base": base, "state": "open", "draft": draft}
 
     async def _fake_list_pull_requests_for_head(self, *, head, base, state="all"):
         return []

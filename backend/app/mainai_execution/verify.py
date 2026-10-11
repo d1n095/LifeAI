@@ -130,14 +130,22 @@ _STEP_RUNNERS = {"targeted_tests": _run_targeted_tests}
 def verify_task(task: MainAITask, *, cwd: str) -> VerificationResult:
     """Runs every entry in `task.verification_plan` in order. ALL steps must pass for the
     overall result to pass — a single failing step fails the whole verification, never
-    averaged or partially credited. An empty verification_plan passes trivially (recorded as
+    averaged or partially credited.     An empty verification_plan passes trivially for non-edit tasks (recorded as
     zero steps, visible as such in the evidence — never silently indistinguishable from "ran
     and passed real checks") — the planner is responsible for populating verification_plan for
     any task whose work has real risk of being wrong; a task genuinely without a verifiable
-    side effect (e.g. read_only_audit) legitimately has nothing to verify.
+    side effect (e.g. read_only_audit) legitimately has nothing to verify. A `repo_edit` task
+    is never allowed to complete without at least one targeted_tests step.
 
     Raises VerificationStepError for a malformed step or an unknown `kind` -- never silently
     skips a step it doesn't understand and calls that "passed"."""
+    if getattr(task, "task_type", None) == "repo_edit":
+        has_targeted_tests = any(
+            isinstance(step, dict) and step.get("kind") == "targeted_tests" for step in (task.verification_plan or [])
+        )
+        if not has_targeted_tests:
+            raise VerificationStepError("repo_edit requires at least one targeted_tests verification step")
+
     steps: list[VerificationStepResult] = []
     for step in task.verification_plan:
         if not isinstance(step, dict) or "kind" not in step:

@@ -42,8 +42,8 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
+from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
 from app.providers.base import Message
-from app.providers.registry import chat_with_fallback
 
 
 class PlannerError(Exception):
@@ -345,14 +345,18 @@ PLANNER_SYSTEM_PROMPT = (
     'true|false, "verification_plan": [{"kind": "targeted_tests", "target": "..."}]}]} -- '
     "inget annat, ingen markdown-kodblocksmarkering, ingen förklarande text före eller efter. "
     "depends_on är 0-baserade index in i samma tasks-lista. Håll planen minimal: bara de "
-    "tasks som faktiskt krävs för målet, aldrig spekulativa extra steg. En task som ändrar "
-    "kod (repo_edit) eller öppnar en PR (open_pr) ska nästan alltid ha approval_required=false "
-    "(godkännande krävs bara för merge/deploy, inte för att föreslå en ändring som PR) -- men "
-    "en task märkt risk_level=high ska nästan alltid ha approval_required=true."
+    "tasks som faktiskt krävs för målet, aldrig spekulativa extra steg. En repo_edit-task "
+    "MÅSTE ha minst ett verification_plan-steg kind=targeted_tests mot en konkret pytest-fil. "
+    "En task som ändrar kod (repo_edit) eller öppnar en PR (open_pr) ska nästan alltid ha "
+    "approval_required=false (godkännande krävs bara för merge/deploy, inte för att föreslå "
+    "en ändring som PR) -- men en task märkt risk_level=high ska nästan alltid ha "
+    "approval_required=true."
 )
 
 
-async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[PlannedTaskSpec], str, str]:
+async def propose_plan_via_ai(
+    db: Session, *, goal: MainAIGoal, failure_context: str | None = None
+) -> tuple[list[PlannedTaskSpec], str, str]:
     """The one genuinely non-deterministic planning step -- a single chat_with_fallback() call
     (same provider chain app/agent_orchestration.py's dispatch_task() already uses) asked to
     produce a structured JSON task breakdown for `goal`. Returns (tasks, provider, model) so
@@ -363,10 +367,24 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
     never falls back to guessing a plan from free text, and never itself writes anything to
     the database (see create_plan() for the separate, deterministic persist step this feeds)."""
     user_prompt = f"## Mål\n{goal.title}\n\n## Fullständig instruktion\n{goal.original_instruction}"
+    if failure_context:
+        user_prompt += (
+            "\n\n## Föregående verifieringsfel (använd detta vid omplanering; "
+            "repo_edit måste ha targeted_tests som täcker felet)\n"
+            f"{failure_context}"
+        )
     messages = [Message(role="system", content=PLANNER_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
-    result, _attempted = await chat_with_fallback(
-        db, messages, owner_id=goal.owner_id, purpose="mainai_planning", requested_by="mainai_execution.planner.propose_plan_via_ai", goal_id=goal.id
-    )
+    try:
+        result, _attempted = await billed_execution_chat(
+            db,
+            messages,
+            owner_id=goal.owner_id,
+            goal_id=goal.id,
+            purpose="mainai_planning",
+            requested_by="mainai_execution.planner.propose_plan_via_ai",
+        )
+    except ExecutionSpendError as exc:
+        raise PlanValidationError(str(exc)) from exc
 
     raw = result.content.strip()
     if raw.startswith("```"):

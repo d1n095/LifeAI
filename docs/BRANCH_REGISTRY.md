@@ -6,6 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — MainAI Path A first-cycle activation (2026-10-11)
+
+Isolated Cursor builder child of verified Founder Alpha integration base
+`2fbe20aacf1203fc0e16d216ef55b666b2181619`. Makes existing `mainai_execution` Path A
+capable of a Founder-supervised first development cycle: configurable worktree/PR
+bases, existing file contents to the code agent, required targeted tests with
+pytest-failure feedback into retry/replan, draft PRs only, and per-goal spend via
+existing `provider_spend`. Frozen GitHub discovery `#263` / `e33f494` is not modified.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-execution-path-a-activation-91c1` | [#264](https://github.com/d1n095/LifeAI/pull/264) | **Open isolated builder child of `2fbe20a`** | Path A first-cycle capability on the existing execution engine. |
+
+**Must not:** modify frozen discovery `#263`, sovereignty `#262`, Continuous Conversation, or Codex active work; add a new orchestration engine; migrate; merge; deploy; activate Recall; run a live cycle.
+
 ## Universal Personal Recall — isolated Codex lane (2026-09-04)
 
 | Branch | PR | Status | Scope |

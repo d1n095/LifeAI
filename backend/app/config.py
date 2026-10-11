@@ -199,6 +199,13 @@ class Settings(BaseSettings):
     github_repo: str | None = None  # "owner/repo", e.g. "d1n095/LifeAI"
     github_write_enabled: bool = False
     github_auto_merge_enabled: bool = False
+    # Path A worktree fetch + PR target. Empty PR base means "same as the worktree base".
+    github_worktree_base_branch: str = "claude/det-kommer-mer-879lcm"
+    github_pr_base_branch: str = ""
+    # Per-goal AI spend for Path A. Existing provider_spend grants remain the live ceiling;
+    # this setting is an additional hard cap and, when require=True, a fail-closed gate.
+    mainai_execution_require_provider_spend: bool = False
+    mainai_execution_goal_spend_cap_usd: float = 5.0
 
     @property
     def frontend_origin_list(self) -> list[str]:

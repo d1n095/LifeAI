@@ -189,3 +189,20 @@ async def test_commit_multiple_files_raises_on_non_fast_forward_ref_update_race(
         await client.commit_multiple_files(
             branch="claude/demo-branch", base_sha="base123", files=[{"path": "a.py", "content": "x"}], message="msg"
         )
+
+
+@pytest.mark.asyncio
+async def test_create_pull_request_can_open_a_draft(monkeypatch):
+    calls = _fake_github(monkeypatch, {("POST", "/repos/d1n095/LifeAI/pulls"): {"number": 9, "draft": True}})
+    client = _configured_client(monkeypatch)
+    pr = await client.create_pull_request(title="t", body="b", head="feat", base="main", draft=True)
+    assert pr["number"] == 9
+    assert calls[0]["json"]["draft"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_pull_request_defaults_to_not_draft(monkeypatch):
+    calls = _fake_github(monkeypatch, {("POST", "/repos/d1n095/LifeAI/pulls"): {"number": 10, "draft": False}})
+    client = _configured_client(monkeypatch)
+    await client.create_pull_request(title="t", body="b", head="feat", base="main")
+    assert calls[0]["json"]["draft"] is False

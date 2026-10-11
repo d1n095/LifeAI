@@ -1419,13 +1419,14 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
     created_prs: list[dict] = []
     create_calls = {"n": 0}
 
-    async def _fake_create_pull_request(self, *, title, body, head, base):
+    async def _fake_create_pull_request(self, *, title, body, head, base, draft=False):
         # Mirrors a real GitHub quirk this fix relies on: create_pull_request()'s own `head`
         # is a bare branch name (same-repo PR), but the pulls-LIST endpoint's `head` filter
         # requires the owner-prefixed `owner:branch` form -- so the stored/comparable value
         # here is intentionally owner-prefixed even though the create call itself wasn't.
         create_calls["n"] += 1
-        pr = {"number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42", "head": f"d1n095:{head}", "base": base, "state": "open"}
+        create_calls["draft"] = draft
+        pr = {"number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42", "head": f"d1n095:{head}", "base": base, "state": "open", "draft": draft}
         created_prs.append(pr)
         return pr
 
@@ -1460,6 +1461,7 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
     assert second["pull_request_number"] == 42
 
     assert create_calls["n"] == 1, "create_pull_request() must never be called twice for the same head/base"
+    assert create_calls["draft"] is True, "Path A must open draft PRs only"
 
 
 def test_record_engineering_lesson_for_the_mark_completed_mark_failed_finalize_ordering_fix(db_session, owner_id):
