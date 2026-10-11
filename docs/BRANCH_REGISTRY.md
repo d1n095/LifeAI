@@ -17,7 +17,7 @@ existing `provider_spend`. Frozen GitHub discovery `#263` / `e33f494` is not mod
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-execution-path-a-activation-91c1` | pending | **Open isolated builder child of `2fbe20a`** | Path A first-cycle capability on the existing execution engine. |
+| `cursor/mainai-execution-path-a-activation-91c1` | [#264](https://github.com/d1n095/LifeAI/pull/264) | **Open isolated builder child of `2fbe20a`** | Path A first-cycle capability on the existing execution engine. |
 
 **Must not:** modify frozen discovery `#263`, sovereignty `#262`, Continuous Conversation, or Codex active work; add a new orchestration engine; migrate; merge; deploy; activate Recall; run a live cycle.
 
