@@ -371,6 +371,8 @@ def _parse_evidence_time(value: Any) -> datetime | None:
 
 def _limits_do_not_widen(requested: dict[str, Any], granted: dict[str, Any]) -> bool:
     """A grant may narrow requested caps, never silently broaden or omit them."""
+    if set(granted) != set(requested):
+        return False
     for key, requested_value in requested.items():
         if key not in granted:
             return False
@@ -389,6 +391,16 @@ def _limits_do_not_widen(requested: dict[str, Any], granted: dict[str, Any]) -> 
         elif granted_value != requested_value:
             return False
     return True
+
+
+_GRANT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def _canonical_grant_id(value: Any) -> str | None:
+    """Accept exactly one representation of a grant id; reject whitespace/lookalike ambiguity."""
+    if not isinstance(value, str) or value != value.strip() or not _GRANT_ID_RE.fullmatch(value):
+        return None
+    return value
 
 
 def _permission_request_matches_grant(
@@ -445,6 +457,7 @@ def _validate_permission_grant(
     if grant is None or grant.source_type != EvidenceSourceType.permission_authority.value or not grant.authoritative:
         raise ClaimActionIntegrityError("permission grant must come from the configured permission authority")
     p = grant.payload
+    grant_id = _canonical_grant_id(p.get("grant_id"))
     issued_at = _parse_evidence_time(p.get("issued_at"))
     expires_at = _parse_evidence_time(p.get("expires_at"))
     required = (
@@ -458,7 +471,7 @@ def _validate_permission_grant(
         and p.get("action") == action_key
         and p.get("granted") is True
         and p.get("revoked") is False
-        and isinstance(p.get("grant_id"), str) and bool(p["grant_id"].strip())
+        and grant_id is not None
         and p.get("issuer_authority") in _PERMISSION_AUTHORITY_ISSUERS
         and isinstance(p.get("scopes"), list) and action_key in p["scopes"]
         and issued_at is not None and expires_at is not None
@@ -481,7 +494,7 @@ def _validate_permission_grant(
     ).scalars().all()
     if any(
         row.authoritative
-        and row.payload.get("grant_id") == p["grant_id"]
+        and _canonical_grant_id(row.payload.get("grant_id")) == grant_id
         and row.payload.get("issuer_authority") == p.get("issuer_authority")
         and row.payload.get("revoked") is True
         for row in revocations

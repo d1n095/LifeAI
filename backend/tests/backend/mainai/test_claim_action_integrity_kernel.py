@@ -584,6 +584,39 @@ def test_revoked_grant_cannot_be_resurrected_by_replaying_old_grant(superuser_db
         _record_dispatched_merge(superuser_db, owner, replay, now=issued + timedelta(seconds=3))
 
 
+def test_revocation_is_monotonic_even_when_replay_uses_historical_timestamps(superuser_db):
+    owner = _owner(superuser_db)
+    issued = datetime.now(timezone.utc) - timedelta(minutes=2)
+    _permission_grant(superuser_db, owner, observed_at=issued, issued_at=issued)
+    _permission_grant(
+        superuser_db, owner, revoked=True, grant_id="grant-1",
+        observed_at=issued + timedelta(seconds=30), issued_at=issued - timedelta(days=1),
+    )
+    replay = _permission_grant(
+        superuser_db, owner, grant_id="grant-1",
+        observed_at=issued + timedelta(seconds=45), issued_at=issued,
+    )
+    with pytest.raises(ClaimActionIntegrityError, match="revoked"):
+        _record_dispatched_merge(superuser_db, owner, replay, now=issued + timedelta(minutes=1))
+
+
+@pytest.mark.parametrize("ambiguous_id", [" grant-1", "grant-1 ", "grant 1", "grant-1\n"])
+def test_ambiguous_grant_ids_are_rejected(superuser_db, ambiguous_id):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner, grant_id=ambiguous_id)
+    with pytest.raises(ClaimActionIntegrityError, match="invalid"):
+        _record_dispatched_merge(superuser_db, owner, grant)
+
+
+def test_whitespace_variant_cannot_bypass_existing_revocation(superuser_db):
+    owner = _owner(superuser_db)
+    grant = _permission_grant(superuser_db, owner, grant_id="grant-1")
+    _permission_grant(superuser_db, owner, revoked=True, grant_id="grant-1")
+    grant.payload["grant_id"] = " grant-1 "
+    with pytest.raises(ClaimActionIntegrityError, match="invalid"):
+        _record_dispatched_merge(superuser_db, owner, grant)
+
+
 def test_missing_principal_on_both_request_and_grant_is_rejected(superuser_db):
     owner = _owner(superuser_db)
     grant = _permission_grant(superuser_db, owner, principal=None)
@@ -599,6 +632,8 @@ def test_missing_principal_on_both_request_and_grant_is_rejected(superuser_db):
         ({"action": "deploy"}, {}),
         ({"scopes": ["merge", "deploy"]}, {}),
         ({"limits": {"max_runs": 1000}}, {}),
+        ({"limits": {"max_runs": 1, "max_tokens": 1000000}}, {}),
+        ({"limits": {"max_runs": 1, "nested": {"max_cost": 100}}}, {}),
         ({"risk": "critical"}, {}),
         ({"session_id": "session-other"}, {}),
         ({"device_id": "device-other"}, {}),
@@ -684,6 +719,19 @@ def test_natural_unsupported_external_claims_are_removed(claim):
     assert "binding evidence" in sanitized or "bindande evidens" in sanitized
 
 
+@pytest.mark.parametrize("tagged_assertion", [
+    "CI passed, right?",
+    "The branch is on GitHub, correct?",
+    "Recall is active, isn't it?",
+    "Det är mergat, eller hur?",
+    "Deployen lyckades, visst?",
+])
+def test_assertion_with_question_tag_is_not_treated_as_uncertainty(tagged_assertion):
+    sanitized = sanitize_unverified_execution_claims(tagged_assertion)
+    assert sanitized != tagged_assertion
+    assert "evidence" in sanitized or "evidens" in sanitized
+
+
 @pytest.mark.parametrize(
     "honest",
     [
@@ -714,6 +762,19 @@ def test_negated_clause_cannot_mask_a_separate_unsupported_assertion():
     assert "I have not verified that the branch was pushed" in sanitized
     assert "CI passed" not in sanitized
     assert "binding evidence" in sanitized
+
+
+@pytest.mark.parametrize("text,unsupported", [
+    ("Codex reports CI passed, but the branch is on GitHub.", "branch is on GitHub"),
+    ("According to Cursor, the PR was merged; Recall is active.", "Recall is active"),
+    ("Enligt Claude är CI grön, men deployen lyckades.", "deployen lyckades"),
+    ("Agenten uppger att testerna är gröna — allt är mergat.", "allt är mergat"),
+])
+def test_attribution_does_not_launder_independent_claim_in_another_clause(text, unsupported):
+    sanitized = sanitize_unverified_execution_claims(text)
+    assert unsupported not in sanitized
+    assert "attributed report" in sanitized or "attribuerad rapport" in sanitized
+    assert "evidence" in sanitized or "evidens" in sanitized
 
 
 @pytest.mark.parametrize("claim", [
@@ -763,10 +824,32 @@ def test_hedge_or_negation_words_elsewhere_cannot_mask_assertion(claim):
         "CI är grön.",
         "Ändringen är mergad.",
         "Agenten är färdig.",
+        "The commit is visible in the GitHub repository.",
+        "The code has landed on main.",
+        "CI is healthy.",
+        "The service is running in production.",
+        "Recall is online.",
+        "Committen finns på GitHub.",
+        "Koden är infogad i main.",
+        "Kontrollerna är godkända.",
+        "Tjänsten är igång i produktionen.",
+        "Recall är startad.",
     ],
 )
 def test_compositional_boundary_catches_natural_paraphrases(paraphrase):
     assert sanitize_unverified_execution_claims(paraphrase) != paraphrase
+
+
+@pytest.mark.parametrize("fragment", [
+    "Status: CI passed; deployment successful",
+    "Update — branch pushed — Recall active",
+    "Läge: testerna är gröna; allt mergat",
+    "Klart — driftsättningen lyckades",
+])
+def test_fragments_and_punctuation_separated_claims_are_sanitized(fragment):
+    sanitized = sanitize_unverified_execution_claims(fragment)
+    assert sanitized != fragment
+    assert "evidence" in sanitized or "evidens" in sanitized
 
 
 @pytest.mark.parametrize(

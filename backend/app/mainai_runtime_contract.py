@@ -219,7 +219,22 @@ _TRUTHFUL_REPLACEMENT: dict[str, str] = {
 # choices) — good enough to isolate a single offending sentence from the rest of an otherwise
 # legitimate answer without needing a real NLP sentence tokenizer for this narrow purpose.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
-_CLAUSE_SPLIT_RE = re.compile(r",?\s+(?=(?:but|however|and|men|dock|och)\b)", re.I)
+_CLAUSE_SPLIT_RE = re.compile(
+    r"(?:[,;]|\s+[—–-])?\s+(?=(?:but|however|yet|men|dock|däremot)\b)|"
+    r",\s+(?=(?:and|och)\b)|"
+    r"\s+(?=(?:and|och)\s+(?:the\s+)?(?:branch|commit|github|ci|pipeline|workflow|build|"
+    r"deployment|production|release|recall|agent|grenen|branchen|ändringen|deployen|"
+    r"driftsättningen|produktionen|agenten)\b)|"
+    r"\s*[;]\s*|\s+[—–]\s+",
+    re.I,
+)
+_GENUINE_QUESTION_RE = re.compile(
+    r"^\s*(?:(?:is|are|was|were|has|have|had|did|does|do|can|could|will|would|should|"
+    r"may|might)\b|(?:what|when|where|which|who|why|how)\b|"
+    r"(?:är|var|blev|har|hade|kan|kunde|kommer|skulle|bör|får)\b|"
+    r"(?:vad|när|var|vilken|vilka|vem|varför|hur)\b)",
+    re.I,
+)
 _LEADING_NON_ASSERTIVE_RE = re.compile(
     r"^\s*(?:if|whether|maybe|perhaps|om|kanske)\b",
     re.I,
@@ -258,7 +273,7 @@ _HYPOTHETICAL_OR_EXAMPLE_RE = re.compile(
 def _is_non_assertive(sentence: str) -> bool:
     stripped = sentence.strip()
     return (
-        stripped.endswith("?")
+        bool(stripped.endswith("?") and _GENUINE_QUESTION_RE.search(stripped))
         or bool(_LEADING_NON_ASSERTIVE_RE.search(stripped))
         or bool(_UNCERTAINTY_BEFORE_CLAIM_RE.search(stripped))
         or bool(_DIRECT_NEGATION_RE.search(stripped))
@@ -276,16 +291,16 @@ def _contains_external_state_assertion(sentence: str) -> bool:
     words = set(re.findall(r"[^\W_]+", sentence.casefold(), re.UNICODE))
     subject_predicates = (
         (
-            {"branch", "commit", "github", "origin", "remote", "grenen", "branchen"},
-            {"pushed", "uploaded", "synced", "present", "available", "pushad", "uppladdad", "synkad"},
+            {"branch", "commit", "github", "origin", "remote", "repository", "repo", "grenen", "branchen"},
+            {"pushed", "uploaded", "synced", "present", "available", "published", "visible", "pushad", "uppladdad", "synkad", "publicerad", "finns"},
         ),
         (
             {"test", "tests", "pytest", "suite", "testerna", "testsviten"},
             {"passed", "passing", "green", "succeeded", "successful", "clean", "passerat", "gröna", "godkända"},
         ),
         (
-            {"ci", "pipeline", "workflow", "actions", "build", "bygget"},
-            {"passed", "passing", "green", "succeeded", "successful", "passerat", "grön", "lyckades", "igenom"},
+            {"ci", "pipeline", "workflow", "actions", "build", "checks", "kontrollerna", "bygget"},
+            {"passed", "passing", "green", "succeeded", "successful", "clear", "healthy", "passerat", "grön", "lyckades", "igenom", "godkänd", "godkända"},
         ),
         (
             {"certification", "certifieringen"},
@@ -296,16 +311,16 @@ def _contains_external_state_assertion(sentence: str) -> bool:
             {"passed", "passing", "green", "successful", "gröna", "godkända"},
         ),
         (
-            {"pr", "branch", "change", "main", "grenen", "ändringen", "allt"},
-            {"merged", "landed", "integrated", "mergat", "mergad", "infogad"},
+            {"pr", "branch", "change", "main", "code", "grenen", "ändringen", "allt", "koden"},
+            {"merged", "landed", "integrated", "combined", "mergat", "mergad", "infogad", "inlemmad"},
         ),
         (
-            {"deploy", "deployment", "production", "release", "everything", "deployen", "driftsättningen", "produktionen", "allt"},
-            {"deployed", "released", "live", "complete", "completed", "successful", "klar", "driftsatt", "lyckats"},
+            {"deploy", "deployment", "production", "prod", "release", "service", "everything", "deployen", "driftsättningen", "produktionen", "tjänsten", "allt"},
+            {"deployed", "released", "live", "shipped", "published", "complete", "completed", "successful", "running", "klar", "driftsatt", "lanserad", "publicerad", "lyckats", "lyckades", "igång"},
         ),
         (
             {"recall"},
-            {"live", "active", "activated", "enabled", "running", "aktiv", "aktiverad", "påslagen", "igång"},
+            {"live", "active", "activated", "enabled", "running", "online", "aktiv", "aktiverad", "påslagen", "igång", "startad"},
         ),
         (
             {"agent", "codex", "claude", "cursor", "agenten"},
@@ -334,10 +349,12 @@ def sanitize_unverified_execution_claims(message: str) -> str:
     changed = False
     clauses = []
     for sentence in sentences:
-        if _ATTRIBUTED_CLAIM_RE.search(sentence):
+        if _ATTRIBUTED_WITH_UNCERTAINTY_RE.search(sentence):
             clauses.append(sentence)
-        else:
-            clauses.extend(_CLAUSE_SPLIT_RE.split(sentence))
+            continue
+        # Attribution applies only to the clause it grammatically introduces. Always split
+        # coordinated clauses so "Codex reports X, but Y is deployed" cannot launder Y.
+        clauses.extend(_CLAUSE_SPLIT_RE.split(sentence))
     for sentence in clauses:
         matched_lang: str | None = None
         attributed = bool(_ATTRIBUTED_CLAIM_RE.search(sentence))
