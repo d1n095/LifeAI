@@ -119,9 +119,13 @@ class GitHubClient:
             payload["sha"] = sha
         return await self._request("PUT", f"/repos/{repo}/contents/{path}", json=payload)
 
-    async def create_pull_request(self, *, title: str, body: str, head: str, base: str) -> dict:
+    async def create_pull_request(self, *, title: str, body: str, head: str, base: str, draft: bool = False) -> dict:
         repo = self._require_configured()
-        return await self._request("POST", f"/repos/{repo}/pulls", json={"title": title, "body": body, "head": head, "base": base})
+        return await self._request(
+            "POST",
+            f"/repos/{repo}/pulls",
+            json={"title": title, "body": body, "head": head, "base": base, "draft": draft},
+        )
 
     async def update_pull_request(self, number: int, *, title: str | None = None, body: str | None = None) -> dict:
         repo = self._require_configured()

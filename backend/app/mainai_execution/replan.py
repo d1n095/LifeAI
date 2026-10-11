@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.planner import create_plan, propose_plan_via_ai
+from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.models.mainai_execution import (
     MainAIGoal,
     MainAIPlan,
@@ -89,7 +90,8 @@ async def trigger_replan(db: Session, *, goal: MainAIGoal, failed_task: MainAITa
     cancellation, and re-promoting dependency-free tasks to `ready` entirely on its own,
     unchanged from V0.1. Records a `replanned` event on the failed task that triggered this --
     the durable link between "this specific failure" and "this specific new plan version"."""
-    tasks, provider, model = await propose_plan_via_ai(db, goal=goal)
+    failure_context = latest_verification_failure_text(db, failed_task.id)
+    tasks, provider, model = await propose_plan_via_ai(db, goal=goal, failure_context=failure_context)
     plan = create_plan(
         db,
         goal=goal,

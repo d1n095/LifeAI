@@ -39,7 +39,14 @@ from sqlalchemy.orm import Session
 from app.integrations.github_client import GitHubClient, GitHubClientError
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step
 from app.mainai_execution.lessons import lookup_lessons
-from app.mainai_execution.worktree import fetch_remote_branch, is_ancestor, task_branch_name, verify_worktree_ownership, worktree_git_status
+from app.mainai_execution.worktree import (
+    execution_pr_base_branch,
+    fetch_remote_branch,
+    is_ancestor,
+    task_branch_name,
+    verify_worktree_ownership,
+    worktree_git_status,
+)
 from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import (
@@ -145,7 +152,9 @@ async def inspect_recovery_record(db: Session, *, task: MainAITask, job: MainAIJ
         if evidence["remote_branch_exists"]:
             try:
                 repo_owner = client.settings.github_repo.split("/", 1)[0]
-                prs = await client.list_pull_requests_for_head(head=f"{repo_owner}:{branch}", base="claude/det-kommer-mer-879lcm", state="all")
+                prs = await client.list_pull_requests_for_head(
+                    head=f"{repo_owner}:{branch}", base=execution_pr_base_branch(), state="all"
+                )
                 evidence["pr_exists"] = bool(prs)
                 evidence["pr_numbers"] = [pr.get("number") for pr in prs]
             except GitHubClientError as exc:

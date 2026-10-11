@@ -147,6 +147,10 @@ CONFIG_MATRIX: dict[str, dict] = {
     "github_repo": {"required_in_production": False, "secret": False, "default": None, "validates": "none — 'owner/repo' format, checked at call time by app/integrations/github_client.py, not at startup"},
     "github_write_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — a plain bool gate; off by default so MainAI only proposes PRs until explicitly turned on"},
     "github_auto_merge_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates a merge capability that has no implementation yet (see app/integrations/github_client.py's docstring); always off in this slice"},
+    "github_worktree_base_branch": {"required_in_production": False, "secret": False, "default": "claude/det-kommer-mer-879lcm", "validates": "none — Path A worktree fetch base; empty falls back to the historical default"},
+    "github_pr_base_branch": {"required_in_production": False, "secret": False, "default": "", "validates": "none — Path A PR target; empty means same as github_worktree_base_branch"},
+    "mainai_execution_require_provider_spend": {"required_in_production": False, "secret": False, "default": False, "validates": "none — when true, Path A AI calls fail closed without a live provider_spend grant"},
+    "mainai_execution_goal_spend_cap_usd": {"required_in_production": False, "secret": False, "default": 5.0, "validates": "none — additional Path A hard ceiling on a live provider_spend grant's max_cost_usd"},
 }
 
 

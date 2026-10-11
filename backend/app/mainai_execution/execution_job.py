@@ -57,10 +57,14 @@ from app.mainai_execution.verify import (
     validate_targeted_tests_target,
     verify_task,
 )
+from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
+from app.mainai_execution.code_agent_context import build_code_agent_user_prompt
+from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.mainai_execution.worktree import (
     WorktreeError,
     commit_worktree_changes,
     create_task_worktree,
+    execution_pr_base_branch,
     push_worktree_branch,
     verify_worktree_ownership,
     worktree_git_status,
@@ -76,7 +80,6 @@ from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.mainai_recovery import MainAITaskWorktree
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.providers.base import Message
-from app.providers.registry import chat_with_fallback
 
 logger = logging.getLogger("mainai.execution")
 
@@ -144,9 +147,18 @@ CODE_AGENT_SYSTEM_PROMPT = (
 )
 
 
-async def _handle_read_only_audit(db: Session, task: MainAITask) -> dict:
+async def _handle_read_only_audit(db: Session, task: MainAITask, *, goal: MainAIGoal, job: MainAIJob) -> dict:
     messages = [Message(role="system", content=READ_ONLY_AUDIT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    result, _attempted = await billed_execution_chat(
+        db,
+        messages,
+        owner_id=task.owner_id,
+        goal_id=goal.id,
+        purpose="mainai_execution.read_only_audit",
+        requested_by="mainai_execution.execution_job._handle_read_only_audit",
+        task_id=task.id,
+        job_id=job.id,
+    )
     return {"summary": result.content, "provider": result.provider, "model": result.model}
 
 
@@ -201,11 +213,20 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     the extensive existing path-traversal/symlink-escape hardening tests targeting this exact
     behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
     al.) keep exercising the identical code, unchanged."""
-    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
-    parsed = _parse_code_agent_response(result.content)
-
     repo_root = _repo_root().resolve()
+    failure_context = latest_verification_failure_text(db, task.id)
+    user_prompt = build_code_agent_user_prompt(task.description, repo_root, failure_context=failure_context)
+    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
+    result, _attempted = await billed_execution_chat(
+        db,
+        messages,
+        owner_id=task.owner_id,
+        goal_id=task.goal_id,
+        purpose="mainai_execution.repo_edit",
+        requested_by="mainai_execution.execution_job._propose_repo_edit",
+        task_id=task.id,
+    )
+    parsed = _parse_code_agent_response(result.content)
     previous_contents: dict[str, str | None] = {}
     for file in parsed["files"]:
         # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
@@ -318,11 +339,21 @@ async def _handle_repo_edit(
         renew_mainai_job_lease(db, job.id, worker_id, lease_generation, lease_seconds)
         db.commit()
 
-    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
-    parsed = _parse_code_agent_response(result.content)
-
     worktree_root = Path(worktree.path).resolve()
+    failure_context = latest_verification_failure_text(db, task.id)
+    user_prompt = build_code_agent_user_prompt(task.description, worktree_root, failure_context=failure_context)
+    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
+    result, _attempted = await billed_execution_chat(
+        db,
+        messages,
+        owner_id=task.owner_id,
+        goal_id=task.goal_id,
+        purpose="mainai_execution.repo_edit",
+        requested_by="mainai_execution.execution_job._handle_repo_edit",
+        task_id=task.id,
+        job_id=job.id,
+    )
+    parsed = _parse_code_agent_response(result.content)
     for file in parsed["files"]:
         # Identical two-layer defense _propose_repo_edit() already uses (syntactic guard at
         # parse time + this resolve()-and-compare confinement check), now against the isolated
@@ -431,7 +462,7 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     title = f"MainAI: {goal.title}"[:250]
     body = f"Automatiskt genererad av MainAI Execution Loop V0.1 för mål: {goal.title}\n\n{goal.original_instruction}"
     head_branch = edit_info["branch"]
-    base_branch = edit_info.get("base_branch", "main")
+    base_branch = edit_info.get("base_branch") or execution_pr_base_branch()
 
     if not settings.github_write_enabled:
         return {"proposed": True, "title": title, "body": body, "head": head_branch, "base": base_branch}
@@ -442,7 +473,7 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     if existing:
         pr = existing[0]
     else:
-        pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch)
+        pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch, draft=True)
     return {
         "proposed": False,
         "pull_request_number": pr.get("number"),
@@ -479,7 +510,7 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
     exit 0) -- calling this function twice for the same worktree is naturally idempotent,
     without needing any tip-tracking logic at all."""
     branch = f"claude/mainai-task-{task.id}"
-    base_branch = "claude/det-kommer-mer-879lcm"
+    base_branch = execution_pr_base_branch()
 
     worktree_id = work_result.get("worktree_id")
     if worktree_id is None:
@@ -535,7 +566,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             # real side effect, not to abandon one already durably in flight.
             _check_cancel_requested(db, job_id)
             if task.task_type == "read_only_audit":
-                work_result = await _handle_read_only_audit(db, task)
+                work_result = await _handle_read_only_audit(db, task, goal=goal, job=job)
             elif task.task_type == "repo_edit":
                 # _handle_repo_edit() makes its own internal, lease-checked commits (worktree
                 # creation, real local git commits) since those facts must be durable before
@@ -706,7 +737,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             return
         return
 
-    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError) as exc:
+    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError, ExecutionSpendError) as exc:
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
         db.rollback()
         job = db.get(MainAIJob, job_id)
