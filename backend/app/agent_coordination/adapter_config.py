@@ -56,7 +56,11 @@ _ENV_CREDENTIALS_CONFIRMED = "LIFE_AGENT_ADAPTER_CREDENTIALS_CONFIRMED__{key}"
 _ENV_CREDENTIAL_REF = "LIFE_AGENT_ADAPTER_CREDENTIAL_REF__{key}"  # an opaque LABEL, never a secret
 _ENV_ENV_ALLOWLIST = "LIFE_AGENT_ADAPTER_ENV_ALLOWLIST__{key}"  # comma-separated ambient VAR NAMES
 
+_ENV_MAX_BUDGET_USD = "LIFE_AGENT_ADAPTER_MAX_BUDGET_USD__{key}"  # per-turn spend ceiling, where the CLI supports one
+
 _DEFAULT_TIMEOUT_SECONDS = 900  # a bound always applies; 15 minutes if the founder sets none
+_DEFAULT_MAX_BUDGET_USD = 1.0  # per conversation turn, if the founder sets none
+HARD_MAX_BUDGET_USD = 25.0  # a configured value above this ceiling is refused, never clamped silently
 
 
 def _env_key(agent_key: str) -> str:
@@ -133,6 +137,24 @@ def real_adapter_config(provider_key: str) -> tuple[str, tuple[str, ...], int] |
     except ValueError:
         timeout_seconds = _DEFAULT_TIMEOUT_SECONDS
     return availability.executable_path, args_template, timeout_seconds
+
+
+def adapter_max_budget_usd(provider_key: str) -> float | None:
+    """The per-turn spend ceiling handed to a CLI that supports one (Claude Code's
+    `--max-budget-usd`). Defaults to `_DEFAULT_MAX_BUDGET_USD`; returns `None` -- which makes
+    a budget-capable adapter refuse to construct -- for a non-numeric, non-positive or
+    above-`HARD_MAX_BUDGET_USD` value. Fail closed, never clamped."""
+
+    raw = os.environ.get(_ENV_MAX_BUDGET_USD.format(key=_env_key(provider_key)), "").strip()
+    if not raw:
+        return _DEFAULT_MAX_BUDGET_USD
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    if not 0 < value <= HARD_MAX_BUDGET_USD:
+        return None
+    return value
 
 
 def credential_reference(provider_key: str) -> str | None:

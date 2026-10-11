@@ -88,6 +88,7 @@ OUTCOME_ADAPTER_DISABLED = "ADAPTER_DISABLED"
 OUTCOME_ADAPTER_UNAVAILABLE = "ADAPTER_UNAVAILABLE"
 OUTCOME_ADAPTER_PROCESS_LOST = "ADAPTER_PROCESS_LOST"
 OUTCOME_ADAPTER_TIMEOUT = "ADAPTER_TIMEOUT"
+OUTCOME_INSTRUCTION_REJECTED = "INSTRUCTION_REJECTED"
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,7 @@ async def dispatch_assignment(
     authority_envelope: dict | None = None,
     required_capabilities: tuple[str, ...] = (),
     require_adapter_enabled: bool = False,
+    instruction: str | None = None,
 ) -> DispatchDecision:
     """`dispatch(agent_id, assignment_id, authority_envelope)` -- the canonical control-plane
     entry point. ALWAYS re-runs `evaluate_dispatch_readiness()` immediately before touching the
@@ -232,9 +234,18 @@ async def dispatch_assignment(
     `waiting_agent` maps to `RuntimeStatus.IDLE` in `app.agent_coordination.runtime_view`, and a
     crashed dispatch left there would silently read as "idle," never as "broken." NEVER
     silently reports success, never fabricates a running state for a dispatch that never
-    actually reached a real external agent."""
+    actually reached a real external agent.
 
-    from app.agent_coordination.adapters import AdapterProcessLostError, AdapterTimeoutError, ProviderNotConfiguredError
+    `instruction`, when supplied, is the text delivered to the agent's NEW session (a
+    conversational adapter -- see `app.agent_coordination.adapters.CLIDialect`). It is passed
+    only when set, so adapters predating it keep their exact single-argument call."""
+
+    from app.agent_coordination.adapters import (
+        AdapterInstructionError,
+        AdapterProcessLostError,
+        AdapterTimeoutError,
+        ProviderNotConfiguredError,
+    )
 
     decision = evaluate_dispatch_readiness(
         db, assignment=assignment, agent=agent, required_capabilities=required_capabilities, require_adapter_enabled=require_adapter_enabled
@@ -253,7 +264,10 @@ async def dispatch_assignment(
     attempt_id = uuid.uuid4()
     transition_status(db, assignment=assignment, new_status="waiting_agent", detail={"reason": "dispatching", "attempt_id": str(attempt_id)})
     try:
-        await adapter.start_assignment(assignment.id)
+        if instruction is None:
+            await adapter.start_assignment(assignment.id)
+        else:
+            await adapter.start_assignment(assignment.id, instruction=instruction)
     except ProviderNotConfiguredError as exc:
         transition_status(
             db, assignment=assignment, new_status="blocked",
@@ -272,6 +286,12 @@ async def dispatch_assignment(
             detail={"reason": OUTCOME_ADAPTER_TIMEOUT, "detail": str(exc), "attempt_id": str(attempt_id)},
         )
         return DispatchDecision(OUTCOME_ADAPTER_TIMEOUT, str(exc), attempt_id=attempt_id)
+    except AdapterInstructionError as exc:
+        transition_status(
+            db, assignment=assignment, new_status="blocked",
+            detail={"reason": OUTCOME_INSTRUCTION_REJECTED, "detail": str(exc), "attempt_id": str(attempt_id)},
+        )
+        return DispatchDecision(OUTCOME_INSTRUCTION_REJECTED, str(exc), attempt_id=attempt_id)
     except Exception as exc:
         transition_status(
             db, assignment=assignment, new_status="blocked",
@@ -312,9 +332,21 @@ class DispatchResult:
     duration_seconds: float | None = None
     cost_tokens: int | None = None
     cost_usd: float | None = None
+    agent_output_refs: tuple[dict, ...] = ()  # the adapter's own refs (final message, session id), appended verbatim
 
 
-def apply_dispatch_result(db: Session, *, assignment: AgentWorkAssignment, agent: CoordinationAgent, result: DispatchResult) -> None:
+# A conversation turn that answered is NOT the end of the assignment: it waits for MainAI /
+# the Founder to review the answer and either continue the session or close it -- the existing
+# running -> waiting_review -> reviewing -> changes_requested -> running review loop.
+SUCCESS_TRANSITIONS = frozenset({"completed", "waiting_review"})
+# The only adapter output refs recorded on the assignment: a conversational adapter's final
+# message (agent self-report), its session id, and a failed turn's bounded diagnostics.
+CONVERSATION_REF_KINDS = frozenset({"agent_final_message", "agent_session", "agent_failure"})
+
+
+def apply_dispatch_result(
+    db: Session, *, assignment: AgentWorkAssignment, agent: CoordinationAgent, result: DispatchResult, on_success: str = "completed"
+) -> None:
     """The ONE place a dispatched worker's result is handed back into durable state. Updates
     the assignment's own pointer fields (`head_sha`, `output_refs`, `upstream_pr_ref`) only
     when the caller actually observed a value -- never overwrites with a guess. Records
@@ -323,8 +355,13 @@ def apply_dispatch_result(db: Session, *, assignment: AgentWorkAssignment, agent
     duplicate the underlying `IntelligenceExecution` row), never a second evidence store.
     Transitions status through the EXISTING state machine (`transition_status()`) -- never a
     raw status assignment; a caller invoking this from a non-`running` state gets
-    `InvalidTransitionError`, fail-closed by construction, not silently accepted."""
+    `InvalidTransitionError`, fail-closed by construction, not silently accepted.
 
+    `on_success` is `completed` (the default, unchanged) or `waiting_review` for a
+    conversation turn that a reviewer may continue; anything else is refused."""
+
+    if on_success not in SUCCESS_TRANSITIONS:
+        raise ValueError(f"on_success must be one of {sorted(SUCCESS_TRANSITIONS)}, got {on_success!r}")
     if result.head_sha is not None:
         assignment.head_sha = result.head_sha
     if result.pr_ref is not None:
@@ -333,6 +370,9 @@ def apply_dispatch_result(db: Session, *, assignment: AgentWorkAssignment, agent
         assignment.output_refs = [*assignment.output_refs, {"kind": "changed_paths", "paths": list(result.changed_paths)}]
     if result.ci_refs:
         assignment.output_refs = [*assignment.output_refs, {"kind": "ci_refs", "refs": list(result.ci_refs)}]
+    if result.agent_output_refs:
+        attempt = str(result.dispatch_attempt_id) if result.dispatch_attempt_id is not None else None
+        assignment.output_refs = [*assignment.output_refs, *({**ref, "attempt_id": attempt} for ref in result.agent_output_refs)]
     db.flush()
 
     if assignment.intelligence_execution_id is None:
@@ -357,10 +397,19 @@ def apply_dispatch_result(db: Session, *, assignment: AgentWorkAssignment, agent
         payload["adapter_key"] = result.adapter_key
     if result.dispatch_attempt_id is not None:
         payload["dispatch_attempt_id"] = str(result.dispatch_attempt_id)
-    record_assignment_outcome(db, assignment=assignment, evidence_kind="dispatch_result", payload=payload, deterministic=True)
+    # One evidence row per dispatch ATTEMPT (each conversation turn is its own attempt);
+    # re-applying the same attempt stays idempotent. Results without an attempt id keep the
+    # original per-assignment key unchanged.
+    idempotency_key = (
+        f"agent-coordination-outcome:{assignment.id}:dispatch_result:{result.dispatch_attempt_id}"
+        if result.dispatch_attempt_id is not None else None
+    )
+    record_assignment_outcome(
+        db, assignment=assignment, evidence_kind="dispatch_result", payload=payload, deterministic=True, idempotency_key=idempotency_key
+    )
 
     if result.succeeded:
-        transition_status(db, assignment=assignment, new_status="completed")
+        transition_status(db, assignment=assignment, new_status=on_success)
     elif result.block_reason is not None:
         transition_status(db, assignment=assignment, new_status="blocked", detail={"reason": result.block_reason})
     else:
@@ -373,7 +422,7 @@ def apply_dispatch_result(db: Session, *, assignment: AgentWorkAssignment, agent
 
 async def collect_dispatch_result(
     db: Session, *, assignment: AgentWorkAssignment, agent: CoordinationAgent, adapter: "AgentAdapter", adapter_key: str | None = None,
-    dispatch_attempt_id: uuid.UUID | None = None,
+    dispatch_attempt_id: uuid.UUID | None = None, on_success: str = "completed",
 ) -> DispatchDecision:
     """Collects the adapter's own `AgentResult` and applies it via `apply_dispatch_result()` --
     the companion to `dispatch_assignment()` for the OTHER end of a dispatch's lifecycle.
@@ -403,6 +452,7 @@ async def collect_dispatch_result(
         adapter_key=adapter_key,
         dispatch_attempt_id=dispatch_attempt_id,
         failure_reason=None if agent_result.succeeded else agent_result.summary,
+        agent_output_refs=tuple(ref for ref in agent_result.output_refs if ref.get("kind") in CONVERSATION_REF_KINDS),
     )
-    apply_dispatch_result(db, assignment=assignment, agent=agent, result=result)
+    apply_dispatch_result(db, assignment=assignment, agent=agent, result=result, on_success=on_success)
     return DispatchDecision(OUTCOME_ASSIGNABLE, "result collected and applied", attempt_id=dispatch_attempt_id)
