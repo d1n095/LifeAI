@@ -8,6 +8,7 @@ from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
 from app.security import hash_opaque_token, hash_refresh_token
+from app.session_tokens import mint_refresh_token
 
 
 def test_purges_old_expired_refresh_tokens_but_keeps_recent_ones(db_session, make_verified_user):
@@ -15,21 +16,22 @@ def test_purges_old_expired_refresh_tokens_but_keeps_recent_ones(db_session, mak
     settings = get_settings()
     retention = settings.token_cleanup_retention_days
 
-    old = RefreshToken(
+    old = mint_refresh_token(
+        db_session,
         user_id=user.id,
         family_id=uuid.uuid4(),
         token_hash=hash_refresh_token("old-token"),
-        csrf_token="csrf",
+        csrf_token="csrf-token-value",
         expires_at=datetime.utcnow() - timedelta(days=retention + 1),
     )
-    recent = RefreshToken(
+    recent = mint_refresh_token(
+        db_session,
         user_id=user.id,
         family_id=uuid.uuid4(),
         token_hash=hash_refresh_token("recent-token"),
-        csrf_token="csrf",
+        csrf_token="csrf-token-other",
         expires_at=datetime.utcnow() - timedelta(days=retention - 1),
     )
-    db_session.add_all([old, recent])
     db_session.commit()
 
     counts = run_token_cleanup(db_session)
@@ -50,15 +52,15 @@ def test_purges_refresh_tokens_revoked_past_retention_even_if_not_yet_naturally_
     settings = get_settings()
     retention = settings.token_cleanup_retention_days
 
-    row = RefreshToken(
+    row = mint_refresh_token(
+        db_session,
         user_id=user.id,
         family_id=uuid.uuid4(),
         token_hash=hash_refresh_token("revoked-long-ago"),
-        csrf_token="csrf",
+        csrf_token="csrf-token-value",
         expires_at=datetime.utcnow() + timedelta(days=100),
-        revoked_at=datetime.utcnow() - timedelta(days=retention + 1),
     )
-    db_session.add(row)
+    row.revoked_at = datetime.utcnow() - timedelta(days=retention + 1)
     db_session.commit()
 
     counts = run_token_cleanup(db_session)

@@ -105,12 +105,15 @@ def _ensure_founder(db) -> User:
 
 
 def _bind_founder_jti(db, user: User | None = None) -> str:
+    from app.session_tokens import mint_refresh_token
+
     user = user or _ensure_founder(db)
     jti = str(uuid.uuid4())
-    issued_at = datetime.now(timezone.utc)
-    user.sessions_valid_after = issued_at - timedelta(seconds=2)
-    db.add(
-        RefreshToken(
+    issued_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    role = db.execute(text("SELECT current_user")).scalar()
+    if role == "mainai_app":
+        mint_refresh_token(
+            db,
             user_id=user.id,
             family_id=uuid.uuid4(),
             token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
@@ -119,8 +122,20 @@ def _bind_founder_jti(db, user: User | None = None) -> str:
             created_at=issued_at,
             expires_at=issued_at + timedelta(hours=1),
         )
-    )
-    db.flush()
+    else:
+        user.sessions_valid_after = issued_at - timedelta(seconds=2)
+        db.add(
+            RefreshToken(
+                user_id=user.id,
+                family_id=uuid.uuid4(),
+                token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+                access_jti=jti,
+                csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
+                created_at=issued_at,
+                expires_at=issued_at + timedelta(hours=1),
+            )
+        )
+        db.flush()
     _bind_session(db, user.id, jti)
     return jti
 
@@ -1147,3 +1162,118 @@ def test_genuine_step_up_unlocks_and_wrong_jti_does_not(superuser_db):
     set_workflow_lock(superuser_db, policy_key="jti_lock", locked=False)
     head = superuser_db.get(FounderPolicyHead, {"owner_id": FOUNDER_USER_ID, "policy_key": "jti_lock"})
     assert head is not None and head.workflow_locked is False
+
+
+def test_runtime_role_cannot_rewrite_founder_identity_fields(db_session, superuser_db):
+    founder = _ensure_founder(superuser_db)
+    superuser_db.commit()
+    assert db_session.execute(text("SELECT current_user")).scalar() == "mainai_app"
+    db_session.execute(text("SELECT set_config('app.current_user_id', :uid, true)"), {"uid": str(founder.id)})
+    _attack(
+        db_session,
+        "UPDATE users SET password_hash = :h WHERE id = :o",
+        {"h": hash_password("attacker-chosen-pw"), "o": str(FOUNDER_USER_ID)},
+    )
+    _attack(db_session, "UPDATE users SET role = 'member' WHERE id = :o", {"o": str(FOUNDER_USER_ID)})
+    _attack(db_session, "UPDATE users SET is_active = false WHERE id = :o", {"o": str(FOUNDER_USER_ID)})
+    _attack(db_session, "UPDATE users SET sessions_valid_after = now() WHERE id = :o", {"o": str(FOUNDER_USER_ID)})
+    superuser_db.expire_all()
+    fresh = superuser_db.get(User, FOUNDER_USER_ID)
+    assert fresh is not None
+    assert fresh.role == UserRole.founder
+    assert fresh.is_active is True
+    assert verify_password(FOUNDER_PASSWORD, fresh.password_hash)
+
+
+def test_runtime_role_cannot_insert_or_rebind_refresh_tokens(db_session, superuser_db):
+    _ensure_founder(superuser_db)
+    superuser_db.commit()
+    assert db_session.execute(text("SELECT current_user")).scalar() == "mainai_app"
+    forged = "f" + uuid.uuid4().hex
+    _attack(
+        db_session,
+        """
+        INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, access_jti, csrf_token, created_at, expires_at)
+        VALUES (gen_random_uuid(), :o, gen_random_uuid(), :t, :j, :c, now() + interval '1 second', now() + interval '1 hour')
+        """,
+        {
+            "o": str(FOUNDER_USER_ID),
+            "t": uuid.uuid4().hex * 2,
+            "j": forged,
+            "c": uuid.uuid4().hex * 2,
+        },
+    )
+    existing = superuser_db.execute(text("SELECT id FROM refresh_tokens LIMIT 1")).scalar()
+    if existing is not None:
+        _attack(
+            db_session,
+            "UPDATE refresh_tokens SET user_id = :o, access_jti = :j WHERE id = :id",
+            {"o": str(FOUNDER_USER_ID), "j": forged, "id": str(existing)},
+        )
+
+
+def test_http_password_rewrite_login_step_up_rollback_is_blocked(client, db_session, superuser_db):
+    """Examiner HTTP chain: runtime SQL rewrites Founder password_hash, then real login,
+    step-up, and locked-policy rollback. The rewrite must fail and the chain must stop."""
+    founder = _ensure_founder(superuser_db)
+    email = founder.email
+    superuser_db.execute(
+        text("UPDATE users SET email_verified = true, is_active = true WHERE id = :o"),
+        {"o": str(FOUNDER_USER_ID)},
+    )
+    jti = _bind_founder_jti(superuser_db, founder)
+    _bind_session(superuser_db, FOUNDER_USER_ID, jti)
+    key = f"h_{uuid.uuid4().hex[:6]}"
+    apply_founder_policy(
+        superuser_db, actor_kind=ActorKind.FOUNDER, policy_key=key, payload={"v": 1}, reason="v1"
+    )
+    apply_founder_policy(
+        superuser_db, actor_kind=ActorKind.FOUNDER, policy_key=key, payload={"v": 2}, reason="v2"
+    )
+    set_workflow_lock(superuser_db, policy_key=key, locked=True)
+    superuser_db.commit()
+    before = superuser_db.execute(
+        text(
+            "SELECT h.workflow_locked, v.payload "
+            "FROM founder_policy_heads h "
+            "JOIN founder_policy_versions v ON v.id = h.current_version_id "
+            "WHERE h.policy_key = :k"
+        ),
+        {"k": key},
+    ).one()
+
+    assert db_session.execute(text("SELECT current_user")).scalar() == "mainai_app"
+    _attack(
+        db_session,
+        "UPDATE users SET password_hash = :h WHERE id = :o",
+        {"h": hash_password("attacker-pw-123!"), "o": str(FOUNDER_USER_ID)},
+    )
+
+    login = client.post("/api/auth/login", json={"email": email, "password": "attacker-pw-123!"})
+    assert login.status_code == 401
+    step_up = client.post(
+        "/api/founder-sovereignty/step-up",
+        json={"purpose": "policy_rollback", "password": "attacker-pw-123!"},
+    )
+    assert step_up.status_code != 200
+    rollback = client.post(
+        "/api/founder-sovereignty/policies/rollback",
+        json={"policy_key": key, "reason": "attacker"},
+    )
+    assert rollback.status_code != 200
+
+    genuine = client.post("/api/auth/login", json={"email": email, "password": FOUNDER_PASSWORD})
+    assert genuine.status_code == 200
+
+    superuser_db.expire_all()
+    after = superuser_db.execute(
+        text(
+            "SELECT h.workflow_locked, v.payload "
+            "FROM founder_policy_heads h "
+            "JOIN founder_policy_versions v ON v.id = h.current_version_id "
+            "WHERE h.policy_key = :k"
+        ),
+        {"k": key},
+    ).one()
+    assert after == before
+    assert after[0] is True

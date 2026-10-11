@@ -112,18 +112,18 @@ def _make_user(session, email=None, *, role=UserRole.founder) -> User:
 
 
 def _issue_erasure_access_session(session, owner_id) -> str:
+    from app.session_tokens import mint_refresh_token
+
     access_jti = str(uuid.uuid4())
-    session.add(
-        RefreshToken(
-            user_id=owner_id,
-            family_id=uuid.uuid4(),
-            token_hash=hash_opaque_token(f"erasure-refresh-{uuid.uuid4()}"),
-            access_jti=access_jti,
-            csrf_token=generate_csrf_token(),
-            expires_at=datetime.utcnow() + timedelta(minutes=10),
-        )
+    mint_refresh_token(
+        session,
+        user_id=owner_id,
+        family_id=uuid.uuid4(),
+        token_hash=hash_opaque_token(f"erasure-refresh-{uuid.uuid4()}"),
+        access_jti=access_jti,
+        csrf_token=generate_csrf_token(),
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
     )
-    session.flush()
     return access_jti
 
 
@@ -2449,18 +2449,18 @@ def test_erase_account_data_governs_personal_recall_content_and_keys():
         session.add(owner)
         session.flush()
         access_jti = str(uuid.uuid4())
-        session.add(
-            RefreshToken(
-                user_id=FOUNDER_USER_ID,
-                family_id=uuid.uuid4(),
-                token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
-                access_jti=access_jti,
-                csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
-                created_at=now,
-                expires_at=now + timedelta(hours=1),
-            )
+        from app.session_tokens import mint_refresh_token
+
+        mint_refresh_token(
+            session,
+            user_id=FOUNDER_USER_ID,
+            family_id=uuid.uuid4(),
+            token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            access_jti=access_jti,
+            csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
+            created_at=now,
+            expires_at=now + timedelta(hours=1),
         )
-        session.flush()
         _set_rls_user(session, FOUNDER_USER_ID)
         authority = recall_founder_authority_from_user(user=owner, access_jti=access_jti)
         create_recall_grant(

@@ -148,7 +148,12 @@ def require_canonical_founder_recall_authority(db: Session, *, owner_id: uuid.UU
         )
         .execution_options(populate_existing=True)
     ).scalar_one_or_none()
-    if token is None or token.created_at <= row.sessions_valid_after:
+    # Compare at whole-second precision, same as JWT iat vs sessions_valid_after in
+    # app/deps.py. Refresh-token created_at is microsecond-precise; logout-all / password
+    # reset store date_trunc('second', now()). A same-second token must fail closed.
+    token_created = None if token is None else token.created_at.replace(microsecond=0)
+    valid_after = row.sessions_valid_after.replace(microsecond=0)
+    if token is None or token_created <= valid_after:
         raise RecallProductionError("founder Recall authority is stale or revoked")
 
 

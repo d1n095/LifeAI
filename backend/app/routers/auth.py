@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit
@@ -29,6 +30,7 @@ from app.security import (
     hash_refresh_token,
     verify_password,
 )
+from app.session_tokens import mint_refresh_token
 from app.token_revocation import revoke_access_token, revoke_all_sessions_for_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -55,7 +57,13 @@ FAILED_LOGIN_THRESHOLD = 10
 
 
 def _issue_session(
-    db: Session, request: Request, response: Response, user: User, family_id: uuid.UUID
+    db: Session,
+    request: Request,
+    response: Response,
+    user: User,
+    family_id: uuid.UUID,
+    *,
+    replaces_id: uuid.UUID | None = None,
 ) -> tuple[RefreshToken, str]:
     """Create a new refresh token row (in the given family) plus a fresh access token and
     CSRF value, and attach the two session cookies. Shared by login (new family) and
@@ -66,7 +74,8 @@ def _issue_session(
     access_token, access_jti = create_access_token(user.id, user.role.value)
     csrf_token = generate_csrf_token()
 
-    new_row = RefreshToken(
+    new_row = mint_refresh_token(
+        db,
         user_id=user.id,
         family_id=family_id,
         token_hash=hash_refresh_token(refresh_plain),
@@ -75,11 +84,9 @@ def _issue_session(
         expires_at=datetime.utcnow() + timedelta(days=settings.refresh_token_expire_days),
         user_agent=request.headers.get("user-agent"),
         ip_address=request.client.host if request.client else None,
+        replaces_id=replaces_id,
     )
-    db.add(new_row)
     db.commit()
-    # No db.refresh(): `id` is populated client-side by the default=uuid.uuid4 (see
-    # app/models/refresh_token.py) — same reasoning as app/routers/chat.py.
 
     set_session_cookies(response, access_token, refresh_plain)
     return new_row, csrf_token
@@ -316,12 +323,9 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
     db.add(row)
     db.commit()
 
-    new_row, csrf_token = _issue_session(db, request, response, user, family_id=row.family_id)
-    # Purely for audit/forensics — not used by any security check (reuse detection keys
-    # off revoked_at + family_id, not this chain pointer).
-    new_row.replaces_id = row.id
-    db.add(new_row)
-    db.commit()
+    new_row, csrf_token = _issue_session(
+        db, request, response, user, family_id=row.family_id, replaces_id=row.id
+    )
 
     record_audit(db, user_id=user.id, action="refresh_success", request=request)
     return _session_response(user, csrf_token)
@@ -420,14 +424,33 @@ def reset_password(request: Request, response: Response, payload: ResetPasswordI
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    row.used_at = datetime.utcnow()
-    user.password_hash = hash_password(payload.new_password)
-    db.add_all([row, user])
+    try:
+        reset_user_id = db.execute(
+            text("SELECT consume_password_reset_token_and_set_hash(:token_hash, :new_hash)"),
+            {
+                "token_hash": hash_opaque_token(payload.token),
+                "new_hash": hash_password(payload.new_password),
+            },
+        ).scalar_one()
+    except Exception as exc:
+        db.rollback()
+        record_audit(db, user_id=row.user_id, action="reset_password_invalid_token", request=request)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Länken är ogiltig eller har gått ut. Begär en ny återställning.",
+        ) from exc
+    if reset_user_id != user.id:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Länken är ogiltig eller har gått ut. Begär en ny återställning.",
+        )
     db.commit()
 
     # A password reset is exactly the situation where old sessions must not survive — if the
     # password was compromised, whoever had it may also be holding a live session cookie.
-    revoke_all_sessions_for_user(db, user.id)
+    # consume_password_reset_token_and_set_hash already bumped sessions_valid_after.
+    revoke_all_sessions_for_user(db, user.id, bump_epoch=False)
     clear_session_cookies(response)
     record_audit(db, user_id=user.id, action="password_reset_success", request=request)
     return {"status": "password_reset"}

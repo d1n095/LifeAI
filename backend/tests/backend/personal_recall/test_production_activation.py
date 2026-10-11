@@ -60,20 +60,19 @@ def _ensure_founder_user(session) -> User:
         )
         session.add(user)
     else:
-        user.role = UserRole.founder
-        user.is_active = True
         user.email_verified = True
-        user.sessions_valid_after = now - timedelta(seconds=2)
     session.flush()
     return user
 
 
 def _founder_authority(session) -> tuple[User, RecallFounderAuthority]:
+    from app.session_tokens import mint_refresh_token
+
     user = _ensure_founder_user(session)
     issued_at = datetime.utcnow()
-    user.sessions_valid_after = issued_at - timedelta(seconds=2)
     access_jti = str(uuid.uuid4())
-    token = RefreshToken(
+    mint_refresh_token(
+        session,
         user_id=FOUNDER_USER_ID,
         family_id=uuid.uuid4(),
         token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
@@ -82,8 +81,6 @@ def _founder_authority(session) -> tuple[User, RecallFounderAuthority]:
         created_at=issued_at,
         expires_at=issued_at + timedelta(hours=1),
     )
-    session.add(token)
-    session.flush()
     _set_rls_user(session, FOUNDER_USER_ID, access_jti=access_jti)
     return user, recall_founder_authority_from_user(user=user, access_jti=access_jti)
 
@@ -109,21 +106,20 @@ def _create_erasure_operation(session, owner_id, *, status="active", phase="pers
     user = session.get(User, owner_id)
     if user is None:
         raise AssertionError("owner must exist for erasure operation test helper")
+    from app.session_tokens import mint_refresh_token
+
     access_jti = str(uuid.uuid4())
     issued_at = datetime.utcnow()
-    user.sessions_valid_after = issued_at - timedelta(seconds=2)
-    session.add(
-        RefreshToken(
-            user_id=owner_id,
-            family_id=uuid.uuid4(),
-            token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
-            access_jti=access_jti,
-            csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
-            created_at=issued_at,
-            expires_at=issued_at + timedelta(hours=1),
-        )
+    mint_refresh_token(
+        session,
+        user_id=owner_id,
+        family_id=uuid.uuid4(),
+        token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        access_jti=access_jti,
+        csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
+        created_at=issued_at,
+        expires_at=issued_at + timedelta(hours=1),
     )
-    session.flush()
     password = "CorrectHorseBattery9!"
     receipt = create_account_erasure_reauth_receipt(session, user=user, password=password, access_jti=access_jti)
     _set_rls_user(session, owner_id, access_jti=access_jti)
@@ -331,7 +327,10 @@ def test_revoked_or_stale_founder_authority_rejected_after_restart(db_session):
         restarted.close()
 
     founder, authority = _founder_authority(db_session)
-    founder.sessions_valid_after = datetime.utcnow() + timedelta(seconds=1)
+    _set_rls_user(db_session, FOUNDER_USER_ID)
+    # Runtime role cannot write sessions_valid_after; the legitimate logout-all epoch
+    # bump must still stale the just-minted Founder session.
+    db_session.execute(text("SELECT bump_sessions_valid_after(:uid)"), {"uid": str(FOUNDER_USER_ID)})
     db_session.commit()
 
     restarted = SessionLocal()

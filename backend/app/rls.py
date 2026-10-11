@@ -815,6 +815,43 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
         "return_type": "uuid",
         "mainai_app_execute": True,
     },
+    {
+        "name": "users_identity_guard",
+        "identity_args": "",
+        "return_type": "trigger",
+        "mainai_app_execute": False,
+        "security_definer": False,
+    },
+    {
+        "name": "refresh_tokens_session_guard",
+        "identity_args": "",
+        "return_type": "trigger",
+        "mainai_app_execute": False,
+        "security_definer": False,
+    },
+    {
+        "name": "mint_refresh_token",
+        "identity_args": (
+            "p_id uuid, p_user_id uuid, p_family_id uuid, p_token_hash character varying, "
+            "p_access_jti character varying, p_csrf_token character varying, "
+            "p_created_at timestamp without time zone, p_expires_at timestamp without time zone, "
+            "p_user_agent character varying, p_ip_address character varying, p_replaces_id uuid"
+        ),
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
+    {
+        "name": "consume_password_reset_token_and_set_hash",
+        "identity_args": "p_token_hash character varying, p_new_hash character varying",
+        "return_type": "uuid",
+        "mainai_app_execute": True,
+    },
+    {
+        "name": "bump_sessions_valid_after",
+        "identity_args": "p_user_id uuid",
+        "return_type": "void",
+        "mainai_app_execute": True,
+    },
 ]
 
 # The full table-privilege vocabulary this policy checks — deliberately checked one-by-one via
@@ -838,6 +875,15 @@ def _effective_table_privileges(conn, role: str, table: str) -> set[str]:
             {"role": role, "table": f"public.{table}", "priv": priv},
         ).scalar()
     }
+
+
+def _has_column_privilege(conn, role: str, table: str, column: str, priv: str) -> bool:
+    return bool(
+        conn.execute(
+            text("SELECT has_column_privilege(:role, :table, :column, :priv)"),
+            {"role": role, "table": f"public.{table}", "column": column, "priv": priv},
+        ).scalar()
+    )
 
 
 def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: bool = True) -> None:
@@ -1162,6 +1208,31 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION consume_founder_unlock_step_up() TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION consume_family_capability_grant_once(uuid) TO mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION family_capability_risk(varchar) TO mainai_app"))
+        conn.execute(text("REVOKE UPDATE ON users FROM mainai_app"))
+        conn.execute(
+            text(
+                "GRANT UPDATE (email, email_verified, email_verified_at) ON users TO mainai_app"
+            )
+        )
+        conn.execute(text("REVOKE INSERT ON refresh_tokens FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE ON refresh_tokens FROM mainai_app"))
+        conn.execute(
+            text(
+                "GRANT UPDATE (replaces_id, revoked_at, expires_at, user_agent, ip_address) "
+                "ON refresh_tokens TO mainai_app"
+            )
+        )
+        conn.execute(
+            text(
+                "GRANT EXECUTE ON FUNCTION mint_refresh_token("
+                "uuid, uuid, uuid, varchar, varchar, varchar, timestamp, timestamp, varchar, varchar, uuid"
+                ") TO mainai_app"
+            )
+        )
+        conn.execute(
+            text("GRANT EXECUTE ON FUNCTION consume_password_reset_token_and_set_hash(varchar, varchar) TO mainai_app")
+        )
+        conn.execute(text("GRANT EXECUTE ON FUNCTION bump_sessions_valid_after(uuid) TO mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1248,10 +1319,25 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("family_grant_consumption_receipts", frozenset({"SELECT", "INSERT"})),
             ("kernel_security_invariants", frozenset({"SELECT"})),
             ("family_capability_catalog", frozenset({"SELECT"})),
+            ("refresh_tokens", frozenset({"SELECT", "DELETE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
                 errors.append(f"{table}: mainai_app effective privileges are {sorted(granted)}, expected exactly {sorted(allowed)}")
+
+        for table, column in (
+            ("users", "password_hash"),
+            ("users", "role"),
+            ("users", "is_active"),
+            ("users", "sessions_valid_after"),
+            ("refresh_tokens", "user_id"),
+            ("refresh_tokens", "family_id"),
+            ("refresh_tokens", "token_hash"),
+            ("refresh_tokens", "access_jti"),
+            ("refresh_tokens", "csrf_token"),
+        ):
+            if _has_column_privilege(conn, "mainai_app", table, column, "UPDATE"):
+                errors.append(f"{table}.{column}: mainai_app must not hold UPDATE")
 
         for spec in _MAINAI_EXECUTION_FUNCTION_SPECS:
             name = spec["name"]
