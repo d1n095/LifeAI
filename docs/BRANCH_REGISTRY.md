@@ -6,6 +6,28 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — Founder sovereignty P1-fix-4 (2026-10-11)
+
+Child of `cursor/mainai-founder-sovereignty-p1-fix-3-91c1` @ exact
+`216962835b718c5a6aa306c5b03376f62d2aaee0` (examined SHA, RETURN_TO_BUILDER: erasure
+fixed; runtime-writable Founder credentials still open). Built in a **new isolated
+Cursor builder worktree**. Does **not** modify the examined P1-fix-3 SHA or PR #261.
+
+Closes the root-of-trust gap at the database privilege boundary: `mainai_app` cannot
+UPDATE `users.password_hash` / `role` / `is_active` / `sessions_valid_after` or INSERT
+refresh tokens. Legitimate login, registration, password reset, session revocation, and
+account erasure stay available through SECURITY DEFINER mint/reset/bump paths.
+Migration `0092_fs_p1_root_of_trust` stays on the FS lineage
+(`0090_founder_sovereignty` → `0091_fs_p1_authority` → `0092_fs_p1_root_of_trust`).
+Does **not** independently compose the sibling 0091/0092 collision with Continuous
+Conversation.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-founder-sovereignty-p1-fix-4-91c1` | *(draft PR pending)* | **Open isolated builder child of `2169628`** | Deny runtime-role Founder credential/session minting; keep login/register/reset/revoke/erasure; adversarial HTTP chain tests. Recall stays disabled. |
+
+**Must not:** modify examined SHA `2169628` or PR #261; touch CC P1-fix-4 `2d9f62e` / PR #260; compose/renumber the 0091 (or 0092) sibling collision; merge; deploy; activate Recall; self-certify.
+
 ## Post-Founder-Alpha — Founder sovereignty P1-fix-3 (2026-10-10)
 
 Child of `cursor/mainai-founder-sovereignty-p1-fix-2-91c1` @ exact
@@ -22,7 +44,7 @@ before any merge revision.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-founder-sovereignty-p1-fix-3-91c1` | [#261](https://github.com/d1n095/LifeAI/pull/261) | **Open isolated builder child of `4ccf1ed`** | Call `erase_own_founder_sovereignty_children()` while the account-erasure operation is still `active` in `personal_data_erasure` (before `account_erasure_complete_operation`) so DELETE `/api/account`, account-lifecycle, Playwright deletion, and `erase_account_data` succeed without loosening `founder_sovereignty_erasure_authorized()`. Make runtime-role unlock/substitution attacks raise under CI `mainai_app` (zero-row UPDATE is not a pass). Recall stays disabled. |
+| `cursor/mainai-founder-sovereignty-p1-fix-3-91c1` | [#261](https://github.com/d1n095/LifeAI/pull/261) | **Frozen examined SHA `2169628` — RETURN_TO_BUILDER (erasure fixed; runtime-writable Founder credentials still open). Successor is P1-fix-4.** | Call `erase_own_founder_sovereignty_children()` while the account-erasure operation is still `active` in `personal_data_erasure` (before `account_erasure_complete_operation`) so DELETE `/api/account`, account-lifecycle, Playwright deletion, and `erase_account_data` succeed without loosening `founder_sovereignty_erasure_authorized()`. Make runtime-role unlock/substitution attacks raise under CI `mainai_app` (zero-row UPDATE is not a pass). Recall stays disabled. |
 
 **Must not:** modify frozen SHA `4ccf1ed` or its worktree; touch CC P1-fix-4 `2d9f62e` / PR #260; compose/renumber the 0091 (or 0092) sibling collision; merge; deploy; activate Recall; alter Founder authority.
 

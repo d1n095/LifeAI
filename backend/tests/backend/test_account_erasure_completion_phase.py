@@ -28,20 +28,20 @@ def _set_context(session, owner_id, access_jti: str | None) -> None:
 
 
 def _begin_operation(session, make_verified_user):
+    from app.session_tokens import mint_refresh_token
+
     owner, password = make_verified_user()
     issued_at = datetime.utcnow()
-    owner.sessions_valid_after = issued_at - timedelta(seconds=2)
     access_jti = str(uuid.uuid4())
-    session.add(
-        RefreshToken(
-            user_id=owner.id,
-            family_id=uuid.uuid4(),
-            token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
-            access_jti=access_jti,
-            csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
-            created_at=issued_at,
-            expires_at=issued_at + timedelta(hours=1),
-        )
+    mint_refresh_token(
+        session,
+        user_id=owner.id,
+        family_id=uuid.uuid4(),
+        token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        access_jti=access_jti,
+        csrf_token=uuid.uuid4().hex + uuid.uuid4().hex,
+        created_at=issued_at,
+        expires_at=issued_at + timedelta(hours=1),
     )
     session.commit()
     owner = session.get(type(owner), owner.id)

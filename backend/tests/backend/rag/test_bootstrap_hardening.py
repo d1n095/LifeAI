@@ -69,18 +69,18 @@ def _issue_erasure_receipt(session, owner: User):
 
     from app.account.reauth import create_account_erasure_reauth_receipt
 
+    from app.session_tokens import mint_refresh_token
+
     access_jti = str(__import__("uuid").uuid4())
-    session.add(
-        RefreshToken(
-            user_id=owner.id,
-            family_id=__import__("uuid").uuid4(),
-            token_hash=hash_opaque_token(f"bootstrap-erasure-refresh-{access_jti}"),
-            access_jti=access_jti,
-            csrf_token=generate_csrf_token(),
-            expires_at=datetime.utcnow() + timedelta(minutes=10),
-        )
+    mint_refresh_token(
+        session,
+        user_id=owner.id,
+        family_id=__import__("uuid").uuid4(),
+        token_hash=hash_opaque_token(f"bootstrap-erasure-refresh-{access_jti}"),
+        access_jti=access_jti,
+        csrf_token=generate_csrf_token(),
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
     )
-    session.flush()
     receipt = create_account_erasure_reauth_receipt(
         session,
         user=owner,
