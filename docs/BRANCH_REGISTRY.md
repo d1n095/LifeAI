@@ -24,7 +24,7 @@ Conversation.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-founder-sovereignty-p1-fix-4-91c1` | *(draft PR pending)* | **Open isolated builder child of `2169628`** | Deny runtime-role Founder credential/session minting; keep login/register/reset/revoke/erasure; adversarial HTTP chain tests. Recall stays disabled. |
+| `cursor/mainai-founder-sovereignty-p1-fix-4-91c1` | [#262](https://github.com/d1n095/LifeAI/pull/262) | **Open isolated builder child of `2169628`** | Deny runtime-role Founder credential/session minting; keep login/register/reset/revoke/erasure; adversarial HTTP chain tests. Recall stays disabled. |
 
 **Must not:** modify examined SHA `2169628` or PR #261; touch CC P1-fix-4 `2d9f62e` / PR #260; compose/renumber the 0091 (or 0092) sibling collision; merge; deploy; activate Recall; self-certify.
 
