@@ -17,7 +17,7 @@ method, agent dispatch, merge, deploy, or Recall activation.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-github-readonly-discovery-91c1` | pending | **Open isolated builder child of `2fbe20a`** | Read-only GitHub discovery on the existing client. |
+| `cursor/mainai-github-readonly-discovery-91c1` | [#263](https://github.com/d1n095/LifeAI/pull/263) | **Open isolated builder child of `2fbe20a`** | Read-only GitHub discovery on the existing client. |
 
 **Must not:** modify frozen Founder Sovereignty P1-fix-4 `aa0876d` / PR #262; touch Continuous Conversation; compose sibling migrations; merge; deploy; activate Recall.
 
