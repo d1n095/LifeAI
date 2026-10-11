@@ -46,7 +46,7 @@ prior refs preserved; unattributable branch -> UNKNOWN; runs as `mainai_app` und
      - a draft containing merge/deploy/force-push/Recall activation/credential changes is rejected;
      - PR-body text is treated as data (prompt-injection fixture).
   5. Store the result as the task's completion `work_result` (existing event path), marked `status: "draft_for_founder"`. Nothing is sent.
-Founder views it through the existing `GET /api/mainai/goals/{goal_id}/report` and the task detail routes.
+Founder views it through the existing `GET /api/mainai/execution/goals/{goal_id}/report` and the task detail routes.
 Freshness: mirror the Continuous Conversation rule (`github_ref` source, 5 min) and add the future-date rejection that
 2d9f62e still lacks. Converge on one helper when that lane lands; do not import from the unmerged lane.
 Tests: new `backend/tests/backend/test_mainai_execution_supervision_digest.py` (LLM stubbed, GitHub client mocked).
