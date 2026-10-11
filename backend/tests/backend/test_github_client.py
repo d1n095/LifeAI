@@ -189,3 +189,175 @@ async def test_commit_multiple_files_raises_on_non_fast_forward_ref_update_race(
         await client.commit_multiple_files(
             branch="claude/demo-branch", base_sha="base123", files=[{"path": "a.py", "content": "x"}], message="msg"
         )
+
+
+def _link_next(url: str) -> str:
+    return f'<{url}>; rel="next"'
+
+
+@pytest.mark.asyncio
+async def test_list_check_runs_follows_pagination(monkeypatch):
+    calls = []
+
+    async def _fake_request(self, method, url, *, headers=None, json=None, **kwargs):
+        calls.append({"method": method, "url": str(url), "json": json})
+        request = httpx.Request(method, url)
+        path = str(url)
+        if path.endswith("/check-runs?per_page=100"):
+            return httpx.Response(
+                200,
+                request=request,
+                headers={"Link": _link_next("https://api.github.com/repos/d1n095/LifeAI/commits/abc/check-runs?page=2")},
+                json={"total_count": 3, "check_runs": [{"id": 1, "name": "lint"}, {"id": 2, "name": "test"}]},
+            )
+        if "check-runs?page=2" in path:
+            return httpx.Response(200, request=request, json={"total_count": 3, "check_runs": [{"id": 3, "name": "e2e"}]})
+        return httpx.Response(404, request=request, json={"message": f"unexpected {path}"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _fake_request)
+    client = _configured_client(monkeypatch)
+
+    runs = await client.list_check_runs("abc")
+    assert [run["id"] for run in runs] == [1, 2, 3]
+    assert all(call["method"] == "GET" for call in calls)
+    assert all(call["json"] is None for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_list_check_runs_missing_payload_is_empty(monkeypatch):
+    _fake_github(monkeypatch, {("GET", "/repos/d1n095/LifeAI/commits/abc/check-runs?per_page=100"): {}})
+    client = _configured_client(monkeypatch)
+    assert await client.list_check_runs("abc") == []
+
+
+@pytest.mark.asyncio
+async def test_list_check_runs_raises_on_github_failure(monkeypatch):
+    async def _fake_request(self, method, url, *, headers=None, json=None, **kwargs):
+        request = httpx.Request(method, url)
+        return httpx.Response(502, request=request, json={"message": "bad gateway"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _fake_request)
+    client = _configured_client(monkeypatch)
+    with pytest.raises(GitHubClientError, match="502"):
+        await client.list_check_runs("abc")
+
+
+@pytest.mark.asyncio
+async def test_list_branches_filters_by_prefix(monkeypatch):
+    _fake_github(
+        monkeypatch,
+        {
+            ("GET", "/repos/d1n095/LifeAI/branches?per_page=100"): [
+                {"name": "cursor/mainai-github-readonly-discovery-91c1"},
+                {"name": "cursor/other"},
+                {"name": "claude/det-kommer-mer-879lcm"},
+            ]
+        },
+    )
+    client = _configured_client(monkeypatch)
+    rows = await client.list_branches(prefix="cursor/")
+    assert [row["name"] for row in rows] == [
+        "cursor/mainai-github-readonly-discovery-91c1",
+        "cursor/other",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_open_pull_requests_paginates_and_is_get_only(monkeypatch):
+    calls = []
+
+    async def _fake_request(self, method, url, *, headers=None, json=None, **kwargs):
+        calls.append({"method": method, "url": str(url), "json": json})
+        request = httpx.Request(method, url)
+        if str(url).endswith("/pulls?state=open&per_page=100"):
+            return httpx.Response(
+                200,
+                request=request,
+                headers={"Link": _link_next("https://api.github.com/repos/d1n095/LifeAI/pulls?state=open&page=2")},
+                json=[{"number": 1, "title": "first"}],
+            )
+        if "pulls?state=open&page=2" in str(url):
+            return httpx.Response(200, request=request, json=[{"number": 2, "title": "second"}])
+        return httpx.Response(404, request=request, json={"message": "unexpected"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _fake_request)
+    client = _configured_client(monkeypatch)
+    prs = await client.list_open_pull_requests()
+    assert [pr["number"] for pr in prs] == [1, 2]
+    assert {call["method"] for call in calls} == {"GET"}
+    assert all(call["json"] is None for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_list_pull_request_comments_and_file_contents(monkeypatch):
+    import base64
+
+    encoded = base64.b64encode(b"hello discovery\n").decode("ascii")
+    calls = _fake_github(
+        monkeypatch,
+        {
+            ("GET", "/repos/d1n095/LifeAI/issues/12/comments?per_page=100"): [{"id": 9, "body": "please examine"}],
+            ("GET", "/repos/d1n095/LifeAI/contents/backend/app/integrations/github_client.py?ref=abc123"): {
+                "type": "file",
+                "encoding": "base64",
+                "content": encoded,
+            },
+        },
+    )
+    client = _configured_client(monkeypatch)
+    comments = await client.list_pull_request_comments(12)
+    assert comments[0]["body"] == "please examine"
+    text = await client.get_file_contents("backend/app/integrations/github_client.py", ref="abc123")
+    assert text == "hello discovery\n"
+    assert all(call["method"] == "GET" for call in calls)
+    assert all(call["json"] is None for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_get_file_contents_missing_path_is_none(monkeypatch):
+    _fake_github(monkeypatch, {})
+    client = _configured_client(monkeypatch)
+    assert await client.get_file_contents("docs/NOPE.md", ref="abc123") is None
+
+
+@pytest.mark.asyncio
+async def test_get_file_contents_raises_on_github_failure(monkeypatch):
+    async def _fake_request(self, method, url, *, headers=None, json=None, **kwargs):
+        request = httpx.Request(method, url)
+        return httpx.Response(500, request=request, json={"message": "boom"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _fake_request)
+    client = _configured_client(monkeypatch)
+    with pytest.raises(GitHubClientError, match="500"):
+        await client.get_file_contents("README.md", ref="abc123")
+
+
+@pytest.mark.asyncio
+async def test_discovery_methods_do_not_issue_writes(monkeypatch):
+    writes = []
+
+    async def _fake_request(self, method, url, *, headers=None, json=None, **kwargs):
+        if method != "GET":
+            writes.append(method)
+        request = httpx.Request(method, url)
+        path = str(url).removeprefix("https://api.github.com")
+        if path.startswith("/repos/d1n095/LifeAI/branches"):
+            return httpx.Response(200, request=request, json=[])
+        if path.startswith("/repos/d1n095/LifeAI/pulls"):
+            return httpx.Response(200, request=request, json=[])
+        if "/comments" in path:
+            return httpx.Response(200, request=request, json=[])
+        if "/contents/" in path:
+            return httpx.Response(404, request=request, json={"message": "Not Found"})
+        if "/check-runs" in path:
+            return httpx.Response(200, request=request, json={"check_runs": []})
+        return httpx.Response(404, request=request, json={"message": "unexpected"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _fake_request)
+    client = _configured_client(monkeypatch)
+    await client.list_branches(prefix="cursor/")
+    await client.list_open_pull_requests()
+    await client.list_pull_request_comments(1)
+    await client.get_file_contents("x.py", ref="sha")
+    await client.list_check_runs("sha")
+    assert writes == []

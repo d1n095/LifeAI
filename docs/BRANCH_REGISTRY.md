@@ -6,6 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Post-Founder-Alpha — MainAI GitHub read-only discovery (2026-10-11)
+
+Isolated Cursor builder child of verified Founder Alpha integration base
+`2fbe20aacf1203fc0e16d216ef55b666b2181619`. Extends the existing
+`app/integrations/github_client.py` with read-only discovery (branches-by-prefix,
+open PRs, PR comments, file contents at a ref) and paginated `list_check_runs`.
+Does **not** add a second GitHub client, coordination framework, migration, write
+method, agent dispatch, merge, deploy, or Recall activation.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-github-readonly-discovery-91c1` | [#263](https://github.com/d1n095/LifeAI/pull/263) | **Open isolated builder child of `2fbe20a`** | Read-only GitHub discovery on the existing client. |
+
+**Must not:** modify frozen Founder Sovereignty P1-fix-4 `aa0876d` / PR #262; touch Continuous Conversation; compose sibling migrations; merge; deploy; activate Recall.
+
 ## Universal Personal Recall — isolated Codex lane (2026-09-04)
 
 | Branch | PR | Status | Scope |
