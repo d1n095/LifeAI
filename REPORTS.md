@@ -10,6 +10,7 @@ Every suite runs from OUTSIDE a detached target worktree and verifies the target
 | Coordination store (base) | 2fbe20aacf1203fc0e16d216ef55b666b2181619 | Examination only (DB 7 PASS / 20 FAIL) | probes/coordination_v1 |
 | Orchestration ledger | 32442758a4a575931c684e959f368e649fb8314b | RETURN_TO_BUILDER (baseline 23 failed / 13 passed) | probes/ledger_v2 |
 | Founder Sovereignty P1-fix-2 | 4ccf1ed0aeb0ea35301a38437b57e097c16f435d | RETURN_TO_BUILDER (erasure regression; runtime-writable Founder credentials) | probes/sovereignty_v3 |
+| Continuous Conversation P1-fix-4 (PR #260) | 2d9f62eb5ff3f616ecf05aed0e458cbfd1e4af39 | RETURN_TO_BUILDER (paraphrase/Recall gating, relay gaps, decision history + cross-owner definer) | probes/cc_v4 |
 | Founder Sovereignty P1-fix-3 | 216962835b718c5a6aa306c5b03376f62d2aaee0 | RETURN_TO_BUILDER (erasure fixed; runtime-writable Founder credentials still open) | probes/sovereignty_v3 |
 
 Reproduce, e.g.: `git worktree add --detach ../wt <sha>` then `probes/sovereignty_v3/run.sh ../wt`
