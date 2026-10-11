@@ -16,6 +16,18 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 then bind this bridge to reviewed V2 key-hierarchy and route interfaces as a separate integration change. The current branch
 deliberately does not depend on, rebase onto, or change either active lane.
 
+## Post-Founder-Alpha — MainAI direct agent communication, Track B (2026-10-11)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/mainai-agent-communication-track-b` | [#265](https://github.com/d1n095/LifeAI/pull/265) | **Draft — needs independent cross-examination; no live agent launch until a Founder-authorized smoke test** | Conversational CLI dialects (Claude Code, Cursor Agent, Codex) in `agent_coordination/adapters.py`: real instruction delivery, bounded answer + session-id capture, same-session continuation, fixed sandbox/permission/budget flags. `agent_coordination/session.py` turns over existing dispatch/execution tracking/review states (no migration). Path A `agent_assignment` hook. |
+
+**Base:** `codex/founder-alpha-final-composed-candidate` @ `2fbe20a`. **Overlap with Cursor's Path A PR #264** (`21ff3cc`):
+two touch points in files #264 also edits, in different functions — `mainai_execution/planner.py` `KNOWN_TASK_TYPES`
+(+`"agent_assignment"`) and one `elif task.task_type == "agent_assignment"` branch after `open_pr` in
+`mainai_execution/execution_job.py`'s task dispatch. #264 changes neither line; it edits the `read_only_audit` call 18 lines above.
+`approval.py` is unchanged: unknown task types already require Founder approval.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

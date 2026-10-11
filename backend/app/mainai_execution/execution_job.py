@@ -555,6 +555,13 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                 work_result = _handle_run_tests(task)
             elif task.task_type == "open_pr":
                 work_result = await _handle_open_pr(db, task, goal)
+            elif task.task_type == "agent_assignment":
+                from app.agent_coordination.session import AgentSessionError, run_agent_assignment_task
+
+                try:
+                    work_result = await run_agent_assignment_task(db, task)
+                except AgentSessionError as exc:
+                    raise TaskExecutionError(str(exc)) from exc
             else:
                 raise TaskExecutionError(f"Unknown task_type '{task.task_type}'.")
             # V0.2 fencing finding: unlike task-state/verification writes (which reach

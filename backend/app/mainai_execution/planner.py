@@ -78,7 +78,7 @@ class PlanValidationError(PlannerError):
 # to dispatch. A plan proposing an unknown task_type is rejected at PLAN time -- the same
 # fail-closed principle app/mainai_runtime_contract.py's CAPABILITY_MANIFEST already
 # establishes for mainai_jobs job_types, applied one layer up.
-KNOWN_TASK_TYPES = frozenset({"read_only_audit", "repo_edit", "run_tests", "open_pr"})
+KNOWN_TASK_TYPES = frozenset({"read_only_audit", "repo_edit", "run_tests", "open_pr", "agent_assignment"})
 
 
 @dataclass

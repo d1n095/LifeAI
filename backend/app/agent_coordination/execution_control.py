@@ -252,7 +252,7 @@ def mark_result_ingestion_failed(db: Session, *, execution: AgentDispatchExecuti
 
 async def collect_and_ingest_execution_result(
     db: Session, *, execution: AgentDispatchExecution, assignment: AgentWorkAssignment, agent: CoordinationAgent, adapter: "AgentAdapter",
-    adapter_key: str | None = None,
+    adapter_key: str | None = None, on_success: str = "completed",
 ) -> DispatchDecision:
     """The companion to `start_execution_tracking()` on the collection side -- calls
     `dispatch.collect_dispatch_result()` (never reimplements its crash handling) and mirrors
@@ -264,7 +264,8 @@ async def collect_and_ingest_execution_result(
 
     try:
         decision = await collect_dispatch_result(
-            db, assignment=assignment, agent=agent, adapter=adapter, adapter_key=adapter_key, dispatch_attempt_id=execution.attempt_id
+            db, assignment=assignment, agent=agent, adapter=adapter, adapter_key=adapter_key, dispatch_attempt_id=execution.attempt_id,
+            on_success=on_success,
         )
     except Exception:
         mark_result_ingestion_failed(db, execution=execution)

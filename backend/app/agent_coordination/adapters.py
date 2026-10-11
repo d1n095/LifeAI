@@ -15,6 +15,8 @@ distinction and why none of this reads a credential, a secret, or a session toke
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import shutil
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -40,13 +42,18 @@ class AgentObservation:
 
 @dataclass(frozen=True)
 class AgentResult:
-    """What a completed/failed assignment produced -- pointers only (branch/PR/commit refs),
-    never raw diff/log content this coordination layer would have to trust blindly; see
-    `AgentWorkAssignment.output_refs` for where a caller records these durably."""
+    """What a completed/failed assignment produced -- pointers (branch/PR/commit refs) plus,
+    for a conversational CLI agent, the agent's own bounded final message and session id.
+    The final message is the agent's SELF-REPORT: recorded verbatim (bounded), never treated
+    as verified truth about the repository; see `AgentWorkAssignment.output_refs` for where a
+    caller records these durably."""
 
     succeeded: bool
     output_refs: tuple[dict, ...] = ()
     summary: str = ""
+    final_message: str | None = None
+    session_id: str | None = None
+    structured: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -77,7 +84,7 @@ class AgentAdapter(Protocol):
 
     def control_capabilities(self) -> AdapterCapabilities: ...
 
-    async def start_assignment(self, assignment_id: UUID) -> None: ...
+    async def start_assignment(self, assignment_id: UUID, instruction: str | None = None) -> None: ...
 
     async def send_instruction(self, assignment_id: UUID, instruction: str) -> None: ...
 
@@ -108,11 +115,16 @@ class NotConfiguredAdapter:
     makes no network call, and reads no credential, by construction; there is nothing in it
     capable of doing any of those things."""
 
-    def __init__(self, *, provider_key: str):
+    _DEFAULT_REASON = "no real Agent Runtime is wired up yet"
+
+    def __init__(self, *, provider_key: str, reason: str = _DEFAULT_REASON):
         self._provider_key = provider_key
+        self._reason = reason
 
     async def health(self) -> AgentHealth:
-        return AgentHealth(healthy=False, detail=f"REAL_PROVIDER_NOT_CONFIGURED: no Agent Runtime is wired up for '{self._provider_key}' yet")
+        if self._reason == self._DEFAULT_REASON:
+            return AgentHealth(healthy=False, detail=f"REAL_PROVIDER_NOT_CONFIGURED: no Agent Runtime is wired up for '{self._provider_key}' yet")
+        return AgentHealth(healthy=False, detail=f"REAL_PROVIDER_NOT_CONFIGURED: '{self._provider_key}': {self._reason}")
 
     def capabilities(self) -> tuple[str, ...]:
         return ()
@@ -120,9 +132,9 @@ class NotConfiguredAdapter:
     def control_capabilities(self) -> AdapterCapabilities:
         return AdapterCapabilities()  # every flag False -- there is nothing here capable of any of them
 
-    async def start_assignment(self, assignment_id: UUID) -> None:
+    async def start_assignment(self, assignment_id: UUID, instruction: str | None = None) -> None:
         raise ProviderNotConfiguredError(
-            f"REAL_PROVIDER_NOT_CONFIGURED: cannot start_assignment for '{self._provider_key}' -- no real Agent Runtime is wired up yet"
+            f"REAL_PROVIDER_NOT_CONFIGURED: cannot start_assignment for '{self._provider_key}' -- {self._reason}"
         )
 
     async def send_instruction(self, assignment_id: UUID, instruction: str) -> None:
@@ -155,28 +167,243 @@ class AdapterTimeoutError(RuntimeError):
     background."""
 
 
+
+
+class AdapterInstructionError(ValueError):
+    """An instruction, session reference or invocation setting this adapter refuses to use --
+    raised BEFORE any subprocess is started, never after. A refusal here is a structured
+    configuration/input failure, distinct from `AdapterProcessLostError` (a process that could
+    not run) and from an agent-reported failure (`AgentResult.succeeded=False`)."""
+
+
+class AdapterSessionUnknownError(RuntimeError):
+    """`send_instruction()` was asked to continue a session for which this adapter holds no
+    MainAI-created session id. Continuation only ever targets a session this adapter itself
+    started (or one bound from this assignment's own recorded result) -- never a guessed,
+    caller-invented or Founder-owned session."""
+
+
+# ============================================================================ conversational CLI
+# dialects -- how ONE bounded subprocess mechanism (LocalCLIAdapter below) delivers an
+# instruction to, and reads the answer from, each supported agent CLI. Every safety flag is
+# fixed here in code; the founder-supplied args template may only add a model selection.
+
+MAX_INSTRUCTION_CHARS = 32_000
+MAX_FINAL_MESSAGE_CHARS = 16_000
+MAX_STDERR_TAIL_CHARS = 2_000
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$")
+_MODEL_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]=,-]{0,120}$")
+_EXTRA_ARG_FLAGS = frozenset({"--model", "-m"})
+
+
+def build_prompt(assignment_id: UUID, instruction: str | None) -> str:
+    """The exact text an agent receives. The fixed header guarantees the argv element can
+    never be parsed as a command-line option (it can never start with `-`), and ties the
+    session to the assignment it serves."""
+
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise AdapterInstructionError("instruction must be a non-empty string")
+    if "\x00" in instruction:
+        raise AdapterInstructionError("instruction must not contain NUL bytes")
+    if len(instruction) > MAX_INSTRUCTION_CHARS:
+        raise AdapterInstructionError(f"instruction exceeds {MAX_INSTRUCTION_CHARS} characters")
+    return f"MainAI assignment {assignment_id}. Founder-authorized instruction follows.\n\n{instruction}"
+
+
+def validate_session_id(session_id: object) -> str:
+    if not isinstance(session_id, str) or not _SESSION_ID.match(session_id):
+        raise AdapterInstructionError(f"refusing a malformed session id: {session_id!r}")
+    return session_id
+
+
+def validate_extra_args(args: tuple[str, ...]) -> tuple[str, ...]:
+    """The founder-supplied args template for a conversational dialect may ONLY select a
+    model (`--model X` / `-m X`). Everything that affects authority -- permission mode,
+    sandbox, budget, workspace, output format, resume -- is fixed by the dialect itself and
+    cannot be overridden or weakened from configuration."""
+
+    if len(args) % 2 != 0:
+        raise AdapterInstructionError(f"args template must be '--model <name>' pairs only, got {list(args)}")
+    for flag, value in zip(args[::2], args[1::2]):
+        if flag not in _EXTRA_ARG_FLAGS or not _MODEL_VALUE.match(value):
+            raise AdapterInstructionError(f"args template may only select a model; refusing {flag!r} {value!r}")
+    return tuple(args)
+
+
+@dataclass(frozen=True)
+class ParsedAgentOutput:
+    final_message: str | None
+    session_id: str | None
+    is_error: bool
+    structured: dict
+    parse_error: str | None = None
+
+
+def _json_result_object(stdout: str) -> ParsedAgentOutput:
+    """`--output-format json` result object (Claude Code; Cursor Agent assumed compatible --
+    see `CursorAgentDialect`)."""
+
+    try:
+        data = json.loads(stdout.strip())
+    except (json.JSONDecodeError, ValueError) as exc:
+        return ParsedAgentOutput(None, None, True, {}, parse_error=f"output is not a JSON object: {exc}")
+    if not isinstance(data, dict):
+        return ParsedAgentOutput(None, None, True, {}, parse_error="output JSON is not an object")
+    message = data.get("result")
+    session = data.get("session_id") or data.get("chat_id") or data.get("chatId")
+    structured = {
+        key: data[key]
+        for key in ("type", "subtype", "is_error", "num_turns", "duration_ms", "total_cost_usd", "request_id")
+        if key in data
+    }
+    return ParsedAgentOutput(
+        final_message=message if isinstance(message, str) else None,
+        session_id=session if isinstance(session, str) else None,
+        is_error=bool(data.get("is_error")) or data.get("subtype") not in (None, "success"),
+        structured=structured,
+        parse_error=None if isinstance(message, str) else "result field missing",
+    )
+
+
+class CLIDialect:
+    provider_key: str = ""
+    supports_budget: bool = False
+
+    def start_argv(self, executable: str, prompt: str, *, cwd: str, read_only: bool, max_budget_usd: float | None, extra_args: tuple[str, ...]) -> list[str]:
+        raise NotImplementedError
+
+    def resume_argv(self, executable: str, session_id: str, prompt: str, *, cwd: str, read_only: bool, max_budget_usd: float | None, extra_args: tuple[str, ...]) -> list[str]:
+        raise NotImplementedError
+
+    def parse(self, stdout: str) -> ParsedAgentOutput:
+        raise NotImplementedError
+
+
+class ClaudeCodeDialect(CLIDialect):
+    """`claude -p --output-format json` (headless). Read-only work runs in `plan` permission
+    mode; write work in `acceptEdits` (file edits allowed, no tool runs without an explicit
+    allow rule -- never `bypassPermissions`). `--max-budget-usd` is always set."""
+
+    provider_key = "claude-code"
+    supports_budget = True
+
+    def _base(self, read_only: bool, max_budget_usd: float | None) -> list[str]:
+        if max_budget_usd is None:
+            raise AdapterInstructionError("claude-code requires a max budget")
+        return ["-p", "--output-format", "json", "--permission-mode", "plan" if read_only else "acceptEdits", "--max-budget-usd", f"{max_budget_usd:.2f}"]
+
+    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+        return [executable, *self._base(read_only, max_budget_usd), *extra_args, prompt]
+
+    def resume_argv(self, executable, session_id, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+        return [executable, *self._base(read_only, max_budget_usd), "--resume", validate_session_id(session_id), *extra_args, prompt]
+
+    def parse(self, stdout):
+        return _json_result_object(stdout)
+
+
+class CursorAgentDialect(CLIDialect):
+    """`cursor-agent -p --output-format json`, sandbox explicitly enabled, never `--force`.
+    Read-only work runs in `--mode plan`. Cursor's CLI has no budget flag: the adapter's
+    timeout is the only cost bound. Its JSON result shape is assumed to match Claude Code's
+    (`result`/`session_id`/`is_error`) -- unverified until the first supervised smoke test."""
+
+    provider_key = "cursor-agent"
+
+    def _base(self, cwd: str, read_only: bool) -> list[str]:
+        args = ["-p", "--output-format", "json", "--sandbox", "enabled", "--trust", "--workspace", cwd]
+        return [*args, "--mode", "plan"] if read_only else args
+
+    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+        return [executable, *self._base(cwd, read_only), *extra_args, prompt]
+
+    def resume_argv(self, executable, session_id, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+        return [executable, *self._base(cwd, read_only), "--resume", validate_session_id(session_id), *extra_args, prompt]
+
+    def parse(self, stdout):
+        return _json_result_object(stdout)
+
+
+class CodexDialect(CLIDialect):
+    """`codex exec --json` (JSONL events) with the sandbox fixed through `-c sandbox_mode=...`
+    (`read-only` or `workspace-write`, never `danger-full-access`, never the bypass flag); the
+    same override is used for `codex exec resume`, which has no `--sandbox` option. Codex has
+    no budget flag: the adapter's timeout is the only cost bound. Event field names are parsed
+    tolerantly and are unverified against a live run."""
+
+    provider_key = "codex"
+
+    @staticmethod
+    def _sandbox(read_only: bool) -> list[str]:
+        return ["-c", f'sandbox_mode="{"read-only" if read_only else "workspace-write"}"']
+
+    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+        return [executable, "exec", "--json", "-C", cwd, *self._sandbox(read_only), *extra_args, prompt]
+
+    def resume_argv(self, executable, session_id, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+        return [executable, "exec", "resume", "--json", *self._sandbox(read_only), *extra_args, validate_session_id(session_id), prompt]
+
+    def parse(self, stdout):
+        session = None
+        message = None
+        is_error = False
+        structured: dict = {}
+        events = 0
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            events += 1
+            kind = str(event.get("type", ""))
+            for key in ("thread_id", "session_id", "conversation_id"):
+                if isinstance(event.get(key), str):
+                    session = session or event[key]
+            item = event.get("item") if isinstance(event.get("item"), dict) else None
+            if item is not None and item.get("type") in ("agent_message", "assistant_message") and isinstance(item.get("text"), str):
+                message = item["text"]
+            if kind in ("error", "turn.failed"):
+                is_error = True
+            if kind == "turn.completed" and isinstance(event.get("usage"), dict):
+                structured["usage"] = event["usage"]
+        structured["events"] = events
+        if events == 0:
+            return ParsedAgentOutput(None, None, True, structured, parse_error="no JSONL events in output")
+        return ParsedAgentOutput(message, session, is_error or message is None, structured, None if message is not None else "no agent message event")
+
+
+DIALECTS: dict[str, CLIDialect] = {d.provider_key: d for d in (ClaudeCodeDialect(), CursorAgentDialect(), CodexDialect())}
+
+
+def _redact(text: str) -> str:
+    from app.development_operator.service import redact
+
+    return redact(text)
+
+
 class LocalCLIAdapter:
     """Provider-neutral real adapter over a LOCAL CLI executable -- the SAME bounded
-    subprocess mechanism serves Claude Code, Cursor Agent, or Codex, parametrized entirely by
-    externally-supplied configuration (`executable`/`args_template`/`timeout_seconds`, from
-    `app.agent_coordination.adapter_config.real_adapter_config()`) -- never a per-provider
-    duplicated implementation.
+    subprocess mechanism serves Claude Code, Cursor Agent, or Codex, parametrized by
+    externally-supplied configuration and, for conversational use, a `CLIDialect`.
 
     Every invocation is bounded, by construction:
-    - exact `cwd` -- the assignment's own `worktree_path`, never inferred, never the caller's
-      own process working directory;
-    - a real, always-present `timeout_seconds` -- `asyncio.wait_for()` enforces it and the
-      process is killed on expiry, never left running;
-    - list-form `argv` via `asyncio.create_subprocess_exec()` -- NEVER `shell=True`, NEVER a
-      string command a shell would re-interpret; there is no code path in this class capable
-      of unrestricted shell passthrough;
-    - a minimized environment -- only what the caller explicitly supplies via `env`, never a
-      blind inheritance of this process's own full environment (which could leak unrelated
-      secrets this adapter has no business seeing).
+    - exact `cwd` -- the assignment's own `worktree_path`, never inferred;
+    - a real, always-present `timeout_seconds` -- the process is killed on expiry;
+    - list-form `argv` via `asyncio.create_subprocess_exec()` -- NEVER `shell=True`;
+    - a minimized environment -- only what the caller explicitly supplies via `env`.
 
-    `send_instruction()`/`resume()` are deliberately `NotImplementedError` -- this is a bounded,
-    single-shot, non-interactive invocation (start, wait up to the bound, capture the result),
-    not an interactive session this coordination layer would have to trust mid-flight."""
+    Without a dialect this is the original single-shot invocation (static argv, no
+    instruction, no content captured). With a dialect it is a conversation turn:
+    `start_assignment()` delivers the instruction to a NEW session, `collect_result()` returns
+    the agent's bounded final message and session id, and `send_instruction()` continues ONLY
+    a session this adapter itself started or had bound from the assignment's own recorded
+    result. A session is never chosen by `--continue`/`--last` (which could pick up a
+    Founder-owned session); it is always addressed by an explicit id."""
 
     def __init__(
         self,
@@ -187,14 +414,25 @@ class LocalCLIAdapter:
         cwd: str,
         timeout_seconds: int,
         env: dict[str, str] | None = None,
+        dialect: CLIDialect | None = None,
+        read_only: bool = True,
+        max_budget_usd: float | None = None,
     ):
         self._provider_key = provider_key
         self._executable = executable
-        self._args_template = args_template
+        self._args_template = tuple(args_template)
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
         self._env = dict(env or {})
+        self._dialect = dialect
+        self._read_only = read_only
+        self._max_budget_usd = max_budget_usd
         self._processes: dict[UUID, asyncio.subprocess.Process] = {}
+        self._sessions: dict[UUID, str] = {}
+        if dialect is not None:
+            validate_extra_args(self._args_template)
+            if dialect.supports_budget and (max_budget_usd is None or max_budget_usd <= 0):
+                raise AdapterInstructionError(f"'{provider_key}' requires a positive max budget")
 
     async def health(self) -> AgentHealth:
         found = shutil.which(self._executable) is not None
@@ -204,15 +442,27 @@ class LocalCLIAdapter:
         return ("repo_edit", "read_only_review", "run_tests")
 
     def control_capabilities(self) -> AdapterCapabilities:
-        # Single-shot/non-interactive by construction (see class docstring): only cancel()
-        # (SIGTERM against a tracked, still-running process) is genuinely supported. No
-        # streaming, no mid-run instructions, no resume, no structured events beyond the plain
-        # AgentObservation observe() already returns -- an honest reflection of what this
-        # class's own methods actually do, not a wishful default.
-        return AdapterCapabilities(supports_cancel=True)
+        # Without a dialect: single-shot, only cancel(). With a dialect: an instruction can be
+        # delivered to the same session as a new bounded turn (resume-by-id), and the result
+        # is structured. No streaming, no mid-process input, no `resume()` of a paused process.
+        if self._dialect is None:
+            return AdapterCapabilities(supports_cancel=True)
+        return AdapterCapabilities(supports_cancel=True, supports_instruction=True, supports_structured_events=True)
 
-    async def start_assignment(self, assignment_id: UUID) -> None:
-        argv = [self._executable, *self._args_template]
+    def bind_session(self, assignment_id: UUID, session_id: str) -> None:
+        """Re-attaches a session id recorded from THIS assignment's own earlier result (e.g.
+        after a worker restart). Callers must read it from the assignment's own durable
+        `agent_session` output ref -- see `app.agent_coordination.session`."""
+
+        self._sessions[assignment_id] = validate_session_id(session_id)
+
+    def session_id(self, assignment_id: UUID) -> str | None:
+        return self._sessions.get(assignment_id)
+
+    async def _spawn(self, assignment_id: UUID, argv: list[str]) -> None:
+        running = self._processes.get(assignment_id)
+        if running is not None and running.returncode is None:
+            raise AdapterInstructionError("the previous turn for this assignment is still running")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=self._cwd, env=self._env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -221,8 +471,29 @@ class LocalCLIAdapter:
             raise AdapterProcessLostError(f"failed to start '{self._executable}' for provider '{self._provider_key}': {exc}") from exc
         self._processes[assignment_id] = proc
 
+    async def start_assignment(self, assignment_id: UUID, instruction: str | None = None) -> None:
+        if self._dialect is None:
+            if instruction is not None:
+                raise AdapterInstructionError(f"'{self._provider_key}' has no conversational dialect -- it cannot deliver an instruction")
+            await self._spawn(assignment_id, [self._executable, *self._args_template])
+            return
+        prompt = build_prompt(assignment_id, instruction)
+        argv = self._dialect.start_argv(
+            self._executable, prompt, cwd=self._cwd, read_only=self._read_only, max_budget_usd=self._max_budget_usd, extra_args=self._args_template
+        )
+        await self._spawn(assignment_id, argv)
+
     async def send_instruction(self, assignment_id: UUID, instruction: str) -> None:
-        raise NotImplementedError("LocalCLIAdapter is a bounded, single-shot invocation -- interactive mid-run instructions are out of scope")
+        if self._dialect is None:
+            raise NotImplementedError("LocalCLIAdapter without a dialect is a bounded, single-shot invocation -- no mid-run instructions")
+        session_id = self._sessions.get(assignment_id)
+        if session_id is None:
+            raise AdapterSessionUnknownError(f"no MainAI-created session is known for assignment {assignment_id}")
+        prompt = build_prompt(assignment_id, instruction)
+        argv = self._dialect.resume_argv(
+            self._executable, session_id, prompt, cwd=self._cwd, read_only=self._read_only, max_budget_usd=self._max_budget_usd, extra_args=self._args_template
+        )
+        await self._spawn(assignment_id, argv)
 
     async def observe(self, assignment_id: UUID) -> AgentObservation:
         proc = self._processes.get(assignment_id)
@@ -238,7 +509,7 @@ class LocalCLIAdapter:
             proc.terminate()
 
     async def resume(self, assignment_id: UUID) -> None:
-        raise NotImplementedError("LocalCLIAdapter is a bounded, single-shot invocation -- resume is out of scope")
+        raise NotImplementedError("LocalCLIAdapter does not resume a paused process -- continue a session with send_instruction()")
 
     async def collect_result(self, assignment_id: UUID) -> AgentResult:
         proc = self._processes.get(assignment_id)
@@ -250,18 +521,56 @@ class LocalCLIAdapter:
             proc.kill()
             await proc.wait()
             raise AdapterTimeoutError(f"provider '{self._provider_key}' exceeded its {self._timeout_seconds}s bound; process killed") from exc
-        succeeded = proc.returncode == 0
+        if self._dialect is None:
+            return AgentResult(
+                succeeded=proc.returncode == 0,
+                output_refs=({"kind": "stdout_bytes", "length": len(stdout)}, {"kind": "stderr_bytes", "length": len(stderr)}),
+                summary=f"'{self._provider_key}' exited with code {proc.returncode}",
+            )
+        return self._conversation_result(assignment_id, proc.returncode, stdout, stderr)
+
+    def _conversation_result(self, assignment_id: UUID, returncode: int | None, stdout: bytes, stderr: bytes) -> AgentResult:
+        parsed = self._dialect.parse(stdout.decode("utf-8", errors="replace"))
+        session_id = None
+        if parsed.session_id is not None:
+            try:
+                session_id = validate_session_id(parsed.session_id)
+            except AdapterInstructionError:
+                session_id = None
+        if session_id is not None:
+            self._sessions[assignment_id] = session_id
+
+        message = _redact(parsed.final_message) if parsed.final_message is not None else None
+        truncated = message is not None and len(message) > MAX_FINAL_MESSAGE_CHARS
+        if truncated:
+            message = message[:MAX_FINAL_MESSAGE_CHARS]
+        succeeded = returncode == 0 and parsed.parse_error is None and not parsed.is_error
+
+        refs: list[dict] = []
+        if message is not None:
+            # The agent's own report -- partial and unverified by definition.
+            refs.append({"kind": "agent_final_message", "provider": self._provider_key, "text": message, "truncated": truncated, "self_report": True})
+        if session_id is not None:
+            refs.append({"kind": "agent_session", "provider": self._provider_key, "session_id": session_id})
+        if not succeeded:
+            tail = _redact(stderr.decode("utf-8", errors="replace"))[-MAX_STDERR_TAIL_CHARS:]
+            refs.append({"kind": "agent_failure", "provider": self._provider_key, "returncode": returncode, "parse_error": parsed.parse_error, "stderr_tail": tail})
+
+        if succeeded:
+            summary = f"'{self._provider_key}' answered ({len(message or '')} chars)"
+        else:
+            summary = f"'{self._provider_key}' turn failed: exit={returncode} parse_error={parsed.parse_error} is_error={parsed.is_error}"
         return AgentResult(
-            succeeded=succeeded,
-            output_refs=({"kind": "stdout_bytes", "length": len(stdout)}, {"kind": "stderr_bytes", "length": len(stderr)}),
-            summary=f"'{self._provider_key}' exited with code {proc.returncode}",
+            succeeded=succeeded, output_refs=tuple(refs), summary=summary, final_message=message, session_id=session_id,
+            structured={**parsed.structured, "returncode": returncode},
         )
 
 
-def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None = None) -> "AgentAdapter":
+def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None = None, read_only: bool = True) -> "AgentAdapter":
     """The founder-controlled factory: returns a real `LocalCLIAdapter` ONLY when
     `app.agent_coordination.adapter_config.real_adapter_config()` confirms every precondition
-    (enabled, executable found, an explicit args_template configured); returns
+    (enabled, executable found, an explicit args_template configured) AND, for a
+    conversational provider, its args template and budget pass validation; returns
     `NotConfiguredAdapter` -- the same honest, fail-closed default -- in every other case.
     NEVER silently substitutes a fake/mock adapter; callers that want deterministic test
     behavior construct their own fake explicitly (see
@@ -271,15 +580,23 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     `app.agent_coordination.adapter_config.resolve_adapter_env(provider_key)` -- the founder's
     own explicit per-provider allowlist of ambient variable NAMES, never a blind inheritance of
     this process's full environment. Passing `env={}` explicitly still means "no environment at
-    all," exactly as before -- only an OMITTED `env` triggers the allowlist default."""
+    all," exactly as before -- only an OMITTED `env` triggers the allowlist default.
 
-    from app.agent_coordination.adapter_config import real_adapter_config, resolve_adapter_env
+    `read_only` selects the dialect's read-only permission/sandbox mode; it defaults to True
+    (the safer mode) and must be set False explicitly for a write assignment."""
+
+    from app.agent_coordination.adapter_config import adapter_max_budget_usd, real_adapter_config, resolve_adapter_env
 
     config = real_adapter_config(provider_key)
     if config is None:
         return NotConfiguredAdapter(provider_key=provider_key)
     executable, args_template, timeout_seconds = config
     resolved_env = resolve_adapter_env(provider_key) if env is None else env
-    return LocalCLIAdapter(
-        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds, env=resolved_env
-    )
+    dialect = DIALECTS.get(provider_key)
+    try:
+        return LocalCLIAdapter(
+            provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds,
+            env=resolved_env, dialect=dialect, read_only=read_only, max_budget_usd=adapter_max_budget_usd(provider_key),
+        )
+    except AdapterInstructionError as exc:
+        return NotConfiguredAdapter(provider_key=provider_key, reason=str(exc))
