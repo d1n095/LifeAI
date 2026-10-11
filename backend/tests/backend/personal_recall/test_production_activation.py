@@ -328,6 +328,8 @@ def test_revoked_or_stale_founder_authority_rejected_after_restart(db_session):
 
     founder, authority = _founder_authority(db_session)
     _set_rls_user(db_session, FOUNDER_USER_ID)
+    # Runtime role cannot write sessions_valid_after; the legitimate logout-all epoch
+    # bump must still stale the just-minted Founder session.
     db_session.execute(text("SELECT bump_sessions_valid_after(:uid)"), {"uid": str(FOUNDER_USER_ID)})
     db_session.commit()
 
