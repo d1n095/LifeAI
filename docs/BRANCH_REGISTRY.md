@@ -20,7 +20,7 @@ deliberately does not depend on, rebase onto, or change either active lane.
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `claude/mainai-agent-communication-track-b` | draft (PR link added after creation) | **Draft — needs independent cross-examination; no live agent launch until a Founder-authorized smoke test** | Conversational CLI dialects (Claude Code, Cursor Agent, Codex) in `agent_coordination/adapters.py`: real instruction delivery, bounded answer + session-id capture, same-session continuation, fixed sandbox/permission/budget flags. `agent_coordination/session.py` turns over existing dispatch/execution tracking/review states (no migration). Path A `agent_assignment` hook. |
+| `claude/mainai-agent-communication-track-b` | [#265](https://github.com/d1n095/LifeAI/pull/265) | **Draft — needs independent cross-examination; no live agent launch until a Founder-authorized smoke test** | Conversational CLI dialects (Claude Code, Cursor Agent, Codex) in `agent_coordination/adapters.py`: real instruction delivery, bounded answer + session-id capture, same-session continuation, fixed sandbox/permission/budget flags. `agent_coordination/session.py` turns over existing dispatch/execution tracking/review states (no migration). Path A `agent_assignment` hook. |
 
 **Base:** `codex/founder-alpha-final-composed-candidate` @ `2fbe20a`. **Overlap with Cursor's Path A PR #264** (`21ff3cc`):
 two touch points in files #264 also edits, in different functions — `mainai_execution/planner.py` `KNOWN_TASK_TYPES`
