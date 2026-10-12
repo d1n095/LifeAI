@@ -18,11 +18,12 @@ existing `provider_spend`. Frozen GitHub discovery `#263` / `e33f494` is not mod
 | Branch | PR | Status | Scope |
 |---|---|---|---|
 | `cursor/mainai-execution-path-a-activation-91c1` | [#264](https://github.com/d1n095/LifeAI/pull/264) | **Frozen examined candidate @ `21ff3cc8ddd8a7da8b2c84a3219f65d752d4ea4b`** | Path A first-cycle capability on the existing execution engine. Preserve this SHA and its evidence. Claude independent exam (examiner `e5d2784e48c40ffe3667c26cc52ad3eeecaee877`) returned RETURN_TO_BUILDER. |
-| `cursor/mainai-execution-path-a-p1-fix-91c1` | — | **Open isolated P1 remediation child of frozen `#264` @ `21ff3cc`** | Minimal Path A P1 fix: refuse unseen/truncated file writes; require targeted_tests in `create_plan`; require provider-spend by default and refuse fallback/unpriced settle; wrap reservation/settlement failures as `ExecutionSpendError`; gate legacy non-draft `prepare-pr` writes. No new orchestration, no migrations, no Track B edits. |
+| `cursor/mainai-execution-path-a-p1-fix-91c1` | [#266](https://github.com/d1n095/LifeAI/pull/266) | **Frozen @ `dba9390a6ea2a167300bfd87a52922b6b5153f54`** | Isolated Path A P1 remediation child of frozen `#264`. Claude re-exam (examiner `2a9a137f2e843a7e676d6165712aecf01ca0bffb`) verified original CTX/TEST/SPEND-1..6 HOLDS, then RETURN_TO_BUILDER for new P1 SPEND-7. Do not amend. |
+| `cursor/mainai-execution-path-a-p1-spend-7-91c1` | — | **Open isolated SPEND-7 child of frozen `#266` @ `dba9390`** | Narrow Path A spend fix: reserve authorized spend before any paid call; constrain fallback to the grant allowlist; count every paid request (refused/oversized/unpriced/settlement-failed) on an independent session that survives job rollback; never silently release a hold after a paid request; handle overruns/settlement failures as `ExecutionSpendError` so jobs are not stuck `running`. Also names edited files in two recovery-demo fixtures so CTX-2 can accept the writes without weakening the production gate. No Track B, no migrations, no live paid calls. |
 
-**Must not:** modify frozen discovery `#263`, sovereignty `#262`, Continuous Conversation, Track B `#265`, or Codex active work; rewrite or rebase frozen `#264`; add a new orchestration engine; migrate; merge; deploy; activate Recall; run a live cycle or live AI/GitHub writes.
+**Must not:** modify frozen discovery `#263`, sovereignty `#262`, Continuous Conversation, Track B `#265`/`#267`, or Codex active work; rewrite or rebase frozen `#264` or `#266`; add a new orchestration engine; migrate; merge; deploy; activate Recall; run a live cycle or live AI/GitHub writes.
 
-**Merge order:** keep `#264` frozen. This P1 branch is the candidate for independent re-examination against Claude's published probes at `e5d2784`. Do not rebase onto later bases until the Founder asks.
+**Merge order:** keep `#264` and `#266` frozen. This SPEND-7 branch is the candidate for independent re-examination against Claude's published probes at `2a9a137` (original matrix plus SPEND-7). Do not rebase onto later bases until the Founder asks.
 
 ## Universal Personal Recall — isolated Codex lane (2026-09-04)
 
