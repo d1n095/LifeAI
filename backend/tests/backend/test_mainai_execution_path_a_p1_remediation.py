@@ -6,6 +6,7 @@ fail-closed assertion. No live provider, GitHub write, or agent call."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from decimal import Decimal
@@ -22,8 +23,10 @@ from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import MainAITask
 from app.models.provider_spend import ProviderSpendUsageEvent
 from app.provider_spend import authorize_provider_spend
+from app.providers import registry as provider_registry
 from app.providers.base import ChatResult, Message
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.pricing import estimate_cost
 from app.request_context import current_user_id as current_user_id_var
 
 
@@ -480,3 +483,271 @@ def test_planner_target_files_are_required_and_persisted_into_the_task(db_sessio
     db_session.commit()
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
     assert "backend/app/core.py" in task.description
+
+
+def _grant_custom(db, owner_id, goal, *, max_cost, max_requests, per_request=None, models=("gpt-4o-mini",)):
+    proposal = propose_execution_scope(
+        db, owner_id=owner_id, goal_id=goal.id, idempotency_key=f"prop-{uuid.uuid4()}"
+    )
+    _, envelope = authorize_execution_scope(
+        db,
+        owner_id=owner_id,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=["backend/app/x.py"],
+        authorized_capabilities=["path_a", "read_file", "patch_file"],
+        authorized_risk="low",
+        envelope_idempotency_key=f"env-{uuid.uuid4()}",
+    )
+    authorize_provider_spend(
+        db,
+        owner_id=owner_id,
+        goal_id=goal.id,
+        execution_envelope_id=envelope.id,
+        authorized_by="founder",
+        max_cost_usd=Decimal(max_cost),
+        max_requests=max_requests,
+        max_cost_per_request_usd=None if per_request is None else Decimal(per_request),
+        idempotency_key=f"spend-{uuid.uuid4()}",
+        allowed_providers=["openai"],
+        allowed_models=list(models),
+    )
+    db.commit()
+
+
+def _real_chain(monkeypatch, models, behaviours, seen):
+    """Exercise the real chat_with_fallback path; only provider.chat is faked."""
+    provider = OpenAIProvider()
+    monkeypatch.setattr(billed_chat, "resolve_chat_chain", lambda db: [(provider, m) for m in models])
+    monkeypatch.setattr(
+        "app.egress_policy.enforce_egress_policy",
+        lambda db, *, payload, **kw: payload,
+        raising=True,
+    )
+
+    async def _chat(self, messages, model, **kwargs):
+        seen.append(
+            {
+                "model": model,
+                "kwargs": sorted(kwargs),
+                "max_tokens": kwargs.get("max_tokens"),
+                "chars": sum(len(m.content) for m in messages),
+            }
+        )
+        behaviour = behaviours[model]
+        return behaviour(messages)
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat)
+
+
+@pytest.mark.asyncio
+async def test_spend7b_settlement_failure_keeps_the_paid_request_counted(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_n(db_session, owner_id, goal, max_requests=2)
+    calls = _counting_fallback(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("settle exploded")
+
+    monkeypatch.setattr(billed_chat, "settle_provider_spend_call", _boom)
+    outcomes = [await _call_and_rollback_on_spend_error(db_session, owner_id, goal) for _ in range(4)]
+    counted = _counted_events(db_session, goal.id)
+    statuses = [str(getattr(row.status, "value", row.status)) for row in counted]
+    assert len(calls) <= 2
+    assert len(counted) == len(calls)
+    assert all(status == "reserved" for status in statuses)
+    assert outcomes[0] == "ExecutionSpendError"
+
+
+@pytest.mark.asyncio
+async def test_spend7c_provider_exception_after_reservation_is_counted(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_n(db_session, owner_id, goal, max_requests=2)
+    seen = []
+
+    def _timeout(messages):
+        raise TimeoutError("read timeout after request was sent")
+
+    _real_chain(monkeypatch, ["gpt-4o-mini"], {"gpt-4o-mini": _timeout}, seen)
+    outcomes = [await _call_and_rollback_on_spend_error(db_session, owner_id, goal) for _ in range(3)]
+    counted = _counted_events(db_session, goal.id)
+    assert len(seen) == 2
+    assert len(counted) == 2
+    assert all(str(getattr(row.status, "value", row.status)) == "settled" for row in counted)
+    assert all(outcome == "ExecutionSpendError" for outcome in outcomes)
+
+
+@pytest.mark.asyncio
+async def test_spend8_oversized_prompt_is_refused_before_any_paid_request(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_custom(db_session, owner_id, goal, max_cost="0.05", max_requests=100)
+    seen = []
+
+    def _big(messages):
+        return ChatResult(
+            content="ok",
+            provider="openai",
+            model="gpt-4o-mini",
+            raw_usage={"prompt_tokens": 25_000, "completion_tokens": 2_048},
+        )
+
+    _real_chain(monkeypatch, ["gpt-4o-mini"], {"gpt-4o-mini": _big}, seen)
+    prompt = [Message(role="system", content="s"), Message(role="user", content="x" * 80_000)]
+    outcomes = []
+    for _ in range(40):
+        try:
+            await billed_execution_chat(
+                db_session,
+                prompt,
+                owner_id=owner_id,
+                goal_id=goal.id,
+                purpose="exam",
+                requested_by="exam",
+            )
+            db_session.commit()
+            outcomes.append("accepted")
+        except ExecutionSpendError as exc:
+            db_session.rollback()
+            outcomes.append(str(exc)[:80])
+    counted = _counted_events(db_session, goal.id)
+    actual = estimate_cost("openai", "gpt-4o-mini", 25_000, 2_048) * len(seen)
+    assert seen == []
+    assert counted == []
+    assert outcomes.count("accepted") == 0
+    assert actual == 0 or actual <= Decimal("0.05")
+    assert "estimated prompt" in outcomes[0]
+
+
+@pytest.mark.asyncio
+async def test_spend8_in_budget_call_passes_completion_token_limit(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_custom(db_session, owner_id, goal, max_cost="1.00", max_requests=1, per_request="0.50")
+    seen = []
+
+    def _ok(messages):
+        return ChatResult(
+            content="ok",
+            provider="openai",
+            model="gpt-4o-mini",
+            raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+
+    _real_chain(monkeypatch, ["gpt-4o-mini"], {"gpt-4o-mini": _ok}, seen)
+    result, attempted = await billed_execution_chat(
+        db_session,
+        [Message(role="user", content="x")],
+        owner_id=owner_id,
+        goal_id=goal.id,
+        purpose="exam",
+        requested_by="exam",
+    )
+    db_session.commit()
+    counted = _counted_events(db_session, goal.id)
+    assert result.content == "ok"
+    assert attempted == ["openai"]
+    assert len(seen) == 1
+    assert seen[0]["max_tokens"] == counted[0].reserved_completion_tokens
+    assert seen[0]["max_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_spend9_max_requests_one_is_one_paid_provider_request(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_custom(
+        db_session,
+        owner_id,
+        goal,
+        max_cost="1.00",
+        max_requests=1,
+        per_request="0.50",
+        models=("gpt-4o-mini", "gpt-4o"),
+    )
+    seen = []
+
+    def _timeout(messages):
+        raise TimeoutError("read timeout after request was sent")
+
+    def _ok(messages):
+        return ChatResult(
+            content="ok",
+            provider="openai",
+            model="gpt-4o",
+            raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+
+    _real_chain(monkeypatch, ["gpt-4o-mini", "gpt-4o"], {"gpt-4o-mini": _timeout, "gpt-4o": _ok}, seen)
+    outcome = await _call_and_rollback_on_spend_error(db_session, owner_id, goal)
+    counted = _counted_events(db_session, goal.id)
+    assert len(seen) == 1
+    assert [entry["model"] for entry in seen] == ["gpt-4o-mini"]
+    assert len(counted) == 1
+    assert counted[0].model == "gpt-4o-mini"
+    assert outcome == "ExecutionSpendError"
+
+
+@pytest.mark.asyncio
+async def test_spend10_call_scoped_chain_does_not_mutate_process_registry(db_session, owner_id, monkeypatch):
+    original = provider_registry.resolve_chat_chain
+    goal_a, goal_b = _goal(db_session, owner_id), _goal(db_session, owner_id)
+    _grant_custom(db_session, owner_id, goal_a, max_cost="1.00", max_requests=5, per_request="0.10", models=("gpt-4o-mini",))
+    _grant_custom(db_session, owner_id, goal_b, max_cost="1.00", max_requests=5, per_request="0.10", models=("gpt-4o",))
+    provider = OpenAIProvider()
+    monkeypatch.setattr(
+        billed_chat,
+        "resolve_chat_chain",
+        lambda db: [(provider, "gpt-4o-mini"), (provider, "gpt-4o")],
+    )
+    monkeypatch.setattr(
+        "app.egress_policy.enforce_egress_policy",
+        lambda db, *, payload, **kw: payload,
+        raising=True,
+    )
+    gate_a, gate_b = asyncio.Event(), asyncio.Event()
+    seen = []
+
+    async def _chat(self, messages, model, **kwargs):
+        seen.append(model)
+        await (gate_a if model == "gpt-4o-mini" else gate_b).wait()
+        return ChatResult(
+            content="ok",
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat)
+    from app.db import SessionLocal
+
+    db_b = SessionLocal()
+    db_b.execute(sa_text("SET app.current_user_id = :uid"), {"uid": str(owner_id)})
+
+    async def run(db, goal):
+        try:
+            await billed_execution_chat(
+                db,
+                [Message(role="user", content="x")],
+                owner_id=owner_id,
+                goal_id=goal.id,
+                purpose="exam",
+                requested_by="exam",
+            )
+            return "accepted"
+        except Exception as exc:  # noqa: BLE001
+            return type(exc).__name__
+
+    try:
+        ta = asyncio.create_task(run(db_session, goal_a))
+        await asyncio.sleep(0.2)
+        tb = asyncio.create_task(run(db_b, goal_b))
+        await asyncio.sleep(0.2)
+        gate_a.set()
+        ra = await ta
+        gate_b.set()
+        rb = await tb
+        assert provider_registry.resolve_chat_chain is original
+        assert ra == "accepted"
+        assert rb == "accepted"
+        assert seen == ["gpt-4o-mini", "gpt-4o"]
+    finally:
+        db_b.rollback()
+        db_b.close()

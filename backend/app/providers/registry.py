@@ -150,6 +150,7 @@ async def chat_with_fallback(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    chain: list[tuple[LLMProvider, str]] | None = None,
     **kwargs,
 ) -> tuple[ChatResult, list[str]]:
     """Try the primary chat provider, then fall back through CHAT_FALLBACK_ORDER on failure.
@@ -157,6 +158,11 @@ async def chat_with_fallback(
     Returns the successful result plus the list of provider names that were attempted
     (including the one that succeeded), so callers can log/audit exactly what happened
     instead of it being invisible.
+
+    `chain`, when given, is used as the exact provider/model sequence for this call and
+    does not mutate the process-wide registry. Ordinary chat callers omit it and still
+    resolve through `resolve_chat_chain`. Extra `kwargs` (for example `max_tokens`) are
+    forwarded to `provider.chat`.
 
     Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): when
     `owner_id` is passed, every attempt is routed through `enforce_egress_policy()` first --
@@ -184,11 +190,11 @@ async def chat_with_fallback(
     # already-central module.
     from app.egress_policy import EgressDeniedError, enforce_egress_policy
 
-    chain = resolve_chat_chain(db)
+    resolved_chain = list(chain) if chain is not None else resolve_chat_chain(db)
     attempted: list[str] = []
     last_error: Exception | None = None
 
-    for provider, model in chain:
+    for provider, model in resolved_chain:
         attempted.append(provider.name)
         try:
             outbound_messages = messages
