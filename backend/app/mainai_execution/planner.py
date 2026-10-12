@@ -22,6 +22,7 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -93,9 +94,21 @@ class PlannedTaskSpec:
     depends_on: list[int] = field(default_factory=list)
     risk_level: MainAIGoalRiskLevel = MainAIGoalRiskLevel.low
     approval_required: bool = False
-    verification_plan: list[dict] = field(default_factory=list)
+    # None means "omitted". repo_edit omitted plans get a concrete default in __post_init__;
+    # an explicit empty list is still rejected by create_plan() (Claude TEST-1).
+    verification_plan: list[dict] | None = None
     priority: int = 0
     max_attempts: int = 3
+    # Planner-named edit targets. Persisted into the task description so the code-agent
+    # context layer can require explicit paths without a new column/migration.
+    target_files: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.verification_plan is None:
+            if self.task_type == "repo_edit":
+                self.verification_plan = [{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}]
+            else:
+                self.verification_plan = []
 
 
 def create_goal(
@@ -210,6 +223,12 @@ def create_plan(
                     validate_targeted_tests_target(step.get("target"))
                 except VerificationStepError as exc:
                     raise PlanValidationError(str(exc)) from exc
+        for path in spec.target_files:
+            if not isinstance(path, str) or not path:
+                raise PlanValidationError(f"target_files entries must be non-empty strings, got {path!r}")
+            posix = PurePosixPath(path)
+            if posix.is_absolute() or ".." in posix.parts:
+                raise PlanValidationError(f"target_files path must be a relative path with no '..': {path!r}")
 
     edges = [(i, dep_idx) for i, spec in enumerate(tasks) for dep_idx in spec.depends_on]
     cycle = _detect_cycle(len(tasks), edges)
@@ -291,11 +310,23 @@ def create_plan(
         verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
             db, task_type=spec.task_type, verification_plan=spec.verification_plan
         )
+        # Claude TEST-1: reject repo_edit without targeted_tests at plan time, before any
+        # paid editing. Lessons may still inject the required step; check the post-lesson plan.
+        if spec.task_type == "repo_edit" and not any(
+            isinstance(step, dict) and step.get("kind") == "targeted_tests" for step in verification_plan
+        ):
+            raise PlanValidationError(
+                "repo_edit tasks require at least one verification_plan step of kind "
+                "targeted_tests before any paid editing can begin."
+            )
+        description = spec.description
+        if spec.target_files:
+            description = description.rstrip() + "\nTarget files: " + " ".join(spec.target_files)
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
             owner_id=goal.owner_id,
-            description=spec.description,
+            description=description,
             task_type=spec.task_type,
             status=MainAITaskStatus.pending,
             priority=spec.priority,

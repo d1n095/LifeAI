@@ -287,6 +287,22 @@ def superuser_db():
     session.close()
 
 
+@pytest.fixture(autouse=True)
+def _legacy_suites_may_run_unbilled_path_a_ai(request, monkeypatch):
+    """Path A now requires a live provider-spend grant by default (Claude SPEND-1). Existing
+    executor/recovery fixtures were written against unbilled fake providers. Keep those
+    suites runnable without a grant, but never disable the gate for the examiner probes or
+    the P1 remediation regressions — those must see the real default."""
+    module_name = getattr(request.module, "__name__", "")
+    if module_name.endswith("test_path_a_exam") or module_name.endswith(
+        "test_mainai_execution_path_a_p1_remediation"
+    ):
+        return
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
+
+
 @pytest.fixture
 def make_verified_user(db_session):
     """Creates a verified, active user directly in the DB (bypassing the register/verify

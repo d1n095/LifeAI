@@ -12,6 +12,9 @@ GitHub write access is real (app/integrations/github_client.py) but gated hard:
   - `settings.github_write_enabled=False` (the default): prepare_github_pr() only ever
     PROPOSES an exact branch/commit/PR — it never calls GitHub. This is the "read/analyze/
     propose" phase CLAUDE.md's section 7 asks to start with.
+  - `settings.mainai_legacy_prepare_pr_writes_enabled=False` (the default): even when
+    github_write_enabled is on, this legacy Contents-API route refuses to open a non-draft
+    PR. Path A draft PRs are the write path that may be enabled later.
   - Even with write enabled, a task must have an approved review AND recorded test results
     before a PR can be prepared — see _require_approved_with_tests().
   - attempt_auto_merge() ALWAYS reports blocked in this slice: there is no merge method in
@@ -311,6 +314,13 @@ async def prepare_github_pr(db: Session, task_id: uuid.UUID, *, branch_name: str
     )
 
     settings = get_settings()
+    if settings.github_write_enabled and not settings.mainai_legacy_prepare_pr_writes_enabled:
+        raise ValueError(
+            "Legacy non-draft prepare-pr GitHub writes are gated off until an explicit "
+            "Founder decision (MAINAI_LEGACY_PREPARE_PR_WRITES_ENABLED). GITHUB_WRITE_ENABLED "
+            "alone must not open this Contents-API route. Path A draft PRs are the write path "
+            "that may be enabled later. This call stays proposal-only."
+        )
     if not settings.github_write_enabled:
         proposal = {"branch_name": branch_name, "base_branch": base_branch, "pr_title": pr_title, "pr_body": pr_body, "diff": diff_response}
         _record_event(
@@ -337,7 +347,9 @@ async def prepare_github_pr(db: Session, task_id: uuid.UUID, *, branch_name: str
         )
         _record_event(db, task, event_type=AgentTaskEventType.github_commit_pushed, payload={"branch": branch_name, "commit": commit_result.get("commit", {}).get("sha")}, created_by=prepared_by)
 
-        pr = await client.create_pull_request(title=pr_title, body=pr_body, head=branch_name, base=base_branch)
+        pr = await client.create_pull_request(
+            title=pr_title, body=pr_body, head=branch_name, base=base_branch, draft=True
+        )
         _record_event(
             db,
             task,

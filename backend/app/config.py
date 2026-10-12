@@ -203,9 +203,14 @@ class Settings(BaseSettings):
     github_worktree_base_branch: str = "claude/det-kommer-mer-879lcm"
     github_pr_base_branch: str = ""
     # Per-goal AI spend for Path A. Existing provider_spend grants remain the live ceiling;
-    # this setting is an additional hard cap and, when require=True, a fail-closed gate.
-    mainai_execution_require_provider_spend: bool = False
+    # this setting is an additional hard cap. Default True: Path A AI calls fail closed
+    # without a live grant (Claude exam SPEND-1). Set false only for explicit unbilled tests.
+    mainai_execution_require_provider_spend: bool = True
     mainai_execution_goal_spend_cap_usd: float = 5.0
+    # Legacy agent-orchestration prepare-pr writes a NON-draft PR via the Contents API
+    # whenever GITHUB_WRITE_ENABLED=true. Keep that route proposal-only until an explicit
+    # Founder decision — Path A draft PRs are the write path that may be enabled later.
+    mainai_legacy_prepare_pr_writes_enabled: bool = False
 
     @property
     def frontend_origin_list(self) -> list[str]:

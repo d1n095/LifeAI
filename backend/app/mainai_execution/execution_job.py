@@ -58,7 +58,7 @@ from app.mainai_execution.verify import (
     verify_task,
 )
 from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
-from app.mainai_execution.code_agent_context import build_code_agent_user_prompt
+from app.mainai_execution.code_agent_context import CodeAgentPrompt, prepare_code_agent_prompt
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.mainai_execution.worktree import (
     WorktreeError,
@@ -143,7 +143,9 @@ CODE_AGENT_SYSTEM_PROMPT = (
     "JSON-objekt på formen {\"files\": [{\"path\": \"relative/path/from/repo/root.py\", "
     "\"content\": \"...hela filens NYA fullständiga innehåll...\"}], \"commit_message\": "
     "\"...\"}. Ändra ALDRIG fler filer än vad uppdraget kräver. `content` är filens KOMPLETTA "
-    "nya innehåll, aldrig en diff eller ett utdrag."
+    "nya innehåll, aldrig en diff eller ett utdrag. Skriv BARA filer som uppdraget namnger "
+    "explicit. Skriv ALDRIG om en befintlig fil vars kompletta, otrunkerade innehåll inte "
+    "visades i prompten."
 )
 
 
@@ -204,6 +206,23 @@ def _parse_code_agent_response(raw: str) -> dict:
     return parsed
 
 
+def _assert_repo_edit_writes_allowed(root: Path, files: list[dict], prompt: CodeAgentPrompt) -> None:
+    """Fail closed: never overwrite an existing file the model did not fully see, and never
+    write a path the planner/task did not name. Checked before any write_text()."""
+    for file in files:
+        path = file["path"]
+        if path not in prompt.explicit_paths:
+            raise TaskExecutionError(
+                f"Refusing to edit {path!r}: it is not an explicit target file named by the planner or task."
+            )
+        abs_path = (root / path).resolve()
+        if abs_path.is_file() and path not in prompt.fully_shown_paths:
+            raise TaskExecutionError(
+                f"Refusing to edit existing file {path!r}: the editing model did not receive "
+                "its complete, untruncated contents."
+            )
+
+
 async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     """github_write_enabled is off (or GitHub isn't configured): the ORIGINAL V0.1 proposal-only
     model, completely unchanged -- writes to the single shared local checkout this backend
@@ -215,8 +234,8 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     al.) keep exercising the identical code, unchanged."""
     repo_root = _repo_root().resolve()
     failure_context = latest_verification_failure_text(db, task.id)
-    user_prompt = build_code_agent_user_prompt(task.description, repo_root, failure_context=failure_context)
-    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
+    prompt = prepare_code_agent_prompt(task.description, repo_root, failure_context=failure_context)
+    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
         db,
         messages,
@@ -227,6 +246,7 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         task_id=task.id,
     )
     parsed = _parse_code_agent_response(result.content)
+    _assert_repo_edit_writes_allowed(repo_root, parsed["files"], prompt)
     previous_contents: dict[str, str | None] = {}
     for file in parsed["files"]:
         # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
@@ -341,8 +361,8 @@ async def _handle_repo_edit(
 
     worktree_root = Path(worktree.path).resolve()
     failure_context = latest_verification_failure_text(db, task.id)
-    user_prompt = build_code_agent_user_prompt(task.description, worktree_root, failure_context=failure_context)
-    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
+    prompt = prepare_code_agent_prompt(task.description, worktree_root, failure_context=failure_context)
+    messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
         db,
         messages,
@@ -354,6 +374,7 @@ async def _handle_repo_edit(
         job_id=job.id,
     )
     parsed = _parse_code_agent_response(result.content)
+    _assert_repo_edit_writes_allowed(worktree_root, parsed["files"], prompt)
     for file in parsed["files"]:
         # Identical two-layer defense _propose_repo_edit() already uses (syntactic guard at
         # parse time + this resolve()-and-compare confinement check), now against the isolated
