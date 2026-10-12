@@ -294,8 +294,13 @@ def _legacy_suites_may_run_unbilled_path_a_ai(request, monkeypatch):
     suites runnable without a grant, but never disable the gate for the examiner probes or
     the P1 remediation regressions — those must see the real default."""
     module_name = getattr(request.module, "__name__", "")
-    if module_name.endswith("test_path_a_exam") or module_name.endswith(
-        "test_mainai_execution_path_a_p1_remediation"
+    if module_name.endswith(
+        (
+            "test_path_a_exam",
+            "test_mainai_execution_path_a_p1_remediation",
+            "test_path_routing",
+            "test_mainai_execution_path_a_first_cycle",
+        )
     ):
         return
     from app.config import get_settings

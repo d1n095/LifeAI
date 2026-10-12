@@ -44,6 +44,7 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
+from app.mainai_execution.envelope_scope import merge_repo_edit_target_files
 from app.providers.base import Message
 
 
@@ -320,8 +321,13 @@ def create_plan(
                 "targeted_tests before any paid editing can begin."
             )
         description = spec.description
-        if spec.target_files:
-            description = description.rstrip() + "\nTarget files: " + " ".join(spec.target_files)
+        persisted_targets = (
+            merge_repo_edit_target_files(spec.target_files, verification_plan)
+            if spec.task_type == "repo_edit"
+            else list(spec.target_files)
+        )
+        if persisted_targets:
+            description = description.rstrip() + "\nTarget files: " + " ".join(persisted_targets)
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
@@ -373,15 +379,20 @@ PLANNER_SYSTEM_PROMPT = (
     "i en sekvens av konkreta, avgränsade tasks. Svara ENDAST med ett JSON-objekt på formen "
     '{"tasks": [{"description": "...", "task_type": "read_only_audit|repo_edit|run_tests|'
     'open_pr", "depends_on": [0, 1], "risk_level": "low|medium|high", "approval_required": '
-    'true|false, "verification_plan": [{"kind": "targeted_tests", "target": "..."}]}]} -- '
+    'true|false, "target_files": ["backend/app/foo.py", "backend/tests/test_foo.py"], '
+    '"verification_plan": [{"kind": "targeted_tests", "target": "tests/test_foo.py"}]}]} -- '
     "inget annat, ingen markdown-kodblocksmarkering, ingen förklarande text före eller efter. "
     "depends_on är 0-baserade index in i samma tasks-lista. Håll planen minimal: bara de "
     "tasks som faktiskt krävs för målet, aldrig spekulativa extra steg. En repo_edit-task "
-    "MÅSTE ha minst ett verification_plan-steg kind=targeted_tests mot en konkret pytest-fil. "
-    "En task som ändrar kod (repo_edit) eller öppnar en PR (open_pr) ska nästan alltid ha "
-    "approval_required=false (godkännande krävs bara för merge/deploy, inte för att föreslå "
-    "en ändring som PR) -- men en task märkt risk_level=high ska nästan alltid ha "
-    "approval_required=true."
+    "MÅSTE ha minst ett verification_plan-steg kind=targeted_tests mot en konkret pytest-fil "
+    "relativ till backend/ (t.ex. tests/test_foo.py). En repo_edit-task MÅSTE också sätta "
+    "target_files till VARJE fil som ska skapas eller skrivas, inklusive nya fokuserade "
+    "testfiler, som sökvägar från repo-roten (backend/tests/test_foo.py för den pytest-filen). "
+    "Förlita dig INTE på att filnamn nämns i description -- target_files är det enda "
+    "auktoritativa fältet. En task som ändrar kod (repo_edit) eller öppnar en PR (open_pr) "
+    "ska nästan alltid ha approval_required=false (godkännande krävs bara för merge/deploy, "
+    "inte för att föreslå en ändring som PR) -- men en task märkt risk_level=high ska nästan "
+    "alltid ha approval_required=true."
 )
 
 
@@ -456,6 +467,21 @@ async def propose_plan_via_ai(
         if not isinstance(verification_plan, list):
             raise PlanValidationError(f"tasks[{i}].verification_plan must be a list.")
 
+        raw_targets = raw_task.get("target_files", [])
+        if raw_targets is None:
+            raw_targets = []
+        if not isinstance(raw_targets, list) or not all(isinstance(path, str) and path for path in raw_targets):
+            raise PlanValidationError(f"tasks[{i}].target_files must be a list of non-empty strings.")
+        target_files = list(raw_targets)
+        if task_type == "repo_edit":
+            target_files = merge_repo_edit_target_files(target_files, verification_plan)
+            if not target_files:
+                raise PlanValidationError(
+                    f"tasks[{i}] repo_edit must name target_files (every file to create or "
+                    "edit, including the focused test file) rather than only mentioning "
+                    "filenames in prose."
+                )
+
         specs.append(
             PlannedTaskSpec(
                 description=description,
@@ -465,6 +491,7 @@ async def propose_plan_via_ai(
                 approval_required=bool(raw_task.get("approval_required", False)),
                 verification_plan=verification_plan,
                 priority=int(raw_task.get("priority", 0)),
+                target_files=target_files,
             )
         )
 

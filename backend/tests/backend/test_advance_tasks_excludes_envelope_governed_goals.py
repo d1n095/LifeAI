@@ -343,3 +343,90 @@ async def test_dependent_ready_after_revoke_still_never_reopens_v01(superuser_db
     dependent = superuser_db.get(MainAITask, dependent.id)
     assert dependent.status == MainAITaskStatus.ready
     assert dependent.mainai_job_id is None
+
+
+def _authorize_path_a(db, owner_id, goal_id, *, capabilities=None, paths=None):
+    proposal = propose_execution_scope(db, owner_id=owner_id, goal_id=goal_id, idempotency_key=f"excl-path-a-{goal_id}")
+    _, envelope = authorize_execution_scope(
+        db,
+        owner_id=owner_id,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=paths or ["backend/app/x.py"],
+        authorized_capabilities=capabilities or ["path_a", "read_file", "repo_edit"],
+        authorized_risk="low",
+        envelope_idempotency_key=f"excl-path-a-env-{goal_id}",
+    )
+    return envelope
+
+
+@pytest.mark.asyncio
+async def test_active_path_a_envelope_is_dispatched_by_v01_and_excluded_from_supervisor(
+    superuser_db, make_verified_user,
+):
+    from app.development_supervisor.production_entry import eligible_authorized_goals
+    from app.models.mainai_execution import MainAIGoalStatus
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    _authorize_path_a(superuser_db, owner.id, goal.id)
+    goal.status = MainAIGoalStatus.running
+    superuser_db.commit()
+
+    eligible_ids = {g.id for g, _env in eligible_authorized_goals(superuser_db, limit=50)}
+    assert goal.id not in eligible_ids
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.running
+    assert task.mainai_job_id is not None
+
+
+@pytest.mark.asyncio
+async def test_path_a_envelope_without_path_a_capability_stays_supervisor_only(superuser_db, make_verified_user):
+    from app.development_supervisor.production_entry import eligible_authorized_goals
+    from app.models.mainai_execution import MainAIGoalStatus
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    _authorize(superuser_db, owner.id, goal.id)
+    goal.status = MainAIGoalStatus.running
+    superuser_db.commit()
+
+    eligible_ids = {g.id for g, _env in eligible_authorized_goals(superuser_db, limit=50)}
+    assert goal.id in eligible_ids
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.ready
+    assert task.mainai_job_id is None
+
+
+@pytest.mark.asyncio
+async def test_superseded_or_revoked_path_a_envelope_fails_closed(superuser_db, make_verified_user):
+    from app.development_supervisor.production_entry import eligible_authorized_goals
+    from app.models.execution_envelope import ExecutionAuthorizationEnvelope
+    from app.models.mainai_execution import MainAIGoalStatus
+
+    owner, _ = make_verified_user()
+    goal = _goal_with_ready_task(superuser_db, owner.id)
+    _authorize_path_a(superuser_db, owner.id, goal.id)
+    goal.status = MainAIGoalStatus.running
+    superuser_db.commit()
+
+    superuser_db.query(ExecutionAuthorizationEnvelope).filter(
+        ExecutionAuthorizationEnvelope.goal_id == goal.id
+    ).update({"status": "revoked"})
+    superuser_db.commit()
+
+    eligible_ids = {g.id for g, _env in eligible_authorized_goals(superuser_db, limit=50)}
+    assert goal.id not in eligible_ids
+
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+    task = superuser_db.execute(select(MainAITask).where(MainAITask.goal_id == goal.id)).scalar_one()
+    assert task.status == MainAITaskStatus.ready
+    assert task.mainai_job_id is None

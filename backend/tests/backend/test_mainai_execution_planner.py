@@ -532,6 +532,7 @@ async def test_propose_plan_via_ai_parses_a_valid_response_into_planned_task_spe
     assert specs[0].task_type == "read_only_audit"
     assert specs[1].depends_on == [0]
     assert specs[2].verification_plan == [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]
+    assert "backend/tests/backend/test_x.py" in specs[1].target_files
 
     # The result is directly usable by create_plan() -- proving the two steps' contract
     # actually lines up, not just that each parses in isolation.
@@ -619,6 +620,58 @@ async def test_propose_plan_via_ai_rejects_an_unknown_risk_level(db_session, own
     goal = _goal(db_session, owner_id)
 
     with pytest.raises(planner.PlanValidationError):
+        await planner.propose_plan_via_ai(db_session, goal=goal)
+
+
+@pytest.mark.asyncio
+async def test_propose_plan_via_ai_parses_explicit_target_files(db_session, owner_id, monkeypatch):
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat(
+            '{"tasks": [{"description": "edit greeting", "task_type": "repo_edit", '
+            '"target_files": ["backend/app/greeting.py", "backend/tests/test_greeting_doc.py"], '
+            '"verification_plan": [{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}]}]}'
+        ),
+    )
+    goal = _goal(db_session, owner_id)
+    specs, _provider, _model = await planner.propose_plan_via_ai(db_session, goal=goal)
+    assert specs[0].target_files == [
+        "backend/app/greeting.py",
+        "backend/tests/test_greeting_doc.py",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_propose_plan_via_ai_maps_focused_test_when_target_files_omitted(db_session, owner_id, monkeypatch):
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat(
+            '{"tasks": [{"description": "Add a docstring to greet() in backend/app/greeting.py and add a focused test.", '
+            '"task_type": "repo_edit", '
+            '"verification_plan": [{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}]}]}'
+        ),
+    )
+    goal = _goal(db_session, owner_id)
+    specs, _provider, _model = await planner.propose_plan_via_ai(db_session, goal=goal)
+    assert "backend/tests/test_greeting_doc.py" in specs[0].target_files
+    plan = planner.create_plan(db_session, goal=goal, rationale="mapped", tasks=specs, created_by="test")
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.plan_id == plan.id).one()
+    assert "Target files:" in task.description
+    assert "backend/tests/test_greeting_doc.py" in task.description
+
+
+@pytest.mark.asyncio
+async def test_propose_plan_via_ai_rejects_repo_edit_without_target_files_or_tests(db_session, owner_id, monkeypatch):
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat('{"tasks": [{"description": "edit something", "task_type": "repo_edit", "verification_plan": []}]}'),
+    )
+    goal = _goal(db_session, owner_id)
+    with pytest.raises(planner.PlanValidationError, match="target_files"):
         await planner.propose_plan_via_ai(db_session, goal=goal)
 
 

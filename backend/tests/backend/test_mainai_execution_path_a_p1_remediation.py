@@ -95,7 +95,7 @@ def _grant(db, owner_id, goal):
         proposal_id=proposal.id,
         authorized_by="founder",
         authorized_paths=["backend/app/x.py"],
-        authorized_capabilities=["read_file", "patch_file"],
+        authorized_capabilities=["path_a", "read_file", "patch_file"],
         authorized_risk="low",
         envelope_idempotency_key=f"env-{uuid.uuid4()}",
     )
@@ -386,7 +386,7 @@ def _grant_n(db, owner_id, goal, *, max_requests, models=("gpt-4o-mini",)):
         proposal_id=proposal.id,
         authorized_by="founder",
         authorized_paths=["backend/app/x.py"],
-        authorized_capabilities=["read_file", "patch_file"],
+        authorized_capabilities=["path_a", "read_file", "patch_file"],
         authorized_risk="low",
         envelope_idempotency_key=f"env-{uuid.uuid4()}",
     )
