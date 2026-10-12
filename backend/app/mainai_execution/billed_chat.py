@@ -10,12 +10,21 @@ provider call; only the allowlisted provider/model may be invoked, including fal
 every paid request is counted even when the answer is refused, oversized, unpriced, or
 settlement fails; usage accounting commits on an independent session so a later job
 rollback cannot un-count it; never release a hold after a paid request.
+
+P1 SPEND-8 (Claude exam of #268 @ effafbe): refuse before any provider call when the
+estimated prompt exceeds the reserved prompt budget; pass a completion-token limit that
+matches the reservation so actual paid usage cannot exceed the Founder grant.
+
+P1 SPEND-9: one reservation authorizes exactly one provider/model attempt; Path A does
+not fall back to a second paid request under the same hold.
+
+P2 SPEND-10: pass the reserved chain explicitly into chat_with_fallback; do not mutate
+the process-wide provider registry.
 """
 
 from __future__ import annotations
 
 import uuid
-from contextlib import contextmanager
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -25,10 +34,11 @@ from app.db import SessionLocal
 from app.provider_spend import (
     ProviderSpendError,
     get_current_provider_spend_authorization,
+    release_provider_spend_call,
     reserve_provider_spend_call,
     settle_provider_spend_call,
 )
-from app.providers import registry as provider_registry
+from app.provider_spend.service import _bound_reservation
 from app.providers.base import ChatResult, Message
 from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback, resolve_chat_chain
@@ -75,15 +85,12 @@ def _authorized_chain(chain, grant) -> list:
     return [(provider, model) for provider, model in chain if _grant_allows(grant, _provider_name(provider), model)]
 
 
-@contextmanager
-def _constrain_chat_chain(authorized: list):
-    """Restrict registry fallback to the already-authorized pairs for this call only."""
-    original = provider_registry.resolve_chat_chain
-    provider_registry.resolve_chat_chain = lambda _db: list(authorized)
-    try:
-        yield
-    finally:
-        provider_registry.resolve_chat_chain = original
+def _estimate_prompt_tokens(messages: list[Message]) -> int:
+    """Conservative pre-call size: ceil(chars / 3). Prefer over-estimate to under-estimate."""
+    chars = sum(len(getattr(message, "content", None) or "") for message in messages)
+    if chars <= 0:
+        return 0
+    return (chars + 2) // 3
 
 
 def _open_spend_session(owner_id: uuid.UUID) -> Session:
@@ -230,7 +237,29 @@ async def billed_execution_chat(
                 "Founder's provider-spend allowlist. Fallback must not bypass the authorized grant."
             )
 
-        reserve_provider, reserve_model = _provider_name(authorized[0][0]), authorized[0][1]
+        # SPEND-9: one reservation = one provider/model attempt. Do not fall back inside
+        # the reserved Path A call; a later retry (new reservation) may pick the next pair.
+        reserved_chain = authorized[:1]
+        reserve_provider, reserve_model = _provider_name(reserved_chain[0][0]), reserved_chain[0][1]
+
+        try:
+            expected_prompt, expected_completion, _expected_cost = _bound_reservation(
+                grant, provider=reserve_provider, model=reserve_model
+            )
+        except ProviderSpendError as exc:
+            raise ExecutionSpendError(f"Path A AI call refused by provider_spend: {exc}") from exc
+        estimated_prompt = _estimate_prompt_tokens(messages)
+        if estimated_prompt > expected_prompt:
+            raise ExecutionSpendError(
+                "Path A AI call refused: estimated prompt exceeds the reserved prompt budget "
+                f"(estimated={estimated_prompt}/{expected_prompt}). No provider request was sent."
+            )
+        if expected_completion <= 0:
+            raise ExecutionSpendError(
+                "Path A AI call refused: reservation completion hold is 0. "
+                "No provider request was sent."
+            )
+
         source_ref = (
             f"mainai-execution:{purpose}:{goal_id}:{task_id or 'plan'}:"
             f"{job_id or 'none'}:{uuid.uuid4()}"
@@ -250,6 +279,8 @@ async def billed_execution_chat(
                     "path": "mainai_execution",
                     "reserved_provider": reserve_provider,
                     "reserved_model": reserve_model,
+                    "estimated_prompt_tokens": estimated_prompt,
+                    "max_tokens": expected_completion,
                 },
             )
         except ProviderSpendError as exc:
@@ -261,20 +292,45 @@ async def billed_execution_chat(
         # Durable before any paid invoke. A later job-session rollback must not un-count this.
         spend_db.commit()
 
+        hold_prompt, hold_completion, _hold_cost = _reserved_hold(event)
+        if estimated_prompt > hold_prompt:
+            # Concurrent consumption shrunk the hold after our pre-check. Do not pay.
+            # SPEND-7 forbids releasing after a paid request; this path has not paid yet.
+            try:
+                release_provider_spend_call(
+                    spend_db,
+                    owner_id=owner_id,
+                    source_ref=source_ref,
+                    evidence={
+                        "path": "mainai_execution",
+                        "refused": "estimated prompt exceeds reserved prompt budget after reserve",
+                        "estimated_prompt_tokens": estimated_prompt,
+                        "reserved_prompt_tokens": hold_prompt,
+                    },
+                )
+                spend_db.commit()
+            except Exception:
+                spend_db.rollback()
+            raise ExecutionSpendError(
+                "Path A AI call refused: estimated prompt exceeds the reserved prompt budget "
+                f"(estimated={estimated_prompt}/{hold_prompt}). No provider request was sent."
+            )
+
         attempted: list[str] = []
         result: ChatResult | None = None
         provider_error: Exception | None = None
         try:
-            with _constrain_chat_chain(authorized):
-                result, attempted = await chat_with_fallback(
-                    db,
-                    messages,
-                    owner_id=owner_id,
-                    purpose=purpose,
-                    requested_by=requested_by,
-                    task_id=task_id,
-                    job_id=job_id,
-                )
+            result, attempted = await chat_with_fallback(
+                db,
+                messages,
+                owner_id=owner_id,
+                purpose=purpose,
+                requested_by=requested_by,
+                task_id=task_id,
+                job_id=job_id,
+                chain=reserved_chain,
+                max_tokens=hold_completion,
+            )
         except Exception as exc:  # noqa: BLE001 - paid window is ambiguous; never release
             provider_error = exc
             attempted = list(attempted)
@@ -286,11 +342,10 @@ async def billed_execution_chat(
             actual_model = result.model
             prompt_tokens, completion_tokens = _usage_tokens(result)
             cost = estimate_cost(actual_provider, actual_model, prompt_tokens, completion_tokens)
-            hold_prompt, hold_completion, hold_cost = _reserved_hold(event)
             over_hold = (
                 prompt_tokens > hold_prompt
                 or completion_tokens > hold_completion
-                or (cost is not None and cost > hold_cost)
+                or (cost is not None and cost > _hold_cost)
             )
             if not _grant_allows(grant, actual_provider, actual_model):
                 refusal = (
@@ -319,7 +374,12 @@ async def billed_execution_chat(
             attempted=attempted,
             refusal=refusal,
             over_hold=over_hold,
-            extra_evidence={"provider_error": None if provider_error is None else type(provider_error).__name__},
+            extra_evidence={
+                "provider_error": None if provider_error is None else type(provider_error).__name__,
+                "answering_provider": None if result is None else result.provider,
+                "answering_model": None if result is None else result.model,
+                "max_tokens": hold_completion,
+            },
         )
 
         if provider_error is not None:
