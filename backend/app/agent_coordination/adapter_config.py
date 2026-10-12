@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
 # The provider-neutral real-adapter boundary this module governs. Adding a new provider means
 # adding one entry here -- never a new adapter class per provider (see
@@ -57,10 +58,29 @@ _ENV_CREDENTIAL_REF = "LIFE_AGENT_ADAPTER_CREDENTIAL_REF__{key}"  # an opaque LA
 _ENV_ENV_ALLOWLIST = "LIFE_AGENT_ADAPTER_ENV_ALLOWLIST__{key}"  # comma-separated ambient VAR NAMES
 
 _ENV_MAX_BUDGET_USD = "LIFE_AGENT_ADAPTER_MAX_BUDGET_USD__{key}"  # per-turn spend ceiling, where the CLI supports one
+_ENV_HOME = "LIFE_AGENT_ADAPTER_HOME__{key}"  # dedicated HOME/session store for MainAI's own agent sessions
+_ENV_MAX_TURNS = "LIFE_AGENT_ADAPTER_MAX_TURNS__{key}"  # instruction turns per assignment
+_ENV_ALLOW_UNBUDGETED = "LIFE_AGENT_ADAPTER_ALLOW_UNBUDGETED__{key}"  # explicit ack for a CLI with no budget flag
 
 _DEFAULT_TIMEOUT_SECONDS = 900  # a bound always applies; 15 minutes if the founder sets none
 _DEFAULT_MAX_BUDGET_USD = 1.0  # per conversation turn, if the founder sets none
 HARD_MAX_BUDGET_USD = 25.0  # a configured value above this ceiling is refused, never clamped silently
+_DEFAULT_MAX_TURNS = 5
+HARD_MAX_TURNS = 20
+
+# Variables that would point an agent CLI back at a personal HOME/config/session store. They are
+# never forwarded from this process's environment -- the isolated HOME below replaces them.
+FORBIDDEN_FORWARDED_ENV = frozenset({
+    "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+    "CLAUDE_CONFIG_DIR", "CODEX_HOME", "CURSOR_CONFIG_DIR",
+})
+# Personal agent stores under the Founder's HOME that an isolated HOME may never be or sit inside.
+_PERSONAL_AGENT_DIRS = (".claude", ".codex", ".cursor", ".config")
+
+
+class AdapterConfigurationError(ValueError):
+    """A founder-supplied adapter setting that would weaken isolation or bounds -- the adapter
+    is then not constructed at all (fail closed), never constructed with a guessed fallback."""
 
 
 def _env_key(agent_key: str) -> str:
@@ -155,6 +175,82 @@ def adapter_max_budget_usd(provider_key: str) -> float | None:
     if not 0 < value <= HARD_MAX_BUDGET_USD:
         return None
     return value
+
+
+def adapter_max_turns(provider_key: str) -> int | None:
+    """Instruction turns allowed per assignment (start + follow-ups). Default 5; `None` -- which
+    makes every turn refuse -- for a non-integer, non-positive or above-`HARD_MAX_TURNS` value."""
+
+    raw = os.environ.get(_ENV_MAX_TURNS.format(key=_env_key(provider_key)), "").strip()
+    if not raw:
+        return _DEFAULT_MAX_TURNS
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if 0 < value <= HARD_MAX_TURNS else None
+
+
+def adapter_unbudgeted_allowed(provider_key: str) -> bool:
+    """A CLI with no per-turn budget flag (Cursor Agent, Codex) is only constructed after the
+    founder explicitly accepts that its timeout is its only cost bound."""
+
+    return _env_flag(_ENV_ALLOW_UNBUDGETED.format(key=_env_key(provider_key)))
+
+
+def _founder_home() -> Path:
+    return Path.home().resolve()
+
+
+def validate_isolated_home(raw: str | None, *, founder_home: Path | None = None) -> Path:
+    """The dedicated HOME a MainAI agent CLI runs with. It must be an existing absolute
+    directory that is NOT the Founder's own HOME, not an ancestor of it, and not inside one of
+    the Founder's personal agent stores (`~/.claude`, `~/.codex`, `~/.cursor`, `~/.config`) --
+    so the CLI's session/transcript store is MainAI's alone and a Founder session can never be
+    listed or resumed through it."""
+
+    if not raw or not raw.strip():
+        raise AdapterConfigurationError("an isolated agent HOME is required (LIFE_AGENT_ADAPTER_HOME__<KEY>)")
+    path = Path(raw.strip())
+    if not path.is_absolute():
+        raise AdapterConfigurationError(f"isolated agent HOME must be an absolute path, got {raw!r}")
+    resolved = path.resolve()
+    if not resolved.is_dir():
+        raise AdapterConfigurationError(f"isolated agent HOME {resolved} does not exist")
+    home = (founder_home or _founder_home()).resolve()
+    if resolved == home or resolved in home.parents:
+        raise AdapterConfigurationError(f"isolated agent HOME {resolved} is (or contains) the Founder's personal HOME")
+    for personal in _PERSONAL_AGENT_DIRS:
+        store = home / personal
+        if resolved == store or store in resolved.parents:
+            raise AdapterConfigurationError(f"isolated agent HOME {resolved} is inside the Founder's personal store {store}")
+    return resolved
+
+
+def isolated_agent_env(provider_key: str) -> dict[str, str]:
+    """The full environment a MainAI agent CLI receives: the founder's allowlisted ambient
+    names (never a HOME/config variable) plus HOME, XDG and CLI config directories all rooted in
+    the dedicated isolated HOME. Raises `AdapterConfigurationError` when isolation is not
+    configured or the allowlist names a forbidden variable."""
+
+    env_key = _env_key(provider_key)
+    allowlist_raw = os.environ.get(_ENV_ENV_ALLOWLIST.format(key=env_key), "")
+    names = {name.strip() for name in allowlist_raw.split(",") if name.strip()}
+    forbidden = sorted(names & FORBIDDEN_FORWARDED_ENV)
+    if forbidden:
+        raise AdapterConfigurationError(f"env allowlist may not forward {forbidden} -- they would expose a personal agent store")
+    home = validate_isolated_home(os.environ.get(_ENV_HOME.format(key=env_key)))
+    env = {name: os.environ[name] for name in names if name in os.environ}
+    env.update({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        "CODEX_HOME": str(home / ".codex"),
+    })
+    return env
 
 
 def credential_reference(provider_key: str) -> str | None:

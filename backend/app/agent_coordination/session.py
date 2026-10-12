@@ -5,17 +5,22 @@ Pure composition over what already exists, never a second dispatcher or store:
 - `dispatch.dispatch_assignment()` -- the fail-closed gate (readiness, lease, capability,
   explicit scope, adapter enablement, Founder approval) and the start of the first turn;
 - `execution_control` -- one `AgentDispatchExecution` tracking row per turn (its documented
-  opaque `process_ref` holds the agent's session id) and the instruction audit event;
+  opaque `process_ref` records the MainAI-bound session id for audit) and the instruction
+  audit event (append-only -- also the turn counter);
 - `dispatch.collect_dispatch_result()` -- result ingestion, appending the agent's bounded
-  final message and session id to `AgentWorkAssignment.output_refs`;
+  final message (and an audit record of the bound session) to `AgentWorkAssignment.output_refs`;
 - the EXISTING review loop of `WorkAssignmentStatus`: an answered turn moves
   `running -> waiting_review`; a follow-up moves `waiting_review -> reviewing ->
   changes_requested -> running`; `close_agent_session()` ends it. No new status, no migration.
 
-Session safety: a session is only ever continued by its explicit id, and that id is only ever
-read from THIS assignment's own `agent_session` output ref -- produced by this adapter's own
-earlier turn. Nothing here accepts a caller-supplied session id, and nothing uses
-`--continue`/`--last`, so a Founder-owned agent session can never be resumed by MainAI.
+Session authority: MainAI derives the session id itself, from the server secret
+(`adapters.mainai_session_id` over owner + assignment + provider), and binds it BEFORE the
+session starts. Continuation re-derives the same id. NOTHING stored is ever read back as a
+session id -- not `output_refs`, not `process_ref`, not the agent's own report (that is only
+compared) -- so forged or poisoned ids have no effect, a worker restart resumes correctly, and a
+Founder-owned session can never be selected. The CLI additionally runs with an isolated HOME
+(`adapter_config.isolated_agent_env`), so Founder sessions are not even in its session store.
+Providers whose session semantics are unverified (Cursor Agent, Codex) are single-shot only.
 
 The agent's final message is its self-report: recorded verbatim (bounded, redacted), never
 treated as verified repository truth."""
@@ -29,7 +34,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agent_coordination.adapter_config import adapter_availability
+from app.agent_coordination.adapter_config import adapter_availability, adapter_max_turns
 from app.agent_coordination.adapters import (
     AdapterInstructionError,
     AdapterProcessLostError,
@@ -54,6 +59,8 @@ from app.mainai_execution.approval import ApprovalRequiredError, require_task_ap
 from app.models.agent_coordination import (
     AgentDispatchExecution,
     AgentWorkAssignment,
+    AgentWorkAssignmentEvent,
+    AgentWorkAssignmentEventType,
     CoordinationAgent,
     WorkAssignmentReadWriteMode,
     WorkAssignmentStatus,
@@ -67,8 +74,10 @@ OUTCOME_UNSUPPORTED_CAPABILITY = "UNSUPPORTED_CAPABILITY"
 OUTCOME_ADAPTER_DISABLED = "ADAPTER_DISABLED"
 OUTCOME_APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
 OUTCOME_TURN_FAILED = "TURN_FAILED"
+OUTCOME_TURN_LIMIT = "TURN_LIMIT_REACHED"
 
 _AUDIT_INSTRUCTION_CHARS = 4_000
+_AUDIT_SUMMARY_PREFIX = "instruction delivered"
 
 
 class AgentSessionError(RuntimeError):
@@ -98,12 +107,34 @@ def _latest_ref(assignment: AgentWorkAssignment, kind: str, provider_key: str) -
     return None
 
 
-def recorded_session_id(assignment: AgentWorkAssignment, provider_key: str) -> str | None:
-    """The session this assignment's own earlier turn produced -- the ONLY session id this
-    module will ever continue."""
+def delivered_turns(db: Session, assignment: AgentWorkAssignment) -> int:
+    """Instructions already delivered for this assignment, counted from the append-only
+    instruction audit events (the runtime role cannot UPDATE or DELETE them) -- never from the
+    mutable tracking rows or `output_refs`."""
 
-    ref = _latest_ref(assignment, "agent_session", provider_key)
-    return ref.get("session_id") if ref else None
+    rows = db.execute(
+        select(AgentWorkAssignmentEvent.detail).where(
+            AgentWorkAssignmentEvent.assignment_id == assignment.id,
+            AgentWorkAssignmentEvent.owner_id == assignment.owner_id,
+            AgentWorkAssignmentEvent.event_type == AgentWorkAssignmentEventType.execution_observed,
+        )
+    ).scalars().all()
+    return sum(1 for detail in rows if isinstance(detail, dict) and str(detail.get("summary", "")).startswith(_AUDIT_SUMMARY_PREFIX))
+
+
+def _turn_limit_refusal(db: Session, assignment: AgentWorkAssignment, provider_key: str) -> tuple[str, str] | None:
+    limit = adapter_max_turns(provider_key)
+    if limit is None:
+        return OUTCOME_TURN_LIMIT, "turn limit is misconfigured -- fails closed"
+    used = delivered_turns(db, assignment)
+    if used >= limit:
+        return OUTCOME_TURN_LIMIT, f"{used} of {limit} instruction turns already used for this assignment"
+    return None
+
+
+def _bind_mainai_session(adapter: AgentAdapter, assignment: AgentWorkAssignment) -> str | None:
+    bind = getattr(adapter, "bind_mainai_session", None)
+    return bind(assignment.id, assignment.owner_id) if bind is not None else None
 
 
 def _turn(assignment: AgentWorkAssignment, outcome: str, detail: str, **extra) -> TurnResult:
@@ -114,7 +145,7 @@ def _audit_instruction(db: Session, *, execution: AgentDispatchExecution, assign
     record_execution_event(
         db, execution=execution, assignment=assignment,
         event=ExecutionEvent(
-            kind="status", summary=f"instruction delivered ({kind})",
+            kind="status", summary=f"{_AUDIT_SUMMARY_PREFIX} ({kind})",
             detail={
                 "instruction_sha256": hashlib.sha256(instruction.encode()).hexdigest(),
                 "instruction_excerpt": instruction[:_AUDIT_INSTRUCTION_CHARS],
@@ -130,12 +161,12 @@ async def _collect_turn(
     decision = await collect_and_ingest_execution_result(
         db, execution=execution, assignment=assignment, agent=agent, adapter=adapter, adapter_key=adapter_key, on_success="waiting_review"
     )
-    session_id = recorded_session_id(assignment, adapter_key)
-    if session_id is not None:
-        execution.process_ref = session_id
-        db.flush()
+    # Reporting only: the bound session confirmed by THIS attempt's result (never used as authority).
+    attempt = str(execution.attempt_id)
+    session_ref = _latest_ref(assignment, "agent_session", adapter_key)
+    session_id = session_ref.get("session_id") if session_ref and session_ref.get("attempt_id") == attempt else None
     message_ref = _latest_ref(assignment, "agent_final_message", adapter_key)
-    message = message_ref.get("text") if message_ref and message_ref.get("attempt_id") == str(execution.attempt_id) else None
+    message = message_ref.get("text") if message_ref and message_ref.get("attempt_id") == attempt else None
     record_execution_event(
         db, execution=execution, assignment=assignment,
         event=ExecutionEvent(kind="final_result", summary=decision.reason, detail={"session_id": session_id, "answer_chars": len(message or "")}),
@@ -150,17 +181,25 @@ async def start_agent_session(
     db: Session, *, assignment: AgentWorkAssignment, agent: CoordinationAgent, adapter: AgentAdapter, instruction: str,
     adapter_key: str | None = None, require_adapter_enabled: bool = True,
 ) -> TurnResult:
-    """Turn 1: deliver `instruction` to a NEW session through the full dispatch gate, then
-    collect the answer. One session per assignment: an assignment that already recorded a
-    session must be continued with `continue_agent_session()`, never restarted silently."""
+    """Turn 1: bind MainAI's own session id, deliver `instruction` to a NEW session through the
+    full dispatch gate, then collect the answer. One session per assignment: once any
+    instruction has been delivered (append-only audit), the assignment can only be continued
+    with `continue_agent_session()`, never restarted."""
 
     key = adapter_key or agent.agent_key
     try:
         build_prompt(assignment.id, instruction)
     except AdapterInstructionError as exc:
         return _turn(assignment, OUTCOME_INSTRUCTION_REJECTED, str(exc))
-    if recorded_session_id(assignment, key) is not None:
+    if delivered_turns(db, assignment) > 0:
         return _turn(assignment, OUTCOME_SESSION_EXISTS, "assignment already has an agent session; continue it instead")
+    refusal = _turn_limit_refusal(db, assignment, key)
+    if refusal is not None:
+        return _turn(assignment, *refusal)
+    try:
+        session_id = _bind_mainai_session(adapter, assignment)
+    except AdapterInstructionError as exc:
+        return _turn(assignment, OUTCOME_INSTRUCTION_REJECTED, str(exc))
 
     decision = await dispatch_assignment(
         db, assignment=assignment, agent=agent, adapter=adapter, require_adapter_enabled=require_adapter_enabled, instruction=instruction
@@ -169,7 +208,7 @@ async def start_agent_session(
         return _turn(assignment, decision.outcome, decision.reason, attempt_id=decision.attempt_id)
 
     execution = start_execution_tracking(db, assignment=assignment, adapter_key=key, attempt_id=decision.attempt_id)
-    mark_execution_running(db, execution=execution)
+    mark_execution_running(db, execution=execution, process_ref=session_id)
     _audit_instruction(db, execution=execution, assignment=assignment, instruction=instruction, kind="new session")
     return await _collect_turn(db, execution=execution, assignment=assignment, agent=agent, adapter=adapter, adapter_key=key)
 
@@ -200,24 +239,32 @@ async def continue_agent_session(
     db: Session, *, assignment: AgentWorkAssignment, agent: CoordinationAgent, adapter: AgentAdapter, instruction: str,
     adapter_key: str | None = None, require_adapter_enabled: bool = True,
 ) -> TurnResult:
-    """Turn N: deliver a follow-up `instruction` to the SAME session (resume by the session id
-    this assignment itself recorded), then collect the answer."""
+    """Turn N: deliver a follow-up `instruction` to the SAME session -- resumed ONLY by the id
+    MainAI re-derives for this assignment, never one read from storage -- then collect the
+    answer."""
 
     key = adapter_key or agent.agent_key
     if assignment.status != WorkAssignmentStatus.waiting_review:
         return _turn(assignment, OUTCOME_NOT_AWAITING_INSTRUCTION, f"assignment is {assignment.status.value}, not waiting_review")
-    session_id = recorded_session_id(assignment, key)
-    if session_id is None:
-        return _turn(assignment, OUTCOME_SESSION_UNKNOWN, "assignment has no recorded agent session to continue")
+    if not adapter.control_capabilities().supports_instruction:
+        return _turn(assignment, OUTCOME_UNSUPPORTED_CAPABILITY, "adapter has no verified MainAI-owned session resume")
+    if delivered_turns(db, assignment) == 0:
+        return _turn(assignment, OUTCOME_SESSION_UNKNOWN, "no instruction was ever delivered for this assignment")
     try:
         build_prompt(assignment.id, instruction)
     except AdapterInstructionError as exc:
         return _turn(assignment, OUTCOME_INSTRUCTION_REJECTED, str(exc))
-    if not adapter.control_capabilities().supports_instruction:
-        return _turn(assignment, OUTCOME_UNSUPPORTED_CAPABILITY, "adapter does not declare supports_instruction")
-    refusal = _continuation_gate(db, assignment=assignment, agent=agent, require_adapter_enabled=require_adapter_enabled)
+    refusal = _turn_limit_refusal(db, assignment, key) or _continuation_gate(
+        db, assignment=assignment, agent=agent, require_adapter_enabled=require_adapter_enabled
+    )
     if refusal is not None:
         return _turn(assignment, *refusal)
+    try:
+        session_id = _bind_mainai_session(adapter, assignment)
+    except AdapterInstructionError as exc:
+        return _turn(assignment, OUTCOME_INSTRUCTION_REJECTED, str(exc))
+    if session_id is None:
+        return _turn(assignment, OUTCOME_SESSION_UNKNOWN, "adapter cannot bind a MainAI-owned session")
 
     attempt_id = uuid.uuid4()
     transition_status(db, assignment=assignment, new_status="reviewing", detail={"reason": "agent_answer_reviewed", "attempt_id": str(attempt_id)})
@@ -227,10 +274,7 @@ async def continue_agent_session(
     execution.process_ref = session_id
     db.flush()
 
-    bind = getattr(adapter, "bind_session", None)
     try:
-        if bind is not None:
-            bind(assignment.id, session_id)
         outcome = await send_execution_instruction(db, execution=execution, assignment=assignment, adapter=adapter, instruction=instruction)
     except (AdapterInstructionError, AdapterSessionUnknownError, AdapterProcessLostError) as exc:
         mark_execution_lost(db, execution=execution)

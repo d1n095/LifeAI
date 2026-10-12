@@ -265,35 +265,65 @@ def _json_result_object(stdout: str) -> ParsedAgentOutput:
     )
 
 
+def mainai_session_id(*, owner_id: UUID, assignment_id: UUID, provider_key: str) -> str:
+    """The ONLY session id MainAI will ever start or resume for an assignment: derived from the
+    server secret with HMAC over (owner, assignment, provider), formatted as a UUID. It is never
+    read from the database, from `output_refs`, from `AgentDispatchExecution.process_ref` or
+    from the agent's own output -- so a forged or poisoned id has no effect, a worker restart
+    re-derives the same id, and no Founder-owned session id can ever be produced (finding a
+    preimage would require the secret)."""
+
+    import hmac
+    import uuid as uuid_module
+    from hashlib import sha256
+
+    from app.config import get_settings
+
+    secret = (get_settings().secret_key or "").encode()
+    if not secret or secret == b"change-me-in-production":
+        raise AdapterInstructionError("a real SECRET_KEY is required to derive MainAI agent session ids")
+    digest = hmac.new(secret, f"mainai-agent-session:v1:{owner_id}:{assignment_id}:{provider_key}".encode(), sha256).digest()
+    return str(uuid_module.UUID(bytes=digest[:16], version=4))
+
+
 class CLIDialect:
     provider_key: str = ""
     supports_budget: bool = False
+    # True only where the CLI accepts a caller-chosen session id at start AND resume by that id
+    # has been verified. Everything else is single-shot: no continuation at all.
+    supports_bound_session: bool = False
 
-    def start_argv(self, executable: str, prompt: str, *, cwd: str, read_only: bool, max_budget_usd: float | None, extra_args: tuple[str, ...]) -> list[str]:
+    def start_argv(self, executable: str, prompt: str, *, cwd: str, read_only: bool, max_budget_usd: float | None,
+                   extra_args: tuple[str, ...], session_id: str | None) -> list[str]:
         raise NotImplementedError
 
-    def resume_argv(self, executable: str, session_id: str, prompt: str, *, cwd: str, read_only: bool, max_budget_usd: float | None, extra_args: tuple[str, ...]) -> list[str]:
-        raise NotImplementedError
+    def resume_argv(self, executable: str, session_id: str, prompt: str, *, cwd: str, read_only: bool, max_budget_usd: float | None,
+                    extra_args: tuple[str, ...]) -> list[str]:
+        raise AdapterInstructionError(f"'{self.provider_key}' session resume is disabled until its CLI session semantics are verified")
 
     def parse(self, stdout: str) -> ParsedAgentOutput:
         raise NotImplementedError
 
 
 class ClaudeCodeDialect(CLIDialect):
-    """`claude -p --output-format json` (headless). Read-only work runs in `plan` permission
-    mode; write work in `acceptEdits` (file edits allowed, no tool runs without an explicit
-    allow rule -- never `bypassPermissions`). `--max-budget-usd` is always set."""
+    """`claude -p --output-format json` (headless). MainAI chooses the session id itself
+    (`--session-id <uuid>`) and continues only that id (`--resume <uuid>`). Read-only work runs
+    in `plan` permission mode; write work in `acceptEdits` (never `bypassPermissions`).
+    `--max-budget-usd` is always set."""
 
     provider_key = "claude-code"
     supports_budget = True
+    supports_bound_session = True
 
     def _base(self, read_only: bool, max_budget_usd: float | None) -> list[str]:
         if max_budget_usd is None:
             raise AdapterInstructionError("claude-code requires a max budget")
         return ["-p", "--output-format", "json", "--permission-mode", "plan" if read_only else "acceptEdits", "--max-budget-usd", f"{max_budget_usd:.2f}"]
 
-    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args):
-        return [executable, *self._base(read_only, max_budget_usd), *extra_args, prompt]
+    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args, session_id):
+        if session_id is None:
+            raise AdapterInstructionError("claude-code sessions must start with a MainAI-chosen session id")
+        return [executable, *self._base(read_only, max_budget_usd), "--session-id", validate_session_id(session_id), *extra_args, prompt]
 
     def resume_argv(self, executable, session_id, prompt, *, cwd, read_only, max_budget_usd, extra_args):
         return [executable, *self._base(read_only, max_budget_usd), "--resume", validate_session_id(session_id), *extra_args, prompt]
@@ -304,9 +334,9 @@ class ClaudeCodeDialect(CLIDialect):
 
 class CursorAgentDialect(CLIDialect):
     """`cursor-agent -p --output-format json`, sandbox explicitly enabled, never `--force`.
-    Read-only work runs in `--mode plan`. Cursor's CLI has no budget flag: the adapter's
-    timeout is the only cost bound. Its JSON result shape is assumed to match Claude Code's
-    (`result`/`session_id`/`is_error`) -- unverified until the first supervised smoke test."""
+    Read-only work runs in `--mode plan`. SINGLE-SHOT ONLY: resume is disabled until Cursor's
+    session id semantics and JSON shape are verified live. No budget flag exists -- the adapter
+    timeout is the only cost bound, so the founder must explicitly accept that."""
 
     provider_key = "cursor-agent"
 
@@ -314,22 +344,18 @@ class CursorAgentDialect(CLIDialect):
         args = ["-p", "--output-format", "json", "--sandbox", "enabled", "--trust", "--workspace", cwd]
         return [*args, "--mode", "plan"] if read_only else args
 
-    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args, session_id):
         return [executable, *self._base(cwd, read_only), *extra_args, prompt]
-
-    def resume_argv(self, executable, session_id, prompt, *, cwd, read_only, max_budget_usd, extra_args):
-        return [executable, *self._base(cwd, read_only), "--resume", validate_session_id(session_id), *extra_args, prompt]
 
     def parse(self, stdout):
         return _json_result_object(stdout)
 
 
 class CodexDialect(CLIDialect):
-    """`codex exec --json` (JSONL events) with the sandbox fixed through `-c sandbox_mode=...`
-    (`read-only` or `workspace-write`, never `danger-full-access`, never the bypass flag); the
-    same override is used for `codex exec resume`, which has no `--sandbox` option. Codex has
-    no budget flag: the adapter's timeout is the only cost bound. Event field names are parsed
-    tolerantly and are unverified against a live run."""
+    """`codex exec --json` with the sandbox fixed through `-c sandbox_mode=...` (`read-only` or
+    `workspace-write`; never `danger-full-access`, never the bypass flag). SINGLE-SHOT ONLY:
+    resume is disabled until Codex's session semantics and JSONL events are verified live. No
+    budget flag exists -- the adapter timeout is the only cost bound."""
 
     provider_key = "codex"
 
@@ -337,11 +363,8 @@ class CodexDialect(CLIDialect):
     def _sandbox(read_only: bool) -> list[str]:
         return ["-c", f'sandbox_mode="{"read-only" if read_only else "workspace-write"}"']
 
-    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args):
+    def start_argv(self, executable, prompt, *, cwd, read_only, max_budget_usd, extra_args, session_id):
         return [executable, "exec", "--json", "-C", cwd, *self._sandbox(read_only), *extra_args, prompt]
-
-    def resume_argv(self, executable, session_id, prompt, *, cwd, read_only, max_budget_usd, extra_args):
-        return [executable, "exec", "resume", "--json", *self._sandbox(read_only), *extra_args, validate_session_id(session_id), prompt]
 
     def parse(self, stdout):
         session = None
@@ -386,6 +409,18 @@ def _redact(text: str) -> str:
     return redact(text)
 
 
+def _require_isolated_home(env: dict[str, str]) -> None:
+    """Defense in depth for any directly-constructed conversational adapter: its environment
+    must carry an isolated HOME, never the Founder's own (see adapter_config.validate_isolated_home)."""
+
+    from app.agent_coordination.adapter_config import AdapterConfigurationError, validate_isolated_home
+
+    try:
+        validate_isolated_home(env.get("HOME"))
+    except AdapterConfigurationError as exc:
+        raise AdapterInstructionError(str(exc)) from exc
+
+
 class LocalCLIAdapter:
     """Provider-neutral real adapter over a LOCAL CLI executable -- the SAME bounded
     subprocess mechanism serves Claude Code, Cursor Agent, or Codex, parametrized by
@@ -395,15 +430,16 @@ class LocalCLIAdapter:
     - exact `cwd` -- the assignment's own `worktree_path`, never inferred;
     - a real, always-present `timeout_seconds` -- the process is killed on expiry;
     - list-form `argv` via `asyncio.create_subprocess_exec()` -- NEVER `shell=True`;
-    - a minimized environment -- only what the caller explicitly supplies via `env`.
+    - a minimized environment -- only what the caller explicitly supplies via `env`, which for
+      a conversational dialect must carry an ISOLATED HOME (never the Founder's).
 
     Without a dialect this is the original single-shot invocation (static argv, no
-    instruction, no content captured). With a dialect it is a conversation turn:
-    `start_assignment()` delivers the instruction to a NEW session, `collect_result()` returns
-    the agent's bounded final message and session id, and `send_instruction()` continues ONLY
-    a session this adapter itself started or had bound from the assignment's own recorded
-    result. A session is never chosen by `--continue`/`--last` (which could pick up a
-    Founder-owned session); it is always addressed by an explicit id."""
+    instruction, no content captured). With a dialect it is a conversation turn. Session
+    authority: for a dialect that supports bound sessions, `bind_mainai_session()` derives the
+    session id from the server secret (`mainai_session_id`) BEFORE the session starts; the
+    session is started with that id and only that id is ever resumed. Ids reported by the agent
+    are compared against it, never adopted; nothing a caller or the database supplies can
+    select a session."""
 
     def __init__(
         self,
@@ -431,6 +467,7 @@ class LocalCLIAdapter:
         self._sessions: dict[UUID, str] = {}
         if dialect is not None:
             validate_extra_args(self._args_template)
+            _require_isolated_home(self._env)
             if dialect.supports_budget and (max_budget_usd is None or max_budget_usd <= 0):
                 raise AdapterInstructionError(f"'{provider_key}' requires a positive max budget")
 
@@ -442,19 +479,23 @@ class LocalCLIAdapter:
         return ("repo_edit", "read_only_review", "run_tests")
 
     def control_capabilities(self) -> AdapterCapabilities:
-        # Without a dialect: single-shot, only cancel(). With a dialect: an instruction can be
-        # delivered to the same session as a new bounded turn (resume-by-id), and the result
-        # is structured. No streaming, no mid-process input, no `resume()` of a paused process.
+        # Without a dialect: single-shot, only cancel(). With a dialect: structured results; a
+        # follow-up instruction to the same session only where MainAI owns the session id.
         if self._dialect is None:
             return AdapterCapabilities(supports_cancel=True)
-        return AdapterCapabilities(supports_cancel=True, supports_instruction=True, supports_structured_events=True)
+        return AdapterCapabilities(
+            supports_cancel=True, supports_instruction=self._dialect.supports_bound_session, supports_structured_events=True
+        )
 
-    def bind_session(self, assignment_id: UUID, session_id: str) -> None:
-        """Re-attaches a session id recorded from THIS assignment's own earlier result (e.g.
-        after a worker restart). Callers must read it from the assignment's own durable
-        `agent_session` output ref -- see `app.agent_coordination.session`."""
+    def bind_mainai_session(self, assignment_id: UUID, owner_id: UUID) -> str | None:
+        """Derives and binds MainAI's own session id for this assignment (start or, after a
+        worker restart, resume). Returns `None` for a dialect without bound sessions."""
 
-        self._sessions[assignment_id] = validate_session_id(session_id)
+        if self._dialect is None or not self._dialect.supports_bound_session:
+            return None
+        session_id = mainai_session_id(owner_id=owner_id, assignment_id=assignment_id, provider_key=self._provider_key)
+        self._sessions[assignment_id] = session_id
+        return session_id
 
     def session_id(self, assignment_id: UUID) -> str | None:
         return self._sessions.get(assignment_id)
@@ -478,20 +519,27 @@ class LocalCLIAdapter:
             await self._spawn(assignment_id, [self._executable, *self._args_template])
             return
         prompt = build_prompt(assignment_id, instruction)
+        session_id = self._sessions.get(assignment_id)
+        if self._dialect.supports_bound_session and session_id is None:
+            raise AdapterInstructionError("bind a MainAI session (bind_mainai_session) before starting a conversation")
         argv = self._dialect.start_argv(
-            self._executable, prompt, cwd=self._cwd, read_only=self._read_only, max_budget_usd=self._max_budget_usd, extra_args=self._args_template
+            self._executable, prompt, cwd=self._cwd, read_only=self._read_only, max_budget_usd=self._max_budget_usd,
+            extra_args=self._args_template, session_id=session_id,
         )
         await self._spawn(assignment_id, argv)
 
     async def send_instruction(self, assignment_id: UUID, instruction: str) -> None:
         if self._dialect is None:
             raise NotImplementedError("LocalCLIAdapter without a dialect is a bounded, single-shot invocation -- no mid-run instructions")
+        if not self._dialect.supports_bound_session:
+            raise AdapterInstructionError(f"'{self._provider_key}' session resume is disabled until its CLI session semantics are verified")
         session_id = self._sessions.get(assignment_id)
         if session_id is None:
-            raise AdapterSessionUnknownError(f"no MainAI-created session is known for assignment {assignment_id}")
+            raise AdapterSessionUnknownError(f"no MainAI-bound session for assignment {assignment_id}")
         prompt = build_prompt(assignment_id, instruction)
         argv = self._dialect.resume_argv(
-            self._executable, session_id, prompt, cwd=self._cwd, read_only=self._read_only, max_budget_usd=self._max_budget_usd, extra_args=self._args_template
+            self._executable, session_id, prompt, cwd=self._cwd, read_only=self._read_only, max_budget_usd=self._max_budget_usd,
+            extra_args=self._args_template,
         )
         await self._spawn(assignment_id, argv)
 
@@ -531,38 +579,39 @@ class LocalCLIAdapter:
 
     def _conversation_result(self, assignment_id: UUID, returncode: int | None, stdout: bytes, stderr: bytes) -> AgentResult:
         parsed = self._dialect.parse(stdout.decode("utf-8", errors="replace"))
-        session_id = None
-        if parsed.session_id is not None:
-            try:
-                session_id = validate_session_id(parsed.session_id)
-            except AdapterInstructionError:
-                session_id = None
-        if session_id is not None:
-            self._sessions[assignment_id] = session_id
+        bound = self._sessions.get(assignment_id)
+        reported = parsed.session_id
+        parse_error = parsed.parse_error
+        # The agent's reported id is evidence, never authority: for a MainAI-bound session it must
+        # equal the bound id, otherwise the turn fails (the agent did not run in our session).
+        if bound is not None and reported is not None and reported != bound:
+            parse_error = "session_mismatch: agent reported a session MainAI did not bind"
 
         message = _redact(parsed.final_message) if parsed.final_message is not None else None
         truncated = message is not None and len(message) > MAX_FINAL_MESSAGE_CHARS
         if truncated:
             message = message[:MAX_FINAL_MESSAGE_CHARS]
-        succeeded = returncode == 0 and parsed.parse_error is None and not parsed.is_error
+        succeeded = returncode == 0 and parse_error is None and not parsed.is_error
 
         refs: list[dict] = []
         if message is not None:
             # The agent's own report -- partial and unverified by definition.
             refs.append({"kind": "agent_final_message", "provider": self._provider_key, "text": message, "truncated": truncated, "self_report": True})
-        if session_id is not None:
-            refs.append({"kind": "agent_session", "provider": self._provider_key, "session_id": session_id})
+        if bound is not None and succeeded:
+            # Audit record of the MainAI-bound session -- never read back as authority.
+            refs.append({"kind": "agent_session", "provider": self._provider_key, "session_id": bound, "mainai_bound": True})
         if not succeeded:
             tail = _redact(stderr.decode("utf-8", errors="replace"))[-MAX_STDERR_TAIL_CHARS:]
-            refs.append({"kind": "agent_failure", "provider": self._provider_key, "returncode": returncode, "parse_error": parsed.parse_error, "stderr_tail": tail})
+            refs.append({"kind": "agent_failure", "provider": self._provider_key, "returncode": returncode, "parse_error": parse_error,
+                         "stderr_tail": tail, "reported_session_id": _redact(str(reported)) if reported is not None else None})
 
         if succeeded:
             summary = f"'{self._provider_key}' answered ({len(message or '')} chars)"
         else:
-            summary = f"'{self._provider_key}' turn failed: exit={returncode} parse_error={parsed.parse_error} is_error={parsed.is_error}"
+            summary = f"'{self._provider_key}' turn failed: exit={returncode} parse_error={parse_error} is_error={parsed.is_error}"
         return AgentResult(
-            succeeded=succeeded, output_refs=tuple(refs), summary=summary, final_message=message, session_id=session_id,
-            structured={**parsed.structured, "returncode": returncode},
+            succeeded=succeeded, output_refs=tuple(refs), summary=summary, final_message=message,
+            session_id=bound if succeeded else None, structured={**parsed.structured, "returncode": returncode},
         )
 
 
@@ -570,33 +619,41 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     """The founder-controlled factory: returns a real `LocalCLIAdapter` ONLY when
     `app.agent_coordination.adapter_config.real_adapter_config()` confirms every precondition
     (enabled, executable found, an explicit args_template configured) AND, for a
-    conversational provider, its args template and budget pass validation; returns
-    `NotConfiguredAdapter` -- the same honest, fail-closed default -- in every other case.
-    NEVER silently substitutes a fake/mock adapter; callers that want deterministic test
-    behavior construct their own fake explicitly (see
-    tests/backend/mainai/test_agent_dispatch_foundation.py's own `_FakeAgentAdapter`).
+    conversational provider: a valid model-only args template, a valid budget (or, for a CLI
+    without a budget flag, the founder's explicit unbudgeted acknowledgement) and a dedicated
+    isolated HOME. Returns `NotConfiguredAdapter` -- the honest, fail-closed default -- in
+    every other case. NEVER silently substitutes a fake/mock adapter.
 
-    When `env` is not explicitly supplied, defaults to
-    `app.agent_coordination.adapter_config.resolve_adapter_env(provider_key)` -- the founder's
-    own explicit per-provider allowlist of ambient variable NAMES, never a blind inheritance of
-    this process's full environment. Passing `env={}` explicitly still means "no environment at
-    all," exactly as before -- only an OMITTED `env` triggers the allowlist default.
+    For a conversational provider the environment is ALWAYS
+    `adapter_config.isolated_agent_env(provider_key)`; a caller-supplied `env` is only honoured
+    for a provider without a dialect (unchanged legacy behaviour). `read_only` selects the
+    dialect's read-only permission/sandbox mode; it defaults to True."""
 
-    `read_only` selects the dialect's read-only permission/sandbox mode; it defaults to True
-    (the safer mode) and must be set False explicitly for a write assignment."""
-
-    from app.agent_coordination.adapter_config import adapter_max_budget_usd, real_adapter_config, resolve_adapter_env
+    from app.agent_coordination.adapter_config import (
+        AdapterConfigurationError,
+        adapter_max_budget_usd,
+        adapter_unbudgeted_allowed,
+        isolated_agent_env,
+        real_adapter_config,
+        resolve_adapter_env,
+    )
 
     config = real_adapter_config(provider_key)
     if config is None:
         return NotConfiguredAdapter(provider_key=provider_key)
     executable, args_template, timeout_seconds = config
-    resolved_env = resolve_adapter_env(provider_key) if env is None else env
     dialect = DIALECTS.get(provider_key)
+    if dialect is None:
+        resolved_env = resolve_adapter_env(provider_key) if env is None else env
+        return LocalCLIAdapter(provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd,
+                               timeout_seconds=timeout_seconds, env=resolved_env)
+    if not dialect.supports_budget and not adapter_unbudgeted_allowed(provider_key):
+        return NotConfiguredAdapter(provider_key=provider_key, reason=(
+            f"'{provider_key}' has no budget flag; set LIFE_AGENT_ADAPTER_ALLOW_UNBUDGETED__<KEY>=true to accept the timeout as its only cost bound"))
     try:
         return LocalCLIAdapter(
             provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds,
-            env=resolved_env, dialect=dialect, read_only=read_only, max_budget_usd=adapter_max_budget_usd(provider_key),
+            env=isolated_agent_env(provider_key), dialect=dialect, read_only=read_only, max_budget_usd=adapter_max_budget_usd(provider_key),
         )
-    except AdapterInstructionError as exc:
+    except (AdapterInstructionError, AdapterConfigurationError) as exc:
         return NotConfiguredAdapter(provider_key=provider_key, reason=str(exc))
