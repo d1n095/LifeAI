@@ -231,10 +231,40 @@ async def test_prepare_github_pr_only_proposes_when_write_disabled(db_session, m
 
 
 @pytest.mark.asyncio
-async def test_prepare_github_pr_calls_github_when_write_enabled(db_session, monkeypatch):
+async def test_prepare_github_pr_write_enabled_alone_does_not_open_a_non_draft_pr(db_session, monkeypatch):
+    """Claude Path A exam: GITHUB_WRITE_ENABLED=true used to let this legacy route create a
+    non-draft PR. That write stays gated off until an explicit Founder flag."""
     monkeypatch.setattr(get_settings(), "github_write_enabled", True)
     monkeypatch.setattr(get_settings(), "github_token", "fake-token")
     monkeypatch.setattr(get_settings(), "github_repo", "d1n095/LifeAI")
+    monkeypatch.setattr(get_settings(), "mainai_legacy_prepare_pr_writes_enabled", False)
+
+    async def _fail_if_called(*args, **kwargs):
+        raise AssertionError("legacy prepare-pr must not call GitHub when the write gate is off")
+
+    monkeypatch.setattr(GitHubClient, "get_ref", _fail_if_called)
+    monkeypatch.setattr(GitHubClient, "create_branch", _fail_if_called)
+    monkeypatch.setattr(GitHubClient, "create_or_update_file", _fail_if_called)
+    monkeypatch.setattr(GitHubClient, "create_pull_request", _fail_if_called)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("VERDICT: approved\nOk."))
+
+    task = _make_task(db_session)
+    await dispatch_task(db_session, task.id, dispatched_by="test")
+    record_test_results(db_session, task.id, passed=True, output="ok", recorded_by="test")
+    await review_task(db_session, task.id, reviewed_by="test")
+
+    with pytest.raises(ValueError, match="Legacy non-draft prepare-pr"):
+        await prepare_github_pr(db_session, task.id, branch_name="mainai/fix-npm-audit", base_branch="main", prepared_by="test")
+    assert get_task(db_session, task.id).status == AgentTaskStatus.reviewed_approved
+
+
+@pytest.mark.asyncio
+async def test_prepare_github_pr_calls_github_when_legacy_write_gate_is_explicitly_enabled(db_session, monkeypatch):
+    monkeypatch.setattr(get_settings(), "github_write_enabled", True)
+    monkeypatch.setattr(get_settings(), "mainai_legacy_prepare_pr_writes_enabled", True)
+    monkeypatch.setattr(get_settings(), "github_token", "fake-token")
+    monkeypatch.setattr(get_settings(), "github_repo", "d1n095/LifeAI")
+    created = {}
 
     async def _fake_get_ref(self, branch):
         return "abc123"
@@ -245,7 +275,8 @@ async def test_prepare_github_pr_calls_github_when_write_enabled(db_session, mon
     async def _fake_create_or_update_file(self, *, path, content, message, branch, sha=None):
         return {"commit": {"sha": "def456"}}
 
-    async def _fake_create_pull_request(self, *, title, body, head, base):
+    async def _fake_create_pull_request(self, *, title, body, head, base, draft=False):
+        created["draft"] = draft
         return {"number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42"}
 
     monkeypatch.setattr(GitHubClient, "get_ref", _fake_get_ref)
@@ -263,6 +294,7 @@ async def test_prepare_github_pr_calls_github_when_write_enabled(db_session, mon
 
     assert result["mode"] == "created"
     assert result["pr_number"] == 42
+    assert created["draft"] is True
     assert get_task(db_session, task.id).status == AgentTaskStatus.pr_opened
 
     event_types = {e.event_type for e in list_task_events(db_session, task.id)}

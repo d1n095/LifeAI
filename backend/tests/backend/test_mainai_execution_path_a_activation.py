@@ -148,6 +148,7 @@ def test_latest_verification_failure_text_extracts_pytest_tails(db_session, owne
 async def test_propose_repo_edit_supplies_existing_file_contents(db_session, owner_id, monkeypatch, tmp_path):
     from app.mainai_execution import execution_job
 
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
     existing = tmp_path / "backend" / "app" / "example.py"
     existing.parent.mkdir(parents=True)
     existing.write_text("OLD = True\n", encoding="utf-8")
@@ -174,6 +175,7 @@ async def test_propose_repo_edit_supplies_existing_file_contents(db_session, own
 
 @pytest.mark.asyncio
 async def test_propose_plan_via_ai_includes_verification_failure_context(db_session, owner_id, monkeypatch):
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
     captured = {}
 
     async def _fake_chat(self, messages, model, **kwargs):

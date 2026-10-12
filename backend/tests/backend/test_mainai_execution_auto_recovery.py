@@ -72,7 +72,7 @@ def _goal(db_session, owner_id):
 def _dispatch_and_claim(db_session, superuser_db, owner_id, *, task_type: str) -> tuple[MainAITask, MainAIGoal, MainAIJob]:
     goal = _goal(db_session, owner_id)
     planner.create_plan(
-        db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[])],
+        db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [])],
         created_by="test",
     )
     db_session.commit()

@@ -1151,7 +1151,7 @@ async def test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_pat
     )
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
 
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
@@ -1193,7 +1193,7 @@ async def test_run_task_execution_job_repo_edit_with_a_symlink_escape_never_writ
     )
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
 
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
@@ -1235,7 +1235,7 @@ async def test_mutation_disabling_the_syntactic_path_guard_alone_is_still_caught
     )
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
 
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
@@ -1819,7 +1819,7 @@ async def test_run_task_execution_job_repo_edit_real_worktree_with_a_symlink_esc
     monkeypatch.setattr(OpenAIProvider, "chat", _symlink_planting_chat)
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
@@ -1853,7 +1853,7 @@ async def test_handle_repo_edit_refuses_to_reuse_a_worktree_whose_ownership_does
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat('{"files": [{"path": "x.py", "content": "x = 1\\n"}], "commit_message": "x"}'))
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 

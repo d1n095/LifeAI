@@ -17,9 +17,12 @@ existing `provider_spend`. Frozen GitHub discovery `#263` / `e33f494` is not mod
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/mainai-execution-path-a-activation-91c1` | [#264](https://github.com/d1n095/LifeAI/pull/264) | **Open isolated builder child of `2fbe20a`** | Path A first-cycle capability on the existing execution engine. |
+| `cursor/mainai-execution-path-a-activation-91c1` | [#264](https://github.com/d1n095/LifeAI/pull/264) | **Frozen examined candidate @ `21ff3cc8ddd8a7da8b2c84a3219f65d752d4ea4b`** | Path A first-cycle capability on the existing execution engine. Preserve this SHA and its evidence. Claude independent exam (examiner `e5d2784e48c40ffe3667c26cc52ad3eeecaee877`) returned RETURN_TO_BUILDER. |
+| `cursor/mainai-execution-path-a-p1-fix-91c1` | — | **Open isolated P1 remediation child of frozen `#264` @ `21ff3cc`** | Minimal Path A P1 fix: refuse unseen/truncated file writes; require targeted_tests in `create_plan`; require provider-spend by default and refuse fallback/unpriced settle; wrap reservation/settlement failures as `ExecutionSpendError`; gate legacy non-draft `prepare-pr` writes. No new orchestration, no migrations, no Track B edits. |
 
-**Must not:** modify frozen discovery `#263`, sovereignty `#262`, Continuous Conversation, or Codex active work; add a new orchestration engine; migrate; merge; deploy; activate Recall; run a live cycle.
+**Must not:** modify frozen discovery `#263`, sovereignty `#262`, Continuous Conversation, Track B `#265`, or Codex active work; rewrite or rebase frozen `#264`; add a new orchestration engine; migrate; merge; deploy; activate Recall; run a live cycle or live AI/GitHub writes.
+
+**Merge order:** keep `#264` frozen. This P1 branch is the candidate for independent re-examination against Claude's published probes at `e5d2784`. Do not rebase onto later bases until the Founder asks.
 
 ## Universal Personal Recall — isolated Codex lane (2026-09-04)
 

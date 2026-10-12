@@ -106,7 +106,7 @@ def _task_and_dead_job(db_session, superuser_db, owner_id, goal, *, task_type="r
     tests/backend/test_mainai_execution_recovery_takeover.py's own `_task_and_dead_job()`."""
     planner.create_plan(
         db_session, goal=goal, rationale="single task",
-        tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[])],
+        tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [])],
         created_by="test",
     )
     db_session.commit()
