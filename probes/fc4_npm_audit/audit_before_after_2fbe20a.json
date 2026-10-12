@@ -1,0 +1,440 @@
+{
+ "before_full": {
+  "metadata": {
+   "info": 0,
+   "low": 0,
+   "moderate": 3,
+   "high": 10,
+   "critical": 1,
+   "total": 14
+  },
+  "findings": [
+   {
+    "package": "@next/eslint-plugin-next",
+    "severity": "high",
+    "range": ">=14.3.0-canary.0",
+    "advisories": [],
+    "via_packages": [
+     "fast-glob"
+    ]
+   },
+   {
+    "package": "brace-expansion",
+    "severity": "high",
+    "range": "<=1.1.20 || 4.0.0 - 5.0.11",
+    "advisories": [
+     {
+      "source": 1240100,
+      "ghsa": "GHSA-q2hr-2g5m-vwhr",
+      "severity": "moderate"
+     },
+     {
+      "source": 1240103,
+      "ghsa": "GHSA-q2hr-2g5m-vwhr",
+      "severity": "moderate"
+     },
+     {
+      "source": 1240104,
+      "ghsa": "GHSA-qhr7-859c-m2p7",
+      "severity": "high"
+     },
+     {
+      "source": 1240107,
+      "ghsa": "GHSA-qhr7-859c-m2p7",
+      "severity": "high"
+     },
+     {
+      "source": 1240108,
+      "ghsa": "GHSA-6j4f-fj2g-mc7p",
+      "severity": "high"
+     },
+     {
+      "source": 1240111,
+      "ghsa": "GHSA-6j4f-fj2g-mc7p",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "braces",
+    "severity": "high",
+    "range": "*",
+    "advisories": [
+     {
+      "source": 1240992,
+      "ghsa": "GHSA-vfj7-8cjw-p6xm",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "chokidar",
+    "severity": "high",
+    "range": "2.0.0 - 3.6.0",
+    "advisories": [],
+    "via_packages": [
+     "braces"
+    ]
+   },
+   {
+    "package": "eslint-config-next",
+    "severity": "high",
+    "range": ">=14.3.0-canary.0",
+    "advisories": [],
+    "via_packages": [
+     "@next/eslint-plugin-next"
+    ]
+   },
+   {
+    "package": "fast-glob",
+    "severity": "high",
+    "range": "*",
+    "advisories": [],
+    "via_packages": [
+     "micromatch"
+    ]
+   },
+   {
+    "package": "micromatch",
+    "severity": "high",
+    "range": ">=0.2.0",
+    "advisories": [],
+    "via_packages": [
+     "braces"
+    ]
+   },
+   {
+    "package": "next",
+    "severity": "critical",
+    "range": "16.0.0 - 16.3.7",
+    "advisories": [
+     {
+      "source": 1240609,
+      "ghsa": "GHSA-vcvr-r3jv-pc5j",
+      "severity": "critical"
+     },
+     {
+      "source": 1241489,
+      "ghsa": "GHSA-3w37-wq28-93x7",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241490,
+      "ghsa": "GHSA-4jqv-mc3x-m676",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241492,
+      "ghsa": "GHSA-39w2-rjm5-chcv",
+      "severity": "low"
+     },
+     {
+      "source": 1241493,
+      "ghsa": "GHSA-f87g-xv8r-7p7x",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241495,
+      "ghsa": "GHSA-mcj8-r9mp-w47p",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241496,
+      "ghsa": "GHSA-cjq9-62q9-8jv4",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "postcss",
+    "severity": "moderate",
+    "range": "<=8.5.22",
+    "advisories": [
+     {
+      "source": 1130709,
+      "ghsa": "GHSA-fxqj-rqcc-2cmp",
+      "severity": "moderate"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "postcss-nested",
+    "severity": "moderate",
+    "range": "2.0.3 - 6.2.0",
+    "advisories": [],
+    "via_packages": [
+     "postcss-selector-parser"
+    ]
+   },
+   {
+    "package": "postcss-selector-parser",
+    "severity": "moderate",
+    "range": "<7.1.6",
+    "advisories": [
+     {
+      "source": 1241232,
+      "ghsa": "GHSA-rj75-hqrm-r3gf",
+      "severity": "moderate"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "sharp",
+    "severity": "high",
+    "range": "<0.35.5",
+    "advisories": [
+     {
+      "source": 1241331,
+      "ghsa": "GHSA-wq5f-xc86-pv6w",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "source-map-js",
+    "severity": "high",
+    "range": "1.0.0 - 1.2.1",
+    "advisories": [
+     {
+      "source": 1241209,
+      "ghsa": "GHSA-68fv-2mgg-jv7q",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "tailwindcss",
+    "severity": "high",
+    "range": "<=0.0.0-oxide-insiders.ff2c25f || 0.5.0 - 3.4.19",
+    "advisories": [],
+    "via_packages": [
+     "chokidar",
+     "fast-glob",
+     "micromatch",
+     "postcss-nested",
+     "postcss-selector-parser"
+    ]
+   }
+  ]
+ },
+ "before_prod": {
+  "metadata": {
+   "info": 0,
+   "low": 0,
+   "moderate": 1,
+   "high": 2,
+   "critical": 1,
+   "total": 4
+  },
+  "findings": [
+   {
+    "package": "next",
+    "severity": "critical",
+    "range": "9.3.4-canary.0 - 16.3.7",
+    "advisories": [
+     {
+      "source": 1240609,
+      "ghsa": "GHSA-vcvr-r3jv-pc5j",
+      "severity": "critical"
+     },
+     {
+      "source": 1241489,
+      "ghsa": "GHSA-3w37-wq28-93x7",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241490,
+      "ghsa": "GHSA-4jqv-mc3x-m676",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241492,
+      "ghsa": "GHSA-39w2-rjm5-chcv",
+      "severity": "low"
+     },
+     {
+      "source": 1241493,
+      "ghsa": "GHSA-f87g-xv8r-7p7x",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241495,
+      "ghsa": "GHSA-mcj8-r9mp-w47p",
+      "severity": "moderate"
+     },
+     {
+      "source": 1241496,
+      "ghsa": "GHSA-cjq9-62q9-8jv4",
+      "severity": "high"
+     }
+    ],
+    "via_packages": [
+     "postcss",
+     "sharp"
+    ]
+   },
+   {
+    "package": "postcss",
+    "severity": "moderate",
+    "range": "<=8.5.22",
+    "advisories": [
+     {
+      "source": 1130709,
+      "ghsa": "GHSA-fxqj-rqcc-2cmp",
+      "severity": "moderate"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "sharp",
+    "severity": "high",
+    "range": "<0.35.5",
+    "advisories": [
+     {
+      "source": 1241331,
+      "ghsa": "GHSA-wq5f-xc86-pv6w",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "source-map-js",
+    "severity": "high",
+    "range": "1.0.0 - 1.2.1",
+    "advisories": [
+     {
+      "source": 1241209,
+      "ghsa": "GHSA-68fv-2mgg-jv7q",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   }
+  ]
+ },
+ "after_full": {
+  "metadata": {
+   "info": 0,
+   "low": 0,
+   "moderate": 2,
+   "high": 7,
+   "critical": 0,
+   "total": 9
+  },
+  "findings": [
+   {
+    "package": "@next/eslint-plugin-next",
+    "severity": "high",
+    "range": ">=14.3.0-canary.0",
+    "advisories": [],
+    "via_packages": [
+     "fast-glob"
+    ]
+   },
+   {
+    "package": "braces",
+    "severity": "high",
+    "range": "*",
+    "advisories": [
+     {
+      "source": 1240992,
+      "ghsa": "GHSA-vfj7-8cjw-p6xm",
+      "severity": "high"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "chokidar",
+    "severity": "high",
+    "range": "2.0.0 - 3.6.0",
+    "advisories": [],
+    "via_packages": [
+     "braces"
+    ]
+   },
+   {
+    "package": "eslint-config-next",
+    "severity": "high",
+    "range": ">=14.3.0-canary.0",
+    "advisories": [],
+    "via_packages": [
+     "@next/eslint-plugin-next"
+    ]
+   },
+   {
+    "package": "fast-glob",
+    "severity": "high",
+    "range": "*",
+    "advisories": [],
+    "via_packages": [
+     "micromatch"
+    ]
+   },
+   {
+    "package": "micromatch",
+    "severity": "high",
+    "range": ">=0.2.0",
+    "advisories": [],
+    "via_packages": [
+     "braces"
+    ]
+   },
+   {
+    "package": "postcss-nested",
+    "severity": "moderate",
+    "range": "2.0.3 - 6.2.0",
+    "advisories": [],
+    "via_packages": [
+     "postcss-selector-parser"
+    ]
+   },
+   {
+    "package": "postcss-selector-parser",
+    "severity": "moderate",
+    "range": "<7.1.6",
+    "advisories": [
+     {
+      "source": 1241232,
+      "ghsa": "GHSA-rj75-hqrm-r3gf",
+      "severity": "moderate"
+     }
+    ],
+    "via_packages": []
+   },
+   {
+    "package": "tailwindcss",
+    "severity": "high",
+    "range": "<=0.0.0-oxide-insiders.ff2c25f || 0.5.0 - 3.4.19",
+    "advisories": [],
+    "via_packages": [
+     "chokidar",
+     "fast-glob",
+     "micromatch",
+     "postcss-nested",
+     "postcss-selector-parser"
+    ]
+   }
+  ]
+ },
+ "after_prod": {
+  "metadata": {
+   "info": 0,
+   "low": 0,
+   "moderate": 0,
+   "high": 0,
+   "critical": 0,
+   "total": 0
+  },
+  "findings": []
+ }
+}
