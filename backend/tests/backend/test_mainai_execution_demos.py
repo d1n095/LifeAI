@@ -202,7 +202,7 @@ _DEMO1_PLAN_JSON = json.dumps(
         "tasks": [
             {"description": "Läs igenom det aktuella modulträdet och hitta en liten, behavior-neutral dokumentations- eller testreferensfix.", "task_type": "read_only_audit", "depends_on": []},
             {
-                "description": "Genomför den lilla, avgränsade fixen.",
+                "description": "Genomför den lilla, avgränsade fixen i backend/tests/test_demo_doc_fix.py.",
                 "task_type": "repo_edit",
                 "depends_on": [0],
                 "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_demo_doc_fix.py"}],

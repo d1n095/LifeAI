@@ -255,8 +255,16 @@ async def test_spend2_fallback_provider_outside_the_grant_allowlist_is_refused(d
             purpose="exam",
             requested_by="exam",
         )
+    db_session.expire_all()
     events = db_session.query(ProviderSpendUsageEvent).filter(ProviderSpendUsageEvent.goal_id == goal.id).all()
-    assert events == []
+    assert events, "a paid fallback that is then refused must still be counted against the grant"
+    assert all(str(e.status) not in ("released", "ProviderSpendUsageStatus.released") for e in events)
+
+
+def _counted_events(db, goal_id):
+    db.expire_all()
+    events = db.query(ProviderSpendUsageEvent).filter(ProviderSpendUsageEvent.goal_id == goal_id).all()
+    return [e for e in events if str(e.status) not in ("released", "ProviderSpendUsageStatus.released")]
 
 
 @pytest.mark.asyncio
@@ -273,7 +281,8 @@ async def test_spend3_unpriced_answer_is_not_settled_as_zero(db_session, owner_i
             purpose="exam",
             requested_by="exam",
         )
-    events = db_session.query(ProviderSpendUsageEvent).filter(ProviderSpendUsageEvent.goal_id == goal.id).all()
+    events = _counted_events(db_session, goal.id)
+    assert events
     assert not any(Decimal(str(e.cost_usd or 0)) == 0 for e in events)
 
 
@@ -291,6 +300,7 @@ async def test_spend4_answer_exceeding_the_reservation_is_a_handled_spend_failur
             purpose="exam",
             requested_by="exam",
         )
+    assert _counted_events(db_session, goal.id)
 
 
 @pytest.mark.asyncio
@@ -331,6 +341,124 @@ async def test_spend5_over_reservation_answer_does_not_strand_the_task(db_sessio
     assert status != "running"
     assert job_status != "running"
     assert status in {"retryable_failed", "failed"}
+    assert _counted_events(db_session, goal.id)
+
+
+def _counting_fallback(
+    monkeypatch,
+    *,
+    provider="openai",
+    model="gpt-4o-mini",
+    prompt_tokens=10,
+    completion_tokens=5,
+    chain_model="gpt-4o-mini",
+):
+    calls = []
+    monkeypatch.setattr(
+        billed_chat,
+        "resolve_chat_chain",
+        lambda db, _m=chain_model: [(SimpleNamespace(name="openai"), _m)],
+    )
+
+    async def _paid(db, messages, **kwargs):
+        calls.append((provider, model))
+        return (
+            ChatResult(
+                content="ok",
+                provider=provider,
+                model=model,
+                raw_usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            ),
+            [provider],
+        )
+
+    monkeypatch.setattr(billed_chat, "chat_with_fallback", _paid)
+    return calls
+
+
+def _grant_n(db, owner_id, goal, *, max_requests, models=("gpt-4o-mini",)):
+    proposal = propose_execution_scope(
+        db, owner_id=owner_id, goal_id=goal.id, idempotency_key=f"prop-{uuid.uuid4()}"
+    )
+    _, envelope = authorize_execution_scope(
+        db,
+        owner_id=owner_id,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=["backend/app/x.py"],
+        authorized_capabilities=["read_file", "patch_file"],
+        authorized_risk="low",
+        envelope_idempotency_key=f"env-{uuid.uuid4()}",
+    )
+    authorize_provider_spend(
+        db,
+        owner_id=owner_id,
+        goal_id=goal.id,
+        execution_envelope_id=envelope.id,
+        authorized_by="founder",
+        max_cost_usd=Decimal("1.00"),
+        max_requests=max_requests,
+        max_cost_per_request_usd=Decimal("0.50"),
+        idempotency_key=f"spend-{uuid.uuid4()}",
+        allowed_providers=["openai"],
+        allowed_models=list(models),
+    )
+    db.commit()
+
+
+async def _call_and_rollback_on_spend_error(db, owner_id, goal):
+    try:
+        await billed_execution_chat(
+            db,
+            [Message(role="user", content="x")],
+            owner_id=owner_id,
+            goal_id=goal.id,
+            purpose="exam",
+            requested_by="exam",
+        )
+        db.commit()
+        return "accepted"
+    except ExecutionSpendError:
+        db.rollback()
+        return "ExecutionSpendError"
+    except Exception:
+        db.rollback()
+        return "other"
+
+
+@pytest.mark.asyncio
+async def test_spend6_exhausted_grant_makes_no_further_paid_provider_call(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_n(db_session, owner_id, goal, max_requests=1)
+    calls = _counting_fallback(monkeypatch)
+    first = await _call_and_rollback_on_spend_error(db_session, owner_id, goal)
+    second = await _call_and_rollback_on_spend_error(db_session, owner_id, goal)
+    third = await _call_and_rollback_on_spend_error(db_session, owner_id, goal)
+    assert first == "accepted"
+    assert second == "ExecutionSpendError"
+    assert third == "ExecutionSpendError"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_spend7_refused_paid_answers_are_still_recorded_against_the_grant(db_session, owner_id, monkeypatch):
+    results = {}
+    cases = (
+        ("outside-allowlist", dict(provider="openrouter", model="vendor/x"), ("gpt-4o-mini",)),
+        ("unpriced-allowlisted", dict(model="gpt-unpriced-exam"), ("gpt-unpriced-exam",)),
+        ("over-hold", dict(prompt_tokens=50_000, completion_tokens=50_000), ("gpt-4o-mini",)),
+    )
+    for label, kw, models in cases:
+        goal = _goal(db_session, owner_id)
+        _grant_n(db_session, owner_id, goal, max_requests=5, models=models)
+        calls = _counting_fallback(monkeypatch, chain_model=models[0], **kw)
+        outcomes = [await _call_and_rollback_on_spend_error(db_session, owner_id, goal) for _ in range(3)]
+        counted = _counted_events(db_session, goal.id)
+        results[label] = (len(calls), len(counted), outcomes[0])
+        assert len(calls) >= 1, results
+        assert len(calls) <= len(counted), results
+        assert all(outcome == "ExecutionSpendError" for outcome in outcomes)
+    assert all(paid <= counted for paid, counted, _ in results.values()), results
 
 
 def test_planner_target_files_are_required_and_persisted_into_the_task(db_session, owner_id):
