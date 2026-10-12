@@ -1,0 +1,226 @@
+"""FC-5: Path A repo_edit, tests, and open_pr stay inside the active envelope."""
+from __future__ import annotations
+
+import json
+import uuid
+from decimal import Decimal
+
+import pytest
+from sqlalchemy import text as sa_text
+
+from app.config import get_settings
+from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
+from app.mainai_execution import execution_job, planner
+from app.mainai_execution.envelope_scope import (
+    map_verification_target_to_repo_path,
+    path_in_authorized_scope,
+)
+from app.mainai_execution.execution_job import TaskExecutionError, _handle_open_pr, _propose_repo_edit
+from app.mainai_execution.planner import PlannedTaskSpec
+from app.models.execution_envelope import ExecutionAuthorizationEnvelope
+from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType
+from app.provider_spend import authorize_provider_spend
+from app.providers.base import ChatResult
+from app.providers.openai_provider import OpenAIProvider
+from app.request_context import current_user_id as current_user_id_var
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _privileges():
+    from app.db import migration_engine
+    from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges
+
+    apply_mainai_job_runtime_privileges(migration_engine)
+    apply_mainai_execution_privileges(migration_engine)
+
+
+@pytest.fixture
+def owner_id(db_session, make_verified_user):
+    user, _ = make_verified_user()
+    current_user_id_var.set(str(user.id))
+    db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+    return user.id
+
+
+def test_path_in_authorized_scope_prefix_and_glob():
+    assert path_in_authorized_scope("backend/app/x.py", ["backend/app/x.py"])
+    assert path_in_authorized_scope("backend/app/x.py", ["backend/app/"])
+    assert path_in_authorized_scope("backend/tests/test_x.py", ["backend/**"])
+    assert not path_in_authorized_scope("frontend/package.json", ["backend/**"])
+    assert not path_in_authorized_scope("backend/app/x.py", [])
+    assert not path_in_authorized_scope("../etc/passwd", ["backend/**"])
+
+
+def test_map_verification_target_to_repo_path():
+    assert map_verification_target_to_repo_path("tests/test_greeting_doc.py") == "backend/tests/test_greeting_doc.py"
+    assert map_verification_target_to_repo_path("backend/tests/test_x.py") == "backend/tests/test_x.py"
+
+
+def _grant(db, owner_id, goal, *, paths, capabilities):
+    proposal = propose_execution_scope(db, owner_id=owner_id, goal_id=goal.id, idempotency_key=f"p-{uuid.uuid4()}")
+    _, envelope = authorize_execution_scope(
+        db,
+        owner_id=owner_id,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=paths,
+        authorized_capabilities=capabilities,
+        authorized_risk="low",
+        envelope_idempotency_key=f"e-{uuid.uuid4()}",
+    )
+    authorize_provider_spend(
+        db,
+        owner_id=owner_id,
+        goal_id=goal.id,
+        execution_envelope_id=envelope.id,
+        authorized_by="founder",
+        max_cost_usd=Decimal("1.00"),
+        max_requests=5,
+        max_cost_per_request_usd=Decimal("0.50"),
+        idempotency_key=f"s-{uuid.uuid4()}",
+        allowed_providers=["openai"],
+        allowed_models=["gpt-4o-mini"],
+    )
+    db.commit()
+    return envelope
+
+
+def _task(db, goal, description, *, task_type="repo_edit", verification_plan=None, target_files=None):
+    planner.create_plan(
+        db,
+        goal=goal,
+        rationale="fc5",
+        created_by="test",
+        tasks=[
+            PlannedTaskSpec(
+                description=description,
+                task_type=task_type,
+                verification_plan=verification_plan
+                if verification_plan is not None
+                else [{"kind": "targeted_tests", "target": "tests/test_x.py"}],
+                target_files=target_files or [],
+            )
+        ],
+    )
+    db.commit()
+    return db.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+
+
+def _fake_files(files):
+    async def _chat(self, messages, model, **kwargs):
+        return ChatResult(
+            content=json.dumps({"files": files, "commit_message": "fc5"}),
+            provider="openai",
+            model=model,
+            raw_usage={},
+        )
+
+    return _chat
+
+
+@pytest.mark.asyncio
+async def test_repo_edit_refuses_a_path_outside_the_envelope(db_session, owner_id, monkeypatch, tmp_path):
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
+    (tmp_path / "backend" / "app").mkdir(parents=True)
+    (tmp_path / "backend" / "app" / "x.py").write_text("X = 1\n")
+    (tmp_path / "secrets.py").write_text("SECRET = 1\n")
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_files([{"path": "secrets.py", "content": "SECRET = 2\n"}]),
+    )
+    goal = planner.create_goal(db_session, owner_id=owner_id, title="fc5", original_instruction="edit", created_by="test")
+    _grant(
+        db_session,
+        owner_id,
+        goal,
+        paths=["backend/app/x.py", "backend/tests/test_x.py"],
+        capabilities=["path_a", "read_file", "repo_edit", "run_tests"],
+    )
+    task = _task(
+        db_session,
+        goal,
+        "edit backend/app/x.py and secrets.py",
+        target_files=["backend/app/x.py", "secrets.py"],
+    )
+    with pytest.raises(TaskExecutionError, match="outside the founder-authorized envelope"):
+        await _propose_repo_edit(db_session, task)
+    assert (tmp_path / "secrets.py").read_text() == "SECRET = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_repo_edit_refuses_when_envelope_lacks_write_capability(db_session, owner_id, monkeypatch, tmp_path):
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
+    (tmp_path / "backend" / "app").mkdir(parents=True)
+    (tmp_path / "backend" / "app" / "x.py").write_text("X = 1\n")
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_files([{"path": "backend/app/x.py", "content": "X = 2\n"}]),
+    )
+    goal = planner.create_goal(db_session, owner_id=owner_id, title="fc5", original_instruction="edit", created_by="test")
+    _grant(
+        db_session,
+        owner_id,
+        goal,
+        paths=["backend/app/x.py"],
+        capabilities=["path_a", "read_file"],
+    )
+    task = _task(db_session, goal, "edit backend/app/x.py", target_files=["backend/app/x.py"])
+    with pytest.raises(TaskExecutionError, match="does not authorize repo_edit"):
+        await _propose_repo_edit(db_session, task)
+    assert (tmp_path / "backend" / "app" / "x.py").read_text() == "X = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_repo_edit_refuses_when_path_a_envelope_is_revoked(db_session, owner_id, monkeypatch, tmp_path):
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
+    (tmp_path / "backend" / "app").mkdir(parents=True)
+    (tmp_path / "backend" / "app" / "x.py").write_text("X = 1\n")
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_files([{"path": "backend/app/x.py", "content": "X = 2\n"}]),
+    )
+    goal = planner.create_goal(db_session, owner_id=owner_id, title="fc5", original_instruction="edit", created_by="test")
+    envelope = _grant(
+        db_session,
+        owner_id,
+        goal,
+        paths=["backend/app/x.py"],
+        capabilities=["path_a", "read_file", "repo_edit"],
+    )
+    task = _task(db_session, goal, "edit backend/app/x.py", target_files=["backend/app/x.py"])
+    db_session.query(ExecutionAuthorizationEnvelope).filter(
+        ExecutionAuthorizationEnvelope.id == envelope.id
+    ).update({"status": "superseded"})
+    db_session.commit()
+    with pytest.raises(TaskExecutionError, match="no current active execution envelope"):
+        await _propose_repo_edit(db_session, task)
+
+
+@pytest.mark.asyncio
+async def test_open_pr_refuses_without_publish_capability(db_session, owner_id):
+    goal = planner.create_goal(db_session, owner_id=owner_id, title="fc5", original_instruction="pr", created_by="test")
+    _grant(
+        db_session,
+        owner_id,
+        goal,
+        paths=["backend/app/x.py"],
+        capabilities=["path_a", "read_file"],
+    )
+    task = _task(db_session, goal, "open pr", task_type="open_pr", verification_plan=[])
+    db_session.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=owner_id,
+            event_type=MainAITaskEventType.completed,
+            detail={"work_result": {"branch": "claude/mainai-task-abc"}},
+        )
+    )
+    db_session.commit()
+    with pytest.raises(TaskExecutionError, match="opening a pull request"):
+        await _handle_open_pr(db_session, task, goal)

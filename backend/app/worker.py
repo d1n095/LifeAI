@@ -30,7 +30,7 @@ import socket
 import uuid
 from datetime import datetime
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
@@ -49,6 +49,7 @@ from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
+from app.mainai_execution.envelope_scope import PATH_A_CAPABILITY, path_a_dispatch_is_authorized
 from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
 from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
@@ -406,8 +407,8 @@ class Worker:
         logged, and never stops the rest of this batch or this poll cycle, exactly like
         _retry_storage_deletion_tasks' own per-task isolation above.
 
-        EXCLUDES any task whose goal has EVER had an ExecutionAuthorizationEnvelope row
-        (migration 0057/0058/0059) -- ANY status, not only `active`. Once a goal enters
+        EXCLUDES envelope-governed goals UNLESS the current active envelope explicitly
+        authorizes Path A (`path_a` in authorized_capabilities). Once a goal enters
         execution-envelope governance it must never implicitly fall back to this blanket,
         envelope-blind approval-policy-only dispatch just because its current envelope is
         absent/superseded/revoked -- authority must never increase as a side effect of
@@ -416,33 +417,42 @@ class Worker:
         `execution_authorization_envelopes` rows are NEVER deleted (only superseded -- see
         migration 0057's own "never mutate, always supersede" discipline), the mere EXISTENCE
         of any row for a goal_id, regardless of status, is itself the durable "this goal has
-        been envelope-governed" fact -- no separate governance-state column needed. A goal
-        that currently has an active envelope remains excluded exactly as before (governed by
-        `app.development_supervisor.production_entry`'s bounded, envelope-scoped
-        `run_supervisor()` path instead -- see `_advance_authorized_supervisor_goals` below); a
-        goal whose envelope was superseded/revoked with no replacement is now ALSO excluded --
-        fail closed (no autonomous dispatch at all), never a silent reopening of the wider,
-        envelope-blind path. Found and pinned as a latent gap by Cursor's own adversarial
-        attack (PR #152) immediately after PR #148 merged; goals that have NEVER had any
-        envelope row are completely unaffected -- this tick's existing behavior for genuinely
-        ordinary, non-autonomous goals is unchanged.
+        been envelope-governed" fact -- no separate governance-state column needed.
+
+        Path A exception (FC-1): an ACTIVE envelope that explicitly lists `path_a` is the
+        Founder's authorization to run this tick, not the Supervisor. Those goals are
+        dispatched here and excluded from `_advance_authorized_supervisor_goals`. Active
+        envelopes without `path_a` remain Supervisor-only. Missing, superseded, revoked, or
+        otherwise inactive envelopes fail closed for BOTH autonomous paths. Goals that have
+        NEVER had any envelope row are completely unaffected -- this tick's existing behavior
+        for genuinely ordinary, non-autonomous goals is unchanged.
 
         Re-verified per task, immediately before dispatch (not only once in the batch query
         above), closing the narrow TOCTOU window between this tick's own SELECT and the actual
-        `dispatch_ready_task()` call: a revoke landing in that gap must still prevent dispatch,
-        not just the next tick's."""
+        `dispatch_ready_task()` call: a revoke or capability narrowing landing in that gap
+        must still prevent Path A dispatch, not just the next tick's."""
         ever_envelope_governed_goal_ids = db.query(ExecutionAuthorizationEnvelope.goal_id)
+        path_a_active_goal_ids = db.query(ExecutionAuthorizationEnvelope.goal_id).filter(
+            ExecutionAuthorizationEnvelope.status == "active",
+            ExecutionAuthorizationEnvelope.authorized_capabilities.contains([PATH_A_CAPABILITY]),
+        )
         ready_tasks = (
             db.query(MainAITask)
-            .filter(MainAITask.status == MainAITaskStatus.ready, MainAITask.goal_id.notin_(ever_envelope_governed_goal_ids))
+            .filter(
+                MainAITask.status == MainAITaskStatus.ready,
+                or_(
+                    MainAITask.goal_id.notin_(ever_envelope_governed_goal_ids),
+                    MainAITask.goal_id.in_(path_a_active_goal_ids),
+                ),
+            )
             .all()
         )
         for task in ready_tasks:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
                 continue
-            if db.query(ExecutionAuthorizationEnvelope.id).filter(ExecutionAuthorizationEnvelope.goal_id == goal.id).first() is not None:
-                continue  # became envelope-governed in the gap between the batch query and here
+            if not path_a_dispatch_is_authorized(db, owner_id=goal.owner_id, goal_id=goal.id):
+                continue  # never-governed became governed, or Path A authorization vanished in the gap
             try:
                 dispatch_ready_task(db, task=task, goal=goal, dispatched_by="mainai_worker_auto_advance")
                 db.commit()

@@ -338,7 +338,9 @@ def test_generate_goal_report_keeps_outcome_verification_and_approval_separate(d
 
     report = final_report.generate_goal_report(db_session, goal_id=goal.id)
 
-    by_desc = {t["description"]: t for t in report["tasks"]}
+    # repo_edit plans persist mapped focused-test paths as a `Target files:` suffix
+    # (FC-2). Reports still identify tasks by the planner description, not that suffix.
+    by_desc = {t["description"].split("\nTarget files:", 1)[0]: t for t in report["tasks"]}
     completed_report = by_desc["completed, verified"]
     assert completed_report["task_outcome"] == "completed"
     assert completed_report["verification_outcome"]["passed"] is True

@@ -59,6 +59,15 @@ from app.mainai_execution.verify import (
 )
 from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
 from app.mainai_execution.code_agent_context import CodeAgentPrompt, prepare_code_agent_prompt
+from app.mainai_execution.envelope_scope import (
+    PathAEnvelopeError,
+    assert_envelope_allows_open_pr,
+    assert_envelope_allows_read,
+    assert_envelope_allows_repo_edit,
+    assert_envelope_allows_tests,
+    map_verification_target_to_repo_path,
+    require_path_a_execution_envelope,
+)
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.mainai_execution.worktree import (
     WorktreeError,
@@ -150,6 +159,7 @@ CODE_AGENT_SYSTEM_PROMPT = (
 
 
 async def _handle_read_only_audit(db: Session, task: MainAITask, *, goal: MainAIGoal, job: MainAIJob) -> dict:
+    _guard_envelope(assert_envelope_allows_read, _envelope_for_path_a_task(db, task))
     messages = [Message(role="system", content=READ_ONLY_AUDIT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
     result, _attempted = await billed_execution_chat(
         db,
@@ -206,9 +216,48 @@ def _parse_code_agent_response(raw: str) -> dict:
     return parsed
 
 
-def _assert_repo_edit_writes_allowed(root: Path, files: list[dict], prompt: CodeAgentPrompt) -> None:
-    """Fail closed: never overwrite an existing file the model did not fully see, and never
-    write a path the planner/task did not name. Checked before any write_text()."""
+def _explicit_edit_targets(task: MainAITask) -> list[str]:
+    """Planner-named files from the `Target files:` suffix plus mapped verification tests."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(path: str) -> None:
+        if path and path not in seen:
+            seen.add(path)
+            found.append(path)
+
+    marker = "\nTarget files:"
+    description = task.description or ""
+    if marker in description:
+        tail = description.rsplit(marker, 1)[1]
+        for token in tail.split():
+            _add(token.strip().rstrip(","))
+    for step in task.verification_plan or []:
+        if isinstance(step, dict) and step.get("kind") == "targeted_tests":
+            _add(map_verification_target_to_repo_path(str(step.get("target") or "")))
+    return found
+
+
+def _envelope_for_path_a_task(db: Session, task: MainAITask):
+    try:
+        return require_path_a_execution_envelope(db, owner_id=task.owner_id, goal_id=task.goal_id)
+    except PathAEnvelopeError as exc:
+        raise TaskExecutionError(str(exc)) from exc
+
+
+def _guard_envelope(fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except PathAEnvelopeError as exc:
+        raise TaskExecutionError(str(exc)) from exc
+
+
+def _assert_repo_edit_writes_allowed(
+    root: Path, files: list[dict], prompt: CodeAgentPrompt, *, envelope=None
+) -> None:
+    """Fail closed: never overwrite an existing file the model did not fully see, never
+    write a path the planner/task did not name, and never escape the active envelope."""
+    _guard_envelope(assert_envelope_allows_repo_edit, envelope, [file["path"] for file in files])
     for file in files:
         path = file["path"]
         if path not in prompt.explicit_paths:
@@ -233,8 +282,14 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
     al.) keep exercising the identical code, unchanged."""
     repo_root = _repo_root().resolve()
+    envelope = _envelope_for_path_a_task(db, task)
     failure_context = latest_verification_failure_text(db, task.id)
-    prompt = prepare_code_agent_prompt(task.description, repo_root, failure_context=failure_context)
+    prompt = prepare_code_agent_prompt(
+        task.description,
+        repo_root,
+        failure_context=failure_context,
+        extra_target_files=_explicit_edit_targets(task),
+    )
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
         db,
@@ -246,7 +301,7 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         task_id=task.id,
     )
     parsed = _parse_code_agent_response(result.content)
-    _assert_repo_edit_writes_allowed(repo_root, parsed["files"], prompt)
+    _assert_repo_edit_writes_allowed(repo_root, parsed["files"], prompt, envelope=envelope)
     previous_contents: dict[str, str | None] = {}
     for file in parsed["files"]:
         # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
@@ -310,6 +365,8 @@ async def _handle_repo_edit(
     worktree row -- JobLeaseLostError propagates out of this function uncaught so the one call
     site in run_task_execution_job() can stop exactly like every other fenced-out write here."""
     settings = get_settings()
+    envelope = _envelope_for_path_a_task(db, task)
+    _guard_envelope(assert_envelope_allows_repo_edit, envelope, _explicit_edit_targets(task))
     if not settings.github_write_enabled:
         return await _propose_repo_edit(db, task)
 
@@ -361,7 +418,12 @@ async def _handle_repo_edit(
 
     worktree_root = Path(worktree.path).resolve()
     failure_context = latest_verification_failure_text(db, task.id)
-    prompt = prepare_code_agent_prompt(task.description, worktree_root, failure_context=failure_context)
+    prompt = prepare_code_agent_prompt(
+        task.description,
+        worktree_root,
+        failure_context=failure_context,
+        extra_target_files=_explicit_edit_targets(task),
+    )
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
         db,
@@ -374,7 +436,7 @@ async def _handle_repo_edit(
         job_id=job.id,
     )
     parsed = _parse_code_agent_response(result.content)
-    _assert_repo_edit_writes_allowed(worktree_root, parsed["files"], prompt)
+    _assert_repo_edit_writes_allowed(worktree_root, parsed["files"], prompt, envelope=envelope)
     for file in parsed["files"]:
         # Identical two-layer defense _propose_repo_edit() already uses (syntactic guard at
         # parse time + this resolve()-and-compare confinement check), now against the isolated
@@ -433,10 +495,16 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
 
 
-def _handle_run_tests(task: MainAITask) -> dict:
+def _handle_run_tests(task: MainAITask, *, db: Session | None = None) -> dict:
     targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
     if not targets:
         raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
+    envelope = _envelope_for_path_a_task(db, task) if db is not None else None
+    _guard_envelope(
+        assert_envelope_allows_tests,
+        envelope,
+        [map_verification_target_to_repo_path(target) for target in targets],
+    )
     try:
         results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
     except VerificationStepError as exc:
@@ -476,6 +544,7 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     PR for this exact head/base already exists FIRST and reuse it instead of creating a
     second one."""
     settings = get_settings()
+    _guard_envelope(assert_envelope_allows_open_pr, _envelope_for_path_a_task(db, task))
     edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
     if edit_info is None:
         raise TaskExecutionError("open_pr task found no completed repo_edit sibling with a recorded branch to open a PR for.")
@@ -534,6 +603,18 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
     base_branch = execution_pr_base_branch()
 
     worktree_id = work_result.get("worktree_id")
+    envelope = _envelope_for_path_a_task(db, task)
+    finalize_paths: list[str] = []
+    for item in work_result.get("files") or []:
+        if isinstance(item, dict) and item.get("path"):
+            finalize_paths.append(str(item["path"]))
+        elif isinstance(item, str) and item:
+            finalize_paths.append(item)
+    _guard_envelope(
+        assert_envelope_allows_repo_edit,
+        envelope,
+        finalize_paths or _explicit_edit_targets(task),
+    )
     if worktree_id is None:
         # Proposal mode (github_write_enabled off) -- unchanged from V0.1.
         return {"branch": branch, "base_branch": base_branch, "proposed": True, "files": [f["path"] for f in work_result["files"]]}
@@ -604,7 +685,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                     db.rollback()
                     return
             elif task.task_type == "run_tests":
-                work_result = _handle_run_tests(task)
+                work_result = _handle_run_tests(task, db=db)
             elif task.task_type == "open_pr":
                 work_result = await _handle_open_pr(db, task, goal)
             else:
@@ -669,6 +750,14 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             # verifying against the shared checkout, unchanged from V0.1.
             worktree_path = work_result.get("worktree_path") if task.task_type == "repo_edit" else None
             verify_cwd = str(Path(worktree_path) / "backend") if worktree_path else str(_backend_root())
+            verify_envelope = _envelope_for_path_a_task(db, task)
+            verify_paths = [
+                map_verification_target_to_repo_path(str(step.get("target") or ""))
+                for step in (task.verification_plan or [])
+                if isinstance(step, dict) and step.get("kind") == "targeted_tests"
+            ]
+            if verify_paths:
+                _guard_envelope(assert_envelope_allows_tests, verify_envelope, verify_paths)
             verification = verify_task(task, cwd=verify_cwd)
 
         if verification_checkpoint is None and verification.passed:
