@@ -282,7 +282,13 @@ async def test_demo_cancel_arriving_mid_flight_preserves_the_already_made_local_
     monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
+    task = _single_task_plan(
+        db_session,
+        goal,
+        description="edit x.py",
+        task_type="repo_edit",
+        verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}],
+    )
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
