@@ -98,7 +98,8 @@ async def test_large_file_is_not_silently_truncated_by_an_edit(db_session, owner
     async def _faithful_model(self, messages, model, **kwargs):
         # A faithful model returns the COMPLETE text it was shown, with one edit at the top.
         prompt = messages[1].content
-        shown = prompt.split("### backend/app/big.py\n```\n", 1)[1].split("\n```", 1)[0].replace("\n...[truncated]...\n", "")
+        marker = "### backend/app/big.py\n```\n"
+        shown = prompt.split(marker, 1)[1].split("\n```", 1)[0].replace("\n...[truncated]...\n", "") if marker in prompt else ""
         captured["shown_chars"] = len(shown)
         content = "# edited\n" + shown
         return ChatResult(content=json.dumps({"files": [{"path": "backend/app/big.py", "content": content}]}), provider="openai", model=model, raw_usage={})
@@ -243,3 +244,75 @@ async def test_over_reservation_answer_does_not_strand_the_task(db_session, supe
     job_status = superuser_db.get(MainAIJob, job.id).status.value
     M("SPEND-5 over-reservation answer leaves the task in a handled terminal/retry state", escaped is None and status != "running",
       f"exception escaped run_task_execution_job={escaped}; task status={status}; job status={job_status}")
+
+
+# ---------------------------------------------------------------- re-examination (#266): paid call vs ceilings and ledger
+def _counting_fallback(monkeypatch, *, provider="openai", model="gpt-4o-mini", prompt_tokens=10, completion_tokens=5):
+    calls = []
+    monkeypatch.setattr(billed_chat, "resolve_chat_chain", lambda db: [(SimpleNamespace(name="openai"), "gpt-4o-mini")])
+
+    async def _paid(db, messages, **kwargs):
+        calls.append((provider, model))  # each entry = one billed provider request
+        return ChatResult(content="ok", provider=provider, model=model,
+                          raw_usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}), [provider]
+
+    monkeypatch.setattr(billed_chat, "chat_with_fallback", _paid)
+    return calls
+
+
+async def _call(db, owner_id, goal):
+    """Mirrors run_task_execution_job: commit an accepted call, roll back after a spend error."""
+    try:
+        await billed_execution_chat(db, [Message(role="user", content="x")], owner_id=owner_id, goal_id=goal.id, purpose="exam", requested_by="exam")
+        db.commit()
+        return "accepted"
+    except ExecutionSpendError as exc:
+        db.rollback()
+        return f"ExecutionSpendError: {str(exc)[:70]}"
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        return type(exc).__name__
+
+
+def _grant_n(db, owner_id, goal, *, max_requests, models=("gpt-4o-mini",)):
+    proposal = propose_execution_scope(db, owner_id=owner_id, goal_id=goal.id, idempotency_key=f"prop-{uuid.uuid4()}")
+    _, envelope = authorize_execution_scope(db, owner_id=owner_id, proposal_id=proposal.id, authorized_by="founder",
+                                            authorized_paths=["backend/app/x.py"], authorized_capabilities=["read_file", "patch_file"],
+                                            authorized_risk="low", envelope_idempotency_key=f"env-{uuid.uuid4()}")
+    authorize_provider_spend(db, owner_id=owner_id, goal_id=goal.id, execution_envelope_id=envelope.id, authorized_by="founder",
+                             max_cost_usd=Decimal("1.00"), max_requests=max_requests, max_cost_per_request_usd=Decimal("0.50"),
+                             idempotency_key=f"spend-{uuid.uuid4()}", allowed_providers=["openai"], allowed_models=list(models))
+    db.commit()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_grant_makes_no_further_paid_provider_call(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_n(db_session, owner_id, goal, max_requests=1)
+    calls = _counting_fallback(monkeypatch)
+    first = await _call(db_session, owner_id, goal)
+    second = await _call(db_session, owner_id, goal)
+    third = await _call(db_session, owner_id, goal)
+    M("SPEND-6 a grant with max_requests=1 allows exactly one paid provider request", len(calls) == 1,
+      f"outcomes={[first, second, third]}; paid provider requests made={len(calls)}")
+
+
+@pytest.mark.asyncio
+async def test_refused_paid_answers_are_still_recorded_against_the_grant(db_session, owner_id, monkeypatch):
+    """A paid answer that is then refused (outside allowlist / unpriced / over the hold) has
+    already cost money. The ledger must record that spend, or repeated refusals spend without limit."""
+    results = {}
+    for label, kw, models in (("outside-allowlist", dict(provider="openrouter", model="vendor/x"), ("gpt-4o-mini",)),
+                              ("unpriced-allowlisted", dict(model="gpt-unpriced-exam"), ("gpt-unpriced-exam",)),
+                              ("over-hold", dict(prompt_tokens=50_000, completion_tokens=50_000), ("gpt-4o-mini",))):
+        goal = _goal(db_session, owner_id)
+        _grant_n(db_session, owner_id, goal, max_requests=5, models=models)
+        calls = _counting_fallback(monkeypatch, **kw)
+        outcomes = [await _call(db_session, owner_id, goal) for _ in range(3)]
+        db_session.expire_all()
+        recorded = db_session.query(ProviderSpendUsageEvent).filter(ProviderSpendUsageEvent.goal_id == goal.id).all()
+        counted = [e for e in recorded if str(e.status) not in ("released", "ProviderSpendUsageStatus.released")]
+        results[label] = (len(calls), len(counted), outcomes[0][:40])
+    ok = all(paid <= counted for paid, counted, _ in results.values())
+    M("SPEND-7 every paid provider request is counted against the grant even when the answer is refused", ok,
+      f"(paid requests, counted usage rows, first outcome) per case={results}")
