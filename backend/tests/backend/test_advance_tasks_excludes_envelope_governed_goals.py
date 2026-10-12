@@ -406,7 +406,7 @@ async def test_path_a_envelope_without_path_a_capability_stays_supervisor_only(s
 
 
 @pytest.mark.asyncio
-async def test_superseded_or_revoked_path_a_envelope_fails_closed(superuser_db, make_verified_user):
+async def test_superseded_path_a_envelope_fails_closed(superuser_db, make_verified_user):
     from app.development_supervisor.production_entry import eligible_authorized_goals
     from app.models.execution_envelope import ExecutionAuthorizationEnvelope
     from app.models.mainai_execution import MainAIGoalStatus
@@ -419,7 +419,7 @@ async def test_superseded_or_revoked_path_a_envelope_fails_closed(superuser_db, 
 
     superuser_db.query(ExecutionAuthorizationEnvelope).filter(
         ExecutionAuthorizationEnvelope.goal_id == goal.id
-    ).update({"status": "revoked"})
+    ).update({"status": "superseded"})
     superuser_db.commit()
 
     eligible_ids = {g.id for g, _env in eligible_authorized_goals(superuser_db, limit=50)}
