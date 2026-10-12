@@ -94,16 +94,21 @@ class PlannedTaskSpec:
     depends_on: list[int] = field(default_factory=list)
     risk_level: MainAIGoalRiskLevel = MainAIGoalRiskLevel.low
     approval_required: bool = False
-    # Default includes a concrete pytest target so omitted-plan fixtures stay valid.
-    # An explicit empty list is still rejected for repo_edit in create_plan() (TEST-1).
-    verification_plan: list[dict] = field(
-        default_factory=lambda: [{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}]
-    )
+    # None means "omitted". repo_edit omitted plans get a concrete default in __post_init__;
+    # an explicit empty list is still rejected by create_plan() (Claude TEST-1).
+    verification_plan: list[dict] | None = None
     priority: int = 0
     max_attempts: int = 3
     # Planner-named edit targets. Persisted into the task description so the code-agent
     # context layer can require explicit paths without a new column/migration.
     target_files: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.verification_plan is None:
+            if self.task_type == "repo_edit":
+                self.verification_plan = [{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}]
+            else:
+                self.verification_plan = []
 
 
 def create_goal(

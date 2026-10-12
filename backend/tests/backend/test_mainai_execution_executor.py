@@ -1076,6 +1076,7 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     task = _single_task_plan(
         db_session,
         goal,
+        description="Add backend/tests/test_scratch_edit.py",
         task_type="repo_edit",
         verification_plan=[{"kind": "targeted_tests", "target": "tests/test_scratch_edit.py"}],
     )
@@ -1365,7 +1366,7 @@ async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exis
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat('{"files": [{"path": "x.py", "content": "x = 1\\n"}], "commit_message": "test edit"}'))
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit")
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", description="edit x.py")
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 

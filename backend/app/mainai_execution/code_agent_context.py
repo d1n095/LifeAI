@@ -13,7 +13,10 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 _PATH_RE = re.compile(
-    r"(?:^|[\s`'\"(\[])((?:backend|frontend|docs|app|tests|scripts)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)"
+    r"(?:^|[\s`'\"(\[])("
+    r"(?:(?:backend|frontend|docs|app|tests|scripts)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)"
+    r"|(?:[A-Za-z0-9_.-]+\.(?:py|ts|tsx|js|jsx|md|txt|json|yml|yaml|toml|css|html))"
+    r")"
 )
 _MAX_FILES = 20
 _MAX_CHARS = 80_000

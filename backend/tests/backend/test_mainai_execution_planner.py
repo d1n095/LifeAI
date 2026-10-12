@@ -514,7 +514,7 @@ def _fake_chat(response_text: str):
 _VALID_PLAN_JSON = """{
   "tasks": [
     {"description": "Read the relevant files", "task_type": "read_only_audit", "depends_on": [], "risk_level": "low"},
-    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false},
+    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false, "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]},
     {"description": "Run the targeted tests", "task_type": "run_tests", "depends_on": [1], "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]}
   ]
 }"""
