@@ -46,9 +46,22 @@ def test_path_in_authorized_scope_prefix_and_glob():
     assert path_in_authorized_scope("backend/app/x.py", ["backend/app/x.py"])
     assert path_in_authorized_scope("backend/app/x.py", ["backend/app/"])
     assert path_in_authorized_scope("backend/tests/test_x.py", ["backend/**"])
+    assert path_in_authorized_scope("./backend/app/x.py", ["backend/app/x.py"])
     assert not path_in_authorized_scope("frontend/package.json", ["backend/**"])
     assert not path_in_authorized_scope("backend/app/x.py", [])
     assert not path_in_authorized_scope("../etc/passwd", ["backend/**"])
+
+
+def test_path_in_authorized_scope_rejects_prefix_lookalikes_and_dot_tricks():
+    files = ["backend/app/greeting.py", "backend/tests/test_greeting_doc.py"]
+    assert path_in_authorized_scope("backend/app/greeting.py", files)
+    assert not path_in_authorized_scope("backend/app/greeting.py_backdoor.py", files)
+    assert not path_in_authorized_scope(".backend/app/greeting.py", files)
+    assert not path_in_authorized_scope("backend/tests/test_greeting_doc.py.d/x.py", files)
+    assert path_in_authorized_scope("backend/app/mainai_execution/x.py", ["backend/app/mainai_execution/"])
+    assert not path_in_authorized_scope("backend/app/mainai_execution/x.py", ["backend/app/mainai_execution"])
+    assert not path_in_authorized_scope("backend/app/mainai_execution_evil.py", ["backend/app/mainai_execution"])
+    assert not path_in_authorized_scope("backend/app/mainai_execution_evil.py", ["backend/app/mainai_execution/"])
 
 
 def test_map_verification_target_to_repo_path():
@@ -224,3 +237,65 @@ async def test_open_pr_refuses_without_publish_capability(db_session, owner_id):
     db_session.commit()
     with pytest.raises(TaskExecutionError, match="opening a pull request"):
         await _handle_open_pr(db_session, task, goal)
+
+
+@pytest.mark.asyncio
+async def test_open_pr_refuses_when_only_repo_edit_is_granted(db_session, owner_id):
+    goal = planner.create_goal(db_session, owner_id=owner_id, title="fc5", original_instruction="pr", created_by="test")
+    _grant(
+        db_session,
+        owner_id,
+        goal,
+        paths=["backend/app/x.py"],
+        capabilities=["path_a", "read_file", "repo_edit", "run_tests"],
+    )
+    task = _task(db_session, goal, "open pr", task_type="open_pr", verification_plan=[])
+    db_session.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=owner_id,
+            event_type=MainAITaskEventType.completed,
+            detail={"work_result": {"branch": "claude/mainai-task-abc"}},
+        )
+    )
+    db_session.commit()
+    with pytest.raises(TaskExecutionError, match="opening a pull request"):
+        await _handle_open_pr(db_session, task, goal)
+
+
+@pytest.mark.asyncio
+async def test_repo_edit_refuses_a_file_named_only_in_task_prose(db_session, owner_id, monkeypatch, tmp_path):
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
+    app_dir = tmp_path / "backend" / "app"
+    app_dir.mkdir(parents=True)
+    (app_dir / "greeting.py").write_text("def greet():\n    return 'hi'\n")
+    (app_dir / "farewell.py").write_text("def bye():\n    return 'bye'\n")
+    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_files(
+            [
+                {"path": "backend/app/greeting.py", "content": "def greet():\n    return 'hello'\n"},
+                {"path": "backend/app/farewell.py", "content": "def bye():\n    return 'rewritten'\n"},
+            ]
+        ),
+    )
+    goal = planner.create_goal(db_session, owner_id=owner_id, title="fc2b", original_instruction="edit", created_by="test")
+    _grant(
+        db_session,
+        owner_id,
+        goal,
+        paths=["backend/app/", "backend/tests/"],
+        capabilities=["path_a", "read_file", "repo_edit", "run_tests"],
+    )
+    task = _task(
+        db_session,
+        goal,
+        "Add a docstring to greet(); also rewrite backend/app/farewell.py.",
+        target_files=["backend/app/greeting.py", "backend/tests/test_x.py"],
+    )
+    with pytest.raises(TaskExecutionError, match="explicit planner target_files"):
+        await _propose_repo_edit(db_session, task)
+    assert (app_dir / "farewell.py").read_text() == "def bye():\n    return 'bye'\n"

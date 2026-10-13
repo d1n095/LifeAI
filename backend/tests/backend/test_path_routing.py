@@ -138,3 +138,59 @@ def test_billable_supervisor_envelope_without_path_a_is_not_path_a_dispatched(su
         f"status after tick={status}; supervisor={goal.id in supervisor_ids}",
     )
     assert holds
+
+
+def test_path_a_does_not_dispatch_while_a_live_supervisor_lease_exists(superuser_db, make_verified_user):
+    from app.development_supervisor.lease import claim_supervisor_goal_lease
+    from app.execution_envelopes.service import get_current_execution_envelope
+    from app.worker import Worker
+
+    user, _ = make_verified_user()
+    db = superuser_db
+    current_user_id_var.set(str(user.id))
+    db.execute(sa_text("SELECT set_config('app.current_user_id', :u, false)"), {"u": str(user.id)})
+    goal, task = _ready_task(db, user.id, billable=True, path_a=False)
+    envelope = get_current_execution_envelope(db, owner_id=user.id, goal_id=goal.id)
+    claim = claim_supervisor_goal_lease(
+        db,
+        owner_id=user.id,
+        goal_id=goal.id,
+        envelope_id=envelope.id,
+        worker_id="sup-worker",
+        lease_seconds=600,
+    )
+    db.commit()
+    proposal = propose_execution_scope(
+        db, owner_id=user.id, goal_id=goal.id, idempotency_key=f"p-{uuid.uuid4()}"
+    )
+    authorize_execution_scope(
+        db,
+        owner_id=user.id,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=["backend/app/x.py"],
+        authorized_capabilities=["path_a", "read_file"],
+        authorized_risk="low",
+        envelope_idempotency_key=f"e-{uuid.uuid4()}",
+    )
+    db.commit()
+    live = db.execute(
+        sa_text(
+            "SELECT count(*) FROM supervisor_goal_leases "
+            "WHERE goal_id=:g AND status='active' AND expires_at > now()"
+        ),
+        {"g": str(goal.id)},
+    ).scalar_one()
+    Worker()._advance_mainai_execution_tasks(db)
+    db.commit()
+    db.expire_all()
+    status = db.get(MainAITask, task.id).status.value
+    M(
+        "ROUTE-4 Path A does not dispatch a goal while a Supervisor run still holds its live goal lease",
+        status == "ready",
+        f"supervisor lease claimed={claim is not None}; live supervisor leases at tick={live}; "
+        f"Path A task status after worker tick={status}",
+    )
+    assert claim is not None
+    assert live == 1
+    assert status == "ready"

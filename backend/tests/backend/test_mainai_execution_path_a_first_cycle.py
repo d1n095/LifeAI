@@ -156,6 +156,29 @@ PLAN = json.dumps(
         ]
     }
 )
+PLAN_WITH_DECLARED_TARGETS = json.dumps(
+    {
+        "tasks": [
+            {
+                "description": "Inspect backend/app/greeting.py and confirm greet() lacks a docstring.",
+                "task_type": "read_only_audit",
+                "depends_on": [],
+            },
+            {
+                "description": "Add a docstring to greet() in backend/app/greeting.py and add a focused test.",
+                "task_type": "repo_edit",
+                "depends_on": [0],
+                "target_files": PATH_A_PATHS,
+                "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+            },
+            {
+                "description": "Open a draft PR for the verified change.",
+                "task_type": "open_pr",
+                "depends_on": [1],
+            },
+        ]
+    }
+)
 EDIT = json.dumps(
     {
         "files": [
@@ -217,7 +240,7 @@ async def _drive(db, goal_id, n=30):
     return {t.task_type: t for t in db.execute(select(MainAITask).where(MainAITask.goal_id == goal_id)).scalars().all()}
 
 
-async def _plan_goal(db, owner_id, *, billable: bool):
+async def _plan_goal(db, owner_id, *, billable: bool, capabilities=None, paths=None):
     goal = planner.create_goal(
         db,
         owner_id=owner_id,
@@ -235,8 +258,8 @@ async def _plan_goal(db, owner_id, *, billable: bool):
             owner_id=owner_id,
             proposal_id=proposal.id,
             authorized_by="founder",
-            authorized_paths=PATH_A_PATHS,
-            authorized_capabilities=PATH_A_CAPS,
+            authorized_paths=list(paths or PATH_A_PATHS),
+            authorized_capabilities=list(capabilities or PATH_A_CAPS),
             authorized_risk="low",
             envelope_idempotency_key=f"e-{uuid.uuid4()}",
         )
@@ -267,7 +290,7 @@ async def _plan_goal(db, owner_id, *, billable: bool):
 @pytest.mark.asyncio
 async def test_e2e_a_authorized_billable_goal(db_session, superuser_db, owner_id, monkeypatch, github):
     monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
-    calls = _provider(monkeypatch)
+    calls = _provider(monkeypatch, plan=PLAN_WITH_DECLARED_TARGETS)
     goal, plan_error = await _plan_goal(db_session, owner_id, billable=True)
     assert plan_error is None, plan_error
     supervisor_ids = {g.id for g, _env in eligible_authorized_goals(superuser_db, limit=50)}
@@ -348,3 +371,130 @@ async def test_e2e_b2_named_file_cycle(db_session, superuser_db, owner_id, monke
         "completed",
         "waiting_ci",
     }
+
+
+def _pushed_paths(bare: Path) -> dict[str, list[str]]:
+    refs = [
+        ref
+        for ref in _git("-C", str(bare), "for-each-ref", "--format=%(refname:short)", "refs/heads").split("\n")
+        if ref.startswith("claude/mainai-task-")
+    ]
+    return {ref: _git("-C", str(bare), "diff", "--name-only", f"{BASE}..{ref}").split("\n") for ref in refs}
+
+
+@pytest.mark.asyncio
+async def test_scope1_sibling_prefix_is_not_pushed(db_session, superuser_db, owner_id, monkeypatch, github):
+    from app.mainai_execution.envelope_scope import path_in_authorized_scope
+
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
+    unit = {
+        path: path_in_authorized_scope(path, PATH_A_PATHS)
+        for path in (
+            "backend/app/greeting.py",
+            "backend/app/greeting.py_backdoor.py",
+            ".backend/app/greeting.py",
+            "backend/tests/test_greeting_doc.py.d/x.py",
+        )
+    }
+    plan = json.dumps(
+        {
+            "tasks": [
+                {
+                    "description": "Add a helper next to greet().",
+                    "task_type": "repo_edit",
+                    "depends_on": [],
+                    "target_files": ["backend/app/greeting.py_backdoor.py"],
+                    "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+                },
+                {"description": "Open a draft PR.", "task_type": "open_pr", "depends_on": [0]},
+            ]
+        }
+    )
+    edit = json.dumps(
+        {
+            "files": [
+                {"path": "backend/app/greeting.py_backdoor.py", "content": "print('outside')\n"},
+                {"path": "backend/tests/test_greeting_doc.py", "content": "def test_ok():\n    assert True\n"},
+            ],
+            "commit_message": "helper",
+        }
+    )
+    calls = _provider(monkeypatch, plan=plan, edit=edit)
+    goal, plan_error = await _plan_goal(db_session, owner_id, billable=True)
+    tasks = await _drive(superuser_db, goal.id) if plan_error is None else {}
+    pushed = _pushed_paths(github.bare)
+    escaped = any("backend/app/greeting.py_backdoor.py" in files for files in pushed.values())
+    states = {k: v.status.value for k, v in tasks.items()}
+    M(
+        "SCOPE-1 envelope path matching has a path boundary (no sibling-prefix / leading-dot escape)",
+        not escaped and not any(v for k, v in unit.items() if k != "backend/app/greeting.py"),
+        f"matcher={unit}; pushed={pushed}; PRs={github.prs}; calls={calls}; states={states}",
+    )
+    assert not escaped
+    assert not unit["backend/app/greeting.py_backdoor.py"]
+    assert not unit[".backend/app/greeting.py"]
+    assert "code_agent" not in calls
+
+
+@pytest.mark.asyncio
+async def test_cap1_repo_edit_does_not_open_a_pr(db_session, superuser_db, owner_id, monkeypatch, github):
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
+    calls = _provider(monkeypatch, plan=PLAN_WITH_DECLARED_TARGETS)
+    goal, plan_error = await _plan_goal(
+        db_session,
+        owner_id,
+        billable=True,
+        capabilities=["path_a", "read_file", "repo_edit", "run_tests"],
+    )
+    assert plan_error is None, plan_error
+    tasks = await _drive(superuser_db, goal.id)
+    states = {k: v.status.value for k, v in tasks.items()}
+    holds = (
+        not github.prs
+        and states.get("repo_edit") in {"completed", "waiting_ci"}
+        and states.get("open_pr") in {"failed", "retryable_failed"}
+    )
+    M(
+        "CAP-1 an envelope without open_pr does not open a pull request",
+        holds,
+        f"PRs={github.prs}; states={states}; calls={calls}",
+    )
+    assert github.prs == []
+    assert states.get("repo_edit") in {"completed", "waiting_ci"}
+    assert states.get("open_pr") in {"failed", "retryable_failed"}
+
+
+@pytest.mark.asyncio
+async def test_fc2b_prose_named_file_is_not_writable(db_session, superuser_db, owner_id, monkeypatch, github):
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
+    plan = json.dumps(
+        {
+            "tasks": [
+                {
+                    "description": "Add a docstring to greet(); also rewrite backend/app/farewell.py.",
+                    "task_type": "repo_edit",
+                    "depends_on": [],
+                    "target_files": PATH_A_PATHS,
+                    "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+                },
+                {"description": "Open a draft PR.", "task_type": "open_pr", "depends_on": [0]},
+            ]
+        }
+    )
+    files = json.loads(EDIT)["files"] + [{"path": "backend/app/farewell.py", "content": "def bye():\n    return 'bye'\n"}]
+    calls = _provider(monkeypatch, plan=plan, edit=json.dumps({"files": files, "commit_message": "x"}))
+    goal, plan_error = await _plan_goal(
+        db_session,
+        owner_id,
+        billable=True,
+        paths=["backend/app/", "backend/tests/"],
+    )
+    await _drive(superuser_db, goal.id) if plan_error is None else {}
+    pushed = _pushed_paths(github.bare)
+    prose_written = any("backend/app/farewell.py" in files for files in pushed.values())
+    M(
+        "FC-2b only planner-declared target_files are writable (a file named only in prose is refused)",
+        not prose_written,
+        f"declared={PATH_A_PATHS}; pushed={pushed}; calls={calls}",
+    )
+    assert not prose_written

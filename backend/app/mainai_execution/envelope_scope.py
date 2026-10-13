@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import PurePosixPath
 
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from app.execution_envelopes.service import (
@@ -23,7 +24,8 @@ from app.models.execution_envelope import ExecutionAuthorizationEnvelope
 PATH_A_CAPABILITY = "path_a"
 REPO_EDIT_CAPABILITIES = frozenset({"repo_edit", "patch_file"})
 RUN_TESTS_CAPABILITIES = frozenset({"run_tests", "repo_edit", "patch_file"})
-OPEN_PR_CAPABILITIES = frozenset({"open_pr", "create_pr", "repo_edit"})
+# Publication is an outward action. repo_edit must never imply open_pr (CAP-1).
+OPEN_PR_CAPABILITIES = frozenset({"open_pr", "create_pr"})
 READ_CAPABILITIES = frozenset({"read_file", "read_only_audit", PATH_A_CAPABILITY})
 
 
@@ -53,22 +55,62 @@ def envelope_authorizes_any_capability(
     return bool(envelope_capability_set(envelope) & allowed)
 
 
-def path_in_authorized_scope(path: str, authorized_paths: list[str] | None) -> bool:
-    """Prefix/`**` matching aligned with workforce `path_allowed`, fail-closed on empty."""
-    prefixes = [str(prefix) for prefix in (authorized_paths or []) if str(prefix)]
-    if not prefixes or not path:
-        return False
-    normalized = path.lstrip("./")
-    posix = PurePosixPath(normalized)
+def _strip_literal_dot_slash(path: str) -> str:
+    """Strip only a leading `./`. Do not lstrip arbitrary dots or slashes (SCOPE-1)."""
+    if path.startswith("./"):
+        return path[2:]
+    return path
+
+
+def _normalize_scope_file(path: str) -> str | None:
+    """Safe relative file path, or None. Rejects `..`, absolutes, and `.`-prefixed parts."""
+    if not isinstance(path, str) or not path:
+        return None
+    stripped = _strip_literal_dot_slash(path)
+    if not stripped:
+        return None
+    posix = PurePosixPath(stripped)
     if posix.is_absolute() or ".." in posix.parts:
+        return None
+    if any(part.startswith(".") for part in posix.parts):
+        return None
+    return posix.as_posix()
+
+
+def _authorized_directory_prefix(entry: str) -> str | None:
+    """Directory boundary only when the Founder wrote `/` or `/**`. Bare names are files."""
+    if not isinstance(entry, str) or not entry:
+        return None
+    raw = _strip_literal_dot_slash(entry)
+    if raw.endswith("/**"):
+        prefix = raw[:-3]
+    elif raw.endswith("/"):
+        prefix = raw[:-1]
+    else:
+        return None
+    if not prefix:
+        return None
+    return _normalize_scope_file(prefix)
+
+
+def path_in_authorized_scope(path: str, authorized_paths: list[str] | None) -> bool:
+    """Exact file match, or a directory prefix only with an explicit `/` or `/**` boundary.
+
+    Sibling-prefix lookalikes (`greeting.py_backdoor.py`), leading-dot tricks
+    (`.backend/...`), and nested suffix paths must not inherit a file grant.
+    """
+    prefixes = [str(prefix) for prefix in (authorized_paths or []) if str(prefix)]
+    candidate = _normalize_scope_file(path)
+    if not prefixes or candidate is None:
         return False
-    for prefix in prefixes:
-        p = prefix.rstrip("*")
-        if normalized == p.rstrip("/") or normalized.startswith(p.rstrip("/") + "/") or (
-            prefix.endswith("**") and normalized.startswith(p.rstrip("*").rstrip("/"))
-        ):
-            return True
-        if normalized.startswith(prefix):
+    for raw in prefixes:
+        directory = _authorized_directory_prefix(raw)
+        if directory is not None:
+            if candidate == directory or candidate.startswith(directory + "/"):
+                return True
+            continue
+        authorized_file = _normalize_scope_file(_strip_literal_dot_slash(raw))
+        if authorized_file is not None and candidate == authorized_file:
             return True
     return False
 
@@ -103,8 +145,26 @@ def merge_repo_edit_target_files(target_files: list[str], verification_plan: lis
     return merged
 
 
+def goal_has_live_supervisor_lease(db: Session, *, goal_id) -> bool:
+    """True when an unexpired active Supervisor goal lease still holds this goal (ROUTE-4)."""
+    live = db.execute(
+        sa_text(
+            "SELECT 1 FROM supervisor_goal_leases "
+            "WHERE goal_id = :goal_id AND status = 'active' AND expires_at > now() "
+            "LIMIT 1"
+        ),
+        {"goal_id": str(goal_id)},
+    ).first()
+    return live is not None
+
+
 def path_a_dispatch_is_authorized(db: Session, *, owner_id, goal_id) -> bool:
-    """Worker tick predicate. Never-governed → True. Envelope-governed → active `path_a`."""
+    """Worker tick predicate. Never-governed → True unless a live Supervisor lease exists.
+
+    Envelope-governed → active `path_a` AND no live Supervisor goal lease (ROUTE-4).
+    """
+    if goal_has_live_supervisor_lease(db, goal_id=goal_id):
+        return False
     if not goal_has_ever_been_envelope_governed(db, owner_id=owner_id, goal_id=goal_id):
         return True
     envelope = get_current_execution_envelope(db, owner_id=owner_id, goal_id=goal_id)

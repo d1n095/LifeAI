@@ -262,7 +262,7 @@ def _assert_repo_edit_writes_allowed(
         path = file["path"]
         if path not in prompt.explicit_paths:
             raise TaskExecutionError(
-                f"Refusing to edit {path!r}: it is not an explicit target file named by the planner or task."
+                f"Refusing to edit {path!r}: it is not an explicit planner target_files path."
             )
         abs_path = (root / path).resolve()
         if abs_path.is_file() and path not in prompt.fully_shown_paths:
@@ -289,6 +289,7 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         repo_root,
         failure_context=failure_context,
         extra_target_files=_explicit_edit_targets(task),
+        declared_targets_only=envelope is not None,
     )
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
@@ -423,6 +424,7 @@ async def _handle_repo_edit(
         worktree_root,
         failure_context=failure_context,
         extra_target_files=_explicit_edit_targets(task),
+        declared_targets_only=envelope is not None,
     )
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
