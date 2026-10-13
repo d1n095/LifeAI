@@ -133,8 +133,14 @@ def prepare_code_agent_prompt(
     *,
     failure_context: str | None = None,
     extra_target_files: list[str] | None = None,
+    declared_targets_only: bool = False,
 ) -> CodeAgentPrompt:
-    explicit = explicit_target_paths(description, extra=extra_target_files)
+    # Envelope-governed Path A (FC-2b): only structured planner target_files (plus mapped
+    # focused tests) authorize writes. Task prose may still appear as context.
+    if declared_targets_only:
+        explicit = explicit_target_paths(extra=extra_target_files)
+    else:
+        explicit = explicit_target_paths(description, extra=extra_target_files)
     inspected = inspect_existing_file_contents(root, explicit)
     fully_shown = frozenset(path for path, info in inspected.items() if info.get("complete"))
     oversized = frozenset(path for path, info in inspected.items() if info.get("oversized"))
