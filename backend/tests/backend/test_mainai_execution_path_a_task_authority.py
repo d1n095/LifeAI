@@ -537,10 +537,9 @@ async def test_retry_reuses_structured_authority_not_mutated_description(db_sess
     (tmp_path / "backend" / "app" / "secrets.py").write_text("SECRET = 1\n")
     (tmp_path / "backend" / "tests").mkdir(parents=True)
     monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
-    monkeypatch.setattr(
-        OpenAIProvider,
-        "chat",
-        lambda self, messages, model, **kwargs: ChatResult(
+
+    async def _chat(self, messages, model, **kwargs):
+        return ChatResult(
             content=json.dumps(
                 {
                     "files": [
@@ -553,8 +552,9 @@ async def test_retry_reuses_structured_authority_not_mutated_description(db_sess
             provider="openai",
             model=model,
             raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat)
     goal = planner.create_goal(db_session, owner_id=owner_id, title="retry", original_instruction="edit", created_by="test")
     planner.create_plan(
         db_session,
@@ -692,5 +692,5 @@ def test_description_is_never_parsed_as_edit_authority(db_session, owner_id):
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
     assert "backend/app/secrets.py" not in _explicit_edit_targets(db_session, task)
     assert "backend/app/greeting.py" in _explicit_edit_targets(db_session, task)
-    # Display suffix may still exist, but it is not the authority source.
-    assert "Target files:" in task.description
+    # Description is never a carrier of edit authority.
+    assert "Target files:" not in task.description

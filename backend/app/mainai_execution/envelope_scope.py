@@ -276,7 +276,9 @@ def persistable_target_authority(
         raise TargetAuthorityError(f"unknown target_source {target_source!r}")
     editable = structured_editable_targets(
         declared_target_files,
-        pre_lesson_verification_plan=list(pre_lesson_verification_plan or []),
+        pre_lesson_verification_plan=(
+            list(pre_lesson_verification_plan or []) if target_source != TARGET_SOURCE_GAP else []
+        ),
         task_type=task_type,
     )
     verify_only = [
@@ -371,6 +373,26 @@ def inherit_structured_edit_targets(db: Session, *, task, allowed_paths: tuple[s
         if path_in_authorized_scope(path, allowed) and path not in inherited:
             inherited.append(path)
     return inherited
+
+
+def file_targets_from_authorized_paths(allowed_paths: tuple[str, ...] | list[str] | None) -> list[str]:
+    """File-level envelope/binding paths that pass the canonical validator.
+
+    Directory grants (`backend/app/`) are not themselves editable file targets.
+    Used only as structural fallback when a parent task has no overlapping created-event
+    targets — never parsed from description text.
+    """
+    files: list[str] = []
+    seen: set[str] = set()
+    for raw in allowed_paths or []:
+        try:
+            canonical = validate_target_path(str(raw))
+        except TargetPathError:
+            continue
+        if canonical not in seen:
+            seen.add(canonical)
+            files.append(canonical)
+    return files
 
 
 def assert_changed_files_within_authority(

@@ -62,7 +62,6 @@ from app.mainai_execution.envelope_scope import (
     TargetAuthorityError,
     TargetPathError,
     assert_paths_in_envelope,
-    display_target_files_suffix,
     persistable_target_authority,
     validate_target_path,
 )
@@ -519,12 +518,11 @@ def insert_plan_tasks(
             assert_paths_in_envelope(envelope, authority["target_files"], action="to insert as editable targets")
         except PathAEnvelopeError as exc:
             raise PlanInsertionValidationError(f"tasks[{i}]: {exc}") from exc
-        description = spec.description.rstrip() + display_target_files_suffix(authority["target_files"])
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
             owner_id=goal.owner_id,
-            description=description,
+            description=spec.description,
             task_type=spec.task_type,
             status=MainAITaskStatus.pending,
             priority=spec.priority,

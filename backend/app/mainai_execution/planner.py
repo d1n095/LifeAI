@@ -46,7 +46,6 @@ from app.mainai_execution.envelope_scope import (
     TARGET_SOURCE_PLANNER,
     TargetAuthorityError,
     TargetPathError,
-    display_target_files_suffix,
     persistable_target_authority,
     structured_editable_targets,
     validate_target_path,
@@ -107,8 +106,8 @@ class PlannedTaskSpec:
     priority: int = 0
     max_attempts: int = 3
     # Planner-named edit targets. Persisted on the append-only created event
-    # (`target_files` / `verify_only_tests` / `target_source`). A description suffix
-    # is display-only and is never parsed back into authority.
+    # (`target_files` / `verify_only_tests` / `target_source`). Task.description is
+    # never a carrier of edit authority and is never parsed back into targets.
     target_files: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -338,12 +337,11 @@ def create_plan(
             )
         except (TargetPathError, TargetAuthorityError) as exc:
             raise PlanValidationError(str(exc)) from exc
-        description = spec.description.rstrip() + display_target_files_suffix(authority["target_files"])
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
             owner_id=goal.owner_id,
-            description=description,
+            description=spec.description,
             task_type=spec.task_type,
             status=MainAITaskStatus.pending,
             priority=spec.priority,
