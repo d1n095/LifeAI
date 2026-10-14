@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "applies_to_composition_audit_sha": "9d9dc9e8a67c1c0d4d6fc6cee8b15063b815bf46",
+  "decision": "NO_GO",
+  "production_change": false,
+  "required_manifest_additions": {
+    "transport_credentials_persisted": false,
+    "worker_visible_write_credential": false,
+    "remote_effect_executor_certified_sha": "PLACEHOLDER",
+    "remote_effect_executor_independent_verdict": "PLACEHOLDER",
+    "private_repo_read_credential": "SEPARATE_READ_ONLY_EFFECT_BOUNDARY",
+    "push_effect": "DISTINCT_ONE_SHOT_GRANT",
+    "open_pr_effect": "DISTINCT_ONE_SHOT_GRANT",
+    "ambiguous_effect_policy": "OBSERVE_EXACT_REF_NEVER_REPLAY",
+    "track_b_builder_enabled": false
+  },
+  "credential_sources_to_exclude": [
+    "git_remote_url_userinfo",
+    "repository_local_credential_helper",
+    "system_or_global_credential_helper",
+    "ambient_github_or_gh_token",
+    "ambient_git_askpass_or_ssh_agent",
+    "git_config_environment_injection",
+    "parent_checkout_common_git_config",
+    "recovered_worktree_secret"
+  ],
+  "effect_bindings": [
+    "authority_version",
+    "preflight_receipt",
+    "owner",
+    "goal",
+    "task",
+    "job",
+    "attempt",
+    "lease_generation",
+    "canonical_worktree",
+    "github_installation",
+    "repository",
+    "host",
+    "branch",
+    "destination_ref",
+    "base_sha",
+    "expected_remote_sha",
+    "local_commit_sha",
+    "effect_kind",
+    "expiry"
+  ],
+  "migration_recommendation": {
+    "revision": "0089_mainai_activation_security",
+    "down_revision": "0088_erasure_completion_phase",
+    "conditional_on_exclusions": [
+      "continuous_conversation_0089_through_0092",
+      "founder_sovereignty_0090_through_0092"
+    ],
+    "additional_contents": [
+      "remote_effect_attempt_receipts",
+      "monotonic_push_grant_consumption"
+    ]
+  },
+  "required_probe_result": "8/8 transport-security reference probes passed"
+}

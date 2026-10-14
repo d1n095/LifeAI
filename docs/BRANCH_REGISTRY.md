@@ -1,5 +1,11 @@
 # Branch-/PR-register — projektets levande karta
 
+## MainAI Git transport credential-authority audit (2026-10-14)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `codex/mainai-git-transport-credential-audit` | — | **Evidence-only; NO-GO; no production changes** | Complete credential-flow and Git/GitHub mutation audit for the activation composition. Specifies credential-free checkouts, isolated one-shot remote effects, crash reconciliation, mutation call-site gates and 8 network-free adversarial reference probes. Reconfirms migration head/collisions. See `docs/MAINAI_GIT_TRANSPORT_CREDENTIAL_AUTHORITY_AUDIT.md`. |
+
 Detta är INTE bara en lista över brancher — det är projektets levande karta, och den
 manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUDE.md`s
 "Målet"-avsnitt och `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`). Den ska hållas uppdaterad
