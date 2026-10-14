@@ -28,11 +28,15 @@ PRICING_PER_1K_TOKENS: dict[str, dict[str, tuple[Decimal, Decimal]]] = {
 }
 
 
-def estimate_cost(provider: str, model: str, prompt_tokens: int, completion_tokens: int) -> Decimal | None:
+def token_rates_per_1k(provider: str, model: str) -> tuple[Decimal, Decimal] | None:
+    """USD per 1,000 tokens (input, output), or None when the pair is unpriced."""
     if provider == "ollama":
-        return Decimal("0")
+        return Decimal("0"), Decimal("0")
+    return PRICING_PER_1K_TOKENS.get(provider, {}).get(model)
 
-    rates = PRICING_PER_1K_TOKENS.get(provider, {}).get(model)
+
+def estimate_cost(provider: str, model: str, prompt_tokens: int, completion_tokens: int) -> Decimal | None:
+    rates = token_rates_per_1k(provider, model)
     if rates is None:
         return None
 

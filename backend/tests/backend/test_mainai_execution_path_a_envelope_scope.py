@@ -125,7 +125,7 @@ def _fake_files(files):
             content=json.dumps({"files": files, "commit_message": "fc5"}),
             provider="openai",
             model=model,
-            raw_usage={},
+            raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
         )
 
     return _chat
