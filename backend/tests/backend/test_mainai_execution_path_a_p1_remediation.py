@@ -18,13 +18,18 @@ from sqlalchemy import text as sa_text
 from app.config import get_settings
 from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
 from app.mainai_execution import billed_chat, execution_job, planner
-from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
+from app.mainai_execution.billed_chat import (
+    ExecutionSpendError,
+    _estimate_prompt_tokens,
+    billed_execution_chat,
+)
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.models.mainai_execution import MainAITask
-from app.models.provider_spend import ProviderSpendUsageEvent
+from app.models.provider_spend import ProviderSpendAuthorization, ProviderSpendUsageEvent
 from app.provider_spend import authorize_provider_spend
 from app.providers import registry as provider_registry
 from app.providers.base import ChatResult, Message
+from app.providers.gemini_provider import GeminiProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.pricing import estimate_cost
 from app.request_context import current_user_id as current_user_id_var
@@ -485,7 +490,17 @@ def test_planner_target_files_are_required_and_persisted_into_the_task(db_sessio
     assert "backend/app/core.py" in task.description
 
 
-def _grant_custom(db, owner_id, goal, *, max_cost, max_requests, per_request=None, models=("gpt-4o-mini",)):
+def _grant_custom(
+    db,
+    owner_id,
+    goal,
+    *,
+    max_cost,
+    max_requests,
+    per_request=None,
+    models=("gpt-4o-mini",),
+    providers=("openai",),
+):
     proposal = propose_execution_scope(
         db, owner_id=owner_id, goal_id=goal.id, idempotency_key=f"prop-{uuid.uuid4()}"
     )
@@ -509,7 +524,7 @@ def _grant_custom(db, owner_id, goal, *, max_cost, max_requests, per_request=Non
         max_requests=max_requests,
         max_cost_per_request_usd=None if per_request is None else Decimal(per_request),
         idempotency_key=f"spend-{uuid.uuid4()}",
-        allowed_providers=["openai"],
+        allowed_providers=list(providers),
         allowed_models=list(models),
     )
     db.commit()
@@ -751,3 +766,162 @@ async def test_spend10_call_scoped_chain_does_not_mutate_process_registry(db_ses
     finally:
         db_b.rollback()
         db_b.close()
+
+
+def test_spend8b_utf8_bytes_are_the_prompt_upper_bound():
+    ascii_msg = [Message(role="user", content="x" * 80_000)]
+    emoji_msg = [Message(role="user", content="\U0001F600" * 20_000)]
+    assert _estimate_prompt_tokens(ascii_msg) >= 80_000
+    assert _estimate_prompt_tokens(emoji_msg) >= 80_000
+    assert _estimate_prompt_tokens(emoji_msg) > _estimate_prompt_tokens(
+        [Message(role="user", content="x" * 20_000)]
+    )
+
+
+@pytest.mark.asyncio
+async def test_spend8a_per_request_usd_cap_shrinks_max_tokens(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_custom(db_session, owner_id, goal, max_cost="0.01", max_requests=100, per_request="0.001")
+    seen = []
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
+    provider = OpenAIProvider()
+    monkeypatch.setattr(billed_chat, "resolve_chat_chain", lambda db: [(provider, "gpt-4o-mini")])
+    monkeypatch.setattr(
+        "app.egress_policy.enforce_egress_policy",
+        lambda db, *, payload, **kw: payload,
+        raising=True,
+    )
+
+    async def _chat(self, messages, model, **kwargs):
+        cap = int(kwargs["max_tokens"])
+        prompt_tokens = _estimate_prompt_tokens(messages)
+        seen.append((prompt_tokens, cap))
+        return ChatResult(
+            content="ok",
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": prompt_tokens, "completion_tokens": cap},
+        )
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat)
+    accepted = 0
+    for _ in range(30):
+        try:
+            await billed_execution_chat(
+                db_session,
+                [Message(role="user", content="x")],
+                owner_id=owner_id,
+                goal_id=goal.id,
+                purpose="exam",
+                requested_by="exam",
+            )
+            db_session.commit()
+            accepted += 1
+        except ExecutionSpendError:
+            db_session.rollback()
+    row = (
+        db_session.query(ProviderSpendAuthorization)
+        .filter(ProviderSpendAuthorization.goal_id == goal.id)
+        .one()
+    )
+    real = sum(
+        estimate_cost("openai", "gpt-4o-mini", prompt_tokens, cap) or Decimal("0")
+        for prompt_tokens, cap in seen
+    )
+    assert seen
+    assert all(0 < cap < 4_000 for _, cap in seen)
+    assert real <= Decimal("0.01")
+    assert Decimal(str(row.spent_cost_usd or 0)) <= Decimal("0.01")
+    assert accepted >= 1
+
+
+@pytest.mark.asyncio
+async def test_spend8b_unicode_prompt_is_refused_before_any_paid_request(db_session, owner_id, monkeypatch):
+    goal = _goal(db_session, owner_id)
+    _grant_custom(db_session, owner_id, goal, max_cost="0.05", max_requests=100)
+    seen = []
+
+    def _ok(messages):
+        return ChatResult(
+            content="ok",
+            provider="openai",
+            model="gpt-4o-mini",
+            raw_usage={"prompt_tokens": 20_000, "completion_tokens": 100},
+        )
+
+    _real_chain(monkeypatch, ["gpt-4o-mini"], {"gpt-4o-mini": _ok}, seen)
+    prompt = [Message(role="user", content="\U0001F600" * 20_000)]
+    outcomes = []
+    for _ in range(3):
+        try:
+            await billed_execution_chat(
+                db_session,
+                prompt,
+                owner_id=owner_id,
+                goal_id=goal.id,
+                purpose="exam",
+                requested_by="exam",
+            )
+            db_session.commit()
+            outcomes.append("accepted")
+        except ExecutionSpendError as exc:
+            db_session.rollback()
+            outcomes.append(str(exc)[:80])
+    assert seen == []
+    assert _counted_events(db_session, goal.id) == []
+    assert outcomes.count("accepted") == 0
+    assert "estimated prompt" in outcomes[0]
+
+
+@pytest.mark.asyncio
+async def test_spend8c_gemini_receives_max_output_tokens_and_counts_thoughts(
+    db_session, owner_id, monkeypatch
+):
+    goal = _goal(db_session, owner_id)
+    _grant_custom(
+        db_session,
+        owner_id,
+        goal,
+        max_cost="1.00",
+        max_requests=5,
+        per_request="0.50",
+        providers=("gemini",),
+        models=("gemini-2.5-flash",),
+    )
+    provider = GeminiProvider()
+    monkeypatch.setattr(GeminiProvider, "is_configured", lambda self: True)
+    monkeypatch.setattr(billed_chat, "resolve_chat_chain", lambda db: [(provider, "gemini-2.5-flash")])
+    monkeypatch.setattr(
+        "app.egress_policy.enforce_egress_policy",
+        lambda db, *, payload, **kw: payload,
+        raising=True,
+    )
+    sent = []
+
+    async def _post(self, action, model, payload, timeout):
+        sent.append(payload)
+        return {
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 100,
+                "thoughtsTokenCount": 20,
+            },
+        }
+
+    monkeypatch.setattr(GeminiProvider, "_post", _post)
+    result, attempted = await billed_execution_chat(
+        db_session,
+        [Message(role="user", content="x")],
+        owner_id=owner_id,
+        goal_id=goal.id,
+        purpose="exam",
+        requested_by="exam",
+    )
+    db_session.commit()
+    cap = (sent[0].get("generationConfig") or {}).get("maxOutputTokens")
+    assert sent
+    assert cap is not None and cap > 0
+    assert result.raw_usage["completion_tokens"] == 120
+    assert result.raw_usage["thoughts_tokens"] == 20
+    assert attempted == ["gemini"]

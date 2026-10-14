@@ -119,14 +119,27 @@ class GeminiProvider(LLMProvider):
         payload: dict = {"contents": contents}
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is not None:
+            generation_config: dict = {"maxOutputTokens": int(max_tokens)}
+            # Gemini 2.5 thinking tokens are billed as output. Bound them to 0 when a
+            # completion cap is in force so they cannot exceed the Founder hold.
+            if "2.5" in _normalize_model(model):
+                generation_config["thinkingConfig"] = {"thinkingBudget": 0}
+            payload["generationConfig"] = generation_config
         data = await self._post("generateContent", model, payload, timeout)
         content = data["candidates"][0]["content"]["parts"][0]["text"]
         usage = data.get("usageMetadata", {})
         # Normalized to prompt_tokens/completion_tokens (Gemini calls them
         # promptTokenCount/candidatesTokenCount) so usage logging is provider-agnostic.
+        # thoughtsTokenCount is billed as output and must count toward completion.
+        candidates = int(usage.get("candidatesTokenCount", 0) or 0)
+        thoughts = int(usage.get("thoughtsTokenCount", 0) or 0)
         normalized_usage = {
-            "prompt_tokens": usage.get("promptTokenCount", 0),
-            "completion_tokens": usage.get("candidatesTokenCount", 0),
+            "prompt_tokens": int(usage.get("promptTokenCount", 0) or 0),
+            "completion_tokens": candidates + thoughts,
+            "candidates_tokens": candidates,
+            "thoughts_tokens": thoughts,
         }
         return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
