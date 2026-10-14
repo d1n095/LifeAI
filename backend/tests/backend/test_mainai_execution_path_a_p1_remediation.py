@@ -93,7 +93,7 @@ def _fake_model(captured, files):
             content=json.dumps({"files": files, "commit_message": "exam"}),
             provider="openai",
             model=model,
-            raw_usage={},
+            raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
         )
 
     return _chat
@@ -189,7 +189,7 @@ async def test_ctx2_large_file_is_not_silently_truncated_by_an_edit(db_session, 
             content=json.dumps({"files": [{"path": "backend/app/big.py", "content": content}]}),
             provider="openai",
             model=model,
-            raw_usage={},
+            raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
         )
 
     monkeypatch.setattr(OpenAIProvider, "chat", _faithful_model)
