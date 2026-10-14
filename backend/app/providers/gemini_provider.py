@@ -70,6 +70,8 @@ class GeminiProvider(LLMProvider):
     HTTPStatusError default message). Never revert to the query-string form."""
 
     name = "gemini"
+    enforces_hard_output_token_cap = True
+    reports_authoritative_billable_usage = True
 
     def __init__(self):
         self.settings = get_settings()
@@ -129,18 +131,25 @@ class GeminiProvider(LLMProvider):
             payload["generationConfig"] = generation_config
         data = await self._post("generateContent", model, payload, timeout)
         content = data["candidates"][0]["content"]["parts"][0]["text"]
-        usage = data.get("usageMetadata", {})
+        usage = data.get("usageMetadata")
         # Normalized to prompt_tokens/completion_tokens (Gemini calls them
         # promptTokenCount/candidatesTokenCount) so usage logging is provider-agnostic.
         # thoughtsTokenCount is billed as output and must count toward completion.
-        candidates = int(usage.get("candidatesTokenCount", 0) or 0)
-        thoughts = int(usage.get("thoughtsTokenCount", 0) or 0)
-        normalized_usage = {
-            "prompt_tokens": int(usage.get("promptTokenCount", 0) or 0),
-            "completion_tokens": candidates + thoughts,
-            "candidates_tokens": candidates,
-            "thoughts_tokens": thoughts,
-        }
+        # Missing/partial usageMetadata is left without token keys so Path A can fail closed
+        # instead of treating fabricated zeros as authoritative billable usage.
+        if not isinstance(usage, dict) or "promptTokenCount" not in usage:
+            normalized_usage: dict = {}
+        elif "candidatesTokenCount" not in usage and "thoughtsTokenCount" not in usage:
+            normalized_usage = {"prompt_tokens": int(usage["promptTokenCount"] or 0)}
+        else:
+            candidates = int(usage.get("candidatesTokenCount", 0) or 0)
+            thoughts = int(usage.get("thoughtsTokenCount", 0) or 0)
+            normalized_usage = {
+                "prompt_tokens": int(usage.get("promptTokenCount", 0) or 0),
+                "completion_tokens": candidates + thoughts,
+                "candidates_tokens": candidates,
+                "thoughts_tokens": thoughts,
+            }
         return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:

@@ -10,6 +10,8 @@ class OpenRouterProvider(LLMProvider):
     """OpenRouter — one API key, gateway to many hosted models. OpenAI-compatible."""
 
     name = "openrouter"
+    enforces_hard_output_token_cap = True
+    reports_authoritative_billable_usage = True
 
     def __init__(self):
         self.settings = get_settings()

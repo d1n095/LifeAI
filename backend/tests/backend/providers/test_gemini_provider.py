@@ -93,6 +93,31 @@ async def test_chat_forwards_max_output_tokens_and_counts_thoughts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_omits_token_keys_when_usage_metadata_is_missing(monkeypatch):
+    from app.providers.base import Message
+
+    monkeypatch.setattr(get_settings(), "google_api_key", FAKE_KEY)
+    calls = []
+
+    async def _fake_post(self, url, **kwargs):
+        calls.append(kwargs.get("json"))
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200,
+            request=request,
+            json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+    result = await GeminiProvider().chat(
+        [Message(role="user", content="Hej")], model="gemini-2.5-flash", max_tokens=16
+    )
+    assert calls[0]["generationConfig"]["maxOutputTokens"] == 16
+    assert "prompt_tokens" not in result.raw_usage
+    assert "completion_tokens" not in result.raw_usage
+
+
+@pytest.mark.asyncio
 async def test_embed_sends_key_in_header_never_in_url(monkeypatch):
     async def _fake_post(self, url, **kwargs):
         request = httpx.Request("POST", url)

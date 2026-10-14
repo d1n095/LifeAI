@@ -10,6 +10,8 @@ class DeepSeekProvider(LLMProvider):
     """DeepSeek exposes an OpenAI-compatible chat API."""
 
     name = "deepseek"
+    enforces_hard_output_token_cap = True
+    reports_authoritative_billable_usage = True
 
     def __init__(self):
         self.settings = get_settings()

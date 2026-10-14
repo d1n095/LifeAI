@@ -8,6 +8,8 @@ BASE_URL = "https://api.openai.com/v1"
 
 class OpenAIProvider(LLMProvider):
     name = "openai"
+    enforces_hard_output_token_cap = True
+    reports_authoritative_billable_usage = True
 
     def __init__(self):
         self.settings = get_settings()

@@ -12,10 +12,13 @@ settlement fails; usage accounting commits on an independent session so a later 
 rollback cannot un-count it; never release a hold after a paid request.
 
 P1 SPEND-8 (Claude exam of #268 @ effafbe, remaining facets from #270 @ d5153eb):
-refuse before any provider call when the prompt upper bound exceeds the reserved
-prompt budget; pass a completion-token limit that matches the reservation; shrink
-that cap (or refuse) so the priced cost of prompt_ub + max_tokens cannot exceed the
-USD hold; estimate tokens from UTF-8 bytes plus per-message overhead (not chars/3).
+before any paid call, derive the dollar hold from remaining grant, per-request
+ceiling, prompt cost and pricing; refuse when the prompt upper bound cannot fit
+that hold; otherwise shrink the completion cap so max prompt cost + max completion
+cost <= the reserved dollar hold; never reserve token quantities whose theoretical
+maximum cost exceeds that hold. Estimate tokens from UTF-8 bytes plus per-message
+overhead (not chars/3). Adapters that cannot prove a hard output cap and
+authoritative billable usage fail closed; incomplete/unknown usage fails closed.
 
 P1 SPEND-9: one reservation authorizes exactly one provider/model attempt; Path A does
 not fall back to a second paid request under the same hold.
@@ -49,17 +52,49 @@ from app.request_context import current_user_id as current_user_id_var
 # Byte-level BPE never covers less than one UTF-8 byte. Add a small per-message
 # framing allowance so the pre-call size is an upper bound, not chars/3.
 _PROMPT_MESSAGE_OVERHEAD_TOKENS = 8
+# Adapters proven to send a hard output cap at the API boundary and return
+# authoritative billable usage. Unknown names fail closed for Path A.
+_BOUNDED_PATH_A_PROVIDER_NAMES = frozenset({"openai", "anthropic", "gemini", "deepseek", "openrouter"})
 
 
 class ExecutionSpendError(RuntimeError):
     """Path A refused an AI call because the per-goal spend cap/grant is not usable."""
 
 
-def _usage_tokens(result: ChatResult) -> tuple[int, int]:
-    usage = result.raw_usage or {}
-    prompt = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-    completion = usage.get("completion_tokens") or usage.get("output_tokens") or 0
-    return int(prompt or 0), int(completion or 0)
+def _usage_tokens(result: ChatResult) -> tuple[int, int] | None:
+    """Authoritative prompt/completion counts, or None when usage is incomplete.
+
+    Explicit zeros are valid. Missing keys, empty usage, or non-integers are not
+    treated as zero — Path A must fail closed instead of under-counting.
+    """
+    usage = result.raw_usage
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("prompt_tokens")
+    if prompt is None:
+        prompt = usage.get("input_tokens")
+    completion = usage.get("completion_tokens")
+    if completion is None:
+        completion = usage.get("output_tokens")
+    if prompt is None or completion is None:
+        return None
+    try:
+        prompt_i = int(prompt)
+        completion_i = int(completion)
+    except (TypeError, ValueError):
+        return None
+    if prompt_i < 0 or completion_i < 0:
+        return None
+    return prompt_i, completion_i
+
+
+def _path_a_adapter_is_bounded(provider) -> bool:
+    """True only when the adapter proves a hard output cap and billable usage."""
+    if getattr(provider, "enforces_hard_output_token_cap", None) is False:
+        return False
+    if getattr(provider, "reports_authoritative_billable_usage", None) is False:
+        return False
+    return _provider_name(provider) in _BOUNDED_PATH_A_PROVIDER_NAMES
 
 
 def _cap_usd() -> Decimal:
@@ -92,15 +127,24 @@ def _authorized_chain(chain, grant) -> list:
 
 
 def _estimate_prompt_tokens(messages: list[Message]) -> int:
-    """Upper bound on prompt tokens: UTF-8 bytes plus per-message overhead (SPEND-8b)."""
+    """Conservative upper bound on prompt tokens (SPEND-8b).
+
+    UTF-8 byte length of role + content cannot underestimate tokenizer input for
+    ASCII, code, emoji, CJK, or structured multi-message prompts. Per-message
+    overhead covers framing/special tokens. Prefer this auditable bound over
+    chars/3.
+    """
     total_bytes = 0
     count = 0
     for message in messages or []:
         count += 1
+        role = getattr(message, "role", None) or ""
         content = getattr(message, "content", None) or ""
+        if not isinstance(role, str):
+            role = str(role)
         if not isinstance(content, str):
             content = str(content)
-        total_bytes += len(content.encode("utf-8"))
+        total_bytes += len(role.encode("utf-8")) + len(content.encode("utf-8"))
     if count <= 0:
         return 0
     return total_bytes + _PROMPT_MESSAGE_OVERHEAD_TOKENS * count
@@ -182,24 +226,38 @@ def _account_paid_call(
         **(extra_evidence or {}),
     }
     if result is not None:
-        prompt_tokens, completion_tokens = _usage_tokens(result)
-        cost = estimate_cost(result.provider, result.model, prompt_tokens, completion_tokens)
-        evidence.update(
-            {
-                "provider": result.provider,
-                "model": result.model,
-                "actual_prompt_tokens": prompt_tokens,
-                "actual_completion_tokens": completion_tokens,
-                "actual_cost_usd": None if cost is None else str(cost),
-            }
-        )
-        settle_prompt = min(max(0, prompt_tokens), hold_prompt)
-        settle_completion = min(max(0, completion_tokens), hold_completion)
-        if refusal or over_hold or cost is None:
-            # Conservative: consume the hold so a refused paid answer cannot be retried free.
-            settle_cost = hold_cost
+        tokens = _usage_tokens(result)
+        if tokens is None:
+            evidence.update(
+                {
+                    "provider": result.provider,
+                    "model": result.model,
+                    "actual_prompt_tokens": None,
+                    "actual_completion_tokens": None,
+                    "actual_cost_usd": None,
+                    "incomplete_usage": True,
+                }
+            )
+            settle_prompt, settle_completion, settle_cost = hold_prompt, hold_completion, hold_cost
         else:
-            settle_cost = min(cost, hold_cost)
+            prompt_tokens, completion_tokens = tokens
+            cost = estimate_cost(result.provider, result.model, prompt_tokens, completion_tokens)
+            evidence.update(
+                {
+                    "provider": result.provider,
+                    "model": result.model,
+                    "actual_prompt_tokens": prompt_tokens,
+                    "actual_completion_tokens": completion_tokens,
+                    "actual_cost_usd": None if cost is None else str(cost),
+                }
+            )
+            settle_prompt = min(max(0, prompt_tokens), hold_prompt)
+            settle_completion = min(max(0, completion_tokens), hold_completion)
+            if refusal or over_hold or cost is None:
+                # Conservative: consume the hold so a refused paid answer cannot be retried free.
+                settle_cost = hold_cost
+            else:
+                settle_cost = min(cost, hold_cost)
     else:
         settle_prompt, settle_completion, settle_cost = hold_prompt, hold_completion, hold_cost
 
@@ -289,7 +347,14 @@ async def billed_execution_chat(
         # SPEND-9: one reservation = one provider/model attempt. Do not fall back inside
         # the reserved Path A call; a later retry (new reservation) may pick the next pair.
         reserved_chain = authorized[:1]
-        reserve_provider, reserve_model = _provider_name(reserved_chain[0][0]), reserved_chain[0][1]
+        reserve_provider_obj, reserve_model = reserved_chain[0]
+        reserve_provider = _provider_name(reserve_provider_obj)
+        if not _path_a_adapter_is_bounded(reserve_provider_obj):
+            raise ExecutionSpendError(
+                "Path A AI call refused: provider adapter does not prove a hard output-token "
+                f"cap and authoritative billable usage ({reserve_provider}/{reserve_model}). "
+                "No provider request was sent."
+            )
 
         try:
             expected_prompt, expected_completion, expected_cost = _bound_reservation(
@@ -302,6 +367,12 @@ async def billed_execution_chat(
             raise ExecutionSpendError(
                 "Path A AI call refused: estimated prompt exceeds the reserved prompt budget "
                 f"(estimated={estimated_prompt}/{expected_prompt}). No provider request was sent."
+            )
+        prompt_only_cost = estimate_cost(reserve_provider, reserve_model, estimated_prompt, 0)
+        if prompt_only_cost is not None and prompt_only_cost > expected_cost:
+            raise ExecutionSpendError(
+                "Path A AI call refused: prompt cost exceeds the USD hold "
+                f"(prompt=${prompt_only_cost}/hold=${expected_cost}). No provider request was sent."
             )
         completion_cap = _affordable_completion_tokens(
             reserve_provider, reserve_model, estimated_prompt, expected_cost, expected_completion
@@ -326,6 +397,8 @@ async def billed_execution_chat(
                 model=reserve_model,
                 task_id=task_id,
                 job_id=job_id,
+                hold_prompt_tokens=estimated_prompt,
+                hold_completion_tokens=completion_cap,
                 evidence={
                     "purpose": purpose,
                     "path": "mainai_execution",
@@ -406,30 +479,38 @@ async def billed_execution_chat(
         if result is not None:
             actual_provider = result.provider
             actual_model = result.model
-            prompt_tokens, completion_tokens = _usage_tokens(result)
-            cost = estimate_cost(actual_provider, actual_model, prompt_tokens, completion_tokens)
-            over_hold = (
-                prompt_tokens > hold_prompt
-                or completion_tokens > hold_completion
-                or (cost is not None and cost > hold_cost)
-            )
-            if not _grant_allows(grant, actual_provider, actual_model):
+            tokens = _usage_tokens(result)
+            if tokens is None:
+                over_hold = True
                 refusal = (
-                    f"Path A AI call refused: answer came from {actual_provider}/{actual_model}, "
-                    "which is outside the Founder's provider-spend allowlist. Fallback must not "
-                    "bypass the authorized grant."
+                    "Path A AI call refused: incomplete or unknown provider usage. "
+                    "Bounded Path A calls require authoritative billable token counts."
                 )
-            elif cost is None:
-                refusal = (
-                    f"Path A AI call refused: unknown pricing for {actual_provider}/{actual_model}. "
-                    "Unpriced answers are not settled at $0."
+            else:
+                prompt_tokens, completion_tokens = tokens
+                cost = estimate_cost(actual_provider, actual_model, prompt_tokens, completion_tokens)
+                over_hold = (
+                    prompt_tokens > hold_prompt
+                    or completion_tokens > hold_completion
+                    or (cost is not None and cost > hold_cost)
                 )
-            elif over_hold:
-                refusal = (
-                    "Path A AI call refused: answer exceeded the reservation hold "
-                    f"(prompt={prompt_tokens}/{hold_prompt}, "
-                    f"completion={completion_tokens}/{hold_completion})."
-                )
+                if not _grant_allows(grant, actual_provider, actual_model):
+                    refusal = (
+                        f"Path A AI call refused: answer came from {actual_provider}/{actual_model}, "
+                        "which is outside the Founder's provider-spend allowlist. Fallback must not "
+                        "bypass the authorized grant."
+                    )
+                elif cost is None:
+                    refusal = (
+                        f"Path A AI call refused: unknown pricing for {actual_provider}/{actual_model}. "
+                        "Unpriced answers are not settled at $0."
+                    )
+                elif over_hold:
+                    refusal = (
+                        "Path A AI call refused: answer exceeded the reservation hold "
+                        f"(prompt={prompt_tokens}/{hold_prompt}, "
+                        f"completion={completion_tokens}/{hold_completion})."
+                    )
 
         settled = _account_paid_call(
             spend_db,

@@ -76,6 +76,10 @@ class LLMProvider(ABC):
     """
 
     name: str
+    # Path A bounded spend (SPEND-8c): both must be True on adapters allowed to
+    # make a paid Path A call. Default False so unknown/uncapped adapters fail closed.
+    enforces_hard_output_token_cap: bool = False
+    reports_authoritative_billable_usage: bool = False
 
     @abstractmethod
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult: ...
