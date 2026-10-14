@@ -61,12 +61,16 @@ from app.mainai_execution.billed_chat import ExecutionSpendError, billed_executi
 from app.mainai_execution.code_agent_context import CodeAgentPrompt, prepare_code_agent_prompt
 from app.mainai_execution.envelope_scope import (
     PathAEnvelopeError,
+    TargetPathError,
+    assert_changed_files_within_authority,
     assert_envelope_allows_open_pr,
     assert_envelope_allows_read,
     assert_envelope_allows_repo_edit,
     assert_envelope_allows_tests,
+    load_structured_edit_targets,
     map_verification_target_to_repo_path,
     require_path_a_execution_envelope,
+    validate_target_path,
 )
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.mainai_execution.worktree import (
@@ -76,6 +80,7 @@ from app.mainai_execution.worktree import (
     execution_pr_base_branch,
     push_worktree_branch,
     verify_worktree_ownership,
+    worktree_changed_files,
     worktree_git_status,
 )
 from app.models.mainai_execution import (
@@ -188,10 +193,15 @@ def _validate_repo_edit_file_path(path_value: object) -> str:
     worker process has write access, with no `..` involved at all."""
     if not isinstance(path_value, str) or not path_value:
         raise TaskExecutionError(f"Code agent file entry 'path' must be a non-empty string, got {path_value!r}.")
-    path = PurePosixPath(path_value)
-    if path.is_absolute() or ".." in path.parts:
-        raise TaskExecutionError(f"Refusing an absolute or '..'-escaping file path from the code agent: {path_value!r}")
-    return path_value
+    posix = PurePosixPath(path_value)
+    if posix.is_absolute() or ".." in posix.parts:
+        raise TaskExecutionError(
+            f"Refusing an absolute or '..'-escaping file path from the code agent: {path_value!r}"
+        )
+    try:
+        return validate_target_path(path_value)
+    except TargetPathError as exc:
+        raise TaskExecutionError(f"Refusing an unsafe file path from the code agent: {exc}") from exc
 
 
 def _parse_code_agent_response(raw: str) -> dict:
@@ -212,30 +222,17 @@ def _parse_code_agent_response(raw: str) -> dict:
     for f in parsed["files"]:
         if not isinstance(f, dict) or "path" not in f or "content" not in f:
             raise TaskExecutionError(f"Malformed file entry in code agent response: {f!r}")
-        _validate_repo_edit_file_path(f["path"])
+        f["path"] = _validate_repo_edit_file_path(f["path"])
     return parsed
 
 
-def _explicit_edit_targets(task: MainAITask) -> list[str]:
-    """Planner-named files from the `Target files:` suffix plus mapped verification tests."""
-    found: list[str] = []
-    seen: set[str] = set()
+def _explicit_edit_targets(db: Session, task: MainAITask) -> list[str]:
+    """Structured editable targets from the append-only created event only.
 
-    def _add(path: str) -> None:
-        if path and path not in seen:
-            seen.add(path)
-            found.append(path)
-
-    marker = "\nTarget files:"
-    description = task.description or ""
-    if marker in description:
-        tail = description.rsplit(marker, 1)[1]
-        for token in tail.split():
-            _add(token.strip().rstrip(","))
-    for step in task.verification_plan or []:
-        if isinstance(step, dict) and step.get("kind") == "targeted_tests":
-            _add(map_verification_target_to_repo_path(str(step.get("target") or "")))
-    return found
+    Task.description and any `Target files:` prose marker are never authority.
+    Historical or text-only tasks fail closed (empty list).
+    """
+    return load_structured_edit_targets(db, task)
 
 
 def _envelope_for_path_a_task(db: Session, task: MainAITask):
@@ -284,12 +281,18 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     repo_root = _repo_root().resolve()
     envelope = _envelope_for_path_a_task(db, task)
     failure_context = latest_verification_failure_text(db, task.id)
+    editable = _explicit_edit_targets(db, task)
+    if not editable:
+        raise TaskExecutionError(
+            "Refusing repo_edit: no structured editable targets on the created event "
+            "(historical or text-only target authority is fail-closed)."
+        )
     prompt = prepare_code_agent_prompt(
         task.description,
         repo_root,
         failure_context=failure_context,
-        extra_target_files=_explicit_edit_targets(task),
-        declared_targets_only=envelope is not None,
+        extra_target_files=editable,
+        declared_targets_only=True,
     )
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
@@ -367,7 +370,13 @@ async def _handle_repo_edit(
     site in run_task_execution_job() can stop exactly like every other fenced-out write here."""
     settings = get_settings()
     envelope = _envelope_for_path_a_task(db, task)
-    _guard_envelope(assert_envelope_allows_repo_edit, envelope, _explicit_edit_targets(task))
+    editable = _explicit_edit_targets(db, task)
+    if not editable:
+        raise TaskExecutionError(
+            "Refusing repo_edit: no structured editable targets on the created event "
+            "(historical or text-only target authority is fail-closed)."
+        )
+    _guard_envelope(assert_envelope_allows_repo_edit, envelope, editable)
     if not settings.github_write_enabled:
         return await _propose_repo_edit(db, task)
 
@@ -423,8 +432,8 @@ async def _handle_repo_edit(
         task.description,
         worktree_root,
         failure_context=failure_context,
-        extra_target_files=_explicit_edit_targets(task),
-        declared_targets_only=envelope is not None,
+        extra_target_files=editable,
+        declared_targets_only=True,
     )
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=prompt.text)]
     result, _attempted = await billed_execution_chat(
@@ -606,18 +615,15 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
 
     worktree_id = work_result.get("worktree_id")
     envelope = _envelope_for_path_a_task(db, task)
-    finalize_paths: list[str] = []
+    editable = _explicit_edit_targets(db, task)
+    claimed_paths: list[str] = []
     for item in work_result.get("files") or []:
         if isinstance(item, dict) and item.get("path"):
-            finalize_paths.append(str(item["path"]))
+            claimed_paths.append(str(item["path"]))
         elif isinstance(item, str) and item:
-            finalize_paths.append(item)
-    _guard_envelope(
-        assert_envelope_allows_repo_edit,
-        envelope,
-        finalize_paths or _explicit_edit_targets(task),
-    )
+            claimed_paths.append(item)
     if worktree_id is None:
+        _guard_envelope(assert_changed_files_within_authority, actual_files=claimed_paths, editable_targets=editable, envelope=envelope)
         # Proposal mode (github_write_enabled off) -- unchanged from V0.1.
         return {"branch": branch, "base_branch": base_branch, "proposed": True, "files": [f["path"] for f in work_result["files"]]}
 
@@ -626,6 +632,16 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
         raise TaskExecutionError(
             f"Worktree ownership verification failed for job {worktree.job_id} at push time -- refusing to trust unverifiable local state."
         )
+    try:
+        actual_files = worktree_changed_files(worktree)
+    except WorktreeError as exc:
+        raise TaskExecutionError(str(exc)) from exc
+    _guard_envelope(
+        assert_changed_files_within_authority,
+        actual_files=actual_files,
+        editable_targets=editable,
+        envelope=envelope,
+    )
     remote_sha = await push_worktree_branch(worktree)
     return {"branch": worktree.branch, "base_branch": base_branch, "proposed": False, "commit_sha": remote_sha}
 

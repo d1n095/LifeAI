@@ -287,6 +287,7 @@ async def test_demo_cancel_arriving_mid_flight_preserves_the_already_made_local_
         goal,
         description="edit x.py",
         task_type="repo_edit",
+        target_files=["x.py"],
         verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}],
     )
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")

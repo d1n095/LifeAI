@@ -59,6 +59,7 @@ from app.models.mainai_execution import (
     MainAIPlan,
     MainAIPlanStatus,
     MainAITask,
+    MainAITaskEvent,
     MainAITaskEventType,
     MainAITaskStatus,
 )
@@ -659,8 +660,12 @@ async def test_propose_plan_via_ai_maps_focused_test_when_target_files_omitted(d
     plan = planner.create_plan(db_session, goal=goal, rationale="mapped", tasks=specs, created_by="test")
     db_session.commit()
     task = db_session.query(MainAITask).filter(MainAITask.plan_id == plan.id).one()
-    assert "Target files:" in task.description
-    assert "backend/tests/test_greeting_doc.py" in task.description
+    created = db_session.query(MainAITaskEvent).filter(
+        MainAITaskEvent.task_id == task.id,
+        MainAITaskEvent.event_type == MainAITaskEventType.created,
+    ).one()
+    assert "backend/tests/test_greeting_doc.py" in created.detail["target_files"]
+    assert "Target files:" not in task.description
 
 
 @pytest.mark.asyncio

@@ -22,8 +22,6 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import PurePosixPath
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -44,7 +42,14 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
-from app.mainai_execution.envelope_scope import merge_repo_edit_target_files
+from app.mainai_execution.envelope_scope import (
+    TARGET_SOURCE_PLANNER,
+    TargetAuthorityError,
+    TargetPathError,
+    persistable_target_authority,
+    structured_editable_targets,
+    validate_target_path,
+)
 from app.providers.base import Message
 
 
@@ -100,8 +105,9 @@ class PlannedTaskSpec:
     verification_plan: list[dict] | None = None
     priority: int = 0
     max_attempts: int = 3
-    # Planner-named edit targets. Persisted into the task description so the code-agent
-    # context layer can require explicit paths without a new column/migration.
+    # Planner-named edit targets. Persisted on the append-only created event
+    # (`target_files` / `verify_only_tests` / `target_source`). Task.description is
+    # never a carrier of edit authority and is never parsed back into targets.
     target_files: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -225,11 +231,10 @@ def create_plan(
                 except VerificationStepError as exc:
                     raise PlanValidationError(str(exc)) from exc
         for path in spec.target_files:
-            if not isinstance(path, str) or not path:
-                raise PlanValidationError(f"target_files entries must be non-empty strings, got {path!r}")
-            posix = PurePosixPath(path)
-            if posix.is_absolute() or ".." in posix.parts:
-                raise PlanValidationError(f"target_files path must be a relative path with no '..': {path!r}")
+            try:
+                validate_target_path(path)
+            except TargetPathError as exc:
+                raise PlanValidationError(str(exc)) from exc
 
     edges = [(i, dep_idx) for i, spec in enumerate(tasks) for dep_idx in spec.depends_on]
     cycle = _detect_cycle(len(tasks), edges)
@@ -303,13 +308,15 @@ def create_plan(
 
     persisted: list[MainAITask] = []
     applied_lessons_by_task: list[list[uuid.UUID]] = []
+    authority_by_task: list[dict] = []
     for spec in tasks:
         # Engineering-lesson influence (app/mainai_execution/lessons.py): a previously recorded
         # lesson tagged for this task_type can add a targeted_tests step the spec itself didn't
         # already have -- real influence on what gets verified, not a loose suggestion. Only
         # ever ADDS to verification_plan, never removes a step the planner/founder specified.
+        pre_lesson_plan = list(spec.verification_plan or [])
         verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
-            db, task_type=spec.task_type, verification_plan=spec.verification_plan
+            db, task_type=spec.task_type, verification_plan=pre_lesson_plan
         )
         # Claude TEST-1: reject repo_edit without targeted_tests at plan time, before any
         # paid editing. Lessons may still inject the required step; check the post-lesson plan.
@@ -320,19 +327,21 @@ def create_plan(
                 "repo_edit tasks require at least one verification_plan step of kind "
                 "targeted_tests before any paid editing can begin."
             )
-        description = spec.description
-        persisted_targets = (
-            merge_repo_edit_target_files(spec.target_files, verification_plan)
-            if spec.task_type == "repo_edit"
-            else list(spec.target_files)
-        )
-        if persisted_targets:
-            description = description.rstrip() + "\nTarget files: " + " ".join(persisted_targets)
+        try:
+            authority = persistable_target_authority(
+                declared_target_files=spec.target_files,
+                pre_lesson_verification_plan=pre_lesson_plan,
+                post_lesson_verification_plan=verification_plan,
+                task_type=spec.task_type,
+                target_source=TARGET_SOURCE_PLANNER,
+            )
+        except (TargetPathError, TargetAuthorityError) as exc:
+            raise PlanValidationError(str(exc)) from exc
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
             owner_id=goal.owner_id,
-            description=description,
+            description=spec.description,
             task_type=spec.task_type,
             status=MainAITaskStatus.pending,
             priority=spec.priority,
@@ -344,6 +353,7 @@ def create_plan(
         db.add(task)
         persisted.append(task)
         applied_lessons_by_task.append(applied_lesson_ids)
+        authority_by_task.append(authority)
     db.flush()
 
     for i, spec in enumerate(tasks):
@@ -356,8 +366,8 @@ def create_plan(
                 )
             )
 
-    for task, applied_lesson_ids in zip(persisted, applied_lessons_by_task):
-        detail = {"plan_version": next_version}
+    for task, applied_lesson_ids, authority in zip(persisted, applied_lessons_by_task, authority_by_task):
+        detail = {"plan_version": next_version, **authority}
         if applied_lesson_ids:
             detail["lessons_applied"] = [str(lesson_id) for lesson_id in applied_lesson_ids]
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.created, detail=detail))
@@ -472,15 +482,22 @@ async def propose_plan_via_ai(
             raw_targets = []
         if not isinstance(raw_targets, list) or not all(isinstance(path, str) and path for path in raw_targets):
             raise PlanValidationError(f"tasks[{i}].target_files must be a list of non-empty strings.")
-        target_files = list(raw_targets)
-        if task_type == "repo_edit":
-            target_files = merge_repo_edit_target_files(target_files, verification_plan)
-            if not target_files:
-                raise PlanValidationError(
-                    f"tasks[{i}] repo_edit must name target_files (every file to create or "
-                    "edit, including the focused test file) rather than only mentioning "
-                    "filenames in prose."
+        try:
+            target_files = [validate_target_path(path) for path in raw_targets]
+            if task_type == "repo_edit":
+                target_files = structured_editable_targets(
+                    target_files,
+                    pre_lesson_verification_plan=verification_plan,
+                    task_type=task_type,
                 )
+                if not target_files:
+                    raise PlanValidationError(
+                        f"tasks[{i}] repo_edit must name target_files (every file to create or "
+                        "edit, including the focused test file) rather than only mentioning "
+                        "filenames in prose."
+                    )
+        except TargetPathError as exc:
+            raise PlanValidationError(f"tasks[{i}].target_files: {exc}") from exc
 
         specs.append(
             PlannedTaskSpec(

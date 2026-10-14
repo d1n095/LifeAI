@@ -30,6 +30,8 @@ from app.models.mainai_execution import (
     MainAIPlanStatus,
     MainAITask,
     MainAITaskDependency,
+    MainAITaskEvent,
+    MainAITaskEventType,
     MainAITaskStatus,
 )
 from app.models.intelligence_governance import IntelligenceEvidence
@@ -117,6 +119,33 @@ def _foundation(db, tmp_path, *, tied=False, approved=True):
         verification_plan=[{"kind": "targeted_tests", "target": "test_calculator.py"}],
     )
     db.add_all([implementation, focused_test])
+    db.flush()
+    db.add(
+        MainAITaskEvent(
+            task_id=implementation.id,
+            owner_id=owner.id,
+            event_type=MainAITaskEventType.created,
+            detail={
+                "plan_version": 1,
+                "target_files": ["calculator.py"],
+                "verify_only_tests": [],
+                "target_source": "planner",
+            },
+        )
+    )
+    db.add(
+        MainAITaskEvent(
+            task_id=focused_test.id,
+            owner_id=owner.id,
+            event_type=MainAITaskEventType.created,
+            detail={
+                "plan_version": 1,
+                "target_files": ["test_calculator.py", "calculator.py"],
+                "verify_only_tests": [],
+                "target_source": "planner",
+            },
+        )
+    )
     db.flush()
     if approved:
         grant_task_approval(db, task=implementation, approved_by="founder")

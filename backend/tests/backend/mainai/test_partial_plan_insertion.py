@@ -608,7 +608,7 @@ def test_inserted_task_still_requires_the_goals_named_approval_policy(db_session
         authority_kind="founder_requirement",
         authorized_instruction_sha256=_auth_hash(goal),
         idempotency_key="approval-gate-1",
-        tasks=[InsertedTaskSpec(description="Edit the repo", task_type="repo_edit")],
+        tasks=[InsertedTaskSpec(description="Edit the repo", task_type="repo_edit", target_files=("backend/app/x.py",))],
         source_type="founder_action",
         source_ref="test",
         reason="inserted repo edit",
@@ -855,7 +855,7 @@ def test_security_insertion_never_auto_grants_approval(db_session, owner_id):
         authority_kind="founder_requirement",
         authorized_instruction_sha256=_auth_hash(goal),
         idempotency_key="no-auto-approval-1",
-        tasks=[InsertedTaskSpec(description="Edit", task_type="repo_edit")],
+        tasks=[InsertedTaskSpec(description="Edit", task_type="repo_edit", target_files=("backend/app/x.py",))],
         source_type="founder_action",
         source_ref="test",
         reason="no bypass",
@@ -885,7 +885,7 @@ def test_security_no_self_work_bypass_regardless_of_source_type(db_session, owne
         authority_kind="founder_requirement",
         authorized_instruction_sha256=_auth_hash(goal),
         idempotency_key="no-self-work-bypass-1",
-        tasks=[InsertedTaskSpec(description="Edit", task_type="repo_edit")],
+        tasks=[InsertedTaskSpec(description="Edit", task_type="repo_edit", target_files=("backend/app/x.py",))],
         source_type="ai_self_proposed",
         source_ref="internal-agent",
         reason="self-proposed insertion",
@@ -929,7 +929,7 @@ def test_insert_applies_active_lessons_like_create_plan(db_session, owner_id):
         authority_kind="founder_requirement",
         authorized_instruction_sha256=_auth_hash(goal),
         idempotency_key="lesson-binding-insert-1",
-        tasks=[InsertedTaskSpec(description="Edit a file", task_type="repo_edit")],
+        tasks=[InsertedTaskSpec(description="Edit a file", task_type="repo_edit", target_files=("backend/app/x.py",))],
         source_type="founder_action",
         source_ref="test",
         reason="prove lesson binding on insertion",
@@ -945,3 +945,7 @@ def test_insert_applies_active_lessons_like_create_plan(db_session, owner_id):
         {"t": str(new_task.id)},
     ).scalar_one()
     assert created_event["lessons_applied"] == [str(lesson.id)]
+    assert created_event["target_files"] == ["backend/app/x.py"]
+    assert "backend/tests/backend/test_lesson_regression.py" in created_event["verify_only_tests"]
+    assert "backend/tests/backend/test_lesson_regression.py" not in created_event["target_files"]
+    assert created_event["target_source"] == "insertion"

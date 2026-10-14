@@ -491,7 +491,13 @@ def test_planner_target_files_are_required_and_persisted_into_the_task(db_sessio
     )
     db_session.commit()
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
-    assert "backend/app/core.py" in task.description
+    assert "Target files:" not in task.description
+    created = db_session.execute(
+        sa_text("SELECT detail FROM mainai_task_events WHERE task_id = :t AND event_type = 'created'"),
+        {"t": str(task.id)},
+    ).scalar_one()
+    assert created["target_files"][0] == "backend/app/core.py"
+    assert created["target_source"] == "planner"
 
 
 def _grant_custom(

@@ -118,7 +118,15 @@ def _goal(db_session, owner_id):
     return planner.create_goal(db_session, owner_id=owner_id, title="Recovery demo goal", original_instruction="Edit a file.", created_by="test")
 
 
-def _dispatch_and_claim(db_session, superuser_db, owner_id, *, task_type: str, description: str = "do it") -> tuple[MainAITask, MainAIGoal, MainAIJob]:
+def _dispatch_and_claim(
+    db_session,
+    superuser_db,
+    owner_id,
+    *,
+    task_type: str,
+    description: str = "do it",
+    target_files: list[str] | None = None,
+) -> tuple[MainAITask, MainAIGoal, MainAIJob]:
     """The real mechanism every demo below starts from: a genuine dispatch, then a genuine
     claim (so the job is really `running`, not merely `queued`) -- the exact state a worker
     process is in right before it does its real work and then dies. No shortcut ever sets
@@ -129,11 +137,14 @@ def _dispatch_and_claim(db_session, superuser_db, owner_id, *, task_type: str, d
     verification_plan = (
         [{"kind": "targeted_tests", "target": "tests/test_ok.py"}] if task_type == "repo_edit" else []
     )
+    spec_kwargs: dict = {"description": description, "task_type": task_type, "verification_plan": verification_plan}
+    if task_type == "repo_edit" and target_files:
+        spec_kwargs["target_files"] = target_files
     planner.create_plan(
         db_session,
         goal=goal,
         rationale="single task",
-        tasks=[PlannedTaskSpec(description=description, task_type=task_type, verification_plan=verification_plan)],
+        tasks=[PlannedTaskSpec(**spec_kwargs)],
         created_by="test",
     )
     db_session.commit()
@@ -259,7 +270,12 @@ async def test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work(
     monkeypatch.setattr(execution_job, "commit_worktree_changes", _commit_that_crashes_on_first_call)
 
     task, goal, dead_job = _dispatch_and_claim(
-        db_session, superuser_db, owner_id, task_type="repo_edit", description="add draft.txt"
+        db_session,
+        superuser_db,
+        owner_id,
+        task_type="repo_edit",
+        description="add draft.txt",
+        target_files=["draft.txt"],
     )
     dead_job_id = dead_job.id
 
@@ -348,7 +364,12 @@ async def test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_p
     monkeypatch.setattr(execution_job, "push_worktree_branch", _push_that_crashes_on_first_call)
 
     task, goal, dead_job = _dispatch_and_claim(
-        db_session, superuser_db, owner_id, task_type="repo_edit", description="add committed.txt"
+        db_session,
+        superuser_db,
+        owner_id,
+        task_type="repo_edit",
+        description="add committed.txt",
+        target_files=["committed.txt"],
     )
     dead_job_id = dead_job.id
 

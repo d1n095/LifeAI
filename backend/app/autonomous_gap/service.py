@@ -72,6 +72,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.checkpoint import record_checkpoint
+from app.mainai_execution.envelope_scope import (
+    TARGET_SOURCE_GAP,
+    CapabilityNameError,
+    file_targets_from_authorized_paths,
+    inherit_structured_edit_targets,
+    validate_capability_name,
+)
 from app.mainai_execution.plan_insertion import (
     ExistingTaskDependencyEdge,
     InsertedTaskSpec,
@@ -190,6 +197,7 @@ class DiscoveredGap:
     source_job_id: uuid.UUID | None = None
     repository_identity: str = ""
     allowed_paths: tuple[str, ...] = field(default_factory=tuple)
+    target_files: tuple[str, ...] = field(default_factory=tuple)
     required_capabilities: tuple[str, ...] = field(default_factory=tuple)
     risk_level: MainAIGoalRiskLevel = MainAIGoalRiskLevel.low
     verification_plan: tuple[dict, ...] = field(default_factory=tuple)
@@ -264,6 +272,24 @@ def instruction_sha256(instruction: str) -> str:
     return hashlib.sha256(instruction.encode()).hexdigest()
 
 
+def _coerce_risk_level(value) -> MainAIGoalRiskLevel:
+    if isinstance(value, MainAIGoalRiskLevel):
+        return value
+    return MainAIGoalRiskLevel(getattr(value, "value", value))
+
+
+def _risk_level_value(value) -> str:
+    return value.value if isinstance(value, MainAIGoalRiskLevel) else str(value)
+
+
+def _structured_gap_targets(db: Session, *, task, allowed_paths: tuple[str, ...]) -> tuple[str, ...]:
+    """Parent created-event targets ∩ envelope, else file-level binding paths. Never description."""
+    inherited = tuple(inherit_structured_edit_targets(db, task=task, allowed_paths=allowed_paths))
+    if inherited:
+        return inherited
+    return tuple(file_targets_from_authorized_paths(allowed_paths))
+
+
 def _gap_identity_key(gap: DiscoveredGap) -> str:
     """Canonical content hash of a gap's SEMANTIC identity -- deliberately excludes
     `required_capabilities`/`verification_plan`/`risk_level`/timestamps (incidental proposal
@@ -331,8 +357,9 @@ def record_gap(db: Session, *, owner_id: uuid.UUID, gap: DiscoveredGap, requeste
         "required_outcome": gap.required_outcome,
         "repository_identity": gap.repository_identity,
         "allowed_paths": list(gap.allowed_paths),
+        "target_files": list(gap.target_files),
         "required_capabilities": list(gap.required_capabilities),
-        "risk_level": gap.risk_level.value,
+        "risk_level": _risk_level_value(gap.risk_level),
         "unknowns": list(gap.unknowns),
         "candidate_options": list(gap.candidate_options),
         "unrelated_work_can_continue": gap.unrelated_work_can_continue,
@@ -402,9 +429,9 @@ def assess_gap_authority(db: Session, *, scope: SupervisorScope, goal: MainAIGoa
         )
     if set(gap.required_capabilities) - set(scope.allowed_capabilities):
         return "CAPABILITY_MISSING", "remediating this gap requires a capability outside the authorized capability envelope."
-    if RISK_ORDER.get(gap.risk_level.value, 99) > RISK_ORDER.get(scope.maximum_risk, -1):
-        return "NEEDS_AUTHORIZATION", f"gap's risk level '{gap.risk_level.value}' exceeds the authorized risk envelope '{scope.maximum_risk}'."
-    if gap.risk_level == MainAIGoalRiskLevel.high:
+    if RISK_ORDER.get(_risk_level_value(gap.risk_level), 99) > RISK_ORDER.get(scope.maximum_risk, -1):
+        return "NEEDS_AUTHORIZATION", f"gap's risk level '{_risk_level_value(gap.risk_level)}' exceeds the authorized risk envelope '{scope.maximum_risk}'."
+    if _coerce_risk_level(gap.risk_level) == MainAIGoalRiskLevel.high:
         return "EXTERNAL_REVIEW_REQUIRED", "high-risk remediation always requires external/human review, regardless of the authorized envelope."
     if gap.unknowns:
         return "NEEDS_CLARIFICATION", f"unresolved unknowns block automatic authorization: {'; '.join(gap.unknowns)}"
@@ -427,11 +454,13 @@ def propose_child_task_spec(gap: DiscoveredGap) -> InsertedTaskSpec:
         description=gap.required_outcome,
         task_type=gap.task_type,
         depends_on=tuple(gap.depends_on_existing_task_ids),
-        risk_level=gap.risk_level,
+        risk_level=_coerce_risk_level(gap.risk_level),
         approval_required=False,
         verification_plan=gap.verification_plan,
         priority=0,
         max_attempts=3,
+        target_files=tuple(gap.target_files),
+        target_source=TARGET_SOURCE_GAP,
     )
 
 
@@ -763,19 +792,31 @@ def _live_generation_depth(db: Session, *, owner_id: uuid.UUID, task: MainAITask
     depth 0. A task whose created event claims `autonomous_gap_child:` lineage MUST resolve to
     an owner-scoped parent LifeProblem -- otherwise fail closed (GapLineageError), never return
     0 and silently unbound the depth limit."""
-    event = db.execute(
-        select(MainAITaskEvent)
-        .where(
-            MainAITaskEvent.task_id == task.id,
-            MainAITaskEvent.owner_id == owner_id,
-            MainAITaskEvent.event_type == MainAITaskEventType.created,
+    events = (
+        db.execute(
+            select(MainAITaskEvent)
+            .where(
+                MainAITaskEvent.task_id == task.id,
+                MainAITaskEvent.owner_id == owner_id,
+                MainAITaskEvent.event_type == MainAITaskEventType.created,
+            )
+            .order_by(MainAITaskEvent.created_at.asc())
         )
-        .order_by(MainAITaskEvent.created_at.asc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if event is None:
+        .scalars()
+        .all()
+    )
+    if not events:
         return 0
-    key = (event.detail or {}).get("insertion_idempotency_key", "")
+    lineage_event = next(
+        (
+            event
+            for event in events
+            if isinstance((event.detail or {}).get("insertion_idempotency_key"), str)
+            and str((event.detail or {}).get("insertion_idempotency_key")).startswith(GAP_CHILD_INSERTION_PREFIX)
+        ),
+        events[0],
+    )
+    key = (lineage_event.detail or {}).get("insertion_idempotency_key", "")
     if not isinstance(key, str) or not key.startswith(GAP_CHILD_INSERTION_PREFIX):
         return 0
     parent_key = key[len(GAP_CHILD_INSERTION_PREFIX) :]
@@ -993,6 +1034,12 @@ def gap_from_verification_required(
     allowed_paths = _narrow_allowed_paths(scope=scope, binding_paths=binding_paths)
     if not allowed_paths:
         raise GapEvidenceError("failing WorkBinding path scope intersects authorized scope to empty set")
+    inherited_targets = _structured_gap_targets(db, task=task, allowed_paths=allowed_paths)
+    if not inherited_targets:
+        raise GapEvidenceError(
+            "gap repair has no structured editable targets inside the authorized path envelope "
+            "(refusing to inherit from description text)."
+        )
     evidence = dict(failure_evidence or {})
     evidence.setdefault("signal", "VERIFICATION_REQUIRED")
     repair_recipe = _structured_repair_recipe_for_gap(
@@ -1030,8 +1077,9 @@ def gap_from_verification_required(
         source_job_id=source_job_id,
         repository_identity=scope.repository_identity,
         allowed_paths=allowed_paths,
+        target_files=inherited_targets,
         required_capabilities=tuple(envelope["required_capabilities"]),
-        risk_level=task.risk_level,
+        risk_level=_coerce_risk_level(task.risk_level),
         verification_plan=tuple(task.verification_plan or ()),
         source_type="mainai_supervisor_verification_required",
         source_ref=f"mainai_task:{task.id}:verification_required",
@@ -1057,11 +1105,20 @@ def gap_from_capability_missing(
         raise GapCapabilityError(
             "CAPABILITY_MISSING requires a concrete requested capability name; refusing to collapse to 'unknown'"
         )
-    capability = str(capability).strip()
+    try:
+        capability = validate_capability_name(str(capability).strip())
+    except CapabilityNameError as exc:
+        raise GapCapabilityError(str(exc)) from exc
     depth = _live_generation_depth(db, owner_id=goal.owner_id, task=task)
     allowed_paths = _narrow_allowed_paths(scope=scope, binding_paths=binding_paths)
     if not allowed_paths:
         raise GapEvidenceError("failing WorkBinding path scope intersects authorized scope to empty set")
+    inherited_targets = _structured_gap_targets(db, task=task, allowed_paths=allowed_paths)
+    if not inherited_targets:
+        raise GapEvidenceError(
+            "capability-gap repair has no structured editable targets inside the authorized path envelope "
+            "(refusing to inherit from description text or the capability string)."
+        )
     evidence = dict(failure_evidence or {})
     evidence["requested_capability"] = capability
     envelope = _build_execution_envelope(
@@ -1086,6 +1143,7 @@ def gap_from_capability_missing(
         source_job_id=source_job_id,
         repository_identity=scope.repository_identity,
         allowed_paths=allowed_paths,
+        target_files=inherited_targets,
         risk_level=MainAIGoalRiskLevel.medium,
         source_type="mainai_supervisor_capability_missing",
         source_ref=f"mainai_task:{task.id}:capability_missing:{capability}",
