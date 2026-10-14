@@ -34,7 +34,7 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -191,6 +191,13 @@ def _validate_repo_edit_file_path(path_value: object) -> str:
     Path("/etc/cron.d/x")`, not an error) -- so an absolute AI-proposed path was a genuine
     arbitrary-file-WRITE primitive onto the executor host's filesystem, wherever the mainai
     worker process has write access, with no `..` involved at all."""
+    if not isinstance(path_value, str) or not path_value:
+        raise TaskExecutionError(f"Code agent file entry 'path' must be a non-empty string, got {path_value!r}.")
+    posix = PurePosixPath(path_value)
+    if posix.is_absolute() or ".." in posix.parts:
+        raise TaskExecutionError(
+            f"Refusing an absolute or '..'-escaping file path from the code agent: {path_value!r}"
+        )
     try:
         return validate_target_path(path_value)
     except TargetPathError as exc:
