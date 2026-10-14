@@ -1,8 +1,11 @@
 # MainAI Founder-supervised v1 — composition feasibility audit
 
-Date: 2026-10-14  
-Audit branch: `codex/mainai-activation-composition-audit`  
-Immutable base: `2fbe20aacf1203fc0e16d216ef55b666b2181619`  
+Date: 2026-10-14
+
+Audit branch: `codex/mainai-activation-composition-audit`
+
+Immutable base: `2fbe20aacf1203fc0e16d216ef55b666b2181619`
+
 Decision: **NO-GO until the gates in section 10 are evidenced**
 
 This is an evidence-only, read-only composition audit. It neither implements the
