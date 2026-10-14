@@ -1,5 +1,11 @@
 # Branch-/PR-register — projektets levande karta
 
+## MainAI activation composition audit (2026-10-14)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `codex/mainai-activation-composition-audit` | — | **Evidence-only; NO-GO manifest; no production changes** | Read-only ancestry and local merge simulation for Founder-supervised v1. Records #263, the latest provisional Path A/Track B candidates, migration collision exclusions, four semantic composition blockers, deterministic merge order and unresolved active-lane placeholders. Does not merge the accepted `8a5bdaf` contract or create the integration branch. See `docs/MAINAI_ACTIVATION_COMPOSITION_AUDIT.md`. |
+
 Detta är INTE bara en lista över brancher — det är projektets levande karta, och den
 manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUDE.md`s
 "Målet"-avsnitt och `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`). Den ska hållas uppdaterad

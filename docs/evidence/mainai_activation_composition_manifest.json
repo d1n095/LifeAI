@@ -1,0 +1,134 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-10-14",
+  "decision": "NO_GO",
+  "target_branch": "mainai/integration-founder-supervised-v1",
+  "target_branch_created": false,
+  "immutable_base": "2fbe20aacf1203fc0e16d216ef55b666b2181619",
+  "sources": {
+    "path_a": {
+      "pr": 272,
+      "candidate_sha": "bb2172e9e6fd1d83402ac1da1d40cc88866ca9da",
+      "product_commit": "a38c227b445be897796df3133291d3962037aca2",
+      "status": "PLACEHOLDER_AWAITING_INDEPENDENT_EXACT_SHA_VERDICT"
+    },
+    "track_b": {
+      "pr": 267,
+      "candidate_sha": "da4d96b2df9ef3345890e990e750c7bb15005040",
+      "product_commit": "c4b2477821c584ba49d2cf528d775abc8af1b5a9",
+      "status": "REQUIRES_COMPOSITION_SECURITY_GATES"
+    },
+    "github_read_only": {
+      "pr": 263,
+      "candidate_sha": "e33f494c4fc53704c494cecea788f3e22be36330",
+      "product_commit": "5bec345a6095a1c1bf72ed12b0772de35813832a"
+    },
+    "activation_security_contract": {
+      "sha": "8a5bdaf28f3a94c629a296ad9804f0a043165ca7",
+      "role": "SPECIFICATION_AND_REFERENCE_ORACLE_ONLY",
+      "merge_into_production": false
+    }
+  },
+  "unresolved_sources": {
+    "path_a_certified_sha": "PLACEHOLDER",
+    "track_b_certified_sha_or_successor": "PLACEHOLDER",
+    "task_authority_certified_sha": "PLACEHOLDER",
+    "activation_security_implementation_certified_sha": "PLACEHOLDER",
+    "frontend_npm_audit_remediation_certified_sha": "PLACEHOLDER",
+    "required_check_set_attestation_digest": "PLACEHOLDER",
+    "github_ruleset_attestation_digest": "PLACEHOLDER",
+    "github_token_permission_attestation_digest": "PLACEHOLDER"
+  },
+  "merge_order": [
+    "immutable_base",
+    "path_a_certified_final_descendant",
+    "track_b_certified_final_descendant",
+    "github_read_only_pr_263",
+    "task_authority_certified_candidate",
+    "activation_security_implementation_built_on_exact_composed_parent",
+    "frontend_npm_audit_remediation_certified_candidate"
+  ],
+  "expected_parentage": {
+    "root": "2fbe20aacf1203fc0e16d216ef55b666b2181619",
+    "strategy": "first_parent_chain_with_declared_merge_parents",
+    "final_sha": "NOT_COMPUTABLE_UNTIL_PLACEHOLDERS_FREEZE",
+    "no_speculative_rebase": true
+  },
+  "known_textual_conflicts": [
+    {
+      "path": "backend/tests/backend/test_github_client.py",
+      "resolution": "retain_union_of_pr263_read_only_pagination_and_path_a_draft_pr_tests"
+    },
+    {
+      "path": "docs/BRANCH_REGISTRY.md",
+      "resolution": "retain_all_current_lane_records"
+    }
+  ],
+  "semantic_blockers": [
+    "credential_bearing_git_remote_exposes_token_and_bypasses_push_gate",
+    "agent_assignment_lacks_distinct_envelope_effect_authority",
+    "track_b_builder_allowed_paths_not_enforced_by_filesystem_or_post_diff_gate",
+    "pr_reference_is_incorrectly_reported_as_merged"
+  ],
+  "required_migrations": [
+    {
+      "recommended_revision": "0089_mainai_activation_security",
+      "down_revision": "0088_erasure_completion_phase",
+      "condition": "only_if_continuous_conversation_and_founder_sovereignty_lineages_are_excluded",
+      "contents": [
+        "activation_envelope_base_sha_and_required_check_binding",
+        "mainai_push_grants",
+        "mainai_activation_preflight_receipts",
+        "constraints_indexes_rls_and_runtime_grants"
+      ]
+    }
+  ],
+  "migration_conflicts_to_exclude": [
+    "continuous_conversation_0090_0091_0092_family",
+    "founder_sovereignty_0090_0091_0092_family"
+  ],
+  "required_feature_semantics": {
+    "activation_mode": "default_off_fail_closed_single_founder_supervised_goal",
+    "github_write": "enabled_only_during_authorized_run_and_still_per_effect_gated",
+    "github_auto_merge": false,
+    "legacy_prepare_pr_writes": false,
+    "track_b_builder": false,
+    "track_b_reviewer": "read_only_and_separately_authorized",
+    "deploy": false,
+    "release": false,
+    "recall_activation": false
+  },
+  "required_test_groups": [
+    "activation_security_reference_oracles_and_production_acceptance",
+    "path_a_adversarial_and_examiner_probes",
+    "track_b_session_adapter_routing_and_assignment_security",
+    "task_authority_independent_probes",
+    "migration_single_head_roundtrip_rls_and_privileges",
+    "full_backend_and_product_ci",
+    "frontend_audit_typescript_eslint_build_tests_and_e2e",
+    "exact_sha_immutable_required_check_set",
+    "independent_final_exact_sha_examination"
+  ],
+  "explicit_exclusions": [
+    "activation_security_spec_sha_as_production_code",
+    "superseded_path_a_ancestors_as_separate_merges",
+    "examiner_and_evidence_branches_as_implementation",
+    "continuous_conversation_migration_lineage",
+    "founder_sovereignty_migration_lineage",
+    "grandmaster_or_claim_action_as_implicit_authority_framework",
+    "uncertified_frontend_audit_proposals",
+    "active_cursor_or_claude_candidates_without_exact_sha_verdict"
+  ],
+  "go_requires": [
+    "all_placeholder_source_shas_independently_frozen",
+    "all_semantic_blockers_closed_with_adversarial_tests",
+    "single_linear_migration_head",
+    "ruleset_and_token_facts_proved_or_immutable_admin_attested",
+    "deterministic_preflight_go_receipt_for_exact_sha_and_authority_version",
+    "distinct_repo_edit_push_and_open_pr_authorities",
+    "credential_free_worktree_and_exact_sha_bindings",
+    "complete_local_and_github_exact_sha_ci_green",
+    "independent_final_exact_sha_examination",
+    "explicit_human_founder_branch_creation_authorization"
+  ]
+}
