@@ -51,6 +51,21 @@ from dataclasses import dataclass, field
 from sqlalchemy import select, text as sa_text
 from sqlalchemy.orm import Session
 
+from app.execution_envelopes.service import (
+    get_current_execution_envelope,
+    goal_has_ever_been_envelope_governed,
+)
+from app.mainai_execution.envelope_scope import (
+    KNOWN_TARGET_SOURCES,
+    TARGET_SOURCE_INSERTION,
+    PathAEnvelopeError,
+    TargetAuthorityError,
+    TargetPathError,
+    assert_paths_in_envelope,
+    display_target_files_suffix,
+    persistable_target_authority,
+    validate_target_path,
+)
 from app.mainai_execution.graph import recompute_task_readiness
 from app.mainai_execution.lessons import apply_lessons_to_verification_plan
 from app.mainai_execution.planner import KNOWN_TASK_TYPES, _detect_cycle
@@ -134,6 +149,8 @@ class InsertedTaskSpec:
     verification_plan: tuple[dict, ...] = field(default_factory=tuple)
     priority: int = 0
     max_attempts: int = 3
+    target_files: tuple[str, ...] = field(default_factory=tuple)
+    target_source: str = TARGET_SOURCE_INSERTION
 
 
 @dataclass(frozen=True)
@@ -178,6 +195,8 @@ def _semantic_hash(
                 "verification_plan": list(t.verification_plan),
                 "priority": t.priority,
                 "max_attempts": t.max_attempts,
+                "target_files": list(t.target_files),
+                "target_source": t.target_source,
             }
             for t in tasks
         ],
@@ -376,6 +395,13 @@ def insert_plan_tasks(
                     validate_targeted_tests_target(step.get("target"))
                 except VerificationStepError as exc:
                     raise PlanInsertionValidationError(str(exc)) from exc
+        if spec.target_source not in KNOWN_TARGET_SOURCES:
+            raise PlanInsertionValidationError(f"tasks[{i}].target_source {spec.target_source!r} is not a known provenance.")
+        for path in spec.target_files:
+            try:
+                validate_target_path(path)
+            except TargetPathError as exc:
+                raise PlanInsertionValidationError(f"tasks[{i}].target_files: {exc}") from exc
         for dep in spec.depends_on:
             if isinstance(dep, int):
                 if not (0 <= dep < len(tasks_t)):
@@ -461,19 +487,44 @@ def insert_plan_tasks(
     # convention planner.py's create_plan() and executor.py's dispatch_ready_task() follow).
     # Same lesson-binding as create_plan: inserted tasks must not bypass known regression
     # lessons just because they arrived via partial insertion rather than a full replan.
+    envelope = None
+    if goal_has_ever_been_envelope_governed(db, owner_id=goal.owner_id, goal_id=goal.id):
+        envelope = get_current_execution_envelope(db, owner_id=goal.owner_id, goal_id=goal.id)
+        if envelope is None or getattr(envelope, "status", None) != "active":
+            raise PlanInsertionValidationError(
+                "Refusing insertion: the goal is envelope-governed but has no current active execution envelope."
+            )
+
     persisted: list[MainAITask] = []
     applied_lessons_by_task: list[list] = []
-    for spec in tasks_t:
+    authority_by_task: list[dict] = []
+    for i, spec in enumerate(tasks_t):
+        pre_lesson_plan = list(spec.verification_plan)
         verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
             db,
-            verification_plan=list(spec.verification_plan),
+            verification_plan=pre_lesson_plan,
             task_type=spec.task_type,
         )
+        try:
+            authority = persistable_target_authority(
+                declared_target_files=spec.target_files,
+                pre_lesson_verification_plan=pre_lesson_plan,
+                post_lesson_verification_plan=verification_plan,
+                task_type=spec.task_type,
+                target_source=spec.target_source,
+            )
+        except (TargetPathError, TargetAuthorityError) as exc:
+            raise PlanInsertionValidationError(f"tasks[{i}]: {exc}") from exc
+        try:
+            assert_paths_in_envelope(envelope, authority["target_files"], action="to insert as editable targets")
+        except PathAEnvelopeError as exc:
+            raise PlanInsertionValidationError(f"tasks[{i}]: {exc}") from exc
+        description = spec.description.rstrip() + display_target_files_suffix(authority["target_files"])
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
             owner_id=goal.owner_id,
-            description=spec.description,
+            description=description,
             task_type=spec.task_type,
             status=MainAITaskStatus.pending,
             priority=spec.priority,
@@ -485,6 +536,7 @@ def insert_plan_tasks(
         db.add(task)
         persisted.append(task)
         applied_lessons_by_task.append(applied_lesson_ids)
+        authority_by_task.append(authority)
     db.flush()
 
     for i, spec in enumerate(tasks_t):
@@ -517,6 +569,7 @@ def insert_plan_tasks(
             "reason": reason,
             "requested_by": requested_by,
             "kind": "partial_plan_insertion",
+            **authority_by_task[i],
         }
         applied_lesson_ids = applied_lessons_by_task[i]
         if applied_lesson_ids:

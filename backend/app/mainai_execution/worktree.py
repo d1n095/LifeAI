@@ -254,6 +254,21 @@ async def create_task_worktree(
     )
 
 
+def worktree_changed_files(worktree: MainAITaskWorktree) -> list[str]:
+    """Repo-root relative paths that differ between the verified base SHA and HEAD.
+
+    Used immediately before remote publication so the actual Git changed-file set
+    can be compared against structured editable targets. The ownership marker is
+    excluded via `.git/info/exclude` and never appears here.
+    """
+    _require_ownership(worktree)
+    if not worktree.base_sha:
+        raise WorktreeError("worktree has no base_sha — refusing to compute changed files.")
+    path = Path(worktree.path)
+    result = _run_git(["diff", "--name-only", "-z", f"{worktree.base_sha}..HEAD"], cwd=path)
+    return [entry for entry in result.stdout.split("\0") if entry]
+
+
 def worktree_git_status(worktree: MainAITaskWorktree) -> dict:
     """Read-only snapshot used by the recovery inspector — never mutates anything. Returns
     ownership_verified=False (with every other field left at its safe default) rather than

@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from app.mainai_execution.envelope_scope import TargetPathError, validate_target_path
+
 _PATH_RE = re.compile(
     r"(?:^|[\s`'\"(\[])("
     r"(?:(?:backend|frontend|docs|app|tests|scripts)/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+)"
@@ -61,14 +63,13 @@ def explicit_target_paths(*texts: str, extra: list[str] | None = None) -> list[s
                 seen.add(path)
                 found.append(path)
     for path in extra or []:
-        if not isinstance(path, str) or not path:
-            raise ValueError(f"target file path must be a non-empty string, got {path!r}")
-        posix = PurePosixPath(path)
-        if posix.is_absolute() or ".." in posix.parts:
-            raise ValueError(f"Refusing absolute or '..'-escaping target file: {path!r}")
-        if path not in seen:
-            seen.add(path)
-            found.append(path)
+        try:
+            canonical = validate_target_path(path)
+        except TargetPathError as exc:
+            raise ValueError(str(exc)) from exc
+        if canonical not in seen:
+            seen.add(canonical)
+            found.append(canonical)
     return found
 
 

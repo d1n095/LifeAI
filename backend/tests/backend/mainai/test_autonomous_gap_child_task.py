@@ -123,7 +123,7 @@ def _scope(
     self_work=False,
     authority_kind="founder_requirement",
     maximum_risk="medium",
-    allowed_paths=("backend/app",),
+    allowed_paths=("backend/app/",),
     allowed_capabilities=(),
     repository_identity="lifeai",
 ):
@@ -152,6 +152,7 @@ def _verification_failure_gap(goal, scope, task_id, *, reason="targeted test fai
         source_task_id=task_id,
         repository_identity=scope.repository_identity,
         allowed_paths=scope.allowed_paths,
+        target_files=("backend/app/module.py",),
         risk_level=MainAIGoalRiskLevel.low,
     )
 
@@ -167,6 +168,7 @@ def _capability_missing_gap(goal, scope, task_id):
         source_task_id=task_id,
         repository_identity=scope.repository_identity,
         allowed_paths=scope.allowed_paths,
+        target_files=("backend/app/module.py",),
         risk_level=MainAIGoalRiskLevel.medium,
     )
 
@@ -262,6 +264,7 @@ def test_missing_prerequisite_inserts_an_additive_dependency_without_recreating_
         task_type="repo_edit",
         repository_identity=scope.repository_identity,
         allowed_paths=scope.allowed_paths,
+        target_files=("backend/app/module.py",),
         existing_task_dependency_target=b.id,
     )
 
@@ -292,7 +295,9 @@ def test_duplicate_gap_discovered_twice_yields_exactly_one_canonical_task(db_ses
 
     assert first.problem.id == second.problem.id
     assert [t.id for t in first.inserted_tasks] == [t.id for t in second.inserted_tasks]
-    count = db_session.query(MainAITask).filter(MainAITask.plan_id == plan.id, MainAITask.description == "Fix the duplicate gap").count()
+    count = db_session.query(MainAITask).filter(
+        MainAITask.plan_id == plan.id, MainAITask.description.startswith("Fix the duplicate gap")
+    ).count()
     assert count == 1
 
 
@@ -386,7 +391,9 @@ def test_interruption_after_gap_evidence_recorded_resumes_without_a_duplicate_ch
     assert outcome.problem.id == problem_id
     assert outcome.classification == "ACCEPTED"
     assert len(outcome.inserted_tasks) == 1
-    count = db_session.query(MainAITask).filter(MainAITask.plan_id == plan.id, MainAITask.description == "Fix the interrupted gap").count()
+    count = db_session.query(MainAITask).filter(
+        MainAITask.plan_id == plan.id, MainAITask.description.startswith("Fix the interrupted gap")
+    ).count()
     assert count == 1
 
 
@@ -474,6 +481,7 @@ def test_self_work_generates_a_child_through_the_full_chain_with_no_bypass(db_se
         source_task_id=a.id,
         repository_identity=scope.repository_identity,
         allowed_paths=scope.allowed_paths,
+        target_files=("backend/app/module.py",),
     )
 
     outcome = generate_child_task_for_gap(db_session, scope=scope, goal=goal, plan=plan, gap=gap, requested_by="test")
@@ -626,6 +634,7 @@ def test_security_owner_isolation_cross_owner_dependency_target_is_rejected(db_s
         required_outcome="x",
         repository_identity=scope.repository_identity,
         allowed_paths=scope.allowed_paths,
+        target_files=("backend/app/module.py",),
         existing_task_dependency_target=other_task_id,
     )
 

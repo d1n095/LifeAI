@@ -324,21 +324,15 @@ async def test_e2e_b_ai_plan_without_target_files_is_accepted(db_session, superu
         {"g": str(goal.id)},
     ).all()
     refusal = next((d for _, et, d in events if "Refusing" in (d or "")), None)
-    pushed = [
-        ref
-        for ref in _git("-C", str(github.bare), "for-each-ref", "--format=%(refname:short)", "refs/heads").split("\n")
-        if ref.startswith("claude/mainai-task-")
-    ]
-    ctx_holds = refusal is None
-    cycle_holds = bool(github.prs) and bool(pushed)
-    M("E2E-B AI-planned edit (module + new focused test) is accepted by the CTX gate", ctx_holds, f"refusal={(refusal or '')[:160]}")
+    pushed_paths = _pushed_paths(github.bare)
+    greeting_pushed = any("backend/app/greeting.py" in files for files in pushed_paths.values())
     M(
-        "E2E-B full cycle reaches a verified push and a draft PR",
-        cycle_holds,
-        f"task states={states}; pushed={pushed}; PRs={github.prs}; provider calls={calls}",
+        "E2E-B AI plan without target_files cannot turn prose-named modules into edit authority",
+        not greeting_pushed,
+        f"plan_error={plan_error}; states={states}; pushed={pushed_paths}; PRs={github.prs}; refusal={(refusal or '')[:160]}; calls={calls}",
     )
-    assert ctx_holds
-    assert cycle_holds
+    assert not greeting_pushed
+    assert github.prs == []
 
 
 @pytest.mark.asyncio

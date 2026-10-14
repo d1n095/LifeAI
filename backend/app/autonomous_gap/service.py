@@ -72,6 +72,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.checkpoint import record_checkpoint
+from app.mainai_execution.envelope_scope import (
+    TARGET_SOURCE_GAP,
+    CapabilityNameError,
+    inherit_structured_edit_targets,
+    validate_capability_name,
+)
 from app.mainai_execution.plan_insertion import (
     ExistingTaskDependencyEdge,
     InsertedTaskSpec,
@@ -190,6 +196,7 @@ class DiscoveredGap:
     source_job_id: uuid.UUID | None = None
     repository_identity: str = ""
     allowed_paths: tuple[str, ...] = field(default_factory=tuple)
+    target_files: tuple[str, ...] = field(default_factory=tuple)
     required_capabilities: tuple[str, ...] = field(default_factory=tuple)
     risk_level: MainAIGoalRiskLevel = MainAIGoalRiskLevel.low
     verification_plan: tuple[dict, ...] = field(default_factory=tuple)
@@ -331,6 +338,7 @@ def record_gap(db: Session, *, owner_id: uuid.UUID, gap: DiscoveredGap, requeste
         "required_outcome": gap.required_outcome,
         "repository_identity": gap.repository_identity,
         "allowed_paths": list(gap.allowed_paths),
+        "target_files": list(gap.target_files),
         "required_capabilities": list(gap.required_capabilities),
         "risk_level": gap.risk_level.value,
         "unknowns": list(gap.unknowns),
@@ -432,6 +440,8 @@ def propose_child_task_spec(gap: DiscoveredGap) -> InsertedTaskSpec:
         verification_plan=gap.verification_plan,
         priority=0,
         max_attempts=3,
+        target_files=tuple(gap.target_files),
+        target_source=TARGET_SOURCE_GAP,
     )
 
 
@@ -993,6 +1003,12 @@ def gap_from_verification_required(
     allowed_paths = _narrow_allowed_paths(scope=scope, binding_paths=binding_paths)
     if not allowed_paths:
         raise GapEvidenceError("failing WorkBinding path scope intersects authorized scope to empty set")
+    inherited_targets = tuple(inherit_structured_edit_targets(db, task=task, allowed_paths=allowed_paths))
+    if not inherited_targets:
+        raise GapEvidenceError(
+            "gap repair has no structured editable targets inside the authorized path envelope "
+            "(refusing to inherit from description text)."
+        )
     evidence = dict(failure_evidence or {})
     evidence.setdefault("signal", "VERIFICATION_REQUIRED")
     repair_recipe = _structured_repair_recipe_for_gap(
@@ -1030,6 +1046,7 @@ def gap_from_verification_required(
         source_job_id=source_job_id,
         repository_identity=scope.repository_identity,
         allowed_paths=allowed_paths,
+        target_files=inherited_targets,
         required_capabilities=tuple(envelope["required_capabilities"]),
         risk_level=task.risk_level,
         verification_plan=tuple(task.verification_plan or ()),
@@ -1057,11 +1074,20 @@ def gap_from_capability_missing(
         raise GapCapabilityError(
             "CAPABILITY_MISSING requires a concrete requested capability name; refusing to collapse to 'unknown'"
         )
-    capability = str(capability).strip()
+    try:
+        capability = validate_capability_name(str(capability).strip())
+    except CapabilityNameError as exc:
+        raise GapCapabilityError(str(exc)) from exc
     depth = _live_generation_depth(db, owner_id=goal.owner_id, task=task)
     allowed_paths = _narrow_allowed_paths(scope=scope, binding_paths=binding_paths)
     if not allowed_paths:
         raise GapEvidenceError("failing WorkBinding path scope intersects authorized scope to empty set")
+    inherited_targets = tuple(inherit_structured_edit_targets(db, task=task, allowed_paths=allowed_paths))
+    if not inherited_targets:
+        raise GapEvidenceError(
+            "capability-gap repair has no structured editable targets inside the authorized path envelope "
+            "(refusing to inherit from description text or the capability string)."
+        )
     evidence = dict(failure_evidence or {})
     evidence["requested_capability"] = capability
     envelope = _build_execution_envelope(
@@ -1086,6 +1112,7 @@ def gap_from_capability_missing(
         source_job_id=source_job_id,
         repository_identity=scope.repository_identity,
         allowed_paths=allowed_paths,
+        target_files=inherited_targets,
         risk_level=MainAIGoalRiskLevel.medium,
         source_type="mainai_supervisor_capability_missing",
         source_ref=f"mainai_task:{task.id}:capability_missing:{capability}",
