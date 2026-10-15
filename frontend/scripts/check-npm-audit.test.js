@@ -79,3 +79,15 @@ test("a major-only moderate dev migration remains tracked but non-blocking", () 
   }));
   assert.deepEqual(errors, []);
 });
+
+test("a propagated moderate wrapper cannot override its root's major-only fix", () => {
+  const errors = evaluateAudits(report(), report({
+    wrapper: { name: "wrapper", severity: "moderate", via: ["root"], fixAvailable: true },
+    root: {
+      name: "root", severity: "moderate",
+      via: [{ source: 42, severity: "moderate", url: "https://example.invalid/root" }],
+      fixAvailable: { name: "parent", version: "4.0.0", isSemVerMajor: true },
+    },
+  }));
+  assert.deepEqual(errors, []);
+});

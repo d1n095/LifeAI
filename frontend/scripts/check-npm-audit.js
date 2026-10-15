@@ -85,8 +85,14 @@ function evaluateAudits(production, full) {
           );
         }
       }
-    } else if (compatibleFixAvailable(vulnerability)) {
-      errors.push(`actionable dev vulnerability: ${packageName} (${vulnerability.severity})`);
+    } else {
+      const roots = rootAdvisories(full, packageName);
+      const actionableRoots = roots.filter(({ packageName: rootPackage }) =>
+        compatibleFixAvailable((full.vulnerabilities || {})[rootPackage] || {})
+      );
+      if ((roots.length === 0 && compatibleFixAvailable(vulnerability)) || actionableRoots.length > 0) {
+        errors.push(`actionable dev vulnerability: ${packageName} (${vulnerability.severity})`);
+      }
     }
   }
   return [...new Set(errors)].sort();
