@@ -1,0 +1,25 @@
+composition: local merge 05df3db (#271) + da4d96b (#267) = 58b5170 (never pushed)
+claude_audit: 94572c28f89bb12d57c855f08cadbce47386e8f0
+pytest: 16 passed (MATRIX never raises on GAP) + E2E-D 1 passed / 4 deselected
+
+MATRIX|TB-1 agent_assignment launches only with a distinct Founder-authorized envelope effect (agent_dispatch) bound to role/mode/workspace|GAP|path_a envelope without agent capability cli_launched=True cwd=not-a-mainai-worktree; never-governed goal cli_launched=True
+MATRIX|TB-2 builder allowed_paths is an enforced boundary|GAP|out_of_scope.py=True ../escape_relative.txt=True absolute=True via symlink=True permission=acceptEdits
+MATRIX|TB-3a reviewer argv selects the CLI read-only mode|HOLDS|argv permission=['plan']
+MATRIX|TB-3b reviewer is read-only at the OS / Git level|GAP|edit landed; HEAD subject='agent commit'
+MATRIX|TB-3c the reviewer's checkout contains no reusable GitHub credential|GAP|remote.origin.url carries token=True; readable by the agent process=True
+MATRIX|TB-4 a PR reference / successful agent result is never recorded as merged|GAP|merge_result=merged; upstream_pr_ref=https://github.com/test-owner/test-repo/pull/7
+MATRIX|TB-6 MainAI-owned sessions, isolated HOME, no Founder resume, unsupported resume dialects fail closed, no default secret forwarding|HOLDS|founder HOME accepted=False; cursor/codex resume=refused; HMAC session ids
+MATRIX|TB-6b env allowlist refuses secret-bearing names|GAP|forwarded=['GITHUB_TOKEN','SECRET_KEY']
+MATRIX|TB-5 a negative review verdict is not recorded as a completed/passing review and does not unblock dependents|GAP|agent_assignment=completed; read_only_audit=retryable_failed
+MATRIX|TB-7 code executed during Path A verification cannot read a reusable push credential|GAP|exfil file written=True; token present=True
+MATRIX|E2E-D Track B review runs through the worker with the isolated HOME|HOLDS|cli HOME isolated=True; assignment=waiting_review
+MATRIX|E2E-D the reviewer's verdict becomes a verification receipt bound to the PR head SHA|GAP|mainai_verification_records rows=0
+MATRIX|INDEP-TB-1 wrong-capability / Path-A-only envelopes cannot launch agent_assignment|GAP|path_a+open_pr cli_launched=True; path_a-only cli_launched=True
+MATRIX|INDEP-TB-3e reviewer role cannot be created in read_write / builder mode|HOLDS|CoordinationError read_only
+MATRIX|INDEP-TB-2e worktree_path symlink is resolved/owned before cwd|GAP|host file written=True
+MATRIX|INDEP-TB-3d reviewer process cannot push using a persisted origin credential|GAP|push_rc=0; pushed_ref=True
+MATRIX|INDEP-TB-3c _authed_remote_url does not embed the token (#267 and #273)|GAP|same_on_frozen_273=True
+MATRIX|INDEP-TB-4b conversation collect_result never sets pr_ref|HOLDS|collect_result binds pr_ref=False
+MATRIX|INDEP-TB-6c Track B CLI budget is recorded on the governed provider_spend ledger|GAP|agent_coordination provider_spend files=[]
+MATRIX|INDEP-TB-8 review evidence is bound via mainai_verification_registry|GAP|references=none
+MATRIX|INDEP-TB-6d _run_git does not inherit the worker process environment|GAP|env= absent
