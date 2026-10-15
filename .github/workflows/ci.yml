@@ -52,9 +52,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
-      # Fails the job on any high/critical vulnerability, except the small, dated,
-      # ID-scoped allowlist in scripts/check-npm-audit.js — moderate-and-below are tracked
-      # but don't block (see docs/SECURITY_BLOCKERS.md for the current baseline).
+      - run: npm run audit:policy:test
+        working-directory: frontend
+      # Production findings always fail. High/critical dev findings fail except the one
+      # exact, dated braces advisory; compatible actionable dev fixes also fail.
       - run: node scripts/check-npm-audit.js
         working-directory: frontend
 
