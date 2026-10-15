@@ -1,5 +1,11 @@
 # Branch-/PR-register — projektets levande karta
 
+## FC-4 frontend npm-audit remediation (2026-10-15)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `codex/frontend-npm-audit-fc4-remediation` | draft pending | **Isolated frontend dependency/security-policy remediation; do not merge before independent examination** | Patch-level Next.js/PostCSS/sharp/source-map/brace-expansion remediation, deterministic production/dev audit policy, and one exact dated dev-only `braces` exception. No backend, migration, Recall, Path A/B, activation-authority or deployment changes. |
+
 Detta är INTE bara en lista över brancher — det är projektets levande karta, och den
 manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUDE.md`s
 "Målet"-avsnitt och `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`). Den ska hållas uppdaterad

@@ -1,59 +1,112 @@
 #!/usr/bin/env node
-// Fails CI on any high/critical npm audit finding EXCEPT the advisories explicitly
-// allowlisted below. This is a dated, ID-scoped exception mechanism, not a general
-// suppression switch — every entry must reference a docs/SECURITY_BLOCKERS.md item
-// explaining why no fix exists yet and when to remove it.
 "use strict";
 
-const { execSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 
-const ALLOWLISTED_ADVISORY_SOURCES = new Set([
-  // GHSA-mh99-v99m-4gvg (brace-expansion DoS). No eslint-config-next release yet supports
-  // eslint@10 (which is the only line using a patched brace-expansion) — see
-  // docs/SECURITY_BLOCKERS.md, "brace-expansion / GHSA-mh99-v99m-4gvg". Dev-only lint
-  // tooling, never shipped in the production bundle. Remove these lines once
-  // eslint-config-next (or eslint-plugin-react/import/jsx-a11y) ships a compatible release.
-  //
-  // GitHub's advisory database re-numbered this SAME advisory's `via.source` id between
-  // when it was first allowlisted (1124334) and 2026-08-02 (1130588, 1130591) — no
-  // dependency, lockfile, or vulnerable version range changed; `npm audit` just reports a
-  // different internal id for the identical GHSA-mh99-v99m-4gvg finding now. Kept all three
-  // ids rather than replacing, since the same churn could recur and this allowlist is
-  // intentionally id-scoped, not GHSA-scoped.
-  1124334,
-  1130588,
-  1130591,
+// Temporary exception approved 2026-10-15. It is deliberately bound to every stable
+// advisory attribute npm exposes, not merely severity or package name. Removal condition:
+// remove as soon as braces publishes a patched compatible release, or Next/Tailwind no
+// longer resolve braces <=3.0.3. Review no later than 2027-01-15.
+const TEMPORARY_DEV_EXCEPTIONS = Object.freeze([
+  Object.freeze({
+    package: "braces",
+    source: 1240992,
+    severity: "high",
+    url: "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+    title: "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns",
+    range: "<=3.0.3",
+  }),
 ]);
 
-function runAudit() {
-  try {
-    return execSync("npm audit --json", { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
-  } catch (err) {
-    // npm audit exits non-zero the moment any vulnerability is found — the JSON report is
-    // still written to stdout, so a non-zero exit here is not itself a failure to handle.
-    if (err.stdout) return err.stdout;
-    throw err;
+function runAudit(extraArgs = []) {
+  const result = spawnSync("npm", ["audit", ...extraArgs, "--json"], {
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  if (!result.stdout) {
+    throw new Error(`npm audit produced no JSON: ${result.stderr || `exit ${result.status}`}`);
   }
+  const parsed = JSON.parse(result.stdout);
+  if (parsed.error || parsed.message) {
+    throw new Error(`npm audit failed: ${parsed.message || parsed.error.summary || "unknown error"}`);
+  }
+  return parsed;
 }
 
-const audit = JSON.parse(runAudit());
-const offendingSources = new Set();
+function advisoryMatchesException(packageName, advisory) {
+  return TEMPORARY_DEV_EXCEPTIONS.some((exception) =>
+    exception.package === packageName &&
+    exception.source === advisory.source &&
+    exception.severity === advisory.severity &&
+    exception.url === advisory.url &&
+    exception.title === advisory.title &&
+    exception.range === advisory.range
+  );
+}
 
-for (const vuln of Object.values(audit.vulnerabilities || {})) {
-  if (vuln.severity !== "high" && vuln.severity !== "critical") continue;
-  for (const via of vuln.via || []) {
-    if (typeof via === "object" && via !== null && via.source != null) {
-      if (!ALLOWLISTED_ADVISORY_SOURCES.has(via.source)) {
-        offendingSources.add(`${via.source} (${via.url || via.title || "unknown"})`);
+function rootAdvisories(report, packageName, seen = new Set()) {
+  if (seen.has(packageName)) return [];
+  seen.add(packageName);
+  const vulnerability = (report.vulnerabilities || {})[packageName];
+  if (!vulnerability) return [];
+  const roots = [];
+  for (const via of vulnerability.via || []) {
+    if (typeof via === "string") roots.push(...rootAdvisories(report, via, new Set(seen)));
+    else if (via && typeof via === "object") roots.push({ packageName, advisory: via });
+  }
+  return roots;
+}
+
+function compatibleFixAvailable(vulnerability) {
+  const fix = vulnerability.fixAvailable;
+  return fix === true || Boolean(fix && typeof fix === "object" && fix.isSemVerMajor === false);
+}
+
+function evaluateAudits(production, full) {
+  const errors = [];
+  for (const vulnerability of Object.values(production.vulnerabilities || {})) {
+    errors.push(`production vulnerability: ${vulnerability.name} (${vulnerability.severity})`);
+  }
+
+  for (const [packageName, vulnerability] of Object.entries(full.vulnerabilities || {})) {
+    if (vulnerability.severity === "high" || vulnerability.severity === "critical") {
+      const roots = rootAdvisories(full, packageName).filter(
+        ({ advisory }) => advisory.severity === "high" || advisory.severity === "critical"
+      );
+      if (roots.length === 0) {
+        errors.push(`unattributed ${vulnerability.severity} dev vulnerability: ${packageName}`);
+        continue;
       }
+      for (const root of roots) {
+        if (!advisoryMatchesException(root.packageName, root.advisory)) {
+          errors.push(
+            `unapproved ${root.advisory.severity} dev advisory: ${root.packageName} ` +
+            `${root.advisory.source} (${root.advisory.url || root.advisory.title || "unknown"})`
+          );
+        }
+      }
+    } else if (compatibleFixAvailable(vulnerability)) {
+      errors.push(`actionable dev vulnerability: ${packageName} (${vulnerability.severity})`);
     }
   }
+  return [...new Set(errors)].sort();
 }
 
-if (offendingSources.size > 0) {
-  console.error("npm audit: unallowlisted high/critical advisories found:");
-  for (const s of offendingSources) console.error(`  - ${s}`);
-  process.exit(1);
+function main() {
+  const production = runAudit(["--omit=dev"]);
+  const full = runAudit();
+  const errors = evaluateAudits(production, full);
+  if (errors.length > 0) {
+    console.error("npm audit policy failed:");
+    for (const error of errors) console.error(`  - ${error}`);
+    process.exit(1);
+  }
+  console.log(
+    "npm audit policy: production clean; no actionable/unapproved dev advisories; " +
+    "only GHSA-vfj7-8cjw-p6xm is temporarily excepted. OK."
+  );
 }
 
-console.log("npm audit: no high/critical findings beyond the documented allowlist. OK.");
+module.exports = { advisoryMatchesException, evaluateAudits, rootAdvisories };
+
+if (require.main === module) main();
