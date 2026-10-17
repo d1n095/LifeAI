@@ -202,6 +202,12 @@ class Settings(BaseSettings):
     # Path A worktree fetch + PR target. Empty PR base means "same as the worktree base".
     github_worktree_base_branch: str = "claude/det-kommer-mer-879lcm"
     github_pr_base_branch: str = ""
+    # Activation mode (first Founder-supervised cycle and later): the worktree/PR base must be
+    # an explicitly configured protected integration branch (never the legacy default above),
+    # and the Founder-approved base SHA must be set. Any gap is a typed fail-closed error;
+    # nothing silently falls back to another branch or to a moving branch tip.
+    mainai_activation_mode: bool = False
+    mainai_activation_approved_base_sha: str = ""
     # Per-goal AI spend for Path A. Existing provider_spend grants remain the live ceiling;
     # this setting is an additional hard cap. Default True: Path A AI calls fail closed
     # without a live grant (Claude exam SPEND-1). Set false only for explicit unbilled tests.
