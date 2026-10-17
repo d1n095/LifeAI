@@ -207,6 +207,7 @@ _DEMO1_PLAN_JSON = json.dumps(
                 "description": "Genomför den lilla, avgränsade fixen i backend/tests/test_demo_doc_fix.py.",
                 "task_type": "repo_edit",
                 "depends_on": [0],
+                "target_files": ["backend/tests/test_demo_doc_fix.py"],
                 "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_demo_doc_fix.py"}],
             },
             {
