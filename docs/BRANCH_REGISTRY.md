@@ -6,6 +6,23 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Activation readiness — repository/GitHub-side batch (2026-10-17)
+
+Claude builder batch from the accepted activation readiness package
+(`examiner/activation-readiness-package-2026-10-17` @ `6321949e7b41f8b3675a9a4f07fe9cbd9ee3aa69`).
+Composition parent `claude/activation-base-276-263` = Path A `#276` @ `6c7517465de337f49150d29cbf3f5f78b133fec4`
++ GitHub discovery `#263` @ `e33f494c4fc53704c494cecea788f3e22be36330` (union-resolved
+`test_github_client.py` and this registry only; no other change).
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/activation-base-276-263` | — | Composition parent only (no own PR) | `#276` + `#263` merge so the batch has both the configurable Path A base and paginated check runs. |
+| `claude/mainai-activation-readiness-batch` | draft (see PR) | **Frozen draft for independent exam** | `ci.yml` triggers for `mainai/**` (activation-branch, PR and post-merge CI) + top-level `permissions: contents: read`; canonical 12-check contract (`required_checks.py`); exact-set CI wait (exact SHA, exact app identity, missing = pending, skipped/neutral never satisfy, Vercel/extras evidence only, re-run supersession, all pages via `#263`); activation-mode base fail-closed (explicit protected `mainai/` base, PR base equal, approved base SHA required, moved tip = NO-GO); integration branch + `mainai/` prefix protected in Python and DB (migration `0089`); first-cycle one-file scope contract tests. |
+
+**Must not:** modify Cursor task authority, Codex push grants/preflight/activation models, Git transport, Track B, FC-4, rulesets/settings, GitHub App, merge/deploy/Recall.
+**Known overlap for composition:** migration `0089_activation_branch_protect` — Codex's planned activation migration must chain after it (or vice versa); `worktree.py`/`config.py` activation settings vs Codex spec §9/§14 startup validation (Codex can source `approved_base_sha` from the envelope and keep `activation_base()` as the config-side check).
+**Inherited (not this batch):** `#276` backend unit/integration red (`test_mainai_execution_demos::test_demo_1…` PlanValidationError) and `#275`-pending npm audit.
+
 ## Post-Founder-Alpha — MainAI Path A first-cycle activation (2026-10-11)
 
 Isolated Cursor builder child of verified Founder Alpha integration base

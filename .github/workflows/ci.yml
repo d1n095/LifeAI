@@ -4,11 +4,20 @@ on:
   push:
     # Agent coding branches need the same required checks as mainline pushes.
     # Explicit prefixes (not a catch-all) — GitHub branch filters have no brace-expansion.
-    branches: [main, "claude/**", "cursor/**", "codex/**"]
+    # `mainai/**` covers the Founder-supervised activation integration branch
+    # (mainai/integration-founder-supervised-v1): CI on its creation at the approved SHA and
+    # after every Founder merge/update.
+    branches: [main, "claude/**", "cursor/**", "codex/**", "mainai/**"]
   pull_request:
     # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*) receive
     # the same required Actions checks as PRs into main. Does not weaken or skip any job.
-    branches: [main, "claude/**", "cursor/**", "codex/**"]
+    # `mainai/**` gives PRs targeting the activation integration branch their own PR CI.
+    branches: [main, "claude/**", "cursor/**", "codex/**", "mainai/**"]
+
+# Least privilege for every job: CI runs repository code (including MainAI-authored tests)
+# and must never receive a write-capable GITHUB_TOKEN, whatever the repository default is.
+permissions:
+  contents: read
 
 # Cancel superseded runs on the same branch/PR to keep the queue short.
 concurrency:
