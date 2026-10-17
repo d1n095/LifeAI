@@ -264,7 +264,7 @@ See `FOUNDER_RUNBOOK.md`: 17 steps, each with expected evidence, GO, NO-GO and r
 ## 11. Readiness matrix
 `readiness_manifest.json` lists every item above with `status ∈ {PASS, FAIL, UNKNOWN, DEFERRED}`, `owner`, `evidence_sha_required`, `class` and `depends_on`.
 - **Rule:** any FAIL or UNKNOWN among non-deferred items ⇒ NO-GO.
-- **Current:** PASS 2, FAIL 8, UNKNOWN 9, DEFERRED/deferrable 10 ⇒ **NO-GO**.
+- **Current:** PASS 2, FAIL 7, UNKNOWN 12, DEFERRED 10 (matches readiness_manifest.json counts) ⇒ **NO-GO**.
 
 ## 12. Final no-drip sweep (same domain), all included above
 New in this package beyond the GO-gate audit:
