@@ -2,7 +2,8 @@
 app/agent_orchestration.py) and, as of the MainAI Execution Loop V0.1 executor
 (app/mainai_execution/execution_job.py), real repo edits.
 
-  - read: get_ref, get_pull_request, list_check_runs
+  - read: get_ref, get_pull_request, list_check_runs (paginated), list_branches,
+    list_open_pull_requests, list_pull_request_comments, get_file_contents
   - write (only ever called when settings.github_write_enabled is True — see
     prepare_github_pr()): create_branch, create_or_update_file, create_pull_request,
     update_pull_request
@@ -30,16 +31,20 @@ without a separate, explicit human decision regardless.
 """
 
 import base64
+from urllib.parse import quote
 
 import httpx
 
 from app.config import get_settings
 
 API_BASE = "https://api.github.com"
+_MAX_PAGES = 50
 
 
 class GitHubClientError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class GitHubClient:
@@ -64,11 +69,64 @@ class GitHubClient:
         }
 
     async def _request(self, method: str, path: str, *, json: dict | None = None, timeout: float = 30) -> dict:
+        resp = await self._request_response(method, path, json=json, timeout=timeout)
+        return resp.json() if resp.content else {}
+
+    async def _request_response(
+        self, method: str, path: str, *, json: dict | None = None, timeout: float = 30
+    ) -> httpx.Response:
+        url = path if path.startswith("https://") else f"{API_BASE}{path}"
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.request(method, f"{API_BASE}{path}", headers=self._headers(), json=json)
+            resp = await client.request(method, url, headers=self._headers(), json=json)
             if resp.status_code >= 400:
-                raise GitHubClientError(f"GitHub {method} {path} misslyckades ({resp.status_code}): {resp.text[:500]}")
-            return resp.json() if resp.content else {}
+                raise GitHubClientError(
+                    f"GitHub {method} {path} misslyckades ({resp.status_code}): {resp.text[:500]}",
+                    status_code=resp.status_code,
+                )
+            return resp
+
+    def _next_page_url(self, resp: httpx.Response) -> str | None:
+        next_link = resp.links.get("next") if resp.links else None
+        if not next_link:
+            return None
+        return next_link.get("url")
+
+    async def _get_paginated(self, path: str) -> list:
+        """Follow GitHub Link rel=next until exhausted. Each page must be a JSON array."""
+        items: list = []
+        current = path
+        for _ in range(_MAX_PAGES):
+            resp = await self._request_response("GET", current)
+            payload = resp.json() if resp.content else []
+            if payload is None:
+                payload = []
+            if not isinstance(payload, list):
+                raise GitHubClientError(f"GitHub GET {current} returned a non-list page")
+            items.extend(payload)
+            nxt = self._next_page_url(resp)
+            if not nxt:
+                return items
+            current = nxt
+        raise GitHubClientError(f"GitHub GET {path} exceeded {_MAX_PAGES} pages")
+
+    async def _get_paginated_key(self, path: str, key: str) -> list:
+        """Follow Link rel=next for object pages that nest the list under `key`."""
+        items: list = []
+        current = path
+        for _ in range(_MAX_PAGES):
+            resp = await self._request_response("GET", current)
+            payload = resp.json() if resp.content else {}
+            if not isinstance(payload, dict):
+                raise GitHubClientError(f"GitHub GET {current} returned a non-object page")
+            page = payload.get(key) or []
+            if not isinstance(page, list):
+                raise GitHubClientError(f"GitHub GET {current} missing list field {key!r}")
+            items.extend(page)
+            nxt = self._next_page_url(resp)
+            if not nxt:
+                return items
+            current = nxt
+        raise GitHubClientError(f"GitHub GET {path} exceeded {_MAX_PAGES} pages")
 
     # --- Read ---------------------------------------------------------------------------
 
@@ -94,9 +152,52 @@ class GitHubClient:
         return await self._request("GET", f"/repos/{repo}/pulls?head={head}&base={base}&state={state}")
 
     async def list_check_runs(self, ref: str) -> list[dict]:
+        """All check runs for `ref`, following GitHub pagination. Same public signature."""
         repo = self._require_configured()
-        data = await self._request("GET", f"/repos/{repo}/commits/{ref}/check-runs")
-        return data.get("check_runs", [])
+        encoded_ref = quote(ref, safe="")
+        return await self._get_paginated_key(
+            f"/repos/{repo}/commits/{encoded_ref}/check-runs?per_page=100",
+            "check_runs",
+        )
+
+    async def list_branches(self, *, prefix: str = "") -> list[dict]:
+        """Read-only branch list. When `prefix` is set, only names that start with it remain."""
+        repo = self._require_configured()
+        rows = await self._get_paginated(f"/repos/{repo}/branches?per_page=100")
+        if prefix:
+            rows = [row for row in rows if str(row.get("name") or "").startswith(prefix)]
+        return rows
+
+    async def list_open_pull_requests(self) -> list[dict]:
+        """Read-only open PRs for the configured repo, following pagination."""
+        repo = self._require_configured()
+        return await self._get_paginated(f"/repos/{repo}/pulls?state=open&per_page=100")
+
+    async def list_pull_request_comments(self, number: int) -> list[dict]:
+        """Read-only conversation comments on a PR (GitHub issue-comment API)."""
+        repo = self._require_configured()
+        return await self._get_paginated(f"/repos/{repo}/issues/{int(number)}/comments?per_page=100")
+
+    async def get_file_contents(self, path: str, *, ref: str) -> str | None:
+        """Decoded UTF-8 file text at `ref`. Missing path returns None; directories raise."""
+        repo = self._require_configured()
+        encoded_path = quote(path, safe="/")
+        encoded_ref = quote(ref, safe="")
+        try:
+            data = await self._request("GET", f"/repos/{repo}/contents/{encoded_path}?ref={encoded_ref}")
+        except GitHubClientError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        if isinstance(data, list) or data.get("type") != "file":
+            raise GitHubClientError(f"GitHub contents at {path!r} is not a file")
+        raw = data.get("content")
+        if not raw:
+            return ""
+        try:
+            return base64.b64decode("".join(str(raw).split()), validate=False).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise GitHubClientError(f"GitHub file {path!r} is not valid UTF-8 text") from exc
 
     # --- Write (only called when settings.github_write_enabled is True) -----------------
 
