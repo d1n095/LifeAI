@@ -35,6 +35,16 @@ from app.models.user import User
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _current_head() -> str:
+    """The single alembic head, read from the script directory rather than pinned, so a later
+    migration (e.g. 0089 activation branch protection) does not silently invalidate the
+    'stays at head after a refused downgrade' assertions below."""
+    script = ScriptDirectory.from_config(Config(os.path.join(BACKEND_ROOT, "alembic.ini")))
+    heads = script.get_heads()
+    assert len(heads) == 1, heads
+    return heads[0]
+
+
 def _run_alembic(*args: str) -> None:
     subprocess.run([sys.executable, "-m", "alembic", *args], cwd=BACKEND_ROOT, check=True, env={**os.environ})
 
@@ -380,7 +390,7 @@ def test_0086_to_head_preserves_existing_restored_concept_relationships():
                     {"owner_id": owner_id},
                 ).scalars()
             )
-        assert revision == "0088_erasure_completion_phase"
+        assert revision == _current_head()
         assert stored == set(restored_types)
     finally:
         _run_alembic("upgrade", "head")
@@ -408,5 +418,5 @@ def test_0087_downgrade_refuses_before_corrupting_restored_concept_rows():
             ),
             {"owner_id": owner_id},
         ).scalar_one()
-    assert revision == "0088_erasure_completion_phase"
+    assert revision == _current_head()
     assert stored == 1

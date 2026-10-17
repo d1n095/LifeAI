@@ -40,6 +40,7 @@ from app.integrations.github_client import GitHubClient, GitHubClientError
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step
 from app.mainai_execution.lessons import lookup_lessons
 from app.mainai_execution.worktree import (
+    WorktreeError,
     execution_pr_base_branch,
     fetch_remote_branch,
     is_ancestor,
@@ -159,6 +160,11 @@ async def inspect_recovery_record(db: Session, *, task: MainAITask, job: MainAIJ
                 evidence["pr_numbers"] = [pr.get("number") for pr in prs]
             except GitHubClientError as exc:
                 unsafe_reasons.append(f"pr_lookup_failed: {exc}")
+            except WorktreeError as exc:
+                # Activation-mode base misconfiguration: unknown PR state, never "no PR".
+                evidence["pr_exists"] = None
+                evidence["pr_numbers"] = None
+                unsafe_reasons.append(f"pr_base_unresolvable: {exc}")
         else:
             evidence["pr_exists"] = False
             evidence["pr_numbers"] = []

@@ -73,6 +73,21 @@ def _single_task_plan(db_session, goal, **spec_kwargs) -> MainAITask:
     return db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
 
 
+def _required_runs(ref, *, failing: str | None = None) -> list[dict]:
+    """Realistic GitHub check runs for `ref`: every check of the default activation contract,
+    produced by GitHub Actions on exactly this SHA. `failing` names one check to fail."""
+    from app.mainai_execution.required_checks import ACTIVATION_REQUIRED_CHECKS
+
+    runs = []
+    for i, check in enumerate(ACTIVATION_REQUIRED_CHECKS, start=1):
+        runs.append({
+            "id": i, "name": check.name, "head_sha": ref, "status": "completed",
+            "conclusion": "failure" if check.name == failing else "success",
+            "app": {"slug": check.app_slug, "id": check.app_id}, "check_suite": {"id": 1},
+        })
+    return runs
+
+
 def _events(db_session, task_id) -> set[str]:
     rows = db_session.execute(sa_text("SELECT event_type FROM mainai_task_events WHERE task_id = :id"), {"id": str(task_id)}).all()
     return {row[0] for row in rows}
@@ -154,7 +169,7 @@ async def test_poll_ci_wait_satisfied_when_all_checks_pass(db_session, owner_id,
 
     async def _fake_list_check_runs(self, ref):
         assert ref == "deadbeef"  # exactly the wait's own recorded sha, never anything else
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
@@ -181,7 +196,7 @@ async def test_poll_ci_wait_failed_when_a_check_fails(db_session, owner_id, monk
     monkeypatch.setattr(settings, "github_token", "fake-token")
 
     async def _fake_list_check_runs(self, ref):
-        return [{"name": "ci", "status": "completed", "conclusion": "failure"}]
+        return _required_runs(ref, failing="Backend — unit/integration tests")
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
@@ -276,7 +291,7 @@ async def test_poll_ci_wait_refuses_to_poll_if_configured_repo_no_longer_matches
 
     async def _fake_list_check_runs(self, ref):
         called["n"] += 1
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
@@ -306,7 +321,7 @@ async def test_poll_ci_wait_fails_closed_when_its_own_resource_ref_is_missing_re
 
     async def _fake_list_check_runs(self, ref):
         called["n"] += 1
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
@@ -416,7 +431,7 @@ async def test_demo_ci_wait_resolves_green_and_completes_the_task(db_session, su
 
     async def _fake_list_check_runs(self, ref):
         assert ref == "realcommitsha"
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
@@ -441,7 +456,7 @@ async def test_demo_ci_wait_resolves_red_and_schedules_a_backoff_retry(db_sessio
     task, _job = await _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch)
 
     async def _fake_list_check_runs(self, ref):
-        return [{"name": "ci", "status": "completed", "conclusion": "failure"}]
+        return _required_runs(ref, failing="Backend — unit/integration tests")
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
@@ -541,7 +556,7 @@ def test_resume_waiting_ci_task_concurrent_same_wait_never_double_finalizes(db_s
     wait_id = wait.id
 
     async def _fake_list_check_runs(self, ref):
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
     monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
@@ -629,7 +644,7 @@ def test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsis
     async def _slow_list_check_runs(self, ref):
         poll_started.set()
         assert release_poll.wait(timeout=5), "test setup: main thread never released the in-flight poll"
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _slow_list_check_runs)
     monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
