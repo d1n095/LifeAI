@@ -136,8 +136,9 @@ def prepare_code_agent_prompt(
     extra_target_files: list[str] | None = None,
     declared_targets_only: bool = False,
 ) -> CodeAgentPrompt:
-    # Envelope-governed Path A (FC-2b): only structured planner target_files (plus mapped
-    # focused tests) authorize writes. Task prose may still appear as context.
+    # Envelope-governed Path A (FC-2b / TA-8b): only structured planner target_files,
+    # plus genuinely new focused tests absent at the base commit, authorize writes.
+    # Existing repository tests listed only in verification_plan are verification-only.
     if declared_targets_only:
         explicit = explicit_target_paths(extra=extra_target_files)
     else:

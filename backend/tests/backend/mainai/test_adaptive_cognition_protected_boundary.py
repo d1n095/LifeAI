@@ -64,7 +64,7 @@ def _owner(db, make_verified_user):
 
 def _goal_plan_task(db, owner_id, *, approval_policy="autonomous_development_work"):
     goal = create_goal(db, owner_id=owner_id, title="Boundary test", original_instruction="test", created_by="founder", approval_policy=approval_policy)
-    plan = create_plan(db, goal=goal, rationale="boundary test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit")], created_by="founder")
+    plan = create_plan(db, goal=goal, rationale="boundary test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])], created_by="founder")
     db.commit()
     task = db.query(MainAITask).filter_by(plan_id=plan.id).order_by(MainAITask.created_at).first()
     return goal, plan, task

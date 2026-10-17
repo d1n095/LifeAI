@@ -39,7 +39,7 @@ def owner_id(superuser_db, make_verified_user):
 
 def _goal_plan_task(db, owner_id, *, instruction="Resource intelligence cost bridge test."):
     goal = create_goal(db, owner_id=owner_id, title="RI cost bridge test", original_instruction=instruction, created_by="founder", approval_policy="standard_repo_work")
-    plan = create_plan(db, goal=goal, rationale="ri cost bridge test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit")], created_by="founder")
+    plan = create_plan(db, goal=goal, rationale="ri cost bridge test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])], created_by="founder")
     db.commit()
     task = db.query(MainAITask).filter_by(plan_id=plan.id).order_by(MainAITask.created_at).first()
     return goal, task
@@ -146,8 +146,8 @@ def test_cost_for_assignment_never_attributes_another_tasks_settled_spend(superu
     from app.mainai_execution.planner import create_plan as _create_plan
 
     plan = _create_plan(superuser_db, goal=goal, rationale="two tasks", tasks=[
-        PlannedTaskSpec(description="Task A", task_type="repo_edit"),
-        PlannedTaskSpec(description="Task B", task_type="repo_edit"),
+        PlannedTaskSpec(description="Task A", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"]),
+        PlannedTaskSpec(description="Task B", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"]),
     ], created_by="founder")
     superuser_db.commit()
     tasks = superuser_db.query(MainAITask).filter_by(plan_id=plan.id).order_by(MainAITask.created_at).all()

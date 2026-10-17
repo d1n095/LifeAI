@@ -19,6 +19,7 @@ from app.mainai_execution.envelope_scope import (
     map_verification_target_to_repo_path,
     path_in_authorized_scope,
     persistable_target_authority,
+    runtime_editable_targets,
     validate_capability_name,
     validate_target_path,
 )
@@ -122,12 +123,56 @@ def test_persistable_target_authority_keeps_lesson_tests_verify_only():
         task_type="repo_edit",
         target_source="planner",
     )
-    assert authority["target_files"] == [
-        "backend/app/greeting.py",
-        "backend/tests/test_greeting_doc.py",
-    ]
-    assert authority["verify_only_tests"] == ["backend/tests/test_lesson_guard.py"]
+    assert authority["target_files"] == ["backend/app/greeting.py"]
+    assert authority["undeclared_focused_tests"] == ["backend/tests/test_greeting_doc.py"]
+    assert "backend/tests/test_lesson_guard.py" in authority["verify_only_tests"]
+    assert "backend/tests/test_greeting_doc.py" in authority["verify_only_tests"]
+    assert "backend/tests/test_lesson_guard.py" not in authority["undeclared_focused_tests"]
     assert authority["target_source"] == "planner"
+
+
+def test_existing_undeclared_focused_test_is_not_runtime_editable():
+    authority = persistable_target_authority(
+        declared_target_files=["backend/app/greeting.py"],
+        pre_lesson_verification_plan=[{"kind": "targeted_tests", "target": "tests/test_lesson_guard.py"}],
+        post_lesson_verification_plan=[{"kind": "targeted_tests", "target": "tests/test_lesson_guard.py"}],
+        task_type="repo_edit",
+        target_source="planner",
+    )
+    existing = {"backend/app/greeting.py", "backend/tests/test_lesson_guard.py"}
+    editable = runtime_editable_targets(authority, exists_at_base=lambda path: path in existing)
+    assert editable == ["backend/app/greeting.py"]
+    assert "backend/tests/test_lesson_guard.py" not in editable
+
+
+def test_new_undeclared_focused_test_absent_at_base_is_runtime_editable():
+    authority = persistable_target_authority(
+        declared_target_files=["backend/app/greeting.py"],
+        pre_lesson_verification_plan=[{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+        post_lesson_verification_plan=[{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+        task_type="repo_edit",
+        target_source="planner",
+    )
+    editable = runtime_editable_targets(
+        authority, exists_at_base=lambda path: path == "backend/app/greeting.py"
+    )
+    assert editable == ["backend/app/greeting.py", "backend/tests/test_greeting_doc.py"]
+
+
+def test_lesson_injected_test_is_never_lifted_even_if_absent_at_base():
+    authority = persistable_target_authority(
+        declared_target_files=["backend/app/greeting.py"],
+        pre_lesson_verification_plan=[{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+        post_lesson_verification_plan=[
+            {"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"},
+            {"kind": "targeted_tests", "target": "tests/test_lesson_guard.py"},
+        ],
+        task_type="repo_edit",
+        target_source="planner",
+    )
+    editable = runtime_editable_targets(authority, exists_at_base=lambda _path: False)
+    assert "backend/tests/test_lesson_guard.py" not in editable
+    assert "backend/tests/test_greeting_doc.py" in editable
 
 
 def test_assert_changed_files_rejects_unexpected_git_diff_paths():

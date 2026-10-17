@@ -150,24 +150,19 @@ def map_verification_target_to_repo_path(target: str) -> str:
 
 
 def merge_repo_edit_target_files(target_files: list[str], verification_plan: list[dict] | None) -> list[str]:
-    """Union planner-named files with mapped focused-test paths. Preserve order.
+    """Declared planner-named files only. Preserve order.
 
-    Callers that persist edit authority must pass the PRE-lesson verification plan.
-    Lesson-injected regression tests are verify-only and must never enter this merge.
+    `verification_plan` never grants edit authority — listing a focused test there
+    does not make an existing repository test writable (TA-8b). The parameter is
+    kept so historical callers keep the same signature.
     """
+    del verification_plan
     merged: list[str] = []
     seen: set[str] = set()
     for path in list(target_files or []):
         if isinstance(path, str) and path and path not in seen:
             seen.add(path)
             merged.append(path)
-    for step in verification_plan or []:
-        if not isinstance(step, dict) or step.get("kind") != "targeted_tests":
-            continue
-        mapped = map_verification_target_to_repo_path(str(step.get("target") or ""))
-        if mapped and mapped not in seen:
-            seen.add(mapped)
-            merged.append(mapped)
     return merged
 
 
@@ -232,10 +227,13 @@ def structured_editable_targets(
     pre_lesson_verification_plan: list[dict] | tuple[dict, ...] | None = None,
     task_type: str,
 ) -> list[str]:
-    """Editable write paths: validated declared files plus pre-lesson focused tests.
+    """Persisted editable write paths: validated declared `target_files` only.
 
-    Lesson-injected tests are intentionally absent — they are verify-only.
+    A focused test in `verification_plan` is not editable merely by being listed.
+    Genuinely new focused tests (absent at the approved/base commit) may be
+    created at execution time via `runtime_editable_targets`.
     """
+    del pre_lesson_verification_plan, task_type
     declared: list[str] = []
     seen: set[str] = set()
     for path in list(declared_target_files or []):
@@ -243,12 +241,6 @@ def structured_editable_targets(
         if canonical not in seen:
             seen.add(canonical)
             declared.append(canonical)
-    if task_type != "repo_edit":
-        return declared
-    for mapped in _mapped_targeted_test_paths(list(pre_lesson_verification_plan or [])):
-        if mapped not in seen:
-            seen.add(mapped)
-            declared.append(mapped)
     return declared
 
 
@@ -271,33 +263,75 @@ def persistable_target_authority(
     task_type: str,
     target_source: str,
 ) -> dict:
-    """Canonical created-event payload for task target authority."""
+    """Canonical created-event payload for task target authority.
+
+    `target_files` are declared edit paths only. Undeclared pre-lesson focused
+    tests are verification-only until execution proves they do not exist at the
+    approved/base commit (`undeclared_focused_tests` + `runtime_editable_targets`).
+    Lesson-injected tests are never lift candidates.
+    """
     if target_source not in KNOWN_TARGET_SOURCES:
         raise TargetAuthorityError(f"unknown target_source {target_source!r}")
-    editable = structured_editable_targets(
+    declared = structured_editable_targets(
         declared_target_files,
-        pre_lesson_verification_plan=(
-            list(pre_lesson_verification_plan or []) if target_source != TARGET_SOURCE_GAP else []
-        ),
+        pre_lesson_verification_plan=[],
         task_type=task_type,
     )
-    verify_only = [
+    declared_set = set(declared)
+    undeclared_focused: list[str] = []
+    if target_source != TARGET_SOURCE_GAP:
+        for path in _mapped_targeted_test_paths(list(pre_lesson_verification_plan or [])):
+            if path not in declared_set and path not in undeclared_focused:
+                undeclared_focused.append(path)
+    lesson_only = [
         path
         for path in verify_only_test_paths(
             pre_lesson_verification_plan=list(pre_lesson_verification_plan or []),
             post_lesson_verification_plan=list(post_lesson_verification_plan or []),
         )
-        if path not in set(editable)
+        if path not in declared_set
     ]
-    if task_type == "repo_edit" and not editable:
+    verify_only: list[str] = []
+    seen_verify: set[str] = set()
+    for path in [*lesson_only, *undeclared_focused]:
+        if path not in seen_verify:
+            seen_verify.add(path)
+            verify_only.append(path)
+    if task_type == "repo_edit" and not declared:
         raise TargetAuthorityError(
             "repo_edit requires structured target_files; text-only or historical authority is refused."
         )
     return {
-        "target_files": editable,
+        "target_files": declared,
         "verify_only_tests": verify_only,
+        "undeclared_focused_tests": undeclared_focused,
         "target_source": target_source,
     }
+
+
+def runtime_editable_targets(authority: dict, *, exists_at_base) -> list[str]:
+    """Declared files plus undeclared focused tests that are absent at the base commit.
+
+    Existing repository tests not in `target_files` stay verification-only,
+    including a planner-listed lesson guard (TA-8b). Lesson-injected tests are
+    not in `undeclared_focused_tests` and are never lifted.
+    """
+    editable: list[str] = []
+    seen: set[str] = set()
+    for path in list((authority or {}).get("target_files") or []):
+        canonical = validate_target_path(path)
+        if canonical not in seen:
+            seen.add(canonical)
+            editable.append(canonical)
+    for path in list((authority or {}).get("undeclared_focused_tests") or []):
+        canonical = validate_target_path(path)
+        if canonical in seen:
+            continue
+        if exists_at_base(canonical):
+            continue
+        seen.add(canonical)
+        editable.append(canonical)
+    return editable
 
 
 def display_target_files_suffix(target_files: list[str]) -> str:
@@ -346,7 +380,12 @@ def load_structured_target_authority(db: Session, task) -> dict:
         .order_by(MainAITaskEvent.created_at.asc())
         .limit(1)
     ).scalar_one_or_none()
-    empty = {"target_files": [], "verify_only_tests": [], "target_source": None}
+    empty = {
+        "target_files": [],
+        "verify_only_tests": [],
+        "undeclared_focused_tests": [],
+        "target_source": None,
+    }
     if event is None:
         return empty
     detail = dict(event.detail or {})
@@ -359,10 +398,25 @@ def load_structured_target_authority(db: Session, task) -> dict:
                 verify_only.append(validate_target_path(path))
             except TargetPathError:
                 continue
+    undeclared: list[str] = []
+    raw_undeclared = detail.get("undeclared_focused_tests")
+    if isinstance(raw_undeclared, list):
+        for path in raw_undeclared:
+            try:
+                canonical = validate_target_path(path)
+            except TargetPathError:
+                continue
+            if canonical not in undeclared:
+                undeclared.append(canonical)
     source = detail.get("target_source")
     if source not in KNOWN_TARGET_SOURCES:
         source = None
-    return {"target_files": files, "verify_only_tests": verify_only, "target_source": source}
+    return {
+        "target_files": files,
+        "verify_only_tests": verify_only,
+        "undeclared_focused_tests": undeclared,
+        "target_source": source,
+    }
 
 
 def inherit_structured_edit_targets(db: Session, *, task, allowed_paths: tuple[str, ...] | list[str] | None) -> list[str]:

@@ -65,7 +65,7 @@ def _task_and_dead_job(db_session, superuser_db, owner_id, *, task_type="read_on
     goal = _goal(db_session, owner_id)
     planner.create_plan(
         db_session, goal=goal, rationale="single task",
-        tasks=[planner.PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [])],
+        tasks=[planner.PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [], target_files=["backend/tests/backend/test_ok.py"] if task_type == "repo_edit" else [])],
         created_by="test",
     )
     db_session.commit()

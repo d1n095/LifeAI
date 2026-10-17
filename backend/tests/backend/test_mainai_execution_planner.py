@@ -137,7 +137,7 @@ def test_create_plan_persists_tasks_and_marks_dependency_free_tasks_ready(db_ses
     goal = _goal(db_session, owner_id)
     tasks = [
         PlannedTaskSpec(description="Read the repo", task_type="read_only_audit"),
-        PlannedTaskSpec(description="Make the edit", task_type="repo_edit", depends_on=[0]),
+        PlannedTaskSpec(description="Make the edit", task_type="repo_edit", depends_on=[0], target_files=["backend/tests/backend/test_ok.py"]),
         PlannedTaskSpec(description="Run tests", task_type="run_tests", depends_on=[1]),
     ]
     plan = planner.create_plan(db_session, goal=goal, rationale="three-step plan", tasks=tasks, created_by="test")
@@ -515,7 +515,7 @@ def _fake_chat(response_text: str):
 _VALID_PLAN_JSON = """{
   "tasks": [
     {"description": "Read the relevant files", "task_type": "read_only_audit", "depends_on": [], "risk_level": "low"},
-    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false, "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]},
+    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false, "target_files": ["backend/app/x.py", "backend/tests/backend/test_x.py"], "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]},
     {"description": "Run the targeted tests", "task_type": "run_tests", "depends_on": [1], "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]}
   ]
 }"""
@@ -644,7 +644,7 @@ async def test_propose_plan_via_ai_parses_explicit_target_files(db_session, owne
 
 
 @pytest.mark.asyncio
-async def test_propose_plan_via_ai_maps_focused_test_when_target_files_omitted(db_session, owner_id, monkeypatch):
+async def test_propose_plan_via_ai_does_not_treat_focused_test_as_target_files(db_session, owner_id, monkeypatch):
     monkeypatch.setattr(
         OpenAIProvider,
         "chat",
@@ -655,16 +655,36 @@ async def test_propose_plan_via_ai_maps_focused_test_when_target_files_omitted(d
         ),
     )
     goal = _goal(db_session, owner_id)
-    specs, _provider, _model = await planner.propose_plan_via_ai(db_session, goal=goal)
-    assert "backend/tests/test_greeting_doc.py" in specs[0].target_files
-    plan = planner.create_plan(db_session, goal=goal, rationale="mapped", tasks=specs, created_by="test")
+    with pytest.raises(planner.PlanValidationError, match="target_files"):
+        await planner.propose_plan_via_ai(db_session, goal=goal)
+
+
+@pytest.mark.asyncio
+async def test_create_plan_keeps_undeclared_focused_test_out_of_target_files(db_session, owner_id):
+    goal = _goal(db_session, owner_id)
+    plan = planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="ta8b",
+        created_by="test",
+        tasks=[
+            planner.PlannedTaskSpec(
+                description="edit greeting",
+                task_type="repo_edit",
+                target_files=["backend/app/greeting.py"],
+                verification_plan=[{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+            )
+        ],
+    )
     db_session.commit()
     task = db_session.query(MainAITask).filter(MainAITask.plan_id == plan.id).one()
     created = db_session.query(MainAITaskEvent).filter(
         MainAITaskEvent.task_id == task.id,
         MainAITaskEvent.event_type == MainAITaskEventType.created,
     ).one()
-    assert "backend/tests/test_greeting_doc.py" in created.detail["target_files"]
+    assert created.detail["target_files"] == ["backend/app/greeting.py"]
+    assert created.detail["undeclared_focused_tests"] == ["backend/tests/test_greeting_doc.py"]
+    assert "backend/tests/test_greeting_doc.py" in created.detail["verify_only_tests"]
     assert "Target files:" not in task.description
 
 

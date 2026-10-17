@@ -267,7 +267,7 @@ async def test_replan_never_inherits_the_old_plans_approval_even_when_the_new_ta
         db_session,
         goal=goal,
         rationale="v1, founder already reviewed and approved this exact task",
-        tasks=[PlannedTaskSpec(description="edit something sensitive", task_type="repo_edit", approval_required=True)],
+        tasks=[PlannedTaskSpec(description="edit something sensitive", task_type="repo_edit", approval_required=True, target_files=["backend/tests/backend/test_ok.py"])],
         created_by="test",
     )
     db_session.commit()

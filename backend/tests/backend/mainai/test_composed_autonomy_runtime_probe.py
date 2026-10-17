@@ -154,8 +154,7 @@ async def test_composed_claim_to_supervisor_tick_stops_honestly_without_spend(
             PlannedTaskSpec(
                 description="edit README.md",
                 task_type="repo_edit",
-                risk_level="low",
-            )
+                risk_level="low", target_files=["backend/tests/backend/test_ok.py"])
         ],
         created_by="founder",
     )

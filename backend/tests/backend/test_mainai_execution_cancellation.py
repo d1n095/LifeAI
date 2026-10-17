@@ -66,6 +66,8 @@ def _goal(db_session, owner_id):
 def _single_task_plan(db_session, goal, **spec_kwargs) -> MainAITask:
     spec_kwargs.setdefault("description", "do the work")
     spec_kwargs.setdefault("task_type", "read_only_audit")
+    if spec_kwargs.get("task_type") == "repo_edit":
+        spec_kwargs.setdefault("target_files", ["backend/tests/backend/test_ok.py"])
     planner.create_plan(db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(**spec_kwargs)], created_by="test")
     db_session.commit()
     return db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()

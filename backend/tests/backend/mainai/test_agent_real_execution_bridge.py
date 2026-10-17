@@ -72,7 +72,7 @@ def _goal_plan_task(db, owner_id, *, instruction="Real execution bridge test.", 
     goal = create_goal(db, owner_id=owner_id, title="Bridge test", original_instruction=instruction, created_by="founder", approval_policy=approval_policy)
     plan = create_plan(
         db, goal=goal, rationale="bridge test",
-        tasks=[PlannedTaskSpec(description=f"Task {i}", task_type="repo_edit") for i in range(task_count)],
+        tasks=[PlannedTaskSpec(description=f"Task {i}", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"]) for i in range(task_count)],
         created_by="founder",
     )
     db.commit()

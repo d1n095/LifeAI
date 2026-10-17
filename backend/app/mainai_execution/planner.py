@@ -47,7 +47,6 @@ from app.mainai_execution.envelope_scope import (
     TargetAuthorityError,
     TargetPathError,
     persistable_target_authority,
-    structured_editable_targets,
     validate_target_path,
 )
 from app.providers.base import Message
@@ -484,18 +483,13 @@ async def propose_plan_via_ai(
             raise PlanValidationError(f"tasks[{i}].target_files must be a list of non-empty strings.")
         try:
             target_files = [validate_target_path(path) for path in raw_targets]
-            if task_type == "repo_edit":
-                target_files = structured_editable_targets(
-                    target_files,
-                    pre_lesson_verification_plan=verification_plan,
-                    task_type=task_type,
+            if task_type == "repo_edit" and not target_files:
+                raise PlanValidationError(
+                    f"tasks[{i}] repo_edit must name target_files (every file to create or "
+                    "edit) rather than only mentioning filenames in prose. Listing a focused "
+                    "test in verification_plan does not grant edit authority over an existing "
+                    "repository test."
                 )
-                if not target_files:
-                    raise PlanValidationError(
-                        f"tasks[{i}] repo_edit must name target_files (every file to create or "
-                        "edit, including the focused test file) rather than only mentioning "
-                        "filenames in prose."
-                    )
         except TargetPathError as exc:
             raise PlanValidationError(f"tasks[{i}].target_files: {exc}") from exc
 

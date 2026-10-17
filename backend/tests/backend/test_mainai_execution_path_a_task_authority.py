@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import uuid
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -280,6 +282,7 @@ async def test_ta2_inserted_task_prose_marker(db_session, superuser_db, owner_id
             InsertedTaskSpec(
                 description="Add a docstring.\nTarget files: backend/app/greeting.py backend/app/farewell.py",
                 task_type="repo_edit",
+                target_files=("backend/app/greeting.py",),
                 verification_plan=({"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"},),
             )
         ],
@@ -525,6 +528,202 @@ async def test_ta8_lesson_regression_test_is_verify_only(db_session, superuser_d
         "TA-8 a lesson-injected regression test is verify-only, never an edit target",
         holds,
         f"authority={authority}; pushed={pushed}",
+    )
+    assert holds
+
+
+@pytest.mark.asyncio
+async def test_ta8b_planner_lists_existing_guard_as_focused_test(
+    db_session, superuser_db, owner_id, monkeypatch, github, remote
+):
+    from app.mainai_execution.lessons import record_lesson
+
+    seed = remote.parent / "seed"
+    (seed / "backend" / "tests" / "test_lesson_guard.py").write_text("def test_guard():\n    assert 1 + 1 == 2\n")
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-q", "-m", "guard", cwd=seed)
+    _git("push", "-q", "origin", BASE, cwd=seed)
+    record_lesson(
+        db_session,
+        problem="p",
+        root_cause="r",
+        affected_component="greeting",
+        severity=list(EngineeringLessonSeverity)[0],
+        evidence="e",
+        fix="f",
+        general_rule="g",
+        applies_to=["repo_edit"],
+        source_type="examiner",
+        source_ref="probe",
+        created_by="examiner",
+        first_seen_at=datetime.utcnow(),
+        regression_test="tests/test_lesson_guard.py",
+    )
+    db_session.commit()
+    plan = json.dumps(
+        {
+            "tasks": [
+                {
+                    "description": "Docstring.",
+                    "task_type": "repo_edit",
+                    "depends_on": [],
+                    "target_files": ["backend/app/greeting.py"],
+                    "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_lesson_guard.py"}],
+                },
+                {"description": "Open a draft PR.", "task_type": "open_pr", "depends_on": [0]},
+            ]
+        }
+    )
+    weakened = {
+        "path": "backend/tests/test_lesson_guard.py",
+        "content": "def test_guard():\n    pass  # weakened by the code agent\n",
+    }
+    files = [json.loads(EDIT)["files"][0], weakened]
+    _provider(monkeypatch, plan=plan, edit=json.dumps({"files": files, "commit_message": "x"}))
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
+    goal, err = await _ai_goal(db_session, owner_id, caps=PATH_A_CAPS, paths=DIRS, plan=plan)
+    assert err is None, err
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id, MainAITask.task_type == "repo_edit").one()
+    authority = load_structured_target_authority(db_session, task)
+    assert "backend/tests/test_lesson_guard.py" not in authority["target_files"]
+    assert "backend/tests/test_lesson_guard.py" in authority["undeclared_focused_tests"]
+    await _drive(superuser_db, goal.id)
+    pushed = _pushed_paths(github.bare)
+    holds = not any("backend/tests/test_lesson_guard.py" in files for files in pushed.values()) and not github.prs
+    M(
+        "TA-8b an existing focused test is not editable unless declared in target_files",
+        holds,
+        f"authority={authority}; pushed={pushed}; PRs={len(github.prs)}; refusals={_refusals(superuser_db, goal.id)[:1]}",
+    )
+    assert holds
+
+
+@pytest.mark.asyncio
+async def test_new_focused_test_absent_at_base_may_be_created(
+    db_session, superuser_db, owner_id, monkeypatch, github
+):
+    plan = json.dumps(
+        {
+            "tasks": [
+                {
+                    "description": "Docstring + new focused test.",
+                    "task_type": "repo_edit",
+                    "depends_on": [],
+                    "target_files": ["backend/app/greeting.py"],
+                    "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+                },
+                {"description": "Open a draft PR.", "task_type": "open_pr", "depends_on": [0]},
+            ]
+        }
+    )
+    _provider(monkeypatch, plan=plan, edit=EDIT)
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
+    goal, err = await _ai_goal(db_session, owner_id, caps=PATH_A_CAPS, paths=DIRS, plan=plan)
+    assert err is None, err
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id, MainAITask.task_type == "repo_edit").one()
+    authority = load_structured_target_authority(db_session, task)
+    assert authority["target_files"] == ["backend/app/greeting.py"]
+    assert "backend/tests/test_greeting_doc.py" in authority["undeclared_focused_tests"]
+    await _drive(superuser_db, goal.id)
+    pushed = _pushed_paths(github.bare)
+    holds = any("backend/tests/test_greeting_doc.py" in files for files in pushed.values())
+    M(
+        "TA-8b new focused test absent at the base SHA may be created",
+        holds,
+        f"authority={authority}; pushed={pushed}; PRs={github.prs}",
+    )
+    assert holds
+
+
+def test_ta10_changed_file_set_includes_deletions_and_renames(tmp_path):
+    from app.mainai_execution.worktree import git_changed_paths_no_renames
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    run = lambda *args: subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)  # noqa: E731
+    run("init", "-q")
+    (repo / "backend" / "app").mkdir(parents=True)
+    body = "".join(f"line {i}\n" for i in range(50))
+    (repo / "backend" / "app" / "security_guard.py").write_text(body)
+    run("add", "-A")
+    run("-c", "user.name=s", "-c", "user.email=s@s", "commit", "-qm", "base")
+    base = run("rev-parse", "HEAD").stdout.strip()
+    run("mv", "backend/app/security_guard.py", "backend/app/greeting.py")
+    run("-c", "user.name=s", "-c", "user.email=s@s", "commit", "-qam", "rename")
+    collapsed = [
+        path
+        for path in subprocess.run(
+            ["git", "diff", "--name-only", "-z", f"{base}..HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split("\0")
+        if path
+    ]
+    listed = git_changed_paths_no_renames(cwd=repo, base_sha=base)
+    holds = "backend/app/security_guard.py" in listed and "backend/app/greeting.py" in listed
+    M(
+        "TA-10 changed-file check sees deletions/renames (no out-of-scope deletion hidden behind a rename)",
+        holds,
+        f"default name-only={collapsed}; --no-renames={listed}",
+    )
+    assert holds
+
+
+@pytest.mark.asyncio
+async def test_ta10_rename_of_out_of_scope_file_fails_before_publication(
+    db_session, superuser_db, owner_id, monkeypatch, github, remote
+):
+    seed = remote.parent / "seed"
+    body = "".join(f"line {i}\n" for i in range(50))
+    (seed / "backend" / "app" / "security_guard.py").write_text(body)
+    _git("add", "-A", cwd=seed)
+    _git("commit", "-q", "-m", "guard-source", cwd=seed)
+    _git("push", "-q", "origin", BASE, cwd=seed)
+
+    original = execution_job.commit_worktree_changes
+
+    def _commit_with_rename(db, worktree, *, message):
+        root = Path(worktree.path)
+        src = root / "backend" / "app" / "security_guard.py"
+        dst = root / "backend" / "app" / "greeting.py"
+        if src.is_file():
+            subprocess.run(
+                ["git", "mv", "-f", str(src.relative_to(root)), str(dst.relative_to(root))],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        return original(db, worktree, message=message)
+
+    monkeypatch.setattr(execution_job, "commit_worktree_changes", _commit_with_rename)
+    plan = json.dumps(
+        {
+            "tasks": [
+                {
+                    "description": "Docstring + test.",
+                    "task_type": "repo_edit",
+                    "depends_on": [],
+                    "target_files": PATHS,
+                    "verification_plan": [{"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"}],
+                },
+                {"description": "Open a draft PR.", "task_type": "open_pr", "depends_on": [0]},
+            ]
+        }
+    )
+    _provider(monkeypatch, plan=plan)
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", True)
+    goal, err = await _ai_goal(db_session, owner_id, caps=PATH_A_CAPS, paths=DIRS, plan=plan)
+    assert err is None, err
+    await _drive(superuser_db, goal.id, n=8)
+    pushed = _pushed_paths(github.bare)
+    holds = not pushed and not github.prs
+    M(
+        "TA-10 a rename from an out-of-scope file onto an authorized target fails before push/PR",
+        holds,
+        f"pushed={pushed}; PRs={len(github.prs)}; refusals={_refusals(superuser_db, goal.id)[:1]}",
     )
     assert holds
 

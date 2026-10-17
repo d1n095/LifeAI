@@ -72,7 +72,7 @@ def _goal_plan_task(db, owner_id, *, instruction="Harden PR #79's live-loop wiri
     goal = create_goal(db, owner_id=owner_id, title="PR79 hardening", original_instruction=instruction, created_by="founder", approval_policy=approval_policy)
     plan = create_plan(
         db, goal=goal, rationale="coordination test",
-        tasks=[PlannedTaskSpec(description=f"Task {i}", task_type="repo_edit") for i in range(task_count)],
+        tasks=[PlannedTaskSpec(description=f"Task {i}", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"]) for i in range(task_count)],
         created_by="founder",
     )
     db.commit()

@@ -61,7 +61,7 @@ def _goal_task(db, owner_id, *, instruction="Resource intelligence longitudinal 
     )
     plan = create_plan(
         db, goal=goal, rationale="RI scenario",
-        tasks=[PlannedTaskSpec(description="Task", task_type="repo_edit")],
+        tasks=[PlannedTaskSpec(description="Task", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])],
         created_by="founder",
     )
     db.commit()

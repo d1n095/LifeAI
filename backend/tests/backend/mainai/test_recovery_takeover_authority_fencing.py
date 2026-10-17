@@ -106,7 +106,7 @@ def _task_and_dead_job(db_session, superuser_db, owner_id, goal, *, task_type="r
     tests/backend/test_mainai_execution_recovery_takeover.py's own `_task_and_dead_job()`."""
     planner.create_plan(
         db_session, goal=goal, rationale="single task",
-        tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [])],
+        tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [], target_files=["backend/tests/backend/test_ok.py"] if task_type == "repo_edit" else [])],
         created_by="test",
     )
     db_session.commit()
@@ -551,7 +551,7 @@ async def test_a_crashed_governed_task_is_declined_by_recovery_then_re_governed_
     goal = planner.create_goal(superuser_db, owner_id=owner.id, title="crash+recovery composition test", original_instruction="edit a file", created_by="test")
     planner.create_plan(
         superuser_db, goal=goal, rationale="single task",
-        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit")],
+        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])],
         created_by="test",
     )
     superuser_db.flush()
