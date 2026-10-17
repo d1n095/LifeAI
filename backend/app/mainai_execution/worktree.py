@@ -254,19 +254,74 @@ async def create_task_worktree(
     )
 
 
+def git_changed_paths_no_renames(*, cwd: Path, base_sha: str, head: str = "HEAD") -> list[str]:
+    """Changed paths between `base_sha` and `head`, with rename collapsing disabled.
+
+    Equivalent to `git diff --name-only --no-renames`. A rename of an out-of-scope
+    file onto an authorized target therefore exposes the deleted source path
+    (TA-10), not only the destination.
+    """
+    if not base_sha:
+        raise WorktreeError("refusing to compute changed files without a base_sha.")
+    result = _run_git(["diff", "--name-only", "--no-renames", "-z", f"{base_sha}..{head}"], cwd=cwd)
+    return [entry for entry in result.stdout.split("\0") if entry]
+
+
+def path_exists_in_git_revision(*, cwd: Path, revision: str, path: str) -> bool | None:
+    """True if `path` exists as a blob at `revision`. False if git answers "missing".
+
+    Returns None when git cannot be queried (not a repo, timeout, unexpected error)
+    so callers can fail closed rather than treat an unknown tree as empty.
+    """
+    if not revision or not path:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{revision}:{path}"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode == 0:
+        return True
+    stderr = (result.stderr or "").lower()
+    if "not a git repository" in stderr or "not a git repo" in stderr:
+        return None
+    if result.returncode in {1, 128}:
+        return False
+    return None
+
+
+def path_exists_at_base(worktree: MainAITaskWorktree, path: str) -> bool:
+    """Whether `path` exists at the worktree's verified base SHA (not the current tree)."""
+    _require_ownership(worktree)
+    if not worktree.base_sha:
+        raise WorktreeError("worktree has no base_sha — refusing to test path existence.")
+    exists = path_exists_in_git_revision(cwd=Path(worktree.path), revision=worktree.base_sha, path=path)
+    if exists is None:
+        raise WorktreeError(
+            f"cannot determine whether {path!r} exists at base_sha {worktree.base_sha} — refusing to lift edit authority."
+        )
+    return exists
+
+
 def worktree_changed_files(worktree: MainAITaskWorktree) -> list[str]:
     """Repo-root relative paths that differ between the verified base SHA and HEAD.
 
     Used immediately before remote publication so the actual Git changed-file set
-    can be compared against structured editable targets. The ownership marker is
-    excluded via `.git/info/exclude` and never appears here.
+    can be compared against structured editable targets. Rename collapsing is
+    disabled so a deleted/renamed source path cannot hide behind a destination
+    that happens to be authorized. The ownership marker is excluded via
+    `.git/info/exclude` and never appears here.
     """
     _require_ownership(worktree)
     if not worktree.base_sha:
         raise WorktreeError("worktree has no base_sha — refusing to compute changed files.")
-    path = Path(worktree.path)
-    result = _run_git(["diff", "--name-only", "-z", f"{worktree.base_sha}..HEAD"], cwd=path)
-    return [entry for entry in result.stdout.split("\0") if entry]
+    return git_changed_paths_no_renames(cwd=Path(worktree.path), base_sha=worktree.base_sha)
 
 
 def worktree_git_status(worktree: MainAITaskWorktree) -> dict:

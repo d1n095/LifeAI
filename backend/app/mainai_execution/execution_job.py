@@ -68,8 +68,10 @@ from app.mainai_execution.envelope_scope import (
     assert_envelope_allows_repo_edit,
     assert_envelope_allows_tests,
     load_structured_edit_targets,
+    load_structured_target_authority,
     map_verification_target_to_repo_path,
     require_path_a_execution_envelope,
+    runtime_editable_targets,
     validate_target_path,
 )
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
@@ -78,6 +80,8 @@ from app.mainai_execution.worktree import (
     commit_worktree_changes,
     create_task_worktree,
     execution_pr_base_branch,
+    path_exists_at_base,
+    path_exists_in_git_revision,
     push_worktree_branch,
     verify_worktree_ownership,
     worktree_changed_files,
@@ -227,12 +231,30 @@ def _parse_code_agent_response(raw: str) -> dict:
 
 
 def _explicit_edit_targets(db: Session, task: MainAITask) -> list[str]:
-    """Structured editable targets from the append-only created event only.
+    """Structured declared targets from the append-only created event only.
 
     Task.description and any `Target files:` prose marker are never authority.
     Historical or text-only tasks fail closed (empty list).
     """
     return load_structured_edit_targets(db, task)
+
+
+def _path_exists_at_proposal_base(root: Path, path: str) -> bool:
+    """Existence at the approved tree, not the post-write working copy.
+
+    Prefer `HEAD:path` so a newly created focused test is still treated as
+    absent after the code agent writes it. Filesystem fallback is for
+    non-git proposal fixtures; unknown git state fails closed (exists).
+    """
+    exists = path_exists_in_git_revision(cwd=root, revision="HEAD", path=path)
+    if exists is not None:
+        return exists
+    return (root / path).is_file()
+
+
+def _runtime_edit_targets(db: Session, task: MainAITask, *, exists_at_base) -> list[str]:
+    """Declared targets plus genuinely new undeclared focused tests (TA-8b)."""
+    return runtime_editable_targets(load_structured_target_authority(db, task), exists_at_base=exists_at_base)
 
 
 def _envelope_for_path_a_task(db: Session, task: MainAITask):
@@ -281,12 +303,15 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     repo_root = _repo_root().resolve()
     envelope = _envelope_for_path_a_task(db, task)
     failure_context = latest_verification_failure_text(db, task.id)
-    editable = _explicit_edit_targets(db, task)
-    if not editable:
+    declared = _explicit_edit_targets(db, task)
+    if not declared:
         raise TaskExecutionError(
             "Refusing repo_edit: no structured editable targets on the created event "
             "(historical or text-only target authority is fail-closed)."
         )
+    editable = _runtime_edit_targets(
+        db, task, exists_at_base=lambda path: _path_exists_at_proposal_base(repo_root, path)
+    )
     prompt = prepare_code_agent_prompt(
         task.description,
         repo_root,
@@ -370,13 +395,13 @@ async def _handle_repo_edit(
     site in run_task_execution_job() can stop exactly like every other fenced-out write here."""
     settings = get_settings()
     envelope = _envelope_for_path_a_task(db, task)
-    editable = _explicit_edit_targets(db, task)
-    if not editable:
+    declared = _explicit_edit_targets(db, task)
+    if not declared:
         raise TaskExecutionError(
             "Refusing repo_edit: no structured editable targets on the created event "
             "(historical or text-only target authority is fail-closed)."
         )
-    _guard_envelope(assert_envelope_allows_repo_edit, envelope, editable)
+    _guard_envelope(assert_envelope_allows_repo_edit, envelope, declared)
     if not settings.github_write_enabled:
         return await _propose_repo_edit(db, task)
 
@@ -427,6 +452,13 @@ async def _handle_repo_edit(
         db.commit()
 
     worktree_root = Path(worktree.path).resolve()
+    try:
+        editable = _runtime_edit_targets(
+            db, task, exists_at_base=lambda path: path_exists_at_base(worktree, path)
+        )
+    except WorktreeError as exc:
+        raise TaskExecutionError(str(exc)) from exc
+    _guard_envelope(assert_envelope_allows_repo_edit, envelope, editable)
     failure_context = latest_verification_failure_text(db, task.id)
     prompt = prepare_code_agent_prompt(
         task.description,
@@ -615,7 +647,6 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
 
     worktree_id = work_result.get("worktree_id")
     envelope = _envelope_for_path_a_task(db, task)
-    editable = _explicit_edit_targets(db, task)
     claimed_paths: list[str] = []
     for item in work_result.get("files") or []:
         if isinstance(item, dict) and item.get("path"):
@@ -623,6 +654,9 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
         elif isinstance(item, str) and item:
             claimed_paths.append(item)
     if worktree_id is None:
+        editable = _runtime_edit_targets(
+            db, task, exists_at_base=lambda path: _path_exists_at_proposal_base(_repo_root().resolve(), path)
+        )
         _guard_envelope(assert_changed_files_within_authority, actual_files=claimed_paths, editable_targets=editable, envelope=envelope)
         # Proposal mode (github_write_enabled off) -- unchanged from V0.1.
         return {"branch": branch, "base_branch": base_branch, "proposed": True, "files": [f["path"] for f in work_result["files"]]}
@@ -634,6 +668,9 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
         )
     try:
         actual_files = worktree_changed_files(worktree)
+        editable = _runtime_edit_targets(
+            db, task, exists_at_base=lambda path: path_exists_at_base(worktree, path)
+        )
     except WorktreeError as exc:
         raise TaskExecutionError(str(exc)) from exc
     _guard_envelope(
