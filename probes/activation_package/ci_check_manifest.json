@@ -1,0 +1,336 @@
+{
+ "schema": "mainai.activation.ci_check_manifest/v1",
+ "observed_at": "2026-10-17",
+ "repository": "d1n095/LifeAI",
+ "observed_from": {
+  "check_runs_at_sha": "eed3f4a380be71398a0481414518a29506a57ccb",
+  "workflow_source_sha": "6c75174 (Path A #276 head; ci.yml identical to eed3f4a except FC-4 audit step)"
+ },
+ "required_set_canonical": [
+  {
+   "name": "All required checks passed",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — Alembic migration check",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — RLS & session-security tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — account lifecycle & rate-limit tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — unit/integration tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — Library / Founder Knowledge Studio",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — Playwright (full stack)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — same-origin proxy",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — TypeScript & ESLint",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — build (docker)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — build (vercel)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — npm audit",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  }
+ ],
+ "checks": [
+  {
+   "name": "Frontend — TypeScript & ESLint",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "lint-and-typecheck",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "Frontend — npm audit",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "npm-audit",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "Frontend — build (docker)",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "frontend-build[matrix.mode=docker]",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "Frontend — build (vercel)",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "frontend-build[matrix.mode=vercel]",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "Backend — unit/integration tests",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "backend-tests",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "Backend — RLS & session-security tests",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "rls-security-tests",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "Backend — account lifecycle & rate-limit tests",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "account-rate-limit-tests",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "Backend — Alembic migration check",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "migration-check",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "E2E — Playwright (full stack)",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "e2e-tests",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "E2E — Library / Founder Knowledge Studio",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "e2e-library-studio-tests",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "E2E — same-origin proxy",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "same-origin-proxy-test",
+   "required": true,
+   "trigger_context": "always"
+  },
+  {
+   "name": "All required checks passed",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "all-checks-passed",
+   "required": true,
+   "trigger_context": "always (if: always()); fails on failure/cancelled, treats skipped as ok"
+  },
+  {
+   "name": "Combined container — build, run, verify",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "combined-container-verify",
+   "required": false,
+   "trigger_context": "branch-gated: only claude/verify-combined-container, claude/integrate-founder-vps, claude/det-kommer-mer-879lcm; else skipped"
+  },
+  {
+   "name": "VPS bootstrap scripts — shellcheck + dry-run",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "vps-scripts-check",
+   "required": false,
+   "trigger_context": "branch-gated; skipped elsewhere"
+  },
+  {
+   "name": "Strato VPS compose topology — build, run, verify",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "vps-compose-verify",
+   "required": false,
+   "trigger_context": "branch-gated; skipped elsewhere"
+  },
+  {
+   "name": "VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "vps-deploy-rollback-test",
+   "required": false,
+   "trigger_context": "branch-gated; skipped elsewhere"
+  },
+  {
+   "name": "VPS backup.sh / restore.sh — archive structure, checksums, and restore behavior",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "vps-backup-restore-test",
+   "required": false,
+   "trigger_context": "branch-gated; skipped elsewhere"
+  },
+  {
+   "name": "Deploy to Render (PERMANENTLY DISABLED — superseded by Strato VPS)",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "CI",
+   "workflow_path": ".github/workflows/ci.yml",
+   "job": "deploy-render",
+   "required": false,
+   "trigger_context": "push to claude/det-kommer-mer-879lcm only; inert"
+  },
+  {
+   "name": "Vercel Preview Comments",
+   "kind": "check_run",
+   "app_slug": "vercel",
+   "integration_id": 8329,
+   "workflow": null,
+   "workflow_path": null,
+   "job": null,
+   "required": false,
+   "trigger_context": "Vercel GitHub integration, every pushed branch; external deployment signal"
+  },
+  {
+   "name": "Vercel",
+   "kind": "commit_status",
+   "app_slug": null,
+   "integration_id": null,
+   "workflow": null,
+   "workflow_path": null,
+   "job": null,
+   "required": false,
+   "trigger_context": "Vercel deployment status (commit status API, not a check run)"
+  },
+  {
+   "name": "Dependency Graph",
+   "kind": "dynamic_workflow",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "Dependency Graph",
+   "workflow_path": "dynamic/dependabot/update-graph",
+   "job": null,
+   "required": false,
+   "trigger_context": "default-branch dependency graph"
+  },
+  {
+   "name": "(Build & push VPS images jobs)",
+   "kind": "check_run",
+   "app_slug": "github-actions",
+   "integration_id": 15368,
+   "workflow": "Build & push VPS images",
+   "workflow_path": ".github/workflows/build-images.yml",
+   "job": "*",
+   "required": false,
+   "trigger_context": "push to main / workflow_dispatch only; never runs for activation branches"
+  }
+ ],
+ "per_sha_duplication": "each check runs once per push event and once per pull_request event when both triggers match; both must pass",
+ "name_collision_analysis": {
+  "near_duplicates": [
+   [
+    "Frontend — build (docker)",
+    "Frontend — build (vercel)"
+   ],
+   [
+    "Backend — unit/integration tests",
+    "Backend — RLS & session-security tests",
+    "Backend — account lifecycle & rate-limit tests"
+   ]
+  ],
+  "risk": "names are distinct strings; substitution risk is app-level (another app or commit status using the same context). Mitigation: bind integration_id 15368 in the ruleset and app_slug in MainAI ci_wait.",
+  "unicode_note": "names contain U+2014 EM DASH and '&'; must be copied byte-exact (UTF-8) into the ruleset and envelope"
+ },
+ "unsuitable_as_hard_requirements": [
+  "all branch-gated jobs (always 'skipped' outside their hard-coded refs; GitHub treats skipped as satisfying a required check, so requiring them proves nothing)",
+  "Vercel signals (third-party deploy)",
+  "Deploy to Render (disabled)"
+ ]
+}

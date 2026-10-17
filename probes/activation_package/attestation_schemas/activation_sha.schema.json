@@ -1,0 +1,86 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.activation_sha/v1",
+ "title": "activation_sha",
+ "description": "approved_base_sha MUST equal branch_tip_observed_sha and the running activation code SHA.",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "repository_full_name",
+  "integration_branch",
+  "approved_base_sha",
+  "branch_tip_observed_sha",
+  "tree_sha",
+  "composition",
+  "observed_at",
+  "observed_by"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.activation_sha/v1"
+  },
+  "repository_full_name": {
+   "const": "d1n095/LifeAI"
+  },
+  "integration_branch": {
+   "const": "mainai/integration-founder-supervised-v1"
+  },
+  "approved_base_sha": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{40}$"
+  },
+  "branch_tip_observed_sha": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{40}$"
+  },
+  "tree_sha": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{40}$"
+  },
+  "composition": {
+   "type": "array",
+   "minItems": 1,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "lane",
+     "head_sha",
+     "examiner_evidence_sha",
+     "verdict"
+    ],
+    "properties": {
+     "lane": {
+      "type": "string"
+     },
+     "pr": {
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+     },
+     "examiner_evidence_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+     },
+     "verdict": {
+      "const": "PASS"
+     }
+    }
+   }
+  },
+  "observed_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "observed_by": {
+   "type": "string",
+   "description": "who ran the read (Founder admin session or runtime token id); never MainAI for admin facts"
+  }
+ }
+}

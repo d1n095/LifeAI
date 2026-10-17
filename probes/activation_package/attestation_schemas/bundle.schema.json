@@ -1,0 +1,70 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.bundle/v1",
+ "title": "bundle",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "repository_identity_sha256",
+  "activation_sha_sha256",
+  "required_checks_sha256",
+  "ruleset_snapshot_sha256",
+  "no_bypass_sha256",
+  "installation_sha256",
+  "runtime_config_sha256",
+  "approved_base_sha",
+  "integration_branch",
+  "created_at",
+  "expires_at"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.bundle/v1"
+  },
+  "repository_identity_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "activation_sha_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "required_checks_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "ruleset_snapshot_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "no_bypass_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "installation_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "runtime_config_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "approved_base_sha": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{40}$"
+  },
+  "integration_branch": {
+   "const": "mainai/integration-founder-supervised-v1"
+  },
+  "created_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "expires_at": {
+   "type": "string",
+   "format": "date-time"
+  }
+ },
+ "description": "The single digest the preflight receipt binds (ruleset_attestation_digest / runtime_token_attestation_digest are the corresponding member digests). expires_at <= min(envelope, spend grant, token, ruleset attestation expiry); <= 15 min after created_at for the receipt."
+}

@@ -1,0 +1,107 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.installation/v1",
+ "title": "installation",
+ "description": "From GET /app/installations/{id} (App JWT) and the minted-token response's permissions/repositories (token value never recorded). bot_user_id MUST differ from founder_user_id. additionalProperties=false on permissions makes ANY extra permission (administration, workflows, actions, secrets, ...) a schema failure.",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "app_id",
+  "app_slug",
+  "bot_login",
+  "bot_user_id",
+  "founder_user_id",
+  "installation_id",
+  "account_login",
+  "repository_selection",
+  "repositories",
+  "permissions",
+  "events",
+  "token_max_ttl_seconds",
+  "observed_at",
+  "observed_by"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.installation/v1"
+  },
+  "app_id": {
+   "type": "integer"
+  },
+  "app_slug": {
+   "type": "string"
+  },
+  "bot_login": {
+   "type": "string",
+   "pattern": "\\[bot\\]$"
+  },
+  "bot_user_id": {
+   "type": "integer"
+  },
+  "founder_user_id": {
+   "type": "integer"
+  },
+  "installation_id": {
+   "type": "integer"
+  },
+  "account_login": {
+   "const": "d1n095"
+  },
+  "repository_selection": {
+   "const": "selected"
+  },
+  "repositories": {
+   "type": "array",
+   "items": {
+    "const": "d1n095/LifeAI"
+   },
+   "minItems": 1,
+   "maxItems": 1
+  },
+  "permissions": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "metadata",
+    "contents",
+    "pull_requests",
+    "checks",
+    "statuses"
+   ],
+   "properties": {
+    "metadata": {
+     "const": "read"
+    },
+    "contents": {
+     "const": "write"
+    },
+    "pull_requests": {
+     "const": "write"
+    },
+    "checks": {
+     "const": "read"
+    },
+    "statuses": {
+     "const": "read"
+    }
+   }
+  },
+  "events": {
+   "type": "array",
+   "maxItems": 0
+  },
+  "token_max_ttl_seconds": {
+   "type": "integer",
+   "maximum": 3600
+  },
+  "observed_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "observed_by": {
+   "type": "string",
+   "description": "who ran the read (Founder admin session or runtime token id); never MainAI for admin facts"
+  }
+ }
+}

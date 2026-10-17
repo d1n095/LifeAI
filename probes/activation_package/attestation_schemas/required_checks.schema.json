@@ -1,0 +1,58 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.required_checks/v1",
+ "title": "required_checks",
+ "description": "Sorted by name; must equal ci_check_manifest.required_set_canonical and the ruleset's required_status_checks.",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "workflow_source_sha",
+  "contexts",
+  "observed_at",
+  "observed_by"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.required_checks/v1"
+  },
+  "workflow_source_sha": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{40}$"
+  },
+  "contexts": {
+   "type": "array",
+   "minItems": 12,
+   "maxItems": 12,
+   "uniqueItems": true,
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "name",
+     "app_slug",
+     "integration_id"
+    ],
+    "properties": {
+     "name": {
+      "type": "string"
+     },
+     "app_slug": {
+      "const": "github-actions"
+     },
+     "integration_id": {
+      "const": 15368
+     }
+    }
+   }
+  },
+  "observed_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "observed_by": {
+   "type": "string",
+   "description": "who ran the read (Founder admin session or runtime token id); never MainAI for admin facts"
+  }
+ }
+}

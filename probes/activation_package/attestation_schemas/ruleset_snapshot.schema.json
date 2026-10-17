@@ -1,0 +1,44 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.ruleset_snapshot/v1",
+ "title": "ruleset_snapshot",
+ "description": "Captured with the Founder admin session (bypass_actors visible only to admins).",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "ruleset_id",
+  "ruleset",
+  "effective_rules",
+  "classic_protection",
+  "observed_at",
+  "observed_by"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.ruleset_snapshot/v1"
+  },
+  "ruleset_id": {
+   "type": "integer"
+  },
+  "ruleset": {
+   "type": "object",
+   "description": "GET /repos/{r}/rulesets/{id} reduced to: name,target,source_type,enforcement,conditions,rules,bypass_actors (drop id-like volatile fields: created_at,updated_at,_links,node_id,current_user_can_bypass)"
+  },
+  "effective_rules": {
+   "type": "array",
+   "description": "GET /repos/{r}/rules/branches/mainai%2Fintegration-founder-supervised-v1, each item reduced to type+parameters (drop ruleset_id/source fields)"
+  },
+  "classic_protection": {
+   "const": "absent"
+  },
+  "observed_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "observed_by": {
+   "type": "string",
+   "description": "who ran the read (Founder admin session or runtime token id); never MainAI for admin facts"
+  }
+ }
+}

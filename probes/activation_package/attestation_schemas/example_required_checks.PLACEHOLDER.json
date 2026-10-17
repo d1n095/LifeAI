@@ -1,0 +1,68 @@
+{
+ "schema": "mainai.activation.required_checks/v1",
+ "workflow_source_sha": "0000000000000000000000000000000000000000",
+ "contexts": [
+  {
+   "name": "All required checks passed",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — Alembic migration check",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — RLS & session-security tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — account lifecycle & rate-limit tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — unit/integration tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — Library / Founder Knowledge Studio",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — Playwright (full stack)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — same-origin proxy",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — TypeScript & ESLint",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — build (docker)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — build (vercel)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — npm audit",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  }
+ ],
+ "observed_at": "2026-10-17T00:00:00Z",
+ "observed_by": "EXAMPLE-PLACEHOLDER"
+}

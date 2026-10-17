@@ -1,0 +1,82 @@
+{
+ "_comment": "GitHub App manifest (Settings -> Developer settings -> GitHub Apps -> New from manifest). Owner: user d1n095. Install on 'Only select repositories' = LifeAI. Private key stays in the Founder-controlled token broker, never in the MainAI worker env.",
+ "manifest": {
+  "name": "mainai-runtime-lifeai",
+  "url": "https://github.com/d1n095/LifeAI",
+  "public": false,
+  "hook_attributes": {
+   "url": "https://example.invalid/webhooks-disabled",
+   "active": false
+  },
+  "default_permissions": {
+   "metadata": "read",
+   "contents": "write",
+   "pull_requests": "write",
+   "checks": "read",
+   "statuses": "read"
+  },
+  "default_events": []
+ },
+ "token_minting": {
+  "read_phase": {
+   "endpoint": "POST /app/installations/{installation_id}/access_tokens",
+   "body": {
+    "repositories": [
+     "LifeAI"
+    ],
+    "permissions": {
+     "metadata": "read",
+     "contents": "read",
+     "pull_requests": "read",
+     "checks": "read",
+     "statuses": "read"
+    }
+   }
+  },
+  "effect_phase_push_or_open_pr": {
+   "endpoint": "POST /app/installations/{installation_id}/access_tokens",
+   "body": {
+    "repositories": [
+     "LifeAI"
+    ],
+    "permissions": {
+     "metadata": "read",
+     "contents": "write",
+     "pull_requests": "write"
+    }
+   },
+   "note": "minted only inside the one-shot effect executor (Codex transport design bf9616e); never persisted; never in a worktree"
+  }
+ },
+ "forbidden_permissions": [
+  "administration",
+  "workflows",
+  "actions",
+  "secrets",
+  "variables",
+  "environments",
+  "deployments",
+  "pages",
+  "packages",
+  "security_events",
+  "repository_hooks",
+  "repository_projects",
+  "issues",
+  "discussions",
+  "members",
+  "organization_administration",
+  "single_file",
+  "vulnerability_alerts",
+  "dependabot_secrets",
+  "codespaces",
+  "attestations"
+ ],
+ "no_go": [
+  "any permission outside default_permissions",
+  "repository_selection != selected or repositories != [d1n095/LifeAI]",
+  "events subscribed",
+  "bot_user_id == founder_user_id or token authenticates as a user (GET /user returns 200)",
+  "private key or installation token reachable from the MainAI worker/agent environment",
+  "any ruleset bypass_actors entry"
+ ]
+}

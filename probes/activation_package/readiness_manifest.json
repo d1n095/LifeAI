@@ -1,0 +1,387 @@
+{
+ "schema": "mainai.activation.readiness_manifest/v1",
+ "observed_at": "2026-10-17",
+ "repository": "d1n095/LifeAI",
+ "integration_branch": "mainai/integration-founder-supervised-v1",
+ "lane_heads": {
+  "path_a_276": "6c75174",
+  "fc4_275": "eed3f4a",
+  "github_discovery_263": "e33f494",
+  "track_b_267_excluded": "da4d96b",
+  "spec_activation_security": "8a5bdaf",
+  "spec_composition": "9d9dc9e",
+  "spec_git_transport": "bf9616e",
+  "go_gate_baseline": "9208e5d"
+ },
+ "composition_order": [
+  "2fbe20a",
+  "Path A final (#264..#276 lineage, PASS)",
+  "#263 (union-resolve test_github_client.py + BRANCH_REGISTRY.md)",
+  "FC-4 #275 successor",
+  "activation-security implementation (B-03/B-05/B-06)",
+  "Git transport (B-04)",
+  "ci.yml change (B-07)",
+  "exact-SHA battery + examiner PASS -> approved_base_sha"
+ ],
+ "first_cycle_scope": {
+  "recommended": "A",
+  "A": {
+   "target_files": [
+    "backend/tests/backend/test_first_cycle_probe.py"
+   ],
+   "targeted_test": "tests/backend/test_first_cycle_probe.py",
+   "subject": "app.providers.pricing.estimate_cost price-independent invariants"
+  },
+  "B": {
+   "target_files": [
+    "backend/app/first_cycle_probe.py",
+    "backend/tests/backend/test_first_cycle_probe.py"
+   ],
+   "targeted_test": "tests/backend/test_first_cycle_probe.py"
+  },
+  "capabilities": [
+   "path_a",
+   "read_file",
+   "repo_edit",
+   "run_tests",
+   "push",
+   "open_pr"
+  ]
+ },
+ "rule": "any FAIL or UNKNOWN among non-DEFERRED items => NO-GO",
+ "counts": {
+  "UNKNOWN": 12,
+  "FAIL": 7,
+  "PASS": 2,
+  "DEFERRED": 10
+ },
+ "overall": "NO-GO",
+ "items": [
+  {
+   "id": "B-01",
+   "item": "Path A task authority TA-8b/TA-10 fixed (#276)",
+   "class": "code",
+   "status": "UNKNOWN",
+   "owner": "Cursor",
+   "evidence_sha_required": "examiner PASS at #276 freeze SHA (current head 6c75174)",
+   "depends_on": [],
+   "severity": "P1"
+  },
+  {
+   "id": "B-02",
+   "item": "FC-4 exception policy A6/A7 (#275 successor)",
+   "class": "code",
+   "status": "FAIL",
+   "owner": "Codex",
+   "evidence_sha_required": "examiner PASS at #275 successor SHA (prior RETURN_TO_BUILDER evidence 6d56ff0)",
+   "depends_on": [],
+   "severity": "P1"
+  },
+  {
+   "id": "B-03",
+   "item": "Activation-security substrate (envelope activation fields+migration, push grants, preflight receipts, remote-effect predicate, PR identity, startup validation)",
+   "class": "code",
+   "status": "UNKNOWN",
+   "owner": "Codex",
+   "evidence_sha_required": "examiner PASS at implementation SHA (spec 8a5bdaf)",
+   "depends_on": [
+    "B-01",
+    "B-02"
+   ],
+   "severity": "P1"
+  },
+  {
+   "id": "B-04",
+   "item": "Credential-free Git transport (worktree.py:196 token in .git/config; Codex bf9616e)",
+   "class": "code",
+   "status": "FAIL",
+   "owner": "Codex",
+   "evidence_sha_required": "examiner PASS + rehearsal R-2",
+   "depends_on": [],
+   "severity": "P0"
+  },
+  {
+   "id": "B-05",
+   "item": "CI wait exact required set + app binding + no skipped-as-pass + ignore Vercel",
+   "class": "code",
+   "status": "FAIL",
+   "owner": "Codex",
+   "evidence_sha_required": "examiner PASS + rehearsal R-4",
+   "depends_on": [
+    "B-03"
+   ],
+   "severity": "P1"
+  },
+  {
+   "id": "B-06",
+   "item": "Base branch fail-closed (no stale BASE_BRANCH fallback; explicit settings == envelope)",
+   "class": "code",
+   "status": "FAIL",
+   "owner": "Codex",
+   "evidence_sha_required": "examiner PASS + test",
+   "depends_on": [
+    "B-03"
+   ],
+   "severity": "P1"
+  },
+  {
+   "id": "B-07",
+   "item": "ci.yml: add mainai/** to push and pull_request; top-level permissions contents:read",
+   "class": "code",
+   "status": "FAIL",
+   "owner": "UNASSIGNED",
+   "evidence_sha_required": "merged in composition; CI on IB at activation SHA",
+   "depends_on": [],
+   "severity": "P1"
+  },
+  {
+   "id": "B-08",
+   "item": "#263 paginated check runs included in composition (default page 30/37 live)",
+   "class": "composition",
+   "status": "UNKNOWN",
+   "owner": "Codex composition lane",
+   "evidence_sha_required": "composition manifest lists e33f494 or successor",
+   "depends_on": [],
+   "severity": "P1"
+  },
+  {
+   "id": "B-09",
+   "item": "Track B #267 excluded from activation composition",
+   "class": "composition",
+   "status": "UNKNOWN",
+   "owner": "Founder",
+   "evidence_sha_required": "composition manifest",
+   "depends_on": [],
+   "severity": "P1"
+  },
+  {
+   "id": "B-10",
+   "item": "Composed activation SHA: full regression + examiner probes (R-1) + exact-SHA CI green",
+   "class": "evidence",
+   "status": "UNKNOWN",
+   "owner": "Examiner + CI",
+   "evidence_sha_required": "activation SHA",
+   "depends_on": [
+    "B-01",
+    "B-02",
+    "B-03",
+    "B-04",
+    "B-05",
+    "B-06",
+    "B-07",
+    "B-08",
+    "B-09"
+   ]
+  },
+  {
+   "id": "G-01",
+   "item": "Ruleset phase1+phase2 applied; snapshot + no_bypass attested",
+   "class": "config",
+   "status": "FAIL",
+   "owner": "Founder",
+   "evidence_sha_required": "ruleset_snapshot/no_bypass digests",
+   "depends_on": [
+    "B-10"
+   ]
+  },
+  {
+   "id": "G-02",
+   "item": "Integration branch created at approved_base_sha",
+   "class": "config",
+   "status": "UNKNOWN",
+   "owner": "Founder",
+   "evidence_sha_required": "activation_sha attestation",
+   "depends_on": [
+    "G-01"
+   ]
+  },
+  {
+   "id": "G-03",
+   "item": "GitHub App created/installed exactly per package; broker outside worker",
+   "class": "config",
+   "status": "FAIL",
+   "owner": "Founder",
+   "evidence_sha_required": "installation attestation + R-5",
+   "depends_on": []
+  },
+  {
+   "id": "G-04",
+   "item": "Vercel preview builds of claude/mainai-task-* disabled or non-secret",
+   "class": "config",
+   "status": "UNKNOWN",
+   "owner": "Founder",
+   "evidence_sha_required": "Vercel project setting evidence",
+   "depends_on": [],
+   "severity": "P2"
+  },
+  {
+   "id": "G-05",
+   "item": "Actions default token read; cannot approve PRs",
+   "class": "config",
+   "status": "PASS",
+   "owner": "-",
+   "evidence_sha_required": "GET /actions/permissions/workflow 2026-10-17 (re-observe at preflight)",
+   "depends_on": []
+  },
+  {
+   "id": "G-06",
+   "item": "No deploy keys, extra collaborators, webhooks; auto-merge off",
+   "class": "config",
+   "status": "PASS",
+   "owner": "-",
+   "evidence_sha_required": "2026-10-17 observation (re-observe at preflight)",
+   "depends_on": []
+  },
+  {
+   "id": "F-01",
+   "item": "Runtime config digest (bases, write flag session-only, auto-merge false, legacy false, spend gate true, openai only, fallback openai, real SECRET_KEY, Track B adapters disabled)",
+   "class": "config",
+   "status": "UNKNOWN",
+   "owner": "Founder",
+   "evidence_sha_required": "runtime_config_sha256",
+   "depends_on": [
+    "B-06"
+   ]
+  },
+  {
+   "id": "F-02",
+   "item": "Pricing attestation openai/gpt-4o-mini",
+   "class": "evidence",
+   "status": "UNKNOWN",
+   "owner": "Founder",
+   "evidence_sha_required": "signed note",
+   "depends_on": []
+  },
+  {
+   "id": "F-03",
+   "item": "Signed attestation bundle; preflight GO receipt <= 15 min",
+   "class": "evidence",
+   "status": "UNKNOWN",
+   "owner": "Founder",
+   "evidence_sha_required": "bundle digest + receipt",
+   "depends_on": [
+    "G-01",
+    "G-02",
+    "G-03",
+    "F-01",
+    "F-02",
+    "B-03"
+   ]
+  },
+  {
+   "id": "F-04",
+   "item": "Envelope + spend grant rows exact (Option A or B)",
+   "class": "evidence",
+   "status": "UNKNOWN",
+   "owner": "Founder",
+   "evidence_sha_required": "DB rows",
+   "depends_on": [
+    "F-03"
+   ]
+  },
+  {
+   "id": "F-05",
+   "item": "Runbook steps 11-17 recorded; STOP before merge",
+   "class": "evidence",
+   "status": "UNKNOWN",
+   "owner": "Founder + Examiner",
+   "evidence_sha_required": "cycle evidence",
+   "depends_on": [
+    "F-04"
+   ]
+  },
+  {
+   "id": "D-01",
+   "item": "Track B TB-1 agent_dispatch envelope effect",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "-",
+   "evidence_sha_required": "before any Track B use",
+   "depends_on": []
+  },
+  {
+   "id": "D-02",
+   "item": "Track B TB-2 builder scope enforcement",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "-",
+   "evidence_sha_required": "before any Track B use",
+   "depends_on": []
+  },
+  {
+   "id": "D-03",
+   "item": "Track B TB-3b reviewer OS-level read-only",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "-",
+   "evidence_sha_required": "before any Track B use",
+   "depends_on": []
+  },
+  {
+   "id": "D-04",
+   "item": "Track B TB-4 PR ref recorded as merged",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "-",
+   "evidence_sha_required": "before any Track B use",
+   "depends_on": []
+  },
+  {
+   "id": "D-05",
+   "item": "Track B TB-5 negative verdict completes task",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "-",
+   "evidence_sha_required": "before any Track B use",
+   "depends_on": []
+  },
+  {
+   "id": "D-06",
+   "item": "Track B exact-SHA review receipt (E2E-D)",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "-",
+   "evidence_sha_required": "before any Track B use",
+   "depends_on": []
+  },
+  {
+   "id": "D-07",
+   "item": "Track B TB-6b env allowlist forwards secrets",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "-",
+   "evidence_sha_required": "before any Track B use",
+   "depends_on": []
+  },
+  {
+   "id": "P2-01",
+   "item": "PROTECTED_BRANCHES / migration 0033 CHECK lack integration branch",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "Codex",
+   "evidence_sha_required": "activation migration",
+   "depends_on": [],
+   "severity": "P2"
+  },
+  {
+   "id": "P2-02",
+   "item": "ci.yml persist-credentials:false; action SHA pinning",
+   "class": "code",
+   "status": "DEFERRED",
+   "owner": "UNASSIGNED",
+   "evidence_sha_required": "-",
+   "depends_on": [],
+   "severity": "P2"
+  },
+  {
+   "id": "P2-03",
+   "item": "GitHub default branch stale; render.yaml / legacy gated jobs",
+   "class": "config",
+   "status": "DEFERRED",
+   "owner": "Founder",
+   "evidence_sha_required": "-",
+   "depends_on": [],
+   "severity": "P2"
+  }
+ ]
+}

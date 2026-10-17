@@ -1,0 +1,79 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.attestation_envelope/v1",
+ "title": "attestation_envelope",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "payload_type",
+  "payload_sha256",
+  "payload",
+  "signer",
+  "signed_at",
+  "expires_at",
+  "signature"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.attestation_envelope/v1"
+  },
+  "payload_type": {
+   "enum": [
+    "repository_identity",
+    "activation_sha",
+    "required_checks",
+    "ruleset_snapshot",
+    "no_bypass",
+    "installation",
+    "bundle"
+   ]
+  },
+  "payload_sha256": {
+   "type": "string",
+   "pattern": "^[0-9a-f]{64}$"
+  },
+  "payload": {
+   "type": "object"
+  },
+  "signer": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "name",
+    "method",
+    "key_fingerprint",
+    "namespace"
+   ],
+   "properties": {
+    "name": {
+     "const": "Founder"
+    },
+    "method": {
+     "enum": [
+      "ssh-sig"
+     ]
+    },
+    "key_fingerprint": {
+     "type": "string",
+     "pattern": "^SHA256:"
+    },
+    "namespace": {
+     "const": "mainai-activation-v1"
+    }
+   }
+  },
+  "signed_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "expires_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "signature": {
+   "type": "string",
+   "description": "armored SSHSIG over the canonical payload bytes"
+  }
+ }
+}

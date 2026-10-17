@@ -1,0 +1,82 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.no_bypass/v1",
+ "title": "no_bypass",
+ "description": "Combines admin view (bypass list) with runtime negative read probes. Never probe with a write.",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "rulesets_targeting_branch",
+  "bypass_actors",
+  "org_rulesets",
+  "classic_protection",
+  "runtime_admin_probe",
+  "runtime_user_probe",
+  "observed_at",
+  "observed_by"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.no_bypass/v1"
+  },
+  "rulesets_targeting_branch": {
+   "type": "array",
+   "items": {
+    "type": "integer"
+   },
+   "minItems": 1,
+   "maxItems": 1
+  },
+  "bypass_actors": {
+   "type": "array",
+   "maxItems": 0
+  },
+  "org_rulesets": {
+   "const": "not_applicable_user_owned_repository"
+  },
+  "classic_protection": {
+   "const": "absent"
+  },
+  "runtime_admin_probe": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "endpoint",
+    "http_status"
+   ],
+   "properties": {
+    "endpoint": {
+     "const": "GET /repos/d1n095/LifeAI/actions/permissions"
+    },
+    "http_status": {
+     "const": 403
+    }
+   }
+  },
+  "runtime_user_probe": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "endpoint",
+    "http_status"
+   ],
+   "properties": {
+    "endpoint": {
+     "const": "GET /user"
+    },
+    "http_status": {
+     "const": 403
+    }
+   }
+  },
+  "observed_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "observed_by": {
+   "type": "string",
+   "description": "who ran the read (Founder admin session or runtime token id); never MainAI for admin facts"
+  }
+ }
+}

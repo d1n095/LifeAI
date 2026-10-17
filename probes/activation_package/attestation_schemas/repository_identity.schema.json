@@ -1,0 +1,57 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "mainai.activation.repository_identity/v1",
+ "title": "repository_identity",
+ "description": "GET /repos/d1n095/LifeAI (subset).",
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "schema",
+  "full_name",
+  "repo_id",
+  "owner_login",
+  "owner_id",
+  "owner_type",
+  "visibility",
+  "default_branch",
+  "observed_at",
+  "observed_by"
+ ],
+ "properties": {
+  "schema": {
+   "const": "mainai.activation.repository_identity/v1"
+  },
+  "full_name": {
+   "const": "d1n095/LifeAI"
+  },
+  "repo_id": {
+   "type": "integer"
+  },
+  "owner_login": {
+   "const": "d1n095"
+  },
+  "owner_id": {
+   "type": "integer"
+  },
+  "owner_type": {
+   "const": "User"
+  },
+  "visibility": {
+   "enum": [
+    "public",
+    "private"
+   ]
+  },
+  "default_branch": {
+   "type": "string"
+  },
+  "observed_at": {
+   "type": "string",
+   "format": "date-time"
+  },
+  "observed_by": {
+   "type": "string",
+   "description": "who ran the read (Founder admin session or runtime token id); never MainAI for admin facts"
+  }
+ }
+}
