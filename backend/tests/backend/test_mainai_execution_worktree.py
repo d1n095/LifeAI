@@ -127,7 +127,7 @@ def _repo_edit_job(db_session, owner_id) -> tuple[MainAITask, MainAIJob]:
     goal = _goal(db_session, owner_id)
     planner.create_plan(
         db_session, goal=goal, rationale="single repo_edit task",
-        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit")], created_by="test",
+        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])], created_by="test",
     )
     db_session.commit()
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()

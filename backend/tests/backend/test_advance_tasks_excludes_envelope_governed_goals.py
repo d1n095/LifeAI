@@ -31,7 +31,7 @@ def _goal_with_ready_task(db, owner_id):
     goal = planner.create_goal(db, owner_id=owner_id, title="exclusion test", original_instruction="edit a file", created_by="test")
     planner.create_plan(
         db, goal=goal, rationale="single task",
-        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit")],
+        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])],
         created_by="test",
     )
     db.flush()
@@ -312,7 +312,7 @@ async def test_dependent_ready_after_revoke_still_never_reopens_v01(superuser_db
     planner.create_plan(
         superuser_db, goal=goal, rationale="two-step",
         tasks=[
-            PlannedTaskSpec(description="edit a file", task_type="repo_edit"),
+            PlannedTaskSpec(description="edit a file", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"]),
             PlannedTaskSpec(description="run tests", task_type="run_tests", depends_on=[0]),
         ],
         created_by="test",

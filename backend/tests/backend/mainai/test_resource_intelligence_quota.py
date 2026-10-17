@@ -24,7 +24,7 @@ def owner_id(superuser_db, make_verified_user):
 
 def _goal(db, owner_id):
     goal = create_goal(db, owner_id=owner_id, title="RI quota test", original_instruction="quota test", created_by="founder", approval_policy="standard_repo_work")
-    create_plan(db, goal=goal, rationale="ri quota test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit")], created_by="founder")
+    create_plan(db, goal=goal, rationale="ri quota test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])], created_by="founder")
     db.commit()
     return goal
 

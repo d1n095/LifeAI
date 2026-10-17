@@ -151,8 +151,7 @@ async def _bootstrap_n_task_goal(db, n: int = 8):
             description="add multiply helper and focused test",
             task_type="repo_edit",
             risk_level="low",
-            max_attempts=12,
-        )
+            max_attempts=12, target_files=["backend/tests/backend/test_ok.py"])
     ]
     for index in range(1, n):
         specs.append(
@@ -164,6 +163,7 @@ async def _bootstrap_n_task_goal(db, n: int = 8):
                 risk_level="low",
                 depends_on=[index - 1],
                 max_attempts=12,
+                target_files=["backend/tests/backend/test_ok.py"],
             )
         )
 

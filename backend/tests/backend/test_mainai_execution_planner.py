@@ -137,7 +137,7 @@ def test_create_plan_persists_tasks_and_marks_dependency_free_tasks_ready(db_ses
     goal = _goal(db_session, owner_id)
     tasks = [
         PlannedTaskSpec(description="Read the repo", task_type="read_only_audit"),
-        PlannedTaskSpec(description="Make the edit", task_type="repo_edit", depends_on=[0]),
+        PlannedTaskSpec(description="Make the edit", task_type="repo_edit", depends_on=[0], target_files=["backend/tests/backend/test_ok.py"]),
         PlannedTaskSpec(description="Run tests", task_type="run_tests", depends_on=[1]),
     ]
     plan = planner.create_plan(db_session, goal=goal, rationale="three-step plan", tasks=tasks, created_by="test")
@@ -515,7 +515,7 @@ def _fake_chat(response_text: str):
 _VALID_PLAN_JSON = """{
   "tasks": [
     {"description": "Read the relevant files", "task_type": "read_only_audit", "depends_on": [], "risk_level": "low"},
-    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false, "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]},
+    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false, "target_files": ["backend/app/x.py", "backend/tests/backend/test_x.py"], "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]},
     {"description": "Run the targeted tests", "task_type": "run_tests", "depends_on": [1], "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]}
   ]
 }"""

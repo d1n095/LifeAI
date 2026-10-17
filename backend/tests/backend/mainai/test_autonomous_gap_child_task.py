@@ -99,8 +99,8 @@ def _goal_and_plan(db_session, owner_id, *, task_specs=None, instruction="Do the
     )
     if task_specs is None:
         task_specs = [
-            PlannedTaskSpec(description="A", task_type="repo_edit"),
-            PlannedTaskSpec(description="B", task_type="repo_edit"),
+            PlannedTaskSpec(description="A", task_type="repo_edit", target_files=["backend/app/module.py"]),
+            PlannedTaskSpec(description="B", task_type="repo_edit", target_files=["backend/app/module.py"]),
         ]
     plan = planner.create_plan(db_session, goal=goal, rationale="base plan", tasks=task_specs, created_by="test")
     db_session.commit()
@@ -248,8 +248,8 @@ def test_missing_prerequisite_inserts_an_additive_dependency_without_recreating_
         db_session,
         owner_id,
         task_specs=[
-            PlannedTaskSpec(description="A", task_type="repo_edit"),
-            PlannedTaskSpec(description="B", task_type="repo_edit", depends_on=[0]),
+            PlannedTaskSpec(description="A", task_type="repo_edit", target_files=["backend/app/module.py"]),
+            PlannedTaskSpec(description="B", task_type="repo_edit", depends_on=[0], target_files=["backend/app/module.py"]),
         ],
     )
     _a, b = _tasks(db_session, plan.id)
@@ -620,7 +620,7 @@ def test_security_owner_isolation_cross_owner_dependency_target_is_rejected(db_s
 
     other_goal = planner.create_goal(superuser_db, owner_id=other_user.id, title="other owner goal", original_instruction="Other owner's work.", created_by="test")
     other_plan = planner.create_plan(
-        superuser_db, goal=other_goal, rationale="other owner's plan", tasks=[PlannedTaskSpec(description="Other task", task_type="repo_edit")], created_by="test"
+        superuser_db, goal=other_goal, rationale="other owner's plan", tasks=[PlannedTaskSpec(description="Other task", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])], created_by="test"
     )
     superuser_db.commit()
     other_task_id = superuser_db.query(MainAITask).filter(MainAITask.plan_id == other_plan.id).one().id

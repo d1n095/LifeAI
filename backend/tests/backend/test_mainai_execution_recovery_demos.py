@@ -138,8 +138,8 @@ def _dispatch_and_claim(
         [{"kind": "targeted_tests", "target": "tests/test_ok.py"}] if task_type == "repo_edit" else []
     )
     spec_kwargs: dict = {"description": description, "task_type": task_type, "verification_plan": verification_plan}
-    if task_type == "repo_edit" and target_files:
-        spec_kwargs["target_files"] = target_files
+    if task_type == "repo_edit":
+        spec_kwargs["target_files"] = target_files or ["backend/tests/test_ok.py"]
     planner.create_plan(
         db_session,
         goal=goal,

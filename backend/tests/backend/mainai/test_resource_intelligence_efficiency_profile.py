@@ -42,7 +42,7 @@ def owner_id(superuser_db, make_verified_user):
 
 def _goal_plan_task(db, owner_id, *, instruction="Resource intelligence efficiency profile test."):
     goal = create_goal(db, owner_id=owner_id, title="RI efficiency profile test", original_instruction=instruction, created_by="founder", approval_policy="standard_repo_work")
-    plan = create_plan(db, goal=goal, rationale="ri efficiency profile test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit")], created_by="founder")
+    plan = create_plan(db, goal=goal, rationale="ri efficiency profile test", tasks=[PlannedTaskSpec(description="Task 0", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])], created_by="founder")
     db.commit()
     task = db.query(MainAITask).filter_by(plan_id=plan.id).order_by(MainAITask.created_at).first()
     return goal, task

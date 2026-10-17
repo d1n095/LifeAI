@@ -230,26 +230,22 @@ async def _bootstrap_four_task_goal(db):
         PlannedTaskSpec(
             description="add multiply helper and focused test",
             task_type="repo_edit",
-            risk_level="low",
-        ),
+            risk_level="low", target_files=["backend/tests/backend/test_ok.py"]),
         PlannedTaskSpec(
             description="add divide helper and update focused test",
             task_type="repo_edit",
             risk_level="low",
-            depends_on=[0],
-        ),
+            depends_on=[0], target_files=["backend/tests/backend/test_ok.py"]),
         PlannedTaskSpec(
             description="add subtract helper and update focused test",
             task_type="repo_edit",
             risk_level="low",
-            depends_on=[1],
-        ),
+            depends_on=[1], target_files=["backend/tests/backend/test_ok.py"]),
         PlannedTaskSpec(
             description="add power helper and update focused test",
             task_type="repo_edit",
             risk_level="low",
-            depends_on=[2],
-        ),
+            depends_on=[2], target_files=["backend/tests/backend/test_ok.py"]),
     ]
     planner.create_plan(
         db,

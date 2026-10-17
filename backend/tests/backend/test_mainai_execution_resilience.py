@@ -86,6 +86,8 @@ def _goal(db_session, owner_id, *, approval_policy="standard_repo_work"):
 def _single_task_plan(db_session, goal, **spec_kwargs) -> MainAITask:
     spec_kwargs.setdefault("description", "do the work")
     spec_kwargs.setdefault("task_type", "read_only_audit")
+    if spec_kwargs.get("task_type") == "repo_edit":
+        spec_kwargs.setdefault("target_files", ["backend/tests/backend/test_ok.py"])
     planner.create_plan(db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(**spec_kwargs)], created_by="test")
     db_session.commit()
     return db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
@@ -317,7 +319,7 @@ def test_generate_goal_report_keeps_outcome_verification_and_approval_separate(d
         rationale="mixed outcomes",
         tasks=[
             PlannedTaskSpec(description="completed, verified", task_type="read_only_audit"),
-            PlannedTaskSpec(description="needs approval, not yet granted", task_type="repo_edit", approval_required=True),
+            PlannedTaskSpec(description="needs approval, not yet granted", task_type="repo_edit", approval_required=True, target_files=["backend/tests/backend/test_ok.py"]),
             PlannedTaskSpec(description="will fail", task_type="read_only_audit"),
             PlannedTaskSpec(description="blocked", task_type="read_only_audit", depends_on=[2]),
         ],
@@ -564,7 +566,7 @@ def test_create_plan_is_actually_influenced_by_a_real_previously_recorded_lesson
         db_session,
         goal=goal,
         rationale="a repo_edit task with no verification_plan of its own",
-        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit")],
+        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])],
         created_by="test",
     )
     db_session.commit()

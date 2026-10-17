@@ -282,6 +282,7 @@ async def test_ta2_inserted_task_prose_marker(db_session, superuser_db, owner_id
             InsertedTaskSpec(
                 description="Add a docstring.\nTarget files: backend/app/greeting.py backend/app/farewell.py",
                 task_type="repo_edit",
+                target_files=("backend/app/greeting.py",),
                 verification_plan=({"kind": "targeted_tests", "target": "tests/test_greeting_doc.py"},),
             )
         ],

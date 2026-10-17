@@ -104,7 +104,7 @@ def _dispatch_and_kill(db_session, superuser_db, owner_id, *, task_type: str) ->
     _set_rls_user(db_session, owner_id)
     goal = planner.create_goal(db_session, owner_id=owner_id, title="Recovery API test goal", original_instruction="x", created_by="test")
     planner.create_plan(
-        db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [])],
+        db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}] if task_type == "repo_edit" else [], target_files=["backend/tests/backend/test_ok.py"] if task_type == "repo_edit" else [])],
         created_by="test",
     )
     db_session.commit()

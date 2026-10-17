@@ -76,6 +76,7 @@ def _task(db, goal, description, plan=None):
             PlannedTaskSpec(
                 description=description,
                 task_type="repo_edit",
+                target_files=["backend/tests/backend/test_x.py"],
                 verification_plan=plan
                 if plan is not None
                 else [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}],
@@ -215,8 +216,7 @@ def test_test1_repo_edit_without_targeted_tests_is_rejected_at_plan_time(db_sess
                 PlannedTaskSpec(
                     description="edit backend/app/x.py",
                     task_type="repo_edit",
-                    verification_plan=[],
-                )
+                    verification_plan=[], target_files=["backend/tests/backend/test_ok.py"])
             ],
         )
         db_session.commit()
