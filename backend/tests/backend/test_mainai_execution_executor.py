@@ -1080,6 +1080,7 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
         goal,
         description="Add backend/tests/test_scratch_edit.py",
         task_type="repo_edit",
+        target_files=["backend/tests/test_scratch_edit.py"],
         verification_plan=[{"kind": "targeted_tests", "target": "tests/test_scratch_edit.py"}],
     )
 
