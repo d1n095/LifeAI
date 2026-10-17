@@ -1,0 +1,188 @@
+{
+ "observed_at": "2026-10-17",
+ "repository": "d1n095/LifeAI",
+ "integration_branch": "mainai/integration-founder-supervised-v1",
+ "required_check_contexts": [
+  {
+   "name": "All required checks passed",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — Alembic migration check",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — RLS & session-security tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — account lifecycle & rate-limit tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Backend — unit/integration tests",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — Library / Founder Knowledge Studio",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — Playwright (full stack)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "E2E — same-origin proxy",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — TypeScript & ESLint",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — build (docker)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — build (vercel)",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  },
+  {
+   "name": "Frontend — npm audit",
+   "app_slug": "github-actions",
+   "integration_id": 15368
+  }
+ ],
+ "not_required": [
+  "Combined container — build, run, verify",
+  "Strato VPS compose topology — build, run, verify",
+  "VPS backup.sh / restore.sh — archive structure, checksums, and restore behavior",
+  "VPS bootstrap scripts — shellcheck + dry-run",
+  "VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle",
+  "Deploy to Render (PERMANENTLY DISABLED — superseded by Strato VPS)",
+  "Vercel (commit status)",
+  "Vercel Preview Comments (app vercel/8329)",
+  "Dependency Graph"
+ ],
+ "ruleset": {
+  "target": "refs/heads/mainai/integration-founder-supervised-v1",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "rules": {
+   "pull_request": {
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews_on_push": true,
+    "require_last_push_approval": true,
+    "required_review_thread_resolution": true,
+    "require_code_owner_review": false
+   },
+   "required_status_checks": {
+    "strict_required_status_checks_policy": true,
+    "contexts": "required_check_contexts"
+   },
+   "non_fast_forward": true,
+   "deletion": true,
+   "creation": true
+  }
+ },
+ "runtime_app_permissions": {
+  "required": {
+   "metadata": "read",
+   "contents": "write",
+   "pull_requests": "write",
+   "checks": "read",
+   "statuses": "read"
+  },
+  "forbidden": [
+   "administration",
+   "workflows",
+   "actions:write",
+   "secrets",
+   "variables",
+   "environments",
+   "deployments",
+   "pages",
+   "packages",
+   "security_events",
+   "repository_hooks",
+   "members",
+   "issues",
+   "discussions"
+  ]
+ },
+ "spend_grant": {
+  "allowed_providers": [
+   "openai"
+  ],
+  "allowed_models": [
+   "gpt-4o-mini"
+  ],
+  "max_requests": 5,
+  "max_cost_usd": "0.50",
+  "max_cost_per_request_usd": "0.10",
+  "max_prompt_tokens": 60000,
+  "max_completion_tokens": 12000,
+  "chat_fallback_order": "openai"
+ },
+ "envelope": {
+  "authorized_paths": [
+   "backend/app/first_cycle_probe.py",
+   "backend/tests/backend/test_first_cycle_probe.py"
+  ],
+  "authorized_capabilities": [
+   "path_a",
+   "read_file",
+   "repo_edit",
+   "run_tests",
+   "push",
+   "open_pr"
+  ],
+  "authorized_risk": "low"
+ },
+ "checklist": {
+  "code": {
+   "C-1": "UNKNOWN",
+   "C-2": "UNKNOWN",
+   "C-3": "FAIL",
+   "C-4": "UNKNOWN",
+   "C-5": "FAIL",
+   "C-6": "UNKNOWN",
+   "C-7": "FAIL",
+   "C-8": "UNKNOWN"
+  },
+  "github_admin": {
+   "G-1": "FAIL",
+   "G-2": "FAIL",
+   "G-3": "UNKNOWN",
+   "G-4": "FAIL",
+   "G-5": "UNKNOWN",
+   "G-6": "UNKNOWN",
+   "G-7": "PASS",
+   "G-8": "PASS",
+   "G-9": "PASS",
+   "G-10": "UNKNOWN"
+  },
+  "founder_manual": {
+   "F-1": "UNKNOWN",
+   "F-2": "UNKNOWN",
+   "F-3": "UNKNOWN",
+   "F-4": "UNKNOWN",
+   "F-5": "UNKNOWN",
+   "F-6": "UNKNOWN",
+   "F-7": "UNKNOWN"
+  }
+ },
+ "overall": "NO-GO",
+ "rule": "any FAIL or UNKNOWN => NO-GO"
+}
