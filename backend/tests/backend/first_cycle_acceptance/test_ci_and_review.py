@@ -99,25 +99,43 @@ def test_skipped_and_neutral_do_not_pass():
         boundary="harness.ci.success_only",
         detail=f"skipped={v_skip.passed} neutral={v_neutral.passed}",
     )
+
+
+def test_production_evaluate_check_runs_treats_skipped_as_pass():
+    skipped = exact_set_runs(SHA, conclusion="skipped")
     prod = PRODUCTION["ci_wait"].symbols.get("evaluate_check_runs")
-    if prod is not None:
-        done, passed, _ = prod(skipped)
+    if prod is None:
         conclude(
             "CI-6 production evaluate_check_runs success-only",
-            FAIL if passed else PASS,
-            boundary="production.evaluate_check_runs",
-            detail=f"legacy evaluate_check_runs(skipped) -> done={done} passed={passed}",
-            production_module="app.mainai_execution.ci_wait",
-        )
-    exact_prod = PRODUCTION["ci_wait"].symbols.get("evaluate_required_check_runs")
-    if exact_prod is None:
-        conclude(
-            "CI-6b production evaluate_required_check_runs",
             FAIL,
-            boundary="production.evaluate_required_check_runs",
-            detail="symbol missing on this candidate (frozen #276 has legacy evaluate_check_runs only)",
+            boundary="production.evaluate_check_runs",
+            detail="evaluate_check_runs missing",
             production_module="app.mainai_execution.ci_wait",
         )
+        return
+    done, passed, _ = prod(skipped)
+    conclude(
+        "CI-6 production evaluate_check_runs success-only",
+        FAIL if passed else PASS,
+        boundary="production.evaluate_check_runs",
+        detail=f"legacy evaluate_check_runs(skipped) -> done={done} passed={passed}",
+        production_module="app.mainai_execution.ci_wait",
+    )
+
+
+def test_production_evaluate_required_check_runs_missing():
+    exact_prod = PRODUCTION["ci_wait"].symbols.get("evaluate_required_check_runs")
+    conclude(
+        "CI-6b production evaluate_required_check_runs",
+        PASS if exact_prod is not None else FAIL,
+        boundary="production.evaluate_required_check_runs",
+        detail=(
+            "present"
+            if exact_prod is not None
+            else "symbol missing on this candidate (frozen #276 has legacy evaluate_check_runs only)"
+        ),
+        production_module="app.mainai_execution.ci_wait",
+    )
 
 
 def test_duplicate_retried_checks_use_latest_per_suite():

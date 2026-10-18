@@ -55,6 +55,13 @@ python -m pytest tests/backend/test_mainai_execution_path_a_first_cycle.py -q --
 
 Expect the acceptance suite to be **red on frozen `#276`**. That is the point: current production does not yet meet first-cycle GO. `go` in the matrix is true only when every row is `PASS`.
 
+Recorded on this branch (harness SHA is in the matrix file):
+
+- Acceptance: 48 passed / 11 failed. All 11 failures are production-boundary `FAIL` rows (CI success-only, missing exact-set evaluator, token-in-URL, worktree config leak, subprocess credential read, ungranted push, missing review STOP, TA-12/TA-13/gitlink publication, paid replan after CI failure). Harness oracles themselves passed.
+- Path A regression `test_mainai_execution_path_a_first_cycle.py`: 6 passed. The harness did not break existing first-cycle Path A tests.
+- `GRANT-PROD` is `BLOCKED` (Codex grant module not on this candidate).
+- Matrix `go`: `false`.
+
 ## Status vocabulary
 
 Closed set, written to `docs/examiner/first_cycle_acceptance_matrix.json` and `$FIRST_CYCLE_ACCEPTANCE_MATRIX`:

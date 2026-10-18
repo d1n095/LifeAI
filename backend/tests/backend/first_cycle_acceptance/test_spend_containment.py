@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -288,6 +289,7 @@ def test_no_paid_replan_after_inherited_ci_failure(db_session, owner_id):
     db_session.commit()
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
     task.status = MainAITaskStatus.failed
+    task.completed_at = datetime.utcnow()
     db_session.commit()
     trigger = find_replan_trigger(db_session, goal=goal)
     # First cycle must not spend on replanning inherited CI failures. A trigger here is FAIL.
