@@ -1,0 +1,113 @@
+"""Machine-readable GO/NO-GO matrix. Status vocabulary is closed:
+
+PASS — production (or bound production helper) met the acceptance bar.
+FAIL — production was exercised and did not meet the bar.
+BLOCKED — required production interface is not present (do not invent compatibility).
+UNKNOWN — Founder/GitHub evidence outside this process is required.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from threading import Lock
+
+PASS = "PASS"
+FAIL = "FAIL"
+BLOCKED = "BLOCKED"
+UNKNOWN = "UNKNOWN"
+ALLOWED = frozenset({PASS, FAIL, BLOCKED, UNKNOWN})
+
+_LOCK = Lock()
+_ROWS: list["MatrixRow"] = []
+
+
+def candidate_sha() -> str:
+    override = os.environ.get("FIRST_CYCLE_ACCEPTANCE_SHA")
+    if override:
+        return override.strip()
+    root = Path(__file__).resolve().parents[4]
+    out = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (out.stdout or "unknown").strip()
+
+
+@dataclass
+class MatrixRow:
+    test_id: str
+    status: str
+    boundary: str
+    candidate_sha: str
+    detail: str
+    production_module: str | None = None
+    recorded_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    def __post_init__(self) -> None:
+        if self.status not in ALLOWED:
+            raise ValueError(f"illegal matrix status {self.status!r}")
+
+
+def record(
+    test_id: str,
+    status: str,
+    *,
+    boundary: str,
+    detail: str,
+    production_module: str | None = None,
+    sha: str | None = None,
+) -> MatrixRow:
+    row = MatrixRow(
+        test_id=test_id,
+        status=status,
+        boundary=boundary,
+        candidate_sha=sha or candidate_sha(),
+        detail=detail,
+        production_module=production_module,
+    )
+    with _LOCK:
+        _ROWS.append(row)
+    return row
+
+
+def rows() -> list[MatrixRow]:
+    with _LOCK:
+        return list(_ROWS)
+
+
+def as_payload() -> dict:
+    collected = rows()
+    counts = {key: 0 for key in (PASS, FAIL, BLOCKED, UNKNOWN)}
+    for row in collected:
+        counts[row.status] += 1
+    go = counts[FAIL] == 0 and counts[BLOCKED] == 0 and counts[UNKNOWN] == 0 and counts[PASS] > 0
+    return {
+        "schema": "mainai.first_cycle.acceptance_matrix/v1",
+        "candidate_sha": candidate_sha(),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "go": go,
+        "counts": counts,
+        "rows": [asdict(row) for row in collected],
+    }
+
+
+def write_payload(path: Path | None = None) -> Path:
+    target = path or Path(os.environ.get(
+        "FIRST_CYCLE_ACCEPTANCE_MATRIX",
+        "/opt/cursor/artifacts/first_cycle_acceptance_matrix.json",
+    ))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = as_payload()
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    repo_copy = Path(__file__).resolve().parents[4] / "docs" / "examiner" / "first_cycle_acceptance_matrix.json"
+    repo_copy.parent.mkdir(parents=True, exist_ok=True)
+    repo_copy.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return target
