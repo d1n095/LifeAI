@@ -30,6 +30,20 @@ existing `provider_spend`. Frozen GitHub discovery `#263` / `e33f494` is not mod
 **Must not:** modify frozen discovery `#263`, sovereignty `#262`, Continuous Conversation, Track B `#265`/`#267`, frozen `#264`/`#266`/`#268`/`#269`/`#270`/`#271`/`#272`/`#273`/`#276`, or Codex active work; add a new orchestration engine; migrate; merge; deploy; activate Recall; run a live cycle or live AI/GitHub writes; include npm-audit dependency remediation (isolated to Claude's `examiner/fc4-npm-audit-2026-10-12` lane).
 
 **Merge order:** keep `#264`, `#266`, `#268`, `#269`, `#270`, `#271`, `#272`, `#273`, and `#276` frozen. `#276` waits on frozen `#273` and must not be rebased onto a later base until the Founder asks. `#273` still waits on `#272`. The npm-audit lane is independent and must not be mixed into this diff.
+## Post-Founder-Alpha — MainAI GitHub read-only discovery (2026-10-11)
+
+Isolated Cursor builder child of verified Founder Alpha integration base
+`2fbe20aacf1203fc0e16d216ef55b666b2181619`. Extends the existing
+`app/integrations/github_client.py` with read-only discovery (branches-by-prefix,
+open PRs, PR comments, file contents at a ref) and paginated `list_check_runs`.
+Does **not** add a second GitHub client, coordination framework, migration, write
+method, agent dispatch, merge, deploy, or Recall activation.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/mainai-github-readonly-discovery-91c1` | [#263](https://github.com/d1n095/LifeAI/pull/263) | **Open isolated builder child of `2fbe20a`** | Read-only GitHub discovery on the existing client. |
+
+**Must not:** modify frozen Founder Sovereignty P1-fix-4 `aa0876d` / PR #262; touch Continuous Conversation; compose sibling migrations; merge; deploy; activate Recall.
 
 ## Universal Personal Recall — isolated Codex lane (2026-09-04)
 
