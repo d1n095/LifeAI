@@ -1,0 +1,5 @@
+{
+ "non_fast_forward": "git push origin claude/mainai-task-x:claude/mainai-task-x failed (1): To ../remote.git\n ! [rejected]        main -> b (non-fast-forward)\nerror: failed to push some refs to '../remote.git'\nhint: Updates were rejected because a pushed branch tip is behind its remote\nhint: counterpart. If you want to integrate the remote changes, use 'git pull'\nhint: before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details.",
+ "pre_receive_declined": "git push origin claude/mainai-task-x:claude/mainai-task-x failed (1): remote: push not authorized        \nTo ../remote.git\n ! [remote rejected] main -> c (pre-receive hook declined)\nerror: failed to push some refs to '../remote.git'",
+ "remote_unreachable": "git push origin claude/mainai-task-x:claude/mainai-task-x failed (128): fatal: '<tmp>/missing.git' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists."
+}

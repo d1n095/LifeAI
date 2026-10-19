@@ -1,0 +1,11 @@
+E       AssertionError: extra env re-enabled a credential helper
+test_d_credential_extra_env.py:68: AssertionError
+PASSED test_d_credential_extra_env.py::test_C0_control_canary_leaks_without_isolation
+PASSED test_d_credential_extra_env.py::test_C1_isolated_env_never_invokes_outer_helper
+PASSED test_d_credential_extra_env.py::test_C2_extra_env_cannot_repoint_git_at_host_config
+PASSED test_d_credential_extra_env.py::test_C3_env_injected_helper_is_stripped
+PASSED test_d_credential_extra_env.py::test_C5_matrix_sanitizer_and_no_repo_copy
+FAILED test_d_credential_extra_env.py::test_C4_extra_env_injected_helper_via_config_count
+1 failed, 5 passed in 0.44s
+secret-in-target-tree: 0
+target worktree unchanged

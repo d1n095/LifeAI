@@ -1,0 +1,4 @@
+(version 1)
+(allow default)
+(deny file-read-data (literal "$HOME/.gitconfig") (literal "$HOME/.git-credentials") (subpath "$HOME/.config/gh") (subpath "$HOME/.config/git") (subpath "$HOME/Library/Keychains") (literal "/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig") (literal "/etc/gitconfig") (literal "/opt/homebrew/etc/gitconfig"))
+(deny process-exec (literal "/opt/homebrew/bin/gh") (regex #"git-credential-osxkeychain") (literal "/usr/bin/security"))
