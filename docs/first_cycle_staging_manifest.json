@@ -1,6 +1,7 @@
 {
   "schema": "mainai.first_cycle.staging_composition/v1",
   "branch": "cursor/first-cycle-staging-91c1",
+  "pr": 285,
   "purpose": "Reproducible staging candidate for the first Founder-supervised MainAI cycle. Not a merge into the final integration branch.",
   "inputs": {
     "founder_alpha": {
