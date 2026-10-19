@@ -290,7 +290,9 @@ def test_staging_records_stay_no_go_on_this_successor():
     assert go_nogo["go"] is False
     assert manifest.get("go") is False
     assert go_nogo["branch"] == THIS_BRANCH
+    assert go_nogo["pr"] == 290
     assert manifest["branch"] == THIS_BRANCH
+    assert manifest["pr"] == 290
     assert go_nogo["parent_289"] == FROZEN_289
     assert manifest["successor_of"]["pr"] == 289
     assert manifest["successor_of"]["sha"] == FROZEN_289

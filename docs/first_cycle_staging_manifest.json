@@ -1,7 +1,7 @@
 {
   "schema": "mainai.first_cycle.staging_composition/v1",
   "branch": "cursor/first-cycle-execution-hardening-p3-91c1",
-  "pr": null,
+  "pr": 290,
   "purpose": "Isolated successor of #289. FO-6/FO-7 execution-layer completion: remote-fetch fail-closed, crash-recovery takeover cap, publication locking, founder diagnostics. Not a merge into the final integration branch. Not a GO certification.",
   "go": false,
   "successor_of": {

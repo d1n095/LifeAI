@@ -4,7 +4,7 @@ Companion to `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`. This is **not** activation
 
 Frozen parent: `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`.
 Frozen parent `#289`: `ca60ba54febb49e1c7585fb776811564d54e3d21` (12 required checks, push workflow `39277606295`).
-This successor: `cursor/first-cycle-execution-hardening-p3-91c1`.
+This successor: `cursor/first-cycle-execution-hardening-p3-91c1` ([#290](https://github.com/d1n095/LifeAI/pull/290)).
 
 ## Hard rules
 
