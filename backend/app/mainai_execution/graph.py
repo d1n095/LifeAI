@@ -34,7 +34,15 @@ def recompute_task_readiness(db: Session, *, goal_id: uuid.UUID) -> list[MainAIT
 
     Idempotent -- safe to call after plan creation (planner.py's create_plan()) AND after
     every task completion/failure (see executor.py). Returns the tasks newly promoted to
-    `ready` this call (the set the caller should consider dispatching)."""
+    `ready` this call (the set the caller should consider dispatching).
+
+    First-cycle STOP goals never gain new `ready` tasks: pending work stays parked."""
+    from app.mainai_execution.first_cycle_stop import goal_is_first_cycle_stopped
+    from app.models.mainai_execution import MainAIGoal
+
+    goal = db.get(MainAIGoal, goal_id)
+    stopped = goal is not None and goal_is_first_cycle_stopped(db, goal)
+
     pending_tasks = (
         db.execute(select(MainAITask).where(MainAITask.goal_id == goal_id, MainAITask.status == MainAITaskStatus.pending))
         .scalars()
@@ -50,6 +58,8 @@ def recompute_task_readiness(db: Session, *, goal_id: uuid.UUID) -> list[MainAIT
         )
 
         if not dependency_ids:
+            if stopped:
+                continue
             task.status = MainAITaskStatus.ready
             db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.ready, detail={}))
             newly_ready.append(task)
@@ -73,6 +83,8 @@ def recompute_task_readiness(db: Session, *, goal_id: uuid.UUID) -> list[MainAIT
 
         all_completed = len(dep_rows) == len(dependency_ids) and all(row.status == MainAITaskStatus.completed for row in dep_rows)
         if all_completed:
+            if stopped:
+                continue
             task.status = MainAITaskStatus.ready
             db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.ready, detail={}))
             newly_ready.append(task)
