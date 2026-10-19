@@ -1,7 +1,7 @@
 {
   "schema": "mainai.first_cycle.staging_composition/v1",
   "branch": "cursor/first-cycle-staging-p1-91c1",
-  "pr": null,
+  "pr": 287,
   "purpose": "Reproducible staging successor of fully green #285 incorporating frozen #286 P1 corrections. Not a merge into the final integration branch.",
   "successor_of": {
     "pr": 285,

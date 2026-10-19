@@ -1,14 +1,29 @@
 {
   "schema": "mainai.first_cycle.staging_go_nogo/v1",
   "branch": "cursor/first-cycle-staging-p1-91c1",
-  "pr": null,
+  "pr": 287,
   "parent_285": "f5d9bf14340b0436d7470b28f6026342aeeaf3e6",
   "parent_286": "a255fa23bf29be624d3f24e6387f7ed25defce1e",
   "merge_commit": "9c4e30637b5dc568eb160e7a67178582ec7b2da1",
   "go": false,
   "reason": "Accepted Path A / activation / FC-4 / review-STOP / #286 P1 composition holds. First-cycle GO remains false until Codex transport/grants and a PASS-reviewed activation-security replacement compose. Track B, Recall, merge, and deploy stay off.",
   "local": {
-    "status": "pending_verification"
+    "composition_stop_harness_ci_migration": "104 passed, 8 expected Codex xfails (matrix FAIL/BLOCKED)",
+    "path_a_ci_wait_replan_retry_takeover_executor_github": "311 passed",
+    "alembic_heads": ["0089_activation_branch_protect"],
+    "frontend_audit_policy_tests": "59 passed",
+    "frontend_npm_audit_production": "pass (GHSA-vfj7-8cjw-p6xm excepted until 2027-01-15)",
+    "frontend_tsc": "pass",
+    "frontend_eslint": "0 errors, 1 pre-existing warning",
+    "harness_matrix": {
+      "PASS": 59,
+      "FAIL": 8,
+      "BLOCKED": 1,
+      "UNKNOWN": 0,
+      "go": false,
+      "CRED-8": "PASS",
+      "token_prefixes_in_matrix": false
+    }
   },
   "parent_285_github_ci_f5d9bf1": {
     "push_run": 39218965127,
