@@ -1,0 +1,53 @@
+{
+ "sha": "c57c76820f126caa3f95b38294b7d353c500b487",
+ "required": {
+  "Frontend — TypeScript & ESLint": [
+   "success",
+   "success"
+  ],
+  "Frontend — npm audit": [
+   "success",
+   "success"
+  ],
+  "Frontend — build (docker)": [
+   "success",
+   "success"
+  ],
+  "Frontend — build (vercel)": [
+   "success",
+   "success"
+  ],
+  "Backend — unit/integration tests": [
+   "cancelled",
+   "cancelled"
+  ],
+  "Backend — RLS & session-security tests": [
+   "cancelled",
+   "cancelled"
+  ],
+  "Backend — account lifecycle & rate-limit tests": [
+   "cancelled",
+   "cancelled"
+  ],
+  "Backend — Alembic migration check": [
+   "cancelled",
+   "success"
+  ],
+  "E2E — Playwright (full stack)": [
+   "cancelled",
+   "cancelled"
+  ],
+  "E2E — Library / Founder Knowledge Studio": [
+   "cancelled",
+   "cancelled"
+  ],
+  "E2E — same-origin proxy": [
+   "cancelled",
+   "cancelled"
+  ],
+  "All required checks passed": [
+   "failure",
+   "failure"
+  ]
+ }
+}
