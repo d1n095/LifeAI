@@ -46,7 +46,20 @@ from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
+from app.mainai_execution.first_cycle_stop import (
+    STATE_EXTERNAL_CI_FAILED,
+    STATE_EXTERNAL_CI_TIMED_OUT,
+    fail_closed_external_ci,
+    stop_first_cycle,
+)
 from app.mainai_execution.required_checks import CI_STAGE_PR_OPEN, RequiredCheckContractError
+from app.mainai_execution.review_receipt import (
+    PATH_A_BUILDER_IDENTITY,
+    envelope_authorization_hash,
+    evaluate_first_cycle_review_receipt,
+    instruction_hash,
+    output_hash,
+)
 from app.mainai_execution.executor import _lock_task, task_for_job
 from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.graph import recompute_task_readiness
@@ -623,6 +636,9 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
         # is on and a real PR (existing or freshly created) exists, so a real commit_sha is
         # always expected here in that case.
         "head_sha": edit_info.get("commit_sha"),
+        "draft": True if pr.get("draft", True) else bool(pr.get("draft")),
+        "merged": False,
+        "approved_base_sha": edit_info.get("approved_base_sha") or edit_info.get("base_sha"),
     }
 
 
@@ -684,7 +700,14 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
         envelope=envelope,
     )
     remote_sha = await push_worktree_branch(worktree)
-    return {"branch": worktree.branch, "base_branch": base_branch, "proposed": False, "commit_sha": remote_sha}
+    return {
+        "branch": worktree.branch,
+        "base_branch": base_branch,
+        "proposed": False,
+        "commit_sha": remote_sha,
+        "approved_base_sha": worktree.base_sha,
+        "merged": False,
+    }
 
 
 async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, *, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
@@ -1143,17 +1166,136 @@ async def resume_waiting_ci_task(db: Session, wait: MainAITaskWait) -> None:
     goal = db.get(MainAIGoal, task.goal_id)
     if wait.status == MainAITaskWaitStatus.satisfied:
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_satisfied, detail=wait.evidence))
-        _finalize_task_outcome(db, task, passed=True, evidence={"ci_wait": wait.evidence})
+        _stop_open_pr_after_ci(
+            db,
+            task,
+            wait=wait,
+            goal=goal,
+            ci_passed=True,
+            event_reason="ci_satisfied",
+        )
     elif wait.status == MainAITaskWaitStatus.timed_out:
         db.add(
             MainAITaskEvent(
                 task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_timed_out, detail=wait.evidence
             )
         )
-        _finalize_task_outcome(db, task, passed=False, evidence={"ci_wait": wait.evidence, "reason": "timed_out"})
+        fail_closed_external_ci(
+            db,
+            task,
+            reason="external CI timed out; STOP without paid replan",
+            first_cycle_state=STATE_EXTERNAL_CI_TIMED_OUT,
+            evidence={"ci_wait": wait.evidence, "ci_passed": False, "review_ok": False, "merged": False},
+            goal=goal,
+        )
     else:
-        # failed or cancelled -- both mean "this attempt did not produce verified, green work".
+        # failed or cancelled — external CI outcome, never a local editable-task failure.
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_failed, detail=wait.evidence))
-        _finalize_task_outcome(db, task, passed=False, evidence={"ci_wait": wait.evidence})
+        fail_closed_external_ci(
+            db,
+            task,
+            reason="external CI failed; STOP without paid replan",
+            first_cycle_state=STATE_EXTERNAL_CI_FAILED,
+            evidence={"ci_wait": wait.evidence, "ci_passed": False, "review_ok": False, "merged": False},
+            goal=goal,
+        )
     if goal is not None:
-        record_checkpoint(db, task=task, goal=goal, job_id=wait.job_id, step="ci_wait_resolved", data={"wait_status": wait.status.value})
+        record_checkpoint(
+            db,
+            task=task,
+            goal=goal,
+            job_id=wait.job_id,
+            step="ci_wait_resolved",
+            data={"wait_status": wait.status.value, "merged": False, "first_cycle_stop": True},
+        )
+
+
+def _publication_identity(db: Session, task: MainAITask, wait: MainAITaskWait, goal: MainAIGoal | None) -> dict:
+    """Exact identity the independent review receipt must bind. Missing fields fail closed."""
+    resource = wait.resource_ref if isinstance(wait.resource_ref, dict) else {}
+    condition = wait.condition if isinstance(wait.condition, dict) else {}
+    work_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=wait.job_id, step="work_result")
+    work_result = {}
+    if work_checkpoint is not None and isinstance(work_checkpoint.executor_state, dict):
+        work_result = work_checkpoint.executor_state.get("work_result") or {}
+        if not isinstance(work_result, dict):
+            work_result = {}
+    envelope = None
+    try:
+        envelope = _envelope_for_path_a_task(db, task)
+    except TaskExecutionError:
+        envelope = None
+    envelope_context = {}
+    if envelope is not None:
+        envelope_context = {
+            "envelope_id": str(envelope.id),
+            "authorized_paths": list(envelope.authorized_paths or []),
+            "authorized_capabilities": list(envelope.authorized_capabilities or []),
+            "authorized_by": envelope.authorized_by,
+            "repository_identity": envelope.repository_identity,
+        }
+    repository = str(resource.get("repo") or get_settings().github_repo or "")
+    head_sha = str(resource.get("sha") or work_result.get("head_sha") or "")
+    pr_number = int(work_result.get("pull_request_number") or 0)
+    approved_base = str(
+        work_result.get("approved_base_sha")
+        or condition.get("approved_base_sha")
+        or ""
+    )
+    instruction = goal.original_instruction if goal is not None else ""
+    return {
+        "repository": repository,
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "approved_base": approved_base,
+        "builder_identity": PATH_A_BUILDER_IDENTITY,
+        "instruction_hash_value": instruction_hash(instruction),
+        "output_hash_value": output_hash(repository=repository, pr_number=pr_number, head_sha=head_sha) if pr_number > 0 else "",
+        "envelope_context": envelope_context,
+        "envelope_hash": envelope_authorization_hash(envelope_context),
+        "draft": bool(work_result.get("draft", True)),
+        "merged": False,
+        "work_result": work_result,
+    }
+
+
+def _stop_open_pr_after_ci(
+    db: Session,
+    task: MainAITask,
+    *,
+    wait: MainAITaskWait,
+    goal: MainAIGoal | None,
+    ci_passed: bool,
+    event_reason: str,
+) -> None:
+    """CI success is not merge. Require a verifiable independent review receipt, then STOP."""
+    identity = _publication_identity(db, task, wait, goal)
+    review = evaluate_first_cycle_review_receipt(
+        db,
+        repository=identity["repository"],
+        pr_number=identity["pr_number"],
+        head_sha=identity["head_sha"],
+        approved_base=identity["approved_base"],
+        builder_identity=identity["builder_identity"],
+        instruction_hash_value=identity["instruction_hash_value"],
+        output_hash_value=identity["output_hash_value"],
+        envelope_context=identity["envelope_context"],
+        owner_id=task.owner_id,
+    )
+    evidence = {
+        "ci_wait": wait.evidence,
+        "ci_passed": ci_passed,
+        "review_ok": review.ok,
+        "review_reason": review.reason,
+        "publication": {k: v for k, v in identity.items() if k != "work_result"},
+        "merged": False,
+        "draft_pr": identity["draft"],
+    }
+    stop_first_cycle(
+        db,
+        task,
+        reason=review.reason if not review.ok else "independent review recorded; STOP before merge",
+        first_cycle_state=review.first_cycle_state,
+        evidence=evidence,
+        goal=goal,
+    )
