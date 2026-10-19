@@ -152,12 +152,18 @@ def classify_publication_failure(
 
     if exc is not None:
         from app.integrations.github_client import GitHubClientError
-        from app.mainai_execution.worktree import ActivationBaseConfigurationError, WorktreePushRejected
+        from app.mainai_execution.worktree import (
+            ActivationBaseConfigurationError,
+            WorktreePushRejected,
+            WorktreeTimeoutError,
+        )
 
         if isinstance(exc, ActivationBaseConfigurationError):
             return STATE_APPROVED_BASE_MOVED
         if isinstance(exc, WorktreePushRejected):
             return STATE_EXTERNAL_PUSH_REJECTED
+        if isinstance(exc, WorktreeTimeoutError):
+            return STATE_EXTERNAL_BOUNDARY_FAILED
         if isinstance(exc, GitHubClientError):
             return STATE_EXTERNAL_BOUNDARY_FAILED
     return None

@@ -229,8 +229,9 @@ def test_staging_records_do_not_claim_go_or_certified_path_a():
     assert go_nogo["go"] is False
     assert go_nogo["parent_288"] == "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb"
     assert go_nogo["parent_289"] == "ca60ba54febb49e1c7585fb776811564d54e3d21"
+    assert go_nogo["parent_290"] == "6c988148a7e30531fac21e19c044f5570d95f501"
     assert manifest.get("go") is False
-    assert manifest["successor_of"]["pr"] == 289
+    assert manifest["successor_of"]["pr"] == 290
     pr276 = manifest["inputs"]["pr_276"]
     role = str(pr276.get("role") or "")
     assert "not a first-cycle go certification" in role.lower()

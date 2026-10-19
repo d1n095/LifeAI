@@ -287,6 +287,31 @@ def _require_ownership(worktree: MainAITaskWorktree) -> None:
         )
 
 
+def fetch_origin_base_sha(path: Path, base_sha: str) -> str:
+    """Fetch the verified base object into a newly initialized worktree.
+
+    Network, timeout, and FETCH_HEAD integrity failures are typed publication-boundary
+    errors (FO-7). They must not be raised as a generic `WorktreeError`, which the
+    executor would treat as a local miss and paid-replan.
+    """
+    if not _SHA40.fullmatch(base_sha):
+        raise ApprovedBaseMovedError("worktree base_sha is not a 40-hex commit")
+    try:
+        _run_git(["fetch", "--depth", "1", "origin", base_sha], cwd=path, timeout=120)
+        fetched = _run_git(["rev-parse", "FETCH_HEAD"], cwd=path).stdout.strip().split()[0]
+    except WorktreeTimeoutError as exc:
+        raise PublicationTimeoutError("WorktreeBaseFetchTimeout") from exc
+    except WorktreeError as exc:
+        raise PublicationNetworkError("WorktreeBaseFetchFailed") from exc
+    if not _SHA40.fullmatch(fetched):
+        raise PublicationNetworkError("WorktreeBaseFetchHeadInvalid")
+    if fetched != base_sha:
+        raise ApprovedBaseMovedError(
+            f"worktree FETCH_HEAD {fetched!r} is not the verified base_sha {base_sha!r}."
+        )
+    return fetched
+
+
 def create_task_worktree_sync(
     db: Session, *, task: MainAITask, job: MainAIJob, lease_generation: int, executor_id: str, base_sha: str
 ) -> MainAITaskWorktree:
@@ -339,8 +364,8 @@ def create_task_worktree_sync(
         _run_git(["config", "user.email", COMMIT_AUTHOR[1]], cwd=path)
         _run_git(["config", "user.name", COMMIT_AUTHOR[0]], cwd=path)
         _run_git(["remote", "add", "origin", _authed_remote_url(settings.github_repo, settings.github_token)], cwd=path)
-        _run_git(["fetch", "--depth", "1", "origin", base_sha], cwd=path, timeout=120)
-        _run_git(["checkout", "-b", branch, "FETCH_HEAD"], cwd=path)
+        fetch_origin_base_sha(path, base_sha)
+        _run_git(["checkout", "-b", branch, base_sha], cwd=path)
 
         # The marker file itself must never look like "uncommitted work" to
         # commit_worktree_changes()/worktree_git_status() -- local-only exclude (never

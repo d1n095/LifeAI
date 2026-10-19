@@ -1,8 +1,8 @@
 # Integrating the eventual Codex activation/transport candidate
 
-This operator candidate (`cursor/first-cycle-execution-hardening-p3-91c1`) is the
-isolated successor of frozen `#289` @ `ca60ba54febb49e1c7585fb776811564d54e3d21`, itself
-the P2 child of frozen `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`. The
+This operator candidate (`cursor/first-cycle-execution-completion-91c1`) is the
+isolated successor of `#290` @ `6c988148a7e30531fac21e19c044f5570d95f501`, itself
+the P3 child of frozen `#289` @ `ca60ba54febb49e1c7585fb776811564d54e3d21`. The
 lineage still contains frozen `#263`, `#276`, `#281`, `#282`, `#284`, `#285`,
 `#286`, `#287`, `#288`, and `#289`. It does **not** contain `#280` and does
 **not** implement Git transport, remote-effect grants, or Codex worktree

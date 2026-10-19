@@ -130,6 +130,7 @@ async def inspect_recovery_record(db: Session, *, task: MainAITask, job: MainAIJ
         evidence["worktree_ownership_verified"] = ownership_ok
         evidence["worktree_current_commit"] = worktree.current_commit
         evidence["worktree_branch"] = worktree.branch
+        evidence["worktree_base_sha"] = worktree.base_sha
         if ownership_ok:
             try:
                 status = worktree_git_status(worktree)

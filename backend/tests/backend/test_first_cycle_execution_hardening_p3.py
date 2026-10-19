@@ -44,8 +44,10 @@ from app.request_context import current_user_id as current_user_id_var
 from app.worker import Worker
 
 FROZEN_289 = "ca60ba54febb49e1c7585fb776811564d54e3d21"
-THIS_BRANCH = "cursor/first-cycle-execution-hardening-p3-91c1"
+PARENT_290 = "6c988148a7e30531fac21e19c044f5570d95f501"
+THIS_BRANCH = "cursor/first-cycle-execution-completion-91c1"
 LOCAL_COMMIT = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+BASE_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -151,6 +153,32 @@ def test_true_missing_remote_branch_still_salvageable_local_commit():
             }
         )
         == RecoveryClassification.local_committed_not_pushed
+    )
+
+
+def test_unflushed_local_head_ahead_of_base_is_still_salvageable():
+    assert (
+        _classify(
+            {
+                "worktree_local_head_sha": LOCAL_COMMIT,
+                "worktree_base_sha": BASE_SHA,
+                "remote_branch_exists": False,
+            }
+        )
+        == RecoveryClassification.local_committed_not_pushed
+    )
+
+
+def test_finalized_checkpoint_is_never_auto_unpushed_even_if_remote_lookup_misses():
+    assert (
+        _classify(
+            {
+                "has_finalized_checkpoint": True,
+                "worktree_current_commit": LOCAL_COMMIT,
+                "remote_branch_exists": False,
+            }
+        )
+        == RecoveryClassification.pushed_no_pr
     )
 
 
@@ -290,12 +318,13 @@ def test_staging_records_stay_no_go_on_this_successor():
     assert go_nogo["go"] is False
     assert manifest.get("go") is False
     assert go_nogo["branch"] == THIS_BRANCH
-    assert go_nogo["pr"] == 290
     assert manifest["branch"] == THIS_BRANCH
-    assert manifest["pr"] == 290
     assert go_nogo["parent_289"] == FROZEN_289
-    assert manifest["successor_of"]["pr"] == 289
-    assert manifest["successor_of"]["sha"] == FROZEN_289
+    assert go_nogo["parent_290"] == PARENT_290
+    assert manifest["successor_of"]["pr"] == 290
+    assert manifest["successor_of"]["sha"] == PARENT_290
+    assert go_nogo.get("pr") != 289
+    assert go_nogo.get("pr") != 288
     assert "certified Path A" not in str(manifest["inputs"]["pr_276"].get("role") or "")
     remaining = " ".join(go_nogo["remaining_codex"])
     for token in ("CRED-1/2/3", "E2E-3", "GRANT-PROD", "TA-12", "CI-6", "#280"):

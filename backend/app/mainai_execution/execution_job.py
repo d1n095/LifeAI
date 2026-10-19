@@ -106,6 +106,7 @@ from app.mainai_execution.envelope_scope import (
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.mainai_execution.worktree import (
     WorktreeError,
+    WorktreeTimeoutError,
     commit_worktree_changes,
     create_task_worktree,
     execution_pr_base_branch,
@@ -1039,10 +1040,12 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # is still `running`, correctly reclaimable and resumable from its existing
         # checkpoints); a crash after it has nothing left to lose.
         boundary = exc if isinstance(exc, ExternalBoundaryError) else None
+        if boundary is None and isinstance(exc, WorktreeTimeoutError):
+            boundary = map_publication_boundary_error(exc)
         evidence = {"error": type(exc).__name__}
         if boundary is not None:
             evidence.update(boundary.evidence())
-        _finalize_task_outcome(db, task, passed=False, evidence=evidence, cause=exc)
+        _finalize_task_outcome(db, task, passed=False, evidence=evidence, cause=boundary or exc)
         try:
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
         except JobLeaseLostError:

@@ -337,6 +337,8 @@ def test_recovery_abandons_running_sibling_instead_of_takeover(db_session, super
         PublicationTimeoutError("PublicationTimeoutError"),
         GitHubClientError("GitHubClientError", status_code=503),
         PublicationNetworkError("PublicationNetworkError"),
+        PublicationNetworkError("WorktreeBaseFetchFailed"),
+        WorktreeTimeoutError("WorktreeBaseFetchTimeout"),
         ActivationBaseConfigurationError("ActivationBaseConfigurationError"),
         GrantDeniedError("GrantDeniedError"),
         PublicationUnknownError("PublicationUnknownError"),
