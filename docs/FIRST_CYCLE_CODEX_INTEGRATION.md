@@ -1,8 +1,11 @@
 # Integrating the eventual Codex activation/transport candidate
 
-This staging candidate (`cursor/first-cycle-staging-91c1`) already contains frozen `#263`,
-`#276`, `#281`, `#282`, and provisionally `#284`. It does **not** contain `#280` and does
-**not** implement Git transport, remote-effect grants, or worktree credential isolation.
+This staging candidate (`cursor/first-cycle-staging-p1-91c1`) is the successor of frozen
+`#285` (`cursor/first-cycle-staging-91c1` @ `f5d9bf1`) and also contains frozen `#263`,
+`#276`, `#281`, `#282`, `#284`, and `#286` P1 corrections. It does **not** contain `#280`
+and does **not** implement Git transport, remote-effect grants, or Codex worktree
+credential isolation. `#286` only hermeticizes the acceptance harness; production CRED-1/2/3
+remain FAIL.
 
 Do not modify Codex's active branches from this lane. Do not add a second grant or
 transport system here.
@@ -41,8 +44,9 @@ implementation is composed:
 - TA-12/TA-13/PUB-2 publication history/symlink/gitlink (Codex-adjacent publication oracle)
 
 Compose rule: take Codex's implementation onto **this staging tip**, not onto `#272`/`#280`.
-Preserve `evaluate_first_cycle_review_receipt`, `stop_first_cycle`, and
-`should_suppress_paid_replan`. Reviewers still must not receive push authority.
+Preserve `evaluate_first_cycle_review_receipt`, `stop_first_cycle`,
+`goal_is_autonomous_terminal`, cause-based `should_suppress_paid_replan`, and
+`classify_publication_failure`. Reviewers still must not receive push authority.
 
 ## Required-check contract
 
