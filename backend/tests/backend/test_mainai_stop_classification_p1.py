@@ -295,8 +295,9 @@ def test_recovery_abandons_running_sibling_instead_of_takeover(db_session, super
     db_session.commit()
     t2 = db_session.get(MainAITask, t2.id)
     job = db_session.get(MainAIJob, t2.mainai_job_id)
-    job.status = MainAIJobStatus.failed
-    job.completed_at = datetime.utcnow()
+    # Dead-agent shape without violating job claim constraints: task still `running`,
+    # job never claimed (queued). Recovery must park, not takeover.
+    assert job.status == MainAIJobStatus.queued
     job.lease_expires_at = datetime.utcnow() - timedelta(minutes=5)
     db_session.commit()
 
