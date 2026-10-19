@@ -288,6 +288,13 @@ def reset_task_for_takeover(db: Session, *, task: MainAITask) -> MainAITask:
     goal = db.get(MainAIGoal, task.goal_id)
     if goal_is_autonomous_terminal(db, goal):
         raise TaskNotRetryableError(task.id, task.status)
+    if task.mainai_job_id is not None:
+        from app.mainai_execution.first_cycle_stop import job_has_founder_cancel
+        from app.models.mainai_job import MainAIJob
+
+        linked = db.get(MainAIJob, task.mainai_job_id, populate_existing=True)
+        if job_has_founder_cancel(linked):
+            raise TaskNotRetryableError(task.id, task.status)
     task.status = MainAITaskStatus.ready
     db.add(
         MainAITaskEvent(

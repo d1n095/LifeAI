@@ -1,13 +1,14 @@
 {
   "schema": "mainai.first_cycle.staging_composition/v1",
-  "branch": "cursor/first-cycle-staging-p1-91c1",
-  "pr": 287,
-  "purpose": "Reproducible staging successor of fully green #285 incorporating frozen #286 P1 corrections. Not a merge into the final integration branch.",
+  "branch": "cursor/first-cycle-ops-readiness-p2-91c1",
+  "pr": null,
+  "purpose": "Isolated successor of frozen #288. Execution-layer P2 hardening plus Founder-supervised local first-cycle operating flow. Not a merge into the final integration branch. Not a GO certification.",
+  "go": false,
   "successor_of": {
-    "pr": 285,
-    "ref": "cursor/first-cycle-staging-91c1",
-    "sha": "f5d9bf14340b0436d7470b28f6026342aeeaf3e6",
-    "role": "fully green first-cycle staging candidate; left parent of this successor"
+    "pr": 288,
+    "ref": "cursor/first-cycle-stop-classification-p1-91c1",
+    "sha": "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
+    "role": "frozen P1 STOP-classification child of #287; left parent of this successor. Do not amend."
   },
   "inputs": {
     "founder_alpha": {
@@ -26,7 +27,7 @@
       "pr": 276,
       "ref": "cursor/mainai-execution-path-a-ta8b-ta10-91c1",
       "sha": "09b87e9b70dc02889d39c2bae3d56458509d49cb",
-      "role": "certified Path A task authority; ancestor of #281/#284"
+      "role": "frozen Path A task-authority ancestor (TA-8b/TA-10). Not a first-cycle GO certification."
     },
     "pr_281": {
       "pr": 281,
@@ -40,59 +41,53 @@
       "sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
       "role": "review receipts and STOP-before-merge; merge-base of #285 and #286"
     },
-    "pr_275_frozen_parent_of_282": {
-      "pr": 275,
-      "ref": "codex/frontend-npm-audit-fc4-remediation",
-      "sha": "eed3f4a380be71398a0481414518a29506a57ccb",
-      "role": "frozen FC-4 original; RETURN_TO_BUILDER; parent of #282 only"
-    },
     "pr_282": {
       "pr": 282,
       "ref": "cursor/fc4-npm-audit-a6-a7-91c1",
       "sha": "1e3ee3fd604fc540600f393e215a712b283686d4",
-      "role": "PASS-reviewed FC-4 npm-audit A6/A7 policy; right parent of #285"
+      "role": "PASS-reviewed FC-4 npm-audit A6/A7 policy; ancestor via #285"
     },
     "pr_285": {
       "pr": 285,
       "ref": "cursor/first-cycle-staging-91c1",
       "sha": "f5d9bf14340b0436d7470b28f6026342aeeaf3e6",
-      "role": "fully green staging composition of #284+#282; left parent of this successor"
+      "role": "frozen staging composition of #284+#282"
     },
     "pr_286": {
       "pr": 286,
       "ref": "cursor/first-cycle-review-stop-p1-91c1",
       "sha": "a255fa23bf29be624d3f24e6387f7ed25defce1e",
-      "role": "frozen #284 P1 correction (goal-scoped STOP, cause-based replan, hermetic credentials); right parent of this successor"
+      "role": "frozen #284 P1 correction; composed into #287"
+    },
+    "pr_287": {
+      "pr": 287,
+      "ref": "cursor/first-cycle-staging-p1-91c1",
+      "sha": "1f1819aa46d8fd4aef18db5fb625af51c02d3394",
+      "role": "frozen #285+#286 staging successor; parent of #288"
+    },
+    "pr_288": {
+      "pr": 288,
+      "ref": "cursor/first-cycle-stop-classification-p1-91c1",
+      "sha": "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
+      "role": "frozen P1 STOP classification / typed fail-closed publication errors. Do not amend."
     }
   },
-  "merge": {
-    "order": [
-      "cut branch from pr_285",
-      "no-ff merge pr_286"
+  "this_successor": {
+    "p2": [
+      "model-controlled filename/NUL/control-char rejection before pathlib",
+      "sanitized git commit messages (no NUL/newline/leading-dash argv)",
+      "failure_class without matching origin cannot classify STOP",
+      "retry tick parks STOP retryable_failed instead of skipping forever",
+      "recovery takeover refuses founder cancel_requested",
+      "auto-recovery finalizes interrupted cancelled jobs without takeover",
+      "staging records pin #288 and keep go=false"
     ],
-    "strategy": "no-ff merge of #286 onto #285",
-    "commit": "9c4e30637b5dc568eb160e7a67178582ec7b2da1",
-    "parents": [
-      "f5d9bf14340b0436d7470b28f6026342aeeaf3e6",
-      "a255fa23bf29be624d3f24e6387f7ed25defce1e"
-    ],
-    "merge_base": "9c978ded05b05ad174ce003a3efad22682ec187d",
-    "conflicts": [],
-    "auto_merged_paths": [
-      "docs/BRANCH_REGISTRY.md"
-    ],
-    "resolution": {
-      "docs/BRANCH_REGISTRY.md": "Git auto-merged the union. Keep #285 staging + FC-4 sections. Keep #286 exam status on #284 and the frozen #286 row. Add this successor row. Do not drop FC-4 or Path A."
-    },
-    "prior_composition": {
-      "strategy": "no-ff merge of #282 onto #284",
-      "commit": "ec2e896c4d04dfdbd0f8f556ef3f08f36a18734c",
-      "parents": [
-        "9c978ded05b05ad174ce003a3efad22682ec187d",
-        "1e3ee3fd604fc540600f393e215a712b283686d4"
-      ],
-      "merge_base": "2fbe20aacf1203fc0e16d216ef55b666b2181619"
-    }
+    "ops": [
+      "Founder-supervised local dry run through production execution_job",
+      "synthetic provider, github_write_enabled=false",
+      "exact-SHA audit events and STOP-before-merge",
+      "operator runbook docs/FIRST_CYCLE_OPERATOR_RUNBOOK.md"
+    ]
   },
   "migration": {
     "head": "0089_activation_branch_protect",
@@ -114,11 +109,6 @@
     "E2E — same-origin proxy",
     "All required checks passed"
   ],
-  "p1_from_286": [
-    "goal-scoped terminal STOP (dispatch/retry/recovery/scheduling skip stopped goals)",
-    "cause-based paid-replan suppression from failure evidence",
-    "credential-safe #279 harness (isolated Git config; CRED-8)"
-  ],
   "excluded": {
     "pr_280": {
       "pr": 280,
@@ -127,6 +117,9 @@
       "reason": "RETURN_TO_BUILDER",
       "migration_conflict": "also revises 0088 as 0089_mainai_activation_security"
     },
+    "codex_transport_grants": {
+      "reason": "Do not duplicate Codex Git transport, grant authority, or migration work."
+    },
     "track_b": {
       "reason": "unsafe reviewer runtime stays off for the first cycle"
     },
@@ -134,7 +127,7 @@
       "reason": "production Recall remains blocked"
     },
     "github_settings_merge_deploy": {
-      "reason": "no GitHub settings, merge, or deploy in this composition"
+      "reason": "no GitHub settings, merge, or deploy in this successor"
     }
   },
   "unresolved_codex_dependencies": [
@@ -143,7 +136,7 @@
       "pr": 280,
       "sha": "37bca08a287f00b6282222047340bffa949ff788",
       "blocker": "Claude RETURN_TO_BUILDER (five P1 findings). Do not compose until a replacement is independently PASS-reviewed.",
-      "integration": "See docs/FIRST_CYCLE_CODEX_INTEGRATION.md. Re-point 0089_activation_branch_protect down_revision onto the accepted Codex 0089/00NN, or fold the two CHECK statements into Codex's single activation migration. Do not fork Alembic."
+      "integration": "See docs/FIRST_CYCLE_CODEX_INTEGRATION.md."
     },
     {
       "lane": "codex/mainai-git-transport-credential-audit",
@@ -153,15 +146,7 @@
     }
   ],
   "reproduce": [
-    "git fetch origin f5d9bf14340b0436d7470b28f6026342aeeaf3e6 a255fa23bf29be624d3f24e6387f7ed25defce1e",
-    "git checkout -b cursor/first-cycle-staging-p1-91c1 f5d9bf14340b0436d7470b28f6026342aeeaf3e6",
-    "git merge --no-ff a255fa23bf29be624d3f24e6387f7ed25defce1e",
-    "git merge-base --is-ancestor e33f494c4fc53704c494cecea788f3e22be36330 HEAD",
-    "git merge-base --is-ancestor 09b87e9b70dc02889d39c2bae3d56458509d49cb HEAD",
-    "git merge-base --is-ancestor abc88b4f479489c8c85111d754756058ab77eb22 HEAD",
-    "git merge-base --is-ancestor 9c978ded05b05ad174ce003a3efad22682ec187d HEAD",
-    "git merge-base --is-ancestor 1e3ee3fd604fc540600f393e215a712b283686d4 HEAD",
-    "git merge-base --is-ancestor f5d9bf14340b0436d7470b28f6026342aeeaf3e6 HEAD",
-    "git merge-base --is-ancestor a255fa23bf29be624d3f24e6387f7ed25defce1e HEAD"
+    "git fetch origin 1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
+    "git checkout -b cursor/first-cycle-ops-readiness-p2-91c1 1ea41d7db424cba6b4d9ec93da79fa85d809d2fb"
   ]
 }

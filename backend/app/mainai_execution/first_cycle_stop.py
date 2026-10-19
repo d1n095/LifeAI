@@ -138,21 +138,13 @@ def classify_publication_failure(
             mapped = ORIGIN_TO_STOP_STATE.get(origin)
             if mapped in STOP_STATES:
                 return mapped
-        failure_class = evidence.get("failure_class")
-        if isinstance(failure_class, str) and failure_class:
-            from app.mainai_execution import publication_errors as _pub
-
-            cls = getattr(_pub, failure_class, None)
-            if isinstance(cls, type) and issubclass(cls, ExternalBoundaryError):
-                state = getattr(cls, "first_cycle_state", None)
-                if state in STOP_STATES:
-                    return state
+        # `failure_class` alone is model-smuggleable. Require a matching typed origin.
         # Structured flags our own code set (CI wait / review receipt), never model prose.
         if evidence.get("review_ok") is False and evidence.get("ci_passed") is True:
             return STATE_INDEPENDENT_REVIEW_BLOCKED
         if evidence.get("ci_passed") is False:
             wait = evidence.get("ci_wait") if isinstance(evidence.get("ci_wait"), dict) else {}
-            if evidence.get("reason") == "timed_out" or (isinstance(wait, dict) and wait.get("status") == "timed_out"):
+            if isinstance(wait, dict) and wait.get("status") == "timed_out":
                 return STATE_EXTERNAL_CI_TIMED_OUT
             return STATE_EXTERNAL_CI_FAILED
 
@@ -238,9 +230,16 @@ def _mark_goal_stopped(
 ) -> None:
     if goal is None:
         return
-    if goal.status in TERMINAL_MAINAI_GOAL_STATUSES:
+    if first_cycle_state_from_goal(goal) in STOP_STATES:
         return
-    if goal.status in ACTIVE_MAINAI_GOAL_STATUSES:
+    # Local verification can close the goal as schema-`completed` before STOP-before-merge
+    # runs. First-cycle STOP is autonomously terminal but must stay `blocked`, never merged.
+    if goal.status == MainAIGoalStatus.completed and first_cycle_state == STATE_STOP_BEFORE_MERGE:
+        goal.status = MainAIGoalStatus.blocked
+        goal.completed_at = None
+    elif goal.status in TERMINAL_MAINAI_GOAL_STATUSES:
+        return
+    elif goal.status in ACTIVE_MAINAI_GOAL_STATUSES:
         goal.status = MainAIGoalStatus.blocked
     payload = {
         "first_cycle_state": first_cycle_state,
@@ -487,6 +486,78 @@ def assert_publication_permitted(
         )
     # Founder cancel_requested is cooperative cancel, not first-cycle STOP. Callers re-check
     # via _check_cancel_requested immediately before push / open_pr.
+
+
+def park_retryable_task_on_stopped_goal(
+    db: Session, task: MainAITask, *, goal: MainAIGoal | None
+) -> bool:
+    """A due `retryable_failed` task on a STOP/terminal goal must not auto-retry.
+
+    Clears `next_retry_at` and parks the task `blocked` so the worker retry tick cannot
+    keep scanning it forever, and so a later accidental retry cannot resume work.
+    """
+    if task.status != MainAITaskStatus.retryable_failed:
+        if task.next_retry_at is not None and goal_is_autonomous_terminal(db, goal):
+            task.next_retry_at = None
+            db.flush()
+            return True
+        return False
+    if not goal_is_autonomous_terminal(db, goal):
+        return False
+    state = first_cycle_state_from_goal(goal) if goal is not None else None
+    if state not in STOP_STATES:
+        state = STATE_STOP_BEFORE_MERGE
+    task.status = MainAITaskStatus.blocked
+    task.next_retry_at = None
+    task.completed_at = None
+    if hasattr(task, "blocker_reason"):
+        task.blocker_reason = "first-cycle STOP forbids retry"
+    db.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=task.owner_id,
+            event_type=MainAITaskEventType.blocked,
+            detail={
+                "reason": "first-cycle STOP forbids retry of a retryable_failed task",
+                "first_cycle_state": state,
+                "merged": False,
+                "parked_retry_after_stop": True,
+            },
+        )
+    )
+    db.flush()
+    return True
+
+
+def job_has_founder_cancel(job) -> bool:
+    """True when a live or dead job already carries a Founder cancel request or is cancelled."""
+    if job is None:
+        return False
+    from app.models.mainai_job import MainAIJobStatus
+
+    return bool(getattr(job, "cancel_requested", False)) or job.status == MainAIJobStatus.cancelled
+
+
+def finalize_interrupted_job_after_founder_cancel(db: Session, *, task: MainAITask, job) -> bool:
+    """Dead/interrupted job with Founder cancel_requested: cancel the task, never takeover.
+
+    Recovery of an interrupted cancelled attempt must not mint a fresh job.
+    """
+    if task.status != MainAITaskStatus.running:
+        return False
+    if not job_has_founder_cancel(job):
+        return False
+    from app.jobs.mainai_job_lease import JobNotDeclinableError, mark_job_cancelled_after_dead_founder_cancel
+    from app.mainai_execution.execution_job import _finalize_cancelled_task
+
+    _finalize_cancelled_task(db, task, reason="founder_cancel_beats_recovery_takeover")
+    try:
+        mark_job_cancelled_after_dead_founder_cancel(db, job_id=job.id)
+    except JobNotDeclinableError:
+        # Job may already be terminal (`cancelled`/`failed`) while the task was stuck running.
+        pass
+    db.flush()
+    return True
 
 
 def abandon_running_task_after_stop(db: Session, task: MainAITask, *, goal: MainAIGoal | None) -> bool:

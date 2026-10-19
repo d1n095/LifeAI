@@ -308,8 +308,11 @@ def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
     report = generate_goal_report(db, goal_id=goal.id)
 
     from app.models.mainai_execution import TERMINAL_MAINAI_GOAL_STATUSES, TERMINAL_MAINAI_TASK_STATUSES
+    from app.mainai_execution.first_cycle_stop import goal_is_first_cycle_stopped
 
     if goal.status in TERMINAL_MAINAI_GOAL_STATUSES:
+        return report
+    if goal_is_first_cycle_stopped(db, goal):
         return report
 
     task_statuses = [MainAITaskStatus(t["task_outcome"]) for t in report["tasks"]]

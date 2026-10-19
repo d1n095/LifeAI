@@ -32,6 +32,7 @@ that it defaults to pushing to a live repo."""
 import logging
 import subprocess
 import sys
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -57,6 +58,7 @@ from app.mainai_execution.first_cycle_stop import (
     first_cycle_state_from_goal,
     goal_is_autonomous_terminal,
     goal_is_first_cycle_stopped,
+    park_retryable_task_on_stopped_goal,
     stop_first_cycle,
 )
 from app.mainai_execution.publication_errors import (
@@ -110,6 +112,7 @@ from app.mainai_execution.worktree import (
     path_exists_at_base,
     path_exists_in_git_revision,
     push_worktree_branch,
+    sanitize_git_commit_message,
     verify_worktree_ownership,
     worktree_changed_files,
     worktree_git_status,
@@ -233,6 +236,11 @@ def _validate_repo_edit_file_path(path_value: object) -> str:
     worker process has write access, with no `..` involved at all."""
     if not isinstance(path_value, str) or not path_value:
         raise TaskExecutionError(f"Code agent file entry 'path' must be a non-empty string, got {path_value!r}.")
+    # Reject control characters BEFORE pathlib, which can truncate at NUL.
+    if "\x00" in path_value or any(ch.isspace() or unicodedata.category(ch)[0] == "C" for ch in path_value):
+        raise TaskExecutionError(
+            f"Refusing a file path with whitespace or control characters from the code agent: {path_value!r}"
+        )
     posix = PurePosixPath(path_value)
     if posix.is_absolute() or ".." in posix.parts:
         raise TaskExecutionError(
@@ -381,9 +389,13 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
 
+    try:
+        commit_message = sanitize_git_commit_message(parsed.get("commit_message", task.description[:200]))
+    except WorktreeError as exc:
+        raise TaskExecutionError(str(exc)) from exc
     return {
         "files": parsed["files"],
-        "commit_message": parsed.get("commit_message", task.description[:200]),
+        "commit_message": commit_message,
         "previous_contents": previous_contents,
         "provider": result.provider,
         "model": result.model,
@@ -460,7 +472,7 @@ async def _handle_repo_edit(
                 "task_execution job %s (task %s): committing salvaged uncommitted worktree progress -- no new AI call.", job.id, task.id
             )
             renew_mainai_job_lease(db, job.id, worker_id, lease_generation, lease_seconds)
-            commit_message = f"MainAI: {task.description[:180]}"
+            commit_message = sanitize_git_commit_message(f"MainAI: {task.description[:180]}")
             commit_worktree_changes(db, existing_worktree, message=commit_message)
             db.commit()
             return {
@@ -526,7 +538,10 @@ async def _handle_repo_edit(
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
 
-    commit_message = parsed.get("commit_message", task.description[:200])
+    try:
+        commit_message = sanitize_git_commit_message(parsed.get("commit_message", task.description[:200]))
+    except WorktreeError as exc:
+        raise TaskExecutionError(str(exc)) from exc
     renew_mainai_job_lease(db, job.id, worker_id, lease_generation, lease_seconds)
     commit_worktree_changes(db, worktree, message=commit_message)
     db.commit()
@@ -1181,6 +1196,10 @@ def _finalize_task_outcome(
                 first_cycle_state=publication_state,
                 evidence=merged_evidence or {"error": type(cause).__name__ if cause else "external publication failure"},
             )
+            return
+        stopped_goal = db.get(MainAIGoal, task.goal_id, populate_existing=True)
+        if goal_is_first_cycle_stopped(db, stopped_goal):
+            park_retryable_task_on_stopped_goal(db, task, goal=stopped_goal)
             return
         if task.attempts < task.max_attempts:
             task.status = MainAITaskStatus.retryable_failed

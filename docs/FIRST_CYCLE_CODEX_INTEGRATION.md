@@ -1,11 +1,13 @@
 # Integrating the eventual Codex activation/transport candidate
 
-This staging candidate (`cursor/first-cycle-staging-p1-91c1`) is the successor of frozen
-`#285` (`cursor/first-cycle-staging-91c1` @ `f5d9bf1`) and also contains frozen `#263`,
-`#276`, `#281`, `#282`, `#284`, and `#286` P1 corrections. It does **not** contain `#280`
-and does **not** implement Git transport, remote-effect grants, or Codex worktree
-credential isolation. `#286` only hermeticizes the acceptance harness; production CRED-1/2/3
-remain FAIL.
+This operator candidate (`cursor/first-cycle-ops-readiness-p2-91c1`) is the isolated
+successor of frozen `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`, itself the
+P1 child of frozen `#287` (`cursor/first-cycle-staging-p1-91c1`). The lineage still
+contains frozen `#263`, `#276`, `#281`, `#282`, `#284`, `#285`, `#286`, `#287`, and
+`#288`. It does **not** contain `#280` and does **not** implement Git transport,
+remote-effect grants, or Codex worktree credential isolation. `#286` only
+hermeticizes the acceptance harness; production CRED-1/2/3 remain FAIL. `#276` is a
+frozen Path A ancestor, not a GO certification. `go` stays false.
 
 Do not modify Codex's active branches from this lane. Do not add a second grant or
 transport system here.

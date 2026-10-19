@@ -40,6 +40,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import unicodedata
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,27 @@ _GIT_TIMEOUT_SECONDS = 60
 
 
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
+_COMMIT_MESSAGE_MAX = 200
+
+
+def sanitize_git_commit_message(message: object) -> str:
+    """Single-line commit subject from untrusted model text. Never a git flag vector.
+
+    Newlines, NULs and other control characters are refused (not forwarded to `git commit`).
+    A leading dash is stripped so `-m` cannot be confused with an extra option.
+    """
+    if not isinstance(message, str) or not message.strip():
+        raise WorktreeError("commit message must be a non-empty string")
+    if "\x00" in message:
+        raise WorktreeError("refusing a commit message containing NUL")
+    collapsed = " ".join(message.replace("\r", "\n").splitlines()).strip()
+    if not collapsed:
+        raise WorktreeError("refusing an empty commit message after sanitization")
+    if any(unicodedata.category(ch)[0] == "C" for ch in collapsed):
+        raise WorktreeError("refusing a commit message containing control characters")
+    if collapsed.startswith("-"):
+        collapsed = collapsed.lstrip("-").strip() or "MainAI local edit"
+    return collapsed[:_COMMIT_MESSAGE_MAX]
 
 
 def activation_base() -> tuple[str, str]:
@@ -202,7 +224,9 @@ def sanitized_git_subprocess_env() -> dict[str, str]:
     return strip_git_config_injection(env)
 
 
-def _run_git(args: list[str], *, cwd: Path, timeout: int = _GIT_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+def _run_git(
+    args: list[str], *, cwd: Path, timeout: int = _GIT_TIMEOUT_SECONDS, input_text: str | None = None
+) -> subprocess.CompletedProcess:
     """All git subprocess calls funnel through here. Mirrors the exact
     subprocess.TimeoutExpired handling lesson verify.py/_run_pytest() already established
     (V0.1 hardening pass): a killed subprocess's .stdout/.stderr are not reliably `str` even
@@ -216,6 +240,7 @@ def _run_git(args: list[str], *, cwd: Path, timeout: int = _GIT_TIMEOUT_SECONDS)
             timeout=timeout,
             check=False,
             env=sanitized_git_subprocess_env(),
+            input=input_text,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -544,7 +569,9 @@ def commit_worktree_changes(db: Session, worktree: MainAITaskWorktree, *, messag
     if not status_result.stdout.strip():
         return None
 
-    _run_git(["commit", "-q", "-m", message], cwd=path)
+    safe_message = sanitize_git_commit_message(message)
+    # `-F -` keeps the untrusted subject on stdin; never pass it as a leading-dash argv token.
+    _run_git(["commit", "-q", "--cleanup=strip", "-F", "-"], cwd=path, input_text=safe_message)
     sha = _run_git(["rev-parse", "HEAD"], cwd=path).stdout.strip()
 
     worktree.current_commit = sha

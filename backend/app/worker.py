@@ -522,6 +522,18 @@ class Worker:
         for task in due_tasks:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal_is_autonomous_terminal(db, goal):
+                from app.mainai_execution.first_cycle_stop import park_retryable_task_on_stopped_goal
+
+                try:
+                    park_retryable_task_on_stopped_goal(db, task, goal=goal)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to park retryable MainAITask %s after STOP.",
+                        self.worker_id,
+                        task.id,
+                    )
                 continue
             try:
                 retry_task(db, task=task)
@@ -655,6 +667,22 @@ class Worker:
                         "Worker %s: failed to abandon running task %s after first-cycle STOP.",
                         self.worker_id,
                         task.id,
+                    )
+                continue
+            from app.mainai_execution.first_cycle_stop import job_has_founder_cancel
+
+            if job_has_founder_cancel(job):
+                from app.mainai_execution.first_cycle_stop import finalize_interrupted_job_after_founder_cancel
+
+                try:
+                    finalize_interrupted_job_after_founder_cancel(db, task=task, job=job)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to finalize cancelled dead job %s without takeover.",
+                        self.worker_id,
+                        job.id,
                     )
                 continue
             try:

@@ -97,6 +97,14 @@ class TakeoverError(RuntimeError):
 async def execute_takeover(
     db: Session, *, task: MainAITask, goal: MainAIGoal, record: MainAIRecoveryRecord, dispatched_by: str
 ) -> tuple[MainAIRecoveryRecord, MainAIJob | None]:
+    dead_job_id = record.job_id
+    dead_job = db.get(MainAIJob, dead_job_id)
+    from app.mainai_execution.first_cycle_stop import goal_is_autonomous_terminal, job_has_founder_cancel
+
+    if job_has_founder_cancel(dead_job):
+        raise TakeoverError(
+            f"recovery record {record.id}: founder cancel_requested forbids takeover."
+        )
     if record.status != MainAIRecoveryStatus.classified:
         raise TakeoverError(f"recovery record {record.id} is not classified (status={record.status}) -- cannot take over.")
     if record.classification not in AUTO_SALVAGEABLE_CLASSIFICATIONS:
@@ -110,14 +118,10 @@ async def execute_takeover(
     # require_task_approval() call at the very top of its function.
     require_recovery_approval(db, record=record)
 
-    from app.mainai_execution.first_cycle_stop import goal_is_autonomous_terminal
-
     if goal_is_autonomous_terminal(db, goal):
         raise TakeoverError(
             f"recovery record {record.id}: first-cycle STOP / terminal goal forbids takeover."
         )
-
-    dead_job_id = record.job_id
 
     record_recovery_event(db, record=record, event_type=MainAIRecoveryEventType.takeover_started, detail={"dispatched_by": dispatched_by})
 
