@@ -1,0 +1,76 @@
+target: $X/wt286 @ a255fa23bf29be624d3f24e6387f7ed25defce1e
+$X/probes/fc286/test_review_stop_286_exam.py:261: AssertionError: receipt recorded after CI never re-evaluated: state=independent_review_blocked, final_outcome={"first_cycle_state": "independent_review_blocked", "merged": false, "awaiting_founder_merge": false, "subsequent_autonomous_job": false, "reason": "no review receipt; first cycle must STOP", "stopped_at": "2026-10-19T09:48:23.206148"}
+$X/probes/fc286/test_review_stop_286_exam.py:304: AssertionError: Founder cannot cancel a first-cycle STOP task: TaskNotCancellableError: MainAITask 802d25e2-bd6c-4d4d-9231-ebf5e3db8b52 has status 'blocked', not cancellable directly.
+$X/probes/fc286/test_review_stop_286_exam.py:432: AssertionError: GAP: reviewer 'path_a.builder ' is accepted as independent from builder 'path_a.builder'
+$X/probes/fc286/test_review_stop_286_exam.py:432: AssertionError: GAP: reviewer 'PATH_A.BUILDER' is accepted as independent from builder 'path_a.builder'
+$X/probes/fc286/test_review_stop_286_exam.py:432: AssertionError: GAP: reviewer 'path_a.builder\u200b' is accepted as independent from builder 'path_a.builder'
+$X/probes/fc286/test_review_stop_286_exam.py:446: AssertionError: GAP: a future-dated PASS shadows a later FAIL (ordering trusts caller-supplied reviewed_at)
+$X/probes/fc286/test_review_stop_286_exam.py:475: AssertionError: account erasure fails with an owner-scoped review receipt: InternalError: (psycopg2.errors.RaiseException) mainai_verification_records is append-only
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: git_https_403_denied: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:49:26.165760, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: git_network: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:48:54.133952, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: git_push_timeout: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:49:31.000080, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: git_remote_unreachable: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:48:38.775190, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: github_get_ref_404: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:49:21.357877, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: grant280_base_moved: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:48:50.575058, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: grant280_envelope_superseded: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:49:07.337791, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: grant280_head_mismatch: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:49:17.539619, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: grant280_receipt_stale: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:49:19.705420, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: grant280_version: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:48:42.724179, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:542: AssertionError: post_push_remote_mismatch: classified as local -> status=retryable_failed, next_retry_at=2026-10-19 09:49:08.553966, job=None
+$X/probes/fc286/test_review_stop_286_exam.py:576: AssertionError: model-chosen filename forced STOP: failed
+$X/probes/fc286/test_review_stop_286_exam.py:593: AssertionError: running sibling continues to its push after goal STOP (no cooperative cancel requested)
+$X/probes/fc286/test_review_stop_286_exam.py:667: AssertionError: external push failure re-dispatched: status=running, new job=b9600d41-ed92-4440-b355-c7f1d342a1df
+$X/probes/fc286/test_review_stop_286_exam.py:675: AssertionError: grant denial ('authoritative worktree HEAD no longer matches the grant') triggered a paid replan
+PASSED test_review_stop_286_exam.py::test_S1_ci_green_without_receipt_stops_and_no_tick_restarts
+PASSED test_review_stop_286_exam.py::test_S2_ci_green_with_exact_pass_receipt_is_stop_before_merge_not_merged
+PASSED test_review_stop_286_exam.py::test_S3_pass_receipt_for_previous_head_does_not_satisfy_changed_head
+PASSED test_review_stop_286_exam.py::test_S4_negative_review_stops_and_never_replans
+PASSED test_review_stop_286_exam.py::test_S6_repeated_resolution_events_are_no_ops
+PASSED test_review_stop_286_exam.py::test_S7_other_ready_task_of_a_stopped_goal_is_not_dispatched
+PASSED test_review_stop_286_exam.py::test_P1_external_ci_outcomes_never_replan[failed]
+PASSED test_review_stop_286_exam.py::test_P1_external_ci_outcomes_never_replan[timed_out]
+PASSED test_review_stop_286_exam.py::test_P1_external_ci_outcomes_never_replan[cancelled]
+PASSED test_review_stop_286_exam.py::test_P2_cancelled_job_never_replans
+PASSED test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[stale_base]
+PASSED test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[push_rejected]
+PASSED test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[grant_missing]
+PASSED test_review_stop_286_exam.py::test_P3b_external_publication_failure_inside_repo_edit_is_auto_retried
+PASSED test_review_stop_286_exam.py::test_P4_local_verification_failure_remains_replan_eligible
+PASSED test_review_stop_286_exam.py::test_R1_runtime_role_cannot_insert_a_pass_receipt
+PASSED test_review_stop_286_exam.py::test_R4_receipt_cannot_carry_reviewer_authority
+PASSED test_review_stop_286_exam.py::test_T1_track_b_reviewer_runtime_is_off
+PASSED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[approved_base_moved]
+PASSED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_non_fast_forward]
+PASSED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_pre_receive_declined]
+PASSED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_consumed]
+PASSED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_expired]
+PASSED test_review_stop_286_exam.py::test_N2_local_verification_failure_still_retries_and_replans
+PASSED test_review_stop_286_exam.py::test_N3_local_refusal_is_not_misclassified_as_external
+PASSED test_review_stop_286_exam.py::test_S10_sibling_retry_and_waits_are_parked
+PASSED test_review_stop_286_exam.py::test_S11_manual_and_takeover_paths_refuse_stopped_goal
+PASSED test_review_stop_286_exam.py::test_S12_ordinary_blocked_goal_still_schedules
+PASSED test_review_stop_286_exam.py::test_S13_stop_survives_final_outcome_overwrite
+FAILED test_review_stop_286_exam.py::test_S5_receipt_recorded_after_ci_is_never_evaluated
+FAILED test_review_stop_286_exam.py::test_S8_founder_can_cancel_a_stopped_task
+FAILED test_review_stop_286_exam.py::test_R2_builder_identity_variants_are_not_independent[path_a.builder ]
+FAILED test_review_stop_286_exam.py::test_R2_builder_identity_variants_are_not_independent[PATH_A.BUILDER]
+FAILED test_review_stop_286_exam.py::test_R2_builder_identity_variants_are_not_independent[path_a.builder\u200b]
+FAILED test_review_stop_286_exam.py::test_R3_later_fail_is_not_shadowed_by_a_future_dated_pass
+FAILED test_review_stop_286_exam.py::test_R5_account_erasure_succeeds_after_an_owner_scoped_review_receipt
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_https_403_denied]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_network]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_push_timeout]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_remote_unreachable]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[github_get_ref_404]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_base_moved]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_envelope_superseded]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_head_mismatch]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_receipt_stale]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_version]
+FAILED test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[post_push_remote_mismatch]
+FAILED test_review_stop_286_exam.py::test_N4_model_chosen_path_cannot_force_stop
+FAILED test_review_stop_286_exam.py::test_S9_in_flight_sibling_job_is_asked_to_stop
+FAILED test_review_stop_286_exam.py::test_N1b_misclassified_push_failure_is_redispatched
+FAILED test_review_stop_286_exam.py::test_N1c_misclassified_grant_failure_is_paid_replanned
+22 failed, 29 passed in 32.13s
+target worktree unchanged
