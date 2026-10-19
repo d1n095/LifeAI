@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,24 +16,80 @@ AUTHOR = {
     "GIT_COMMITTER_EMAIL": "harness@lifeai.test",
 }
 
+# Host credential / config keys the harness must never inherit.
+_HOST_CREDENTIAL_ENV = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GIT_ASKPASS",
+    "GIT_USERNAME",
+    "GIT_PASSWORD",
+    "GIT_TERMINAL_PROMPT",
+    "MAINAI_PUSH_TOKEN",
+    "MAINAI_EFFECT_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+)
+
+_HARNESS_HOME: Path | None = None
+_HARNESS_GLOBAL_CONFIG: Path | None = None
+
+
+def _harness_git_home() -> tuple[Path, Path]:
+    """Process-wide isolated HOME + global gitconfig. No host helpers, no tokens."""
+    global _HARNESS_HOME, _HARNESS_GLOBAL_CONFIG
+    if _HARNESS_HOME is None:
+        _HARNESS_HOME = Path(tempfile.mkdtemp(prefix="first-cycle-git-home-"))
+        (_HARNESS_HOME / "xdg").mkdir(parents=True, exist_ok=True)
+        _HARNESS_GLOBAL_CONFIG = _HARNESS_HOME / ".gitconfig"
+        _HARNESS_GLOBAL_CONFIG.write_text(
+            "[user]\n"
+            "\tname = first-cycle-harness\n"
+            "\temail = harness@lifeai.test\n"
+            "[credential]\n"
+            "\thelper =\n",
+            encoding="utf-8",
+        )
+    return _HARNESS_HOME, _HARNESS_GLOBAL_CONFIG
+
+
+def isolated_git_env(base: dict | None = None, *, extra: dict | None = None) -> dict[str, str]:
+    """Git environment that cannot see the operator's real credential helpers or tokens.
+
+    Always overrides HOME / GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_NOSYSTEM even
+    when the parent pytest process itself has a host helper configured. Extra env may model a
+    compromised parent injecting GITHUB_TOKEN, but cannot point git back at host config.
+    """
+    home, global_config = _harness_git_home()
+    env = {k: str(v) for k, v in (base if base is not None else os.environ).items() if v is not None}
+    for key in _HOST_CREDENTIAL_ENV:
+        env.pop(key, None)
+    for key in list(env):
+        if key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"):
+            env.pop(key, None)
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / "xdg")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = str(global_config)
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    env.update(AUTHOR)
+    if extra:
+        for key, value in extra.items():
+            if key in {"HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"}:
+                continue
+            env[key] = str(value)
+    return env
+
 REGULAR_FILE_MODES = frozenset({"100644", "100755"})
 SYMLINK_MODE = "120000"
 GITLINK_MODE = "160000"
 
 
 def git(*args: str, cwd: Path | None = None, env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    merged = {**os.environ, **AUTHOR, **(env or {})}
-    # Never inherit live credentials into harness git.
-    for key in (
-        "GITHUB_TOKEN",
-        "GH_TOKEN",
-        "GIT_ASKPASS",
-        "GIT_USERNAME",
-        "GIT_PASSWORD",
-        "GIT_TERMINAL_PROMPT",
-    ):
-        merged.pop(key, None)
-    merged["GIT_TERMINAL_PROMPT"] = "0"
+    merged = isolated_git_env(os.environ, extra=env)
     result = subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
