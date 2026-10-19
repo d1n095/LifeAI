@@ -44,7 +44,7 @@ from app.mainai_execution.publication_errors import (
     PublicationNetworkError,
     PublicationTimeoutError,
     PublicationUnknownError,
-    map_push_grant_boundary_error,
+    map_publication_boundary_error,
 )
 from app.mainai_execution.replan import ReplanSuppressedError, find_replan_trigger, trigger_replan
 from app.mainai_execution.worktree import (
@@ -162,13 +162,13 @@ def test_typed_origins_fail_closed_and_local_verification_does_not():
 
 
 def test_unknown_push_grant_boundary_error_fails_closed():
-    mapped = map_push_grant_boundary_error(RuntimeError("totally unknown"))
+    mapped = map_publication_boundary_error(RuntimeError("totally unknown"))
     assert isinstance(mapped, PublicationUnknownError)
     assert mapped.origin == "unknown"
     assert classify_publication_failure(mapped) == STATE_EXTERNAL_BOUNDARY_FAILED
-    assert map_push_grant_boundary_error(TimeoutError()).origin == "timeout"
-    assert map_push_grant_boundary_error(ConnectionError()).origin == "network"
-    assert map_push_grant_boundary_error(WorktreeTimeoutError("WorktreeTimeoutError")).origin == "timeout"
+    assert map_publication_boundary_error(TimeoutError()).origin == "timeout"
+    assert map_publication_boundary_error(ConnectionError()).origin == "network"
+    assert map_publication_boundary_error(WorktreeTimeoutError("WorktreeTimeoutError")).origin == "timeout"
 
 
 def test_production_git_env_strips_config_injection():

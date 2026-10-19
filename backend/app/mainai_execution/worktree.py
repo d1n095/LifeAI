@@ -53,7 +53,7 @@ from app.mainai_execution.publication_errors import (
     GitHubApiBoundaryError,
     PublicationTimeoutError,
     PushRejectedError,
-    map_push_grant_boundary_error,
+    map_publication_boundary_error,
 )
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_execution import MainAITask
@@ -374,7 +374,7 @@ async def create_task_worktree(
         try:
             tip = await client.get_ref(base_branch)
         except Exception as exc:
-            raise map_push_grant_boundary_error(exc) from exc
+            raise map_publication_boundary_error(exc) from exc
         if tip != approved_sha:
             raise ActivationBaseConfigurationError(
                 f"integration branch {base_branch!r} tip {tip!r} is not the approved base SHA {approved_sha!r}; refusing to build."
@@ -384,7 +384,7 @@ async def create_task_worktree(
         try:
             base_sha = await client.get_ref(execution_worktree_base_branch())
         except Exception as exc:
-            raise map_push_grant_boundary_error(exc) from exc
+            raise map_publication_boundary_error(exc) from exc
     return create_task_worktree_sync(
         db, task=task, job=job, lease_generation=lease_generation, executor_id=executor_id, base_sha=base_sha
     )
@@ -574,7 +574,7 @@ async def push_worktree_branch(worktree: MainAITaskWorktree) -> str:
     try:
         remote_sha = await client.get_ref(worktree.branch)
     except Exception as exc:
-        raise map_push_grant_boundary_error(exc) from exc
+        raise map_publication_boundary_error(exc) from exc
     if remote_sha != local_sha:
         raise GitHubApiBoundaryError("PushSuccessRemoteMismatch")
     return remote_sha

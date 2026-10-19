@@ -62,7 +62,7 @@ from app.mainai_execution.publication_errors import (
     ExternalBoundaryError,
     ExternalCiContractError,
     PublicationForbiddenAfterStopError,
-    map_push_grant_boundary_error,
+    map_publication_boundary_error,
 )
 from app.mainai_execution.required_checks import CI_STAGE_PR_OPEN, RequiredCheckContractError
 from app.mainai_execution.review_receipt import (
@@ -651,7 +651,7 @@ async def _handle_open_pr(
     except PublicationForbiddenAfterStopError:
         raise
     except Exception as exc:
-        raise map_push_grant_boundary_error(exc) from exc
+        raise map_publication_boundary_error(exc) from exc
     assert_publication_permitted(db, task, job_id=job_id)
     return {
         "proposed": False,
@@ -741,7 +741,7 @@ async def _finalize_repo_edit(
     except PublicationForbiddenAfterStopError:
         raise
     except Exception as exc:
-        raise map_push_grant_boundary_error(exc) from exc
+        raise map_publication_boundary_error(exc) from exc
     assert_publication_permitted(db, task, job_id=job_id)
     return {
         "branch": worktree.branch,

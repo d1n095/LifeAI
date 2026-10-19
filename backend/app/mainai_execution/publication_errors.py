@@ -148,7 +148,7 @@ class ExternalCiContractError(ExternalBoundaryError):
     first_cycle_state = STATE_EXTERNAL_CI_FAILED
 
 
-def map_push_grant_boundary_error(exc: BaseException) -> ExternalBoundaryError:
+def map_publication_boundary_error(exc: BaseException) -> ExternalBoundaryError:
     """Map a push/grant-boundary exception to a typed fail-closed error.
 
     Does not inspect exception message text. Unknown types fail closed.
