@@ -94,9 +94,46 @@ class TakeoverError(RuntimeError):
     pass
 
 
+class TakeoverCapExhaustedError(TakeoverError):
+    """A second auto-takeover on the same task is a crash-recovery loop (FO-6)."""
+
+
+# One auto-takeover per task. A second dead attempt after salvage is a crash-recovery loop
+# (FO-6): park for Founder review instead of minting another job.
+MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK = 1
+
+
+def count_completed_takeovers(db: Session, *, task_id) -> int:
+    """Count takeovers that actually minted a successor job.
+
+    Successful `execute_takeover` ends `completed` with `takeover_job_id` set — counting
+    `status == taken_over` would miss the production path and never trip the cap.
+    """
+    return (
+        db.query(MainAIRecoveryRecord)
+        .filter(
+            MainAIRecoveryRecord.task_id == task_id,
+            MainAIRecoveryRecord.takeover_job_id.isnot(None),
+        )
+        .count()
+    )
+
+
 async def execute_takeover(
     db: Session, *, task: MainAITask, goal: MainAIGoal, record: MainAIRecoveryRecord, dispatched_by: str
 ) -> tuple[MainAIRecoveryRecord, MainAIJob | None]:
+    dead_job_id = record.job_id
+    dead_job = db.get(MainAIJob, dead_job_id)
+    from app.mainai_execution.first_cycle_stop import goal_is_autonomous_terminal, job_has_founder_cancel
+
+    if job_has_founder_cancel(dead_job):
+        raise TakeoverError(
+            f"recovery record {record.id}: founder cancel_requested forbids takeover."
+        )
+    if count_completed_takeovers(db, task_id=task.id) >= MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK:
+        raise TakeoverCapExhaustedError(
+            f"recovery record {record.id}: auto-recovery takeover cap exhausted."
+        )
     if record.status != MainAIRecoveryStatus.classified:
         raise TakeoverError(f"recovery record {record.id} is not classified (status={record.status}) -- cannot take over.")
     if record.classification not in AUTO_SALVAGEABLE_CLASSIFICATIONS:
@@ -110,7 +147,10 @@ async def execute_takeover(
     # require_task_approval() call at the very top of its function.
     require_recovery_approval(db, record=record)
 
-    dead_job_id = record.job_id
+    if goal_is_autonomous_terminal(db, goal):
+        raise TakeoverError(
+            f"recovery record {record.id}: first-cycle STOP / terminal goal forbids takeover."
+        )
 
     record_recovery_event(db, record=record, event_type=MainAIRecoveryEventType.takeover_started, detail={"dispatched_by": dispatched_by})
 

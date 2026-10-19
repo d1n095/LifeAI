@@ -313,3 +313,38 @@ def mark_job_failed_after_governed_recovery_decline(db: Session, *, job_id: uuid
             f"Job {job_id} is not a dead expired-lease running job, nor an already-terminal "
             f"job whose owning task is still stuck running -- refusing to finalize it."
         )
+
+
+def mark_job_cancelled_after_dead_founder_cancel(db: Session, *, job_id: uuid.UUID) -> None:
+    """Terminalize a dead `task_execution` job after the Founder requested cancel.
+
+    Same dead-job fence as `mark_job_failed_after_governed_recovery_decline`: never write a
+    terminal outcome onto a job that might still hold a live lease. Recovery must not
+    takeover this attempt — the honest outcome is `cancelled`, not a fresh dispatch.
+    """
+    result = db.execute(
+        text("""
+            UPDATE mainai_jobs
+            SET status = 'cancelled',
+                completed_at = COALESCE(completed_at, now()),
+                cancel_acknowledged = true
+            WHERE id = :job_id
+              AND (
+                (
+                  status = 'running'
+                  AND cancel_requested = true
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at < now()
+                )
+                OR (
+                  status IN ('failed', 'completed', 'cancelled')
+                  AND cancel_requested = true
+                )
+              )
+        """),
+        {"job_id": str(job_id)},
+    )
+    if result.rowcount == 0:
+        raise JobNotDeclinableError(
+            f"Job {job_id} is not a dead founder-cancelled job -- refusing to mark it cancelled."
+        )

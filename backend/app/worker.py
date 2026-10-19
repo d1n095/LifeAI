@@ -47,6 +47,7 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
+from app.mainai_execution.first_cycle_stop import FirstCycleGoalStoppedError, goal_is_autonomous_terminal
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
 from app.mainai_execution.envelope_scope import PATH_A_CAPABILITY, path_a_dispatch_is_authorized
@@ -55,7 +56,7 @@ from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
 from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
 from app.mainai_execution.recovery_classifier import classify_recovery_record
 from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
-from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
+from app.mainai_execution.recovery_takeover import TakeoverCapExhaustedError, TakeoverError, execute_takeover
 from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
@@ -72,7 +73,7 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
-from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryStatus
+from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryRecord, MainAIRecoveryStatus
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
@@ -451,12 +452,14 @@ class Worker:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
                 continue
+            if goal_is_autonomous_terminal(db, goal):
+                continue  # first-cycle STOP / schema-terminal: no further autonomous dispatch
             if not path_a_dispatch_is_authorized(db, owner_id=goal.owner_id, goal_id=goal.id):
                 continue  # never-governed became governed, or Path A authorization vanished in the gap
             try:
                 dispatch_ready_task(db, task=task, goal=goal, dispatched_by="mainai_worker_auto_advance")
                 db.commit()
-            except ApprovalRequiredError:
+            except (ApprovalRequiredError, FirstCycleGoalStoppedError):
                 db.rollback()
             except Exception:
                 db.rollback()
@@ -487,6 +490,11 @@ class Worker:
             .all()
         )
         for wait in due_waits:
+            task = db.get(MainAITask, wait.task_id)
+            if task is not None:
+                goal = db.get(MainAIGoal, task.goal_id)
+                if goal_is_autonomous_terminal(db, goal) and task.status != MainAITaskStatus.waiting_ci:
+                    continue
             try:
                 await resume_waiting_ci_task(db, wait)
                 db.commit()
@@ -512,6 +520,21 @@ class Worker:
             .all()
         )
         for task in due_tasks:
+            goal = db.get(MainAIGoal, task.goal_id)
+            if goal_is_autonomous_terminal(db, goal):
+                from app.mainai_execution.first_cycle_stop import park_retryable_task_on_stopped_goal
+
+                try:
+                    park_retryable_task_on_stopped_goal(db, task, goal=goal)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to park retryable MainAITask %s after STOP.",
+                        self.worker_id,
+                        task.id,
+                    )
+                continue
             try:
                 retry_task(db, task=task)
                 db.commit()
@@ -632,6 +655,36 @@ class Worker:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
                 continue
+            if goal_is_autonomous_terminal(db, goal):
+                from app.mainai_execution.first_cycle_stop import abandon_running_task_after_stop
+
+                try:
+                    abandon_running_task_after_stop(db, task, goal=goal)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to abandon running task %s after first-cycle STOP.",
+                        self.worker_id,
+                        task.id,
+                    )
+                continue
+            from app.mainai_execution.first_cycle_stop import job_has_founder_cancel
+
+            if job_has_founder_cancel(job):
+                from app.mainai_execution.first_cycle_stop import finalize_interrupted_job_after_founder_cancel
+
+                try:
+                    finalize_interrupted_job_after_founder_cancel(db, task=task, job=job)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to finalize cancelled dead job %s without takeover.",
+                        self.worker_id,
+                        job.id,
+                    )
+                continue
             try:
                 record = get_or_create_recovery_record(db, task=task, job=job)
                 db.commit()
@@ -640,6 +693,31 @@ class Worker:
                 record = classify_recovery_record(db, record=record)
                 db.commit()
                 if record.status == MainAIRecoveryStatus.classified and record.classification in AUTO_SALVAGEABLE_CLASSIFICATIONS:
+                    from app.mainai_execution.recovery_takeover import (
+                        MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK,
+                        count_completed_takeovers,
+                    )
+
+                    if count_completed_takeovers(db, task_id=task.id) >= MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK:
+                        record.status = MainAIRecoveryStatus.blocked
+                        record.manual_review_required = True
+                        record.blocker = "auto-recovery takeover cap exhausted"
+                        task.status = MainAITaskStatus.blocked
+                        task.next_retry_at = None
+                        db.add(
+                            MainAITaskEvent(
+                                task_id=task.id,
+                                owner_id=task.owner_id,
+                                event_type=MainAITaskEventType.blocked,
+                                detail={
+                                    "reason": "auto-recovery takeover cap exhausted",
+                                    "recovery_loop": True,
+                                    "merged": False,
+                                },
+                            )
+                        )
+                        db.commit()
+                        continue
                     db.add(
                         MainAITaskEvent(
                             task_id=task.id,
@@ -652,6 +730,32 @@ class Worker:
                     try:
                         record, _new_job = await execute_takeover(db, task=task, goal=goal, record=record, dispatched_by="mainai_worker_auto_recovery")
                         db.commit()
+                    except TakeoverCapExhaustedError:
+                        record_id = record.id
+                        task_id = task.id
+                        owner_id = task.owner_id
+                        db.rollback()
+                        record = db.get(MainAIRecoveryRecord, record_id)
+                        task = db.get(MainAITask, task_id)
+                        if record is not None and task is not None:
+                            record.status = MainAIRecoveryStatus.blocked
+                            record.manual_review_required = True
+                            record.blocker = "auto-recovery takeover cap exhausted"
+                            task.status = MainAITaskStatus.blocked
+                            task.next_retry_at = None
+                            db.add(
+                                MainAITaskEvent(
+                                    task_id=task.id,
+                                    owner_id=owner_id,
+                                    event_type=MainAITaskEventType.blocked,
+                                    detail={
+                                        "reason": "auto-recovery takeover cap exhausted",
+                                        "recovery_loop": True,
+                                        "merged": False,
+                                    },
+                                )
+                            )
+                            db.commit()
                     except (RecoveryApprovalRequiredError, TakeoverError):
                         db.rollback()
             except Exception:

@@ -41,15 +41,21 @@ from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIR
 
 
 def _classify(evidence: dict) -> RecoveryClassification:
+    if evidence.get("remote_fetch_failed"):
+        return RecoveryClassification.unsafe_to_auto_recover
     if evidence.get("remote_sha_is_ancestor_of_local") is False:
         return RecoveryClassification.conflicted_state
 
     remote_exists = evidence.get("remote_branch_exists")
     local_head = evidence.get("worktree_local_head_sha")
     remote_sha = evidence.get("remote_branch_sha")
+    base_sha = evidence.get("worktree_base_sha")
 
     worktree_confirms_push = remote_exists and remote_sha is not None and remote_sha == local_head
-    checkpoint_confirms_push = bool(remote_exists) and bool(evidence.get("has_finalized_checkpoint"))
+    # A durable `finalized` checkpoint is itself proof a remote push already succeeded.
+    # Requiring a live remote lookup here let a 404/replica lag reclassify the attempt as
+    # LOCAL_COMMITTED_NOT_PUSHED and auto-takeover into a duplicate remote effect (FO-6).
+    checkpoint_confirms_push = bool(evidence.get("has_finalized_checkpoint"))
     if worktree_confirms_push or checkpoint_confirms_push:
         if evidence.get("pr_exists"):
             return RecoveryClassification.pr_exists
@@ -59,7 +65,12 @@ def _classify(evidence: dict) -> RecoveryClassification:
     # new commit -- unlike `worktree_local_head_sha` (which is always non-None once a
     # worktree exists at all, since HEAD points at the base-SHA checkout commit even with zero
     # new commits), this is a real signal that local work beyond the base was committed.
-    if evidence.get("worktree_current_commit"):
+    # Also accept live HEAD ≠ verified base: a crash between `git commit` and the DB flush of
+    # `current_commit` must still salvage as LOCAL_COMMITTED_NOT_PUSHED (FO-6).
+    has_local_commit = bool(evidence.get("worktree_current_commit")) or (
+        bool(local_head) and bool(base_sha) and local_head != base_sha
+    )
+    if has_local_commit:
         return RecoveryClassification.local_committed_not_pushed
 
     if evidence.get("worktree_ownership_verified") and evidence.get("worktree_has_uncommitted_changes"):
