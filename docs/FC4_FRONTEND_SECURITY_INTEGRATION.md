@@ -12,7 +12,9 @@ This correction branch:
 - Parent SHA (exact): `eed3f4a380be71398a0481414518a29506a57ccb`
 - Independent exam of #275: `6d56ff029328c542a77bd6cccbaebdaf16124539` (RETURN_TO_BUILDER)
 
-Do not merge this document's lanes here. Do not amend #275, #276, #277, #279, #280, or #281.
+Do not merge this document's lanes here. Do not amend #275, #276, #277, #279, #280, #281, or #282.
+
+Composed 2026-10-19 onto frozen `#284` @ `9c978de` as `cursor/first-cycle-staging-91c1` merge `ec2e896`. Keep this branch's `check-npm-audit.js`. Discard #275's pre-A6/A7 policy.
 
 ## Authoritative policy rule
 

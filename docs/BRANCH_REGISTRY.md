@@ -1,19 +1,31 @@
 # Branch-/PR-register — projektets levande karta
 
-## FC-4 frontend npm-audit remediation (2026-10-15)
-
-| Branch | PR | Status | Scope |
-|---|---|---|---|
-| `codex/frontend-npm-audit-fc4-remediation` | [#275](https://github.com/d1n095/LifeAI/pull/275) | **Draft; frozen original candidate — do not amend or merge** | Patch-level Next.js/PostCSS/sharp/source-map/brace-expansion remediation at `eed3f4a380be71398a0481414518a29506a57ccb`. Independent exam `6d56ff029328c542a77bd6cccbaebdaf16124539` returned RETURN_TO_BUILDER (P1 A6/A7, P2 A10/A11). |
-| `cursor/fc4-npm-audit-a6-a7-91c1` | [#282](https://github.com/d1n095/LifeAI/pull/282) | **Draft; isolated FC-4 policy correction of frozen #275 — do not merge until independently examined** | Executable A6 compatible-fix auto-revocation, A7 `expires: "2027-01-15"` fail-closed deadline, A10 independent moderate on high-via-braces wrappers, narrowly bounded A11 npm 10/11 wrapper boolean-true rule. Implementation `c8f6a95788a3e43fe172ab7761b1c7bec68099da`. No lockfile or dependency changes. Authoritative `frontend/scripts/check-npm-audit.js` for later composition. See `docs/FC4_FRONTEND_SECURITY_INTEGRATION.md`. |
-
-**Merge-ordning för FC-4:** keep #275 frozen. Examine this correction independently. Compose later with frozen #276 / Claude #277-replacement / Codex activation-security so the final activation candidate contains **exactly one** npm-audit policy — this one, not #275's pre-A6/A7 script alongside it. Do not rebase this branch onto those lanes until their own dependencies have actually merged.
-
 Detta är INTE bara en lista över brancher — det är projektets levande karta, och den
 manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUDE.md`s
 "Målet"-avsnitt och `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`). Den ska hållas uppdaterad
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
+
+## First-cycle staging composition (2026-10-19)
+
+Cursor integration lane. Composes currently accepted first-cycle components into **one**
+reproducible staging candidate. Does **not** merge into `mainai/integration-founder-supervised-v1`,
+does not enable Track B, does not accept `#280`, and does not implement Codex Git transport.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `cursor/first-cycle-staging-91c1` | draft (this PR) | **Staging composition of frozen `#284` + `#282`. Do not amend frozen upstream PRs.** | Exact inputs: `#263` `e33f494`, `#276` `09b87e9`, `#281` `abc88b4` (via `#284`), `#284` `9c978de` (provisional pending Claude exam), `#282` `1e3ee3f`. Merge-commit `ec2e896`. Manifest `docs/first_cycle_staging_manifest.json`. Codex integration notes `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`. |
+
+**Must not:** alter frozen `#263`/`#276`/`#281`/`#282`/`#284`; compose `#280`; enable Track B; merge/deploy/Recall; paid providers; GitHub settings.
+
+## FC-4 frontend npm-audit remediation (2026-10-15)
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `codex/frontend-npm-audit-fc4-remediation` | [#275](https://github.com/d1n095/LifeAI/pull/275) | **Draft; frozen original candidate — do not amend or merge** | Patch-level Next.js/PostCSS/sharp/source-map/brace-expansion remediation at `eed3f4a380be71398a0481414518a29506a57ccb`. Independent exam `6d56ff029328c542a77bd6cccbaebdaf16124539` returned RETURN_TO_BUILDER (P1 A6/A7, P2 A10/A11). |
+| `cursor/fc4-npm-audit-a6-a7-91c1` | [#282](https://github.com/d1n095/LifeAI/pull/282) | **Frozen @ `1e3ee3fd604fc540600f393e215a712b283686d4`. Composed into staging `cursor/first-cycle-staging-91c1`. Do not amend this PR.** | Executable A6 compatible-fix auto-revocation, A7 `expires: "2027-01-15"` fail-closed deadline, A10 independent moderate on high-via-braces wrappers, narrowly bounded A11 npm 10/11 wrapper boolean-true rule. Implementation `c8f6a95788a3e43fe172ab7761b1c7bec68099da`. Authoritative `frontend/scripts/check-npm-audit.js` for composition. See `docs/FC4_FRONTEND_SECURITY_INTEGRATION.md`. |
+
+**Merge-ordning för FC-4:** keep #275 frozen. #282 is composed into `cursor/first-cycle-staging-91c1` as the single npm-audit policy. Do not rebase the frozen #282 branch.
 
 ## Activation readiness — repository/GitHub-side batch (2026-10-17, corrected 2026-10-19)
 
