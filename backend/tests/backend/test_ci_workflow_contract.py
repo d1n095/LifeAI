@@ -17,7 +17,14 @@ from pathlib import Path
 
 import yaml
 
-from app.mainai_execution.required_checks import ACTIVATION_REQUIRED_CHECKS, CI_WORKFLOW_NAME
+from app.mainai_execution.required_checks import (
+    ACTIVATION_REQUIRED_CHECKS,
+    CI_PULL_REQUEST_BRANCH_FILTERS,
+    CI_PUSH_BRANCH_FILTERS,
+    CI_WORKFLOW_NAME,
+    CI_WORKFLOW_PATH,
+    branch_filter_matches,
+)
 from app.models.mainai_recovery import ACTIVATION_INTEGRATION_BRANCH
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -153,3 +160,23 @@ def test_branch_gated_and_deploy_jobs_are_not_required():
     for job_id, job in jobs.items():
         if "if" in job and job_id != "all-checks-passed":
             assert job_id not in required_jobs, f"conditional job {job_id!r} must not be a required check"
+
+
+def test_ci_wait_branch_filters_mirror_the_workflow_exactly():
+    """The CI wait derives which event suites can exist from these tuples; they must be the
+    workflow's own filters or a wait could expect a suite that never runs (deadlock) or skip
+    one that does (overclaim)."""
+    on = _workflow()["on"]
+    assert list(CI_PUSH_BRANCH_FILTERS) == on["push"]["branches"]
+    assert list(CI_PULL_REQUEST_BRANCH_FILTERS) == on["pull_request"]["branches"]
+
+
+def test_required_checks_bind_this_workflow_file():
+    assert CI_WORKFLOW_PATH == ".github/workflows/ci.yml" and CI_YML.exists()
+    assert all(c.workflow_path == CI_WORKFLOW_PATH for c in ACTIVATION_REQUIRED_CHECKS)
+
+
+def test_production_glob_matches_the_test_glob():
+    for pattern in EXPECTED_BRANCH_FILTERS:
+        for ref in ("main", "mainai/integration-founder-supervised-v1", "claude/mainai-task-x", "cursor/a/b", "feature/x", "mainai"):
+            assert branch_filter_matches(pattern, ref) == _github_branch_filter_matches(pattern, ref)

@@ -76,7 +76,7 @@ def test_wait_history_surfaces_a_real_durable_wait(db_session, owner_id):
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
-    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     db_session.commit()
 
     report = _report_for(db_session, task.id)
@@ -193,7 +193,7 @@ def test_goal_rolls_up_to_waiting_when_its_task_enters_waiting_ci(db_session, ow
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     db_session.commit()
 
     final_report.record_final_report(db_session, goal=goal)
@@ -209,7 +209,7 @@ def test_goal_rolls_back_to_running_once_the_waiting_task_resumes(db_session, ow
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     db_session.commit()
     final_report.record_final_report(db_session, goal=goal)
     db_session.commit()
@@ -245,7 +245,7 @@ def test_a_waiting_task_alongside_a_running_task_leaves_the_goal_running(db_sess
 
     job = executor.dispatch_ready_task(db_session, task=waiting_task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     other_task.status = MainAITaskStatus.running
     db_session.commit()
 
@@ -272,7 +272,7 @@ def test_a_waiting_task_alongside_a_ready_task_leaves_the_goal_running(db_sessio
 
     job = executor.dispatch_ready_task(db_session, task=waiting_task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     db_session.commit()
 
     final_report.record_final_report(db_session, goal=goal)
@@ -294,7 +294,7 @@ def test_multiple_waiting_tasks_with_no_actionable_work_marks_the_goal_waiting(d
     for i, task in enumerate(tasks):
         job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
         db_session.commit()
-        start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha=f"sha{i}")
+        start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha=f"sha{i}", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     db_session.commit()
 
     final_report.record_final_report(db_session, goal=goal)
@@ -321,7 +321,7 @@ def test_a_waiting_task_alongside_only_a_retryable_failed_task_still_marks_the_g
 
     job = executor.dispatch_ready_task(db_session, task=waiting_task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=waiting_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     retry_task.status = MainAITaskStatus.retryable_failed
     retry_task.attempts = 1
     retry_task.next_retry_at = datetime.utcnow()
@@ -346,7 +346,7 @@ def test_record_final_report_never_marks_a_blocked_goal_as_waiting(db_session, o
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     goal.status = MainAIGoalStatus.blocked
     db_session.commit()
 

@@ -29,6 +29,7 @@ from app.integrations.github_client import GitHubClientError, get_github_client
 from app.jobs.retry import compute_backoff_seconds
 from app.mainai_execution.required_checks import (
     ACTIVATION_REQUIRED_CHECKS,
+    CI_STAGE_PR_OPEN,
     RequiredCheck,
     RequiredCheckContractError,
     required_checks_from_condition,
@@ -69,6 +70,9 @@ def start_ci_wait(
     repo: str,
     sha: str,
     required_checks=None,
+    stage: str = CI_STAGE_PR_OPEN,
+    head_branch: str | None = None,
+    base_branch: str | None = None,
 ) -> MainAITaskWait:
     """Creates the durable wait record and moves `task` to `waiting_ci` -- called from
     execution_job.py's open_pr handling once a REAL PR has actually been created (never in
@@ -81,11 +85,20 @@ def start_ci_wait(
 
     `required_checks` is the immutable CI contract for this wait (an iterable of
     `RequiredCheck` or dicts). When the caller has no Founder-attested set it defaults to the
-    repository contract `ACTIVATION_REQUIRED_CHECKS`. The set and its digest are stored on
+    repository contract `ACTIVATION_REQUIRED_CHECKS`. `stage` + `head_branch` + `base_branch`
+    determine which GitHub event suites (push, pull_request) must EACH be green -- derived from
+    the workflow's own branch filters, so a suite that cannot exist is never awaited and a suite
+    that will exist is never skipped. The whole contract and its digest are stored on
     `condition` and are the ONLY thing `poll_ci_wait()` evaluates -- arbitrary extra check runs
-    (Vercel, branch-gated jobs, other apps) are recorded as evidence, never awaited."""
+    (Vercel, branch-gated jobs, other apps) are recorded as evidence, never awaited. An
+    unsatisfiable contract raises RequiredCheckContractError before anything is persisted."""
     now = datetime.utcnow()
-    condition = required_checks_payload(ACTIVATION_REQUIRED_CHECKS if required_checks is None else required_checks)
+    condition = required_checks_payload(
+        ACTIVATION_REQUIRED_CHECKS if required_checks is None else required_checks,
+        stage=stage,
+        head_branch=head_branch,
+        base_branch=base_branch,
+    )
     wait = MainAITaskWait(
         task_id=task.id,
         owner_id=task.owner_id,
@@ -113,6 +126,7 @@ def start_ci_wait(
                 "repo": repo,
                 "sha": sha,
                 "required_checks_sha256": condition["required_checks_sha256"],
+                "required_events": condition["required_events"],
             },
         )
     )
@@ -162,7 +176,7 @@ def _run_app_id(run: dict) -> int | None:
     return app_id if isinstance(app_id, int) and not isinstance(app_id, bool) else None
 
 
-def _run_suite_key(run: dict):
+def _run_suite_id(run: dict):
     suite = run.get("check_suite") if isinstance(run.get("check_suite"), dict) else {}
     return suite.get("id")
 
@@ -172,95 +186,140 @@ def _run_order_key(run: dict):
     return (run_id if isinstance(run_id, int) else -1, str(run.get("started_at") or ""))
 
 
-def _matches_required(run: dict, required: RequiredCheck) -> bool:
+def _sha(value) -> str | None:
+    return value.lower() if isinstance(value, str) and value else None
+
+
+def suite_bindings(workflow_runs: list[dict], *, sha: str) -> dict:
+    """check_suite_id -> {"event", "path"} for workflow runs on exactly `sha`."""
+    bindings: dict = {}
+    for run in workflow_runs or []:
+        if not isinstance(run, dict) or _sha(run.get("head_sha")) != _sha(sha):
+            continue
+        suite_id = run.get("check_suite_id")
+        if isinstance(suite_id, int) and not isinstance(suite_id, bool):
+            bindings[suite_id] = {"event": run.get("event"), "path": run.get("path")}
+    return bindings
+
+
+def _matches_identity(run: dict, required: RequiredCheck) -> bool:
     if run.get("name") != required.name or _run_app_slug(run) != required.app_slug:
         return False
     return required.app_id is None or _run_app_id(run) == required.app_id
 
 
 def evaluate_required_check_runs(
-    check_runs: list[dict], *, sha: str, required_checks
+    check_runs: list[dict], *, sha: str, required_checks, required_events, suites: dict
 ) -> tuple[bool, bool, dict]:
-    """Exact-set decision function. Pure; returns (done, passed, evidence).
+    """Exact-set, event-bound decision function. Pure; returns (done, passed, evidence).
 
-    - Only runs whose `head_sha` equals the wait's own `sha` count (stale SHA = evidence only).
-    - A run satisfies a required check only if name AND app identity (slug, and id when the
-      contract binds one) match. A same-name run from another app is recorded as a rejected
-      substitution and never counts.
-    - Per required check, the latest run in each check suite counts (a re-run supersedes the
-      earlier attempt in the same suite; push and pull_request suites are each required).
-    - Missing required check, or any counted run not `completed` -> not done (pending).
-      The wait's deadline turns that into `timed_out`; there is no optimistic PASS.
-    - Done only when every required check has completed runs. Passed only if every counted
-      conclusion is in that check's `allowed_conclusions` (default `success` only, so
-      `skipped`/`neutral` do not satisfy a required check).
-    - Every other run (Vercel, branch-gated jobs, unknown apps) is evidence only.
-    """
+    A required check is evaluated separately for EACH required event (push and/or
+    pull_request, fixed in the immutable contract). A run counts for (check, event) only if:
+    - its `head_sha` equals the wait's SHA (case-insensitive), AND
+    - its name and app identity (slug, and id when bound) match, AND
+    - its check suite is bound (via the Actions workflow run) to that event AND to the check's
+      `workflow_path` on that same SHA.
+    A same-name run from another app, another workflow, another event or an unbound suite is
+    recorded as evidence and never satisfies anything.
+
+    Per (check, event) the latest run counts (a re-run supersedes the earlier attempt).
+    Missing or not-completed -> not done (pending; the wait deadline turns that into
+    `timed_out`). Done only when every (check, event) has a completed run. Passed only if every
+    counted conclusion is in that check's `allowed_conclusions` (default `success` only).
+    One whole required suite missing therefore can never pass."""
     try:
         required = tuple(required_checks)
-        if not required:
-            raise RequiredCheckContractError("empty required-check set")
+        events = tuple(required_events)
+        if not required or not events:
+            raise RequiredCheckContractError("empty required-check set or required events")
     except (TypeError, RequiredCheckContractError) as exc:
         return True, False, {"contract_error": str(exc)}
-    if not isinstance(sha, str) or not sha:
+    wait_sha = _sha(sha)
+    if not wait_sha:
         return True, False, {"contract_error": "wait has no sha"}
+    suites = suites or {}
 
     on_sha: list[dict] = []
-    stale: list[dict] = []
+    stale = 0
     for run in check_runs or []:
         if not isinstance(run, dict):
             continue
-        (on_sha if run.get("head_sha") == sha else stale).append(run)
+        if _sha(run.get("head_sha")) == wait_sha:
+            on_sha.append(run)
+        else:
+            stale += 1
 
     per_check: list[dict] = []
-    substitutions: list[dict] = []
-    claimed_ids: set = set()
+    rejected: list[dict] = []
+    claimed: set = set()
     pending = False
     failed = False
     for check in required:
         same_name = [r for r in on_sha if r.get("name") == check.name]
-        matching = [r for r in same_name if _matches_required(r, check)]
+        identity = [r for r in same_name if _matches_identity(r, check)]
         for r in same_name:
-            if r not in matching:
-                substitutions.append({"name": r.get("name"), "app_slug": _run_app_slug(r), "app_id": _run_app_id(r)})
-        latest_by_suite: dict = {}
-        for r in matching:
-            key = _run_suite_key(r)
-            if key not in latest_by_suite or _run_order_key(r) > _run_order_key(latest_by_suite[key]):
-                latest_by_suite[key] = r
-        counted = list(latest_by_suite.values())
-        for r in matching:
-            claimed_ids.add(id(r))
-        if not counted:
-            state = "missing"
-            pending = True
-        elif any(r.get("status") != "completed" for r in counted):
-            state = "in_progress"
-            pending = True
-        elif all(r.get("conclusion") in check.allowed_conclusions for r in counted):
-            state = "passed"
-        else:
-            state = "failed"
-            failed = True
-        per_check.append({
-            "name": check.name,
-            "app_slug": check.app_slug,
-            "state": state,
-            "runs": [{"id": r.get("id"), "status": r.get("status"), "conclusion": r.get("conclusion")} for r in counted],
-        })
+            if r not in identity:
+                rejected.append({"name": r.get("name"), "reason": "app_identity", "app_slug": _run_app_slug(r), "app_id": _run_app_id(r)})
+        for event in events:
+            bound = []
+            for r in identity:
+                binding = suites.get(_run_suite_id(r))
+                if binding is None:
+                    continue
+                if binding.get("event") == event and (check.workflow_path is None or binding.get("path") == check.workflow_path):
+                    bound.append(r)
+            for r in identity:
+                binding = suites.get(_run_suite_id(r))
+                if binding is None:
+                    rejected.append({"name": r.get("name"), "reason": "unbound_suite", "suite": _run_suite_id(r)})
+                elif check.workflow_path is not None and binding.get("path") != check.workflow_path:
+                    rejected.append({"name": r.get("name"), "reason": "workflow_path", "path": binding.get("path")})
+            latest = max(bound, key=_run_order_key) if bound else None
+            if latest is not None:
+                claimed.add(id(latest))
+            for r in bound:
+                claimed.add(id(r))
+            if latest is None:
+                state = "missing"
+                pending = True
+            elif latest.get("status") != "completed":
+                state = "in_progress"
+                pending = True
+            elif latest.get("conclusion") in check.allowed_conclusions:
+                state = "passed"
+            else:
+                state = "failed"
+                failed = True
+            per_check.append({
+                "name": check.name,
+                "event": event,
+                "app_slug": check.app_slug,
+                "state": state,
+                "run": None if latest is None else {"id": latest.get("id"), "status": latest.get("status"), "conclusion": latest.get("conclusion")},
+            })
 
     extras = [
         {"name": r.get("name"), "app_slug": _run_app_slug(r), "status": r.get("status"), "conclusion": r.get("conclusion")}
         for r in on_sha
-        if id(r) not in claimed_ids
+        if id(r) not in claimed
     ]
+    # De-duplicate rejection evidence (one entry per run/reason).
+    seen = set()
+    rejected_unique = []
+    for item in rejected:
+        key = tuple(sorted((k, str(v)) for k, v in item.items()))
+        if key not in seen:
+            seen.add(key)
+            rejected_unique.append(item)
     evidence = {
-        "sha": sha,
+        "sha": wait_sha,
+        "required_events": list(events),
         "required": per_check,
         "check_run_count": len(check_runs or []),
+        "bound_suites": {str(k): v for k, v in suites.items()},
         "unexpected_checks_evidence_only": extras,
-        "rejected_substitutions": substitutions,
-        "stale_sha_runs_ignored": len(stale),
+        "rejected_runs": rejected_unique,
+        "stale_sha_runs_ignored": stale,
     }
     if pending:
         return False, False, evidence
@@ -299,23 +358,22 @@ async def poll_ci_wait(db: Session, wait: MainAITaskWait) -> MainAITaskWait:
         # silently asking the WRONG repository whether an unrelated commit's checks passed.
         if client.settings.github_repo != repo:
             raise GitHubClientError(f"configured github_repo '{client.settings.github_repo}' no longer matches this wait's own repo '{repo}'.")
-        legacy_default = "required_checks" not in (wait.condition or {})
         try:
-            # A wait created before the exact-set contract existed (empty condition) is
-            # evaluated against the repository default contract -- never against "every
-            # check run that exists". A present-but-malformed or digest-mismatched contract
-            # fails closed below.
-            required = ACTIVATION_REQUIRED_CHECKS if legacy_default else required_checks_from_condition(wait.condition)
+            # Only the immutable contract stored on this wait is ever evaluated. A wait without a
+            # complete stage/event-bound contract (including any wait created before this
+            # contract existed) or with a tampered digest fails closed as done-and-not-passed --
+            # never "whatever check runs exist".
+            required, events = required_checks_from_condition(wait.condition)
         except RequiredCheckContractError as exc:
-            # A wait whose stored contract is malformed or tampered with is never evaluated
-            # against "whatever checks exist"; it fails closed as done-and-not-passed.
-            required = None
+            required, events = None, None
             done, passed, evidence = True, False, {"contract_error": str(exc)}
         if required is not None:
             check_runs = await client.list_check_runs(sha)
-            done, passed, evidence = evaluate_required_check_runs(check_runs, sha=sha, required_checks=required)
-            if legacy_default:
-                evidence = {**evidence, "legacy_wait_default_contract": True}
+            workflow_runs = await client.list_workflow_runs_for_sha(sha)
+            done, passed, evidence = evaluate_required_check_runs(
+                check_runs, sha=sha, required_checks=required, required_events=events,
+                suites=suite_bindings(workflow_runs, sha=sha),
+            )
     except GitHubClientError as exc:
         done, passed, evidence = False, False, {"poll_error": str(exc)}
 

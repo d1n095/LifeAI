@@ -129,6 +129,11 @@ def github(monkeypatch, remote):
     monkeypatch.setattr(GitHubClient, "list_pull_requests_for_head", list_prs)
     monkeypatch.setattr(GitHubClient, "create_pull_request", create_pr)
     monkeypatch.setattr(GitHubClient, "list_check_runs", check_runs)
+
+    async def workflow_runs(self, sha):  # read-only Actions runs for the CI wait; none in this fake
+        return []
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", workflow_runs)
     for name in ("create_or_update_file", "update_ref", "create_branch", "commit_multiple_files"):
         monkeypatch.setattr(GitHubClient, name, forbidden_write)
     return fake

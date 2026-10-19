@@ -50,6 +50,7 @@ from app.integrations.github_client import GitHubClient
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_execution import MainAITask
 from app.models.mainai_recovery import (
+    ACTIVATION_INTEGRATION_BRANCH,
     PROTECTED_BRANCH_PREFIXES,
     PROTECTED_BRANCHES,
     MainAITaskWorktree,
@@ -72,7 +73,9 @@ def activation_base() -> tuple[str, str]:
 
     Requires, with no fallback of any kind:
     - `GITHUB_WORKTREE_BASE_BRANCH` explicitly set, non-empty, and NOT the legacy default;
-    - the branch to be a protected `mainai/` integration branch (never main/master/legacy);
+    - the branch to be exactly the Founder-supervised integration branch
+      (`ACTIVATION_INTEGRATION_BRANCH`), which is protected (never main/master/legacy/other
+      `mainai/` branches);
     - `GITHUB_PR_BASE_BRANCH` explicitly set and equal to the worktree base;
     - `MAINAI_ACTIVATION_APPROVED_BASE_SHA` a 40-hex lowercase commit SHA.
     """
@@ -86,9 +89,13 @@ def activation_base() -> tuple[str, str]:
         raise ActivationBaseConfigurationError(
             f"activation mode refuses the legacy default base {BASE_BRANCH!r}; configure the integration branch explicitly."
         )
-    if not worktree_base.startswith(PROTECTED_BRANCH_PREFIXES) or not is_protected_branch(worktree_base):
+    if (
+        worktree_base != ACTIVATION_INTEGRATION_BRANCH
+        or not worktree_base.startswith(PROTECTED_BRANCH_PREFIXES)
+        or not is_protected_branch(worktree_base)
+    ):
         raise ActivationBaseConfigurationError(
-            f"activation base {worktree_base!r} is not a protected integration branch (expected a 'mainai/' branch)."
+            f"activation base {worktree_base!r} is not the protected integration branch {ACTIVATION_INTEGRATION_BRANCH!r}."
         )
     if not pr_base:
         raise ActivationBaseConfigurationError("activation mode requires GITHUB_PR_BASE_BRANCH; it is empty.")
