@@ -273,6 +273,35 @@ def test_snapshot_never_claims_go_and_keeps_task_context(db_session):
     assert matching["goal_id"] == str(goal.id)
 
 
+def test_app_registers_founder_ops_routes():
+    """Locks the Pydantic forward-ref crash that made every backend/E2E job fail on import."""
+    from app.main import app
+
+    paths = {getattr(route, "path", "") for route in app.routes}
+    methods = {
+        getattr(route, "path", ""): set(getattr(route, "methods", set()) or set())
+        for route in app.routes
+    }
+    assert "/api/mainai/founder-ops/snapshot" in paths
+    assert "/api/mainai/founder-ops/stop" in paths
+    assert "GET" in methods["/api/mainai/founder-ops/snapshot"]
+    assert "POST" in methods["/api/mainai/founder-ops/stop"]
+
+
+def test_unavailable_health_is_not_reported_reachable(db_session):
+    bootstrap_founder_user(db_session)
+    _set_rls(db_session, FOUNDER_USER_ID)
+    snap = build_founder_ops_snapshot(
+        db_session,
+        owner_id=FOUNDER_USER_ID,
+        health={"status": "unavailable", "worker": "unknown"},
+    )
+    assert snap["health"]["backend_reachable"] is False
+    assert snap["health"]["status"] == "unavailable"
+    assert snap["first_cycle_go"] is False
+    assert snap["fabricated_progress"] is False
+
+
 def test_snapshot_http_is_founder_only(client, make_verified_user):
     assert client.get("/api/mainai/founder-ops/snapshot").status_code in (401, 403)
     user, password = make_verified_user()

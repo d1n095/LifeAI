@@ -4,8 +4,6 @@ Exposes STOP, readiness, spend and canonical work status that already exist as P
 services. Does not enable Recall, GitHub writes, activation mode, or first-cycle GO.
 """
 
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
