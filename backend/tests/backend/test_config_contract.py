@@ -152,6 +152,12 @@ CONFIG_MATRIX: dict[str, dict] = {
     "mainai_execution_require_provider_spend": {"required_in_production": False, "secret": False, "default": True, "validates": "none — Path A AI calls fail closed without a live provider_spend grant; default true so fallback/unbilled calls cannot bypass the Founder grant"},
     "mainai_execution_goal_spend_cap_usd": {"required_in_production": False, "secret": False, "default": 5.0, "validates": "none — additional Path A hard ceiling on a live provider_spend grant's max_cost_usd"},
     "mainai_legacy_prepare_pr_writes_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates the legacy non-draft /prepare-pr Contents-API write; off until an explicit Founder decision, even if GITHUB_WRITE_ENABLED is true"},
+    "mainai_activation_sha": {"required_in_production": False, "secret": False, "default": "", "validates": "Founder activation preflight returns NO-GO when empty or not an exact expected SHA"},
+    "mainai_activation_integration_branch": {"required_in_production": False, "secret": False, "default": "", "validates": "Founder activation preflight returns NO-GO when empty or mismatched"},
+    "mainai_activation_runtime_token_identity": {"required_in_production": False, "secret": False, "default": "", "validates": "Founder activation preflight returns NO-GO when empty"},
+    "mainai_activation_token_attestation_digest": {"required_in_production": False, "secret": False, "default": "", "validates": "Founder activation preflight returns NO-GO when empty"},
+    "mainai_activation_ruleset_attestation_digest": {"required_in_production": False, "secret": False, "default": "", "validates": "Founder activation preflight returns NO-GO when empty"},
+    "mainai_activation_founder_attestation_digest": {"required_in_production": False, "secret": False, "default": "", "validates": "Founder activation preflight returns NO-GO when empty"},
 }
 
 

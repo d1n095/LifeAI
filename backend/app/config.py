@@ -211,6 +211,14 @@ class Settings(BaseSettings):
     # whenever GITHUB_WRITE_ENABLED=true. Keep that route proposal-only until an explicit
     # Founder decision — Path A draft PRs are the write path that may be enabled later.
     mainai_legacy_prepare_pr_writes_enabled: bool = False
+    # Founder-supervised activation authority. Empty values are intentional: preflight
+    # records NO-GO until an admin configures every attested fact.
+    mainai_activation_sha: str = ""
+    mainai_activation_integration_branch: str = ""
+    mainai_activation_runtime_token_identity: str = ""
+    mainai_activation_token_attestation_digest: str = ""
+    mainai_activation_ruleset_attestation_digest: str = ""
+    mainai_activation_founder_attestation_digest: str = ""
 
     @property
     def frontend_origin_list(self) -> list[str]:

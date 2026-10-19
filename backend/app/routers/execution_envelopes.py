@@ -123,6 +123,10 @@ def authorize_execution_scope_route(proposal_id: uuid.UUID, payload: AuthorizeEx
             db, owner_id=user.id, proposal_id=proposal_id, authorized_by="founder",
             authorized_paths=payload.authorized_paths, authorized_capabilities=payload.authorized_capabilities,
             authorized_risk=payload.authorized_risk, envelope_idempotency_key=f"api-authorization:{proposal_id}",
+            repository_identity=payload.repository_identity, base_branch=payload.base_branch,
+            approved_base_sha=payload.approved_base_sha,
+            required_check_contexts=payload.required_check_contexts,
+            authority_version=payload.authority_version,
         )
     except ExecutionEnvelopeError as exc:
         db.rollback()

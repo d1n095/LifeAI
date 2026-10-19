@@ -380,7 +380,7 @@ def test_0086_to_head_preserves_existing_restored_concept_relationships():
                     {"owner_id": owner_id},
                 ).scalars()
             )
-        assert revision == "0088_erasure_completion_phase"
+        assert revision == "0089_mainai_activation_security"
         assert stored == set(restored_types)
     finally:
         _run_alembic("upgrade", "head")
@@ -408,5 +408,36 @@ def test_0087_downgrade_refuses_before_corrupting_restored_concept_rows():
             ),
             {"owner_id": owner_id},
         ).scalar_one()
-    assert revision == "0088_erasure_completion_phase"
+    assert revision == "0089_mainai_activation_security"
     assert stored == 1
+
+
+def test_0089_activation_security_roundtrip_is_linear_and_reversible():
+    try:
+        _run_alembic("downgrade", "0088_erasure_completion_phase")
+        with migration_engine.connect() as connection:
+            revision = connection.execute(sa_text("SELECT version_num FROM alembic_version")).scalar_one()
+            tables = set(connection.execute(sa_text(
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' "
+                "AND tablename IN ('mainai_push_grants','mainai_activation_preflight_receipts')"
+            )).scalars())
+            activation_columns = set(connection.execute(sa_text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='execution_authorization_envelopes' "
+                "AND column_name IN ('base_branch','approved_base_sha','required_check_contexts','authority_version')"
+            )).scalars())
+        assert revision == "0088_erasure_completion_phase"
+        assert tables == set()
+        assert activation_columns == set()
+
+        _run_alembic("upgrade", "head")
+        with migration_engine.connect() as connection:
+            revision = connection.execute(sa_text("SELECT version_num FROM alembic_version")).scalar_one()
+            tables = set(connection.execute(sa_text(
+                "SELECT tablename FROM pg_tables WHERE schemaname='public' "
+                "AND tablename IN ('mainai_push_grants','mainai_activation_preflight_receipts')"
+            )).scalars())
+        assert revision == "0089_mainai_activation_security"
+        assert tables == {"mainai_push_grants", "mainai_activation_preflight_receipts"}
+    finally:
+        _run_alembic("upgrade", "head")
