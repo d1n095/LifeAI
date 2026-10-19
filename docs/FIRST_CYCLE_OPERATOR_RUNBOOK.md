@@ -3,7 +3,7 @@
 Companion to `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`. This is **not** activation, merge, or GO.
 
 Frozen parent: `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`.
-This successor: `cursor/first-cycle-ops-readiness-p2-91c1`.
+This successor: `cursor/first-cycle-ops-readiness-p2-91c1` ([#289](https://github.com/d1n095/LifeAI/pull/289)).
 
 ## Hard rules
 

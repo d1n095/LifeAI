@@ -1,7 +1,7 @@
 {
   "schema": "mainai.first_cycle.staging_composition/v1",
   "branch": "cursor/first-cycle-ops-readiness-p2-91c1",
-  "pr": null,
+  "pr": 289,
   "purpose": "Isolated successor of frozen #288. Execution-layer P2 hardening plus Founder-supervised local first-cycle operating flow. Not a merge into the final integration branch. Not a GO certification.",
   "go": false,
   "successor_of": {

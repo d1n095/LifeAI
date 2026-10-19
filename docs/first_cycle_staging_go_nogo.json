@@ -1,7 +1,7 @@
 {
   "schema": "mainai.first_cycle.staging_go_nogo/v1",
   "branch": "cursor/first-cycle-ops-readiness-p2-91c1",
-  "pr": null,
+  "pr": 289,
   "parent_287": "1f1819aa46d8fd4aef18db5fb625af51c02d3394",
   "parent_288": "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
   "frozen_parent_288": "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
