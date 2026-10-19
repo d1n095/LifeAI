@@ -18,6 +18,11 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.mainai_execution.first_cycle_stop import (
+    goal_is_autonomous_terminal,
+    latest_failure_evidence,
+    should_suppress_paid_replan,
+)
 from app.mainai_execution.planner import create_plan, propose_plan_via_ai
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.models.mainai_execution import (
@@ -31,6 +36,10 @@ from app.models.mainai_execution import (
 )
 
 logger = logging.getLogger("mainai.execution")
+
+
+class ReplanSuppressedError(RuntimeError):
+    """Automatic paid replan is forbidden for this failure class (external CI / first-cycle STOP)."""
 
 # Bounds the UNATTENDED replan tick only -- a founder's own explicit replan/re-plan action
 # (app.routers.mainai_execution's propose_and_create_plan route) calls create_plan() directly,
@@ -68,20 +77,31 @@ def find_replan_trigger(db: Session, *, goal: MainAIGoal) -> MainAITask | None:
     discoverable outcome with no new schema or escalation mechanism needed."""
     if goal.current_plan_version - 1 >= MAX_AUTO_REPLANS:
         return None
+    if goal_is_autonomous_terminal(db, goal):
+        return None
     active_plan = db.execute(
         select(MainAIPlan).where(MainAIPlan.goal_id == goal.id, MainAIPlan.status == MainAIPlanStatus.active)
     ).scalar_one_or_none()
     if active_plan is None:
         return None
-    return (
+    failed_tasks = (
         db.execute(
             select(MainAITask)
             .where(MainAITask.plan_id == active_plan.id, MainAITask.status == MainAITaskStatus.failed)
             .order_by(MainAITask.completed_at.asc())
         )
         .scalars()
-        .first()
+        .all()
     )
+    for failed_task in failed_tasks:
+        # External CI / publication / independent-review STOP must not start a paid provider
+        # replan. Classification is by failure cause (evidence), not task type alone.
+        # Local editable-task verification failures remain eligible.
+        evidence = latest_failure_evidence(db, failed_task)
+        if should_suppress_paid_replan(failed_task, evidence=evidence):
+            continue
+        return failed_task
+    return None
 
 
 async def trigger_replan(db: Session, *, goal: MainAIGoal, failed_task: MainAITask, dispatched_by: str) -> MainAIPlan:
@@ -90,6 +110,12 @@ async def trigger_replan(db: Session, *, goal: MainAIGoal, failed_task: MainAITa
     cancellation, and re-promoting dependency-free tasks to `ready` entirely on its own,
     unchanged from V0.1. Records a `replanned` event on the failed task that triggered this --
     the durable link between "this specific failure" and "this specific new plan version"."""
+    evidence = latest_failure_evidence(db, failed_task)
+    if goal_is_autonomous_terminal(db, goal) or should_suppress_paid_replan(failed_task, evidence=evidence):
+        raise ReplanSuppressedError(
+            f"refusing paid replan for {failed_task.task_type} {failed_task.id}: "
+            "external publication / CI / first-cycle STOP is not a local editable-task failure"
+        )
     failure_context = latest_verification_failure_text(db, failed_task.id)
     tasks, provider, model = await propose_plan_via_ai(db, goal=goal, failure_context=failure_context)
     plan = create_plan(
