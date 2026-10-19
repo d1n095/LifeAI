@@ -19,14 +19,18 @@ from threading import Lock
 
 # Never persist raw credential fill output or GitHub token prefixes into the matrix.
 _SECRETISH = re.compile(
-    r"(?i)(password=)\S+|(authorization=)\S+|\b(gho_|ghp_|ghu_|ghs_|github_pat_)[A-Za-z0-9_]+\b"
+    r"(?i)(?<![A-Za-z0-9_])(password=)\S+|(?<![A-Za-z0-9_])(authorization=)\S+"
+    r"|\b(gho_|ghp_|ghu_|ghs_|github_pat_)[A-Za-z0-9_]+\b"
 )
 
 
 def sanitize_matrix_text(text: str) -> str:
     if not text:
         return ""
-    return _SECRETISH.sub(lambda m: (m.group(1) or "") + "<redacted>" if m.group(1) else "<redacted>", text)
+    return _SECRETISH.sub(
+        lambda m: (m.group(1) or m.group(2) or "") + "<redacted>" if (m.group(1) or m.group(2)) else "<redacted>",
+        text,
+    )
 
 PASS = "PASS"
 FAIL = "FAIL"

@@ -494,7 +494,19 @@ async def test_local_verification_failure_still_paid_replan_eligible(db_session,
     task.status = MainAITaskStatus.running
     task.attempts = task.max_attempts
     db_session.commit()
-    evidence = {"steps": [{"kind": "targeted_tests", "passed": False, "detail": "assertion failed"}]}
+    evidence = {
+        "steps": [
+            {
+                "kind": "targeted_tests",
+                "passed": False,
+                "detail": {
+                    "target": "tests/backend/test_greeting_doc.py",
+                    "stdout_tail": "AssertionError: greet() docstring missing",
+                    "stderr_tail": "",
+                },
+            }
+        ]
+    }
     _finalize_task_outcome(db_session, task, passed=False, evidence=evidence)
     db_session.commit()
     task = db_session.get(MainAITask, task.id)
