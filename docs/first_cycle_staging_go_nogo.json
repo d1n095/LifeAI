@@ -19,7 +19,7 @@
     "note": "Frozen #288 @ 1ea41d7db424cba6b4d9ec93da79fa85d809d2fb had all 12 required checks success. Do not amend that PR."
   },
   "parent_289_github_ci_ca60ba5": {
-    "note": "Parent #289 exact SHA ca60ba54febb49e1c7585fb776811564d54e3d21. Freeze only after that SHA's 12 required GitHub checks succeed. Do not amend #289 after freeze."
+    "note": "Frozen #289 @ ca60ba54febb49e1c7585fb776811564d54e3d21 had all 12 required checks success on push workflow 39277606295. Do not amend that PR."
   },
   "remaining_codex": [
     "CRED-1/2/3 token-in-URL and worktree credentials",

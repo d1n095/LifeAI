@@ -8,7 +8,7 @@
     "pr": 289,
     "ref": "cursor/first-cycle-ops-readiness-p2-91c1",
     "sha": "ca60ba54febb49e1c7585fb776811564d54e3d21",
-    "role": "P2 ops-readiness child of frozen #288. Freeze at this SHA after 12 required GitHub checks succeed. Do not amend after freeze."
+    "role": "frozen P2 ops-readiness child of frozen #288. Do not amend."
   },
   "inputs": {
     "founder_alpha": {
@@ -81,7 +81,7 @@
       "pr": 289,
       "ref": "cursor/first-cycle-ops-readiness-p2-91c1",
       "sha": "ca60ba54febb49e1c7585fb776811564d54e3d21",
-      "role": "P2 ops-readiness / cancel-vs-retry / local dry run. Freeze at this SHA after 12 required GitHub checks succeed. Do not amend after freeze. Not a first-cycle GO certification."
+      "role": "frozen P2 ops-readiness / cancel-vs-retry / local dry run. Do not amend. Not a first-cycle GO certification."
     }
   },
   "this_successor": {
