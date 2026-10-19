@@ -8,8 +8,8 @@ Covers:
   C. Demo (real production path): a real `open_pr` task_execution job, dispatched through
      run_task_execution_job() with github_write_enabled -- proves the task lands on
      `waiting_ci` (not `completed`) once a real PR exists, then that a real
-     resume_waiting_ci_task() poll (CI green) completes it, or (CI red) sends it to
-     `retryable_failed` with `next_retry_at` scheduled, or (deadline passed) times it out.
+     resume_waiting_ci_task() poll (CI green) STOPs for independent review (never merged),
+     or (CI red / timeout) fails closed without paid replan.
   D. Security: poll_ci_wait() always polls the wait's OWN durable (repo, sha) -- never
      whatever the branch's current tip happens to be, and refuses to poll if the configured
      repo has drifted from the wait's own repo.
@@ -30,7 +30,14 @@ from app.mainai_execution.ci_wait import cancel_ci_wait, evaluate_check_runs, po
 from app.mainai_execution.executor import TaskNotCancellableError
 from app.mainai_execution.execution_job import resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.planner import PlannedTaskSpec
-from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_execution import (
+    MainAIGoal,
+    MainAIGoalStatus,
+    MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitSourceType, MainAITaskWaitStatus
 from app.request_context import current_user_id as current_user_id_var
@@ -463,10 +470,8 @@ async def test_open_pr_whose_base_has_no_pr_ci_requires_only_the_push_suite(db_s
 
 @pytest.mark.asyncio
 async def test_demo_ci_wait_resolves_green_and_completes_the_task(db_session, superuser_db, owner_id, monkeypatch):
-    """REQUIRED demo: after the real dispatch above, a real resume_waiting_ci_task() poll
-    (mocked GitHub Checks API, real DB state) that finds all checks green moves the task all
-    the way to `completed` -- the full CI-wait success path through real production code, not a
-    manual shortcut."""
+    """REQUIRED demo: CI green is not merge. Without an independent review receipt the task
+    STOPs (`blocked`), never `completed` / merged."""
     task, _job = await _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch)
     assert task.status == MainAITaskStatus.waiting_ci
 
@@ -483,19 +488,96 @@ async def test_demo_ci_wait_resolves_green_and_completes_the_task(db_session, su
     db_session.commit()
 
     task = db_session.get(MainAITask, task.id)
-    assert task.status == MainAITaskStatus.completed
-    assert task.completed_at is not None
+    assert task.status == MainAITaskStatus.blocked
+    assert task.completed_at is None
     events = _events(db_session, task.id)
     assert "wait_satisfied" in events
-    assert "completed" in events
+    assert "blocked" in events
+    assert "completed" not in events
+
+
+@pytest.mark.asyncio
+async def test_demo_ci_green_with_founder_receipt_stops_before_merge(db_session, superuser_db, owner_id, monkeypatch):
+    """CI green + Founder-supplied exact-SHA receipt is STOP-before-merge, never merged."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.mainai_execution.checkpoint import latest_checkpoint_for_step
+    from app.mainai_execution.review_receipt import (
+        PATH_A_BUILDER_IDENTITY,
+        STATE_STOP_BEFORE_MERGE,
+        instruction_hash,
+        output_hash,
+        record_first_cycle_review_receipt,
+    )
+
+    sha = "a" * 40
+    base = "b" * 40
+    task, job = await _dispatch_open_pr_and_reach_waiting_ci(
+        db_session, superuser_db, owner_id, monkeypatch, commit_sha=sha
+    )
+    wait = db_session.query(MainAITaskWait).filter(MainAITaskWait.task_id == task.id).one()
+    wait.condition = {**(wait.condition or {}), "approved_base_sha": base}
+    flag_modified(wait, "condition")
+    checkpoint = latest_checkpoint_for_step(db_session, task_id=task.id, job_id=job.id, step="work_result")
+    work_result = dict(checkpoint.executor_state.get("work_result") or {})
+    work_result.update({"approved_base_sha": base, "head_sha": sha, "draft": True, "merged": False})
+    checkpoint.executor_state = {**checkpoint.executor_state, "work_result": work_result}
+    flag_modified(checkpoint, "executor_state")
+    db_session.commit()
+
+    goal = db_session.get(MainAIGoal, task.goal_id)
+    record_first_cycle_review_receipt(
+        superuser_db,
+        repository="d1n095/LifeAI",
+        pr_number=int(work_result["pull_request_number"]),
+        head_sha=sha,
+        approved_base=base,
+        builder_identity=PATH_A_BUILDER_IDENTITY,
+        reviewer_identity="founder-reviewer",
+        review_result="PASS",
+        evidence_sha="c" * 40,
+        instruction_hash_value=instruction_hash(goal.original_instruction),
+        output_hash_value=output_hash(
+            repository="d1n095/LifeAI",
+            pr_number=int(work_result["pull_request_number"]),
+            head_sha=sha,
+        ),
+        envelope_context={},
+        evidence_summary="Founder independent review",
+        owner_id=owner_id,
+        examiner_class="founder",
+    )
+    superuser_db.commit()
+
+    async def _fake_list_check_runs(self, ref):
+        return _required_runs(ref)
+
+    monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
+
+    wait = db_session.query(MainAITaskWait).filter(MainAITaskWait.task_id == task.id).one()
+    await resume_waiting_ci_task(db_session, wait)
+    db_session.commit()
+
+    task = db_session.get(MainAITask, task.id)
+    goal = db_session.get(MainAIGoal, task.goal_id)
+    assert task.status == MainAITaskStatus.blocked
+    assert goal.status == MainAIGoalStatus.blocked
+    blocked = (
+        db_session.query(MainAITaskEvent)
+        .filter(MainAITaskEvent.task_id == task.id, MainAITaskEvent.event_type == MainAITaskEventType.blocked)
+        .one()
+    )
+    assert blocked.detail["merged"] is False
+    assert blocked.detail["first_cycle_state"] == STATE_STOP_BEFORE_MERGE
+    assert blocked.detail["review_ok"] is True
+    assert "completed" not in _events(db_session, task.id)
 
 
 @pytest.mark.asyncio
 async def test_demo_ci_wait_resolves_red_and_schedules_a_backoff_retry(db_session, superuser_db, owner_id, monkeypatch):
-    """REQUIRED demo: CI failure sends the task to `retryable_failed` (via the SAME
-    _finalize_task_outcome() gate every other task_type's failure goes through) with
-    `next_retry_at` scheduled for the automatic retry-with-backoff worker tick -- never silently
-    treated as done, never a permanent `failed` while attempts remain."""
+    """REQUIRED demo: external CI failure is not a local editable-task failure. The task
+    fails closed with no retry and no paid replan — never `completed`, never merged."""
     task, _job = await _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch)
 
     async def _fake_list_check_runs(self, ref):
@@ -510,16 +592,19 @@ async def test_demo_ci_wait_resolves_red_and_schedules_a_backoff_retry(db_sessio
     db_session.commit()
 
     task = db_session.get(MainAITask, task.id)
-    assert task.status == MainAITaskStatus.retryable_failed
-    assert task.next_retry_at is not None
-    assert task.next_retry_at > datetime.utcnow()
+    assert task.status == MainAITaskStatus.failed
+    assert task.next_retry_at is None
     assert "wait_failed" in _events(db_session, task.id)
+    from app.mainai_execution.replan import find_replan_trigger
+
+    goal = db_session.get(MainAIGoal, task.goal_id)
+    assert find_replan_trigger(db_session, goal=goal) is None
 
 
 @pytest.mark.asyncio
 async def test_demo_ci_wait_times_out_and_never_falsely_completes(db_session, superuser_db, owner_id, monkeypatch):
     """REQUIRED demo: a wait whose deadline has passed with no conclusive check-run result
-    never becomes `completed` -- it resolves to retryable_failed/failed via `timed_out`,
+    never becomes `completed` -- it fails closed via `timed_out` without paid replan,
     exactly like a real CI outage or a misconfigured repo would need to."""
     task, _job = await _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch)
 
@@ -539,7 +624,8 @@ async def test_demo_ci_wait_times_out_and_never_falsely_completes(db_session, su
 
     task = db_session.get(MainAITask, task.id)
     assert task.status != MainAITaskStatus.completed
-    assert task.status in (MainAITaskStatus.retryable_failed, MainAITaskStatus.failed)
+    assert task.status == MainAITaskStatus.failed
+    assert task.next_retry_at is None
     assert "wait_timed_out" in _events(db_session, task.id)
 
 
@@ -638,13 +724,13 @@ def test_resume_waiting_ci_task_concurrent_same_wait_never_double_finalizes(db_s
     assert not errors, f"both callers should complete cleanly (the loser is a no-op, not an error): {errors}"
 
     final_task = superuser_db.get(MainAITask, task_id)
-    assert final_task.status == MainAITaskStatus.completed
+    assert final_task.status == MainAITaskStatus.blocked
     assert final_task.attempts == 1, "attempts must not be double-touched by the race"
 
-    completed_events = superuser_db.execute(
-        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'completed'"), {"t": str(task_id)}
+    blocked_events = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'blocked'"), {"t": str(task_id)}
     ).scalar()
-    assert completed_events == 1, "exactly one 'completed' event, not one per racing caller"
+    assert blocked_events == 1, "exactly one 'blocked' STOP event, not one per racing caller"
 
     wait_satisfied_events = superuser_db.execute(
         sa_text("SELECT count(*) FROM mainai_task_events WHERE task_id = :t AND event_type = 'wait_satisfied'"), {"t": str(task_id)}
@@ -754,13 +840,13 @@ def test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsis
 
     assert not resume_errors, f"resume must complete cleanly: {resume_errors}"
     assert cancel_result.get("outcome") == "refused", (
-        f"the poll won the lock race and completed the task first -- cancel_task() must then refuse "
+        f"the poll won the lock race and STOPped the first cycle first -- cancel_task() must then refuse "
         f"(task no longer in a directly-cancellable status), never silently succeed against stale state: {cancel_result}"
     )
 
     final_task = superuser_db.get(MainAITask, task_id)
     final_wait = superuser_db.get(MainAITaskWait, wait_id)
-    assert final_task.status == MainAITaskStatus.completed
+    assert final_task.status == MainAITaskStatus.blocked
     assert final_wait.status == MainAITaskWaitStatus.satisfied, "the wait's own status must always agree with the task's real outcome"
 
 
