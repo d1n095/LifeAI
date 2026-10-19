@@ -12,15 +12,16 @@ const NAV = [
   { href: "/workbench", label: "Workbench" },
   { href: "/knowledge", label: "Kunskapsdatabas" },
   { href: "/projects", label: "Projekt" },
-  { href: "/admin", label: "Admin" },
-  { href: "/admin/memory", label: "Projektminne" },
-  { href: "/admin/agents", label: "Agentuppdrag" },
-  { href: "/admin/jobs", label: "Jobb & Aktivitet" },
-  { href: "/admin/mainai-execution", label: "MainAI Execution" },
+  { href: "/admin", label: "Admin", founderOnly: true },
+  { href: "/admin/founder-ops", label: "Founder-status", founderOnly: true },
+  { href: "/admin/memory", label: "Projektminne", founderOnly: true },
+  { href: "/admin/agents", label: "Agentuppdrag", founderOnly: true },
+  { href: "/admin/jobs", label: "Jobb & Aktivitet", founderOnly: true },
+  { href: "/admin/mainai-execution", label: "MainAI Execution", founderOnly: true },
   { href: "/account", label: "Konto" },
 ];
 
-export default function Sidebar({ userEmail }: { userEmail: string }) {
+export default function Sidebar({ userEmail, userRole }: { userEmail: string; userRole?: string }) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -37,7 +38,7 @@ export default function Sidebar({ userEmail }: { userEmail: string }) {
 
   const navLinks = (
     <nav aria-label="Huvudmeny" className="flex flex-col gap-1">
-      {NAV.map((item) => {
+      {NAV.filter((item) => !item.founderOnly || userRole === "founder").map((item) => {
         const active = pathname === item.href;
         return (
           <Link

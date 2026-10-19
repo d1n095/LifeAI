@@ -133,5 +133,12 @@ def _kill_switch_status(db: Session, owner_id: uuid.UUID) -> dict[str, Any]:
             "global_active": bool(global_state.active),
             "source": "workforce.kill_switch",
         }
-    except Exception as exc:  # noqa: BLE001
-        return {"active": False, "error": type(exc).__name__, "source": "unavailable"}
+    except Exception as exc:  # noqa: BLE001 — never report STOP inactive when unread
+        return {
+            "active": None,
+            "blocked": True,
+            "observability_failed": True,
+            "reason": "kill_switch_observability_unavailable",
+            "error": type(exc).__name__,
+            "source": "unavailable",
+        }

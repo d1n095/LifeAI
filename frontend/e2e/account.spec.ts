@@ -101,7 +101,13 @@ test.describe.serial("account lifecycle", () => {
     await loginViaUi(page, FRONTEND_URL, userA.email, userA.password);
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
 
-    for (const path of ["/api/conversations", "/api/documents", "/api/projects", "/api/admin/providers/status"]) {
+    for (const path of [
+      "/api/conversations",
+      "/api/documents",
+      "/api/projects",
+      "/api/admin/providers/status",
+      "/api/mainai/founder-ops/snapshot",
+    ]) {
       expect((await context.request.get(`${FRONTEND_URL}${path}`)).status()).toBe(403);
     }
     expect(

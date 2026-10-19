@@ -5,7 +5,8 @@ Companion to `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`. This is **not** activation
 Frozen parent: `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`.
 Frozen parent `#289`: `ca60ba54febb49e1c7585fb776811564d54e3d21` (12 required checks, push workflow `39277606295`).
 Parent `#290`: `6c988148a7e30531fac21e19c044f5570d95f501`.
-This successor: `cursor/first-cycle-execution-completion-91c1` ([#291](https://github.com/d1n095/LifeAI/pull/291)).
+Frozen `#291`: `cursor/first-cycle-execution-completion-91c1` @ `0b1871bf63e4c9b6d0d32633af097b281e644679`.
+Application-readiness successor (website/Founder UI, not a first-cycle GO): `cursor/application-readiness-91c1`. See `docs/APPLICATION_READINESS.md`.
 
 ## Hard rules
 

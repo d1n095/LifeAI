@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api, EngineeringLesson, MainAIGoal, MainAIGoalDetail, MainAIGoalReport, MainAIPlan, MainAITaskDetail, MainAITaskWait } from "@/lib/api";
+import { FOUNDER_STATUS_COLORS, FOUNDER_STATUS_LABELS, founderStatusForExecutionTask } from "@/lib/founderStatus";
 
 // MainAI Execution Loop V0.1 (see backend/docs/MAINAI_EXECUTION_LOOP_V0_1.md,
 // backend/app/mainai_execution/*). Deliberately plain, function-before-design, same
@@ -345,6 +346,9 @@ export default function MainAIExecutionPage() {
                         <span className={LIVENESS_COLORS[t.liveness] ?? ""}>{LIVENESS_LABELS[t.liveness] ?? t.liveness}</span>
                       </div>
                       <div className="text-white/50 mt-1">{TASK_STATUS_LABELS[t.status] ?? t.status}</div>
+                      <div className={FOUNDER_STATUS_COLORS[founderStatusForExecutionTask(t)]}>
+                        Founder: {FOUNDER_STATUS_LABELS[founderStatusForExecutionTask(t)]}
+                      </div>
                       {t.blocker_reason && <div className="text-amber-300/80 mt-1">Blockerare: {t.blocker_reason}</div>}
                       {t.next_retry_at && (
                         <div className="text-blue-300/80 mt-1">Automatiskt nytt försök: {new Date(t.next_retry_at).toLocaleString("sv-SE")}</div>
@@ -399,6 +403,9 @@ export default function MainAIExecutionPage() {
                 <div className="text-xs text-white/40 mt-1 space-y-0.5">
                   <div>Typ: {selectedTask.task_type}</div>
                   <div>Status: {TASK_STATUS_LABELS[selectedTask.status] ?? selectedTask.status}</div>
+                  <div className={FOUNDER_STATUS_COLORS[founderStatusForExecutionTask(selectedTask)]}>
+                    Founder: {FOUNDER_STATUS_LABELS[founderStatusForExecutionTask(selectedTask)]}
+                  </div>
                   <div className={LIVENESS_COLORS[selectedTask.liveness] ?? ""}>
                     Aktivitet: {LIVENESS_LABELS[selectedTask.liveness] ?? selectedTask.liveness}
                   </div>

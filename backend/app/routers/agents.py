@@ -19,6 +19,7 @@ from app.agent_orchestration import (
     record_test_results,
     review_task,
 )
+from app.mainai_founder_ops.assignment_guard import DuplicateWorkError
 from app.audit import record_audit
 from app.db import get_db
 from app.deps import require_founder
@@ -72,6 +73,8 @@ def get_task_route(task_id: uuid.UUID, db: Session = Depends(get_db)):
 async def dispatch_task_route(task_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     try:
         event = await dispatch_task(db, task_id, dispatched_by=user.email)
+    except DuplicateWorkError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ProviderError as exc:
