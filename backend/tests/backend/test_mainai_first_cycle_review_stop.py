@@ -366,27 +366,19 @@ def _two_ready_tasks(db, owner_id):
 
 
 def test_classify_publication_failure_is_cause_based_not_task_type():
+    from app.mainai_execution.publication_errors import GrantDeniedError
+    from app.mainai_execution.worktree import ActivationBaseConfigurationError, WorktreePushRejected
+
+    assert classify_publication_failure(ActivationBaseConfigurationError("ActivationBaseConfigurationError")) == STATE_APPROVED_BASE_MOVED
+    assert classify_publication_failure(WorktreePushRejected("WorktreePushRejected")) == STATE_EXTERNAL_PUSH_REJECTED
+    assert classify_publication_failure(GrantDeniedError("GrantDeniedError")) == STATE_GRANT_DENIED_OR_EXPIRED
     assert (
         classify_publication_failure(
-            evidence={
-                "error": "integration branch 'mainai/integration-founder-supervised-v1' tip 'ffff' is not the approved base SHA 'bbbb'; refusing to build."
-            }
-        )
-        == STATE_APPROVED_BASE_MOVED
-    )
-    assert (
-        classify_publication_failure(
-            evidence={
-                "error": "GitHub push rejected: ! [remote rejected] claude/mainai-task-x (protected branch hook declined)"
-            }
+            evidence={"origin": "push", "failure_class": "WorktreePushRejected", "first_cycle_state": STATE_EXTERNAL_PUSH_REJECTED}
         )
         == STATE_EXTERNAL_PUSH_REJECTED
     )
-    assert (
-        classify_publication_failure(evidence={"error": "push grant missing or stale for local commit"})
-        == STATE_GRANT_DENIED_OR_EXPIRED
-    )
-    assert classify_publication_failure(evidence={"error": "GitHub push rejected (protected branch)"}) == STATE_EXTERNAL_PUSH_REJECTED
+    assert classify_publication_failure(evidence={"error": "GitHub push rejected (protected branch)"}) is None
     assert classify_publication_failure(evidence={"steps": [{"kind": "targeted_tests", "passed": False}]}) is None
 
 
@@ -443,24 +435,40 @@ def test_ordinary_non_terminal_goal_still_dispatches_ready_tasks(db_session, sup
 
 
 @pytest.mark.parametrize(
-    "error,state",
+    "factory,state",
     [
-        (
-            "integration branch 'mainai/integration-founder-supervised-v1' tip 'ffff' is not the approved base SHA 'bbbb'; refusing to build.",
-            STATE_APPROVED_BASE_MOVED,
-        ),
-        (
-            "GitHub push rejected: ! [remote rejected] claude/mainai-task-x (protected branch hook declined)",
-            STATE_EXTERNAL_PUSH_REJECTED,
-        ),
-        ("push grant missing or stale for local commit", STATE_GRANT_DENIED_OR_EXPIRED),
-        ("GitHub push rejected (protected branch)", STATE_EXTERNAL_PUSH_REJECTED),
+        ("base", STATE_APPROVED_BASE_MOVED),
+        ("push", STATE_EXTERNAL_PUSH_REJECTED),
+        ("grant", STATE_GRANT_DENIED_OR_EXPIRED),
+        ("push_structured", STATE_EXTERNAL_PUSH_REJECTED),
     ],
 )
 @pytest.mark.asyncio
 async def test_external_publication_failure_in_repo_edit_never_retries_or_replans(
-    db_session, superuser_db, owner_id, monkeypatch, error, state
+    db_session, superuser_db, owner_id, monkeypatch, factory, state
 ):
+    from app.mainai_execution.publication_errors import GrantDeniedError
+    from app.mainai_execution.worktree import ActivationBaseConfigurationError, WorktreePushRejected
+
+    causes = {
+        "base": ActivationBaseConfigurationError("ActivationBaseConfigurationError"),
+        "push": WorktreePushRejected("WorktreePushRejected"),
+        "grant": GrantDeniedError("GrantDeniedError"),
+        "push_structured": None,
+    }
+    evidence = {
+        "base": {"origin": "approved_base", "failure_class": "ActivationBaseConfigurationError"},
+        "push": {"origin": "push", "failure_class": "WorktreePushRejected"},
+        "grant": {"origin": "grant", "failure_class": "GrantDeniedError"},
+        "push_structured": {
+            "origin": "push",
+            "failure_class": "WorktreePushRejected",
+            "first_cycle_state": STATE_EXTERNAL_PUSH_REJECTED,
+            "error": "WorktreePushRejected",
+        },
+    }
+    cause = causes[factory]
+    ev = evidence[factory]
     goal, task = _goal_with_task(db_session, owner_id, task_type="repo_edit")
     task.status = MainAITaskStatus.running
     task.attempts = 1
@@ -468,14 +476,14 @@ async def test_external_publication_failure_in_repo_edit_never_retries_or_replan
     db_session.commit()
     paid = _PaidPlanner()
     monkeypatch.setattr(replan_mod, "propose_plan_via_ai", paid)
-    _finalize_task_outcome(db_session, task, passed=False, evidence={"error": error})
+    _finalize_task_outcome(db_session, task, passed=False, evidence=ev, cause=cause)
     db_session.commit()
     superuser_db.expire_all()
     task = superuser_db.get(MainAITask, task.id)
     goal = superuser_db.get(MainAIGoal, goal.id)
     assert task.status == MainAITaskStatus.failed
     assert task.next_retry_at is None
-    assert should_suppress_paid_replan(task, evidence={"error": error}) is True
+    assert should_suppress_paid_replan(task, evidence=ev, cause=cause) is True
     assert find_replan_trigger(superuser_db, goal=goal) is None
     with pytest.raises(ReplanSuppressedError):
         await trigger_replan(superuser_db, goal=goal, failed_task=task, dispatched_by="test")
@@ -485,7 +493,7 @@ async def test_external_publication_failure_in_repo_edit_never_retries_or_replan
     assert task.status == MainAITaskStatus.failed, errors
     assert task.mainai_job_id is None
     assert paid.calls == []
-    assert classify_publication_failure(evidence={"error": error}) == state
+    assert classify_publication_failure(cause, evidence=ev) == state
 
 
 @pytest.mark.asyncio

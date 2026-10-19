@@ -98,6 +98,10 @@ def test_composition_markers_from_each_accepted_input():
     stop = _text("backend", "app", "mainai_execution", "first_cycle_stop.py")
     assert "def goal_is_autonomous_terminal" in stop
     assert "def classify_publication_failure" in stop
+    assert (REPO_ROOT / "backend" / "app" / "mainai_execution" / "publication_errors.py").is_file()
+    pub = _text("backend", "app", "mainai_execution", "publication_errors.py")
+    assert "class ExternalBoundaryError" in pub
+    assert "def map_push_grant_boundary_error" in pub
     replan = _text("backend", "app", "mainai_execution", "replan.py")
     assert "should_suppress_paid_replan" in replan
     assert "goal_is_autonomous_terminal" in replan

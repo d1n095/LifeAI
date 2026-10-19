@@ -13,7 +13,6 @@ goal as terminal for autonomous work even while `MainAIGoal.status` stays `block
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from typing import Any
 
@@ -21,6 +20,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
+from app.mainai_execution.publication_errors import (
+    FAIL_CLOSED_ORIGINS,
+    ORIGIN_TO_STOP_STATE,
+    ExternalBoundaryError,
+    PublicationForbiddenAfterStopError,
+    STATE_EXTERNAL_BOUNDARY_FAILED as _STATE_EXTERNAL_BOUNDARY_FAILED,
+)
 from app.mainai_execution.review_receipt import (
     STATE_INDEPENDENT_REVIEW_BLOCKED,
     STATE_STOP_BEFORE_MERGE,
@@ -43,6 +49,7 @@ STATE_EXTERNAL_CI_TIMED_OUT = "external_ci_timed_out"
 STATE_EXTERNAL_PUSH_REJECTED = "external_push_rejected"
 STATE_APPROVED_BASE_MOVED = "approved_base_moved"
 STATE_GRANT_DENIED_OR_EXPIRED = "grant_denied_or_expired"
+STATE_EXTERNAL_BOUNDARY_FAILED = _STATE_EXTERNAL_BOUNDARY_FAILED
 
 LOCAL_EDITABLE_TASK_TYPES = frozenset({"repo_edit", "run_tests", "read_only_audit"})
 PUBLICATION_TASK_TYPES = frozenset({"open_pr"})
@@ -55,31 +62,8 @@ STOP_STATES = frozenset(
         STATE_EXTERNAL_PUSH_REJECTED,
         STATE_APPROVED_BASE_MOVED,
         STATE_GRANT_DENIED_OR_EXPIRED,
+        STATE_EXTERNAL_BOUNDARY_FAILED,
     }
-)
-
-# Cause classifiers — matched against exception type names and evidence error text. Order
-# matters: grant/base/push are more specific than a generic "failed" token.
-_GRANT_CAUSE = re.compile(
-    r"push grant|grant missing|grant denied|grant expired|grant is expired|"
-    r"stale for local commit|missing or stale|expired.?grant|denied.?grant",
-    re.IGNORECASE,
-)
-_BASE_CAUSE = re.compile(
-    r"is not the approved base sha|approved base sha|approved_base|"
-    r"base has moved|refusing to build",
-    re.IGNORECASE,
-)
-_PUSH_CAUSE = re.compile(
-    r"remote rejected|protected branch|hook declined|github push rejected|"
-    r"\[rejected\].*non-fast-forward|failed to push",
-    re.IGNORECASE,
-)
-_CI_FAILED_CAUSE = re.compile(r"external ci failed|required check.*fail", re.IGNORECASE)
-_CI_TIMEOUT_CAUSE = re.compile(r"external ci timed out|ci wait timed", re.IGNORECASE)
-_REVIEW_CAUSE = re.compile(
-    r"independent_review_blocked|review_result.: .FAIL|no review receipt",
-    re.IGNORECASE,
 )
 
 _PARKABLE_TASK_STATUSES = frozenset(
@@ -135,25 +119,35 @@ def classify_publication_failure(
 ) -> str | None:
     """Return a first-cycle STOP state when the failure is an external publication cause.
 
-    Classification is by cause (exception type + evidence), never by task type alone.
-    Unknown / local verification failures return None so ordinary replan stays eligible.
+    Classification is typed and origin-aware. It never reads exception messages or
+    model-controlled `error` / `reason` prose. Unknown / local verification failures
+    without a typed origin return None so ordinary replan stays eligible — except that
+    callers at the push/grant boundary must wrap unknowns as ExternalBoundaryError
+    before reaching here.
     """
     stated = first_cycle_state_from_evidence(evidence)
     if stated in STOP_STATES:
         return stated
 
-    type_name = type(exc).__name__ if exc is not None else ""
-    blob_parts = [type_name, str(exc) if exc is not None else ""]
+    if isinstance(exc, ExternalBoundaryError) and exc.first_cycle_state in STOP_STATES:
+        return exc.first_cycle_state
+
     if isinstance(evidence, dict):
-        err = evidence.get("error")
-        if err:
-            blob_parts.append(str(err))
-        reason = evidence.get("reason")
-        if reason:
-            blob_parts.append(str(reason))
-        review_reason = evidence.get("review_reason")
-        if review_reason:
-            blob_parts.append(str(review_reason))
+        origin = evidence.get("origin")
+        if isinstance(origin, str) and origin in FAIL_CLOSED_ORIGINS:
+            mapped = ORIGIN_TO_STOP_STATE.get(origin)
+            if mapped in STOP_STATES:
+                return mapped
+        failure_class = evidence.get("failure_class")
+        if isinstance(failure_class, str) and failure_class:
+            from app.mainai_execution import publication_errors as _pub
+
+            cls = getattr(_pub, failure_class, None)
+            if isinstance(cls, type) and issubclass(cls, ExternalBoundaryError):
+                state = getattr(cls, "first_cycle_state", None)
+                if state in STOP_STATES:
+                    return state
+        # Structured flags our own code set (CI wait / review receipt), never model prose.
         if evidence.get("review_ok") is False and evidence.get("ci_passed") is True:
             return STATE_INDEPENDENT_REVIEW_BLOCKED
         if evidence.get("ci_passed") is False:
@@ -161,20 +155,17 @@ def classify_publication_failure(
             if evidence.get("reason") == "timed_out" or (isinstance(wait, dict) and wait.get("status") == "timed_out"):
                 return STATE_EXTERNAL_CI_TIMED_OUT
             return STATE_EXTERNAL_CI_FAILED
-    blob = " ".join(part for part in blob_parts if part)
 
-    if type_name in {"ActivationBaseConfigurationError"} or _BASE_CAUSE.search(blob):
-        return STATE_APPROVED_BASE_MOVED
-    if type_name in {"WorktreePushRejected"} or _PUSH_CAUSE.search(blob):
-        return STATE_EXTERNAL_PUSH_REJECTED
-    if _GRANT_CAUSE.search(blob):
-        return STATE_GRANT_DENIED_OR_EXPIRED
-    if _CI_TIMEOUT_CAUSE.search(blob):
-        return STATE_EXTERNAL_CI_TIMED_OUT
-    if _CI_FAILED_CAUSE.search(blob):
-        return STATE_EXTERNAL_CI_FAILED
-    if _REVIEW_CAUSE.search(blob):
-        return STATE_INDEPENDENT_REVIEW_BLOCKED
+    if exc is not None:
+        from app.integrations.github_client import GitHubClientError
+        from app.mainai_execution.worktree import ActivationBaseConfigurationError, WorktreePushRejected
+
+        if isinstance(exc, ActivationBaseConfigurationError):
+            return STATE_APPROVED_BASE_MOVED
+        if isinstance(exc, WorktreePushRejected):
+            return STATE_EXTERNAL_PUSH_REJECTED
+        if isinstance(exc, GitHubClientError):
+            return STATE_EXTERNAL_BOUNDARY_FAILED
     return None
 
 
@@ -298,11 +289,18 @@ def park_remaining_goal_tasks(
         if sibling.status in TERMINAL_MAINAI_TASK_STATUSES:
             continue
         if sibling.status == MainAITaskStatus.running:
-            # Live job: recovery/takeover/dispatch guards refuse the stopped goal. Do not
-            # fabricate a terminal outcome out from under a still-leased worker.
+            # Live job: request cooperative cancel in-session (request_cancel() commits and
+            # cannot run inside this STOP transaction). The worker's next checkpoint and the
+            # immediate pre-push recheck both refuse publication after STOP.
             sibling.next_retry_at = None
             if hasattr(sibling, "blocker_reason"):
                 sibling.blocker_reason = reason[:500]
+            _request_cancel_running_sibling(
+                db,
+                sibling,
+                reason=reason,
+                first_cycle_state=first_cycle_state,
+            )
             continue
         if sibling.status not in _PARKABLE_TASK_STATUSES and sibling.status != MainAITaskStatus.blocked:
             sibling.next_retry_at = None
@@ -407,18 +405,177 @@ def stop_first_cycle(
     return payload
 
 
-def should_suppress_paid_replan(task: MainAITask, *, evidence: dict[str, Any] | None = None) -> bool:
+def _request_cancel_running_sibling(
+    db: Session,
+    sibling: MainAITask,
+    *,
+    reason: str,
+    first_cycle_state: str,
+) -> None:
+    """Set job.cancel_requested without committing. Never call jobs.service.request_cancel here."""
+    from app.models.mainai_job import (
+        CANCELLABLE_MAINAI_JOB_STATUSES,
+        MainAIJob,
+        MainAIJobEvent,
+        MainAIJobEventType,
+    )
+
+    if sibling.mainai_job_id is not None:
+        job = db.get(MainAIJob, sibling.mainai_job_id)
+        if (
+            job is not None
+            and job.status in CANCELLABLE_MAINAI_JOB_STATUSES
+            and not job.cancel_requested
+        ):
+            job.cancel_requested = True
+            db.add(
+                MainAIJobEvent(
+                    job_id=job.id,
+                    owner_id=job.owner_id,
+                    event_type=MainAIJobEventType.cancel_requested,
+                    detail={
+                        "reason": reason,
+                        "first_cycle_state": first_cycle_state,
+                        "source": "first_cycle_stop",
+                    },
+                )
+            )
+    db.add(
+        MainAITaskEvent(
+            task_id=sibling.id,
+            owner_id=sibling.owner_id,
+            event_type=MainAITaskEventType.cancel_requested,
+            detail={
+                "reason": reason,
+                "first_cycle_state": first_cycle_state,
+                "merged": False,
+                "parked_running_sibling": True,
+                "publication_forbidden": True,
+            },
+        )
+    )
+
+
+def assert_publication_permitted(
+    db: Session,
+    task: MainAITask,
+    *,
+    job_id: Any | None = None,
+) -> None:
+    """Immediate pre-push / pre-open_pr recheck. Holds FOR UPDATE on the goal row.
+
+    Raises PublicationForbiddenAfterStopError when the goal is already first-cycle STOP.
+    Raises nothing for cancel_requested — callers also go through _check_cancel_requested.
+    """
+    from app.models.mainai_job import MainAIJob
+
+    goal = db.execute(
+        select(MainAIGoal)
+        .where(MainAIGoal.id == task.goal_id, MainAIGoal.owner_id == task.owner_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if goal is None or goal_is_autonomous_terminal(db, goal):
+        state = first_cycle_state_from_goal(goal) if goal is not None else None
+        raise PublicationForbiddenAfterStopError(
+            "PublicationForbiddenAfterStop",
+            first_cycle_state=state if state in STOP_STATES else STATE_STOP_BEFORE_MERGE,
+        )
+    if job_id is not None:
+        job = db.get(MainAIJob, job_id, populate_existing=True)
+        if job is not None and job.cancel_requested:
+            raise PublicationForbiddenAfterStopError(
+                "PublicationForbiddenCancelRequested",
+                first_cycle_state=STATE_STOP_BEFORE_MERGE,
+            )
+
+
+def abandon_running_task_after_stop(db: Session, task: MainAITask, *, goal: MainAIGoal | None) -> bool:
+    """Park a still-running task on a STOP goal when its job is dead (no live lease).
+
+    A still-leased running job is only cancel_requested — the worker acknowledges cooperatively.
+    Never salvage, takeover, retry, or paid-replan.
+    """
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+
+    if task.status != MainAITaskStatus.running:
+        return False
+    if not goal_is_autonomous_terminal(db, goal):
+        return False
+    state = first_cycle_state_from_goal(goal) if goal is not None else None
+    if state not in STOP_STATES:
+        state = STATE_STOP_BEFORE_MERGE
+    job = db.get(MainAIJob, task.mainai_job_id) if task.mainai_job_id is not None else None
+    if job is not None and job.status == MainAIJobStatus.running:
+        _request_cancel_running_sibling(
+            db,
+            task,
+            reason="first-cycle STOP forbids further execution of a running sibling",
+            first_cycle_state=state,
+        )
+        # Dead lease: park immediately so recovery cannot takeover.
+        if job.lease_expires_at is not None and job.lease_expires_at < datetime.utcnow():
+            task.status = MainAITaskStatus.blocked
+            task.next_retry_at = None
+            task.completed_at = None
+            if hasattr(task, "blocker_reason"):
+                task.blocker_reason = "first-cycle STOP; running sibling abandoned"
+            db.add(
+                MainAITaskEvent(
+                    task_id=task.id,
+                    owner_id=task.owner_id,
+                    event_type=MainAITaskEventType.blocked,
+                    detail={
+                        "reason": "first-cycle STOP; dead running sibling abandoned without takeover",
+                        "first_cycle_state": state,
+                        "merged": False,
+                        "parked_running_sibling": True,
+                        "abandoned_after_stop": True,
+                    },
+                )
+            )
+            return True
+        return False
+    task.status = MainAITaskStatus.blocked
+    task.next_retry_at = None
+    task.completed_at = None
+    if hasattr(task, "blocker_reason"):
+        task.blocker_reason = "first-cycle STOP; running sibling abandoned"
+    db.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=task.owner_id,
+            event_type=MainAITaskEventType.blocked,
+            detail={
+                "reason": "first-cycle STOP; running sibling with dead job abandoned without takeover",
+                "first_cycle_state": state,
+                "merged": False,
+                "parked_running_sibling": True,
+                "abandoned_after_stop": True,
+            },
+        )
+    )
+    return True
+
+
+def should_suppress_paid_replan(
+    task: MainAITask,
+    *,
+    evidence: dict[str, Any] | None = None,
+    cause: BaseException | None = None,
+) -> bool:
     """External CI / independent-review / publication STOP must not call propose_plan_via_ai.
 
     Decision is cause-based: publication-task types always suppress (open_pr never replans),
-    and any task — including repo_edit — suppresses when `evidence` classifies as an external
-    publication / grant / CI / review failure. Local verification failures remain eligible.
+    and any task — including repo_edit — suppresses when `evidence` / `cause` classifies as an
+    external publication / grant / CI / review failure. Local verification failures remain
+    eligible. Error-message prose is never consulted.
     """
     if is_publication_task(task):
         return True
     if first_cycle_state_from_evidence(evidence) in STOP_STATES:
         return True
-    if classify_publication_failure(evidence=evidence) in STOP_STATES:
+    if classify_publication_failure(cause, evidence=evidence) in STOP_STATES:
         return True
     if not is_local_editable_task(task):
         return True

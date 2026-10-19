@@ -81,6 +81,25 @@ def isolated_git_env(base: dict | None = None, *, extra: dict | None = None) -> 
             if key in {"HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "XDG_CONFIG_HOME"}:
                 continue
             env[key] = str(value)
+    # extra_env may model a compromised parent injecting tokens, but must never re-open
+    # Git-config injection (GIT_CONFIG_COUNT / KEY_* / VALUE_* / PARAMETERS) or host HOME.
+    for key in _HOST_CREDENTIAL_ENV:
+        if key in {"GITHUB_TOKEN", "GH_TOKEN", "MAINAI_PUSH_TOKEN", "MAINAI_EFFECT_TOKEN", "GH_ENTERPRISE_TOKEN"}:
+            continue
+        env.pop(key, None)
+    for key in list(env):
+        if key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"):
+            env.pop(key, None)
+    env.pop("GIT_CONFIG", None)
+    env.pop("GIT_CONFIG_COUNT", None)
+    env.pop("GIT_CONFIG_PARAMETERS", None)
+    env["HOME"] = str(home)
+    env["XDG_CONFIG_HOME"] = str(home / "xdg")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = str(global_config)
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
     return env
 
 REGULAR_FILE_MODES = frozenset({"100644", "100755"})

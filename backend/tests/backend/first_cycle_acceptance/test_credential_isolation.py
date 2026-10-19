@@ -219,3 +219,66 @@ def test_ordinary_pytest_cannot_access_host_git_credentials(tmp_path, monkeypatc
     )
     assert not leaked
     assert sanitize_matrix_text(f"password={secret}") == "password=<redacted>"
+
+
+def test_extra_env_cannot_reinject_git_config(tmp_path, monkeypatch, isolated_repo):
+    """P1: extra_env may model a compromised parent token, but GIT_CONFIG_COUNT / KEY / VALUE
+    / PARAMETERS must not re-open host git config after isolation."""
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    helper = tmp_path / "injected-helper.sh"
+    secret = "SYNTHETIC_EXTRA_ENV_GIT_CONFIG_PASSWORD"
+    helper.write_text(f"#!/bin/sh\necho password={secret}\n", encoding="utf-8")
+    helper.chmod(0o755)
+    injected_config = tmp_path / "injected.gitconfig"
+    injected_config.write_text(f"[credential]\n\thelper = {helper}\n", encoding="utf-8")
+
+    env = isolated_git_env(
+        extra={
+            "GITHUB_TOKEN": "gho_synthetic_extra_env_token_not_real",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": str(helper),
+            "GIT_CONFIG_PARAMETERS": f"'credential.helper={helper}'",
+            "GIT_CONFIG": str(injected_config),
+            "HOME": str(host_home),
+            "GIT_CONFIG_GLOBAL": str(injected_config),
+        }
+    )
+    injected = (
+        env.get("GIT_CONFIG_COUNT")
+        or env.get("GIT_CONFIG_KEY_0")
+        or env.get("GIT_CONFIG_VALUE_0")
+        or env.get("GIT_CONFIG_PARAMETERS")
+        or env.get("GIT_CONFIG")
+    )
+    assert injected is None
+    assert Path(env["HOME"]).resolve() != host_home.resolve()
+    assert Path(env["GIT_CONFIG_GLOBAL"]).resolve() != injected_config.resolve()
+    assert env.get("GIT_CONFIG_NOSYSTEM") == "1"
+    assert env.get("GITHUB_TOKEN") == "gho_synthetic_extra_env_token_not_real"
+
+    probe = probe_role(
+        "worker",
+        isolated_repo.work,
+        extra_env={
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "credential.helper",
+            "GIT_CONFIG_VALUE_0": str(helper),
+            "GIT_CONFIG_PARAMETERS": f"'credential.helper={helper}'",
+            "GIT_CONFIG": str(injected_config),
+        },
+    )
+    leaked = (
+        secret in json.dumps(probe.raw)
+        or secret in probe.config
+        or secret in probe.helper_stdout
+        or (probe.fill_password_digest == hashlib.sha256(secret.encode()).hexdigest())
+    )
+    conclude(
+        "CRED-9 extra_env cannot re-inject GIT_CONFIG",
+        FAIL if leaked or injected else PASS,
+        boundary="harness.git_config_injection",
+        detail=f"leaked={leaked}; injected_keys_present={bool(injected)}",
+    )
+    assert not leaked

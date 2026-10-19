@@ -644,6 +644,18 @@ class Worker:
             if goal is None:
                 continue
             if goal_is_autonomous_terminal(db, goal):
+                from app.mainai_execution.first_cycle_stop import abandon_running_task_after_stop
+
+                try:
+                    abandon_running_task_after_stop(db, task, goal=goal)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to abandon running task %s after first-cycle STOP.",
+                        self.worker_id,
+                        task.id,
+                    )
                 continue
             try:
                 record = get_or_create_recovery_record(db, task=task, job=job)
