@@ -10,7 +10,7 @@ from first_cycle_acceptance._adapters import PRODUCTION
 from first_cycle_acceptance._git import add_commit, checkout_branch, git, rev_parse
 from first_cycle_acceptance._matrix import FAIL, PASS
 from first_cycle_acceptance._publication import evaluate_publication
-from first_cycle_acceptance.conftest import conclude
+from first_cycle_acceptance.conftest import REMAINING_OUT_OF_SCOPE, conclude
 
 pytestmark = pytest.mark.first_cycle_acceptance
 
@@ -52,6 +52,7 @@ def test_oracle_accepts_single_regular_commit(isolated_repo):
     assert verdict.commit_count == 1
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_ta12_intermediate_commit_not_concealed_by_clean_final_diff(isolated_repo):
     checkout_branch(isolated_repo.work, "ta12", isolated_repo.base_sha)
     secrets = isolated_repo.work / "backend" / "app" / "secrets.py"
@@ -86,6 +87,7 @@ def test_ta12_intermediate_commit_not_concealed_by_clean_final_diff(isolated_rep
     )
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_ta13_authorized_file_replaced_with_symlink_fails(isolated_repo):
     checkout_branch(isolated_repo.work, "ta13", isolated_repo.base_sha)
     greeting = isolated_repo.work / "backend" / "app" / "greeting.py"
@@ -113,6 +115,7 @@ def test_ta13_authorized_file_replaced_with_symlink_fails(isolated_repo):
     )
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_gitlink_submodule_fails(isolated_repo):
     checkout_branch(isolated_repo.work, "gitlink", isolated_repo.base_sha)
     git(

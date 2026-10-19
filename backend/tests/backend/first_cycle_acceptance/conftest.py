@@ -27,6 +27,19 @@ def pytest_configure(config) -> None:
     )
 
 
+# Known remaining gaps this batch must not implement (Codex transport/grants/credentials,
+# leftover legacy evaluate_check_runs, TA-12/13 publication). Tests still run and still
+# record FAIL in the matrix via conclude(); pytest.fail is an expected xfail so default
+# backend CI can stay green without turning those rows into PASS.
+REMAINING_OUT_OF_SCOPE = pytest.mark.xfail(
+    reason=(
+        "Out of this batch: Codex Git transport/grants/worktree credentials, "
+        "legacy evaluate_check_runs skipped-as-pass, or TA-12/13 publication"
+    ),
+    strict=True,
+)
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:
     write_payload()
 

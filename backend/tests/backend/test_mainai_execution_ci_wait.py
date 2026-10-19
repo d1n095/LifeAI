@@ -518,12 +518,9 @@ async def test_demo_ci_green_with_founder_receipt_stops_before_merge(db_session,
     wait = db_session.query(MainAITaskWait).filter(MainAITaskWait.task_id == task.id).one()
     wait.condition = {**(wait.condition or {}), "approved_base_sha": base}
     flag_modified(wait, "condition")
-    checkpoint = latest_checkpoint_for_step(db_session, task_id=task.id, job_id=job.id, step="work_result")
-    work_result = dict(checkpoint.executor_state.get("work_result") or {})
-    work_result.update({"approved_base_sha": base, "head_sha": sha, "draft": True, "merged": False})
-    checkpoint.executor_state = {**checkpoint.executor_state, "work_result": work_result}
-    flag_modified(checkpoint, "executor_state")
     db_session.commit()
+    checkpoint = latest_checkpoint_for_step(db_session, task_id=task.id, job_id=job.id, step="work_result")
+    work_result = dict((checkpoint.executor_state or {}).get("work_result") or {})
 
     goal = db_session.get(MainAIGoal, task.goal_id)
     record_first_cycle_review_receipt(

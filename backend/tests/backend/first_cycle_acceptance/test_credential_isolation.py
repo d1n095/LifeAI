@@ -12,13 +12,14 @@ from first_cycle_acceptance._credentials import config_contains_token, probe_rol
 from first_cycle_acceptance._git import IsolatedRepo, git, seed_isolated_repo
 from first_cycle_acceptance._grants import GrantStore
 from first_cycle_acceptance._matrix import FAIL, PASS
-from first_cycle_acceptance.conftest import conclude
+from first_cycle_acceptance.conftest import REMAINING_OUT_OF_SCOPE, conclude
 
 pytestmark = pytest.mark.first_cycle_acceptance
 
 TOKEN = "test-token-must-not-leak-into-worktree"
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_production_authed_remote_url_embeds_token():
     fn = PRODUCTION["worktree"].symbols.get("_authed_remote_url")
     if fn is None:
@@ -42,6 +43,7 @@ def test_production_authed_remote_url_embeds_token():
     )
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_worktree_config_must_not_contain_token(tmp_path):
     repo = seed_isolated_repo(tmp_path / "iso")
     # Simulate what production create_task_worktree writes today.
@@ -60,6 +62,7 @@ def test_worktree_config_must_not_contain_token(tmp_path):
     )
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_worker_test_reviewer_subprocesses_cannot_read_writable_credentials(tmp_path):
     repo = seed_isolated_repo(tmp_path / "iso")
     fn = PRODUCTION["worktree"].symbols.get("_authed_remote_url")

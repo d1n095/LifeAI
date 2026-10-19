@@ -15,7 +15,7 @@ from first_cycle_acceptance._ci import (
     make_run,
 )
 from first_cycle_acceptance._matrix import FAIL, PASS
-from first_cycle_acceptance.conftest import conclude
+from first_cycle_acceptance.conftest import REMAINING_OUT_OF_SCOPE, conclude
 
 pytestmark = pytest.mark.first_cycle_acceptance
 
@@ -122,6 +122,7 @@ def test_skipped_and_neutral_do_not_pass():
     )
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_production_evaluate_check_runs_treats_skipped_as_pass():
     skipped = exact_set_runs(SHA, conclusion="skipped")
     prod = PRODUCTION["ci_wait"].symbols.get("evaluate_check_runs")

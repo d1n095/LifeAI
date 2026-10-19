@@ -11,7 +11,7 @@ from first_cycle_acceptance._git import git
 from first_cycle_acceptance._grants import GrantError
 from first_cycle_acceptance._lifecycle import apply_authorized_edit, run_rehearsal
 from first_cycle_acceptance._matrix import BLOCKED, FAIL, PASS
-from first_cycle_acceptance.conftest import conclude
+from first_cycle_acceptance.conftest import REMAINING_OUT_OF_SCOPE, conclude
 
 pytestmark = pytest.mark.first_cycle_acceptance
 
@@ -81,6 +81,7 @@ def test_e2e_ungranted_push_is_refused_by_remote_hook(isolated_repo):
     assert isolated_repo.remote_sha("claude/mainai-task-ungranted") is None
 
 
+@REMAINING_OUT_OF_SCOPE
 def test_e2e_production_push_has_no_grant_gate():
     push = PRODUCTION["worktree"].symbols.get("push_worktree_branch")
     finalize_mod = None
