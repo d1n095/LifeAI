@@ -354,6 +354,12 @@ def cancel_task(
         )
         return task
 
+    if task.status == MainAITaskStatus.blocked:
+        from app.mainai_execution.first_cycle_stop import first_cycle_stop_is_active
+
+        if first_cycle_stop_is_active(db, task):
+            raise TaskNotCancellableError(task.id, task.status)
+
     if task.status not in _CANCELLABLE_MAINAI_TASK_STATUSES:
         raise TaskNotCancellableError(task.id, task.status)
     task.status = MainAITaskStatus.cancelled
