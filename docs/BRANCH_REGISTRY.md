@@ -4,7 +4,10 @@
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `codex/frontend-npm-audit-fc4-remediation` | [#275](https://github.com/d1n095/LifeAI/pull/275) | **Draft; frozen for independent examination — do not merge** | Patch-level Next.js/PostCSS/sharp/source-map/brace-expansion remediation, deterministic production/dev audit policy, and one exact dated dev-only `braces` exception. No backend, migration, Recall, Path A/B, activation-authority or deployment changes. |
+| `codex/frontend-npm-audit-fc4-remediation` | [#275](https://github.com/d1n095/LifeAI/pull/275) | **Draft; frozen original candidate — do not amend or merge** | Patch-level Next.js/PostCSS/sharp/source-map/brace-expansion remediation at `eed3f4a380be71398a0481414518a29506a57ccb`. Independent exam `6d56ff029328c542a77bd6cccbaebdaf16124539` returned RETURN_TO_BUILDER (P1 A6/A7, P2 A10/A11). |
+| `cursor/fc4-npm-audit-a6-a7-91c1` | (this isolated correction) | **Draft; isolated FC-4 policy correction of frozen #275 — do not merge until independently examined** | Executable A6 compatible-fix auto-revocation, A7 `expires: "2027-01-15"` fail-closed deadline, A10 independent moderate on high-via-braces wrappers, narrowly bounded A11 npm 10/11 wrapper boolean-true rule. No lockfile or dependency changes. Authoritative `frontend/scripts/check-npm-audit.js` for later composition. See `docs/FC4_FRONTEND_SECURITY_INTEGRATION.md`. |
+
+**Merge-ordning för FC-4:** keep #275 frozen. Examine this correction independently. Compose later with frozen #276 / Claude #277-replacement / Codex activation-security so the final activation candidate contains **exactly one** npm-audit policy — this one, not #275's pre-A6/A7 script alongside it. Do not rebase this branch onto those lanes until their own dependencies have actually merged.
 
 Detta är INTE bara en lista över brancher — det är projektets levande karta, och den
 manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUDE.md`s

@@ -350,17 +350,33 @@ klientbundeln; exponeringen är stack-exhaustion från djupt nästlade globmöns
 lint/build mot repositoryts egna filer.
 
 Undantaget i `frontend/scripts/check-npm-audit.js` matchar samtidigt exakt paketnamn,
-source-id, GHSA-URL, titel, severity och sårbart range. Ändras någon egenskap blir CI rött.
-Policyn kör dessutom en separat production-audit där inga undantag tillåts, blockerar alla
-andra höga/kritiska dev-advisories och blockerar ny dev-skuld med en kompatibel icke-major
-fix. Propagerade paketnamn tillåts endast om deras advisory-rot exakt är detta fynd.
+source-id, GHSA-URL, titel, severity och sårbart range, och bär maskinläsbar
+`expires: "2027-01-15"`. Ändras någon egenskap, saknas/är expiry ogiltig, eller har
+klockan nått `2027-01-15T00:00:00.000Z`, blir CI rött. Policyn kör dessutom en separat
+production-audit där inga undantag tillåts, blockerar alla andra höga/kritiska
+dev-advisories och blockerar ny dev-skuld med en kompatibel icke-major fix.
 
-**Ta bort undantaget** om `braces` publicerar en patchad kompatibel release, eller när
-Next/Tailwind inte längre drar in `braces<=3.0.3`. En framtida annan advisory i samma paket
-matchar inte undantaget. Tailwind 4 är en separat major-migration och krävs inte för denna
-smala remediation; den befintliga dev-only moderate
-`postcss-selector-parser`-advisoryn kräver samma major och är fortsatt synlig men inte
-high/critical-gatande enligt nuvarande policy.
+Undantaget slutar automatiskt gälla om en kompatibel icke-major-fix finns på `braces`
+självt eller på ett paket som bara propagerar denna advisory (`fixAvailable: true`,
+objekt med `isSemVerMajor === false`, eller ofullständig/okänd fixmetadata —
+fail-closed). Propagerade paketnamn tillåts endast om deras advisory-rot exakt är
+detta fynd. En high-via-braces-wrapper som också bär en självständig, kompatibelt
+lagbar moderate-advisory blockeras (A10); undantaget får inte dölja den.
+
+**Smal, bevisad A11-undantagsregel (npm 10 vs npm 11):** npm 10 rapporterar
+`postcss-nested.fixAvailable === true` medan npm 11 rapporterar det parent-major-objektet
+`{ name: "tailwindcss", version: "4.3.3", isSemVerMajor: true }`. Boolean `true` på en
+propagation-only wrapper (alla `via` är strängar) är därför inte självständigt
+actionable; rotpaketets fixbarhet avgör. Ett objektformat `{ isSemVerMajor: false }`
+på wrappern själv ÄR självständigt actionable och failar CI. Regeln är medvetet
+snäv: den breddas inte till high-fynd och den döljer inte objektformade moderate-vias.
+
+**Ta bort undantaget** om `braces` publicerar en patchad kompatibel release, när
+Next/Tailwind inte längre drar in `braces<=3.0.3`, eller senast vid review-deadline
+2027-01-15. En framtida annan advisory i samma paket matchar inte undantaget. Tailwind 4
+är en separat major-migration och krävs inte för denna smala remediation; den
+befintliga dev-only moderate `postcss-selector-parser`-advisoryn kräver samma major
+och är fortsatt synlig men inte high/critical-gatande enligt nuvarande policy.
 
 ## 4. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
 
