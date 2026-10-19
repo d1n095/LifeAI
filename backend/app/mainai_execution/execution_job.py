@@ -46,7 +46,33 @@ from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
+from app.mainai_execution.first_cycle_stop import (
+    STATE_EXTERNAL_CI_FAILED,
+    STATE_EXTERNAL_CI_TIMED_OUT,
+    STATE_STOP_BEFORE_MERGE,
+    assert_publication_permitted,
+    classify_publication_failure,
+    fail_closed_external_ci,
+    fail_closed_external_publication,
+    first_cycle_state_from_goal,
+    goal_is_autonomous_terminal,
+    goal_is_first_cycle_stopped,
+    stop_first_cycle,
+)
+from app.mainai_execution.publication_errors import (
+    ExternalBoundaryError,
+    ExternalCiContractError,
+    PublicationForbiddenAfterStopError,
+    map_publication_boundary_error,
+)
 from app.mainai_execution.required_checks import CI_STAGE_PR_OPEN, RequiredCheckContractError
+from app.mainai_execution.review_receipt import (
+    PATH_A_BUILDER_IDENTITY,
+    envelope_authorization_hash,
+    evaluate_first_cycle_review_receipt,
+    instruction_hash,
+    output_hash,
+)
 from app.mainai_execution.executor import _lock_task, task_for_job
 from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.graph import recompute_task_readiness
@@ -122,14 +148,23 @@ class TaskCancelledCooperatively(Exception):
     a failure) and never silently ignored."""
 
 
-def _check_cancel_requested(db: Session, job_id: uuid.UUID) -> None:
+def _check_cancel_requested(db: Session, job_id: uuid.UUID, *, task: MainAITask | None = None) -> None:
     """A safe checkpoint: never called mid-write, always between one durable fact and the
     next. Re-reads the job row fresh (`populate_existing=True`) rather than trusting a
     possibly-stale in-memory `job` -- the founder's cancel click can land at any real wall-clock
-    moment, including between this function's own checks."""
+    moment, including between this function's own checks.
+
+    First-cycle STOP on the owning goal is treated as cooperative cancel so an already-running
+    sibling cannot continue into publication after STOP committed.
+    """
     job = db.get(MainAIJob, job_id, populate_existing=True)
     if job is not None and job.cancel_requested:
         raise TaskCancelledCooperatively()
+    resolved = task if task is not None else (task_for_job(db, job) if job is not None else None)
+    if resolved is not None:
+        goal = db.get(MainAIGoal, resolved.goal_id, populate_existing=True)
+        if goal_is_autonomous_terminal(db, goal):
+            raise TaskCancelledCooperatively()
 
 
 def _repo_root() -> Path:
@@ -576,7 +611,9 @@ def _find_repo_edit_branch(db: Session, *, goal_id: uuid.UUID) -> dict | None:
     return None
 
 
-async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> dict:
+async def _handle_open_pr(
+    db: Session, task: MainAITask, goal: MainAIGoal, *, job_id: uuid.UUID | None = None
+) -> dict:
     """Crash-matrix finding (P1, hardening pass): open_pr's real PR creation happens inside
     the SAME "work_result" computation run_task_execution_job() checkpoints -- a crash between
     a successful create_pull_request() call and that checkpoint's commit would, on resume,
@@ -587,6 +624,7 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     already durably succeeded. Fixed the same way _finalize_repo_edit() was: check whether a
     PR for this exact head/base already exists FIRST and reuse it instead of creating a
     second one."""
+    assert_publication_permitted(db, task, job_id=job_id)
     settings = get_settings()
     _guard_envelope(assert_envelope_allows_open_pr, _envelope_for_path_a_task(db, task))
     edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
@@ -599,15 +637,31 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     base_branch = edit_info.get("base_branch") or execution_pr_base_branch()
 
     if not settings.github_write_enabled:
+        if job_id is not None:
+            _check_cancel_requested(db, job_id, task=task)
+        assert_publication_permitted(db, task, job_id=job_id)
         return {"proposed": True, "title": title, "body": body, "head": head_branch, "base": base_branch}
 
+    if job_id is not None:
+        _check_cancel_requested(db, job_id, task=task)
+    assert_publication_permitted(db, task, job_id=job_id)
     client = get_github_client()
     repo_owner = settings.github_repo.split("/", 1)[0]
-    existing = await client.list_pull_requests_for_head(head=f"{repo_owner}:{head_branch}", base=base_branch, state="open")
-    if existing:
-        pr = existing[0]
-    else:
-        pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch, draft=True)
+    try:
+        existing = await client.list_pull_requests_for_head(head=f"{repo_owner}:{head_branch}", base=base_branch, state="open")
+        if existing:
+            pr = existing[0]
+        else:
+            pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch, draft=True)
+    except (PublicationForbiddenAfterStopError, TaskCancelledCooperatively, ExternalBoundaryError):
+        raise
+    except Exception as exc:
+        # Bare RuntimeError is the crash-recovery seam (LOCAL_COMMITTED_NOT_PUSHED). Origin-aware
+        # git/GitHub/network failures are already typed by the time they leave those modules.
+        if type(exc) is RuntimeError:
+            raise
+        raise map_publication_boundary_error(exc) from exc
+    assert_publication_permitted(db, task, job_id=job_id)
     return {
         "proposed": False,
         "pull_request_number": pr.get("number"),
@@ -623,10 +677,15 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
         # is on and a real PR (existing or freshly created) exists, so a real commit_sha is
         # always expected here in that case.
         "head_sha": edit_info.get("commit_sha"),
+        "draft": True if pr.get("draft", True) else bool(pr.get("draft")),
+        "merged": False,
+        "approved_base_sha": edit_info.get("approved_base_sha") or edit_info.get("base_sha"),
     }
 
 
-async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) -> dict:
+async def _finalize_repo_edit(
+    db: Session, task: MainAITask, work_result: dict, *, job_id: uuid.UUID | None = None
+) -> dict:
     """Only called once verify_task() has already passed (see run_task_execution_job()).
 
     Hardening-pass rewrite: the real push now goes through worktree.py's real local
@@ -646,6 +705,7 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
     branch whose tip already matches origin's tip is a genuine no-op ("Everything up-to-date",
     exit 0) -- calling this function twice for the same worktree is naturally idempotent,
     without needing any tip-tracking logic at all."""
+    assert_publication_permitted(db, task, job_id=job_id)
     branch = f"claude/mainai-task-{task.id}"
     base_branch = execution_pr_base_branch()
 
@@ -658,6 +718,7 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
         elif isinstance(item, str) and item:
             claimed_paths.append(item)
     if worktree_id is None:
+        assert_publication_permitted(db, task, job_id=job_id)
         editable = _runtime_edit_targets(
             db, task, exists_at_base=lambda path: _path_exists_at_proposal_base(_repo_root().resolve(), path)
         )
@@ -683,8 +744,29 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
         editable_targets=editable,
         envelope=envelope,
     )
-    remote_sha = await push_worktree_branch(worktree)
-    return {"branch": worktree.branch, "base_branch": base_branch, "proposed": False, "commit_sha": remote_sha}
+    if job_id is not None:
+        _check_cancel_requested(db, job_id, task=task)
+    assert_publication_permitted(db, task, job_id=job_id)
+    try:
+        remote_sha = await push_worktree_branch(worktree)
+    except (PublicationForbiddenAfterStopError, TaskCancelledCooperatively, ExternalBoundaryError):
+        raise
+    except Exception as exc:
+        # Bare RuntimeError must propagate so a worker crash after a durable local commit remains
+        # a crash (recovery classifies LOCAL_COMMITTED_NOT_PUSHED). Typed boundary errors from
+        # worktree/github/network still fail closed via ExternalBoundaryError above.
+        if type(exc) is RuntimeError:
+            raise
+        raise map_publication_boundary_error(exc) from exc
+    assert_publication_permitted(db, task, job_id=job_id)
+    return {
+        "branch": worktree.branch,
+        "base_branch": base_branch,
+        "proposed": False,
+        "commit_sha": remote_sha,
+        "approved_base_sha": worktree.base_sha,
+        "merged": False,
+    }
 
 
 async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, *, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
@@ -746,7 +828,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             elif task.task_type == "run_tests":
                 work_result = _handle_run_tests(task, db=db)
             elif task.task_type == "open_pr":
-                work_result = await _handle_open_pr(db, task, goal)
+                work_result = await _handle_open_pr(db, task, goal, job_id=job_id)
             else:
                 raise TaskExecutionError(f"Unknown task_type '{task.task_type}'.")
             # V0.2 fencing finding: unlike task-state/verification writes (which reach
@@ -853,7 +935,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                     logger.warning("task_execution job %s: lease lost before GitHub push.", job_id)
                     db.rollback()
                     return
-                finalize_info = await _finalize_repo_edit(db, task, work_result)
+                finalize_info = await _finalize_repo_edit(db, task, work_result, job_id=job_id)
                 try:
                     renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
                 except JobLeaseLostError:
@@ -899,7 +981,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             except RequiredCheckContractError as exc:
                 # No CI contract can be satisfied for this head/base (e.g. a base outside the
                 # workflow's triggers): fail the task closed now instead of waiting to time out.
-                raise TaskExecutionError(f"CI contract cannot be satisfied: {exc}") from exc
+                raise ExternalCiContractError("RequiredCheckContractError") from exc
             db.commit()
             entered_ci_wait = True
 
@@ -920,7 +1002,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             return
         return
 
-    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError, ExecutionSpendError) as exc:
+    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError, ExecutionSpendError, ExternalBoundaryError) as exc:
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
         db.rollback()
         job = db.get(MainAIJob, job_id)
@@ -941,7 +1023,11 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # atomic commit for both effects -- a crash before it loses nothing durable (the job
         # is still `running`, correctly reclaimable and resumable from its existing
         # checkpoints); a crash after it has nothing left to lose.
-        _finalize_task_outcome(db, task, passed=False, evidence={"error": str(exc)})
+        boundary = exc if isinstance(exc, ExternalBoundaryError) else None
+        evidence = {"error": type(exc).__name__}
+        if boundary is not None:
+            evidence.update(boundary.evidence())
+        _finalize_task_outcome(db, task, passed=False, evidence=evidence, cause=exc)
         try:
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
         except JobLeaseLostError:
@@ -1009,7 +1095,13 @@ def _rollup_goal_after_task_boundary(db: Session, *, task: MainAITask) -> None:
 
 
 def _finalize_task_outcome(
-    db: Session, task: MainAITask, *, passed: bool, evidence: dict, job_id: uuid.UUID | None = None
+    db: Session,
+    task: MainAITask,
+    *,
+    passed: bool,
+    evidence: dict,
+    job_id: uuid.UUID | None = None,
+    cause: BaseException | None = None,
 ) -> None:
     """THE completion gate — a task becomes `completed` if and only if verification passed
     (or genuinely had nothing to verify). A failed verification never produces `completed`: it
@@ -1020,7 +1112,10 @@ def _finalize_task_outcome(
     After a successful `completed` (or cooperative cancel), the canonical `record_final_report`
     path runs so a fully successful terminal graph closes the MainAIGoal. Permanent `failed`
     outcomes defer goal close to the worker finalize tick so auto-replan can still claim an
-    ACTIVE goal — see `_rollup_goal_after_task_boundary`."""
+    ACTIVE goal — see `_rollup_goal_after_task_boundary`.
+
+    External publication / grant / CI / review failures are classified by cause (evidence and
+    optional `cause` exception) and fail closed: no retry, no paid replan, goal-level STOP."""
     db.add(
         MainAITaskEvent(
             task_id=task.id,
@@ -1041,6 +1136,24 @@ def _finalize_task_outcome(
         ).scalar_one()
         if locked.status == MainAITaskStatus.cancelled:
             return
+        goal = db.get(MainAIGoal, locked.goal_id, populate_existing=True)
+        if goal_is_first_cycle_stopped(db, goal):
+            stop_state = first_cycle_state_from_goal(goal) or STATE_STOP_BEFORE_MERGE
+            fail_closed_external_publication(
+                db,
+                locked,
+                reason="PublicationForbiddenAfterStop",
+                first_cycle_state=stop_state,
+                evidence={
+                    **(evidence if isinstance(evidence, dict) else {}),
+                    "origin": "stop",
+                    "failure_class": "PublicationForbiddenAfterStopError",
+                    "error": "PublicationForbiddenAfterStopError",
+                    "first_cycle_state": stop_state,
+                },
+                goal=goal,
+            )
+            return
         if locked.mainai_job_id is not None:
             job = db.get(MainAIJob, locked.mainai_job_id, populate_existing=True)
             if job is not None and job.cancel_requested:
@@ -1056,6 +1169,19 @@ def _finalize_task_outcome(
         task.next_retry_at = None
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.completed, detail=evidence))
     else:
+        merged_evidence = dict(evidence) if isinstance(evidence, dict) else {}
+        if isinstance(cause, ExternalBoundaryError):
+            merged_evidence.update(cause.evidence())
+        publication_state = classify_publication_failure(cause, evidence=merged_evidence)
+        if publication_state is not None:
+            fail_closed_external_publication(
+                db,
+                task,
+                reason=str(merged_evidence.get("failure_class") or merged_evidence.get("error") or type(cause).__name__ if cause else "external publication failure"),
+                first_cycle_state=publication_state,
+                evidence=merged_evidence or {"error": type(cause).__name__ if cause else "external publication failure"},
+            )
+            return
         if task.attempts < task.max_attempts:
             task.status = MainAITaskStatus.retryable_failed
             # V0.3: schedule the automatic retry-with-backoff scan (app/worker.py's
@@ -1143,17 +1269,136 @@ async def resume_waiting_ci_task(db: Session, wait: MainAITaskWait) -> None:
     goal = db.get(MainAIGoal, task.goal_id)
     if wait.status == MainAITaskWaitStatus.satisfied:
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_satisfied, detail=wait.evidence))
-        _finalize_task_outcome(db, task, passed=True, evidence={"ci_wait": wait.evidence})
+        _stop_open_pr_after_ci(
+            db,
+            task,
+            wait=wait,
+            goal=goal,
+            ci_passed=True,
+            event_reason="ci_satisfied",
+        )
     elif wait.status == MainAITaskWaitStatus.timed_out:
         db.add(
             MainAITaskEvent(
                 task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_timed_out, detail=wait.evidence
             )
         )
-        _finalize_task_outcome(db, task, passed=False, evidence={"ci_wait": wait.evidence, "reason": "timed_out"})
+        fail_closed_external_ci(
+            db,
+            task,
+            reason="external CI timed out; STOP without paid replan",
+            first_cycle_state=STATE_EXTERNAL_CI_TIMED_OUT,
+            evidence={"ci_wait": wait.evidence, "ci_passed": False, "review_ok": False, "merged": False},
+            goal=goal,
+        )
     else:
-        # failed or cancelled -- both mean "this attempt did not produce verified, green work".
+        # failed or cancelled — external CI outcome, never a local editable-task failure.
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.wait_failed, detail=wait.evidence))
-        _finalize_task_outcome(db, task, passed=False, evidence={"ci_wait": wait.evidence})
+        fail_closed_external_ci(
+            db,
+            task,
+            reason="external CI failed; STOP without paid replan",
+            first_cycle_state=STATE_EXTERNAL_CI_FAILED,
+            evidence={"ci_wait": wait.evidence, "ci_passed": False, "review_ok": False, "merged": False},
+            goal=goal,
+        )
     if goal is not None:
-        record_checkpoint(db, task=task, goal=goal, job_id=wait.job_id, step="ci_wait_resolved", data={"wait_status": wait.status.value})
+        record_checkpoint(
+            db,
+            task=task,
+            goal=goal,
+            job_id=wait.job_id,
+            step="ci_wait_resolved",
+            data={"wait_status": wait.status.value, "merged": False, "first_cycle_stop": True},
+        )
+
+
+def _publication_identity(db: Session, task: MainAITask, wait: MainAITaskWait, goal: MainAIGoal | None) -> dict:
+    """Exact identity the independent review receipt must bind. Missing fields fail closed."""
+    resource = wait.resource_ref if isinstance(wait.resource_ref, dict) else {}
+    condition = wait.condition if isinstance(wait.condition, dict) else {}
+    work_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=wait.job_id, step="work_result")
+    work_result = {}
+    if work_checkpoint is not None and isinstance(work_checkpoint.executor_state, dict):
+        work_result = work_checkpoint.executor_state.get("work_result") or {}
+        if not isinstance(work_result, dict):
+            work_result = {}
+    envelope = None
+    try:
+        envelope = _envelope_for_path_a_task(db, task)
+    except TaskExecutionError:
+        envelope = None
+    envelope_context = {}
+    if envelope is not None:
+        envelope_context = {
+            "envelope_id": str(envelope.id),
+            "authorized_paths": list(envelope.authorized_paths or []),
+            "authorized_capabilities": list(envelope.authorized_capabilities or []),
+            "authorized_by": envelope.authorized_by,
+            "repository_identity": envelope.repository_identity,
+        }
+    repository = str(resource.get("repo") or get_settings().github_repo or "")
+    head_sha = str(resource.get("sha") or work_result.get("head_sha") or "")
+    pr_number = int(work_result.get("pull_request_number") or 0)
+    approved_base = str(
+        work_result.get("approved_base_sha")
+        or condition.get("approved_base_sha")
+        or ""
+    )
+    instruction = goal.original_instruction if goal is not None else ""
+    return {
+        "repository": repository,
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "approved_base": approved_base,
+        "builder_identity": PATH_A_BUILDER_IDENTITY,
+        "instruction_hash_value": instruction_hash(instruction),
+        "output_hash_value": output_hash(repository=repository, pr_number=pr_number, head_sha=head_sha) if pr_number > 0 else "",
+        "envelope_context": envelope_context,
+        "envelope_hash": envelope_authorization_hash(envelope_context),
+        "draft": bool(work_result.get("draft", True)),
+        "merged": False,
+        "work_result": work_result,
+    }
+
+
+def _stop_open_pr_after_ci(
+    db: Session,
+    task: MainAITask,
+    *,
+    wait: MainAITaskWait,
+    goal: MainAIGoal | None,
+    ci_passed: bool,
+    event_reason: str,
+) -> None:
+    """CI success is not merge. Require a verifiable independent review receipt, then STOP."""
+    identity = _publication_identity(db, task, wait, goal)
+    review = evaluate_first_cycle_review_receipt(
+        db,
+        repository=identity["repository"],
+        pr_number=identity["pr_number"],
+        head_sha=identity["head_sha"],
+        approved_base=identity["approved_base"],
+        builder_identity=identity["builder_identity"],
+        instruction_hash_value=identity["instruction_hash_value"],
+        output_hash_value=identity["output_hash_value"],
+        envelope_context=identity["envelope_context"],
+        owner_id=task.owner_id,
+    )
+    evidence = {
+        "ci_wait": wait.evidence,
+        "ci_passed": ci_passed,
+        "review_ok": review.ok,
+        "review_reason": review.reason,
+        "publication": {k: v for k, v in identity.items() if k != "work_result"},
+        "merged": False,
+        "draft_pr": identity["draft"],
+    }
+    stop_first_cycle(
+        db,
+        task,
+        reason=review.reason if not review.ok else "independent review recorded; STOP before merge",
+        first_cycle_state=review.first_cycle_state,
+        evidence=evidence,
+        goal=goal,
+    )

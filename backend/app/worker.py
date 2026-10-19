@@ -47,6 +47,7 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
+from app.mainai_execution.first_cycle_stop import FirstCycleGoalStoppedError, goal_is_autonomous_terminal
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
 from app.mainai_execution.envelope_scope import PATH_A_CAPABILITY, path_a_dispatch_is_authorized
@@ -451,12 +452,14 @@ class Worker:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
                 continue
+            if goal_is_autonomous_terminal(db, goal):
+                continue  # first-cycle STOP / schema-terminal: no further autonomous dispatch
             if not path_a_dispatch_is_authorized(db, owner_id=goal.owner_id, goal_id=goal.id):
                 continue  # never-governed became governed, or Path A authorization vanished in the gap
             try:
                 dispatch_ready_task(db, task=task, goal=goal, dispatched_by="mainai_worker_auto_advance")
                 db.commit()
-            except ApprovalRequiredError:
+            except (ApprovalRequiredError, FirstCycleGoalStoppedError):
                 db.rollback()
             except Exception:
                 db.rollback()
@@ -487,6 +490,11 @@ class Worker:
             .all()
         )
         for wait in due_waits:
+            task = db.get(MainAITask, wait.task_id)
+            if task is not None:
+                goal = db.get(MainAIGoal, task.goal_id)
+                if goal_is_autonomous_terminal(db, goal) and task.status != MainAITaskStatus.waiting_ci:
+                    continue
             try:
                 await resume_waiting_ci_task(db, wait)
                 db.commit()
@@ -512,6 +520,9 @@ class Worker:
             .all()
         )
         for task in due_tasks:
+            goal = db.get(MainAIGoal, task.goal_id)
+            if goal_is_autonomous_terminal(db, goal):
+                continue
             try:
                 retry_task(db, task=task)
                 db.commit()
@@ -631,6 +642,20 @@ class Worker:
                 continue
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
+                continue
+            if goal_is_autonomous_terminal(db, goal):
+                from app.mainai_execution.first_cycle_stop import abandon_running_task_after_stop
+
+                try:
+                    abandon_running_task_after_stop(db, task, goal=goal)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to abandon running task %s after first-cycle STOP.",
+                        self.worker_id,
+                        task.id,
+                    )
                 continue
             try:
                 record = get_or_create_recovery_record(db, task=task, job=job)

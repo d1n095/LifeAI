@@ -247,3 +247,35 @@ def test_unscripted_cancel_vs_finalize_race_only_legal_outcomes(superuser_db, tm
         f"expected both legal orderings across {TRIALS} trials; "
         f"cancel_wins={seen_cancel_wins} finalize_wins={seen_finalize_wins}"
     )
+
+
+def test_success_finalize_after_goal_completed_is_not_stop_failed(superuser_db, tmp_path):
+    """Later unscripted-race trials reset the task to running after a completed finalize
+    that may have closed the goal. Schema-terminal without first-cycle STOP must not
+    fail-close the task as publication-after-STOP."""
+    _, _, task, job, _, _ = _foundation(superuser_db, tmp_path)
+    task.mainai_job_id = job.id
+    _reset_running(superuser_db, task, job)
+    _finalize_task_outcome(
+        superuser_db,
+        task,
+        passed=True,
+        evidence={"race": "first_complete"},
+        job_id=job.id,
+    )
+    superuser_db.commit()
+    superuser_db.expire_all()
+    task = superuser_db.get(MainAITask, task.id)
+    job = superuser_db.get(MainAIJob, job.id)
+    assert task.status == MainAITaskStatus.completed
+    _reset_running(superuser_db, task, job)
+    _finalize_task_outcome(
+        superuser_db,
+        task,
+        passed=True,
+        evidence={"race": "second_complete"},
+        job_id=job.id,
+    )
+    superuser_db.commit()
+    superuser_db.expire_all()
+    assert superuser_db.get(MainAITask, task.id).status == MainAITaskStatus.completed
