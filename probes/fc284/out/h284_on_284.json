@@ -1,0 +1,608 @@
+{
+  "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+  "counts": {
+    "BLOCKED": 1,
+    "FAIL": 8,
+    "PASS": 57,
+    "UNKNOWN": 0
+  },
+  "go": false,
+  "recorded_at": "2026-10-19T07:02:08.305178+00:00",
+  "rows": [
+    {
+      "boundary": "harness.ci.exact_set",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "done=True passed=True n_required=12 evidence={'sha': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'required': [{'name': 'Frontend \u2014 TypeScript & ESLint', 'state': 'passed', 'runs': 2}, {'name': 'Frontend \u2014 npm audit', 'state': 'passed', 'runs': 2}, {'name': 'Frontend \u2014 build (docker)', 'state': 'passed', 'runs': 2}, {'name': 'Frontend \u2014 build (vercel)', 'state': 'passed', 'runs': 2}, {'name': 'Backend \u2014 unit/integration tests', 'state': 'passed', 'runs': 2}, {'name': 'Backend \u2014 RLS & session-security tests', 'state': 'passed', 'runs': 2}, {'name': 'Backend \u2014 account lifecycle & rate-limit tests', 'state': 'passed', 'runs': 2}, {'name': 'Backend \u2014 Alembic migration check', 'state': 'passed', 'runs': 2}, {'name': 'E2E \u2014 Playwright (full stack)', 'state': 'passed', 'runs': 2}, {'name': 'E2E \u2014 Library / Founder Knowledge Studio', 'state': 'passed', 'runs': 2}, {'name': 'E2E \u2014 same-origin proxy', 'state': 'passed', 'runs': 2}, {'name': 'All required checks passed', 'state': 'passed', 'runs': 2}], 'overflow': False, 'check_run_count': 24, 'unexpected_checks_evidence_only': [], 'rejected_substitutions': [], 'stale_sha_runs_ignored': 0}",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:35.181272+00:00",
+      "status": "PASS",
+      "test_id": "CI-1 exact 12-check set with push and pull_request suites"
+    },
+    {
+      "boundary": "harness.ci.suites",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "done=False passed=False [{'name': 'Frontend \u2014 TypeScript & ESLint', 'state': 'missing_suite', 'runs': 1}, {'name': 'Frontend \u2014 npm audit', 'state': 'missing_suite', 'runs': 1}, {'name': 'Frontend \u2014 build (docker)', 'state': 'missing_suite', 'runs': 1}]",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:35.448420+00:00",
+      "status": "PASS",
+      "test_id": "CI-2 push/PR suite semantics: one suite is not enough"
+    },
+    {
+      "boundary": "harness.ci.app_identity",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "done=False passed=False substitutions=[{'name': 'Frontend \u2014 TypeScript & ESLint', 'app_slug': 'vercel', 'app_id': 1}, {'name': 'Frontend \u2014 TypeScript & ESLint', 'app_slug': 'vercel', 'app_id': 1}]",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:35.749694+00:00",
+      "status": "PASS",
+      "test_id": "CI-3 wrong app cannot substitute"
+    },
+    {
+      "boundary": "harness.ci.sha",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "done=False stale=24",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:36.037145+00:00",
+      "status": "PASS",
+      "test_id": "CI-4 wrong SHA is ignored"
+    },
+    {
+      "boundary": "harness.ci.missing",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "done=False passed=False",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:36.369196+00:00",
+      "status": "PASS",
+      "test_id": "CI-5 missing required check is not a pass"
+    },
+    {
+      "boundary": "harness.ci.success_only",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "skipped=False neutral=False",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:36.660513+00:00",
+      "status": "PASS",
+      "test_id": "CI-6 skipped/neutral do not satisfy required checks"
+    },
+    {
+      "boundary": "production.evaluate_check_runs",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "legacy evaluate_check_runs(skipped) -> done=True passed=True",
+      "production_module": "app.mainai_execution.ci_wait",
+      "recorded_at": "2026-10-19T07:01:36.988481+00:00",
+      "status": "FAIL",
+      "test_id": "CI-6 production evaluate_check_runs success-only"
+    },
+    {
+      "boundary": "production.evaluate_required_check_runs",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "present",
+      "production_module": "app.mainai_execution.ci_wait",
+      "recorded_at": "2026-10-19T07:01:37.301465+00:00",
+      "status": "PASS",
+      "test_id": "CI-6b production evaluate_required_check_runs"
+    },
+    {
+      "boundary": "harness.ci.retry",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "done=True passed=True",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:37.550422+00:00",
+      "status": "PASS",
+      "test_id": "CI-7 duplicate/retried checks: latest per suite counts"
+    },
+    {
+      "boundary": "harness.ci.overflow",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "count=64 overflow=True",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:37.847325+00:00",
+      "status": "PASS",
+      "test_id": "CI-8 >30 results: overflow recorded, exact set still required"
+    },
+    {
+      "boundary": "harness.ci.vercel",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "extras=[{'name': 'Vercel Preview', 'app_slug': 'vercel', 'conclusion': 'success'}]",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:38.117216+00:00",
+      "status": "PASS",
+      "test_id": "CI-9 unexpected Vercel checks are evidence only"
+    },
+    {
+      "boundary": "harness.review.negative",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "negative or non-approving review: changes_requested",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:38.381683+00:00",
+      "status": "PASS",
+      "test_id": "REV-1 negative review is not a GO"
+    },
+    {
+      "boundary": "harness.review.head_sha",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "review receipt SHA does not match current PR head",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:38.639792+00:00",
+      "status": "PASS",
+      "test_id": "REV-2 changed PR head invalidates review receipt"
+    },
+    {
+      "boundary": "harness.review.identity",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "reviewer and builder identities must be distinct",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:38.908030+00:00",
+      "status": "PASS",
+      "test_id": "REV-3 reviewer/builder identity separation"
+    },
+    {
+      "boundary": "harness.review.missing",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "no review receipt; first cycle must STOP",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:39.189894+00:00",
+      "status": "PASS",
+      "test_id": "REV-4 missing review receipt is STOP"
+    },
+    {
+      "boundary": "production.review_receipt",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "present",
+      "production_module": "app.mainai_execution.review_receipt",
+      "recorded_at": "2026-10-19T07:01:39.453053+00:00",
+      "status": "PASS",
+      "test_id": "REV-5 production evaluate_first_cycle_review_receipt"
+    },
+    {
+      "boundary": "production.review_receipt.missing",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "no review receipt; first cycle must STOP",
+      "production_module": "app.mainai_execution.review_receipt",
+      "recorded_at": "2026-10-19T07:01:39.838621+00:00",
+      "status": "PASS",
+      "test_id": "REV-6 production missing review is STOP"
+    },
+    {
+      "boundary": "production.review_receipt.truth",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "{'merged': False, 'automatic_merge': False, 'automatic_deploy': False, 'push_is_not_merged': True, 'draft_pr_is_not_merged': True, 'ci_success_is_not_merged': True, 'positive_review_is_not_merged': True, 'ci_passed': True, 'review_ok': True, 'first_cycle_state': 'stop_before_merge', 'awaiting_founder_merge': True, 'subsequent_autonomous_job': False}",
+      "production_module": "app.mainai_execution.review_receipt",
+      "recorded_at": "2026-10-19T07:01:40.109875+00:00",
+      "status": "PASS",
+      "test_id": "REV-7 publication truth never merged"
+    },
+    {
+      "boundary": "production._authed_remote_url",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "url_contains_token=True; source='def _authed_remote_url(repo: str, token: str) -> str:\\n    return f\"https://x-access-token:{token}@github.com/{repo}.git\"'",
+      "production_module": "app.mainai_execution.worktree",
+      "recorded_at": "2026-10-19T07:01:40.375250+00:00",
+      "status": "FAIL",
+      "test_id": "CRED-1 production does not embed the token in the remote URL"
+    },
+    {
+      "boundary": "production.create_task_worktree.remote",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "leaked=True; origin=https://x-access-token:test-token-must-not-leak-into-worktree@github.com/test-owner/test-repo.git",
+      "production_module": "app.mainai_execution.worktree",
+      "recorded_at": "2026-10-19T07:01:41.015437+00:00",
+      "status": "FAIL",
+      "test_id": "CRED-2 worktree .git/config contains no token after production URL write"
+    },
+    {
+      "boundary": "harness.subprocess_probe",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "leaks={'worker': True, 'test': True, 'reviewer': True}",
+      "production_module": "app.mainai_execution.worktree",
+      "recorded_at": "2026-10-19T07:01:42.286522+00:00",
+      "status": "FAIL",
+      "test_id": "CRED-3 worker/test/reviewer subprocesses cannot read writable remote credentials"
+    },
+    {
+      "boundary": "harness.credential_helper",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "<REDACTED by examiner: raw host `git credential fill` output contained a live GitHub token and host credential-helper config (finding P1-3)>",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:43.046226+00:00",
+      "status": "PASS",
+      "test_id": "CRED-4 credential helper cannot supply push authority"
+    },
+    {
+      "boundary": "harness.env_injection",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "config_leak=False; env_hits={'GITHUB_TOKEN': 'test-token-must-not-leak-into-worktree', 'GH_TOKEN': 'test-token-must-not-leak-into-worktree', 'GIT_ASKPASS': '/bin/echo'}",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:43.759766+00:00",
+      "status": "PASS",
+      "test_id": "CRED-5 Git environment injection does not persist into .git/config"
+    },
+    {
+      "boundary": "harness.one_use_credential",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "token_file_exists=False; cancelled=True",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:44.463449+00:00",
+      "status": "PASS",
+      "test_id": "CRED-6 cancellation/recovery cannot revive credentials"
+    },
+    {
+      "boundary": "harness.remote_grant_hook",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "returncode=1; stderr=remote: first-cycle-harness: ungranted push refused        \nTo <tmp>/pytest-70/test_direct_ungranted_push_ref0/github.git\n ! [remote rejected] HEAD -> claude/mainai-task-direct (pre-receive hook declined)\nerror: failed to push some refs to '<tmp>",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:45.582100+00:00",
+      "status": "PASS",
+      "test_id": "CRED-7 direct ungranted push is refused"
+    },
+    {
+      "boundary": "harness.lifecycle",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "stages=['goal', 'founder_authorization', 'planning', 'repo_edit', 'verification', 'local_commit', 'exact_sha_push_grant', 'simulated_push', 'remote_observation', 'separate_draft_pr_authorization', 'exact_sha_ci', 'review_receipt', 'STOP']; sha=89fc1f06a810c12b8d65a7075f0322ff5814464c; remote=89fc1f06a810c12b8d65a7075f0322ff5814464c; publication=True []; ci=True; review=True; pr={'number': 1, 'draft': True, 'head': {'ref': 'claude/mainai-task-task-1', 'sha': '89fc1f06a810c12b8d65a7075f0322ff5814464c'}, 'base': 'integration/founder-alpha-test-base', 'title': 'Document greet()', 'html_url': 'https://example.invalid/pull/1'}",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:46.748167+00:00",
+      "status": "PASS",
+      "test_id": "E2E-1 harness rehearsal Goal\u2192STOP"
+    },
+    {
+      "boundary": "harness.remote_grant_hook",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "returncode=1; stderr=remote: first-cycle-harness: ungranted push refused        \nTo <tmp>/pytest-70/test_e2e_ungranted_push_is_ref0/github.git\n ! [remote rejected] claude/mainai-task-ungranted -> claude/mainai-task-ungranted (pre-receive hook declined)\nerror: failed to push some refs to '<tmp>",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:47.641309+00:00",
+      "status": "PASS",
+      "test_id": "E2E-2 ungranted push refused"
+    },
+    {
+      "boundary": "production._finalize_repo_edit",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "mentions_grant=False; push_gated=False; unconditional_push=True; push_grants_module=False",
+      "production_module": "app.mainai_execution.execution_job",
+      "recorded_at": "2026-10-19T07:01:48.040394+00:00",
+      "status": "FAIL",
+      "test_id": "E2E-3 production finalize requires exact-SHA push grant"
+    },
+    {
+      "boundary": "production.open_pr.review_receipt",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "review_receipt_present=True; stop_first_cycle=True",
+      "production_module": "app.mainai_execution.execution_job",
+      "recorded_at": "2026-10-19T07:01:48.307031+00:00",
+      "status": "PASS",
+      "test_id": "E2E-4 production STOP after review receipt"
+    },
+    {
+      "boundary": "harness.grants.separate_kinds",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "distinct=True",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:49.426078+00:00",
+      "status": "PASS",
+      "test_id": "E2E-5 separate push and draft-PR grants"
+    },
+    {
+      "boundary": "harness.grants.kind_and_one_use",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "push grant rejected when presented as draft_pr after consume",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:50.409652+00:00",
+      "status": "PASS",
+      "test_id": "E2E-6 consumed push grant cannot be reused as a PR grant"
+    },
+    {
+      "boundary": "production.push_grants",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "Codex activation-security grant module is not present on this candidate; harness contract tests below are not a production compatibility claim",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:50.770798+00:00",
+      "status": "BLOCKED",
+      "test_id": "GRANT-PROD production push/PR grant interface"
+    },
+    {
+      "boundary": "harness.grants.missing",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "unknown grant refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:51.103136+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-1 missing approval"
+    },
+    {
+      "boundary": "harness.grants.owner",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "owner mismatch refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:51.410956+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-2 wrong owner"
+    },
+    {
+      "boundary": "harness.grants.identity",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "goal/task/job mismatches refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:51.680698+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-3 wrong goal/task/job"
+    },
+    {
+      "boundary": "harness.grants.worktree",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "worktree mismatch refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:51.956314+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-4 wrong worktree"
+    },
+    {
+      "boundary": "harness.grants.repo_branch",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "branch and repository mismatches refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:52.225210+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-5 wrong branch/repository"
+    },
+    {
+      "boundary": "harness.grants.base_sha",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "stale base refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:52.494153+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-6 stale base SHA"
+    },
+    {
+      "boundary": "harness.grants.commit_sha",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "moved local HEAD refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:52.762955+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-7 changed local commit"
+    },
+    {
+      "boundary": "harness.grants.one_use",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "second consume refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:53.011879+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-8 consumed grant"
+    },
+    {
+      "boundary": "harness.grants.expiry",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "expired grant refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:53.282059+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-9 expired grant"
+    },
+    {
+      "boundary": "harness.grants.cancel",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "cancelled grant refused",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:53.566666+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-10 cancellation"
+    },
+    {
+      "boundary": "harness.grants.recovery",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "consumed bit is durable in the grant record",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:53.850639+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-11 restart/recovery cannot revive consumed grant"
+    },
+    {
+      "boundary": "harness.grants.concurrency",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "results=['ok', 'err', 'err', 'err', 'err', 'err', 'err', 'err']",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:54.125787+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-12 simultaneous duplicate consumption"
+    },
+    {
+      "boundary": "harness.grants.unknown_network",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "matching remote tip confirms; mismatch does not revive the grant",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:54.395675+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-13 unknown network + exact remote-tip reconciliation"
+    },
+    {
+      "boundary": "harness.grants.separate_kinds",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "push=5598b003-ba89-4033-b823-561b1527473b pr=01a1220e-479e-42f3-806b-154a1640f860",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:54.689566+00:00",
+      "status": "PASS",
+      "test_id": "GRANT-14 separate push and PR grants"
+    },
+    {
+      "boundary": "harness.matrix.sha",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "sha=9c978ded05b05ad174ce003a3efad22682ec187d",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:54.981888+00:00",
+      "status": "PASS",
+      "test_id": "MATRIX-1 candidate SHA is the exact code SHA under test"
+    },
+    {
+      "boundary": "harness.matrix.vocab",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "illegal=[]; allowed=['BLOCKED', 'FAIL', 'PASS', 'UNKNOWN']",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:55.273159+00:00",
+      "status": "PASS",
+      "test_id": "MATRIX-2 closed status vocabulary"
+    },
+    {
+      "boundary": "harness.publication_oracle",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "ok=True; reasons=[]; commits=['7ecf422ee6003e1ae0ea0a803307397bc929095e']",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:56.097680+00:00",
+      "status": "PASS",
+      "test_id": "PUB-1 oracle accepts one regular-file commit"
+    },
+    {
+      "boundary": "harness.publication_oracle.history",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "oracle=[\"first cycle requires exactly one authorized commit on the approved base; got 2: ['11d5bbdb5518d77127cb6a759bccfe757eaa1b10', '82f4f1694a85a204152a0eb697d305c73d609754']\", \"out-of-scope path 'backend/app/secrets.py' appears in commit 11d5bbdb5518 (status=A); a clean final diff must not conceal intermediate or deleted unauthorized paths\", \"out-of-scope path 'backend/app/secrets.py' appears in commit 82f4f1694a85 (status=D); a clean final diff must not conceal intermediate or deleted unauthorized paths\"]; commits=['11d5bbdb5518d77127cb6a759bccfe757eaa1b10', '82f4f1694a85a204152a0eb697d305c73d609754']",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:57.024127+00:00",
+      "status": "PASS",
+      "test_id": "TA-12 oracle rejects intermediate out-of-scope commit"
+    },
+    {
+      "boundary": "production.assert_changed_files_within_authority",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "production_accepted=True (accepted actual=['backend/app/greeting.py']); net diff conceals intermediate secrets.py if only base..HEAD names are checked",
+      "production_module": "app.mainai_execution.envelope_scope",
+      "recorded_at": "2026-10-19T07:01:57.024162+00:00",
+      "status": "FAIL",
+      "test_id": "TA-12 production publication inspects full history"
+    },
+    {
+      "boundary": "harness.publication_oracle.symlink",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "oracle=[\"symlink is not a regular file: 'backend/app/greeting.py' in 99aba12594ba\", \"non-regular object mode 120000 for 'backend/app/greeting.py' in 99aba12594ba\", \"changed object 'backend/app/greeting.py' is not a regular file (mode=120000)\", \"authorized path 'backend/app/greeting.py' is a symlink at 99aba12594ba\"]; objects=[{'commit': '99aba12594ba0de2d4c03de42f1432626338048d', 'path': 'backend/app/greeting.py', 'old_mode': '100644', 'new_mode': '120000', 'status': 'T'}]",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:57.903229+00:00",
+      "status": "PASS",
+      "test_id": "TA-13 oracle rejects authorized-path symlink"
+    },
+    {
+      "boundary": "production.assert_changed_files_within_authority",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "production_accepted=True (accepted actual=['backend/app/greeting.py'])",
+      "production_module": "app.mainai_execution.envelope_scope",
+      "recorded_at": "2026-10-19T07:01:57.903272+00:00",
+      "status": "FAIL",
+      "test_id": "TA-13 production rejects authorized-path symlink"
+    },
+    {
+      "boundary": "harness.publication_oracle.gitlink",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "oracle=['working tree/index is not clean at publication:\\n T backend/app/greeting.py\\n', \"git submodule/gitlink is forbidden: 'backend/app/greeting.py' in 75fd2afae33c\", \"non-regular object mode 160000 for 'backend/app/greeting.py' in 75fd2afae33c\", \"changed object 'backend/app/greeting.py' is not a regular file (mode=160000)\", \"authorized path 'backend/app/greeting.py' is a gitlink at 75fd2afae33c\"]",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:58.724690+00:00",
+      "status": "PASS",
+      "test_id": "PUB-2 oracle rejects gitlink/submodule"
+    },
+    {
+      "boundary": "production.assert_changed_files_within_authority",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "production_accepted=True (accepted actual=['backend/app/greeting.py'])",
+      "production_module": "app.mainai_execution.envelope_scope",
+      "recorded_at": "2026-10-19T07:01:58.724762+00:00",
+      "status": "FAIL",
+      "test_id": "PUB-2 production rejects gitlink/submodule"
+    },
+    {
+      "boundary": "harness.publication_oracle.clean_tree",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "oracle=['working tree/index is not clean at publication:\\nA  backend/app/stowaway.py\\n']",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:01:59.570457+00:00",
+      "status": "PASS",
+      "test_id": "PUB-3 untracked/staged discrepancy fails"
+    },
+    {
+      "boundary": "harness.publication_oracle.deletion",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "oracle=[\"out-of-scope path 'README.md' appears in commit d60de00516c1 (status=D); a clean final diff must not conceal intermediate or deleted unauthorized paths\"]",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:02:00.503290+00:00",
+      "status": "PASS",
+      "test_id": "PUB-4 oracle rejects deleted out-of-scope path"
+    },
+    {
+      "boundary": "production.assert_changed_files_within_authority",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "production_accepted=False (Refusing to publish 'README.md': it is not in the structured editable targets.)",
+      "production_module": "app.mainai_execution.envelope_scope",
+      "recorded_at": "2026-10-19T07:02:00.503350+00:00",
+      "status": "PASS",
+      "test_id": "PUB-4 production rejects deleted out-of-scope path"
+    },
+    {
+      "boundary": "harness.publication_oracle.one_commit",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "commit_count=2; reasons=[\"first cycle requires exactly one authorized commit on the approved base; got 2: ['95bb77ab74955edbaa5efd266d3f47a829b21f42', '76892ee30d155d7275c8b733cdbff57cff6c9603']\"]",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:02:01.514352+00:00",
+      "status": "PASS",
+      "test_id": "PUB-5 first cycle requires exactly one commit on the approved base"
+    },
+    {
+      "boundary": "harness.publication_oracle.rev_list",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "base=a4c72a356a219a06762acba7904ba9687390d1d5; head=d0d3536db70b83adc40b2a650da56f0391c78902; commits=['d0d3536db70b83adc40b2a650da56f0391c78902']",
+      "production_module": null,
+      "recorded_at": "2026-10-19T07:02:02.419744+00:00",
+      "status": "PASS",
+      "test_id": "PUB-6 exact commit history from base to pushed SHA"
+    },
+    {
+      "boundary": "production.billed_execution_chat",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "provider=openai; model=gpt-4o-mini; calls=[('openai', 'gpt-4o-mini')]",
+      "production_module": "app.mainai_execution.billed_chat",
+      "recorded_at": "2026-10-19T07:02:03.110946+00:00",
+      "status": "PASS",
+      "test_id": "SPEND-1 one approved provider/model"
+    },
+    {
+      "boundary": "production.billed_execution_chat.fallback",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "paid_attempts=1",
+      "production_module": "app.mainai_execution.billed_chat",
+      "recorded_at": "2026-10-19T07:02:03.543111+00:00",
+      "status": "PASS",
+      "test_id": "SPEND-2 no unauthorized fallback after the allowlisted attempt"
+    },
+    {
+      "boundary": "production.provider_spend",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "second billed call refused after max_requests=1",
+      "production_module": "app.provider_spend",
+      "recorded_at": "2026-10-19T07:02:03.981172+00:00",
+      "status": "PASS",
+      "test_id": "SPEND-3 bounded requests/tokens/USD"
+    },
+    {
+      "boundary": "production.pricing",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "estimate_cost(openai/not-a-real-model-xyz)=None",
+      "production_module": "app.providers.pricing",
+      "recorded_at": "2026-10-19T07:02:04.273092+00:00",
+      "status": "PASS",
+      "test_id": "SPEND-4 unknown pricing fails closed"
+    },
+    {
+      "boundary": "production.billed_execution_chat.reserve",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "paid_calls=0",
+      "production_module": "app.mainai_execution.billed_chat",
+      "recorded_at": "2026-10-19T07:02:04.658845+00:00",
+      "status": "PASS",
+      "test_id": "SPEND-5 invalid authority fails before any paid call"
+    },
+    {
+      "boundary": "production.replan",
+      "candidate_sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
+      "detail": "find_replan_trigger=None after a failed open_pr (CI-failure stand-in)",
+      "production_module": "app.mainai_execution.replan",
+      "recorded_at": "2026-10-19T07:02:05.077922+00:00",
+      "status": "PASS",
+      "test_id": "SPEND-6 no paid replanning after inherited CI failures"
+    }
+  ],
+  "schema": "mainai.first_cycle.acceptance_matrix/v1"
+}

@@ -1,0 +1,40 @@
+target: $X/wt284 @ 9c978ded05b05ad174ce003a3efad22682ec187d
+$X/probes/fc284/test_review_stop_284_exam.py:261: AssertionError: receipt recorded after CI never re-evaluated: state=independent_review_blocked, final_outcome={"first_cycle_state": "independent_review_blocked", "merged": false, "awaiting_founder_merge": false, "reason": "no review receipt; first cycle must STOP", "stopped_at": "2026-10-19T07:11:21.588481"}
+$X/probes/fc284/test_review_stop_284_exam.py:286: AssertionError: GAP: stopped goal still dispatched T2 -> status=MainAITaskStatus.running, job=37c8f0d7-5b54-42f1-897c-a0b37adcb0fe; tick errors=[]
+$X/probes/fc284/test_review_stop_284_exam.py:304: AssertionError: Founder cannot cancel a first-cycle STOP task: TaskNotCancellableError: MainAITask 9738bde9-79c3-4437-9a12-da62b4448837 has status 'blocked', not cancellable directly.
+$X/probes/fc284/test_review_stop_284_exam.py:359: AssertionError: GAP: external publication failure (integration branch 'mainai/integration-f…) triggered a paid replan
+$X/probes/fc284/test_review_stop_284_exam.py:359: AssertionError: GAP: external publication failure (GitHub push rejected: ! [remote rejected…) triggered a paid replan
+$X/probes/fc284/test_review_stop_284_exam.py:359: AssertionError: GAP: external publication failure (push grant missing or stale for local co…) triggered a paid replan
+$X/probes/fc284/test_review_stop_284_exam.py:379: AssertionError: GAP: external push rejection auto-retried and re-dispatched -> status=MainAITaskStatus.running, job=03cd201a-a873-400e-86b8-d1d3c51b03d5
+$X/probes/fc284/test_review_stop_284_exam.py:433: AssertionError: GAP: reviewer 'path_a.builder ' is accepted as independent from builder 'path_a.builder'
+$X/probes/fc284/test_review_stop_284_exam.py:433: AssertionError: GAP: reviewer 'PATH_A.BUILDER' is accepted as independent from builder 'path_a.builder'
+$X/probes/fc284/test_review_stop_284_exam.py:433: AssertionError: GAP: reviewer 'path_a.builder\u200b' is accepted as independent from builder 'path_a.builder'
+$X/probes/fc284/test_review_stop_284_exam.py:447: AssertionError: GAP: a future-dated PASS shadows a later FAIL (ordering trusts caller-supplied reviewed_at)
+$X/probes/fc284/test_review_stop_284_exam.py:476: AssertionError: account erasure fails with an owner-scoped review receipt: InternalError: (psycopg2.errors.RaiseException) mainai_verification_records is append-only
+PASSED test_review_stop_284_exam.py::test_S1_ci_green_without_receipt_stops_and_no_tick_restarts
+PASSED test_review_stop_284_exam.py::test_S2_ci_green_with_exact_pass_receipt_is_stop_before_merge_not_merged
+PASSED test_review_stop_284_exam.py::test_S3_pass_receipt_for_previous_head_does_not_satisfy_changed_head
+PASSED test_review_stop_284_exam.py::test_S4_negative_review_stops_and_never_replans
+PASSED test_review_stop_284_exam.py::test_S6_repeated_resolution_events_are_no_ops
+PASSED test_review_stop_284_exam.py::test_P1_external_ci_outcomes_never_replan[failed]
+PASSED test_review_stop_284_exam.py::test_P1_external_ci_outcomes_never_replan[timed_out]
+PASSED test_review_stop_284_exam.py::test_P1_external_ci_outcomes_never_replan[cancelled]
+PASSED test_review_stop_284_exam.py::test_P2_cancelled_job_never_replans
+PASSED test_review_stop_284_exam.py::test_P4_local_verification_failure_remains_replan_eligible
+PASSED test_review_stop_284_exam.py::test_R1_runtime_role_cannot_insert_a_pass_receipt
+PASSED test_review_stop_284_exam.py::test_R4_receipt_cannot_carry_reviewer_authority
+PASSED test_review_stop_284_exam.py::test_T1_track_b_reviewer_runtime_is_off
+FAILED test_review_stop_284_exam.py::test_S5_receipt_recorded_after_ci_is_never_evaluated
+FAILED test_review_stop_284_exam.py::test_S7_other_ready_task_of_a_stopped_goal_is_not_dispatched
+FAILED test_review_stop_284_exam.py::test_S8_founder_can_cancel_a_stopped_task
+FAILED test_review_stop_284_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[stale_base]
+FAILED test_review_stop_284_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[push_rejected]
+FAILED test_review_stop_284_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[grant_missing]
+FAILED test_review_stop_284_exam.py::test_P3b_external_publication_failure_inside_repo_edit_is_auto_retried
+FAILED test_review_stop_284_exam.py::test_R2_builder_identity_variants_are_not_independent[path_a.builder ]
+FAILED test_review_stop_284_exam.py::test_R2_builder_identity_variants_are_not_independent[PATH_A.BUILDER]
+FAILED test_review_stop_284_exam.py::test_R2_builder_identity_variants_are_not_independent[path_a.builder\u200b]
+FAILED test_review_stop_284_exam.py::test_R3_later_fail_is_not_shadowed_by_a_future_dated_pass
+FAILED test_review_stop_284_exam.py::test_R5_account_erasure_succeeds_after_an_owner_scoped_review_receipt
+12 failed, 13 passed in 29.30s
+target worktree unchanged
