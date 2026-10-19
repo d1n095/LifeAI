@@ -94,6 +94,31 @@ class TakeoverError(RuntimeError):
     pass
 
 
+class TakeoverCapExhaustedError(TakeoverError):
+    """A second auto-takeover on the same task is a crash-recovery loop (FO-6)."""
+
+
+# One auto-takeover per task. A second dead attempt after salvage is a crash-recovery loop
+# (FO-6): park for Founder review instead of minting another job.
+MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK = 1
+
+
+def count_completed_takeovers(db: Session, *, task_id) -> int:
+    """Count takeovers that actually minted a successor job.
+
+    Successful `execute_takeover` ends `completed` with `takeover_job_id` set — counting
+    `status == taken_over` would miss the production path and never trip the cap.
+    """
+    return (
+        db.query(MainAIRecoveryRecord)
+        .filter(
+            MainAIRecoveryRecord.task_id == task_id,
+            MainAIRecoveryRecord.takeover_job_id.isnot(None),
+        )
+        .count()
+    )
+
+
 async def execute_takeover(
     db: Session, *, task: MainAITask, goal: MainAIGoal, record: MainAIRecoveryRecord, dispatched_by: str
 ) -> tuple[MainAIRecoveryRecord, MainAIJob | None]:
@@ -104,6 +129,10 @@ async def execute_takeover(
     if job_has_founder_cancel(dead_job):
         raise TakeoverError(
             f"recovery record {record.id}: founder cancel_requested forbids takeover."
+        )
+    if count_completed_takeovers(db, task_id=task.id) >= MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK:
+        raise TakeoverCapExhaustedError(
+            f"recovery record {record.id}: auto-recovery takeover cap exhausted."
         )
     if record.status != MainAIRecoveryStatus.classified:
         raise TakeoverError(f"recovery record {record.id} is not classified (status={record.status}) -- cannot take over.")

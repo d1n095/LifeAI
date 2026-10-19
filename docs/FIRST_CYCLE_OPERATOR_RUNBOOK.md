@@ -3,7 +3,8 @@
 Companion to `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`. This is **not** activation, merge, or GO.
 
 Frozen parent: `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`.
-This successor: `cursor/first-cycle-ops-readiness-p2-91c1` ([#289](https://github.com/d1n095/LifeAI/pull/289)).
+Parent `#289` exact SHA: `ca60ba54febb49e1c7585fb776811564d54e3d21` (freeze after 12 required checks).
+This successor: `cursor/first-cycle-execution-hardening-p3-91c1`.
 
 ## Hard rules
 
@@ -129,6 +130,10 @@ Do not treat `evidence_sha` as a Git commit. The local verification commit SHA i
 | Want to inspect after a local pytest | Read the test assertion / SQL on the test DB | Pushing the isolated branch |
 | Codex transport still missing | Keep CRED-1/2/3, E2E-3, GRANT-PROD FAIL/BLOCKED | Implementing a second grant/transport |
 | Staging JSON still says `go: false` | Correct — do not flip it | Claiming GO from this runbook |
+| GitHub 5xx / `git fetch` failure during recovery | Leave the recovery record blocked; no paid replan | Treating it as `LOCAL_COMMITTED_NOT_PUSHED` |
+| Second dead job after one auto-takeover | Leave the task `blocked` (FO-6 cap) | Another `execute_takeover` |
+
+Founder-visible diagnostics are on `snapshot_first_cycle()["founder_diagnostics"]` (`go: false`, no tokens).
 
 ## Remaining blockers (not GO)
 

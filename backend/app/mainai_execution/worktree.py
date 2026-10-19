@@ -52,6 +52,7 @@ from app.integrations.github_client import GitHubClient
 from app.mainai_execution.publication_errors import (
     ApprovedBaseMovedError,
     GitHubApiBoundaryError,
+    PublicationNetworkError,
     PublicationTimeoutError,
     PushRejectedError,
     map_publication_boundary_error,
@@ -505,25 +506,37 @@ def worktree_git_status(worktree: MainAITaskWorktree) -> dict:
 
 
 def fetch_remote_branch(worktree: MainAITaskWorktree) -> str | None:
-    """Fetches the CURRENT remote tip of the worktree's own branch into this local checkout's
-    object database (read-only in effect -- never touches the local branch ref or working
-    tree) so is_ancestor() below has something real to compare against. Necessary because
-    create_task_worktree() makes a shallow, single-commit checkout (`--depth 1`) that never
-    contains anyone else's commits by default. Returns None if the branch does not exist on
-    the remote at all (nothing to compare against -- not an error)."""
+    """Fetches the CURRENT remote tip of the worktree's own branch into this local checkout.
+
+    A missing remote branch is `None` (not an error). Timeout / network / origin failures are
+    typed publication-boundary errors so they cannot be mistaken for a local verification
+    miss and must not trigger paid replan. Uses `_run_git` (sanitized env, no GIT_CONFIG
+    injection) rather than a raw subprocess.
+    """
     _require_ownership(worktree)
     path = Path(worktree.path)
-    result = subprocess.run(
-        ["git", "-C", str(path), "fetch", "origin", worktree.branch],
-        cwd=str(path),
-        capture_output=True,
-        text=True,
-        timeout=_GIT_TIMEOUT_SECONDS,
-        env=sanitized_git_subprocess_env(),
-    )
-    if result.returncode != 0:
+    try:
+        listed = _run_git(
+            ["ls-remote", "--heads", "origin", worktree.branch],
+            cwd=path,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except WorktreeTimeoutError as exc:
+        raise PublicationTimeoutError("RemoteFetchTimeout") from exc
+    except WorktreeError as exc:
+        raise PublicationNetworkError("RemoteFetchFailed") from exc
+    if not listed.stdout.strip():
         return None
-    return _run_git(["rev-parse", "FETCH_HEAD"], cwd=path).stdout.strip()
+    try:
+        _run_git(["fetch", "--", "origin", worktree.branch], cwd=path, timeout=_GIT_TIMEOUT_SECONDS)
+        sha = _run_git(["rev-parse", "FETCH_HEAD"], cwd=path).stdout.strip().split()[0]
+    except WorktreeTimeoutError as exc:
+        raise PublicationTimeoutError("RemoteFetchTimeout") from exc
+    except WorktreeError as exc:
+        raise PublicationNetworkError("RemoteFetchFailed") from exc
+    if not _SHA40.fullmatch(sha):
+        raise PublicationNetworkError("RemoteFetchHeadInvalid")
+    return sha
 
 
 def is_ancestor(worktree: MainAITaskWorktree, ancestor_sha: str) -> bool | None:

@@ -1,14 +1,14 @@
 {
   "schema": "mainai.first_cycle.staging_composition/v1",
-  "branch": "cursor/first-cycle-ops-readiness-p2-91c1",
-  "pr": 289,
-  "purpose": "Isolated successor of frozen #288. Execution-layer P2 hardening plus Founder-supervised local first-cycle operating flow. Not a merge into the final integration branch. Not a GO certification.",
+  "branch": "cursor/first-cycle-execution-hardening-p3-91c1",
+  "pr": null,
+  "purpose": "Isolated successor of #289. FO-6/FO-7 execution-layer completion: remote-fetch fail-closed, crash-recovery takeover cap, publication locking, founder diagnostics. Not a merge into the final integration branch. Not a GO certification.",
   "go": false,
   "successor_of": {
-    "pr": 288,
-    "ref": "cursor/first-cycle-stop-classification-p1-91c1",
-    "sha": "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
-    "role": "frozen P1 STOP-classification child of #287; left parent of this successor. Do not amend."
+    "pr": 289,
+    "ref": "cursor/first-cycle-ops-readiness-p2-91c1",
+    "sha": "ca60ba54febb49e1c7585fb776811564d54e3d21",
+    "role": "P2 ops-readiness child of frozen #288. Freeze at this SHA after 12 required GitHub checks succeed. Do not amend after freeze."
   },
   "inputs": {
     "founder_alpha": {
@@ -76,17 +76,30 @@
       "ref": "cursor/first-cycle-stop-classification-p1-91c1",
       "sha": "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
       "role": "frozen P1 STOP classification / typed fail-closed publication errors. Do not amend."
+    },
+    "pr_289": {
+      "pr": 289,
+      "ref": "cursor/first-cycle-ops-readiness-p2-91c1",
+      "sha": "ca60ba54febb49e1c7585fb776811564d54e3d21",
+      "role": "P2 ops-readiness / cancel-vs-retry / local dry run. Freeze at this SHA after 12 required GitHub checks succeed. Do not amend after freeze. Not a first-cycle GO certification."
     }
   },
   "this_successor": {
+    "p3": [
+      "FO-7: git fetch / GitHub 5xx cannot look like a missing remote branch",
+      "FO-7: remote_fetch_failed classifies UNSAFE_TO_AUTO_RECOVER and suppresses paid replan",
+      "FO-6: at most one auto-recovery takeover per task; second dead attempt parks blocked",
+      "publication lock SELECT FOR UPDATE goal then task before push/open_pr",
+      "Founder-visible first-cycle diagnostics (go=false, no tokens)",
+      "staging records pin #289 and keep go=false"
+    ],
     "p2": [
       "model-controlled filename/NUL/control-char rejection before pathlib",
       "sanitized git commit messages (no NUL/newline/leading-dash argv)",
       "failure_class without matching origin cannot classify STOP",
       "retry tick parks STOP retryable_failed instead of skipping forever",
       "recovery takeover refuses founder cancel_requested",
-      "auto-recovery finalizes interrupted cancelled jobs without takeover",
-      "staging records pin #288 and keep go=false"
+      "auto-recovery finalizes interrupted cancelled jobs without takeover"
     ],
     "ops": [
       "Founder-supervised local dry run through production execution_job",
@@ -176,7 +189,7 @@
     }
   ],
   "reproduce": [
-    "git fetch origin 1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
-    "git checkout -b cursor/first-cycle-ops-readiness-p2-91c1 1ea41d7db424cba6b4d9ec93da79fa85d809d2fb"
+    "git fetch origin ca60ba54febb49e1c7585fb776811564d54e3d21",
+    "git checkout -b cursor/first-cycle-execution-hardening-p3-91c1 ca60ba54febb49e1c7585fb776811564d54e3d21"
   ]
 }

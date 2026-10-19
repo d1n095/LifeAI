@@ -1,13 +1,15 @@
 # Integrating the eventual Codex activation/transport candidate
 
-This operator candidate (`cursor/first-cycle-ops-readiness-p2-91c1`) is the isolated
-successor of frozen `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`, itself the
-P1 child of frozen `#287` (`cursor/first-cycle-staging-p1-91c1`). The lineage still
-contains frozen `#263`, `#276`, `#281`, `#282`, `#284`, `#285`, `#286`, `#287`, and
-`#288`. It does **not** contain `#280` and does **not** implement Git transport,
-remote-effect grants, or Codex worktree credential isolation. `#286` only
-hermeticizes the acceptance harness; production CRED-1/2/3 remain FAIL. `#276` is a
-frozen Path A ancestor, not a GO certification. `go` stays false.
+This operator candidate (`cursor/first-cycle-execution-hardening-p3-91c1`) is the
+isolated successor of `#289` @ `ca60ba54febb49e1c7585fb776811564d54e3d21`, itself
+the P2 child of frozen `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`. The
+lineage still contains frozen `#263`, `#276`, `#281`, `#282`, `#284`, `#285`,
+`#286`, `#287`, `#288`, and `#289`. It does **not** contain `#280` and does
+**not** implement Git transport, remote-effect grants, or Codex worktree
+credential isolation. `#286` only hermeticizes the acceptance harness;
+production CRED-1/2/3 remain FAIL. `#276` is a frozen Path A ancestor, not a GO
+certification. `go` stays false. Operator `push_branch` still fails closed on
+unverifiable remote state without adding a second grant/transport system.
 
 Do not modify Codex's active branches from this lane. Do not add a second grant or
 transport system here.

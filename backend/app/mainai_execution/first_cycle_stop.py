@@ -133,11 +133,13 @@ def classify_publication_failure(
         return exc.first_cycle_state
 
     if isinstance(evidence, dict):
-        origin = evidence.get("origin")
+        origin = evidence.get("origin") or evidence.get("remote_fetch_origin")
         if isinstance(origin, str) and origin in FAIL_CLOSED_ORIGINS:
             mapped = ORIGIN_TO_STOP_STATE.get(origin)
             if mapped in STOP_STATES:
                 return mapped
+        if evidence.get("remote_fetch_failed") is True:
+            return STATE_EXTERNAL_BOUNDARY_FAILED
         # `failure_class` alone is model-smuggleable. Require a matching typed origin.
         # Structured flags our own code set (CI wait / review receipt), never model prose.
         if evidence.get("review_ok") is False and evidence.get("ci_passed") is True:
@@ -461,10 +463,12 @@ def assert_publication_permitted(
     *,
     job_id: Any | None = None,
 ) -> None:
-    """Immediate pre-push / pre-open_pr recheck. Holds FOR UPDATE on the goal row.
+    """Immediate pre-push / pre-open_pr recheck.
 
-    Raises PublicationForbiddenAfterStopError when the goal is already first-cycle STOP
-    or schema-terminal. Founder cancel_requested is not STOP — callers re-check via
+    Locks the goal row then the task row (`SELECT … FOR UPDATE`, goal first to keep lock
+    order stable). Callers must not `commit()` between this lock and the publication side
+    effect. Raises PublicationForbiddenAfterStopError when the goal is already first-cycle
+    STOP or schema-terminal. Founder cancel_requested is not STOP — callers re-check via
     `_check_cancel_requested`. `job_id` is accepted so publication call sites can pass the
     live job without a second signature.
     """
@@ -476,8 +480,17 @@ def assert_publication_permitted(
         .with_for_update()
         .execution_options(populate_existing=True)
     ).scalar_one_or_none()
-    if goal is None or goal_is_first_cycle_stopped(db, goal) or (
-        goal is not None and goal.status in TERMINAL_MAINAI_GOAL_STATUSES
+    locked_task = db.execute(
+        select(MainAITask)
+        .where(MainAITask.id == task.id, MainAITask.owner_id == task.owner_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if (
+        goal is None
+        or locked_task is None
+        or goal_is_first_cycle_stopped(db, goal)
+        or goal.status in TERMINAL_MAINAI_GOAL_STATUSES
     ):
         state = first_cycle_state_from_goal(goal) if goal is not None else None
         raise PublicationForbiddenAfterStopError(

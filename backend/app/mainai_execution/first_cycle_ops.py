@@ -43,6 +43,7 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.models.mainai_job import MainAIJob
+from app.models.mainai_recovery import MainAIRecoveryRecord
 from app.models.provider_spend import ProviderSpendAuthorization, ProviderSpendAuthorizationStatus
 
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
@@ -240,6 +241,59 @@ def _authorized_actions(db: Session, task: MainAITask, *, goal: MainAIGoal, sett
     return actions
 
 
+def founder_diagnostics(db: Session, goal: MainAIGoal) -> dict[str, Any]:
+    """Founder-visible first-cycle diagnostics. Never includes tokens, credentials, or GO."""
+    from app.mainai_execution.recovery_takeover import (
+        MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK,
+        count_completed_takeovers,
+    )
+
+    tasks = db.execute(
+        select(MainAITask).where(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at)
+    ).scalars().all()
+    recovery_rows: list[dict[str, Any]] = []
+    for task in tasks:
+        records = (
+            db.execute(
+                select(MainAIRecoveryRecord)
+                .where(MainAIRecoveryRecord.task_id == task.id)
+                .order_by(MainAIRecoveryRecord.detected_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+        takeovers = count_completed_takeovers(db, task_id=task.id)
+        for rec in records:
+            evidence = rec.evidence if isinstance(rec.evidence, dict) else {}
+            recovery_rows.append(
+                {
+                    "task_id": str(task.id),
+                    "recovery_id": str(rec.id),
+                    "status": rec.status.value,
+                    "classification": rec.classification.value if rec.classification else None,
+                    "manual_review_required": bool(rec.manual_review_required),
+                    "blocker": rec.blocker,
+                    "remote_fetch_failed": bool(evidence.get("remote_fetch_failed")),
+                    "remote_fetch_origin": evidence.get("remote_fetch_origin"),
+                    "takeovers_completed": takeovers,
+                    "takeover_cap": MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK,
+                    "recovery_loop_blocked": takeovers >= MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK,
+                }
+            )
+    return {
+        "schema": "mainai.first_cycle.founder_diagnostics/v1",
+        "goal_id": str(goal.id),
+        "goal_status": goal.status.value,
+        "first_cycle_state": first_cycle_state_from_goal(goal),
+        "stopped": goal_is_first_cycle_stopped(db, goal),
+        "merged": False,
+        "go": False,
+        "publication_permitted": not goal_is_autonomous_terminal(db, goal),
+        "recovery": recovery_rows,
+        "codex_transport": "FAIL/BLOCKED",
+    }
+
+
 def snapshot_first_cycle(
     db: Session, goal: MainAIGoal, *, repo_root: Path | None = None
 ) -> dict[str, Any]:
@@ -294,6 +348,7 @@ def snapshot_first_cycle(
         "authorized_actions": authorized,
         "forbidden_live_actions": sorted(FORBIDDEN_LIVE_ACTIONS),
         "costs": _spend_costs(db, owner_id=goal.owner_id, goal_id=goal.id),
+        "founder_diagnostics": founder_diagnostics(db, goal),
         "report": report,
         "audit": audit,
         "codex_transport": "FAIL/BLOCKED — not implemented on this candidate",
