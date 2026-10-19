@@ -125,6 +125,12 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
+from app.models.mainai_activation import (
+    ActivationPreflightVerdict,
+    MainAIActivationPreflightReceipt,
+    MainAIPushGrant,
+    PushGrantStatus,
+)
 from app.models.mainai_recovery import (
     AUTO_SALVAGEABLE_CLASSIFICATIONS,
     PROTECTED_BRANCHES,
@@ -493,4 +499,8 @@ __all__ = [
     "MainAIFounderBootEvent",
     "MainAIFounderBootStatus",
     "MainAIFounderCovenant",
+    "ActivationPreflightVerdict",
+    "MainAIActivationPreflightReceipt",
+    "MainAIPushGrant",
+    "PushGrantStatus",
 ]

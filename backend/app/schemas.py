@@ -1163,6 +1163,11 @@ class AuthorizeExecutionScopeIn(BaseModel):
     authorized_paths: list[str]
     authorized_capabilities: list[str]
     authorized_risk: str
+    repository_identity: str | None = None
+    base_branch: str | None = None
+    approved_base_sha: str | None = None
+    required_check_contexts: list[dict[str, str]] = []
+    authority_version: int = 1
 
 
 class RejectExecutionScopeIn(BaseModel):
@@ -1189,6 +1194,10 @@ class ExecutionAuthorizationEnvelopeOut(BaseModel):
     goal_id: uuid.UUID
     source_proposal_id: uuid.UUID | None = None
     repository_identity: str | None = None
+    base_branch: str | None = None
+    approved_base_sha: str | None = None
+    required_check_contexts: list = []
+    authority_version: int = 1
     authorized_paths: list
     authorized_capabilities: list
     authorized_risk: str
@@ -1197,3 +1206,59 @@ class ExecutionAuthorizationEnvelopeOut(BaseModel):
     status: str
     supersedes_envelope_id: uuid.UUID | None = None
     created_at: datetime
+
+
+class ActivationPreflightIn(BaseModel):
+    execution_envelope_id: uuid.UUID
+    provider_spend_authorization_id: uuid.UUID
+    repository_identity: str
+    integration_branch: str
+    activation_sha: str
+    base_branch: str
+    base_sha: str
+    authority_version: int
+    expires_at: datetime
+
+
+class ActivationPreflightOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    goal_id: uuid.UUID
+    verdict: str
+    unknown_required_facts: list
+    receipt_digest: str
+    expires_at: datetime
+
+
+class PushGrantCreateIn(BaseModel):
+    goal_id: uuid.UUID
+    job_id: uuid.UUID
+    worktree_id: uuid.UUID
+    execution_envelope_id: uuid.UUID
+    preflight_receipt_id: uuid.UUID
+    repository_identity: str
+    branch: str
+    base_branch: str
+    base_sha: str
+    local_commit_sha: str
+    authority_version: int
+    expires_at: datetime
+    idempotency_key: str
+
+
+class PushGrantOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    goal_id: uuid.UUID
+    task_id: uuid.UUID
+    job_id: uuid.UUID
+    worktree_id: uuid.UUID
+    repository_identity: str
+    branch: str
+    base_branch: str
+    base_sha: str
+    local_commit_sha: str
+    authority_version: int
+    status: str
+    expires_at: datetime
+    consumed_at: datetime | None = None

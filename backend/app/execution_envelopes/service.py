@@ -16,6 +16,7 @@ remains entirely the caller's own responsibility (its router, gated by
 `Depends(require_founder)`), exactly like `app.work_candidates.service.
 authorize_work_candidate()` already established for the layer directly below this one."""
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -30,6 +31,23 @@ from app.models.mainai_execution import MainAIGoal
 
 class ExecutionEnvelopeError(ValueError):
     pass
+
+
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _canonical_activation_checks(checks: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for check in checks or []:
+        if set(check) != {"name", "app_slug"}:
+            raise ExecutionEnvelopeError("required checks must contain only name and app_slug")
+        pair = (check["name"].strip(), check["app_slug"].strip())
+        if not all(pair) or pair in seen:
+            raise ExecutionEnvelopeError("required checks must be non-empty and unique")
+        seen.add(pair)
+        normalized.append({"name": pair[0], "app_slug": pair[1]})
+    return sorted(normalized, key=lambda item: (item["name"], item["app_slug"]))
 
 
 def _same(row: ExecutionScopeProposal, values: dict[str, Any]) -> ExecutionScopeProposal:
@@ -153,6 +171,11 @@ def authorize_execution_scope(
     authorized_capabilities: list[str],
     authorized_risk: str,
     envelope_idempotency_key: str,
+    repository_identity: str | None = None,
+    base_branch: str | None = None,
+    approved_base_sha: str | None = None,
+    required_check_contexts: list[dict[str, str]] | None = None,
+    authority_version: int = 1,
 ) -> tuple[ExecutionScopeProposal, ExecutionAuthorizationEnvelope]:
     """The ONLY path from a proposed execution scope to real, founder-granted execution
     authority -- PROPOSED_SCOPE != AUTHORIZED_SCOPE enforced here, not just in the schema's
@@ -185,6 +208,16 @@ def authorize_execution_scope(
     orderings) plus test_authorize_execution_scope_itself_locks_the_goal_row_no_manual_
     prelock_needed (proves this function's OWN lock, not a caller's, closes the window)."""
 
+    checks = _canonical_activation_checks(required_check_contexts)
+    activation_fields_requested = base_branch is not None or approved_base_sha is not None or bool(checks) or authority_version != 1
+    if authority_version <= 0:
+        raise ExecutionEnvelopeError("authority_version must be positive")
+    if activation_fields_requested:
+        if not repository_identity or not base_branch or not approved_base_sha or not checks:
+            raise ExecutionEnvelopeError("activation envelopes require repository, base branch, exact base SHA, and required checks")
+        if not _SHA_RE.fullmatch(approved_base_sha):
+            raise ExecutionEnvelopeError("approved_base_sha must be an exact lowercase 40-character SHA")
+
     row = db.execute(
         select(ExecutionScopeProposal).where(ExecutionScopeProposal.id == proposal_id, ExecutionScopeProposal.owner_id == owner_id).with_for_update()
     ).scalar_one_or_none()
@@ -211,7 +244,10 @@ def authorize_execution_scope(
 
     envelope = ExecutionAuthorizationEnvelope(
         owner_id=owner_id, goal_id=row.goal_id, source_proposal_id=row.id,
-        repository_identity=row.repository_identity, authorized_paths=authorized_paths,
+        repository_identity=repository_identity if repository_identity is not None else row.repository_identity,
+        base_branch=base_branch, approved_base_sha=approved_base_sha,
+        required_check_contexts=checks, authority_version=authority_version,
+        authorized_paths=authorized_paths,
         authorized_capabilities=authorized_capabilities, authorized_risk=authorized_risk,
         authorized_by=authorized_by, idempotency_key=envelope_idempotency_key,
         supersedes_envelope_id=prior_envelope.id if prior_envelope is not None else None,

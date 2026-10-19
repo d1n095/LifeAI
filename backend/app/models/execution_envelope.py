@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String, Text
+from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -69,6 +69,10 @@ class ExecutionAuthorizationEnvelope(Base):
     goal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
     source_proposal_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     repository_identity: Mapped[str | None] = mapped_column(Text, nullable=True)
+    base_branch: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_base_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    required_check_contexts: Mapped[list] = mapped_column(JSONB, default=list)
+    authority_version: Mapped[int] = mapped_column(Integer, default=1)
     authorized_paths: Mapped[list] = mapped_column(JSONB, default=list)
     authorized_capabilities: Mapped[list] = mapped_column(JSONB, default=list)
     authorized_risk: Mapped[str] = mapped_column(String(16))
