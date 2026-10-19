@@ -18,7 +18,11 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.mainai_execution.first_cycle_stop import should_suppress_paid_replan
+from app.mainai_execution.first_cycle_stop import (
+    goal_is_autonomous_terminal,
+    latest_failure_evidence,
+    should_suppress_paid_replan,
+)
 from app.mainai_execution.planner import create_plan, propose_plan_via_ai
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.models.mainai_execution import (
@@ -73,6 +77,8 @@ def find_replan_trigger(db: Session, *, goal: MainAIGoal) -> MainAITask | None:
     discoverable outcome with no new schema or escalation mechanism needed."""
     if goal.current_plan_version - 1 >= MAX_AUTO_REPLANS:
         return None
+    if goal_is_autonomous_terminal(db, goal):
+        return None
     active_plan = db.execute(
         select(MainAIPlan).where(MainAIPlan.goal_id == goal.id, MainAIPlan.status == MainAIPlanStatus.active)
     ).scalar_one_or_none()
@@ -89,8 +95,10 @@ def find_replan_trigger(db: Session, *, goal: MainAIGoal) -> MainAITask | None:
     )
     for failed_task in failed_tasks:
         # External CI / publication / independent-review STOP must not start a paid provider
-        # replan. Local editable-task failures remain eligible.
-        if should_suppress_paid_replan(failed_task):
+        # replan. Classification is by failure cause (evidence), not task type alone.
+        # Local editable-task verification failures remain eligible.
+        evidence = latest_failure_evidence(db, failed_task)
+        if should_suppress_paid_replan(failed_task, evidence=evidence):
             continue
         return failed_task
     return None
@@ -102,10 +110,11 @@ async def trigger_replan(db: Session, *, goal: MainAIGoal, failed_task: MainAITa
     cancellation, and re-promoting dependency-free tasks to `ready` entirely on its own,
     unchanged from V0.1. Records a `replanned` event on the failed task that triggered this --
     the durable link between "this specific failure" and "this specific new plan version"."""
-    if should_suppress_paid_replan(failed_task):
+    evidence = latest_failure_evidence(db, failed_task)
+    if goal_is_autonomous_terminal(db, goal) or should_suppress_paid_replan(failed_task, evidence=evidence):
         raise ReplanSuppressedError(
             f"refusing paid replan for {failed_task.task_type} {failed_task.id}: "
-            "external CI / first-cycle STOP is not a local editable-task failure"
+            "external publication / CI / first-cycle STOP is not a local editable-task failure"
         )
     failure_context = latest_verification_failure_text(db, failed_task.id)
     tasks, provider, model = await propose_plan_via_ai(db, goal=goal, failure_context=failure_context)

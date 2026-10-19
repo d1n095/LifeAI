@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 from pathlib import Path
 
 import pytest
 
 from first_cycle_acceptance._adapters import PRODUCTION
 from first_cycle_acceptance._credentials import config_contains_token, probe_role, write_one_use_askpass
-from first_cycle_acceptance._git import IsolatedRepo, git, seed_isolated_repo
+from first_cycle_acceptance._git import IsolatedRepo, git, isolated_git_env, seed_isolated_repo
 from first_cycle_acceptance._grants import GrantStore
-from first_cycle_acceptance._matrix import FAIL, PASS
+from first_cycle_acceptance._matrix import FAIL, PASS, sanitize_matrix_text
 from first_cycle_acceptance.conftest import REMAINING_OUT_OF_SCOPE, conclude
 
 pytestmark = pytest.mark.first_cycle_acceptance
@@ -89,12 +91,18 @@ def test_credential_helper_cannot_supply_authority(isolated_repo):
     probe = probe_role("worker", isolated_repo.work, extra_env={"GIT_TERMINAL_PROMPT": "0"})
     # Helper output in a worker probe must not be treated as authority, and fill must not
     # produce a usable password for github.com from worktree config (credential-free origin).
-    usable = "password=should-not-work" in probe.fill_stdout and "github.com" in probe.fill_stdout
+    # Compare only a digest — never record the password itself.
+    helper_digest = __import__("hashlib").sha256(b"should-not-work").hexdigest()
+    usable = probe.fill_password_digest == helper_digest and probe.fill_mentions_github
     conclude(
         "CRED-4 credential helper cannot supply push authority",
         FAIL if usable else PASS,
         boundary="harness.credential_helper",
-        detail=f"fill={probe.fill_stdout!r}; helper_cfg={probe.helper_stdout!r}",
+        detail=(
+            f"fill_had_password={probe.fill_had_password}; "
+            f"fill_mentions_github={probe.fill_mentions_github}; "
+            f"helper_cfg={probe.helper_stdout!r}"
+        ),
     )
 
 
@@ -167,3 +175,47 @@ def test_direct_ungranted_push_refused(isolated_repo):
         detail=f"returncode={result.returncode}; stderr={(result.stderr or '')[:400]}",
     )
     assert refused
+
+
+def test_ordinary_pytest_cannot_access_host_git_credentials(tmp_path, monkeypatch, isolated_repo):
+    """Regression for P1-3: a developer-machine credential helper must be invisible to the
+    harness. The secret is synthetic; this test never reads a real host token."""
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    helper = tmp_path / "host-helper.sh"
+    secret = "SYNTHETIC_HOST_HELPER_PASSWORD_NOT_A_TOKEN"
+    helper.write_text(f"#!/bin/sh\necho password={secret}\n", encoding="utf-8")
+    helper.chmod(0o755)
+    host_config = host_home / ".gitconfig"
+    host_config.write_text(f"[credential]\n\thelper = {helper}\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(host_config))
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+
+    env = isolated_git_env()
+    assert Path(env["GIT_CONFIG_GLOBAL"]).resolve() != host_config.resolve()
+    assert Path(env["HOME"]).resolve() != host_home.resolve()
+    assert env.get("GIT_CONFIG_NOSYSTEM") == "1"
+    assert secret not in Path(env["GIT_CONFIG_GLOBAL"]).read_text(encoding="utf-8")
+
+    probe = probe_role("worker", isolated_repo.work)
+    leaked = (
+        secret in json.dumps(probe.raw)
+        or secret in probe.config
+        or secret in probe.helper_stdout
+        or (probe.fill_password_digest == hashlib.sha256(secret.encode()).hexdigest())
+    )
+    detail = (
+        f"leaked={leaked}; fill_had_password={probe.fill_had_password}; "
+        f"isolated_home={probe.isolated_home!r}; "
+        f"isolated_global={probe.isolated_global_config!r}"
+    )
+    assert secret not in detail
+    conclude(
+        "CRED-8 ordinary pytest cannot access host git credentials",
+        FAIL if leaked else PASS,
+        boundary="harness.host_credential_isolation",
+        detail=detail,
+    )
+    assert not leaked
+    assert sanitize_matrix_text(f"password={secret}") == "password=<redacted>"

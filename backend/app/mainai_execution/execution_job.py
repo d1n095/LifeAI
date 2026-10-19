@@ -49,7 +49,9 @@ from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
 from app.mainai_execution.first_cycle_stop import (
     STATE_EXTERNAL_CI_FAILED,
     STATE_EXTERNAL_CI_TIMED_OUT,
+    classify_publication_failure,
     fail_closed_external_ci,
+    fail_closed_external_publication,
     stop_first_cycle,
 )
 from app.mainai_execution.required_checks import CI_STAGE_PR_OPEN, RequiredCheckContractError
@@ -964,7 +966,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # atomic commit for both effects -- a crash before it loses nothing durable (the job
         # is still `running`, correctly reclaimable and resumable from its existing
         # checkpoints); a crash after it has nothing left to lose.
-        _finalize_task_outcome(db, task, passed=False, evidence={"error": str(exc)})
+        _finalize_task_outcome(db, task, passed=False, evidence={"error": str(exc)}, cause=exc)
         try:
             mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
         except JobLeaseLostError:
@@ -1032,7 +1034,13 @@ def _rollup_goal_after_task_boundary(db: Session, *, task: MainAITask) -> None:
 
 
 def _finalize_task_outcome(
-    db: Session, task: MainAITask, *, passed: bool, evidence: dict, job_id: uuid.UUID | None = None
+    db: Session,
+    task: MainAITask,
+    *,
+    passed: bool,
+    evidence: dict,
+    job_id: uuid.UUID | None = None,
+    cause: BaseException | None = None,
 ) -> None:
     """THE completion gate — a task becomes `completed` if and only if verification passed
     (or genuinely had nothing to verify). A failed verification never produces `completed`: it
@@ -1043,7 +1051,10 @@ def _finalize_task_outcome(
     After a successful `completed` (or cooperative cancel), the canonical `record_final_report`
     path runs so a fully successful terminal graph closes the MainAIGoal. Permanent `failed`
     outcomes defer goal close to the worker finalize tick so auto-replan can still claim an
-    ACTIVE goal — see `_rollup_goal_after_task_boundary`."""
+    ACTIVE goal — see `_rollup_goal_after_task_boundary`.
+
+    External publication / grant / CI / review failures are classified by cause (evidence and
+    optional `cause` exception) and fail closed: no retry, no paid replan, goal-level STOP."""
     db.add(
         MainAITaskEvent(
             task_id=task.id,
@@ -1079,6 +1090,16 @@ def _finalize_task_outcome(
         task.next_retry_at = None
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.completed, detail=evidence))
     else:
+        publication_state = classify_publication_failure(cause, evidence=evidence)
+        if publication_state is not None:
+            fail_closed_external_publication(
+                db,
+                task,
+                reason=str((evidence or {}).get("error") or (cause or "external publication failure")),
+                first_cycle_state=publication_state,
+                evidence=evidence if isinstance(evidence, dict) else {"error": str(cause or "external publication failure")},
+            )
+            return
         if task.attempts < task.max_attempts:
             task.status = MainAITaskStatus.retryable_failed
             # V0.3: schedule the automatic retry-with-backoff scan (app/worker.py's
