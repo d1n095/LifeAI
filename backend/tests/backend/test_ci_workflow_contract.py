@@ -180,3 +180,15 @@ def test_production_glob_matches_the_test_glob():
     for pattern in EXPECTED_BRANCH_FILTERS:
         for ref in ("main", "mainai/integration-founder-supervised-v1", "claude/mainai-task-x", "cursor/a/b", "feature/x", "mainai"):
             assert branch_filter_matches(pattern, ref) == _github_branch_filter_matches(pattern, ref)
+
+
+def test_npm_audit_job_runs_composed_fc4_policy_then_production_audit():
+    """#282's policy test and production auditor must both run; #281's trigger/permission
+    changes must not drop either step or rename the required check."""
+    job = _workflow()["jobs"]["npm-audit"]
+    assert job["name"] == "Frontend — npm audit"
+    assert "if" not in job
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert "npm run audit:policy:test" in runs
+    assert "node scripts/check-npm-audit.js" in runs
+    assert runs.index("npm run audit:policy:test") < runs.index("node scripts/check-npm-audit.js")

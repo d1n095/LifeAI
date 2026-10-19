@@ -35,10 +35,12 @@ duration these functions run; `lease_generation` is recorded on the worktree row
 durable ownership fact for later recovery inspection, not enforced here as a live check."""
 
 import json
+import os
 import re
 import secrets
 import shutil
 import subprocess
+import unicodedata
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +49,14 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.integrations.github_client import GitHubClient
+from app.mainai_execution.publication_errors import (
+    ApprovedBaseMovedError,
+    GitHubApiBoundaryError,
+    PublicationNetworkError,
+    PublicationTimeoutError,
+    PushRejectedError,
+    map_publication_boundary_error,
+)
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_execution import MainAITask
 from app.models.mainai_recovery import (
@@ -66,6 +76,27 @@ _GIT_TIMEOUT_SECONDS = 60
 
 
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
+_COMMIT_MESSAGE_MAX = 200
+
+
+def sanitize_git_commit_message(message: object) -> str:
+    """Single-line commit subject from untrusted model text. Never a git flag vector.
+
+    Newlines, NULs and other control characters are refused (not forwarded to `git commit`).
+    A leading dash is stripped so `-m` cannot be confused with an extra option.
+    """
+    if not isinstance(message, str) or not message.strip():
+        raise WorktreeError("commit message must be a non-empty string")
+    if "\x00" in message:
+        raise WorktreeError("refusing a commit message containing NUL")
+    collapsed = " ".join(message.replace("\r", "\n").splitlines()).strip()
+    if not collapsed:
+        raise WorktreeError("refusing an empty commit message after sanitization")
+    if any(unicodedata.category(ch)[0] == "C" for ch in collapsed):
+        raise WorktreeError("refusing a commit message containing control characters")
+    if collapsed.startswith("-"):
+        collapsed = collapsed.lstrip("-").strip() or "MainAI local edit"
+    return collapsed[:_COMMIT_MESSAGE_MAX]
 
 
 def activation_base() -> tuple[str, str]:
@@ -137,7 +168,12 @@ class WorktreeError(RuntimeError):
     cannot proceed automatically" — never as "treat it as if nothing happened"."""
 
 
-class ActivationBaseConfigurationError(WorktreeError):
+class WorktreeTimeoutError(WorktreeError):
+    """A git subprocess exceeded its timeout. Local operations may retry; at the push/grant
+    boundary this is mapped to a typed fail-closed publication timeout."""
+
+
+class ActivationBaseConfigurationError(WorktreeError, ApprovedBaseMovedError):
     """Activation-mode base branch / approved base SHA is missing, stale, or has moved.
     A hard NO-GO: nothing falls back to another branch or to a moving tip."""
 
@@ -147,10 +183,9 @@ class WorktreeOwnershipError(WorktreeError):
     founder's explicit instruction: fail closed -> manual_review_required, never guess."""
 
 
-class WorktreePushRejected(WorktreeError):
-    """git itself rejected a non-force push (non-fast-forward). This means the remote branch
-    already has commits this local history is not a descendant of — a genuine divergence, not
-    something this layer ever resolves automatically. Maps to CONFLICTED_STATE."""
+class WorktreePushRejected(WorktreeError, PushRejectedError):
+    """git itself rejected a non-force push. The remote did not accept this publication.
+    Typed origin=`push`; recovery may still inspect refs for CONFLICTED_STATE."""
 
 
 def task_branch_name(task_id: uuid.UUID) -> str:
@@ -161,19 +196,59 @@ def task_branch_name(task_id: uuid.UUID) -> str:
     return f"claude/mainai-task-{task_id}"
 
 
-def _run_git(args: list[str], *, cwd: Path, timeout: int = _GIT_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
+_GIT_CONFIG_INJECTION_KEYS = frozenset(
+    {
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+    }
+)
+
+
+def strip_git_config_injection(env: dict[str, str]) -> dict[str, str]:
+    """Remove Git config-injection vectors (GIT_CONFIG_COUNT / KEY / VALUE / PARAMETERS).
+
+    Does not implement a second credential transport. Token-in-URL (CRED-1) stays FAIL.
+    """
+    cleaned = dict(env)
+    for key in _GIT_CONFIG_INJECTION_KEYS:
+        cleaned.pop(key, None)
+    for key in list(cleaned):
+        if key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"):
+            cleaned.pop(key, None)
+    return cleaned
+
+
+def sanitized_git_subprocess_env() -> dict[str, str]:
+    """Process env for git subprocesses, with config-injection keys removed."""
+    env = {k: str(v) for k, v in os.environ.items() if v is not None}
+    return strip_git_config_injection(env)
+
+
+def _run_git(
+    args: list[str], *, cwd: Path, timeout: int = _GIT_TIMEOUT_SECONDS, input_text: str | None = None
+) -> subprocess.CompletedProcess:
     """All git subprocess calls funnel through here. Mirrors the exact
     subprocess.TimeoutExpired handling lesson verify.py/_run_pytest() already established
     (V0.1 hardening pass): a killed subprocess's .stdout/.stderr are not reliably `str` even
     with text=True, and an uncaught TimeoutExpired must never propagate as a bare crash."""
     try:
         result = subprocess.run(
-            ["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=timeout, check=False
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=sanitized_git_subprocess_env(),
+            input=input_text,
         )
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        raise WorktreeError(f"git {' '.join(args)} timed out after {timeout}s: stdout={stdout[:500]!r} stderr={stderr[:500]!r}") from exc
+        raise WorktreeTimeoutError(
+            f"git {' '.join(args)} timed out after {timeout}s: stdout={stdout[:500]!r} stderr={stderr[:500]!r}"
+        ) from exc
     if result.returncode != 0:
         raise WorktreeError(f"git {' '.join(args)} failed ({result.returncode}): {result.stderr[:1000]}")
     return result
@@ -322,14 +397,20 @@ async def create_task_worktree(
         # Bind to the Founder-approved SHA, never to whatever the branch tip is now. A moved
         # tip is a NO-GO (the approval no longer describes what would be built on).
         base_branch, approved_sha = activation_base()
-        tip = await client.get_ref(base_branch)
+        try:
+            tip = await client.get_ref(base_branch)
+        except Exception as exc:
+            raise map_publication_boundary_error(exc) from exc
         if tip != approved_sha:
             raise ActivationBaseConfigurationError(
                 f"integration branch {base_branch!r} tip {tip!r} is not the approved base SHA {approved_sha!r}; refusing to build."
             )
         base_sha = approved_sha
     else:
-        base_sha = await client.get_ref(execution_worktree_base_branch())
+        try:
+            base_sha = await client.get_ref(execution_worktree_base_branch())
+        except Exception as exc:
+            raise map_publication_boundary_error(exc) from exc
     return create_task_worktree_sync(
         db, task=task, job=job, lease_generation=lease_generation, executor_id=executor_id, base_sha=base_sha
     )
@@ -364,6 +445,7 @@ def path_exists_in_git_revision(*, cwd: Path, revision: str, path: str) -> bool 
             text=True,
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
+            env=sanitized_git_subprocess_env(),
         )
     except subprocess.TimeoutExpired:
         return None
@@ -424,20 +506,37 @@ def worktree_git_status(worktree: MainAITaskWorktree) -> dict:
 
 
 def fetch_remote_branch(worktree: MainAITaskWorktree) -> str | None:
-    """Fetches the CURRENT remote tip of the worktree's own branch into this local checkout's
-    object database (read-only in effect -- never touches the local branch ref or working
-    tree) so is_ancestor() below has something real to compare against. Necessary because
-    create_task_worktree() makes a shallow, single-commit checkout (`--depth 1`) that never
-    contains anyone else's commits by default. Returns None if the branch does not exist on
-    the remote at all (nothing to compare against -- not an error)."""
+    """Fetches the CURRENT remote tip of the worktree's own branch into this local checkout.
+
+    A missing remote branch is `None` (not an error). Timeout / network / origin failures are
+    typed publication-boundary errors so they cannot be mistaken for a local verification
+    miss and must not trigger paid replan. Uses `_run_git` (sanitized env, no GIT_CONFIG
+    injection) rather than a raw subprocess.
+    """
     _require_ownership(worktree)
     path = Path(worktree.path)
-    result = subprocess.run(
-        ["git", "-C", str(path), "fetch", "origin", worktree.branch], cwd=str(path), capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS
-    )
-    if result.returncode != 0:
+    try:
+        listed = _run_git(
+            ["ls-remote", "--heads", "origin", worktree.branch],
+            cwd=path,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except WorktreeTimeoutError as exc:
+        raise PublicationTimeoutError("RemoteFetchTimeout") from exc
+    except WorktreeError as exc:
+        raise PublicationNetworkError("RemoteFetchFailed") from exc
+    if not listed.stdout.strip():
         return None
-    return _run_git(["rev-parse", "FETCH_HEAD"], cwd=path).stdout.strip()
+    try:
+        _run_git(["fetch", "--", "origin", worktree.branch], cwd=path, timeout=_GIT_TIMEOUT_SECONDS)
+        sha = _run_git(["rev-parse", "FETCH_HEAD"], cwd=path).stdout.strip().split()[0]
+    except WorktreeTimeoutError as exc:
+        raise PublicationTimeoutError("RemoteFetchTimeout") from exc
+    except WorktreeError as exc:
+        raise PublicationNetworkError("RemoteFetchFailed") from exc
+    if not _SHA40.fullmatch(sha):
+        raise PublicationNetworkError("RemoteFetchHeadInvalid")
+    return sha
 
 
 def is_ancestor(worktree: MainAITaskWorktree, ancestor_sha: str) -> bool | None:
@@ -450,10 +549,21 @@ def is_ancestor(worktree: MainAITaskWorktree, ancestor_sha: str) -> bool | None:
     itself signal the classifier should treat as unsafe rather than as "not an ancestor"."""
     _require_ownership(worktree)
     path = Path(worktree.path)
-    cat_file = subprocess.run(["git", "-C", str(path), "cat-file", "-e", ancestor_sha], capture_output=True, text=True)
+    git_env = sanitized_git_subprocess_env()
+    cat_file = subprocess.run(
+        ["git", "-C", str(path), "cat-file", "-e", ancestor_sha],
+        capture_output=True,
+        text=True,
+        env=git_env,
+    )
     if cat_file.returncode != 0:
         return None
-    result = subprocess.run(["git", "-C", str(path), "merge-base", "--is-ancestor", ancestor_sha, "HEAD"], capture_output=True, text=True)
+    result = subprocess.run(
+        ["git", "-C", str(path), "merge-base", "--is-ancestor", ancestor_sha, "HEAD"],
+        capture_output=True,
+        text=True,
+        env=git_env,
+    )
     return result.returncode == 0
 
 
@@ -472,7 +582,9 @@ def commit_worktree_changes(db: Session, worktree: MainAITaskWorktree, *, messag
     if not status_result.stdout.strip():
         return None
 
-    _run_git(["commit", "-q", "-m", message], cwd=path)
+    safe_message = sanitize_git_commit_message(message)
+    # `-F -` keeps the untrusted subject on stdin; never pass it as a leading-dash argv token.
+    _run_git(["commit", "-q", "--cleanup=strip", "-F", "-"], cwd=path, input_text=safe_message)
     sha = _run_git(["rev-parse", "HEAD"], cwd=path).stdout.strip()
 
     worktree.current_commit = sha
@@ -491,18 +603,20 @@ async def push_worktree_branch(worktree: MainAITaskWorktree) -> str:
 
     try:
         _run_git(["push", "origin", f"{worktree.branch}:{worktree.branch}"], cwd=path, timeout=120)
+    except WorktreeTimeoutError as exc:
+        raise PublicationTimeoutError(type(exc).__name__) from exc
     except WorktreeError as exc:
-        if "non-fast-forward" in str(exc) or "fetch first" in str(exc) or "rejected" in str(exc):
-            raise WorktreePushRejected(str(exc)) from exc
-        raise
+        # Any failed push is a publication-boundary failure. Do not classify from git stderr.
+        raise WorktreePushRejected(type(exc).__name__) from exc
 
     local_sha = _run_git(["rev-parse", "HEAD"], cwd=path).stdout.strip()
     client = GitHubClient()
-    remote_sha = await client.get_ref(worktree.branch)
+    try:
+        remote_sha = await client.get_ref(worktree.branch)
+    except Exception as exc:
+        raise map_publication_boundary_error(exc) from exc
     if remote_sha != local_sha:
-        raise WorktreeError(
-            f"Push claimed success but remote {worktree.branch} tip ({remote_sha}) does not match local HEAD ({local_sha})."
-        )
+        raise GitHubApiBoundaryError("PushSuccessRemoteMismatch")
     return remote_sha
 
 

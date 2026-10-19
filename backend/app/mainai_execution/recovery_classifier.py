@@ -41,6 +41,8 @@ from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIR
 
 
 def _classify(evidence: dict) -> RecoveryClassification:
+    if evidence.get("remote_fetch_failed"):
+        return RecoveryClassification.unsafe_to_auto_recover
     if evidence.get("remote_sha_is_ancestor_of_local") is False:
         return RecoveryClassification.conflicted_state
 

@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 from app.integrations.github_client import GitHubClient, GitHubClientError
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step
 from app.mainai_execution.lessons import lookup_lessons
+from app.mainai_execution.publication_errors import ExternalBoundaryError, map_publication_boundary_error
 from app.mainai_execution.worktree import (
     WorktreeError,
     execution_pr_base_branch,
@@ -146,11 +147,29 @@ async def inspect_recovery_record(db: Session, *, task: MainAITask, job: MainAIJ
             remote_sha = await client.get_ref(branch)
             evidence["remote_branch_exists"] = True
             evidence["remote_branch_sha"] = remote_sha
-        except GitHubClientError:
-            evidence["remote_branch_exists"] = False
+        except GitHubClientError as exc:
+            if exc.status_code in (None, 404):
+                evidence["remote_branch_exists"] = False
+                evidence["remote_branch_sha"] = None
+            else:
+                mapped = map_publication_boundary_error(exc)
+                evidence["remote_branch_exists"] = None
+                evidence["remote_branch_sha"] = None
+                evidence["remote_fetch_failed"] = True
+                evidence["remote_fetch_origin"] = mapped.origin
+                evidence["remote_fetch_failure_class"] = type(mapped).__name__
+                unsafe_reasons.append("remote_ref_lookup_failed")
+        except Exception as exc:  # noqa: BLE001 -- network/timeout must not look like "no branch"
+            mapped = map_publication_boundary_error(exc)
+            evidence["remote_branch_exists"] = None
             evidence["remote_branch_sha"] = None
+            evidence["remote_fetch_failed"] = True
+            evidence["remote_fetch_origin"] = mapped.origin
+            evidence["remote_fetch_failure_class"] = type(mapped).__name__
+            unsafe_reasons.append("remote_ref_lookup_failed")
 
-        if evidence["remote_branch_exists"]:
+        remote_exists = evidence.get("remote_branch_exists")
+        if remote_exists:
             try:
                 repo_owner = client.settings.github_repo.split("/", 1)[0]
                 prs = await client.list_pull_requests_for_head(
@@ -165,9 +184,13 @@ async def inspect_recovery_record(db: Session, *, task: MainAITask, job: MainAIJ
                 evidence["pr_exists"] = None
                 evidence["pr_numbers"] = None
                 unsafe_reasons.append(f"pr_base_unresolvable: {exc}")
-        else:
+        elif remote_exists is False:
             evidence["pr_exists"] = False
             evidence["pr_numbers"] = []
+        else:
+            # Fetch/API failure: unknown, never "confirmed no PR" / "confirmed no branch".
+            evidence["pr_exists"] = None
+            evidence["pr_numbers"] = None
     else:
         # GitHub not configured -- genuinely unknown, never coerced to False (that would read
         # as "confirmed no PR" when it is really "never checked").
@@ -190,8 +213,17 @@ async def inspect_recovery_record(db: Session, *, task: MainAITask, job: MainAIJ
             evidence["remote_sha_is_ancestor_of_local"] = ancestor
             if ancestor is None:
                 unsafe_reasons.append("remote_sha_not_present_in_local_worktree")
+        except ExternalBoundaryError as exc:
+            evidence["remote_fetch_failed"] = True
+            evidence["remote_fetch_origin"] = exc.origin
+            evidence["remote_fetch_failure_class"] = type(exc).__name__
+            unsafe_reasons.append("remote_fetch_failed")
         except Exception as exc:  # noqa: BLE001 -- ancestry check failure is evidence, not a crash
-            unsafe_reasons.append(f"ancestry_check_failed: {exc}")
+            mapped = map_publication_boundary_error(exc)
+            evidence["remote_fetch_failed"] = True
+            evidence["remote_fetch_origin"] = mapped.origin
+            evidence["remote_fetch_failure_class"] = type(mapped).__name__
+            unsafe_reasons.append("remote_fetch_failed")
 
     # -- task-level verification outcome --
     verification_event_types = {
