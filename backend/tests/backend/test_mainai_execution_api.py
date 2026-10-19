@@ -298,7 +298,7 @@ def test_api_list_task_waits_surfaces_a_real_durable_wait(client, db_session):
     task = _founder_task(db_session, goal, task_type="open_pr")
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test")
     db_session.commit()
-    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     db_session.commit()
 
     res = client.get(f"/api/mainai/execution/tasks/{task.id}/waits", headers={"X-CSRF-Token": csrf})
@@ -399,7 +399,7 @@ def test_api_a_founder_cannot_list_another_owners_task_waits(client, db_session,
     other_task = db_session.query(MainAITask).filter(MainAITask.goal_id == other_goal.id).one()
     job = executor.dispatch_ready_task(db_session, task=other_task, goal=other_goal, dispatched_by="test")
     db_session.commit()
-    start_ci_wait(db_session, task=other_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    start_ci_wait(db_session, task=other_task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     db_session.commit()
 
     res = client.get(f"/api/mainai/execution/tasks/{other_task.id}/waits", headers={"X-CSRF-Token": csrf})

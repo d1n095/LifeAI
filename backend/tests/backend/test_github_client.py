@@ -378,3 +378,27 @@ async def test_discovery_methods_do_not_issue_writes(monkeypatch):
     await client.get_file_contents("x.py", ref="sha")
     await client.list_check_runs("sha")
     assert writes == []
+
+
+
+@pytest.mark.asyncio
+async def test_list_workflow_runs_for_sha_is_read_only_and_paginated(monkeypatch):
+    calls = []
+
+    async def _fake_request(self, method, url, *, headers=None, json=None, **kwargs):
+        calls.append({"method": method, "url": str(url), "json": json})
+        request = httpx.Request(method, url)
+        path = str(url)
+        if path.endswith("/actions/runs?head_sha=abc&per_page=100"):
+            nxt = "https://api.github.com/repos/d1n095/LifeAI/actions/runs?head_sha=abc&per_page=100&page=2"
+            return httpx.Response(200, request=request, headers={"Link": f'<{nxt}>; rel="next"'},
+                                  json={"total_count": 2, "workflow_runs": [{"id": 1, "event": "push", "check_suite_id": 11}]})
+        if "page=2" in path:
+            return httpx.Response(200, request=request, json={"total_count": 2, "workflow_runs": [{"id": 2, "event": "pull_request", "check_suite_id": 12}]})
+        return httpx.Response(404, request=request, json={"message": f"unexpected {path}"})
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _fake_request)
+    client = _configured_client(monkeypatch)
+    runs = await client.list_workflow_runs_for_sha("abc")
+    assert [r["event"] for r in runs] == ["push", "pull_request"]
+    assert all(c["method"] == "GET" and c["json"] is None for c in calls)

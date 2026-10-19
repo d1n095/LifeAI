@@ -6,6 +6,22 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Activation readiness — repository/GitHub-side batch (2026-10-17, corrected 2026-10-19)
+
+Claude builder lane from the accepted activation readiness package
+(`examiner/activation-readiness-package-2026-10-17` @ `6321949e7b41f8b3675a9a4f07fe9cbd9ee3aa69`).
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/activation-base-276-263` | — | **Superseded** composition parent (#276 @ `6c75174` + #263); kept only as #277's base | Cursor exam `f3abe631e23ff77ed059ae712a3f76afc87251b8`: not frozen #276. |
+| `claude/mainai-activation-readiness-batch` | [#277](https://github.com/d1n095/LifeAI/pull/277) | **Frozen @ `f0c1d70e0fae44951d82fb24a2fc4bc3188093dc`, RETURN_TO_BUILDER** (Cursor exam `f3abe63`). Do not amend. | Superseded by the v2 candidate below. |
+| `claude/activation-base-276f-263` | — | Corrected composition parent @ `6871790c8f819d548ffb2ee01f8c24268c09d840` | Frozen #276 `09b87e9` (incl. Demo 1 fixture `dc67524`) + #263 `e33f494`; union-resolved `test_github_client.py` and this registry only. |
+| `claude/mainai-activation-readiness-v2` | draft (see PR) | **Frozen draft for independent exam** | #277 replayed onto the corrected parent, plus: event-bound CI wait (each required check must be green in EVERY event suite the stage requires: `branch_pushed` -> push; `pr_open` -> push + pull_request when the base is covered by the workflow's PR filter; derived from the workflow's own filters so no suite that cannot exist is awaited); checks bound to workflow file via the Actions run's `check_suite_id`; read-only paginated `GitHubClient.list_workflow_runs_for_sha`; whole-contract digest (checks + stage + branches + events); legacy/incomplete contracts fail closed; unsatisfiable contracts fail the open_pr task closed; case-insensitive SHA; activation base must be exactly `mainai/integration-founder-supervised-v1`. |
+
+**Migration 0089 (`0089_activation_branch_protect`, down `0088_erasure_completion_phase`):** unique revision id, but `0088` already has other in-flight children (Codex `0089_claim_action_integrity` → `0090_claim_action_permission_authority`; Codex's planned activation-security migration). **Composition rule:** never merge two children of the same parent into the activation candidate. The lane that composes LATER re-points its `down_revision` to the composed head at that moment (e.g. if Codex activation-security lands first as `00NN`, set this file's `down_revision = "00NN_…"` and keep its own `revision`). Alternatively Codex folds this file's two DDL statements into the single activation migration and this file is dropped. `tests/backend/test_migration_roundtrip.py` asserts a single head, so a forked composition fails CI.
+**Must not:** modify Cursor task authority, Codex push grants/preflight/PR identity/activation models, Git transport, Track B, FC-4, rulesets/settings, GitHub App, merge/deploy/Recall.
+**Inherited (not this lane):** FC-4 npm audit (#275 RETURN_TO_BUILDER) keeps `Frontend — npm audit` and the aggregate red.
+
 ## Post-Founder-Alpha — MainAI Path A first-cycle activation (2026-10-11)
 
 Isolated Cursor builder child of verified Founder Alpha integration base

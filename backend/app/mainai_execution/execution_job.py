@@ -46,6 +46,7 @@ from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
+from app.mainai_execution.required_checks import CI_STAGE_PR_OPEN, RequiredCheckContractError
 from app.mainai_execution.executor import _lock_task, task_for_job
 from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.graph import recompute_task_readiness
@@ -611,6 +612,9 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
         "proposed": False,
         "pull_request_number": pr.get("number"),
         "pull_request_url": pr.get("html_url"),
+        # Exact branches the CI contract is derived from (which event suites must be green).
+        "head_branch": head_branch,
+        "base_branch": base_branch,
         # V0.3: the exact commit the PR's checks run against -- ci_wait.py's start_ci_wait()
         # polls THIS sha, never "the branch's current tip" (see that module's docstring for why
         # that distinction matters). `edit_info["commit_sha"]` is only present once a real push
@@ -881,7 +885,21 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                 logger.warning("task_execution job %s: lease lost before starting CI wait.", job_id)
                 db.rollback()
                 return
-            start_ci_wait(db, task=task, job_id=job_id, repo=get_settings().github_repo, sha=work_result["head_sha"])
+            try:
+                start_ci_wait(
+                    db,
+                    task=task,
+                    job_id=job_id,
+                    repo=get_settings().github_repo,
+                    sha=work_result["head_sha"],
+                    stage=CI_STAGE_PR_OPEN,
+                    head_branch=work_result.get("head_branch"),
+                    base_branch=work_result.get("base_branch"),
+                )
+            except RequiredCheckContractError as exc:
+                # No CI contract can be satisfied for this head/base (e.g. a base outside the
+                # workflow's triggers): fail the task closed now instead of waiting to time out.
+                raise TaskExecutionError(f"CI contract cannot be satisfied: {exc}") from exc
             db.commit()
             entered_ci_wait = True
 

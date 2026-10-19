@@ -35,6 +35,7 @@ duration these functions run; `lease_generation` is recorded on the worktree row
 durable ownership fact for later recovery inspection, not enforced here as a live check."""
 
 import json
+import re
 import secrets
 import shutil
 import subprocess
@@ -48,7 +49,14 @@ from app.config import get_settings
 from app.integrations.github_client import GitHubClient
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_execution import MainAITask
-from app.models.mainai_recovery import PROTECTED_BRANCHES, MainAITaskWorktree, MainAITaskWorktreeStatus
+from app.models.mainai_recovery import (
+    ACTIVATION_INTEGRATION_BRANCH,
+    PROTECTED_BRANCH_PREFIXES,
+    PROTECTED_BRANCHES,
+    MainAITaskWorktree,
+    MainAITaskWorktreeStatus,
+    is_protected_branch,
+)
 
 WORKTREE_ROOT = Path("/tmp/mainai-worktrees")
 MARKER_FILENAME = ".mainai_worktree_owner.json"
@@ -57,15 +65,65 @@ COMMIT_AUTHOR = ("MainAI Executor", "mainai-executor@lifeai.local")
 _GIT_TIMEOUT_SECONDS = 60
 
 
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def activation_base() -> tuple[str, str]:
+    """Activation-mode base: (integration branch, Founder-approved base SHA). Fail closed.
+
+    Requires, with no fallback of any kind:
+    - `GITHUB_WORKTREE_BASE_BRANCH` explicitly set, non-empty, and NOT the legacy default;
+    - the branch to be exactly the Founder-supervised integration branch
+      (`ACTIVATION_INTEGRATION_BRANCH`), which is protected (never main/master/legacy/other
+      `mainai/` branches);
+    - `GITHUB_PR_BASE_BRANCH` explicitly set and equal to the worktree base;
+    - `MAINAI_ACTIVATION_APPROVED_BASE_SHA` a 40-hex lowercase commit SHA.
+    """
+    settings = get_settings()
+    worktree_base = (settings.github_worktree_base_branch or "").strip()
+    pr_base = (settings.github_pr_base_branch or "").strip()
+    approved = (settings.mainai_activation_approved_base_sha or "").strip()
+    if not worktree_base:
+        raise ActivationBaseConfigurationError("activation mode requires GITHUB_WORKTREE_BASE_BRANCH; it is empty.")
+    if worktree_base == BASE_BRANCH:
+        raise ActivationBaseConfigurationError(
+            f"activation mode refuses the legacy default base {BASE_BRANCH!r}; configure the integration branch explicitly."
+        )
+    if (
+        worktree_base != ACTIVATION_INTEGRATION_BRANCH
+        or not worktree_base.startswith(PROTECTED_BRANCH_PREFIXES)
+        or not is_protected_branch(worktree_base)
+    ):
+        raise ActivationBaseConfigurationError(
+            f"activation base {worktree_base!r} is not the protected integration branch {ACTIVATION_INTEGRATION_BRANCH!r}."
+        )
+    if not pr_base:
+        raise ActivationBaseConfigurationError("activation mode requires GITHUB_PR_BASE_BRANCH; it is empty.")
+    if pr_base != worktree_base:
+        raise ActivationBaseConfigurationError(
+            f"activation PR base {pr_base!r} differs from worktree base {worktree_base!r}."
+        )
+    if not _SHA40.match(approved):
+        raise ActivationBaseConfigurationError(
+            "activation mode requires MAINAI_ACTIVATION_APPROVED_BASE_SHA (40 lowercase hex characters)."
+        )
+    return worktree_base, approved
+
+
 def execution_worktree_base_branch() -> str:
-    """Configured worktree fetch base. Falls back to the historical default so existing
-    tests that seed `BASE_BRANCH` keep matching production-default settings."""
+    """Configured worktree fetch base. Outside activation mode it falls back to the historical
+    default so existing tests that seed `BASE_BRANCH` keep matching production-default settings.
+    In activation mode there is no fallback: see `activation_base()`."""
+    if get_settings().mainai_activation_mode:
+        return activation_base()[0]
     configured = (get_settings().github_worktree_base_branch or "").strip()
     return configured or BASE_BRANCH
 
 
 def execution_pr_base_branch() -> str:
-    """Configured PR target. Empty setting means the worktree base."""
+    """Configured PR target. Empty setting means the worktree base (legacy mode only)."""
+    if get_settings().mainai_activation_mode:
+        return activation_base()[0]
     configured = (get_settings().github_pr_base_branch or "").strip()
     return configured or execution_worktree_base_branch()
 
@@ -77,6 +135,11 @@ def protected_execution_branches() -> frozenset[str]:
 class WorktreeError(RuntimeError):
     """Base for all worktree-layer failures. Callers must treat any of these as "recovery
     cannot proceed automatically" — never as "treat it as if nothing happened"."""
+
+
+class ActivationBaseConfigurationError(WorktreeError):
+    """Activation-mode base branch / approved base SHA is missing, stale, or has moved.
+    A hard NO-GO: nothing falls back to another branch or to a moving tip."""
 
 
 class WorktreeOwnershipError(WorktreeError):
@@ -176,8 +239,15 @@ def create_task_worktree_sync(
             "push-bar worktree. MainAI stannar i förslagsläge (se app/mainai_execution/execution_job.py)."
         )
 
+    if settings.mainai_activation_mode:
+        _branch, approved_sha = activation_base()
+        if base_sha != approved_sha:
+            raise ActivationBaseConfigurationError(
+                f"worktree base_sha {base_sha!r} is not the Founder-approved base SHA {approved_sha!r}."
+            )
+
     branch = task_branch_name(task.id)
-    if branch in protected_execution_branches():
+    if branch in protected_execution_branches() or is_protected_branch(branch):
         # Structurally unreachable given task_branch_name()'s fixed prefix, but checked
         # explicitly anyway -- the DB CHECK constraint is the real backstop, this is defense
         # in depth before any filesystem or network side effect happens at all.
@@ -248,7 +318,18 @@ async def create_task_worktree(
             "GITHUB_WRITE_ENABLED är av eller GITHUB_TOKEN/GITHUB_REPO saknas — kan inte skapa en verklig, "
             "push-bar worktree. MainAI stannar i förslagsläge (se app/mainai_execution/execution_job.py)."
         )
-    base_sha = await client.get_ref(execution_worktree_base_branch())
+    if settings.mainai_activation_mode:
+        # Bind to the Founder-approved SHA, never to whatever the branch tip is now. A moved
+        # tip is a NO-GO (the approval no longer describes what would be built on).
+        base_branch, approved_sha = activation_base()
+        tip = await client.get_ref(base_branch)
+        if tip != approved_sha:
+            raise ActivationBaseConfigurationError(
+                f"integration branch {base_branch!r} tip {tip!r} is not the approved base SHA {approved_sha!r}; refusing to build."
+            )
+        base_sha = approved_sha
+    else:
+        base_sha = await client.get_ref(execution_worktree_base_branch())
     return create_task_worktree_sync(
         db, task=task, job=job, lease_generation=lease_generation, executor_id=executor_id, base_sha=base_sha
     )

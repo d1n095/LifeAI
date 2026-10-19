@@ -73,6 +73,38 @@ def _single_task_plan(db_session, goal, **spec_kwargs) -> MainAITask:
     return db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
 
 
+_HEAD = "claude/mainai-task-00000000-0000-4000-8000-000000000000"
+_BASE = "mainai/integration-founder-supervised-v1"
+_PUSH_SUITE, _PR_SUITE = 1, 2
+
+
+def _required_runs(ref, *, failing: str | None = None) -> list[dict]:
+    """Realistic GitHub check runs for `ref`: every check of the default activation contract,
+    produced by GitHub Actions on exactly this SHA, once in the push suite and once in the
+    pull_request suite. `failing` names one check to fail (in both suites)."""
+    from app.mainai_execution.required_checks import ACTIVATION_REQUIRED_CHECKS
+
+    runs = []
+    run_id = 0
+    for suite in (_PUSH_SUITE, _PR_SUITE):
+        for check in ACTIVATION_REQUIRED_CHECKS:
+            run_id += 1
+            runs.append({
+                "id": run_id, "name": check.name, "head_sha": ref, "status": "completed",
+                "conclusion": "failure" if check.name == failing else "success",
+                "app": {"slug": check.app_slug, "id": check.app_id}, "check_suite": {"id": suite},
+            })
+    return runs
+
+
+async def _fake_workflow_runs(self, sha):
+    """The two CI workflow runs (push + pull_request) that own the two check suites."""
+    return [
+        {"check_suite_id": _PUSH_SUITE, "event": "push", "path": ".github/workflows/ci.yml", "head_sha": sha},
+        {"check_suite_id": _PR_SUITE, "event": "pull_request", "path": ".github/workflows/ci.yml", "head_sha": sha},
+    ]
+
+
 def _events(db_session, task_id) -> set[str]:
     rows = db_session.execute(sa_text("SELECT event_type FROM mainai_task_events WHERE task_id = :id"), {"id": str(task_id)}).all()
     return {row[0] for row in rows}
@@ -131,7 +163,7 @@ def test_start_ci_wait_creates_a_durable_wait_and_moves_the_task_to_waiting_ci(d
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
 
     assert task.status == MainAITaskStatus.waiting_ci
@@ -154,11 +186,13 @@ async def test_poll_ci_wait_satisfied_when_all_checks_pass(db_session, owner_id,
 
     async def _fake_list_check_runs(self, ref):
         assert ref == "deadbeef"  # exactly the wait's own recorded sha, never anything else
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
+
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
 
     resolved = await poll_ci_wait(db_session, wait)
@@ -181,11 +215,13 @@ async def test_poll_ci_wait_failed_when_a_check_fails(db_session, owner_id, monk
     monkeypatch.setattr(settings, "github_token", "fake-token")
 
     async def _fake_list_check_runs(self, ref):
-        return [{"name": "ci", "status": "completed", "conclusion": "failure"}]
+        return _required_runs(ref, failing="Backend — unit/integration tests")
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
+
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
 
     resolved = await poll_ci_wait(db_session, wait)
@@ -210,7 +246,9 @@ async def test_poll_ci_wait_still_pending_reschedules_with_backoff_and_never_exc
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
+
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch=_HEAD, base_branch=_BASE)
     wait.deadline_at = datetime.utcnow() + timedelta(seconds=5)  # a short deadline the next poll will already be past
     db_session.commit()
 
@@ -234,7 +272,7 @@ async def test_poll_ci_wait_is_a_no_op_on_an_already_terminal_wait(db_session, o
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch=_HEAD, base_branch=_BASE)
     wait.status = MainAITaskWaitStatus.satisfied
     wait.resolved_at = datetime.utcnow()
     db_session.commit()
@@ -249,7 +287,7 @@ def test_cancel_ci_wait_resolves_a_pending_wait(db_session, owner_id):
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
 
     cancelled = cancel_ci_wait(db_session, wait, reason="task cancelled")
@@ -276,11 +314,13 @@ async def test_poll_ci_wait_refuses_to_poll_if_configured_repo_no_longer_matches
 
     async def _fake_list_check_runs(self, ref):
         called["n"] += 1
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
 
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
+
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
 
     resolved = await poll_ci_wait(db_session, wait)
@@ -306,16 +346,18 @@ async def test_poll_ci_wait_fails_closed_when_its_own_resource_ref_is_missing_re
 
     async def _fake_list_check_runs(self, ref):
         called["n"] += 1
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
 
     for missing_field, resource_ref in (("repo", {"repo": "", "sha": "deadbeef"}), ("sha", {"repo": "d1n095/LifeAI", "sha": ""})):
         goal = _goal(db_session, owner_id)
         task = _single_task_plan(db_session, goal, task_type="open_pr")
         job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
         db_session.commit()
-        wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+        wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch=_HEAD, base_branch=_BASE)
         wait.resource_ref = resource_ref
         db_session.commit()
 
@@ -330,7 +372,7 @@ async def test_poll_ci_wait_fails_closed_when_its_own_resource_ref_is_missing_re
 # ---------------------------------------------------------------- C. real end-to-end demos
 
 
-async def _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch, *, commit_sha="realcommitsha"):
+async def _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch, *, commit_sha="realcommitsha", base_branch="claude/det-kommer-mer-879lcm"):
     """Shared setup for the three real end-to-end demos below: a real repo_edit-completed
     sibling event, github_write_enabled on, a fake (never networked) GitHubClient that creates
     one PR, dispatched through the REAL run_task_execution_job() -- never hand-constructed
@@ -369,7 +411,7 @@ async def _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner
             task_id=repo_edit_task.id,
             owner_id=owner_id,
             event_type=MainAITaskEventType.completed,
-            detail={"work_result": {"branch": "claude/mainai-task-abc", "base_branch": "claude/det-kommer-mer-879lcm", "commit_sha": commit_sha}},
+            detail={"work_result": {"branch": "claude/mainai-task-abc", "base_branch": base_branch, "commit_sha": commit_sha}},
         )
     )
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
@@ -403,6 +445,20 @@ async def test_demo_open_pr_real_dispatch_lands_on_waiting_ci_not_completed(db_s
     assert wait.status == MainAITaskWaitStatus.pending
     assert wait.source_type == MainAITaskWaitSourceType.github_check_runs
     assert wait.resource_ref["sha"] == "realcommitsha"
+    # A PR exists, its base is covered by the workflow's pull_request filter: both suites required.
+    assert wait.condition["stage"] == "pr_open"
+    assert wait.condition["head_branch"] == "claude/mainai-task-abc"
+    assert wait.condition["required_events"] == ["push", "pull_request"]
+
+
+@pytest.mark.asyncio
+async def test_open_pr_whose_base_has_no_pr_ci_requires_only_the_push_suite(db_session, superuser_db, owner_id, monkeypatch):
+    """A PR base outside the workflow's pull_request filter still gets push CI, so the contract
+    is push-only (no deadlock waiting for a PR suite that can never exist)."""
+    task, job = await _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch, base_branch="release/never-in-ci")
+    assert task.status == MainAITaskStatus.waiting_ci
+    wait = db_session.query(MainAITaskWait).filter(MainAITaskWait.task_id == task.id).one()
+    assert wait.condition["required_events"] == ["push"]
 
 
 @pytest.mark.asyncio
@@ -416,9 +472,11 @@ async def test_demo_ci_wait_resolves_green_and_completes_the_task(db_session, su
 
     async def _fake_list_check_runs(self, ref):
         assert ref == "realcommitsha"
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
 
     wait = db_session.query(MainAITaskWait).filter(MainAITaskWait.task_id == task.id).one()
     await resume_waiting_ci_task(db_session, wait)
@@ -441,9 +499,11 @@ async def test_demo_ci_wait_resolves_red_and_schedules_a_backoff_retry(db_sessio
     task, _job = await _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner_id, monkeypatch)
 
     async def _fake_list_check_runs(self, ref):
-        return [{"name": "ci", "status": "completed", "conclusion": "failure"}]
+        return _required_runs(ref, failing="Backend — unit/integration tests")
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
 
     wait = db_session.query(MainAITaskWait).filter(MainAITaskWait.task_id == task.id).one()
     await resume_waiting_ci_task(db_session, wait)
@@ -467,6 +527,8 @@ async def test_demo_ci_wait_times_out_and_never_falsely_completes(db_session, su
         return []  # CI never even started -- this repo/commit is unmonitored
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
 
     wait = db_session.query(MainAITaskWait).filter(MainAITaskWait.task_id == task.id).one()
     wait.deadline_at = datetime.utcnow() - timedelta(seconds=1)
@@ -498,6 +560,8 @@ async def test_resume_waiting_ci_task_is_a_defensive_no_op_if_the_task_already_l
         raise AssertionError("must never poll once the task has already left waiting_ci")
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
 
     await resume_waiting_ci_task(db_session, wait)
     db_session.commit()
@@ -535,15 +599,17 @@ def test_resume_waiting_ci_task_concurrent_same_wait_never_double_finalizes(db_s
     task = _single_task_plan(db_session, goal, task_type="open_pr")
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
     task_id = task.id
     wait_id = wait.id
 
     async def _fake_list_check_runs(self, ref):
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _fake_list_check_runs)
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
     monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
 
     errors: list[str] = []
@@ -618,7 +684,7 @@ def test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsis
     task = _single_task_plan(db_session, goal, task_type="open_pr")
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
     task_id = task.id
     wait_id = wait.id
@@ -629,9 +695,11 @@ def test_cancel_task_racing_a_slow_in_flight_poll_never_leaves_the_wait_inconsis
     async def _slow_list_check_runs(self, ref):
         poll_started.set()
         assert release_poll.wait(timeout=5), "test setup: main thread never released the in-flight poll"
-        return [{"name": "ci", "status": "completed", "conclusion": "success"}]
+        return _required_runs(ref)
 
     monkeypatch.setattr(GitHubClient, "list_check_runs", _slow_list_check_runs)
+
+    monkeypatch.setattr(GitHubClient, "list_workflow_runs_for_sha", _fake_workflow_runs)
     monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
 
     resume_errors: list[str] = []
@@ -719,7 +787,7 @@ def test_cross_owner_rls_isolation_holds_for_mainai_task_waits_through_the_real_
     task = _single_task_plan(db_session, goal, task_type="open_pr")
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
-    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123")
+    wait = start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="abc123", head_branch=_HEAD, base_branch=_BASE)
     db_session.commit()
     wait_id = wait.id
 

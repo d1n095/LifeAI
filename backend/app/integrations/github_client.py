@@ -160,6 +160,17 @@ class GitHubClient:
             "check_runs",
         )
 
+    async def list_workflow_runs_for_sha(self, sha: str) -> list[dict]:
+        """Read-only: all Actions workflow runs for exactly `sha`, following pagination. Each run
+        carries `event`, `path` and `check_suite_id`, which bind a check run (via its
+        `check_suite.id`) to the GitHub event and workflow file that produced it."""
+        repo = self._require_configured()
+        encoded_sha = quote(sha, safe="")
+        return await self._get_paginated_key(
+            f"/repos/{repo}/actions/runs?head_sha={encoded_sha}&per_page=100",
+            "workflow_runs",
+        )
+
     async def list_branches(self, *, prefix: str = "") -> list[dict]:
         """Read-only branch list. When `prefix` is set, only names that start with it remain."""
         repo = self._require_configured()

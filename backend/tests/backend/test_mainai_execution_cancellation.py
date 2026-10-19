@@ -129,7 +129,7 @@ def test_cancel_task_on_waiting_ci_cancels_the_wait_and_finalizes_the_task(db_se
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
-    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     task.status = MainAITaskStatus.waiting_ci
     db_session.commit()
 
