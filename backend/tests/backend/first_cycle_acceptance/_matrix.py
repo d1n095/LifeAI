@@ -10,11 +10,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
+
+# Never persist raw credential fill output or GitHub token prefixes into the matrix.
+_SECRETISH = re.compile(
+    r"(?i)(password=)\S+|(authorization=)\S+|\b(gho_|ghp_|ghu_|ghs_|github_pat_)[A-Za-z0-9_]+\b"
+)
+
+
+def sanitize_matrix_text(text: str) -> str:
+    if not text:
+        return ""
+    return _SECRETISH.sub(lambda m: (m.group(1) or "") + "<redacted>" if m.group(1) else "<redacted>", text)
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -70,7 +82,7 @@ def record(
         status=status,
         boundary=boundary,
         candidate_sha=sha or candidate_sha(),
-        detail=detail,
+        detail=sanitize_matrix_text(detail),
         production_module=production_module,
     )
     with _LOCK:
@@ -107,7 +119,10 @@ def write_payload(path: Path | None = None) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = as_payload()
     target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    repo_copy = Path(__file__).resolve().parents[4] / "docs" / "examiner" / "first_cycle_acceptance_matrix.json"
-    repo_copy.parent.mkdir(parents=True, exist_ok=True)
-    repo_copy.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Never write the matrix into the source tree by default. A previous copy next to the
+    # harness docs recorded live `git credential fill` output from developer machines.
+    if os.environ.get("FIRST_CYCLE_ACCEPTANCE_WRITE_REPO_COPY") == "1":
+        repo_copy = Path(__file__).resolve().parents[4] / "docs" / "examiner" / "first_cycle_acceptance_matrix.json"
+        repo_copy.parent.mkdir(parents=True, exist_ok=True)
+        repo_copy.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return target

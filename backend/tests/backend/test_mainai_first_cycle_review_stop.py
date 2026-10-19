@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import datetime
 
@@ -9,15 +10,23 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.mainai_execution.first_cycle_stop import (
+    STATE_APPROVED_BASE_MOVED,
     STATE_EXTERNAL_CI_FAILED,
+    STATE_EXTERNAL_PUSH_REJECTED,
+    STATE_GRANT_DENIED_OR_EXPIRED,
     STATE_INDEPENDENT_REVIEW_BLOCKED,
     STATE_STOP_BEFORE_MERGE,
     LOCAL_EDITABLE_TASK_TYPES,
+    classify_publication_failure,
     fail_closed_external_ci,
+    goal_is_autonomous_terminal,
     should_suppress_paid_replan,
     stop_first_cycle,
 )
+from app.mainai_execution.execution_job import _finalize_task_outcome
 from app.mainai_execution.replan import ReplanSuppressedError, find_replan_trigger, trigger_replan
+from app.mainai_execution import replan as replan_mod
+from app.worker import Worker
 from app.mainai_execution.review_receipt import (
     FIRST_CYCLE_REVIEW_COMPONENT,
     PATH_A_BUILDER_IDENTITY,
@@ -31,7 +40,7 @@ from app.mainai_execution.review_receipt import (
 from app.mainai_execution import planner
 from app.mainai_execution.planner import PlannedTaskSpec
 from app.mainai_verification_registry.service import record_verification_attestation
-from app.models.mainai_execution import MainAIGoalStatus, MainAITask, MainAITaskStatus
+from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus, MainAITask, MainAITaskStatus
 from app.request_context import current_user_id as current_user_id_var
 
 HEAD = "a" * 40
@@ -300,3 +309,219 @@ def test_hashes_bind_repo_pr_and_envelope():
     )
     assert envelope_authorization_hash(_envelope_ctx()) != envelope_authorization_hash({})
     assert len(instruction_hash("document greet")) == 64
+
+
+class _PaidPlanner:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, db, *, goal, failure_context=None, **kw):
+        self.calls.append(goal.id)
+        raise RuntimeError("test: paid planner would have been called")
+
+
+def _ticks(superuser_db):
+    worker = Worker()
+    errors = []
+    for name in (
+        "_poll_mainai_task_waits",
+        "_advance_mainai_execution_retries",
+        "_advance_waiting_provider_backoff",
+        "_reconcile_provider_spend_parks",
+        "_advance_mainai_execution_auto_recovery",
+        "_advance_mainai_execution_replan",
+        "_finalize_mainai_execution_goals",
+        "_advance_authorized_supervisor_goals",
+        "_advance_mainai_execution_tasks",
+    ):
+        fn = getattr(worker, name)
+        try:
+            out = fn(superuser_db)
+            if asyncio.iscoroutine(out):
+                asyncio.run(out)
+            superuser_db.commit()
+        except Exception as exc:
+            superuser_db.rollback()
+            errors.append(f"{name}: {type(exc).__name__}: {exc}")
+    return errors
+
+
+def _two_ready_tasks(db, owner_id):
+    goal = planner.create_goal(
+        db, owner_id=owner_id, title="fc-stop", original_instruction="document greet", created_by="founder"
+    )
+    planner.create_plan(
+        db,
+        goal=goal,
+        rationale="two independent edits",
+        tasks=[
+            PlannedTaskSpec(description="first", task_type="read_only_audit"),
+            PlannedTaskSpec(description="second", task_type="read_only_audit"),
+        ],
+        created_by="test",
+    )
+    db.commit()
+    tasks = db.query(MainAITask).filter(MainAITask.goal_id == goal.id).order_by(MainAITask.created_at).all()
+    return goal, tasks[0], tasks[1]
+
+
+def test_classify_publication_failure_is_cause_based_not_task_type():
+    assert (
+        classify_publication_failure(
+            evidence={
+                "error": "integration branch 'mainai/integration-founder-supervised-v1' tip 'ffff' is not the approved base SHA 'bbbb'; refusing to build."
+            }
+        )
+        == STATE_APPROVED_BASE_MOVED
+    )
+    assert (
+        classify_publication_failure(
+            evidence={
+                "error": "GitHub push rejected: ! [remote rejected] claude/mainai-task-x (protected branch hook declined)"
+            }
+        )
+        == STATE_EXTERNAL_PUSH_REJECTED
+    )
+    assert (
+        classify_publication_failure(evidence={"error": "push grant missing or stale for local commit"})
+        == STATE_GRANT_DENIED_OR_EXPIRED
+    )
+    assert classify_publication_failure(evidence={"error": "GitHub push rejected (protected branch)"}) == STATE_EXTERNAL_PUSH_REJECTED
+    assert classify_publication_failure(evidence={"steps": [{"kind": "targeted_tests", "passed": False}]}) is None
+
+
+def test_stopped_goal_does_not_dispatch_remaining_ready_tasks(db_session, superuser_db, owner_id, monkeypatch):
+    goal, t1, t2 = _two_ready_tasks(db_session, owner_id)
+    assert t1.status == MainAITaskStatus.ready and t2.status == MainAITaskStatus.ready
+    stop_first_cycle(
+        db_session,
+        t1,
+        reason="independent review recorded; STOP before merge",
+        first_cycle_state=STATE_STOP_BEFORE_MERGE,
+        evidence={"ci_passed": True, "review_ok": True, "draft_pr": True},
+        goal=goal,
+    )
+    db_session.commit()
+    superuser_db.expire_all()
+    goal = superuser_db.get(MainAIGoal, goal.id)
+    t2 = superuser_db.get(MainAITask, t2.id)
+    assert goal.status == MainAIGoalStatus.blocked
+    assert goal_is_autonomous_terminal(superuser_db, goal) is True
+    assert t2.status == MainAITaskStatus.blocked
+    assert t2.mainai_job_id is None
+    paid = _PaidPlanner()
+    monkeypatch.setattr(replan_mod, "propose_plan_via_ai", paid)
+    jobs_before = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_jobs j JOIN mainai_tasks t ON t.mainai_job_id = j.id WHERE t.goal_id = :g"),
+        {"g": goal.id},
+    ).scalar_one()
+    errors = _ticks(superuser_db)
+    superuser_db.expire_all()
+    t2 = superuser_db.get(MainAITask, t2.id)
+    t1 = superuser_db.get(MainAITask, t1.id)
+    jobs_after = superuser_db.execute(
+        sa_text("SELECT count(*) FROM mainai_jobs j JOIN mainai_tasks t ON t.mainai_job_id = j.id WHERE t.goal_id = :g"),
+        {"g": goal.id},
+    ).scalar_one()
+    assert t1.status == MainAITaskStatus.blocked
+    assert t2.mainai_job_id is None, errors
+    assert t2.status != MainAITaskStatus.running, errors
+    assert jobs_after == jobs_before
+    assert paid.calls == []
+    assert superuser_db.get(MainAIGoal, goal.id).status != MainAIGoalStatus.completed
+
+
+def test_ordinary_non_terminal_goal_still_dispatches_ready_tasks(db_session, superuser_db, owner_id):
+    goal, t1, t2 = _two_ready_tasks(db_session, owner_id)
+    assert goal_is_autonomous_terminal(db_session, goal) is False
+    Worker()._advance_mainai_execution_tasks(superuser_db)
+    superuser_db.expire_all()
+    t1 = superuser_db.get(MainAITask, t1.id)
+    t2 = superuser_db.get(MainAITask, t2.id)
+    dispatched = [t for t in (t1, t2) if t.status == MainAITaskStatus.running and t.mainai_job_id is not None]
+    assert dispatched, "ordinary running goal must still auto-dispatch ready tasks"
+
+
+@pytest.mark.parametrize(
+    "error,state",
+    [
+        (
+            "integration branch 'mainai/integration-founder-supervised-v1' tip 'ffff' is not the approved base SHA 'bbbb'; refusing to build.",
+            STATE_APPROVED_BASE_MOVED,
+        ),
+        (
+            "GitHub push rejected: ! [remote rejected] claude/mainai-task-x (protected branch hook declined)",
+            STATE_EXTERNAL_PUSH_REJECTED,
+        ),
+        ("push grant missing or stale for local commit", STATE_GRANT_DENIED_OR_EXPIRED),
+        ("GitHub push rejected (protected branch)", STATE_EXTERNAL_PUSH_REJECTED),
+    ],
+)
+@pytest.mark.asyncio
+async def test_external_publication_failure_in_repo_edit_never_retries_or_replans(
+    db_session, superuser_db, owner_id, monkeypatch, error, state
+):
+    goal, task = _goal_with_task(db_session, owner_id, task_type="repo_edit")
+    task.status = MainAITaskStatus.running
+    task.attempts = 1
+    task.max_attempts = 3
+    db_session.commit()
+    paid = _PaidPlanner()
+    monkeypatch.setattr(replan_mod, "propose_plan_via_ai", paid)
+    _finalize_task_outcome(db_session, task, passed=False, evidence={"error": error})
+    db_session.commit()
+    superuser_db.expire_all()
+    task = superuser_db.get(MainAITask, task.id)
+    goal = superuser_db.get(MainAIGoal, goal.id)
+    assert task.status == MainAITaskStatus.failed
+    assert task.next_retry_at is None
+    assert should_suppress_paid_replan(task, evidence={"error": error}) is True
+    assert find_replan_trigger(superuser_db, goal=goal) is None
+    with pytest.raises(ReplanSuppressedError):
+        await trigger_replan(superuser_db, goal=goal, failed_task=task, dispatched_by="test")
+    errors = _ticks(superuser_db)
+    superuser_db.expire_all()
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.failed, errors
+    assert task.mainai_job_id is None
+    assert paid.calls == []
+    assert classify_publication_failure(evidence={"error": error}) == state
+
+
+@pytest.mark.asyncio
+async def test_local_verification_failure_still_paid_replan_eligible(db_session, owner_id, monkeypatch):
+    goal, task = _goal_with_task(db_session, owner_id, task_type="repo_edit")
+    task.status = MainAITaskStatus.running
+    task.attempts = task.max_attempts
+    db_session.commit()
+    evidence = {"steps": [{"kind": "targeted_tests", "passed": False, "detail": "assertion failed"}]}
+    _finalize_task_outcome(db_session, task, passed=False, evidence=evidence)
+    db_session.commit()
+    task = db_session.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.failed
+    assert should_suppress_paid_replan(task, evidence=evidence) is False
+    assert find_replan_trigger(db_session, goal=goal) == task
+    paid = _PaidPlanner()
+    monkeypatch.setattr(replan_mod, "propose_plan_via_ai", paid)
+    with pytest.raises(RuntimeError, match="paid planner would have been called"):
+        await trigger_replan(db_session, goal=goal, failed_task=task, dispatched_by="test")
+    assert paid.calls == [goal.id]
+
+
+def test_fail_closed_external_ci_stops_the_goal(db_session, owner_id):
+    goal, t1, t2 = _two_ready_tasks(db_session, owner_id)
+    fail_closed_external_ci(
+        db_session,
+        t1,
+        reason="external CI failed; STOP without paid replan",
+        first_cycle_state=STATE_EXTERNAL_CI_FAILED,
+        evidence={"ci_passed": False},
+        goal=goal,
+    )
+    db_session.commit()
+    assert t1.status == MainAITaskStatus.failed
+    assert t1.next_retry_at is None
+    assert t2.status == MainAITaskStatus.blocked
+    assert goal.status == MainAIGoalStatus.blocked
+    assert goal_is_autonomous_terminal(db_session, goal) is True
+    assert find_replan_trigger(db_session, goal=goal) is None

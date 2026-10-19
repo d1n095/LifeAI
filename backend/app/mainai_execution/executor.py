@@ -194,6 +194,13 @@ def dispatch_ready_task(db: Session, *, task: MainAITask, goal: MainAIGoal, disp
     if task.status != MainAITaskStatus.ready:
         raise ValueError(f"MainAITask {task.id} has status '{task.status.value}', not 'ready' -- cannot dispatch.")
 
+    from app.mainai_execution.first_cycle_stop import FirstCycleGoalStoppedError, goal_is_autonomous_terminal
+
+    if goal_is_autonomous_terminal(db, goal):
+        raise FirstCycleGoalStoppedError(
+            f"MainAITask {task.id} belongs to a first-cycle STOP / terminal goal -- refusing dispatch."
+        )
+
     require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
 
     job_id = uuid.uuid4()
@@ -248,6 +255,11 @@ def retry_task(db: Session, *, task: MainAITask) -> MainAITask:
     task = _lock_task(db, task.id)
     if task.status not in RETRYABLE_MAINAI_TASK_STATUSES:
         raise TaskNotRetryableError(task.id, task.status)
+    from app.mainai_execution.first_cycle_stop import goal_is_autonomous_terminal
+
+    goal = db.get(MainAIGoal, task.goal_id)
+    if goal_is_autonomous_terminal(db, goal):
+        raise TaskNotRetryableError(task.id, task.status)
     task.status = MainAITaskStatus.ready
     # V0.3: clear the automatic-retry-scan due-time -- it already did its job (or a founder
     # retried manually, bypassing the scan entirely); a stale value here would be inert (the
@@ -270,6 +282,11 @@ def reset_task_for_takeover(db: Session, *, task: MainAITask) -> MainAITask:
     way retry_task() is, for the same concurrent-caller reason."""
     task = _lock_task(db, task.id)
     if task.status != MainAITaskStatus.running:
+        raise TaskNotRetryableError(task.id, task.status)
+    from app.mainai_execution.first_cycle_stop import goal_is_autonomous_terminal
+
+    goal = db.get(MainAIGoal, task.goal_id)
+    if goal_is_autonomous_terminal(db, goal):
         raise TaskNotRetryableError(task.id, task.status)
     task.status = MainAITaskStatus.ready
     db.add(
