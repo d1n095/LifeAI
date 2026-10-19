@@ -59,6 +59,7 @@ def test_manifest_records_exact_frozen_input_shas():
     assert payload["excluded"]["pr_280"]["reason"] == "RETURN_TO_BUILDER"
     assert payload["go"] is False
     assert payload["branch"] == "cursor/first-cycle-execution-completion-91c1"
+    assert payload["pr"] == 291
     assert payload["successor_of"]["pr"] == 290
     assert payload["successor_of"]["sha"] == FROZEN_INPUTS["pr_290"]
     assert "certified Path A" not in inputs["pr_276"]["role"]
@@ -172,6 +173,7 @@ def test_go_nogo_stays_false_with_codex_gaps_visible():
     assert payload["parent_288"] == FROZEN_INPUTS["pr_288"]
     assert payload["parent_289"] == FROZEN_INPUTS["pr_289"]
     assert payload["parent_290"] == FROZEN_INPUTS["pr_290"]
+    assert payload["pr"] == 291
     assert payload["branch"] == "cursor/first-cycle-execution-completion-91c1"
 
 

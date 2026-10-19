@@ -1,7 +1,7 @@
 {
   "schema": "mainai.first_cycle.staging_composition/v1",
   "branch": "cursor/first-cycle-execution-completion-91c1",
-  "pr": null,
+  "pr": 291,
   "purpose": "Isolated successor of #290. Real FO-7 create_task_worktree_sync network/base-fetch fail-closed (no paid replan), FO-6 preserve LOCAL_COMMITTED_NOT_PUSHED while blocking duplicate remote effects, complete first-cycle rehearsal through STOP-before-merge. Not a merge into the final integration branch. Not a GO certification.",
   "go": false,
   "successor_of": {

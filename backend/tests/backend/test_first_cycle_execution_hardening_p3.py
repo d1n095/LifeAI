@@ -323,8 +323,8 @@ def test_staging_records_stay_no_go_on_this_successor():
     assert go_nogo["parent_290"] == PARENT_290
     assert manifest["successor_of"]["pr"] == 290
     assert manifest["successor_of"]["sha"] == PARENT_290
-    assert go_nogo.get("pr") != 289
-    assert go_nogo.get("pr") != 288
+    assert go_nogo["pr"] == 291
+    assert manifest["pr"] == 291
     assert "certified Path A" not in str(manifest["inputs"]["pr_276"].get("role") or "")
     remaining = " ".join(go_nogo["remaining_codex"])
     for token in ("CRED-1/2/3", "E2E-3", "GRANT-PROD", "TA-12", "CI-6", "#280"):

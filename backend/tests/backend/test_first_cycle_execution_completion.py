@@ -381,6 +381,8 @@ def test_staging_pins_this_completion_successor():
     assert go_nogo["parent_290"] == PARENT_290
     assert manifest["successor_of"]["pr"] == 290
     assert manifest["successor_of"]["sha"] == PARENT_290
+    assert go_nogo["pr"] == 291
+    assert manifest["pr"] == 291
     assert go_nogo["go"] is False
     assert manifest["go"] is False
     assert "certified Path A" not in str(manifest["inputs"]["pr_276"].get("role") or "")
