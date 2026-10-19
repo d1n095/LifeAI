@@ -195,10 +195,12 @@ REDIS_URL=redis://127.0.0.1:<port>/0 probes/fc284/run.sh ../wt284 -rA
 # #279 acceptance delta (run outside the candidate tree; the harness writes its matrix next to itself)
 git -C ../wt284 archive ceb416e backend/tests/backend/first_cycle_acceptance | tar -x -C probes/fc284/h279 --strip-components=3
 git -C ../wt284 archive HEAD    backend/tests/backend/first_cycle_acceptance | tar -x -C probes/fc284/h284 --strip-components=3
-REDIS_URL=... probes/fc284/run_harness.sh h279 ../wt284 h279_on_284
-REDIS_URL=... probes/fc284/run_harness.sh h284 ../wt284 h284_on_284
+# run_harness.sh now refuses without EXAMINER_ALLOW_HARNESS=1, always excludes test_credential_isolation.py,
+# and isolates git from the host config (see probes/staging285/REPORT_285_f5d9bf1.md §4). CRED rows are then not produced.
+EXAMINER_ALLOW_HARNESS=1 REDIS_URL=... probes/fc284/run_harness.sh h279 ../wt284 h279_on_284
+EXAMINER_ALLOW_HARNESS=1 REDIS_URL=... probes/fc284/run_harness.sh h284 ../wt284 h284_on_284
 ```
 
 Matrices are in `out/`: `baseline_279_ceb416e.json`, `h279_on_284.json` and `h284_on_284.json`. The last two are **redacted**: the CRED-4 detail contained a real host token (P1-3).
 
-**Warning:** do not run the harness on a machine with a global git credential helper until P1-3 is fixed. Otherwise run it with `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1`.
+**Warning:** do not run the candidate harness on a machine with a global git credential helper until P1-3 is fixed. The examiner runner has since been hardened (hermetic git, CRED tests excluded, explicit opt-in). The matrices above were produced before that hardening and are redacted.
