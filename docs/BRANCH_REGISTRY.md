@@ -14,7 +14,7 @@ does not enable Track B, does not accept `#280`, and does not implement Codex Gi
 
 | Branch | PR | Status | Scope |
 |---|---|---|---|
-| `cursor/first-cycle-staging-91c1` | draft (this PR) | **Staging composition of frozen `#284` + `#282`. Do not amend frozen upstream PRs.** | Exact inputs: `#263` `e33f494`, `#276` `09b87e9`, `#281` `abc88b4` (via `#284`), `#284` `9c978de` (provisional pending Claude exam), `#282` `1e3ee3f`. Merge-commit `ec2e896`. Manifest `docs/first_cycle_staging_manifest.json`. Codex integration notes `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`. |
+| `cursor/first-cycle-staging-91c1` | [#285](https://github.com/d1n095/LifeAI/pull/285) | **Staging composition of frozen `#284` + `#282`. Do not amend frozen upstream PRs.** | Exact inputs: `#263` `e33f494`, `#276` `09b87e9`, `#281` `abc88b4` (via `#284`), `#284` `9c978de` (provisional pending Claude exam), `#282` `1e3ee3f`. Merge-commit `ec2e896`. Manifest `docs/first_cycle_staging_manifest.json`. Codex integration notes `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`. |
 
 **Must not:** alter frozen `#263`/`#276`/`#281`/`#282`/`#284`; compose `#280`; enable Track B; merge/deploy/Recall; paid providers; GitHub settings.
 

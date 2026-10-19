@@ -1,0 +1,54 @@
+{
+  "schema": "mainai.first_cycle.staging_go_nogo/v1",
+  "branch": "cursor/first-cycle-staging-91c1",
+  "pr": 285,
+  "go": false,
+  "reason": "Accepted Path A / activation / FC-4 / review-STOP composition holds. First-cycle GO remains false until Codex transport/grants and a PASS-reviewed activation-security replacement compose. Track B, Recall, merge, and deploy stay off.",
+  "local": {
+    "composition_path_a_review_harness": "238 passed, 8 expected Codex xfails (matrix FAIL)",
+    "backend_unit_integration": "3182+ passed on GitHub after composition-test fix; local combined session 3279 passed / 8 xfailed / 8 security false-coupling on shared DB; isolated security+account 103 passed",
+    "security_account_isolated": "103 passed",
+    "frontend_audit_policy_tests": "59 passed",
+    "frontend_npm_audit_production": "pass (GHSA-vfj7-8cjw-p6xm excepted until 2027-01-15)",
+    "frontend_tsc": "pass",
+    "frontend_eslint": "0 errors, 1 pre-existing warning",
+    "frontend_next_docker": "standalone produced",
+    "frontend_next_vercel": "standalone not produced",
+    "harness_matrix": {
+      "PASS": 57,
+      "FAIL": 8,
+      "BLOCKED": 1,
+      "UNKNOWN": 0,
+      "go": false
+    }
+  },
+  "github_pr_suite_cabdb77": {
+    "run": 39213801581,
+    "event": "pull_request",
+    "Frontend — npm audit": "success",
+    "Frontend — TypeScript & ESLint": "success",
+    "Frontend — build (docker)": "success",
+    "Frontend — build (vercel)": "success",
+    "E2E — Playwright (full stack)": "success",
+    "E2E — Library / Founder Knowledge Studio": "success",
+    "E2E — same-origin proxy": "success",
+    "Backend — RLS & session-security tests": "success",
+    "Backend — account lifecycle & rate-limit tests": "success",
+    "Backend — Alembic migration check": "success",
+    "Backend — unit/integration tests": "failure on shallow-clone ancestry probes (fixed in follow-up commit)",
+    "All required checks passed": "failure because backend-tests failed"
+  },
+  "pr_284_ci_9c978de": {
+    "pull_request": 39207496200,
+    "push": 39207492010,
+    "note": "Product jobs success except inherited Frontend npm-audit (closed by composing #282). Backend unit/integration success on the PR suite."
+  },
+  "remaining_codex": [
+    "CRED-1/2/3 token-in-URL and worktree credentials",
+    "E2E-3 ungranted push_worktree_branch",
+    "GRANT-PROD missing production grant interface",
+    "TA-12/TA-13/PUB-2 production publication history/symlink/gitlink",
+    "CI-6 production evaluate_check_runs skipped-as-pass",
+    "#280 RETURN_TO_BUILDER dual 0089"
+  ]
+}

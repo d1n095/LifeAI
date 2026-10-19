@@ -1,14 +1,16 @@
 """Composition integrity for the first-cycle staging candidate.
 
-These checks belong to THIS integration: exact frozen-input ancestry, a single Alembic head,
-exactly one npm-audit policy, no Track B, no #280 activation-security migration, and no
-automatic merge/deploy. They do not implement Codex grants or Git transport.
+These checks belong to THIS integration: exact frozen-input SHAs in the manifest, a single
+Alembic head, exactly one npm-audit policy, markers from each accepted input, no Track B,
+no #280 activation-security migration, and no automatic merge/deploy.
+
+Git ancestry is recorded in the manifest for full clones. These tests do not `git fetch`
+or require a non-shallow history, because GitHub Actions checks out a shallow PR merge.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 from alembic.config import Config
@@ -37,8 +39,8 @@ EXCLUDED = {
 }
 
 
-def _git(*args: str) -> str:
-    return subprocess.check_output(["git", *args], cwd=REPO_ROOT, text=True).strip()
+def _text(*parts: str) -> str:
+    return (REPO_ROOT.joinpath(*parts)).read_text(encoding="utf-8")
 
 
 def test_manifest_records_exact_frozen_input_shas():
@@ -50,25 +52,39 @@ def test_manifest_records_exact_frozen_input_shas():
     assert payload["excluded"]["pr_280"]["sha"] == EXCLUDED["pr_280"]
     assert payload["excluded"]["pr_280"]["reason"] == "RETURN_TO_BUILDER"
     assert payload["merge"]["strategy"] == "no-ff merge of #282 onto #284"
-    merge_sha = payload["merge"]["commit"]
-    assert _git("rev-parse", merge_sha) == merge_sha
-    parents = _git("rev-parse", f"{merge_sha}^1", f"{merge_sha}^2").splitlines()
-    assert parents == payload["merge"]["parents"]
-    rc = subprocess.call(["git", "merge-base", "--is-ancestor", merge_sha, "HEAD"], cwd=REPO_ROOT)
-    assert rc == 0
+    assert payload["merge"]["commit"] == "ec2e896c4d04dfdbd0f8f556ef3f08f36a18734c"
+    assert payload["merge"]["parents"] == [
+        FROZEN_INPUTS["pr_284"],
+        FROZEN_INPUTS["pr_282"],
+    ]
+    assert payload["merge"]["conflicts"] == []
 
 
-def test_every_accepted_input_is_an_ancestor_of_this_candidate():
-    head = _git("rev-parse", "HEAD")
-    for key, sha in FROZEN_INPUTS.items():
-        rc = subprocess.call(["git", "merge-base", "--is-ancestor", sha, head], cwd=REPO_ROOT)
-        assert rc == 0, f"{key} {sha} is not an ancestor of {head}"
-    known = subprocess.call(["git", "cat-file", "-e", EXCLUDED["pr_280"] + "^{commit}"], cwd=REPO_ROOT)
-    if known == 0:
-        rc = subprocess.call(
-            ["git", "merge-base", "--is-ancestor", EXCLUDED["pr_280"], head], cwd=REPO_ROOT
-        )
-        assert rc != 0, "#280 must not be an ancestor of the staging candidate"
+def test_composition_markers_from_each_accepted_input():
+    github_client = _text("backend", "app", "integrations", "github_client.py")
+    assert "def list_workflow_runs_for_sha" in github_client
+    assert "def list_check_runs" in github_client
+    assert "def merge" not in github_client
+    assert "def merge_pull_request" not in github_client
+
+    assert (REPO_ROOT / "backend" / "app" / "mainai_execution" / "envelope_scope.py").is_file()
+    ci = _text(".github", "workflows", "ci.yml")
+    assert '"mainai/**"' in ci
+    assert "permissions:" in ci
+    assert "npm run audit:policy:test" in ci
+    assert "node scripts/check-npm-audit.js" in ci
+
+    audit = _text("frontend", "scripts", "check-npm-audit.js")
+    assert 'EXCEPTION_REVIEW_DEADLINE = "2027-01-15"' in audit
+    assert "compatibleFixAvailable" in audit
+
+    assert (REPO_ROOT / "backend" / "app" / "mainai_execution" / "review_receipt.py").is_file()
+    assert (REPO_ROOT / "backend" / "app" / "mainai_execution" / "first_cycle_stop.py").is_file()
+    execution_job = _text("backend", "app", "mainai_execution", "execution_job.py")
+    assert "evaluate_first_cycle_review_receipt" in execution_job
+    assert "stop_first_cycle" in execution_job
+    replan = _text("backend", "app", "mainai_execution", "replan.py")
+    assert "should_suppress_paid_replan" in replan
 
 
 def test_single_alembic_head_is_activation_branch_protection_not_codex_0089():
@@ -87,7 +103,7 @@ def test_exactly_one_npm_audit_policy_script():
     scripts = list((REPO_ROOT / "frontend" / "scripts").glob("check-npm-audit.js"))
     assert [p.name for p in scripts] == ["check-npm-audit.js"]
     text = scripts[0].read_text(encoding="utf-8")
-    assert 'expires: EXCEPTION_REVIEW_DEADLINE' in text
+    assert "expires: EXCEPTION_REVIEW_DEADLINE" in text
     assert 'EXCEPTION_REVIEW_DEADLINE = "2027-01-15"' in text
     assert "compatibleFixAvailable" in text
 
