@@ -1,7 +1,7 @@
 # Integrating the eventual Codex activation/transport candidate
 
 This operator candidate (`cursor/first-cycle-execution-hardening-p3-91c1`) is the
-isolated successor of `#289` @ `ca60ba54febb49e1c7585fb776811564d54e3d21`, itself
+isolated successor of frozen `#289` @ `ca60ba54febb49e1c7585fb776811564d54e3d21`, itself
 the P2 child of frozen `#288` @ `1ea41d7db424cba6b4d9ec93da79fa85d809d2fb`. The
 lineage still contains frozen `#263`, `#276`, `#281`, `#282`, `#284`, `#285`,
 `#286`, `#287`, `#288`, and `#289`. It does **not** contain `#280` and does

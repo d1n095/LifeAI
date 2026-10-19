@@ -5,7 +5,7 @@ Codex follow-up: `docs/FIRST_CYCLE_CODEX_INTEGRATION.md`.
 
 This file originally described frozen `#287` (`cursor/first-cycle-staging-p1-91c1`).
 That SHA remains frozen. The current operator candidate is the isolated successor
-of `#289` @ `ca60ba54febb49e1c7585fb776811564d54e3d21`
+of frozen `#289` @ `ca60ba54febb49e1c7585fb776811564d54e3d21`
 (`cursor/first-cycle-execution-hardening-p3-91c1`). Machine-readable truth:
 `docs/first_cycle_staging_manifest.json` (`go: false`). Do not amend `#285`,
 `#286`, `#287`, `#288`, or `#289` after freeze. `#276` is a frozen Path A
