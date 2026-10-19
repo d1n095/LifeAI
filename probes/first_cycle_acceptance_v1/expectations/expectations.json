@@ -6,7 +6,9 @@
         "test_FO_",
         "test_LR1_",
         "test_LR2_",
-        "test_RS_"
+        "test_RS_",
+        "test_FO6b_",
+        "test_FC_"
       ],
       "known_p2": [
         "test_LR3_",
@@ -19,7 +21,9 @@
         "test_FO_",
         "test_LR1_",
         "test_LR2_",
-        "test_RS_"
+        "test_RS_",
+        "test_FO6b_",
+        "test_FC_"
       ],
       "known_p2": [
         "test_LR3_",
@@ -27,7 +31,7 @@
         "[untyped_boundary_exception]"
       ]
     },
-    "_note": "untyped_boundary_exception (bare RuntimeError at push) is crash-semantics by design since #284: contained (no paid call, no re-execution, Founder-visible recovery record; FO-6b) but not terminal -> P2. FO-7 base-fetch network failure -> bounded paid replans (<= MAX_AUTO_REPLANS), no code-agent spend -> P2 (found at #288)."
+    "_note": "untyped_boundary_exception (bare RuntimeError at push) is crash-semantics by design since #284: contained (no paid call, no re-execution, Founder-visible recovery record; FO-6b) but not terminal -> P2. FO-7 base-fetch network failure -> bounded paid replans (<= MAX_AUTO_REPLANS), no code-agent spend -> P2 (found at #288). FO-6b (crash contained, Founder-visible) and FC-1..3 (Founder cancel beats recovery takeover; added at #289) are required."
   },
   "credential_canary": {
     "cursor": {
