@@ -8,12 +8,17 @@
         "test_LR2_",
         "test_RS_",
         "test_FO6b_",
-        "test_FC_"
+        "test_FC_",
+        "test_FO6x_",
+        "test_RL_",
+        "test_FO7n_",
+        "test_CS_",
+        "test_ER4_"
       ],
       "known_p2": [
         "test_LR3_",
         "test_FO7_",
-        "[untyped_boundary_exception]"
+        "test_FO7x_"
       ]
     },
     "codex": {
@@ -23,15 +28,20 @@
         "test_LR2_",
         "test_RS_",
         "test_FO6b_",
-        "test_FC_"
+        "test_FC_",
+        "test_FO6x_",
+        "test_RL_",
+        "test_FO7n_",
+        "test_CS_",
+        "test_ER4_"
       ],
       "known_p2": [
         "test_LR3_",
         "test_FO7_",
-        "[untyped_boundary_exception]"
+        "test_FO7x_"
       ]
     },
-    "_note": "untyped_boundary_exception (bare RuntimeError at push) is crash-semantics by design since #284: contained (no paid call, no re-execution, Founder-visible recovery record; FO-6b) but not terminal -> P2. FO-7 base-fetch network failure -> bounded paid replans (<= MAX_AUTO_REPLANS), no code-agent spend -> P2 (found at #288). FO-6b (crash contained, Founder-visible) and FC-1..3 (Founder cancel beats recovery takeover; added at #289) are required."
+    "_note": "CORRECTED after the harness 404-fidelity fix: FO-6 (untyped error / crash at the push boundary on an envelope-governed Path A goal) is NOT contained - governed recovery declines takeover, the retry tick re-dispatches, each attempt re-runs the paid code agent (bounded by max_attempts: 2 extra paid runs) and the task is stranded `ready`. FO-6 family (untyped_boundary_exception, FO6b, FO6x, RL) is REQUIRED (P1). FO-7/FO-7x (approved-base fetch at worktree creation -> bounded paid replans) stay P2. FO-7n (#290 neighbour fix) required."
   },
   "credential_canary": {
     "cursor": {
@@ -229,5 +239,33 @@
   "_informational_matrix": [
     "TA-10 changed-file check",
     "TA-11 retry preserves structured authority; replan creates"
-  ]
+  ],
+  "grant_contract": {
+    "codex": {
+      "required": [
+        "test_GC"
+      ],
+      "known_p2": [],
+      "_note": "Validated on #280 37bca08: GC-1..GC-5 pass; GC-6 BLOCKED (no draft-PR grant); GC-7 GAP (re-mint from a consumed preflight receipt); GC-8 BLOCKED standalone (no typed boundary). All must pass on the Codex composed candidate."
+    }
+  },
+  "transport_contract": {
+    "cursor": {
+      "required": [
+        "test_TC0_",
+        "test_TC2_"
+      ],
+      "known_p2": [
+        "test_TC1_",
+        "test_TC3_"
+      ],
+      "_note": "TC-1/TC-3 are Codex-owned CRED items (credential-free transport); listed, not gating the Cursor execution layer."
+    },
+    "codex": {
+      "required": [
+        "test_TC"
+      ],
+      "known_p2": []
+    }
+  }
 }

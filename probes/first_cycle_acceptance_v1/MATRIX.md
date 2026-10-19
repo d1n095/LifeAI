@@ -104,3 +104,18 @@ An independent **PASS/FREEZE** for either profile requires all of the following:
 - for the final activation decision, every class-F item is attested.
 
 **RETURN_TO_BUILDER** if any required row fails, or if any non-required row regresses against its recorded baseline.
+
+
+## Additions (FO-6/FO-7 exact paths, grant contract, transport contract, concurrent STOP, erasure)
+
+| ID | Check | Class | Suite | Owner | Status (#290 6c98814 / #291 0b1871b) |
+|---|---|---|---|---|---|
+| FO-7x | Approved-base fetch at worktree creation fails closed (typed) | E | `stop_classification` H | Cursor | FAIL / **PASS** |
+| FO-7n | Recovery/operator fetch failure is typed, never "no branch" | E | `stop_classification` H | Cursor | PASS / PASS |
+| FO-6x, RL-1..3, FO-6b | Bare RuntimeError / crash at the push boundary on a governed goal: no paid re-run, terminal, Founder-visible (**P1**) | E | `stop_classification` H, K, F | Cursor | **FAIL / FAIL** (3 jobs, 3 paid agent runs, stranded `ready`) |
+| CS-1..3 | Concurrent STOP before draft-PR publication: no PR, no completion, no paid call | E | `stop_classification` J | Cursor | PASS / PASS |
+| ER-4 | Account erasure after a complete cycle (push, draft PR, STOP-before-merge) | E | `stop_classification` J | Cursor | PASS / PASS |
+| GC-1..GC-8 | One-use, race-safe, expiring, cancellable, exactly bound push grant; distinct draft-PR grant; no re-issue without fresh preflight; typed denial | E | `grant_contract_v1` (adapter) | Codex | BLOCKED (no grant API) / BLOCKED. On #280: GC-1..5 pass, GC-6 BLOCKED, GC-7 GAP, GC-8 BLOCKED. |
+| TC-0..TC-3 | Production git never consults global/system helpers, env-injected helpers or askpass | E | `transport_contract_v1` (canary, sandbox, localhost 401) | Codex | TC-1/TC-3 FAIL, TC-2 PASS (both) |
+
+Integration contracts K1..K12 and the adapter strategy: `../grant_contract_v1/INTEGRATION_CONTRACTS.md`.

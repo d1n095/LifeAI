@@ -110,7 +110,15 @@ def install_github(monkeypatch, bare: Path, base: str) -> FakeGitHub:
             result = fake.get_ref_override(branch)
             if result is not None:
                 return result
-        return git("-C", str(fake.bare), "rev-parse", f"refs/heads/{branch}")
+        # Mirror the real client: a missing ref is GitHubClientError(404), never a raw subprocess error.
+        from app.integrations.github_client import GitHubClientError
+
+        res = subprocess.run(["git", "-C", str(fake.bare), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                             capture_output=True, text=True)
+        if res.returncode != 0:
+            raise GitHubClientError(f"GitHub GET /repos/test-owner/test-repo/git/ref/heads/{branch} misslyckades (404): "
+                                    '{"message":"Not Found"}', status_code=404)
+        return res.stdout.strip()
 
     async def list_prs(self, *, head, base, state="all"):
         return [p for p in fake.prs if p["head"] == head.split(":", 1)[-1] and p["base"] == base]

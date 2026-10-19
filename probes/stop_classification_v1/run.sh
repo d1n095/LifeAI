@@ -13,6 +13,6 @@ cd "$HERE" && env -u GH_TOKEN -u GITHUB_TOKEN -u GIT_ASKPASS -u SSH_ASKPASS -u S
   PATH="$(dirname "$VENV"):$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$HERE:$TARGET/backend" SECRET_KEY=x TZ=UTC \
   LIFEAI_TEST_DATABASE_NAME="examiner_stopcls_$$" REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6390/0}" \
   "$VENV" -m pytest -q -p no:cacheprovider -p tests.conftest -W ignore --rootdir="$HERE" -c /dev/null \
-  test_a_failure_origins.py test_b_local_retries.py test_c_running_sibling.py test_e_worktree_creation.py test_f_untyped_recovery.py test_g_founder_cancel_recovery.py "${@:2}"
+  test_a_failure_origins.py test_b_local_retries.py test_c_running_sibling.py test_e_worktree_creation.py test_f_untyped_recovery.py test_g_founder_cancel_recovery.py test_h_fo6_fo7_exact_paths.py test_k_recovery_loop_bound.py test_j_concurrent_stop_publication.py "${@:2}"
 RC=$?; rm -rf "$SANDBOX_HOME"; AFTER="$(git -C "$TARGET" status --porcelain)"
 [ "$BEFORE" == "$AFTER" ] && echo "target worktree unchanged" || { echo "WARNING: target worktree changed"; RC=99; }; exit $RC

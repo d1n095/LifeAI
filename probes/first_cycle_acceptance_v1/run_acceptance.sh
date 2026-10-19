@@ -19,6 +19,8 @@ Q1=(); [ "$QUICK" = "--quick" ] && Q1=(-k "pre_receive or opaque or LR1")
 "$PROBES/stop_classification_v1/run.sh" "$TARGET" -rA --tb=line "${Q1[@]+"${Q1[@]}"}" > "$OUT/stop_classification.log" 2>&1
 # 2 credential isolation canary (sandboxed; needs REAL_HOME only to build the deny profile)
 env HOME="$REAL_HOME" "$PROBES/stop_classification_v1/run_canary.sh" "$TARGET" > "$OUT/credential_canary.log" 2>&1
+# 2b production transport credential sources (TC-0..TC-3; canary helper, sandbox, localhost 401 server)
+env HOME="$REAL_HOME" REAL_HOME="$REAL_HOME" "$PROBES/transport_contract_v1/run.sh" "$TARGET" -rA --tb=line > "$OUT/transport_contract.log" 2>&1
 # 3 review receipts / STOP-before-merge / goal STOP / replan (DB-level, real worker ticks)
 Q3=(); [ "$QUICK" = "--quick" ] && Q3=(-k "S1_ or S7_ or N1b")
 "$PROBES/fc286/run.sh" "$TARGET" -rA --tb=line "${Q3[@]+"${Q3[@]}"}" > "$OUT/review_stop.log" 2>&1
@@ -30,6 +32,8 @@ env HOME="$REAL_HOME" "$HERE/run_candidate_harness_sandboxed.sh" "$TARGET" "$OUT
 # 6 authorization / grants / account erasure (Codex security candidate)
 if [ "$PROFILE" = "codex" ]; then
   "$PROBES/activation_280/run.sh" "$TARGET" -rA --tb=line > "$OUT/authorization_grants.log" 2>&1
+  # adapter-driven grant / remote-effect contract (GC-1..GC-8); BLOCKED / ADAPTER-NEEDED never pass
+  "$PROBES/grant_contract_v1/run.sh" "$TARGET" -rA --tb=line > "$OUT/grant_contract.log" 2>&1
 fi
 # 7 candidate's own backend regression (selected domains)
 ( cd "$TARGET/backend" && F=$(ls tests/backend/*.py tests/backend/mainai/*.py | grep -E "first_cycle|ci_wait|path_a|replan|recovery|executor|execution_job|mainai_execution|worker|envelope|verification|account_erasure|migration_roundtrip|provider_spend|advance_tasks|takeover|retry|wait|ci_workflow|staging|activation|github_client" | tr '\n' ' ')
