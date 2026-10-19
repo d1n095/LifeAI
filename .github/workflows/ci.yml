@@ -55,7 +55,8 @@ jobs:
       - run: npm run audit:policy:test
         working-directory: frontend
       # Production findings always fail. High/critical dev findings fail except the one
-      # exact, dated braces advisory; compatible actionable dev fixes also fail.
+      # exact, dated braces advisory (expires 2027-01-15; auto-revoked if a compatible
+      # non-major fix appears). Compatible actionable dev fixes also fail.
       - run: node scripts/check-npm-audit.js
         working-directory: frontend
 
