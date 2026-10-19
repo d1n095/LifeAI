@@ -1,0 +1,215 @@
+{
+  "_doc": "Per suite and profile: 'required' must PASS/HOLD (blocker if not); 'known_p2' may fail (tolerated, listed); anything else failing = REGRESSION. Patterns are substrings of the pytest node id or MATRIX id. '_informational_matrix' rows are historical demonstrations of raw git behaviour or pre-#276 expectations superseded by design (TA-10 -> TA-10a/10b; TA-11 -> TA-11', see VERDICT_276 \u00a73) and never gate.",
+  "stop_classification": {
+    "cursor": {
+      "required": [
+        "test_FO_",
+        "test_LR1_",
+        "test_LR2_",
+        "test_RS_"
+      ],
+      "known_p2": [
+        "test_LR3_"
+      ]
+    },
+    "codex": {
+      "required": [
+        "test_FO_",
+        "test_LR1_",
+        "test_LR2_",
+        "test_RS_"
+      ],
+      "known_p2": [
+        "test_LR3_"
+      ]
+    }
+  },
+  "credential_canary": {
+    "cursor": {
+      "required": [
+        "test_C0_",
+        "test_C1_",
+        "test_C2_",
+        "test_C3_",
+        "test_C5_"
+      ],
+      "known_p2": [
+        "test_C4_"
+      ]
+    },
+    "codex": {
+      "required": [
+        "test_C0_",
+        "test_C1_",
+        "test_C2_",
+        "test_C3_",
+        "test_C5_"
+      ],
+      "known_p2": [
+        "test_C4_"
+      ]
+    }
+  },
+  "review_stop": {
+    "cursor": {
+      "required": [
+        "test_S1_",
+        "test_S2_",
+        "test_S3_",
+        "test_S4_",
+        "test_S6_",
+        "test_S7_",
+        "test_S9_",
+        "test_S10_",
+        "test_S11_",
+        "test_S12_",
+        "test_S13_",
+        "test_P1_",
+        "test_P2_",
+        "test_P3_",
+        "test_P3b_",
+        "test_P4_",
+        "test_N1_",
+        "test_N1b_",
+        "test_N1c_",
+        "test_N2_",
+        "test_N3_",
+        "test_R1_",
+        "test_R4_",
+        "test_T1_"
+      ],
+      "known_p2": [
+        "test_S5_",
+        "test_S8_",
+        "test_R2_",
+        "test_R3_",
+        "test_R5_",
+        "test_N4_"
+      ]
+    },
+    "codex": {
+      "same_as": "cursor"
+    }
+  },
+  "task_authority": {
+    "cursor": {
+      "required_matrix_hold": "*",
+      "known_p2_matrix": [
+        "TA-12",
+        "TA-13"
+      ]
+    },
+    "codex": {
+      "required_matrix_hold": "*",
+      "known_p2_matrix": []
+    }
+  },
+  "spend": {
+    "cursor": {
+      "required_matrix_hold": "*",
+      "known_p2_matrix": []
+    },
+    "codex": {
+      "required_matrix_hold": "*",
+      "known_p2_matrix": []
+    }
+  },
+  "authorization_grants": {
+    "codex": {
+      "required": [
+        "test_"
+      ],
+      "known_p2": [],
+      "_note": "probes written against #280's activation_security API; an API rename needs a thin adapter (see MATRIX.md), never a weakened assertion"
+    }
+  },
+  "candidate_harness": {
+    "cursor": {
+      "safety": {
+        "canary_invoked": "no",
+        "secret_in_outputs": "0",
+        "secret_in_target": "0",
+        "target_unchanged": "yes"
+      },
+      "allowed_matrix_fail": [
+        "CI-6",
+        "E2E-3",
+        "GRANT-PROD",
+        "TA-12",
+        "TA-13",
+        "PUB-2"
+      ]
+    },
+    "codex": {
+      "safety": {
+        "canary_invoked": "no",
+        "secret_in_outputs": "0",
+        "secret_in_target": "0",
+        "target_unchanged": "yes"
+      },
+      "allowed_matrix_fail": [
+        "CI-6"
+      ]
+    }
+  },
+  "backend_regression": {
+    "cursor": {
+      "required": [
+        "*"
+      ]
+    },
+    "codex": {
+      "required": [
+        "*"
+      ]
+    }
+  },
+  "fc4_policy": {
+    "cursor": {
+      "required": [
+        "*"
+      ]
+    },
+    "codex": {
+      "required": [
+        "*"
+      ]
+    }
+  },
+  "fc4_bypass": {
+    "cursor": {
+      "required_matrix_hold": "*",
+      "known_p2_matrix": [
+        "B1 ",
+        "B2 ",
+        "B3 ",
+        "B7 ",
+        "B8 "
+      ]
+    },
+    "codex": {
+      "required_matrix_hold": "*",
+      "known_p2_matrix": [
+        "B1 ",
+        "B2 ",
+        "B3 ",
+        "B7 ",
+        "B8 "
+      ]
+    }
+  },
+  "ci_exact_sha": {
+    "cursor": {
+      "required_checks": 12,
+      "suites": 2
+    },
+    "codex": {
+      "required_checks": 12,
+      "suites": 2
+    }
+  },
+  "_informational_matrix": [
+    "TA-10 changed-file check",
+    "TA-11 retry preserves structured authority; replan creates"
+  ]
+}

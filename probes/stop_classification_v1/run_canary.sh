@@ -3,7 +3,7 @@
 # runs under a sandbox profile denying the real ~/.gitconfig, gh config, keychains and helper binaries.
 # Usage: run_canary.sh <target-worktree> [extra pytest target...]
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"; TARGET="$(cd "$1" && pwd)"; VENV="$HERE/../../venv312/bin/python"
+HERE="$(cd "$(dirname "$0")" && pwd)"; TARGET="$(cd "$1" && pwd)"; VENV="${ACCEPT_VENV:-$HERE/../../venv312/bin/python}"
 WORK="$(mktemp -d)"; CH="$WORK/canary-home"; mkdir -p "$CH"
 SECRET="CANARY-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 cat > "$WORK/canary-helper.sh" <<H

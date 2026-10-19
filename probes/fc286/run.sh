@@ -1,7 +1,7 @@
 #!/bin/bash
 # Examiner probes for #286 (re-run of the #284 suite plus new probes). Loads the target's conftest; verifies the target is unchanged.
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"; TARGET="$(cd "${1:?usage: run.sh <target-worktree> [pytest args]}" && pwd)"; VENV="$HERE/../../venv312/bin/python"
+HERE="$(cd "$(dirname "$0")" && pwd)"; TARGET="$(cd "${1:?usage: run.sh <target-worktree> [pytest args]}" && pwd)"; VENV="${ACCEPT_VENV:-$HERE/../../venv312/bin/python}"
 echo "target: $TARGET @ $(git -C "$TARGET" rev-parse HEAD)"; BEFORE="$(git -C "$TARGET" status --porcelain)"
 cd "$HERE" && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$HERE:$TARGET/backend" SECRET_KEY=x TZ=UTC LIFEAI_TEST_DATABASE_NAME="examiner_fc286_$$" \
   "$VENV" -m pytest -q -p no:cacheprovider -p tests.conftest -W ignore --rootdir="$HERE" -c /dev/null test_review_stop_286_exam.py "${@:2}"
