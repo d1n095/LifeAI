@@ -227,8 +227,10 @@ def test_staging_records_do_not_claim_go_or_certified_path_a():
     go_nogo = json.loads((root / "docs" / "first_cycle_staging_go_nogo.json").read_text())
     manifest = json.loads((root / "docs" / "first_cycle_staging_manifest.json").read_text())
     assert go_nogo["go"] is False
+    assert go_nogo["pr"] == 289
     assert go_nogo["parent_288"] == "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb"
     assert manifest.get("go") is False
+    assert manifest.get("pr") == 289
     pr276 = manifest["inputs"]["pr_276"]
     role = str(pr276.get("role") or "")
     assert "not a first-cycle go certification" in role.lower()
