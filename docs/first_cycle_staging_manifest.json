@@ -41,6 +41,12 @@
       "sha": "9c978ded05b05ad174ce003a3efad22682ec187d",
       "role": "review receipts and STOP-before-merge; merge-base of #285 and #286"
     },
+    "pr_275_frozen_parent_of_282": {
+      "pr": 275,
+      "ref": "codex/frontend-npm-audit-fc4-remediation",
+      "sha": "eed3f4a380be71398a0481414518a29506a57ccb",
+      "role": "frozen FC-4 original; RETURN_TO_BUILDER; parent of #282 only. Not a first-cycle GO certification."
+    },
     "pr_282": {
       "pr": 282,
       "ref": "cursor/fc4-npm-audit-a6-a7-91c1",
@@ -88,6 +94,30 @@
       "exact-SHA audit events and STOP-before-merge",
       "operator runbook docs/FIRST_CYCLE_OPERATOR_RUNBOOK.md"
     ]
+  },
+  "merge": {
+    "note": "Historical #287 composition. This candidate is a linear child of frozen #288, not a new merge.",
+    "order": [
+      "cut branch from pr_285",
+      "no-ff merge pr_286"
+    ],
+    "strategy": "no-ff merge of #286 onto #285",
+    "commit": "9c4e30637b5dc568eb160e7a67178582ec7b2da1",
+    "parents": [
+      "f5d9bf14340b0436d7470b28f6026342aeeaf3e6",
+      "a255fa23bf29be624d3f24e6387f7ed25defce1e"
+    ],
+    "merge_base": "9c978ded05b05ad174ce003a3efad22682ec187d",
+    "conflicts": [],
+    "prior_composition": {
+      "strategy": "no-ff merge of #282 onto #284",
+      "commit": "ec2e896c4d04dfdbd0f8f556ef3f08f36a18734c",
+      "parents": [
+        "9c978ded05b05ad174ce003a3efad22682ec187d",
+        "1e3ee3fd604fc540600f393e215a712b283686d4"
+      ],
+      "merge_base": "2fbe20aacf1203fc0e16d216ef55b666b2181619"
+    }
   },
   "migration": {
     "head": "0089_activation_branch_protect",

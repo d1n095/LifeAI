@@ -34,6 +34,8 @@ FROZEN_INPUTS = {
     "pr_275_frozen_parent_of_282": "eed3f4a380be71398a0481414518a29506a57ccb",
     "pr_285": "f5d9bf14340b0436d7470b28f6026342aeeaf3e6",
     "pr_286": "a255fa23bf29be624d3f24e6387f7ed25defce1e",
+    "pr_287": "1f1819aa46d8fd4aef18db5fb625af51c02d3394",
+    "pr_288": "1ea41d7db424cba6b4d9ec93da79fa85d809d2fb",
 }
 
 EXCLUDED = {
@@ -53,8 +55,11 @@ def test_manifest_records_exact_frozen_input_shas():
         assert len(sha) == 40
     assert payload["excluded"]["pr_280"]["sha"] == EXCLUDED["pr_280"]
     assert payload["excluded"]["pr_280"]["reason"] == "RETURN_TO_BUILDER"
-    assert payload["branch"] == "cursor/first-cycle-staging-p1-91c1"
-    assert payload["successor_of"]["sha"] == FROZEN_INPUTS["pr_285"]
+    assert payload["go"] is False
+    assert payload["branch"] == "cursor/first-cycle-ops-readiness-p2-91c1"
+    assert payload["pr"] == 289
+    assert payload["successor_of"]["sha"] == FROZEN_INPUTS["pr_288"]
+    assert "certified Path A" not in inputs["pr_276"]["role"]
     assert payload["merge"]["strategy"] == "no-ff merge of #286 onto #285"
     assert payload["merge"]["commit"] == "9c4e30637b5dc568eb160e7a67178582ec7b2da1"
     assert payload["merge"]["parents"] == [
@@ -149,6 +154,10 @@ def test_go_nogo_stays_false_with_codex_gaps_visible():
         assert token in remaining
     assert payload["parent_285"] == FROZEN_INPUTS["pr_285"]
     assert payload["parent_286"] == FROZEN_INPUTS["pr_286"]
+    assert payload["parent_287"] == FROZEN_INPUTS["pr_287"]
+    assert payload["parent_288"] == FROZEN_INPUTS["pr_288"]
+    assert payload["pr"] == 289
+    assert payload["branch"] == "cursor/first-cycle-ops-readiness-p2-91c1"
 
 
 def test_defaults_keep_write_merge_deploy_and_activation_off():
