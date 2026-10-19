@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from app.mainai_founder_ops.assignment_guard import DuplicateWorkError, assert_no_duplicate_task_assignment
 from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest, WorkforceTeam
 from app.workforce.authority import TaskScopedAuthority, revoke_assignment_authority
 from app.workforce.context import create_context_package
@@ -45,6 +46,10 @@ def submit_delegation_request(
     verification_requirement: str = "independent_verifier",
     provenance: dict | None = None,
 ) -> WorkforceDelegationRequest:
+    try:
+        assert_no_duplicate_task_assignment(db, owner_id=owner_id, task_id=task_id)
+    except DuplicateWorkError as exc:
+        raise DelegationBrokerError(str(exc)) from exc
     row = WorkforceDelegationRequest(
         owner_id=owner_id,
         goal_id=goal_id,
@@ -83,6 +88,15 @@ def resolve_delegation(
         raise DelegationBrokerError("owner mismatch on delegation request")
     if request.status != "open":
         raise DelegationBrokerError(f"request status={request.status} is not open")
+    try:
+        assert_no_duplicate_task_assignment(
+            db,
+            owner_id=owner_id,
+            task_id=request.task_id,
+            excluding_request_id=request.id,
+        )
+    except DuplicateWorkError as exc:
+        raise DelegationBrokerError(str(exc)) from exc
 
     prefer_local = prefer_local_only or request.data_sensitivity in ("vault", "secret", "high")
 

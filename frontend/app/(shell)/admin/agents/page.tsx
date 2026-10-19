@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, AgentTask, AgentTaskDetail } from "@/lib/api";
 
 // MainAI Core: minimal founder-only view onto agent orchestration (see
@@ -34,6 +34,7 @@ export default function AgentOrchestrationPage() {
   const [testOutput, setTestOutput] = useState("");
   const [branchName, setBranchName] = useState("");
   const [baseBranch, setBaseBranch] = useState("main");
+  const selectedIdRef = useRef<string | null>(null);
 
   async function refreshTasks() {
     try {
@@ -44,6 +45,7 @@ export default function AgentOrchestrationPage() {
   }
 
   async function openTask(id: string) {
+    selectedIdRef.current = id;
     try {
       setSelected(await api.agentTaskDetail(id));
     } catch (e: any) {
@@ -54,6 +56,11 @@ export default function AgentOrchestrationPage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshTasks();
+    const interval = setInterval(() => {
+      refreshTasks();
+      if (selectedIdRef.current) openTask(selectedIdRef.current);
+    }, 4000);
+    return () => clearInterval(interval);
   }, []);
 
   async function createTask() {

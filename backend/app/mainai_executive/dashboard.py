@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.mainai_executive.observability import executive_status_snapshot
 from app.mainai_executive.why_graph import list_decision_debt
+from app.mainai_founder_ops.snapshot import build_founder_ops_snapshot
 from app.workforce.kill_switch import get_kill_switch
 from app.workforce.org_view import organization_snapshot
 
@@ -25,8 +26,17 @@ def founder_executive_dashboard(
         org = organization_snapshot(db, owner_id=owner_id)
     except Exception:
         org = {"error": "org_unavailable"}
-    ks = get_kill_switch(db, owner_id).as_dict()
+    try:
+        ks = get_kill_switch(db, owner_id).as_dict()
+    except Exception as exc:  # noqa: BLE001 — do not under-report STOP
+        ks = {
+            "active": None,
+            "blocked": True,
+            "observability_failed": True,
+            "error": type(exc).__name__,
+        }
     debt = list_decision_debt(db, owner_id=owner_id, limit=10)
+    ops = build_founder_ops_snapshot(db, owner_id=owner_id)
 
     return {
         "WHAT_SHE_IS_DOING": snap.get("current_goal"),
@@ -43,7 +53,7 @@ def founder_executive_dashboard(
         or (snap.get("assumption_scan") or {}).get("unverified_assumptions"),
         "WHAT_AGENTS_ARE_WORKING": snap.get("active_work"),
         "WHAT_EACH_AGENT_CAN_ACTUALLY_DO": org,
-        "WHAT_COST_IS_ACCRUING": {"note": "provider_invoke_disabled", "spend_live": False},
+        "WHAT_COST_IS_ACCRUING": ops.get("spend"),
         "WHAT_NEEDS_FOUNDER_APPROVAL": [
             c for c in (snap.get("executive_work_candidates") or []) if c.get("status") == "unreviewed"
         ],
@@ -51,8 +61,13 @@ def founder_executive_dashboard(
         "WHAT_RECOVERED": snap.get("last_recovery"),
         "WHAT_CHANGED": debt["items"][:5],
         "WHAT_WAS_LEARNED": (snap.get("assumption_scan") or {}).get("lesson_conflict_candidates"),
-        "startup_readiness": snap.get("startup_readiness"),
+        "startup_readiness": ops.get("startup_readiness") or snap.get("startup_readiness"),
         "kill_switch": ks,
+        "stop": ops.get("stop"),
+        "founder_ops": {
+            "work_item_counts": ops.get("work_item_counts"),
+            "first_cycle_go": False,
+        },
         "chain_of_thought_exposed": False,
         "evidence_basis": "durable_rows_only",
         "authority_state": snap.get("authority_state"),

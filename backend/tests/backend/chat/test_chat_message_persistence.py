@@ -158,6 +158,11 @@ def test_reload_confirms_user_message_remains_after_provider_failure(client, mon
     user_messages = [m for m in messages if m["role"] == "user"]
     assert len(user_messages) == 1
     assert user_messages[0]["content"] == "Detta meddelande ska överleva ett AI-fel."
+    assistants = [m for m in messages if m["role"] == "assistant"]
+    assert len(assistants) == 1
+    assert assistants[0]["status"] == "failed"
+    assert assistants[0]["content"] == ""
+    assert assistants[0]["in_reply_to_id"] == user_messages[0]["id"]
 
 
 # --- D/F: retry never duplicates, and is idempotent once succeeded ---------------------------

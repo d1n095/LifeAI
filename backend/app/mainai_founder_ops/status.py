@@ -1,0 +1,202 @@
+"""Canonical founder-facing work status.
+
+Never infers activity from an assignment existing. `assigned` is queued, not running.
+`independently_verified` requires durable verification evidence from a party that is not
+the builder of the work. Agent-orchestration self-review is `completed`, not verified.
+"""
+
+from __future__ import annotations
+
+import enum
+from typing import Any, Iterable
+
+from app.mainai_execution.liveness import TaskLiveness, task_liveness
+from app.models.agent_task import AgentTask, AgentTaskStatus
+from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_job import MainAIJob, MainAIJobStatus
+from app.models.workforce import WorkforceAssignment
+
+
+class FounderWorkStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    waiting_on_dependency = "waiting_on_dependency"
+    failed = "failed"
+    completed = "completed"
+    independently_verified = "independently_verified"
+
+
+_LIVE_ASSIGNMENT_STATUSES = frozenset({"assigned", "running", "awaiting_verification"})
+
+# Agent-orchestration statuses that still justify a paid dispatch. Anything else is a
+# repeated prompt (already in flight, already reviewed, or already published).
+REDISPATCHABLE_AGENT_STATUSES = frozenset(
+    {AgentTaskStatus.created, AgentTaskStatus.reviewed_needs_correction}
+)
+
+
+def classify_mainai_task(
+    task: MainAITask,
+    job: MainAIJob | None = None,
+    *,
+    events: Iterable[MainAITaskEvent] | None = None,
+    checkpoint_test_status: str | None = None,
+    checkpoint_ci_status: str | None = None,
+) -> dict[str, Any]:
+    """Map a durable MainAI execution task to founder vocabulary.
+
+    Liveness `idle` while status is `ready` is queued. `pending`/`blocked` wait on a
+    dependency. A running task whose lease is dead/stalled is failed, not still running.
+    """
+    liveness = task_liveness(task, job)
+    source_status = task.status.value if isinstance(task.status, enum.Enum) else str(task.status)
+    evidence: dict[str, Any] = {
+        "source": "mainai_task",
+        "source_status": source_status,
+        "liveness": liveness.value,
+        "blocker_reason": task.blocker_reason,
+        "mainai_job_id": str(task.mainai_job_id) if task.mainai_job_id else None,
+        "goal_id": str(task.goal_id),
+        "task_id": str(task.id),
+        "description": task.description,
+    }
+
+    verified = _task_independently_verified(
+        task,
+        events=events,
+        checkpoint_test_status=checkpoint_test_status,
+        checkpoint_ci_status=checkpoint_ci_status,
+    )
+    if verified and task.status == MainAITaskStatus.completed:
+        status = FounderWorkStatus.independently_verified
+    elif task.status == MainAITaskStatus.completed:
+        status = FounderWorkStatus.completed
+    elif task.status in {MainAITaskStatus.failed, MainAITaskStatus.cancelled, MainAITaskStatus.retryable_failed}:
+        status = FounderWorkStatus.failed
+    elif liveness in {TaskLiveness.stalled, TaskLiveness.dead}:
+        status = FounderWorkStatus.failed
+        evidence["failure_class"] = liveness.value
+    elif liveness == TaskLiveness.running:
+        status = FounderWorkStatus.running
+    elif task.status in {
+        MainAITaskStatus.pending,
+        MainAITaskStatus.blocked,
+        MainAITaskStatus.waiting_external,
+        MainAITaskStatus.waiting_ci,
+    }:
+        status = FounderWorkStatus.waiting_on_dependency
+    elif task.status == MainAITaskStatus.ready:
+        status = FounderWorkStatus.queued
+    else:
+        status = FounderWorkStatus.queued
+
+    evidence["independently_verified"] = status == FounderWorkStatus.independently_verified
+    return {"founder_status": status.value, **evidence}
+
+
+def classify_mainai_job(job: MainAIJob) -> dict[str, Any]:
+    source = job.status.value if isinstance(job.status, enum.Enum) else str(job.status)
+    if job.status == MainAIJobStatus.queued:
+        status = FounderWorkStatus.queued
+    elif job.status == MainAIJobStatus.running:
+        status = FounderWorkStatus.running
+    elif job.status == MainAIJobStatus.paused:
+        status = FounderWorkStatus.waiting_on_dependency
+    elif job.status == MainAIJobStatus.completed:
+        status = FounderWorkStatus.completed
+    else:
+        status = FounderWorkStatus.failed
+    return {
+        "founder_status": status.value,
+        "source": "mainai_job",
+        "source_status": source,
+        "job_id": str(job.id),
+        "job_type": job.job_type,
+        "public_message": job.public_message,
+        "error_category": job.error_category,
+        "independently_verified": False,
+    }
+
+
+def classify_workforce_assignment(assignment: WorkforceAssignment) -> dict[str, Any]:
+    """Assignment existence is not activity. `assigned` stays queued until status is running."""
+    source = assignment.status
+    verification = assignment.verification_status or "UNVERIFIED"
+    evidence = {
+        "source": "workforce_assignment",
+        "source_status": source,
+        "assignment_id": str(assignment.id),
+        "profile_id": str(assignment.profile_id),
+        "verification_status": verification,
+        "revoked": assignment.revoked_at is not None,
+    }
+    if assignment.revoked_at is not None or source == "failed":
+        status = FounderWorkStatus.failed
+    elif source == "running":
+        status = FounderWorkStatus.running
+    elif source == "awaiting_verification":
+        status = FounderWorkStatus.waiting_on_dependency
+    elif source == "completed" and verification == "VERIFIED" and assignment.verifier_profile_id:
+        if assignment.verifier_profile_id != assignment.profile_id:
+            status = FounderWorkStatus.independently_verified
+        else:
+            status = FounderWorkStatus.completed
+            evidence["unjustified_self_verification"] = True
+    elif source == "completed":
+        status = FounderWorkStatus.completed
+    else:
+        # assigned / unknown → queued. Never "running" just because work was handed out.
+        status = FounderWorkStatus.queued
+    evidence["independently_verified"] = status == FounderWorkStatus.independently_verified
+    return {"founder_status": status.value, **evidence}
+
+
+def classify_agent_task(task: AgentTask) -> dict[str, Any]:
+    source = task.status.value if isinstance(task.status, enum.Enum) else str(task.status)
+    if task.status in {AgentTaskStatus.created}:
+        status = FounderWorkStatus.queued
+    elif task.status == AgentTaskStatus.dispatched:
+        status = FounderWorkStatus.running
+    elif task.status in {
+        AgentTaskStatus.result_recorded,
+        AgentTaskStatus.reviewed_needs_correction,
+        AgentTaskStatus.ready_for_human,
+        AgentTaskStatus.pr_prepared,
+    }:
+        status = FounderWorkStatus.waiting_on_dependency
+    elif task.status == AgentTaskStatus.reviewed_rejected:
+        status = FounderWorkStatus.failed
+    elif task.status in {
+        AgentTaskStatus.reviewed_approved,
+        AgentTaskStatus.pr_opened,
+    }:
+        # Self-review / self-proposed PR is not independent verification.
+        status = FounderWorkStatus.completed
+    else:
+        status = FounderWorkStatus.queued
+    return {
+        "founder_status": status.value,
+        "source": "agent_task",
+        "source_status": source,
+        "task_id": str(task.id),
+        "title": task.title,
+        "independently_verified": False,
+    }
+
+
+def _task_independently_verified(
+    task: MainAITask,
+    *,
+    events: Iterable[MainAITaskEvent] | None,
+    checkpoint_test_status: str | None,
+    checkpoint_ci_status: str | None,
+) -> bool:
+    if task.status != MainAITaskStatus.completed:
+        return False
+    if (checkpoint_test_status or "").lower() == "passed":
+        return True
+    if (checkpoint_ci_status or "").lower() in {"passed", "success"}:
+        return True
+    if events is None:
+        return False
+    return any(e.event_type == MainAITaskEventType.verification_passed for e in events)

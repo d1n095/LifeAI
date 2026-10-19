@@ -1,0 +1,40 @@
+import type { FounderWorkStatus, MainAITask, MainAITaskLiveness } from "@/lib/api";
+
+export const FOUNDER_STATUS_LABELS: Record<FounderWorkStatus, string> = {
+  queued: "Köad",
+  running: "Kör",
+  waiting_on_dependency: "Väntar på beroende",
+  failed: "Misslyckades",
+  completed: "Klar",
+  independently_verified: "Självständigt verifierad",
+};
+
+export const FOUNDER_STATUS_COLORS: Record<FounderWorkStatus, string> = {
+  queued: "text-white/50",
+  running: "text-blue-300",
+  waiting_on_dependency: "text-amber-300",
+  failed: "text-red-300",
+  completed: "text-emerald-300",
+  independently_verified: "text-emerald-200",
+};
+
+/** Client mirror of backend/app/mainai_founder_ops/status.py for the execution list.
+ * Assignment existence is never treated as running. */
+export function founderStatusForExecutionTask(task: MainAITask): FounderWorkStatus {
+  const liveness: MainAITaskLiveness = task.liveness;
+  if (task.status === "completed") return "completed";
+  if (task.status === "failed" || task.status === "cancelled" || task.status === "retryable_failed") {
+    return "failed";
+  }
+  if (liveness === "stalled" || liveness === "dead") return "failed";
+  if (liveness === "running") return "running";
+  if (
+    task.status === "pending" ||
+    task.status === "blocked" ||
+    task.status === "waiting_external" ||
+    task.status === "waiting_ci"
+  ) {
+    return "waiting_on_dependency";
+  }
+  return "queued";
+}

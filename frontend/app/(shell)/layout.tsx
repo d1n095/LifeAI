@@ -13,7 +13,7 @@ export default function ShellLayout({ children }: { children: React.ReactNode })
         // remounts on navigation, not this layout. See lib/uploadQueue.tsx.
         <UploadQueueProvider>
           <div className="flex min-h-screen flex-col md:flex-row">
-            <Sidebar userEmail={user.email} />
+            <Sidebar userEmail={user.email} userRole={user.role} />
             <main className="flex-1 p-4 md:p-8 min-w-0">{children}</main>
           </div>
         </UploadQueueProvider>

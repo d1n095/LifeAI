@@ -47,6 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.mainai_founder_ops.assignment_guard import DuplicateWorkError, assert_agent_dispatch_allowed
 from app.integrations.github_client import GitHubClientError, get_github_client
 from app.models.agent_task import AgentRole, AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.project_memory import ingest_github_status
@@ -188,6 +189,7 @@ async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) 
     that is a deliberately separate, later increment (see module docstring's scope note); this
     slice proves the dispatch -> record -> review -> propose chain end to end."""
     task = get_task(db, task_id)
+    assert_agent_dispatch_allowed(task)
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=_build_task_prompt(task))]
     result, attempted = await chat_with_fallback(db, messages)
     return _record_event(

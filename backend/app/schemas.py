@@ -176,6 +176,11 @@ class MessageOut(BaseModel):
     provider: str | None
     model: str | None
     created_at: datetime
+    # Durable assistant-failure rows are stored with empty content and status=failed
+    # (see app/models/conversation.py). The chat UI must render them, not drop them.
+    status: str = "succeeded"
+    error_category: str | None = None
+    in_reply_to_id: uuid.UUID | None = None
 
 
 class ConversationOut(BaseModel):
