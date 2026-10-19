@@ -80,7 +80,19 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
     await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId("dashboard-health")).not.toContainText("Allt system operationellt");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar");
     await expect(page.getByTestId("dashboard-health")).toContainText("otillgänglig");
+  });
+
+  test("dashboard does not treat a failed Founder-ops snapshot as operational", async ({ page }) => {
+    await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
+    });
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+    await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar");
+    await expect(page.getByTestId("dashboard-health")).toContainText("otillgänglig");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("GO");
   });
 
   test("founder-ops page shows durable STOP/readiness rather than a fabricated GO", async ({ page }) => {

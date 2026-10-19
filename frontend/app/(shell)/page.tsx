@@ -132,6 +132,7 @@ export default function DashboardPage() {
 function statusLine(snapshot: FounderOpsSnapshot | null, error: string | null, loaded: boolean): string {
   if (!loaded) return "Hämtar systemstatus…";
   if (error && !snapshot) return "Backend otillgänglig — ingen driftsstatus påstås.";
+  if (error) return "Backend delvis otillgänglig — ingen samlad driftsstatus påstås.";
   if (!snapshot) return "Founder-status inte inläst.";
   const parts = [
     snapshot.health.backend_reachable ? "Backend nåbar" : "Backend otillgänglig",
