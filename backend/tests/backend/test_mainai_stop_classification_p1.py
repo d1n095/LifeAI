@@ -401,6 +401,20 @@ async def test_local_verification_still_paid_replan_eligible(db_session, owner_i
     assert paid.calls == [goal.id]
 
 
+def test_founder_cancel_is_cooperative_not_publication_stop(db_session, owner_id):
+    """cancel_requested without first-cycle STOP must not classify as STOP-before-merge."""
+    goal, _t1, t2 = _two_ready_tasks(db_session, owner_id)
+    dispatch_ready_task(db_session, task=t2, goal=goal, dispatched_by="test")
+    db_session.commit()
+    t2 = db_session.get(MainAITask, t2.id)
+    job = db_session.get(MainAIJob, t2.mainai_job_id)
+    job.cancel_requested = True
+    db_session.commit()
+    assert_publication_permitted(db_session, t2, job_id=t2.mainai_job_id)
+    with pytest.raises(TaskCancelledCooperatively):
+        _check_cancel_requested(db_session, t2.mainai_job_id, task=t2)
+
+
 def test_ordinary_goal_still_dispatches(db_session, superuser_db, owner_id):
     goal, t1, t2 = _two_ready_tasks(db_session, owner_id)
     assert goal_is_autonomous_terminal(db_session, goal) is False

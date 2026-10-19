@@ -56,6 +56,7 @@ from app.mainai_execution.first_cycle_stop import (
     fail_closed_external_publication,
     first_cycle_state_from_goal,
     goal_is_autonomous_terminal,
+    goal_is_first_cycle_stopped,
     stop_first_cycle,
 )
 from app.mainai_execution.publication_errors import (
@@ -636,9 +637,13 @@ async def _handle_open_pr(
     base_branch = edit_info.get("base_branch") or execution_pr_base_branch()
 
     if not settings.github_write_enabled:
+        if job_id is not None:
+            _check_cancel_requested(db, job_id, task=task)
         assert_publication_permitted(db, task, job_id=job_id)
         return {"proposed": True, "title": title, "body": body, "head": head_branch, "base": base_branch}
 
+    if job_id is not None:
+        _check_cancel_requested(db, job_id, task=task)
     assert_publication_permitted(db, task, job_id=job_id)
     client = get_github_client()
     repo_owner = settings.github_repo.split("/", 1)[0]
@@ -648,9 +653,13 @@ async def _handle_open_pr(
             pr = existing[0]
         else:
             pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch, draft=True)
-    except PublicationForbiddenAfterStopError:
+    except (PublicationForbiddenAfterStopError, TaskCancelledCooperatively, ExternalBoundaryError):
         raise
     except Exception as exc:
+        # Bare RuntimeError is the crash-recovery seam (LOCAL_COMMITTED_NOT_PUSHED). Origin-aware
+        # git/GitHub/network failures are already typed by the time they leave those modules.
+        if type(exc) is RuntimeError:
+            raise
         raise map_publication_boundary_error(exc) from exc
     assert_publication_permitted(db, task, job_id=job_id)
     return {
@@ -735,12 +744,19 @@ async def _finalize_repo_edit(
         editable_targets=editable,
         envelope=envelope,
     )
+    if job_id is not None:
+        _check_cancel_requested(db, job_id, task=task)
     assert_publication_permitted(db, task, job_id=job_id)
     try:
         remote_sha = await push_worktree_branch(worktree)
-    except PublicationForbiddenAfterStopError:
+    except (PublicationForbiddenAfterStopError, TaskCancelledCooperatively, ExternalBoundaryError):
         raise
     except Exception as exc:
+        # Bare RuntimeError must propagate so a worker crash after a durable local commit remains
+        # a crash (recovery classifies LOCAL_COMMITTED_NOT_PUSHED). Typed boundary errors from
+        # worktree/github/network still fail closed via ExternalBoundaryError above.
+        if type(exc) is RuntimeError:
+            raise
         raise map_publication_boundary_error(exc) from exc
     assert_publication_permitted(db, task, job_id=job_id)
     return {
@@ -1121,7 +1137,7 @@ def _finalize_task_outcome(
         if locked.status == MainAITaskStatus.cancelled:
             return
         goal = db.get(MainAIGoal, locked.goal_id, populate_existing=True)
-        if goal_is_autonomous_terminal(db, goal):
+        if goal_is_first_cycle_stopped(db, goal):
             stop_state = first_cycle_state_from_goal(goal) or STATE_STOP_BEFORE_MERGE
             fail_closed_external_publication(
                 db,

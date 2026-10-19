@@ -464,10 +464,12 @@ def assert_publication_permitted(
 ) -> None:
     """Immediate pre-push / pre-open_pr recheck. Holds FOR UPDATE on the goal row.
 
-    Raises PublicationForbiddenAfterStopError when the goal is already first-cycle STOP.
-    Raises nothing for cancel_requested — callers also go through _check_cancel_requested.
+    Raises PublicationForbiddenAfterStopError when the goal is already first-cycle STOP
+    or schema-terminal. Founder cancel_requested is not STOP — callers re-check via
+    `_check_cancel_requested`. `job_id` is accepted so publication call sites can pass the
+    live job without a second signature.
     """
-    from app.models.mainai_job import MainAIJob
+    del job_id
 
     goal = db.execute(
         select(MainAIGoal)
@@ -475,19 +477,16 @@ def assert_publication_permitted(
         .with_for_update()
         .execution_options(populate_existing=True)
     ).scalar_one_or_none()
-    if goal is None or goal_is_autonomous_terminal(db, goal):
+    if goal is None or goal_is_first_cycle_stopped(db, goal) or (
+        goal is not None and goal.status in TERMINAL_MAINAI_GOAL_STATUSES
+    ):
         state = first_cycle_state_from_goal(goal) if goal is not None else None
         raise PublicationForbiddenAfterStopError(
             "PublicationForbiddenAfterStop",
             first_cycle_state=state if state in STOP_STATES else STATE_STOP_BEFORE_MERGE,
         )
-    if job_id is not None:
-        job = db.get(MainAIJob, job_id, populate_existing=True)
-        if job is not None and job.cancel_requested:
-            raise PublicationForbiddenAfterStopError(
-                "PublicationForbiddenCancelRequested",
-                first_cycle_state=STATE_STOP_BEFORE_MERGE,
-            )
+    # Founder cancel_requested is cooperative cancel, not first-cycle STOP. Callers re-check
+    # via _check_cancel_requested immediately before push / open_pr.
 
 
 def abandon_running_task_after_stop(db: Session, task: MainAITask, *, goal: MainAIGoal | None) -> bool:
