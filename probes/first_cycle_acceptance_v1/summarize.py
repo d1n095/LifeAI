@@ -30,7 +30,7 @@ for log in sorted(out.glob("*.log")):
     text = log.read_text(errors="replace")
     if s is None:
         continue
-    status = {"suite": suite, "blocker": [], "regression": [], "known_p2": [], "fixed": [], "passed": 0}
+    status = {"suite": suite, "blocker": [], "regression": [], "known_p2": [], "fixed": [], "superseded": [], "passed": 0}
     if "required_matrix_hold" in s:
         for mid, res in matrix_results(text).items():
             if match(mid, exp.get("_informational_matrix", [])):
@@ -58,6 +58,8 @@ for log in sorted(out.glob("*.log")):
                     status["fixed"].append(node)
             elif match(node, s.get("known_p2", [])):
                 status["known_p2"].append(node)
+            elif match(node, s.get("superseded", [])):
+                status["superseded"].append(node)
             elif match(node, s["required"]):
                 status["blocker"].append(node)
             else:
@@ -99,7 +101,7 @@ if ci.exists():
 summary = {"profile": profile, "blockers_and_regressions": verdict_blockers, "suites": rows}
 (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 for r in rows:
-    print(f"{r['suite']:22s} pass={r['passed']:<4d} BLOCKER={len(r['blocker']):<3d} REGRESSION={len(r['regression']):<3d} KNOWN_P2={len(r['known_p2']):<3d} FIXED_P2={len(r['fixed'])}")
+    print(f"{r['suite']:22s} pass={r['passed']:<4d} BLOCKER={len(r['blocker']):<3d} REGRESSION={len(r['regression']):<3d} KNOWN_P2={len(r['known_p2']):<3d} FIXED_P2={len(r['fixed']):<3d} SUPERSEDED={len(r.get('superseded', []))}")
     for b in (r["blocker"] + r["regression"])[:30]:
         print(f"    ! {b}")
 print(f"\nEXECUTABLE GATE: {'PASS' if verdict_blockers == 0 else 'FAIL'} ({verdict_blockers} blocker/regression items). Founder/GitHub evidence (MATRIX.md, class F) is never covered by this gate.")

@@ -1,0 +1,36 @@
+profile=cursor target=1ea41d7db424cba6b4d9ec93da79fa85d809d2fb out=<home>/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtpush/probes/first_cycle_acceptance_v1/out/cursor-1ea41d7
+target worktree unchanged
+backend_regression     pass=754  BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0
+credential_canary      pass=6    BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=1
+fc4_bypass             pass=9    BLOCKER=0   REGRESSION=0   KNOWN_P2=5   FIXED_P2=0
+fc4_policy             pass=59   BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0
+review_stop            pass=22   BLOCKER=22  REGRESSION=0   KNOWN_P2=7   FIXED_P2=1
+    ! test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[stale_base]
+    ! test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[push_rejected]
+    ! test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[grant_missing]
+    ! test_review_stop_286_exam.py::test_P3b_external_publication_failure_inside_repo_edit_is_auto_retried
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[approved_base_moved]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_https_403_denied]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_network]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_non_fast_forward]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_pre_receive_declined]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_push_timeout]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_remote_unreachable]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[github_get_ref_404]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_base_moved]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_consumed]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_envelope_superseded]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_expired]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_head_mismatch]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_receipt_stale]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_version]
+    ! test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[post_push_remote_mismatch]
+    ! test_review_stop_286_exam.py::test_N1b_misclassified_push_failure_is_redispatched
+    ! test_review_stop_286_exam.py::test_N1c_misclassified_grant_failure_is_paid_replanned
+spend                  pass=19   BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0
+stop_classification    pass=21   BLOCKER=0   REGRESSION=0   KNOWN_P2=2   FIXED_P2=1
+task_authority         pass=15   BLOCKER=0   REGRESSION=0   KNOWN_P2=2   FIXED_P2=0
+candidate_harness      pass=0    BLOCKER=0   REGRESSION=0   KNOWN_P2=6   FIXED_P2=0
+ci_exact_sha           pass=12   BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0
+
+EXECUTABLE GATE: FAIL (22 blocker/regression items). Founder/GitHub evidence (MATRIX.md, class F) is never covered by this gate.

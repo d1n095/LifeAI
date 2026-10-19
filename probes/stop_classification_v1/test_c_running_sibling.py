@@ -1,8 +1,11 @@
 """C — A sibling already RUNNING when the goal reaches terminal first-cycle STOP (criteria RS-1..RS-3).
 
 Scenario (real worker, real git): the goal has two repo_edit chains, A (greeting) and
-B (farewell). While B's job is mid-flight — after the paid code-agent call and the local commit,
-before verification and push — chain A's goal-level STOP is committed from a separate session.
+B (farewell). While B's job is mid-flight — after the paid code-agent call, the local commit and
+the work_result checkpoint commit, at the start of verification, before push — chain A's
+goal-level STOP is committed from a separate session (another thread, like a second worker).
+  RS-0  the STOP commits promptly (<= 60 s) while B is running: a running job must not hold
+        locks that block the STOP transaction (a blocked STOP is reported, not hung);
   RS-1  B's branch never reaches the remote (final pre-push authority check refuses);
   RS-2  B's running job is cooperatively cancel-requested by the STOP itself;
   RS-3  no paid call of any kind happens after the STOP; B never becomes `completed`.
@@ -57,19 +60,38 @@ async def test_RS_running_sibling_cannot_push_after_goal_stop(db_session, superu
     b = next(t for t in edits if "farewell" in t.description)
     state = {"stopped_at_call": None, "b_job": None, "a_status_at_stop": None}
 
-    original_commit = execution_job.commit_worktree_changes
+    original_verify = execution_job.verify_task
 
-    def commit_then_stop(db, worktree, *, message):
-        result = original_commit(db, worktree, message=message)
-        if worktree.task_id == b.id and state["stopped_at_call"] is None:
-            state["a_status_at_stop"] = db.get(MainAITask, a.id).status.value
-            state["b_job"] = worktree.job_id
-            _stop_goal_from_other_session(goal.id, a.id)
+    def stop_then_verify(task, *args, **kwargs):
+        if task.id == b.id and state["stopped_at_call"] is None:
+            import threading
+
+            from app.db import migration_engine
+
+            with sessionmaker(bind=migration_engine)() as probe:
+                state["a_status_at_stop"] = probe.get(MainAITask, a.id).status.value
+                state["b_job"] = probe.get(MainAITask, b.id).mainai_job_id
+            outcome = {}
+
+            def do_stop():
+                try:
+                    _stop_goal_from_other_session(goal.id, a.id)
+                    outcome["ok"] = True
+                except Exception as exc:  # deadlock / serialization failures are findings
+                    outcome["error"] = f"{type(exc).__name__}: {str(exc).splitlines()[0][:200]}"
+
+            t = threading.Thread(target=do_stop, daemon=True)
+            t.start()
+            t.join(60)
+            state["stop_outcome"] = outcome if not t.is_alive() else {"blocked": "STOP still waiting after 60 s"}
+            state["stop_thread"] = t
             state["stopped_at_call"] = len(paid.calls)
-        return result
+        return original_verify(task, *args, **kwargs)
 
-    monkeypatch.setattr(execution_job, "commit_worktree_changes", commit_then_stop)
+    monkeypatch.setattr(execution_job, "verify_task", stop_then_verify)
     await drive(superuser_db, goal.id, rounds=3)
+    if state.get("stop_thread") is not None:
+        state["stop_thread"].join(120)
 
     assert state["stopped_at_call"] is not None, f"scenario did not reach B's commit: trail={trail(superuser_db, goal.id)}"
     superuser_db.expire_all()
@@ -80,6 +102,7 @@ async def test_RS_running_sibling_cannot_push_after_goal_stop(db_session, superu
     detail = (f"B status={b_now.status.value}; remote task branches={task_branches(github.bare)}; "
               f"B job cancel_requested={getattr(job, 'cancel_requested', None)}; paid after STOP={paid.since(state['stopped_at_call'])}; "
               f"trail={trail(superuser_db, goal.id)[-5:]}")
+    assert state.get("stop_outcome") == {"ok": True}, "RS-0 STOP did not commit promptly while sibling ran: " + str(state.get("stop_outcome")) + " | " + detail
     assert b_branch not in task_branches(github.bare), "RS-1 running sibling pushed after goal STOP: " + detail
     assert job is not None and job.cancel_requested, "RS-2 running sibling job not cancel-requested by STOP: " + detail
     assert paid.since(state["stopped_at_call"]) == [] and b_now.status != MainAITaskStatus.completed, "RS-3 " + detail

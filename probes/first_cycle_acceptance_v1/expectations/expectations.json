@@ -9,7 +9,9 @@
         "test_RS_"
       ],
       "known_p2": [
-        "test_LR3_"
+        "test_LR3_",
+        "test_FO7_",
+        "[untyped_boundary_exception]"
       ]
     },
     "codex": {
@@ -20,9 +22,12 @@
         "test_RS_"
       ],
       "known_p2": [
-        "test_LR3_"
+        "test_LR3_",
+        "test_FO7_",
+        "[untyped_boundary_exception]"
       ]
-    }
+    },
+    "_note": "untyped_boundary_exception (bare RuntimeError at push) is crash-semantics by design since #284: contained (no paid call, no re-execution, Founder-visible recovery record; FO-6b) but not terminal -> P2. FO-7 base-fetch network failure -> bounded paid replans (<= MAX_AUTO_REPLANS), no code-agent spend -> P2 (found at #288)."
   },
   "credential_canary": {
     "cursor": {
@@ -85,7 +90,16 @@
         "test_R3_",
         "test_R5_",
         "test_N4_"
-      ]
+      ],
+      "superseded_from": "1ea41d7 (#288)",
+      "superseded": [
+        "test_N1_",
+        "test_N1b_",
+        "test_N1c_",
+        "test_P3_",
+        "test_P3b_"
+      ],
+      "_superseded_note": "DB-level probes that hand _finalize_task_outcome a TaskExecutionError carrying the failure as MESSAGE TEXT (the #286 shape). From #288 production never reports push/grant/base/GitHub failures that way (typed ExternalBoundaryError at the real origin), and text is deliberately ignored. Their intent is gated end-to-end by stop_classification FO-1..FO-6 at the real origins. Codex contract: grant/transport denials MUST be raised as typed ExternalBoundaryError (GrantDeniedError) or inside the push boundary."
     },
     "codex": {
       "same_as": "cursor"
