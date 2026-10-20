@@ -1,271 +1,347 @@
 {
-  "_doc": "Per suite and profile: 'required' must PASS/HOLD (blocker if not); 'known_p2' may fail (tolerated, listed); anything else failing = REGRESSION. Patterns are substrings of the pytest node id or MATRIX id. '_informational_matrix' rows are historical demonstrations of raw git behaviour or pre-#276 expectations superseded by design (TA-10 -> TA-10a/10b; TA-11 -> TA-11', see VERDICT_276 \u00a73) and never gate.",
-  "stop_classification": {
-    "cursor": {
-      "required": [
-        "test_FO_",
-        "test_LR1_",
-        "test_LR2_",
-        "test_RS_",
-        "test_FO6b_",
-        "test_FC_",
-        "test_FO6x_",
-        "test_RL_",
-        "test_FO7n_",
-        "test_CS_",
-        "test_ER4_"
-      ],
-      "known_p2": [
-        "test_LR3_",
-        "test_FO7_",
-        "test_FO7x_"
-      ]
-    },
-    "codex": {
-      "required": [
-        "test_FO_",
-        "test_LR1_",
-        "test_LR2_",
-        "test_RS_",
-        "test_FO6b_",
-        "test_FC_",
-        "test_FO6x_",
-        "test_RL_",
-        "test_FO7n_",
-        "test_CS_",
-        "test_ER4_"
-      ],
-      "known_p2": [
-        "test_LR3_",
-        "test_FO7_",
-        "test_FO7x_"
-      ]
-    },
-    "_note": "CORRECTED after the harness 404-fidelity fix: FO-6 (untyped error / crash at the push boundary on an envelope-governed Path A goal) is NOT contained - governed recovery declines takeover, the retry tick re-dispatches, each attempt re-runs the paid code agent (bounded by max_attempts: 2 extra paid runs) and the task is stranded `ready`. FO-6 family (untyped_boundary_exception, FO6b, FO6x, RL) is REQUIRED (P1). FO-7/FO-7x (approved-base fetch at worktree creation -> bounded paid replans) stay P2. FO-7n (#290 neighbour fix) required."
+ "_doc": "Per suite and profile: 'required' must PASS/HOLD (blocker if not); 'known_p2' may fail (tolerated, listed); anything else failing = REGRESSION. Patterns are substrings of the pytest node id or MATRIX id. '_informational_matrix' rows are historical demonstrations of raw git behaviour or pre-#276 expectations superseded by design (TA-10 -> TA-10a/10b; TA-11 -> TA-11', see VERDICT_276 §3) and never gate.",
+ "stop_classification": {
+  "cursor": {
+   "required": [
+    "test_FO_",
+    "test_LR1_",
+    "test_LR2_",
+    "test_RS_",
+    "test_FO6b_",
+    "test_FC_",
+    "test_FO6x_",
+    "test_RL_",
+    "test_FO7n_",
+    "test_CS_",
+    "test_ER4_"
+   ],
+   "known_p2": [
+    "test_LR3_",
+    "test_FO7_",
+    "test_FO7x_"
+   ]
   },
-  "credential_canary": {
-    "cursor": {
-      "required": [
-        "test_C0_",
-        "test_C1_",
-        "test_C2_",
-        "test_C3_",
-        "test_C5_"
-      ],
-      "known_p2": [
-        "test_C4_"
-      ]
-    },
-    "codex": {
-      "required": [
-        "test_C0_",
-        "test_C1_",
-        "test_C2_",
-        "test_C3_",
-        "test_C5_"
-      ],
-      "known_p2": [
-        "test_C4_"
-      ]
-    }
+  "codex": {
+   "required": [
+    "test_FO_",
+    "test_LR1_",
+    "test_LR2_",
+    "test_RS_",
+    "test_FO6b_",
+    "test_FC_",
+    "test_FO6x_",
+    "test_RL_",
+    "test_FO7n_",
+    "test_CS_",
+    "test_ER4_"
+   ],
+   "known_p2": [
+    "test_LR3_",
+    "test_FO7_",
+    "test_FO7x_"
+   ]
   },
-  "review_stop": {
-    "cursor": {
-      "required": [
-        "test_S1_",
-        "test_S2_",
-        "test_S3_",
-        "test_S4_",
-        "test_S6_",
-        "test_S7_",
-        "test_S9_",
-        "test_S10_",
-        "test_S11_",
-        "test_S12_",
-        "test_S13_",
-        "test_P1_",
-        "test_P2_",
-        "test_P3_",
-        "test_P3b_",
-        "test_P4_",
-        "test_N1_",
-        "test_N1b_",
-        "test_N1c_",
-        "test_N2_",
-        "test_N3_",
-        "test_R1_",
-        "test_R4_",
-        "test_T1_"
-      ],
-      "known_p2": [
-        "test_S5_",
-        "test_S8_",
-        "test_R2_",
-        "test_R3_",
-        "test_R5_",
-        "test_N4_"
-      ],
-      "superseded_from": "1ea41d7 (#288)",
-      "superseded": [
-        "test_N1_",
-        "test_N1b_",
-        "test_N1c_",
-        "test_P3_",
-        "test_P3b_"
-      ],
-      "_superseded_note": "DB-level probes that hand _finalize_task_outcome a TaskExecutionError carrying the failure as MESSAGE TEXT (the #286 shape). From #288 production never reports push/grant/base/GitHub failures that way (typed ExternalBoundaryError at the real origin), and text is deliberately ignored. Their intent is gated end-to-end by stop_classification FO-1..FO-6 at the real origins. Codex contract: grant/transport denials MUST be raised as typed ExternalBoundaryError (GrantDeniedError) or inside the push boundary."
-    },
-    "codex": {
-      "same_as": "cursor"
-    }
-  },
-  "task_authority": {
-    "cursor": {
-      "required_matrix_hold": "*",
-      "known_p2_matrix": [
-        "TA-12",
-        "TA-13"
-      ]
-    },
-    "codex": {
-      "required_matrix_hold": "*",
-      "known_p2_matrix": []
-    }
-  },
-  "spend": {
-    "cursor": {
-      "required_matrix_hold": "*",
-      "known_p2_matrix": []
-    },
-    "codex": {
-      "required_matrix_hold": "*",
-      "known_p2_matrix": []
-    }
-  },
-  "authorization_grants": {
-    "codex": {
-      "required": [
-        "test_"
-      ],
-      "known_p2": [],
-      "_note": "probes written against #280's activation_security API; an API rename needs a thin adapter (see MATRIX.md), never a weakened assertion"
-    }
-  },
-  "candidate_harness": {
-    "cursor": {
-      "safety": {
-        "canary_invoked": "no",
-        "secret_in_outputs": "0",
-        "secret_in_target": "0",
-        "target_unchanged": "yes"
-      },
-      "allowed_matrix_fail": [
-        "CI-6",
-        "E2E-3",
-        "GRANT-PROD",
-        "TA-12",
-        "TA-13",
-        "PUB-2"
-      ]
-    },
-    "codex": {
-      "safety": {
-        "canary_invoked": "no",
-        "secret_in_outputs": "0",
-        "secret_in_target": "0",
-        "target_unchanged": "yes"
-      },
-      "allowed_matrix_fail": [
-        "CI-6"
-      ]
-    }
-  },
-  "backend_regression": {
-    "cursor": {
-      "required": [
-        "*"
-      ]
-    },
-    "codex": {
-      "required": [
-        "*"
-      ]
-    }
-  },
-  "fc4_policy": {
-    "cursor": {
-      "required": [
-        "*"
-      ]
-    },
-    "codex": {
-      "required": [
-        "*"
-      ]
-    }
-  },
-  "fc4_bypass": {
-    "cursor": {
-      "required_matrix_hold": "*",
-      "known_p2_matrix": [
-        "B1 ",
-        "B2 ",
-        "B3 ",
-        "B7 ",
-        "B8 "
-      ]
-    },
-    "codex": {
-      "required_matrix_hold": "*",
-      "known_p2_matrix": [
-        "B1 ",
-        "B2 ",
-        "B3 ",
-        "B7 ",
-        "B8 "
-      ]
-    }
-  },
-  "ci_exact_sha": {
-    "cursor": {
-      "required_checks": 12,
-      "suites": 2
-    },
-    "codex": {
-      "required_checks": 12,
-      "suites": 2
-    }
-  },
-  "_informational_matrix": [
-    "TA-10 changed-file check",
-    "TA-11 retry preserves structured authority; replan creates"
-  ],
-  "grant_contract": {
-    "codex": {
-      "required": [
-        "test_GC"
-      ],
-      "known_p2": [],
-      "_note": "Validated on #280 37bca08: GC-1..GC-5 pass; GC-6 BLOCKED (no draft-PR grant); GC-7 GAP (re-mint from a consumed preflight receipt); GC-8 BLOCKED standalone (no typed boundary). All must pass on the Codex composed candidate."
-    }
-  },
-  "transport_contract": {
-    "cursor": {
-      "required": [
-        "test_TC0_",
-        "test_TC2_"
-      ],
-      "known_p2": [
-        "test_TC1_",
-        "test_TC3_"
-      ],
-      "_note": "TC-1/TC-3 are Codex-owned CRED items (credential-free transport); listed, not gating the Cursor execution layer."
-    },
-    "codex": {
-      "required": [
-        "test_TC"
-      ],
-      "known_p2": []
-    }
+  "_note": "CORRECTED after the harness 404-fidelity fix: FO-6 (untyped error / crash at the push boundary on an envelope-governed Path A goal) is NOT contained - governed recovery declines takeover, the retry tick re-dispatches, each attempt re-runs the paid code agent (bounded by max_attempts: 2 extra paid runs) and the task is stranded `ready`. FO-6 family (untyped_boundary_exception, FO6b, FO6x, RL) is REQUIRED (P1). FO-7/FO-7x (approved-base fetch at worktree creation -> bounded paid replans) stay P2. FO-7n (#290 neighbour fix) required.",
+  "combined": {
+   "same_as": "codex"
   }
+ },
+ "credential_canary": {
+  "cursor": {
+   "required": [
+    "test_C0_",
+    "test_C1_",
+    "test_C2_",
+    "test_C3_",
+    "test_C5_"
+   ],
+   "known_p2": [
+    "test_C4_"
+   ]
+  },
+  "codex": {
+   "required": [
+    "test_C0_",
+    "test_C1_",
+    "test_C2_",
+    "test_C3_",
+    "test_C5_"
+   ],
+   "known_p2": [
+    "test_C4_"
+   ]
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "review_stop": {
+  "cursor": {
+   "required": [
+    "test_S1_",
+    "test_S2_",
+    "test_S3_",
+    "test_S4_",
+    "test_S6_",
+    "test_S7_",
+    "test_S9_",
+    "test_S10_",
+    "test_S11_",
+    "test_S12_",
+    "test_S13_",
+    "test_P1_",
+    "test_P2_",
+    "test_P3_",
+    "test_P3b_",
+    "test_P4_",
+    "test_N1_",
+    "test_N1b_",
+    "test_N1c_",
+    "test_N2_",
+    "test_N3_",
+    "test_R1_",
+    "test_R4_",
+    "test_T1_"
+   ],
+   "known_p2": [
+    "test_S5_",
+    "test_S8_",
+    "test_R2_",
+    "test_R3_",
+    "test_R5_",
+    "test_N4_"
+   ],
+   "superseded_from": "1ea41d7 (#288)",
+   "superseded": [
+    "test_N1_",
+    "test_N1b_",
+    "test_N1c_",
+    "test_P3_",
+    "test_P3b_"
+   ],
+   "_superseded_note": "DB-level probes that hand _finalize_task_outcome a TaskExecutionError carrying the failure as MESSAGE TEXT (the #286 shape). From #288 production never reports push/grant/base/GitHub failures that way (typed ExternalBoundaryError at the real origin), and text is deliberately ignored. Their intent is gated end-to-end by stop_classification FO-1..FO-6 at the real origins. Codex contract: grant/transport denials MUST be raised as typed ExternalBoundaryError (GrantDeniedError) or inside the push boundary."
+  },
+  "codex": {
+   "same_as": "cursor"
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "task_authority": {
+  "cursor": {
+   "required_matrix_hold": "*",
+   "known_p2_matrix": [
+    "TA-12",
+    "TA-13"
+   ]
+  },
+  "codex": {
+   "required_matrix_hold": "*",
+   "known_p2_matrix": []
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "spend": {
+  "cursor": {
+   "required_matrix_hold": "*",
+   "known_p2_matrix": []
+  },
+  "codex": {
+   "required_matrix_hold": "*",
+   "known_p2_matrix": []
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "authorization_grants": {
+  "codex": {
+   "required": [
+    "test_"
+   ],
+   "known_p2": [],
+   "_note": "probes written against #280's activation_security API; an API rename needs a thin adapter (see MATRIX.md), never a weakened assertion"
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "candidate_harness": {
+  "cursor": {
+   "safety": {
+    "canary_invoked": "no",
+    "secret_in_outputs": "0",
+    "secret_in_target": "0",
+    "target_unchanged": "yes"
+   },
+   "allowed_matrix_fail": [
+    "CI-6",
+    "E2E-3",
+    "GRANT-PROD",
+    "TA-12",
+    "TA-13",
+    "PUB-2"
+   ]
+  },
+  "codex": {
+   "safety": {
+    "canary_invoked": "no",
+    "secret_in_outputs": "0",
+    "secret_in_target": "0",
+    "target_unchanged": "yes"
+   },
+   "allowed_matrix_fail": [
+    "CI-6"
+   ]
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "backend_regression": {
+  "cursor": {
+   "required": [
+    "*"
+   ]
+  },
+  "codex": {
+   "required": [
+    "*"
+   ]
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "fc4_policy": {
+  "cursor": {
+   "required": [
+    "*"
+   ]
+  },
+  "codex": {
+   "required": [
+    "*"
+   ]
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "fc4_bypass": {
+  "cursor": {
+   "required_matrix_hold": "*",
+   "known_p2_matrix": [
+    "B1 ",
+    "B2 ",
+    "B3 ",
+    "B7 ",
+    "B8 "
+   ]
+  },
+  "codex": {
+   "required_matrix_hold": "*",
+   "known_p2_matrix": [
+    "B1 ",
+    "B2 ",
+    "B3 ",
+    "B7 ",
+    "B8 "
+   ]
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "ci_exact_sha": {
+  "cursor": {
+   "required_checks": 12,
+   "suites": 2
+  },
+  "codex": {
+   "required_checks": 12,
+   "suites": 2
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "_informational_matrix": [
+  "TA-10 changed-file check",
+  "TA-11 retry preserves structured authority; replan creates"
+ ],
+ "grant_contract": {
+  "codex": {
+   "required": [
+    "test_GC"
+   ],
+   "known_p2": [],
+   "_note": "Validated on #280 37bca08: GC-1..GC-5 pass; GC-6 BLOCKED (no draft-PR grant); GC-7 GAP (re-mint from a consumed preflight receipt); GC-8 BLOCKED standalone (no typed boundary). All must pass on the Codex composed candidate."
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "transport_contract": {
+  "cursor": {
+   "required": [
+    "test_TC0_",
+    "test_TC2_"
+   ],
+   "known_p2": [
+    "test_TC1_",
+    "test_TC3_"
+   ],
+   "_note": "TC-1/TC-3 are Codex-owned CRED items (credential-free transport); listed, not gating the Cursor execution layer."
+  },
+  "codex": {
+   "required": [
+    "test_TC"
+   ],
+   "known_p2": []
+  },
+  "combined": {
+   "same_as": "codex"
+  }
+ },
+ "app_readiness": {
+  "cursor": {
+   "required": [
+    "test_AR"
+   ],
+   "known_p2": [],
+   "_note": "#292 5e3cd01: AR-9/AR-9h (paid dispatch race, P1), AR-11/AR-11b (self-verification shown as independent, P1), AR-10 (delegation race, P2) fail."
+  },
+  "codex": {
+   "same_as": "cursor"
+  },
+  "combined": {
+   "same_as": "cursor"
+  }
+ },
+ "proxy": {
+  "cursor": {
+   "required": [
+    "proxy::"
+   ],
+   "known_p2": [
+    "PX-1_",
+    "PX-2_",
+    "PX-9_"
+   ],
+   "_note": "PX-1 traversal to /openapi.json|/docs, PX-2/PX-9 client XFF trusted (rate-limit bypass) are pre-existing (route.ts + Dockerfile); listed for execution-layer profiles, REQUIRED for combined (public launch)."
+  },
+  "codex": {
+   "same_as": "cursor"
+  },
+  "combined": {
+   "required": [
+    "proxy::"
+   ],
+   "known_p2": []
+  }
+ }
 }

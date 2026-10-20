@@ -1,0 +1,16 @@
+D4/D5 live observation, #292 5e3cd01 (examiner, built-in browser; local stack via proxy_v1/live_stack.sh; synthetic CI founder credentials)
+
+1. Healthy stack, /admin/founder-ops after login:
+   HÄLSA Backend: nåbar | Worker: unknown | Beredskap: BLOCKED
+   STOP Inte blockerad
+   SÄKER START ✓ GitHub-skrivning av ✓ Privilegierade fjärreffekter av ✓ Recall HTTP inte monterad ✓ Aktiveringsläge av ✓ Första cykelns GO = false
+   BLOCKERINGAR (0) Inga registrerade blockeringar.          <- D5: readiness BLOCKED but 0 blockers listed
+   Dashboard line: "Backend nåbar · beredskap BLOCKED · STOP inaktiv · fjärrskrivning av · Recall av"
+
+2. Full outage (backend stopped, then page loaded): AuthGuard "Kunde inte nå servern. Sessionen antas inte vara utloggad." (correct)
+
+3. Stale case (page loaded healthy, backend process killed, read after 8 s / >1 poll):
+   [alert] Kunde inte nå backend-tjänsten.
+   HÄLSA Backend: nåbar | Worker: unknown | Beredskap: BLOCKED      <- D4: stale positive claim kept
+   STOP Inte blockerad                                              <- D4: STOP unreadable but shown as not blocked
+   Köad: 0 Kör: 0 ... (last snapshot, no generated_at / staleness marker)

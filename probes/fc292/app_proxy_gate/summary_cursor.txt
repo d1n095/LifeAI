@@ -1,0 +1,9 @@
+app_readiness          pass=13   BLOCKER=5   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! test_ar9_races_and_truth.py::test_AR9_concurrent_dispatch_single_paid_call
+    ! test_ar9_races_and_truth.py::test_AR9h_concurrent_dispatch_over_http
+    ! test_ar9_races_and_truth.py::test_AR10_concurrent_delegation_single_request
+    ! test_ar9_races_and_truth.py::test_AR11_builder_self_verification_is_not_independent
+    ! test_ar9_races_and_truth.py::test_AR11b_unopened_pr_with_zero_checks_is_not_independently_verified
+proxy                  pass=5    BLOCKER=0   REGRESSION=0   KNOWN_P2=3   FIXED_P2=0   SUPERSEDED=0
+
+EXECUTABLE GATE: FAIL (5 blocker/regression items). Founder/GitHub evidence (MATRIX.md, class F) is never covered by this gate.

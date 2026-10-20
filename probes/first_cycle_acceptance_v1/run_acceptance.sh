@@ -1,11 +1,13 @@
 #!/bin/bash
 # First-cycle independent acceptance run.
-#   run_acceptance.sh <cursor|codex> <candidate-worktree> [--quick]
-# cursor = corrected Cursor staging successor; codex = Codex composed security candidate.
+#   run_acceptance.sh <cursor|codex|combined> <candidate-worktree> [--quick]
+# cursor = Cursor execution/application successor; codex = Codex composed security candidate;
+# combined = Codex integration candidate judged for application + activation readiness (every suite required).
+# Proxy suites need a built frontend: FE_BUILT=<dir from proxy_v1/build_frontend.sh>; without it they report FAILED (never skipped).
 # Network-free except the read-only, unauthenticated GitHub API read of exact-SHA CI (suite ci_exact_sha).
 # Synthetic credentials only; hermetic git; host credential helpers denied by sandbox for credential suites.
 set -u
-PROFILE="${1:?profile cursor|codex}"; TARGET="$(cd "${2:?candidate worktree}" && pwd)"; QUICK="${3:-}"
+PROFILE="${1:?profile cursor|codex|combined}"; TARGET="$(cd "${2:?candidate worktree}" && pwd)"; QUICK="${3:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"; PROBES="$(cd "$HERE/.." && pwd)"
 export ACCEPT_VENV="${ACCEPT_VENV:-$PROBES/../../venv312/bin/python}"
 [ -x "$ACCEPT_VENV" ] || { echo "ACCEPT_VENV not executable: $ACCEPT_VENV"; exit 2; }
@@ -30,7 +32,7 @@ env HOME="$REAL_HOME" "$HERE/run_candidate_harness_sandboxed.sh" "$TARGET" "$OUT
 "$PROBES/e2e_v1/run.sh" "$TARGET" test_task_authority_273.py test_task_authority_276.py -k "${QUICK:+ta10 and }(ta or rename or symlink or intermediate)" > "$OUT/task_authority.log" 2>&1
 "$PROBES/path_a_v1/run.sh" "$TARGET" test_path_a_268.py test_path_a_270.py test_path_a_276_ctx.py -k "not unseen_existing and not large_file" > "$OUT/spend.log" 2>&1
 # 6 authorization / grants / account erasure (Codex security candidate)
-if [ "$PROFILE" = "codex" ]; then
+if [ "$PROFILE" = "codex" ] || [ "$PROFILE" = "combined" ]; then
   "$PROBES/activation_280/run.sh" "$TARGET" -rA --tb=line > "$OUT/authorization_grants.log" 2>&1
   # adapter-driven grant / remote-effect contract (GC-1..GC-8); BLOCKED / ADAPTER-NEEDED never pass
   "$PROBES/grant_contract_v1/run.sh" "$TARGET" -rA --tb=line > "$OUT/grant_contract.log" 2>&1
@@ -42,6 +44,14 @@ fi
 # 8 FC-4 npm-audit policy (offline unit + bypass matrix)
 ( cd "$TARGET/frontend" && node --test scripts/check-npm-audit.test.js ) > "$OUT/fc4_policy.log" 2>&1
 ( cd "$PROBES/fc4_npm_audit_282" && POLICY="$TARGET/frontend/scripts/check-npm-audit.js" node --test bypass_policy.test.js ) > "$OUT/fc4_bypass.log" 2>&1
+# 10 application readiness: route authz matrix, Founder-ops STOP/truthfulness/isolation, duplicate-work races, safe launch
+REDIS_URL="${REDIS_URL%/*}/3" "$PROBES/app_readiness_v1/run.sh" "$TARGET" -rA --tb=line > "$OUT/app_readiness.log" 2>&1
+# 11 same-origin proxy: traversal, header trust, XFF rate-limit bypass end to end (real backend with Dockerfile flags)
+if [ -n "${FE_BUILT:-}" ] && [ -d "$FE_BUILT/.next" ]; then
+  { "$PROBES/proxy_v1/run.sh" "$FE_BUILT"; "$PROBES/proxy_v1/xff_ratelimit.sh" "$TARGET" "$FE_BUILT"; } > "$OUT/proxy.log" 2>&1
+else
+  echo "FAILED proxy::FRONTEND_NOT_BUILT (set FE_BUILT from proxy_v1/build_frontend.sh)" > "$OUT/proxy.log"
+fi
 # 9 exact-SHA CI (read-only, unauthenticated public API; no credentials)
 "$ACCEPT_VENV" - "$SHA" > "$OUT/ci_exact_sha.json" <<'PY'
 import json, sys, urllib.request

@@ -119,3 +119,20 @@ An independent **PASS/FREEZE** for either profile requires all of the following:
 | TC-0..TC-3 | Production git never consults global/system helpers, env-injected helpers or askpass | E | `transport_contract_v1` (canary, sandbox, localhost 401) | Codex | TC-1/TC-3 FAIL, TC-2 PASS (both) |
 
 Integration contracts K1..K12 and the adapter strategy: `../grant_contract_v1/INTEGRATION_CONTRACTS.md`.
+
+## Application readiness (added for #292; `combined` profile = Codex integration candidate, every row required)
+
+| ID | Check | Class | Suite | Owner | Status @ #292 5e3cd01 |
+|---|---|---|---|---|---|
+| AP-1 | Every mounted /api route: member and role-only "founder" impostor get 401/403; anon only reaches public entry points | E | `app_readiness` AR-1 (131 routes) | all | PASS |
+| AP-2 | Founder STOP over HTTP: authz, CSRF, validation, no epoch change on refusal, rate limit, fail-closed reads | E | `app_readiness` AR-2..AR-4 | Cursor | PASS |
+| AP-3 | Dependency failure / stale heartbeat never reported reachable/alive; account isolation of the snapshot | E | `app_readiness` AR-5, AR-6 | Cursor | PASS |
+| AP-4 | Recall unmounted (non-vacuous detector); GO never derived from flags; safe default never pushes/opens PR | E | `app_readiness` AR-7, AR-13 | Cursor | PASS |
+| AP-5 | Status reads and safe-mode chat make no provider call / egress | E | `app_readiness` AR-8, AR-12 | Cursor | PASS |
+| AP-6 | Concurrent duplicate paid dispatch refused (direct + HTTP) | E | `app_readiness` AR-9, AR-9h | Cursor | **FAIL (P1)** 2 paid calls |
+| AP-7 | Concurrent duplicate delegation refused | E | `app_readiness` AR-10 | Cursor | **FAIL (P2)** 20/20 |
+| AP-8 | `independently_verified` never shown for builder self-verification or zero-check work | E | `app_readiness` AR-11, AR-11b | Cursor | **FAIL (P1)** |
+| AP-9 | Founder-status UI never keeps positive health/STOP claims after a failed poll | E (manual, live stack) | `proxy_v1/live_stack.sh` | Cursor | **FAIL (P2)** |
+| PX-1 | Proxy never leaves /api/ (encoded traversal) | E | `proxy` | frontend lane | FAIL (pre-existing; known P2 for cursor/codex, REQUIRED for combined) |
+| PX-2/PX-9 | Client X-Forwarded-For not trusted; login per-IP limit not bypassable end to end | E | `proxy` (Dockerfile uvicorn flags) | frontend + backend lane | FAIL (pre-existing; same) |
+| PX-3..PX-6 | Host not forwarded; hop-by-hop stripped; Set-Cookie preserved; backend-down structured 502 | E | `proxy` | frontend lane | PASS |

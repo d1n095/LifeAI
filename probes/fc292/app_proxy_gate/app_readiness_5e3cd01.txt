@@ -1,0 +1,34 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+AR1|routes=131 violations=0 provider_calls=0 egress=[]
+..AR3|limit=120/min codes_tail=[200, 200, 429, 429]
+.........AR9|results=['ok', 'ok'] paid_calls=2
+FAR9h|url=/api/admin/agents/tasks/{task_id}/dispatch codes=[200, 200] paid_calls=2
+FAR10|races=20 duplicated=20 counts=[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+FAR11|verification_events=1 dispatch_jobs=1 founder_status=independently_verified independently_verified=True
+FAR12|chat_status=200 provider_attempts=[('OpenAIProvider', 'embed'), ('OpenAIProvider', 'chat')] egress=[]
+SAFE|remote_task_branches=[] prs=0 local_server_checkout_writes=['?? backend/app/greeting.py', '?? backend/tests/test_greeting_doc.py'] labels=[('Docstring + test for', 'completed', 'independently_verified'), ('Open a draft PR.', 'completed', 'independently_verified')] trail_tail=[('open_pr', 'completed', '{"steps": [], "passed": true, "work_result": {"base": "integration/founder-alpha-test-base", "body": "Automatiskt genererad av MainAI Execution Loop V0.1 för må')]
+SAFE|remote_task_branches=[] prs=0 local_server_checkout_writes=['?? backend/app/greeting.py', '?? backend/tests/test_greeting_doc.py'] labels=[('Docstring + test for', 'completed', 'independently_verified'), ('Open a draft PR.', 'completed', 'independently_verified')] trail_tail=[('open_pr', 'completed', '{"steps": [], "passed": true, "work_result": {"base": "integration/founder-alpha-test-base", "body": "Automatiskt genererad av MainAI Execution Loop V0.1 för må')]
+<home>/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtpush/probes/app_readiness_v1/test_ar9_races_and_truth.py:195: AssertionError: AR-11 a task verified only by its own builder job (verification_passed emitted by execution_job after its own pytest run) is shown to the Founder as 'Självständigt verifierad'
+_______ test_AR12_chat_safe_mode_no_paid_egress_and_failed_turn_visible ________
+WARNING  app.providers.registry:registry.py:232 Chat provider openai failed (unreachable): Leverantören kunde inte nås.
+PASSED test_ar1_route_authz_matrix.py::test_AR1_every_api_route
+PASSED test_ar2_founder_ops.py::test_AR2_stop_post_denied_without_founder_or_csrf
+PASSED test_ar2_founder_ops.py::test_AR3_stop_post_is_rate_limited
+PASSED test_ar2_founder_ops.py::test_AR4_stop_and_readiness_read_failures_fail_closed
+PASSED test_ar2_founder_ops.py::test_AR5_dependency_failure_is_not_reported_reachable[redis]
+PASSED test_ar2_founder_ops.py::test_AR5_dependency_failure_is_not_reported_reachable[database]
+PASSED test_ar2_founder_ops.py::test_AR5b_stale_worker_heartbeat_not_alive
+PASSED test_ar2_founder_ops.py::test_AR6_snapshot_and_conversations_are_account_isolated
+PASSED test_ar2_founder_ops.py::test_AR7_recall_unmounted_and_flags_truthful
+PASSED test_ar2_founder_ops.py::test_AR7b_recall_detector_detects_a_real_mount
+PASSED test_ar2_founder_ops.py::test_AR8_reading_status_is_free_and_offline
+PASSED test_ar9_races_and_truth.py::test_AR12_chat_safe_mode_no_paid_egress_and_failed_turn_visible
+PASSED test_ar9_races_and_truth.py::test_AR13_safe_launch_default_never_pushes_or_opens_pr
+FAILED test_ar9_races_and_truth.py::test_AR9_concurrent_dispatch_single_paid_call
+FAILED test_ar9_races_and_truth.py::test_AR9h_concurrent_dispatch_over_http
+FAILED test_ar9_races_and_truth.py::test_AR10_concurrent_delegation_single_request
+FAILED test_ar9_races_and_truth.py::test_AR11_builder_self_verification_is_not_independent
+FAILED test_ar9_races_and_truth.py::test_AR11b_unopened_pr_with_zero_checks_is_not_independently_verified
+5 failed, 13 passed in 76.52s (0:01:16)
